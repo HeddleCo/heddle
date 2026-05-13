@@ -7,16 +7,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("PROTOC", protoc);
     }
 
+    // The proto source ships inside this crate at `proto/heddle/v1/service.proto`
+    // so the published tarball on crates.io contains everything needed to
+    // run `cargo build` from a fresh download.
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or_else(|| std::io::Error::other("failed to locate workspace root"))?;
-    let proto_dir = workspace_root.join("proto");
+    let proto_dir = manifest_dir.join("proto");
     let proto = proto_dir.join("heddle/v1/service.proto");
-    let descriptor_path = manifest_dir
-        .join(std::env::var("OUT_DIR")?)
-        .join("heddle_descriptor.bin");
+    let descriptor_path = PathBuf::from(std::env::var("OUT_DIR")?).join("heddle_descriptor.bin");
 
     println!("cargo:rerun-if-changed={}", proto.display());
 
