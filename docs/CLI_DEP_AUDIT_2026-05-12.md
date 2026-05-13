@@ -2,7 +2,7 @@
 
 ## Why this exists
 
-A dogfooding-driven dep audit on PR #75 found that the `heddle` CLI pulls **485 transitive packages** for a binary whose default behavior is local-only VCS. That number is excessive for a tool whose competitor (`git`) compiles to a static binary with a much smaller transitive footprint, and is the single largest reason `cargo build -p cli` from a cold cache is slow.
+A dogfooding-driven dep audit on PR #75 found that the `heddle` CLI pulls **485 transitive packages** for a binary whose default behavior is local-only VCS. That number is excessive for a tool whose competitor (`git`) compiles to a static binary with a much smaller transitive footprint, and is the single largest reason `cargo build -p heddle-cli` from a cold cache is slow.
 
 This document captures the audit results and the planned remediation so a future session can pick up cold.
 
@@ -97,7 +97,7 @@ The CLI's `hosted-client` feature is the only thing that should still touch the 
 | sqlx (if any workspace member enables `postgres`) | ~30 |
 | webauthn + supporting crypto | ~15 |
 
-**~150 transitive deps cut**, taking the CLI from 485 → ~335. Binary size drops 30–50MB on release builds. Cold-cache `cargo build -p cli` should drop 30–60s.
+**~150 transitive deps cut**, taking the CLI from 485 → ~335. Binary size drops 30–50MB on release builds. Cold-cache `cargo build -p heddle-cli` should drop 30–60s.
 
 ### Risks to plan around before starting
 
@@ -173,7 +173,7 @@ If all tiers land:
 |---|---|---|
 | Workspace packages | 668 | ~320 |
 | `cli` transitive | 485 | ~135 |
-| Cold-cache `cargo build -p cli` | (current) | -60s estimated |
+| Cold-cache `cargo build -p heddle-cli` | (current) | -60s estimated |
 | Release binary size | (current) | -40–60MB estimated |
 
 ## How to reproduce the numbers
@@ -192,7 +192,7 @@ m = json.load(open('/tmp/heddle_meta.json'))
 ws = {p['name'] for p in m['packages'] if p['source'] is None}
 node_by_id = {n['id']: n for n in m['resolve']['nodes']}
 pkg_by_id = {p['id']: p for p in m['packages']}
-cli_id = next(p['id'] for p in m['packages'] if p['name'] == 'cli' and p['source'] is None)
+cli_id = next(p['id'] for p in m['packages'] if p['name'] == 'heddle-cli' and p['source'] is None)
 seen, stack = set(), [cli_id]
 while stack:
     nid = stack.pop()
@@ -206,7 +206,7 @@ print(f'cli transitive externals: {len(ext)}')
 EOF
 
 # Why a specific dep is in cli
-cargo tree -p cli --edges normal --invert <dep>
+cargo tree -p heddle-cli --edges normal --invert <dep>
 ```
 
 ## Suggested order of operations
