@@ -53,17 +53,17 @@ links these crates from a separate workspace.
 
 ## 2026-05-12 — OSS extraction prep
 
-- Daemon trait extraction, `git-overlay` / `native` mode gating, `weft/` and `tapestry/` renames, SPDX headers across the workspace ([#76](https://github.com/HeddleCo/heddle/pull/76))
-- CLI polish for OSS — TTY-aware flags, error hints, examples, docs ([#75](https://github.com/HeddleCo/heddle/pull/75))
+- Daemon trait extraction, `git-overlay` / `native` mode gating, `weft/` and `tapestry/` renames, SPDX headers across the workspace
+- CLI polish for OSS — TTY-aware flags, error hints, examples, docs
 
 ## 2026-05-11
 
-- Workflow integration, 17 plan items, 24 Codex review fixes, OSS prep ([#72](https://github.com/HeddleCo/heddle/pull/72))
-- build: trim dev-profile debug info for faster incremental links ([#74](https://github.com/HeddleCo/heddle/pull/74))
+- Workflow integration, 17 plan items, 24 Codex review fixes, OSS prep
+- build: trim dev-profile debug info for faster incremental links
 
 ## 2026-05-09 — Git-overlay foundation
 
-- OSS Heddle CLI: git-overlay foundation, threads, real-world fixtures ([#51](https://github.com/HeddleCo/heddle/pull/51))
+- OSS Heddle CLI: git-overlay foundation, threads, real-world fixtures
   - Native git-overlay replacement workflows
   - Linked-worktree write-through
   - Reflog UX and real-world Git stress fixtures
@@ -72,7 +72,7 @@ links these crates from a separate workspace.
 
 ## 2026-05-05 — Mount and daemon
 
-- feat(mount): virtualized threads, heddled daemon, reflink CoW worktrees ([#47](https://github.com/HeddleCo/heddle/pull/47))
+- feat(mount): virtualized threads, heddled daemon, reflink CoW worktrees
   - `ContentAddressedMount` projects `(StateId, overlay) → POSIX FS` via the `PlatformShell` trait; stateless on the read path
   - Two-tier write model: in-memory buffers → CAS-promoted blobs on flush/release/idle
   - Clock-driven safety sweep promotes idle buffers (default 5s)
@@ -82,12 +82,12 @@ links these crates from a separate workspace.
 
 ## 2026-05-01
 
-- perf: pack-batch snapshot blobs (32s → 117ms) + reload-on-miss for multi-instance ([#40](https://github.com/HeddleCo/heddle/pull/40))
-- Bridge ingest, provenance, and semantic-hotspots overhaul ([#38](https://github.com/HeddleCo/heddle/pull/38))
+- perf: pack-batch snapshot blobs (32s → 117ms) + reload-on-miss for multi-instance
+- Bridge ingest, provenance, and semantic-hotspots overhaul
 
 ## 2026-04-30
 
-- Rename project **Loom → Heddle** ([#37](https://github.com/HeddleCo/heddle/pull/37))
+- Rename project **Loom → Heddle**
   - 14 Rust crates renamed: `loom-X` → bare `X` (`loom-core` → `objects`)
   - CLI binary: `loom` → `heddle`
   - Proto package: `loom.v1` → `heddle.v1`
@@ -95,35 +95,35 @@ links these crates from a separate workspace.
 
 ## 2026-04-23
 
-- Claude Code hook integration + ingest matcher/loader fixes ([#32](https://github.com/HeddleCo/heddle/pull/32))
+- Claude Code hook integration + ingest matcher/loader fixes
 
 ## 2026-04-22
 
-- Add constraint/invariant/rationale annotation taxonomy ([#28](https://github.com/HeddleCo/heddle/pull/28))
+- Add constraint/invariant/rationale annotation taxonomy
   - `AnnotationKind { Constraint, Invariant, Rationale }` shipped end-to-end through object model, proto, gRPC, CLI, and web
   - `--kind` flag on context subcommands (default `rationale`)
   - JSON output renders the kind alongside text
 
 ## 2026-04-21
 
-- Workspace control tower + bare `Repository::init` refactor ([#27](https://github.com/HeddleCo/heddle/pull/27))
+- Workspace control tower + bare `Repository::init` refactor
   - `Repository::init` is now a bare primitive; `init_default` seeds a `main` thread
   - `seed_default_thread` made public; init is no longer undoable
   - `thread_is_unclaimed_bootstrap` lets the git bridge tolerate a seeded main while catching real divergence
-- feat(ingest): import git history with agent attribution + reasoning annotations ([#26](https://github.com/HeddleCo/heddle/pull/26))
+- feat(ingest): import git history with agent attribution + reasoning annotations
 
 ## 2026-04-18
 
-- Performance improvements ([#24](https://github.com/HeddleCo/heddle/pull/24))
+- Performance improvements
 
 ## 2026-04-13
 
-- Improve local performance across status, history, and oplog paths ([#22](https://github.com/HeddleCo/heddle/pull/22))
-- Add low-ceremony workflow commands and sync thread metadata ([#18](https://github.com/HeddleCo/heddle/pull/18))
+- Improve local performance across status, history, and oplog paths
+- Add low-ceremony workflow commands and sync thread metadata
 
 ## 2026-04-04
 
-- Remove hosted CLI subcommand from the OSS surface; review pipeline lives in the closed workspace ([#17](https://github.com/HeddleCo/heddle/pull/17))
+- Remove hosted CLI subcommand from the OSS surface; review pipeline lives in the closed workspace
 
 ## 2026-03-24
 
