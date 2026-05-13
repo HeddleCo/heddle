@@ -1,5 +1,15 @@
 # Workspace Split Plan
 
+**Status: Phase 1 executed on 2026-05-13.** The workspace now lives across three repos:
+
+- [HeddleCo/heddle](https://github.com/HeddleCo/heddle) — OSS, Apache-2.0, the 17 crates documented below. Published to crates.io as `heddle-*` and `weft-client-shim` at `0.2.0`.
+- [HeddleCo/weft](https://github.com/HeddleCo/weft) — closed, the hosted backend (`weft-server`, `weft`, `weft-client`) plus the production `heddle` binary. Depends on the OSS crates via crates.io.
+- [HeddleCo/tapestry](https://github.com/HeddleCo/tapestry) — closed, the SvelteKit marketing + early-access app deployed to Cloudflare Workers.
+
+The historical plan below records the design that was executed.
+
+---
+
 This document captures the recommended plan for splitting Heddle from a single crate into a Cargo workspace. It is written to preserve context if the working session needs to be compacted or resumed later.
 
 ## Goals
