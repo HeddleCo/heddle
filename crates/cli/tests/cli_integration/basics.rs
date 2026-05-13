@@ -1014,7 +1014,7 @@ fn test_cli_diff_git_only_branch_tip_suggests_ref_scoped_import() {
     .unwrap_err()
     .to_string();
     assert!(
-        output.contains("heddle bridge import --ref support/git-only"),
+        output.contains("heddle bridge git import --ref support/git-only"),
         "diff should recommend a ref-scoped import for git-only branch tips: {output}"
     );
 }
@@ -1031,7 +1031,7 @@ fn test_cli_compare_git_only_tag_suggests_ref_scoped_import() {
         .unwrap_err()
         .to_string();
     assert!(
-        output.contains("heddle bridge import --ref v1.0.0"),
+        output.contains("heddle bridge git import --ref v1.0.0"),
         "compare should recommend a ref-scoped import for git-only tags: {output}"
     );
 }
@@ -1057,7 +1057,7 @@ fn test_cli_thread_list_marks_tip_only_branch_with_ref_scoped_import_action() {
     assert_eq!(thread["thread_health"], "tip_only");
     assert_eq!(
         thread["recommended_action"],
-        "heddle bridge import --ref support/git-only"
+        "heddle bridge git import --ref support/git-only"
     );
 }
 
@@ -1092,7 +1092,7 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_tag() {
         .unwrap_err()
         .to_string();
     assert!(
-        v2_err.contains("heddle bridge import --ref v2.0.0"),
+        v2_err.contains("heddle bridge git import --ref v2.0.0"),
         "unselected tag should remain import-only: {v2_err}"
     );
 }
@@ -1225,7 +1225,7 @@ fn test_cli_workspace_surfaces_git_import_hint_in_text_output() {
         "missing branch hint: {output}"
     );
     assert!(
-        output.contains("heddle bridge import"),
+        output.contains("heddle bridge git import"),
         "missing import command: {output}"
     );
 }

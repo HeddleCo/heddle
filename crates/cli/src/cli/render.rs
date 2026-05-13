@@ -68,6 +68,24 @@ pub fn preview_list(items: &[String], total: usize) -> String {
     format!("{}{suffix}", visible.join(", "))
 }
 
+/// POSIX-shell-quote a path for inclusion in a copy-pasteable command.
+///
+/// Returns the bare path when it's a safe identifier; otherwise wraps it
+/// in single quotes (escaping any embedded single quote via the standard
+/// `'\''` trick). Keeps the common case (`cd /tmp/scratch`) clean while
+/// staying correct for spaces, parens, `$`, etc.
+pub fn shell_quote(path: &str) -> String {
+    let safe = !path.is_empty()
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+'));
+    if safe {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
 /// Optional knobs the text renderer respects. New options append at the
 /// tail; defaults stay backwards-compatible.
 #[derive(Clone, Debug, Default)]
@@ -128,4 +146,50 @@ pub fn emit_with_opts<T: RenderOutput>(
         out.render_text(&mut handle, opts)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn safe_paths_are_returned_unquoted() {
+        assert_eq!(shell_quote("/tmp/scratch"), "/tmp/scratch");
+        assert_eq!(
+            shell_quote("/home/user/.heddle-threads/my-thread/root"),
+            "/home/user/.heddle-threads/my-thread/root"
+        );
+        assert_eq!(
+            shell_quote("relative/path-1.2_3+x"),
+            "relative/path-1.2_3+x"
+        );
+    }
+
+    #[test]
+    fn paths_with_spaces_are_single_quoted() {
+        assert_eq!(shell_quote("/tmp/scratch dir"), "'/tmp/scratch dir'");
+        assert_eq!(
+            shell_quote("/Users/luke/My Repo/.thread"),
+            "'/Users/luke/My Repo/.thread'"
+        );
+    }
+
+    #[test]
+    fn metacharacters_are_single_quoted() {
+        assert_eq!(shell_quote("/tmp/$HOME"), "'/tmp/$HOME'");
+        assert_eq!(shell_quote("/tmp/(paren)"), "'/tmp/(paren)'");
+        assert_eq!(shell_quote("/tmp/a;b"), "'/tmp/a;b'");
+        assert_eq!(shell_quote("/tmp/a&b"), "'/tmp/a&b'");
+        assert_eq!(shell_quote("/tmp/a*b"), "'/tmp/a*b'");
+    }
+
+    #[test]
+    fn embedded_single_quote_is_escaped() {
+        assert_eq!(shell_quote("/tmp/o'brien"), "'/tmp/o'\\''brien'");
+    }
+
+    #[test]
+    fn empty_path_is_quoted() {
+        assert_eq!(shell_quote(""), "''");
+    }
 }
