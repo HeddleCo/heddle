@@ -10,11 +10,10 @@ use super::SemanticCommands;
 use super::{
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AttemptArgs,
-        CloneArgs, CollapseArgs, DelegateArgs, DiagnoseArgs, DiffArgs, DoctorArgs, InitArgs,
-        LogArgs, MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs,
-        RunArgs, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
-        SessionStartArgs, ShipArgs, SnapshotArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs,
-        WatchArgs,
+        CloneArgs, CollapseArgs, DelegateArgs, DiffArgs, DoctorArgs, InitArgs, LogArgs, MergeArgs,
+        PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
+        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShipArgs,
+        SnapshotArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
     },
     AgentCommands, BisectCommands, CheckpointArgs, ConflictCommands, ContextCommands,
     DiscussCommands, HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs,
@@ -75,54 +74,13 @@ Examples:
     /// Exits on Ctrl-C.
     Watch(WatchArgs),
 
-    /// Diagnose repository, thread, actor, and worktree context.
-    ///
-    /// TODO(diagnose-doctor-merge): collapse `diagnose` into `doctor`.
-    /// `heddle doctor` (no subcommand) already renders the same
-    /// payload — it calls `build_diagnose_output` from
-    /// `commands/diagnose.rs`. The `diagnose` verb is therefore a
-    /// redundant alias on the user-facing CLI surface. The planned
-    /// simplification has three steps; do them as one PR so the docs
-    /// truth-checker (`heddle doctor docs`) doesn't flag drift
-    /// between phases:
-    ///   1. Delete this `Diagnose` variant and its dispatch in
-    ///      `crates/cli/src/main.rs`. Keep
-    ///      `commands::diagnose::build_diagnose_output` and its
-    ///      `render_diagnose` helper — they remain the
-    ///      implementation behind subcommand-less `heddle doctor`.
-    ///      `DiagnoseArgs` itself can stay since the `--profile`
-    ///      flag is still surfaced on `doctor`. Delete `cmd_diagnose`.
-    ///   2. Gate `DoctorCommands::Docs` and `DoctorCommands::Schemas`
-    ///      — plus their `DoctorDocsArgs` / `DoctorSchemasArgs` and
-    ///      the `commands/doctor_docs.rs` / `commands/doctor_schemas.rs`
-    ///      modules and their `mod` entries — behind
-    ///      `#[cfg(any(debug_assertions, feature = "devtools"))]`.
-    ///      These are maintainer drift-checkers; a release-mode
-    ///      `cargo install heddle-cli` shouldn't ship them. Add a
-    ///      `devtools` feature to `crates/cli/Cargo.toml` so CI and
-    ///      contributors can opt back in with
-    ///      `--features devtools`. Integration tests under
-    ///      `crates/cli/tests/cli_integration/` that exercise
-    ///      `doctor docs` / `doctor schemas` need the same cfg, and
-    ///      the help-text snapshots in
-    ///      `crates/cli/tests/snapshots/` will need updates for both
-    ///      cfgs.
-    ///   3. Update the tapestry docs (already partly done in
-    ///      HeddleCo/tapestry#1): remove `/docs/cli/diagnose`,
-    ///      add a clear "dev-build only" note on the `doctor
-    ///      docs` / `doctor schemas` sections of
-    ///      `/docs/cli/doctor`, and drop the `diagnose` entry
-    ///      from `CLI_COMMANDS` / `CLI_FAMILIES` in
-    ///      `src/lib/docs/cli-spec.ts`.
-    Diagnose(DiagnoseArgs),
-
     /// Explain repository health, or run targeted doctor checks.
     ///
     /// `heddle doctor` (no subcommand) reports repository health and
-    /// the next recovery step (the same payload as `heddle diagnose`).
-    /// `heddle doctor docs` diff-checks markdown documentation against
-    /// the actual CLI surface and exits non-zero on drift — wire it
-    /// into CI to stop docs from going stale.
+    /// the next recovery step. `heddle doctor docs` diff-checks
+    /// markdown documentation against the actual CLI surface and
+    /// exits non-zero on drift — wire it into CI to stop docs from
+    /// going stale.
     Doctor(DoctorArgs),
 
     /// Show the low-friction Git-overlay workflow.

@@ -147,7 +147,7 @@ cargo install --path .
 ```bash
 heddle init [PATH]
 heddle status [--short] [--watch]
-heddle diagnose [--profile]
+heddle doctor [--profile]
 heddle workspace show [--watch]
 heddle start <name> [--workspace auto|heavy|light] [--path <dir>]
 heddle capture -m "message"
@@ -284,7 +284,7 @@ Important current behavior:
 - Git tags are not auto-adopted as threads; import them explicitly with `heddle bridge git import --ref <tag>` when you want full Heddle history semantics for a tag target
 - `auto` defaults to a Heddle-managed heavy checkout; the managed-vs-custom distinction is just path placement, not a separate workspace mode
 - `heddle workspace show` is the repo-wide control tower; it groups current, stacked, parallel, ready, blocked, and recently merged threads
-- `heddle diagnose` gives a one-command local handoff packet: repository, current thread, actor/session context, dirty paths, workspace counts, health, next command, and optional read-path timing with `--profile`
+- `heddle doctor` gives a one-command local handoff packet: repository, current thread, actor/session context, dirty paths, workspace counts, health, next command, and optional read-path timing with `--profile`
 - `heddle ready` captures outstanding work if needed, evaluates semantic merge readiness, and moves the thread to `ready` or `blocked`
 - `heddle status` acts as the control tower, including thread health and the next recommended command
 - `heddle thread show/list/refresh/move/absorb/resolve/promote/drop` provide the expert maintenance surface for thread lifecycle and work shaping
@@ -301,8 +301,8 @@ Heddle is designed for programmatic use by agents and automation.
 
 ```bash
 heddle status --json
-heddle diagnose --json
-heddle diagnose --profile --json
+heddle doctor --json
+heddle doctor --profile --json
 heddle diff --json
 heddle log --json
 heddle show HEAD --json
