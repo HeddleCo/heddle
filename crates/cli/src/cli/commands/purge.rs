@@ -5,14 +5,23 @@
 //! Workspace-owner capability is a documented constraint in the build
 //! brief; the Biscuit verifier rule is a future-work item. For now,
 //! `--force` is the explicit confirmation step.
+//!
+//! TODO(purge-propagation): purge currently only affects the replica
+//! it runs on. The product intent is that a purge by an authorized
+//! user redacts the bytes on every replica at the next sync/pull,
+//! without the admin touching each remote machine. The durable
+//! `OpRecord::Purge` already exists locally — see the matching TODO
+//! on that variant in `crates/oplog/src/oplog/oplog_types.rs` for
+//! the wire-protocol work that needs to land before this surface
+//! can claim cross-replica scope.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use objects::object::ChangeId;
 use repo::Repository;
 use serde::Serialize;
 
 use crate::{
-    cli::{Cli, PurgeApplyArgs, PurgeCommands, PurgeListArgs, should_output_json},
+    cli::{should_output_json, Cli, PurgeApplyArgs, PurgeCommands, PurgeListArgs},
     config::UserConfig,
 };
 
