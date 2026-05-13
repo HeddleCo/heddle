@@ -37,11 +37,16 @@ jobs:
           shared-key: rust-tests-${{ runner.os }}
           cache-on-failure: true
 
-      - name: Clippy (all features)
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      # `--all-features` would enable `heddle-cli/weft-client`, which is
+      # designed to be patched in from the closed HeddleCo/weft workspace
+      # via [patch.crates-io]. From OSS it would resolve to the 0.0.0
+      # reservation stub and fail to compile. Clippy across the practical
+      # OSS feature set instead.
+      - name: Clippy (OSS features)
+        run: cargo clippy --locked --workspace --all-targets --features git-overlay,native,semantic,zstd -- -D warnings
 
       - name: Clippy (heddle-cli minimal features)
-        run: cargo clippy --locked -p cli --all-targets --no-default-features --features local -- -D warnings
+        run: cargo clippy --locked -p heddle-cli --all-targets --no-default-features --features git-overlay,local -- -D warnings
 
   test-minimal:
     name: Tests (minimal features)
@@ -61,7 +66,7 @@ jobs:
           cache-on-failure: true
 
       - name: Run heddle-cli tests (minimal features)
-        run: cargo test --locked -p cli --no-default-features --features local
+        run: cargo test --locked -p heddle-cli --no-default-features --features git-overlay,local
 
   coverage:
     name: Coverage
@@ -84,8 +89,13 @@ jobs:
           shared-key: rust-tests-${{ runner.os }}
           cache-on-failure: true
 
+      # `--all-features` would enable `heddle-cli/weft-client`, which
+      # only resolves to the closed weft-client crate via the [patch.crates-io]
+      # in HeddleCo/weft. From the OSS workspace the dep resolves to the
+      # 0.0.0 reservation stub which intentionally has no impls.
+      # Run coverage against the OSS feature set instead.
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
@@ -124,51 +134,7 @@ jobs:
       - name: Show sccache stats
         run: sccache --show-stats
 
-  postgres-integration:
-    name: Postgres Integration Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: heddle_ci
-          POSTGRES_USER: heddle
-          POSTGRES_PASSWORD: heddle
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U heddle -d heddle_ci"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgres://heddle:heddle@127.0.0.1:5432/heddle_ci
-      HEDDLE_TEST_DATABASE_URL: postgres://heddle:heddle@127.0.0.1:5432/heddle_ci
-      HEDDLE_SERVER_DATABASE_URL: postgres://heddle:heddle@127.0.0.1:5432/heddle_ci
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-tests-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-
-      - name: Enable pgcrypto
-        env:
-          PGPASSWORD: heddle
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
-
-      - name: Run Postgres-backed registry integration tests
-        run: cargo test --locked -p cli --features hosted-client --test pg_hosted_registry_integration --test grpc_hosted_integration --test cli_hosted_grpc_integration -- --ignored --test-threads=1
-
-      - name: Show sccache stats
-        run: sccache --show-stats
+  # Note: the closed Postgres-backed integration tests
+  # (pg_hosted_registry_integration, grpc_hosted_integration,
+  # cli_hosted_grpc_integration) live in the HeddleCo/weft workspace
+  # and run from CI there. They're not part of the OSS surface.
