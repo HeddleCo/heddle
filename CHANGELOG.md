@@ -87,10 +87,10 @@ links these crates from a separate workspace.
 
 ## 2026-04-30
 
-- Rename project **Loom → Heddle**
-  - 14 Rust crates renamed: `loom-X` → bare `X` (`loom-core` → `objects`)
-  - CLI binary: `loom` → `heddle`
-  - Proto package: `loom.v1` → `heddle.v1`
+- Rename project **\[redacted\] → Heddle**
+  - 14 Rust crates renamed: `[redacted]-X` → bare `X` (`[redacted]-core` → `objects`)
+  - CLI binary: `[redacted]` → `heddle`
+  - Proto package: `[redacted].v1` → `heddle.v1`
   - Workspace `[lib]` name overrides dropped so each crate's library name defaults to its package name
 
 ## 2026-04-23
