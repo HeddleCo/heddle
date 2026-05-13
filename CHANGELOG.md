@@ -182,10 +182,10 @@ links these crates from a separate workspace.
 ## 2026-02-20 — Multi-agent worktrees
 
 - feat: multi-agent parallel worktrees + security/correctness fixes
-  - `Repository::open` detects `.loom` as a file (object-store pointer) for filesystem-isolated agent checkouts that share one store
+  - `Repository::open` detects `.heddle` as a file (object-store pointer) for filesystem-isolated agent checkouts that share one store
   - `RefManager::with_local_head` gives each checkout its own HEAD file so concurrent agents on different threads don't contend on HEAD
-  - `worktree add <path> [--track] [--from]` materializes a state into a new isolated directory with a `.loom` pointer file
-  - Lightweight agent session registry stored as TOML under `.loom/agents/`
+  - `worktree add <path> [--track] [--from]` materializes a state into a new isolated directory with a `.heddle` pointer file
+  - Lightweight agent session registry stored as TOML under `.heddle/agents/`
   - 22 multi-agent worktree integration tests
 - fix: symlink validation bypass, unhandled symlinks in status, non-atomic oplog writes
   - Replace `canonicalize` fallback with lexical normalization to prevent path traversal via dangling symlinks
