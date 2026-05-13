@@ -1,0 +1,29 @@
+[package]
+name = "heddle-crypto"
+version = "0.2.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
+p256.workspace = true
+pkcs8.workspace = true
+rsa.workspace = true
+sec1.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "crypto"

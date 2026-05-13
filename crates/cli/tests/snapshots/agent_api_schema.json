@@ -1,0 +1,151 @@
+{
+  "AgentReservationConflict": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+      "AgentReservationOutput": {
+        "properties": {
+          "anchor_root": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "anchor_state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reservation_token": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "description": "Lifecycle status as a stable kebab-case string (`active|abandoned|complete|merged`). Mirrors `objects::store::AgentStatus` but kept as a `String` here so the schema lives entirely in the CLI crate.",
+            "type": "string"
+          },
+          "task": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thread": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "status",
+          "thread"
+        ],
+        "type": "object"
+      }
+    },
+    "description": "Stable structured conflict shape emitted on stdout when `agent reserve` cannot proceed. Orchestrators parse this; humans see the shorter `Error: ...` message anyhow renders to stderr.",
+    "properties": {
+      "kind": {
+        "description": "`\"live_owner\"` (existing reservation matches the requested anchor — wait or release) or `\"anchor_drift\"` (existing reservation is on a different anchor — refresh and retry).",
+        "type": "string"
+      },
+      "message": {
+        "type": "string"
+      },
+      "owner": {
+        "anyOf": [
+          {
+            "$ref": "#/definitions/AgentReservationOutput"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "`Some` when a live agent already holds the thread; `None` when the thread ref exists at a different state with no live owner."
+      },
+      "requested_anchor": {
+        "type": "string"
+      },
+      "reserved_anchor": {
+        "description": "Anchor recorded against the existing reservation or thread ref, when known. Always present for anchor-drift conflicts so orchestrators can decide whether to refresh.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "thread": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "message",
+      "requested_anchor",
+      "thread"
+    ],
+    "title": "AgentReservationConflict",
+    "type": "object"
+  },
+  "AgentReservationOutput": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "properties": {
+      "anchor_root": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "anchor_state": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "path": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "reservation_token": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "status": {
+        "description": "Lifecycle status as a stable kebab-case string (`active|abandoned|complete|merged`). Mirrors `objects::store::AgentStatus` but kept as a `String` here so the schema lives entirely in the CLI crate.",
+        "type": "string"
+      },
+      "task": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "thread": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "status",
+      "thread"
+    ],
+    "title": "AgentReservationOutput",
+    "type": "object"
+  }
+}

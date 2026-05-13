@@ -1,0 +1,15 @@
+[package]
+name = "heddle-devtools"
+version = "0.2.0"
+edition.workspace = true
+authors.workspace = true
+description = "Developer tooling for the Heddle workspace"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+protoc-bin-vendored.workspace = true
+tempfile.workspace = true

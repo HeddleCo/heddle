@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Local glue between cli's dispatch and the `WeftExtensions`
+//! trait surface.
+//!
+//! In OSS builds without `hosted-client`, `main.rs` constructs a
+//! `NoopWeftExtensions` from the shim crate directly. With
+//! `hosted-client` enabled, this module provides
+//! [`EnabledWeftExtensions`], which downcasts the trait's opaque
+//! arguments back to the concrete `cli::cli::AuthCommands` /
+//! `SupportCommands` / `PresenceCommands` types and delegates to the
+//! existing in-`cli` command implementations.
+//!
+//! Step 5 of the OSS extraction plan moves the underlying command
+//! implementations out of `cli` into a separate `hosted-client`
+//! crate that ships the closed build. At that point this adapter goes
+//! away and the closed crate implements `WeftExtensions` directly.
+
+#![cfg(feature = "weft-client")]
+
+use std::any::Any;
+
+use anyhow::{Result, anyhow};
+use async_trait::async_trait;
+use weft_client_shim::{CliContext, WeftExtensions};
+
+use crate::cli::AuthCommands;
+use crate::cli::cli_args::SupportCommands;
+use crate::cli::commands::{cmd_auth, cmd_presence_publish, cmd_support};
+
+pub struct EnabledWeftExtensions;
+
+#[async_trait]
+impl WeftExtensions for EnabledWeftExtensions {
+    async fn auth(
+        &self,
+        ctx: &(dyn CliContext + 'static),
+        command: &(dyn Any + Send + Sync),
+    ) -> Result<()> {
+        let command = downcast::<AuthCommands>(command, "AuthCommands")?;
+        cmd_auth(ctx, command.clone()).await
+    }
+
+    async fn support(
+        &self,
+        ctx: &(dyn CliContext + 'static),
+        command: &(dyn Any + Send + Sync),
+    ) -> Result<()> {
+        let command = downcast::<SupportCommands>(command, "SupportCommands")?;
+        cmd_support(ctx, command.clone()).await
+    }
+
+    async fn presence_publish(
+        &self,
+        ctx: &(dyn CliContext + 'static),
+        session: String,
+        interval_secs: u64,
+    ) -> Result<()> {
+        cmd_presence_publish(ctx, session, interval_secs).await
+    }
+}
+
+fn downcast<'a, T: 'static>(
+    value: &'a (dyn Any + Send + Sync),
+    name: &'static str,
+) -> Result<&'a T> {
+    value
+        .downcast_ref::<T>()
+        .ok_or_else(|| anyhow!("WeftExtensions trait dispatch: failed to downcast to {name}"))
+}

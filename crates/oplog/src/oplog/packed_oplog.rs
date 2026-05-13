@@ -1,0 +1,428 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Packed binary oplog: all entries in a single file, loaded into memory.
+
+use std::path::{Path, PathBuf};
+
+use chrono::{TimeZone, Utc};
+use objects::{
+    error::{HeddleError, Result},
+    fs_atomic::write_file_atomic,
+};
+
+use super::oplog_types::{OpBatch, OpEntry, OpRecord};
+
+const MAGIC: &[u8; 8] = b"LMOPLOG\0";
+/// Binary oplog format version.
+///
+/// `2` adds the W1 fields: each entry now encodes its `actor` (principal
+/// name + email, length-prefixed UTF-8) and `operation_id` (tag byte +
+/// optional 16-byte UUID). Pre-W1 v1 files are rejected — there are no
+/// live deployments to migrate from.
+const VERSION: u32 = 2;
+
+pub(crate) struct PackedOpLog {
+    pub(crate) entries: Vec<OpEntry>, // sorted by id ascending
+    pub(crate) head_id: u64,
+    pub(crate) path: PathBuf,
+}
+
+impl PackedOpLog {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self {
+            entries: Vec::new(),
+            head_id: 0,
+            path,
+        }
+    }
+
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)?;
+        Self::parse(&bytes, path.to_path_buf())
+    }
+
+    pub(crate) fn save(&self) -> Result<()> {
+        let bytes = self.serialize()?;
+        write_file_atomic(&self.path, &bytes)?;
+        Ok(())
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&VERSION.to_le_bytes());
+        buf.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&self.head_id.to_le_bytes());
+
+        for entry in &self.entries {
+            buf.extend_from_slice(&entry.id.to_le_bytes());
+            buf.extend_from_slice(&entry.batch_id.to_le_bytes());
+            buf.extend_from_slice(&entry.batch_index.to_le_bytes());
+            buf.extend_from_slice(&entry.timestamp.timestamp().to_le_bytes());
+            buf.extend_from_slice(&entry.timestamp.timestamp_subsec_nanos().to_le_bytes());
+            buf.push(if entry.undone { 1 } else { 0 });
+
+            let scope_bytes = entry.scope.as_deref().unwrap_or("").as_bytes();
+            buf.extend_from_slice(&(scope_bytes.len() as u16).to_le_bytes());
+            buf.extend_from_slice(scope_bytes);
+
+            let op_data = rmp_serde::to_vec(&entry.operation)
+                .map_err(|e| HeddleError::Serialization(e.to_string()))?;
+            buf.extend_from_slice(&(op_data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&op_data);
+
+            // v2: actor (name + email) + operation_id.
+            let actor_name = entry.actor.name.as_bytes();
+            buf.extend_from_slice(&(actor_name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(actor_name);
+            let actor_email = entry.actor.email.as_bytes();
+            buf.extend_from_slice(&(actor_email.len() as u16).to_le_bytes());
+            buf.extend_from_slice(actor_email);
+            match entry.operation_id {
+                Some(op_id) => {
+                    buf.push(1);
+                    buf.extend_from_slice(op_id.as_bytes());
+                }
+                None => buf.push(0),
+            }
+        }
+
+        Ok(buf)
+    }
+
+    fn parse(bytes: &[u8], path: PathBuf) -> Result<Self> {
+        let mut c = Cursor::new(bytes);
+
+        let magic = c.read_array::<8>()?;
+        if &magic != MAGIC {
+            return Err(HeddleError::InvalidObject(
+                "invalid oplog magic".to_string(),
+            ));
+        }
+
+        let version = c.read_u32()?;
+        if version != VERSION {
+            return Err(HeddleError::InvalidObject(format!(
+                "unsupported oplog version {version}"
+            )));
+        }
+
+        let entry_count = c.read_u64()? as usize;
+        let head_id = c.read_u64()?;
+        let mut entries = Vec::with_capacity(entry_count);
+
+        for _ in 0..entry_count {
+            let id = c.read_u64()?;
+            let batch_id = c.read_u64()?;
+            let batch_index = c.read_u32()?;
+            let timestamp_secs = c.read_i64()?;
+            let timestamp_ns = c.read_u32()?;
+            let undone = c.read_u8()? != 0;
+
+            let scope_len = c.read_u16()? as usize;
+            let scope_bytes = c.read_bytes(scope_len)?;
+            let scope = if scope_bytes.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8(scope_bytes).map_err(|_| {
+                    HeddleError::InvalidObject("invalid UTF-8 in scope".to_string())
+                })?)
+            };
+
+            let op_data_len = c.read_u32()? as usize;
+            let op_data = c.read_bytes(op_data_len)?;
+            let operation: OpRecord = rmp_serde::from_slice(&op_data)
+                .map_err(|e| HeddleError::Serialization(e.to_string()))?;
+
+            // v2 fields: actor (name + email) and operation_id.
+            let actor_name_len = c.read_u16()? as usize;
+            let actor_name = String::from_utf8(c.read_bytes(actor_name_len)?).map_err(|_| {
+                HeddleError::InvalidObject("invalid UTF-8 in actor.name".to_string())
+            })?;
+            let actor_email_len = c.read_u16()? as usize;
+            let actor_email = String::from_utf8(c.read_bytes(actor_email_len)?).map_err(|_| {
+                HeddleError::InvalidObject("invalid UTF-8 in actor.email".to_string())
+            })?;
+            let actor = objects::object::Principal {
+                name: actor_name,
+                email: actor_email,
+            };
+            let operation_id_tag = c.read_u8()?;
+            let operation_id = match operation_id_tag {
+                0 => None,
+                1 => {
+                    let bytes = c.read_array::<16>()?;
+                    Some(objects::object::OperationId::from_uuid(
+                        uuid::Uuid::from_bytes(bytes),
+                    ))
+                }
+                other => {
+                    return Err(HeddleError::InvalidObject(format!(
+                        "invalid operation_id tag byte {other}"
+                    )));
+                }
+            };
+
+            let timestamp = Utc
+                .timestamp_opt(timestamp_secs, timestamp_ns)
+                .single()
+                .ok_or_else(|| {
+                    HeddleError::InvalidObject(format!(
+                        "invalid oplog timestamp secs={timestamp_secs} nanos={timestamp_ns}"
+                    ))
+                })?;
+
+            entries.push(OpEntry {
+                id,
+                timestamp,
+                operation,
+                undone,
+                batch_id,
+                batch_index,
+                scope,
+                actor,
+                operation_id,
+            });
+        }
+
+        Ok(Self {
+            entries,
+            head_id,
+            path,
+        })
+    }
+
+    pub(crate) fn append(&mut self, new_entries: Vec<OpEntry>) {
+        let last_id = new_entries.last().map(|e| e.id).unwrap_or(self.head_id);
+        self.entries.extend(new_entries);
+        self.head_id = last_id;
+    }
+
+    pub(crate) fn set_undone(&mut self, batch_id: u64, undone: bool) {
+        for entry in &mut self.entries {
+            if entry.batch_id == batch_id || (entry.batch_id == 0 && entry.id == batch_id) {
+                entry.undone = undone;
+            }
+        }
+    }
+
+    pub(crate) fn last_entry(&self) -> Option<&OpEntry> {
+        self.entries.last()
+    }
+
+    pub(crate) fn recent_entries(&self, count: usize) -> Vec<OpEntry> {
+        self.entries.iter().rev().take(count).cloned().collect()
+    }
+
+    pub(crate) fn collect_batches_scoped(
+        &self,
+        count: usize,
+        predicate: impl Fn(&OpBatch) -> bool,
+        scope: Option<&str>,
+    ) -> Vec<OpBatch> {
+        if count == 0 {
+            return Vec::new();
+        }
+
+        let mut batches: Vec<OpBatch> = Vec::new();
+        let mut seen_batch_ids: Vec<u64> = Vec::new();
+
+        // Walk entries in reverse (most recent first)
+        for entry in self.entries.iter().rev() {
+            let batch_id = if entry.batch_id == 0 {
+                entry.id
+            } else {
+                entry.batch_id
+            };
+            if seen_batch_ids.contains(&batch_id) {
+                continue;
+            }
+
+            // Collect all entries for this batch
+            let batch_entries: Vec<OpEntry> = self
+                .entries
+                .iter()
+                .filter(|e| {
+                    let bid = if e.batch_id == 0 { e.id } else { e.batch_id };
+                    bid == batch_id
+                })
+                .cloned()
+                .collect();
+
+            if batch_entries.is_empty() {
+                continue;
+            }
+
+            // Check scope filter
+            if let Some(scope) = scope {
+                let all_match = batch_entries
+                    .iter()
+                    .all(|e| e.scope.as_deref() == Some(scope));
+                if !all_match {
+                    seen_batch_ids.push(batch_id);
+                    continue;
+                }
+            }
+
+            let mut sorted = batch_entries;
+            sorted.sort_by_key(|e| e.batch_index);
+            let batch = OpBatch {
+                id: batch_id,
+                entries: sorted,
+            };
+
+            if predicate(&batch) {
+                batches.push(batch);
+                if batches.len() == count {
+                    break;
+                }
+            }
+            seen_batch_ids.push(batch_id);
+        }
+
+        batches
+    }
+}
+
+// Cursor for parsing
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let end = self.offset + N;
+        if end > self.bytes.len() {
+            return Err(HeddleError::InvalidObject("oplog truncated".to_string()));
+        }
+        let mut out = [0u8; N];
+        out.copy_from_slice(&self.bytes[self.offset..end]);
+        self.offset = end;
+        Ok(out)
+    }
+
+    fn read_bytes(&mut self, n: usize) -> Result<Vec<u8>> {
+        let end = self.offset + n;
+        if end > self.bytes.len() {
+            return Err(HeddleError::InvalidObject("oplog truncated".to_string()));
+        }
+        let out = self.bytes[self.offset..end].to_vec();
+        self.offset = end;
+        Ok(out)
+    }
+
+    fn read_u8(&mut self) -> Result<u8> {
+        Ok(self.read_array::<1>()?[0])
+    }
+    fn read_u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.read_array::<2>()?))
+    }
+    fn read_u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.read_array::<4>()?))
+    }
+    fn read_u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.read_array::<8>()?))
+    }
+    fn read_i64(&mut self) -> Result<i64> {
+        Ok(i64::from_le_bytes(self.read_array::<8>()?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objects::object::ChangeId;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn make_entry(id: u64, scope: Option<&str>) -> OpEntry {
+        let state = ChangeId::generate();
+        OpEntry {
+            id,
+            timestamp: Utc::now(),
+            operation: OpRecord::Snapshot {
+                new_state: state,
+                prev_head: None,
+                thread: None,
+            },
+            undone: false,
+            batch_id: id,
+            batch_index: 0,
+            scope: scope.map(str::to_string),
+            actor: objects::object::Principal::new("Test", "test@example.com"),
+            operation_id: None,
+        }
+    }
+
+    #[test]
+    fn round_trip_empty() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let log = PackedOpLog::new(path.clone());
+        log.save().unwrap();
+        let loaded = PackedOpLog::load(&path).unwrap();
+        assert_eq!(loaded.entries.len(), 0);
+        assert_eq!(loaded.head_id, 0);
+    }
+
+    #[test]
+    fn round_trip_with_entries() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let mut log = PackedOpLog::new(path.clone());
+        log.append(vec![
+            make_entry(1, Some("lane-a")),
+            make_entry(2, Some("lane-b")),
+        ]);
+        log.head_id = 2;
+        log.save().unwrap();
+
+        let loaded = PackedOpLog::load(&path).unwrap();
+        assert_eq!(loaded.entries.len(), 2);
+        assert_eq!(loaded.head_id, 2);
+        assert_eq!(loaded.entries[0].id, 1);
+        assert_eq!(loaded.entries[1].id, 2);
+        assert_eq!(loaded.entries[0].scope.as_deref(), Some("lane-a"));
+    }
+
+    #[test]
+    fn set_undone_flips_entries() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let mut log = PackedOpLog::new(path.clone());
+        log.append(vec![make_entry(1, None)]);
+        log.head_id = 1;
+        assert!(!log.entries[0].undone);
+        log.set_undone(1, true);
+        assert!(log.entries[0].undone);
+        log.set_undone(1, false);
+        assert!(!log.entries[0].undone);
+    }
+
+    #[test]
+    fn parse_rejects_invalid_timestamp() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let mut log = PackedOpLog::new(path.clone());
+        log.append(vec![make_entry(1, None)]);
+        log.head_id = 1;
+
+        let mut bytes = log.serialize().unwrap();
+        let header_len = 8 + 4 + 8 + 8;
+        let timestamp_ns_offset = header_len + 8 + 8 + 4 + 8;
+        bytes[timestamp_ns_offset..timestamp_ns_offset + 4]
+            .copy_from_slice(&1_500_000_000u32.to_le_bytes());
+
+        let error = match PackedOpLog::parse(&bytes, path) {
+            Ok(_) => panic!("timestamp should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, HeddleError::InvalidObject(message) if message.contains("invalid oplog timestamp"))
+        );
+    }
+}

@@ -1,0 +1,80 @@
+# release-plz config for the Heddle OSS workspace.
+#
+# Synchronises per-crate semver across the 17 OSS crates. release-plz
+# walks the workspace dependency graph and publishes in topological
+# order, opening release PRs that bump versions and update changelogs.
+
+[workspace]
+release = true
+dependencies_update = true
+git_release_enable = true
+publish_allow_dirty = false
+
+# Publishable OSS crates — all release = true.
+[[package]]
+name = "heddle-objects"
+release = true
+
+[[package]]
+name = "heddle-refs"
+release = true
+
+[[package]]
+name = "heddle-oplog"
+release = true
+
+[[package]]
+name = "heddle-repo"
+release = true
+
+[[package]]
+name = "heddle-crypto"
+release = true
+
+[[package]]
+name = "heddle-semantic"
+release = true
+
+[[package]]
+name = "heddle-proto"
+release = true
+
+[[package]]
+name = "heddle-grpc"
+release = true
+
+[[package]]
+name = "heddle-ingest"
+release = true
+
+[[package]]
+name = "heddle-mount"
+release = true
+
+[[package]]
+name = "heddle-daemon"
+release = true
+
+[[package]]
+name = "heddle-cli"
+release = true
+
+[[package]]
+name = "heddle-cli-shared"
+release = true
+
+[[package]]
+name = "heddle-devtools"
+release = true
+
+[[package]]
+name = "heddle-review"
+release = true
+
+[[package]]
+name = "heddle-state-review"
+release = true
+
+[[package]]
+name = "weft-client-shim"
+release = true
