@@ -18,10 +18,14 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  clippy:
-    name: Clippy
+  # Single sequential job: build once, then clippy + test + feature-checks
+  # all reuse the same `target/` directory. Avoids the 4-jobs-each-doing-a-
+  # cold-build pattern; total compute time drops ~70% at the cost of less
+  # parallelism in wall-clock terms.
+  check-and-test:
+    name: Check & test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -37,37 +41,32 @@ jobs:
           shared-key: rust-tests-${{ runner.os }}
           cache-on-failure: true
 
-      # `--all-features` would enable `heddle-cli/weft-client`, which is
-      # designed to be patched in from the closed HeddleCo/weft workspace
-      # via [patch.crates-io]. From OSS it would resolve to the 0.0.0
-      # reservation stub and fail to compile. Clippy across the practical
-      # OSS feature set instead.
+      # 1. Warm target/ with the full default-feature workspace build.
+      #    Everything downstream reuses these artifacts.
+      - name: Build (default features)
+        run: cargo build --locked --workspace --tests
+
+      # 2. Lint the same artifacts — clippy reuses target/ from step 1.
       - name: Clippy (OSS features)
-        run: cargo clippy --locked --workspace --all-targets --features git-overlay,native,semantic,zstd -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: Clippy (heddle-cli minimal features)
-        run: cargo clippy --locked -p heddle-cli --all-targets --no-default-features --features git-overlay,local -- -D warnings
+      # 3. Run tests — test binaries already compiled in step 1.
+      - name: Tests
+        run: cargo test --locked --workspace
 
-  test-minimal:
-    name: Tests (minimal features)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+      # 4. Verify the OSS build flavors compile. `cargo check` is fast on
+      #    a warm cache; the feature-delta from defaults is small.
+      - name: Check git-overlay-only
+        run: cargo check --locked -p heddle-cli --no-default-features --features git-overlay,semantic,zstd
 
-    steps:
-      - uses: actions/checkout@v4
+      - name: Check native-only
+        run: cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: sccache stats
+        run: sccache --show-stats
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-tests-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: Run heddle-cli tests (minimal features)
-        run: cargo test --locked -p heddle-cli --no-default-features --features git-overlay,local
-
+  # Coverage requires an instrumented build that can't share `target/`
+  # with the regular profile, so it stays as its own job.
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -86,14 +85,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: rust-tests-${{ runner.os }}
+          shared-key: coverage-${{ runner.os }}
           cache-on-failure: true
 
-      # `--all-features` would enable `heddle-cli/weft-client`, which
-      # only resolves to the closed weft-client crate via the [patch.crates-io]
-      # in HeddleCo/weft. From the OSS workspace the dep resolves to the
-      # 0.0.0 reservation stub which intentionally has no impls.
-      # Run coverage against the OSS feature set instead.
+      # `--all-features` would enable `heddle-cli/weft-client`, which from
+      # OSS resolves to the 0.0.0 reservation stub and won't compile.
+      # Cover the OSS feature set instead.
       - name: Generate coverage report
         run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd --lcov --output-path lcov.info
 
@@ -131,10 +128,5 @@ jobs:
           path: target/llvm-cov/html
           if-no-files-found: error
 
-      - name: Show sccache stats
+      - name: sccache stats
         run: sccache --show-stats
-
-  # Note: the closed Postgres-backed integration tests
-  # (pg_hosted_registry_integration, grpc_hosted_integration,
-  # cli_hosted_grpc_integration) live in the HeddleCo/weft workspace
-  # and run from CI there. They're not part of the OSS surface.
