@@ -1,0 +1,188 @@
+[package]
+name = "heddle-cli"
+version = "0.2.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+# `anstyle` 1.x is already in our transitive deps via clap. Pinning it
+# directly here makes `crates/cli/src/cli/style.rs` a first-class
+# consumer; the version range matches what `cargo tree` resolves.
+anstyle = "1"
+anyhow.workspace = true
+async-stream.workspace = true
+base32.workspace = true
+base64.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+ed25519-dalek.workspace = true
+fs2.workspace = true
+futures.workspace = true
+gix-index = "0.48"
+gix-pack = "0.67"
+gix-protocol = { version = "0.58", features = ["blocking-client"] }
+gix-transport.workspace = true
+gix.workspace = true
+hex.workspace = true
+ignore.workspace = true
+libc.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.2", features = ["memory-backend"] }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.2" }
+daemon = { path = "../daemon", package = "heddle-daemon", version = "0.2" }
+grpc = { path = "../grpc", package = "heddle-grpc", version = "0.2" }
+cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.2" }
+weft-client = { version = "0.0", optional = true }
+weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.2" }
+async-trait.workspace = true
+# `default-features = false` here matches the pattern used for
+# repo below: this crate's `zstd` feature controls the cascade
+# end-to-end. Without these breaks, every dep's own default-on `zstd`
+# would re-enable compression even when the user explicitly built
+# with `--no-default-features`.
+ingest = { path = "../ingest", package = "heddle-ingest", version = "0.2", default-features = false, optional = true }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.2" }
+proto = { path = "../proto", package = "heddle-proto", version = "0.2", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false }
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.2", optional = true }
+memmap2.workspace = true
+notify.workspace = true
+opentelemetry = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+prost-types.workspace = true
+rand.workspace = true
+rmp-serde.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
+tokio-util.workspace = true
+toml.workspace = true
+tonic.workspace = true
+# Health.Check probe for the local daemon UDS handshake. Only
+# pulled in for the client side; the local daemon binary itself does
+# not (yet) install a health reporter — see `client::local_daemon`.
+tonic-health.workspace = true
+# `tower::service_fn` adapts `tokio::net::UnixStream::connect` into a
+# `tower::Service<Uri>` that tonic's `connect_with_connector` accepts.
+# 0.5 is what tonic itself resolves transitively; pinning to the same
+# major version keeps the trait impls compatible.
+tower = { version = "0.5", default-features = false, features = ["util"] }
+# `hyper-util`'s `TokioIo` adapter wraps a `UnixStream` into something
+# that satisfies hyper's `Read`/`Write` traits — required by tonic
+# 0.14's connector contract. Already a workspace dep used by the
+# server crate; promoting it here for first-class consumption.
+hyper-util.workspace = true
+rustls.workspace = true
+tracing.workspace = true
+tracing-opentelemetry = { workspace = true, optional = true }
+tracing-subscriber.workspace = true
+walkdir.workspace = true
+zstd = { workspace = true, optional = true }
+
+# Mount is platform-agnostic in source, but its FUSE shell only
+# compiles on Linux behind the `fuse` feature. We only depend on
+# `mount` from the Linux target so the CLI's `mount` feature can
+# transitively pull in `fuse` without breaking the macOS/Windows
+# build (where `fuser` doesn't exist).
+[target.'cfg(target_os = "linux")'.dependencies]
+mount = { path = "../mount", package = "heddle-mount", version = "0.2", optional = true }
+
+[features]
+# Keep the default `heddle` build focused on the local invisible-VCS
+# workflow. Heavier import/hosted surfaces are opt-in for release
+# builds that need them. `semantic` is included in defaults because
+# `heddle diff --semantic`, `heddle compare --semantic`, and the
+# agent-loop self-review (`/heddle-review`) all reach for it; gating
+# the default install behind an extra `--features semantic` flag
+# turns these documented commands into an opaque error for first-run
+# users. The binary cost is the four `tree-sitter-*` parsers
+# (Rust/Python/JS/TS) — a small fraction of the existing footprint
+# from tonic + server.  `semantic-extended` (Go/C/C++/Java) stays
+# opt-in.
+default = ["git-overlay", "native", "local", "semantic", "zstd"]
+local = []
+# Repository mode features. At least one must be enabled. Released as
+# three OSS CLI flavors: `git-overlay` only (works on top of existing
+# Git repos; no native content-addressed init), `native` only (pure
+# content-addressed VCS; no Git bridge), or both. The closed `heddle-hosted`
+# build adds `hosted-client` on top of either / both.
+git-overlay = ["repo/git-overlay", "ingest"]
+native = ["repo/native"]
+weft-client = ["dep:weft-client", "dep:tokio-tungstenite"]
+# Deep git import + AI-session reasoning extraction. Pulls in `gix`'s
+# transport layer, `rusqlite` for OpenCode, and the transcript matchers.
+# Auto-enabled by `git-overlay` since import is part of the overlay flow;
+# can also be enabled standalone for the `heddle-ingest` binary use case.
+ingest = ["dep:ingest"]
+s3 = ["repo/s3"]
+semantic = ["dep:semantic", "repo/tree-sitter-symbols"]
+semantic-extended = ["semantic", "semantic?/extended-languages"]
+observability = [
+    "dep:opentelemetry",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry_sdk",
+    "dep:tracing-opentelemetry",
+]
+# Forward zstd compression to every layer that touches the pack
+# format. The `?` syntax on optional deps activates the feature only
+# when the dep itself is enabled (`ingest` is gated behind
+# the `ingest` feature).
+zstd = [
+    "dep:zstd",
+    "objects/zstd",
+    "proto/zstd",
+    "repo/zstd",
+    "ingest?/zstd",
+]
+# Wire the content-addressed FUSE mount through the CLI. Off by
+# default — adds a Linux-only kernel-side dependency (`fuser`) and
+# the related runtime requirements (`fusermount` on PATH, kernel
+# CONFIG_FUSE_FS). Activate with `cargo build --features mount` on
+# Linux. On macOS/Windows enabling this feature is a no-op because
+# the underlying `mount` crate dep is target-gated to Linux —
+# `--workspace light` will surface a runtime error there.
+mount = ["dep:mount", "mount?/fuse"]
+
+[dev-dependencies]
+criterion = "0.8"
+gix-transport.workspace = true
+hyper-util.workspace = true
+review = { path = "../review", package = "heddle-review", version = "0.2" }
+ntest.workspace = true
+proptest.workspace = true
+tokio-tungstenite.workspace = true
+serial_test.workspace = true
+tempfile.workspace = true
+tokio-test.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "heddle"
+path = "src/main.rs"
+
+[lib]
+name = "cli"
+path = "src/lib.rs"
+
+# Integration tests for cli live under `tests/` (auto-discovered) so
+# that `cargo publish` can package the crate cleanly.
+
+[[bench]]
+name = "local_ops"
+harness = false
+required-features = ["semantic"]

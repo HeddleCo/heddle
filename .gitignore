@@ -1,0 +1,8 @@
+**/target
+.env
+.env.*
+.heddle/
+.DS_Store
+*.swp
+.idea/
+.vscode/

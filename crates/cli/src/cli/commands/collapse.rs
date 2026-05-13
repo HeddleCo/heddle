@@ -1,0 +1,138 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Collapse command: squash multiple states into one.
+
+use std::time::Instant;
+
+use anyhow::Result;
+use objects::object::State;
+use refs::Head;
+use repo::Repository;
+use serde::Serialize;
+
+use crate::{
+    cli::{Cli, commands::snapshot::resolve_attribution, should_output_json},
+    config::UserConfig,
+};
+
+#[derive(Serialize)]
+struct CollapseOutput {
+    change_id: String,
+    content_hash: String,
+    collapsed_count: usize,
+    intent: Option<String>,
+    message: String,
+}
+
+/// Collapse (squash) multiple states into a single state.
+///
+/// The resulting state has:
+/// - The tree from the last state in the sequence
+/// - The parents of the first state in the sequence
+/// - A new intent (from --into) summarizing the collapsed work
+/// - A new confidence (optional)
+///
+/// This is useful for cleaning up exploratory work before sharing.
+pub fn cmd_collapse(
+    cli: &Cli,
+    states: Vec<String>,
+    into: String,
+    confidence: Option<f32>,
+) -> Result<()> {
+    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let json = should_output_json(cli, Some(repo.config()));
+
+    if states.is_empty() {
+        return Err(anyhow::anyhow!("No states specified to collapse"));
+    }
+
+    let started = Instant::now();
+    if !json {
+        eprintln!("Collapsing {} states: resolving state ids...", states.len());
+    }
+
+    // Resolve all state specifiers to actual states
+    let mut resolved_states = Vec::new();
+    for state_spec in &states {
+        let change_id = repo
+            .resolve_state(state_spec)?
+            .ok_or_else(|| anyhow::anyhow!("State not found: {}", state_spec))?;
+        let state = repo
+            .store()
+            .get_state(&change_id)?
+            .ok_or_else(|| anyhow::anyhow!("State not found: {}", state_spec))?;
+        resolved_states.push(state);
+    }
+
+    // The new state uses:
+    // - Tree from the LAST state (most recent content)
+    // - Parents from the FIRST state (preserving history connection)
+    let first_state = &resolved_states[0];
+    let last_state = &resolved_states[resolved_states.len() - 1];
+    if !json {
+        eprintln!("Using final tree from {}", last_state.change_id.short());
+    }
+
+    // Get attribution for the new state
+    let user_config = UserConfig::load_default()?;
+    let attribution = resolve_attribution(&repo, &user_config)?;
+
+    // Create the collapsed state
+    let mut new_state =
+        State::new_collapse_of(last_state.tree, first_state.parents.clone(), attribution);
+    new_state = new_state.with_intent(into.clone());
+
+    if let Some(provenance) = repo.get_state_provenance_root(last_state)? {
+        new_state = new_state.with_provenance(provenance);
+    }
+
+    if let Some(conf) = confidence {
+        new_state = new_state.with_confidence(conf);
+    }
+
+    // Store the new state
+    repo.store().put_state(&new_state)?;
+    if !json {
+        eprintln!("Writing collapsed state {}...", new_state.change_id.short());
+    }
+
+    // Update HEAD to point to the new state
+    match repo.refs().read_head()? {
+        Head::Attached { ref thread } => {
+            repo.refs().set_thread(thread, &new_state.change_id)?;
+        }
+        Head::Detached { .. } => {
+            repo.refs().write_head(&Head::Detached {
+                state: new_state.change_id,
+            })?;
+        }
+    }
+
+    // Record in oplog
+    let source_ids: Vec<_> = resolved_states.iter().map(|s| s.change_id).collect();
+    repo.oplog()
+        .record_collapse(&source_ids, &new_state.change_id)?;
+
+    let output = CollapseOutput {
+        change_id: new_state.change_id.short(),
+        content_hash: new_state.compute_hash().short(),
+        collapsed_count: resolved_states.len(),
+        intent: Some(into),
+        message: format!(
+            "Collapsed {} states into {}",
+            resolved_states.len(),
+            new_state.change_id.short()
+        ),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!(
+            "{} in {:.1}s",
+            output.message,
+            started.elapsed().as_secs_f32()
+        );
+    }
+
+    Ok(())
+}

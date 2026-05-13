@@ -1,0 +1,66 @@
+[package]
+name = "heddle-repo"
+version = "0.2.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+gix.workspace = true
+ignore.workspace = true
+libc.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.2" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.2" }
+proto = { path = "../proto", package = "heddle-proto", version = "0.2", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
+notify.workspace = true
+rmp-serde.workspace = true
+semantic = { path = "../semantic", package = "heddle-semantic", version = "0.2", optional = true }
+state_review = { path = "../state_review", package = "heddle-state-review", version = "0.2", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, optional = true }
+toml.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["git-overlay", "native", "zstd"]
+# Repository mode features. At least one must be enabled. The OSS CLI
+# can be built as git-overlay-only (works on top of existing Git repos),
+# native-only (content-addressed VCS, no Git bridge), or both.
+# Currently these features are declared as a foundation; the
+# overlay-specific methods on `Repository` are not yet gated behind
+# `git-overlay` — that's a follow-up refactor once the CLI surface
+# (the user-visible binary differentiation) is gated in `crates/cli`.
+git-overlay = []
+native = []
+# Forward zstd compression through to objects (where the pack
+# format lives) and proto (which uses pack via the sync
+# protocol). Default-on so a plain `cargo build` keeps compression;
+# turn off with `--no-default-features` for raw packs.
+zstd = ["objects/zstd", "proto/zstd"]
+s3 = ["objects/s3", "dep:tokio"]
+# Symbol resolution. The implementation lives in `semantic`;
+# enabling the feature here pulls in the dep with the parsers our
+# resolver supports. `semantic`'s `common-languages` covers Rust,
+# Python, JS, TS; `lang-go` adds Go.
+tree-sitter-symbols = ["dep:semantic", "semantic/lang-go", "dep:state_review"]
+
+[dev-dependencies]
+hex.workspace = true
+tempfile.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "repo"

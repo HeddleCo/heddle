@@ -1,0 +1,34 @@
+[package]
+name = "heddle-oplog"
+version = "0.2.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+chrono.workspace = true
+fs2.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
+rand.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+serde_json = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+postgres = ["dep:serde_json", "dep:sqlx", "dep:tokio"]
+
+[lib]
+path = "src/lib.rs"
+name = "oplog"
