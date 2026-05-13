@@ -23,7 +23,7 @@ oplog = { path = "../oplog", package = "heddle-oplog", version = "0.2", default-
 prost.workspace = true
 prost-types.workspace = true
 refs = { path = "../refs", package = "heddle-refs", version = "0.2", default-features = false }
-repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false }
+repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false, features = ["git-overlay", "native"] }
 serde.workspace = true
 serde_json.workspace = true
 state_review = { path = "../state_review", package = "heddle-state-review", version = "0.2" }

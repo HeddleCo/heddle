@@ -22,7 +22,7 @@ oplog = { path = "../oplog", package = "heddle-oplog", version = "0.2" }
 # `default-features = false` here breaks repo's automatic zstd
 # cascade so this crate's own `zstd` feature controls the chain end-
 # to-end. Re-enabled via the forwarded feature below by default.
-repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false }
+repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false, features = ["git-overlay"] }
 semantic = { path = "../semantic", package = "heddle-semantic", version = "0.2" }
 
 anyhow.workspace = true
