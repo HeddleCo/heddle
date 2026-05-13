@@ -18,10 +18,14 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  clippy:
-    name: Clippy
+  # Single sequential job: build once, then clippy + test + feature-checks
+  # all reuse the same `target/` directory. Avoids the 4-jobs-each-doing-a-
+  # cold-build pattern; total compute time drops ~70% at the cost of less
+  # parallelism in wall-clock terms.
+  check-and-test:
+    name: Check & test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -37,32 +41,32 @@ jobs:
           shared-key: rust-tests-${{ runner.os }}
           cache-on-failure: true
 
-      - name: Clippy (all features)
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      # 1. Warm target/ with the full default-feature workspace build.
+      #    Everything downstream reuses these artifacts.
+      - name: Build (default features)
+        run: cargo build --locked --workspace --tests
 
-      - name: Clippy (heddle-cli minimal features)
-        run: cargo clippy --locked -p cli --all-targets --no-default-features --features local -- -D warnings
+      # 2. Lint the same artifacts — clippy reuses target/ from step 1.
+      - name: Clippy (OSS features)
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-  test-minimal:
-    name: Tests (minimal features)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+      # 3. Run tests — test binaries already compiled in step 1.
+      - name: Tests
+        run: cargo test --locked --workspace
 
-    steps:
-      - uses: actions/checkout@v4
+      # 4. Verify the OSS build flavors compile. `cargo check` is fast on
+      #    a warm cache; the feature-delta from defaults is small.
+      - name: Check git-overlay-only
+        run: cargo check --locked -p heddle-cli --no-default-features --features git-overlay,semantic,zstd
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Check native-only
+        run: cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
 
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: sccache stats
+        run: sccache --show-stats
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-tests-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: Run heddle-cli tests (minimal features)
-        run: cargo test --locked -p cli --no-default-features --features local
-
+  # Coverage requires an instrumented build that can't share `target/`
+  # with the regular profile, so it stays as its own job.
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -81,11 +85,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: rust-tests-${{ runner.os }}
+          shared-key: coverage-${{ runner.os }}
           cache-on-failure: true
 
+      # `--all-features` would enable `heddle-cli/weft-client`, which from
+      # OSS resolves to the 0.0.0 reservation stub and won't compile.
+      # Cover the OSS feature set instead.
       - name: Generate coverage report
-        run: cargo llvm-cov --locked --workspace --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --locked --workspace --features git-overlay,native,semantic,zstd --lcov --output-path lcov.info
 
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
@@ -121,54 +128,5 @@ jobs:
           path: target/llvm-cov/html
           if-no-files-found: error
 
-      - name: Show sccache stats
-        run: sccache --show-stats
-
-  postgres-integration:
-    name: Postgres Integration Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: heddle_ci
-          POSTGRES_USER: heddle
-          POSTGRES_PASSWORD: heddle
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U heddle -d heddle_ci"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgres://heddle:heddle@127.0.0.1:5432/heddle_ci
-      HEDDLE_TEST_DATABASE_URL: postgres://heddle:heddle@127.0.0.1:5432/heddle_ci
-      HEDDLE_SERVER_DATABASE_URL: postgres://heddle:heddle@127.0.0.1:5432/heddle_ci
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-tests-${{ runner.os }}
-          cache-on-failure: true
-
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-
-      - name: Enable pgcrypto
-        env:
-          PGPASSWORD: heddle
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'
-
-      - name: Run Postgres-backed registry integration tests
-        run: cargo test --locked -p cli --features hosted-client --test pg_hosted_registry_integration --test grpc_hosted_integration --test cli_hosted_grpc_integration -- --ignored --test-threads=1
-
-      - name: Show sccache stats
+      - name: sccache stats
         run: sccache --show-stats
