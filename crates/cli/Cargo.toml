@@ -9,6 +9,13 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
+# Exclude bulky integration-test fixtures (~24 MB of git-shaped tarballs)
+# from the published tarball — they push the package over crates.io's
+# 10 MB limit and only matter for tests run inside the workspace.
+exclude = [
+    "tests/realworld_git/fixtures/*",
+    "tests/snapshots/**/*",
+]
 
 [dependencies]
 # `anstyle` 1.x is already in our transitive deps via clap. Pinning it
