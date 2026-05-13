@@ -149,10 +149,6 @@ async fn main() -> Result<()> {
 
         Commands::Watch(args) => cmd_watch(&cli, args.clone()).await,
 
-        Commands::Diagnose(DiagnoseArgs { profile }) => {
-            cmd_diagnose(&cli, DiagnoseArgs { profile: *profile })
-        }
-
         Commands::Doctor(args) => match &args.command {
             None => cmd_diagnose(
                 &cli,
@@ -1048,7 +1044,6 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Help { .. } => "help",
         Commands::Status { .. } => "status",
         Commands::Watch(_) => "watch",
-        Commands::Diagnose(_) => "diagnose",
         Commands::Doctor(_) => "doctor",
         Commands::Schemas { .. } => "schemas",
         #[cfg(feature = "git-overlay")]

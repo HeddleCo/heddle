@@ -20,7 +20,7 @@ fn test_cli_diagnose_reports_current_context() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("diagnose.txt"), "pending work").unwrap();
 
-    let output = heddle(&["--output", "text", "diagnose"], Some(temp.path())).unwrap();
+    let output = heddle(&["--output", "text", "doctor"], Some(temp.path())).unwrap();
     assert!(
         output.contains("Doctor"),
         "diagnose header missing: {output}"
@@ -45,7 +45,7 @@ fn test_cli_diagnose_json_profile() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("diagnose.json"), "pending json work").unwrap();
 
-    let output = heddle(&["diagnose", "--profile", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["doctor", "--profile", "--json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).expect("diagnose output should be JSON");
     assert_eq!(parsed["thread"]["name"], "main");
     assert_eq!(parsed["changes"]["added"].as_array().unwrap().len(), 1);

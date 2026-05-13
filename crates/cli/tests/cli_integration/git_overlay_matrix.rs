@@ -81,7 +81,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     assert_eq!(status["thread"], "trunk");
     assert!(status["state"].is_null());
 
-    let diagnose = json(temp.path(), &["diagnose", "--json"]);
+    let diagnose = json(temp.path(), &["doctor", "--json"]);
     assert_git_overlay_basics(&diagnose);
     assert_eq!(diagnose["thread"]["name"], "trunk");
 
@@ -133,7 +133,7 @@ fn git_overlay_matrix_subdirectory_dirty_commands() {
             .any(|value| value == "new.txt")
     );
 
-    let diagnose = json(&nested, &["diagnose", "--json"]);
+    let diagnose = json(&nested, &["doctor", "--json"]);
     assert_eq!(diagnose["changes"]["total"], 2);
 
     let show = json(&nested, &["show", "HEAD", "--json"]);
@@ -322,7 +322,7 @@ fn git_overlay_matrix_non_main_default_branch_commands() {
     let status = json(temp.path(), &["status", "--json"]);
     assert_eq!(status["thread"], "develop");
 
-    let diagnose = json(temp.path(), &["diagnose", "--json"]);
+    let diagnose = json(temp.path(), &["doctor", "--json"]);
     assert_eq!(diagnose["thread"]["name"], "develop");
 
     let thread_list = json(temp.path(), &["thread", "list", "--json"]);
@@ -356,7 +356,7 @@ fn git_overlay_matrix_detached_head_sequence_commands() {
             .any(|value| value == "detached.txt")
     );
 
-    let diagnose = json(temp.path(), &["diagnose", "--json"]);
+    let diagnose = json(temp.path(), &["doctor", "--json"]);
     assert_eq!(diagnose["repository_capability"], "git-overlay");
     assert!(diagnose["git_overlay_import_hint"].is_null());
 
@@ -397,7 +397,7 @@ fn git_overlay_matrix_detached_at_tag_status_commands() {
         "status should remain usable when detached at a tag: {status}"
     );
 
-    let diagnose = json(temp.path(), &["diagnose", "--json"]);
+    let diagnose = json(temp.path(), &["doctor", "--json"]);
     assert_git_overlay_basics(&diagnose);
 
     let show = json(temp.path(), &["show", "HEAD", "--json"]);
@@ -1036,7 +1036,7 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
         "status should stay coherent during rebase conflict: {status}"
     );
 
-    let diagnose = json(rebase_repo.path(), &["diagnose", "--json"]);
+    let diagnose = json(rebase_repo.path(), &["doctor", "--json"]);
     assert_eq!(diagnose["repository_capability"], "git-overlay");
 
     let worktree = json(rebase_repo.path(), &["workspace", "show", "--json"]);
@@ -1302,7 +1302,7 @@ fn git_overlay_matrix_in_progress_operations_surface_consistently() {
     assert_eq!(status["operation"]["scope"], "git");
     assert_eq!(status["operation"]["kind"], "rebase");
     assert_eq!(status["operation"]["next_action"], "heddle continue");
-    let diagnose = json(rebase_repo.path(), &["diagnose", "--json"]);
+    let diagnose = json(rebase_repo.path(), &["doctor", "--json"]);
     assert_eq!(diagnose["operation"]["kind"], "rebase");
     let workspace = json(rebase_repo.path(), &["workspace", "show", "--json"]);
     assert_eq!(workspace["operation"]["kind"], "rebase");
@@ -1526,7 +1526,7 @@ fn git_overlay_matrix_sync_and_primary_guidance_prefer_heddle_verbs() {
     assert_eq!(status_before["remote_tracking"]["behind"], 1);
     assert_eq!(status_before["recommended_action"], "heddle sync");
 
-    let diagnose_before = json(temp.path(), &["diagnose", "--json"]);
+    let diagnose_before = json(temp.path(), &["doctor", "--json"]);
     assert_eq!(
         diagnose_before["health"]["recommended_action"],
         "heddle sync"
@@ -1802,7 +1802,7 @@ fn git_overlay_matrix_operator_states_survive_reopen_and_keep_guidance_consisten
     let _ = heddle(&["merge", "main"], Some(temp.path())).unwrap();
 
     let status = json(temp.path(), &["status", "--json"]);
-    let diagnose = json(temp.path(), &["diagnose", "--json"]);
+    let diagnose = json(temp.path(), &["doctor", "--json"]);
     let thread_show = json(temp.path(), &["thread", "show", "feature", "--json"]);
     let workspace = json(temp.path(), &["workspace", "show", "--json"]);
 

@@ -46,7 +46,7 @@ and assume the discipline holds.
    `--preview` mode); those are documented as conditional.
 3. **No leakage of unrelated context.** Bridge import-hint information
    lives only in `heddle bridge git status --json` (and the
-   comprehensive `heddle diagnose --json`). Per-command outputs do not
+   comprehensive `heddle doctor --json`). Per-command outputs do not
    carry it. Transports do not silently piggy-back state.
 4. **Empty collections serialize as `[]` / `{}`, not omitted.** An
    empty `blockers: []` is more useful than a missing field, and the
@@ -470,11 +470,11 @@ key naming:
 
 ---
 
-## `heddle diagnose --json`
+## `heddle doctor --json`
 
-Comprehensive doctor-style report. This is the one place outside
+Comprehensive health report. This is the one place outside
 `bridge git status` where `git_overlay_import_hint` is part of the
-JSON contract — diagnose is the catch-all health surface and its job
+JSON contract — doctor is the catch-all health surface and its job
 is to surface every relevant signal for the operator.
 
 Top-level fields: `repository`, `repository_capability`,
@@ -510,7 +510,7 @@ Each of these:
 - Serializes empty collections as `[]` / `{}`.
 - Does not carry `git_overlay_import_hint` or `missing_branches`
   payloads; those live only in `heddle bridge git status` and
-  `heddle diagnose`.
+  `heddle doctor`.
 
 ---
 

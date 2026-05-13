@@ -404,7 +404,7 @@ fn test_cli_diagnose_in_plain_git_repo_uses_git_baseline() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
     std::fs::write(temp.path().join("plain.txt"), "new file").unwrap();
 
-    let output = heddle(&["diagnose", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["doctor", "--json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "git-overlay");
     assert_eq!(parsed["changes"]["total"], 2);
@@ -1138,11 +1138,11 @@ fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/diagnose-switch"], temp.path());
 
-    let _ = heddle(&["diagnose", "--json"], Some(temp.path())).unwrap();
+    let _ = heddle(&["doctor", "--json"], Some(temp.path())).unwrap();
     git(&["checkout", "support/diagnose-switch"], temp.path());
     std::fs::write(temp.path().join("diag.txt"), "dirty").unwrap();
 
-    let output = heddle(&["diagnose", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["doctor", "--json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "git-overlay");
     assert_eq!(

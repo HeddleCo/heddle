@@ -38,26 +38,30 @@ pub struct InitArgs {
     pub harness_install_force: bool,
 }
 
-/// Arguments for the `diagnose` command.
+/// Shared argument shape for the no-subcommand `heddle doctor`
+/// health snapshot. Kept as its own struct (rather than inlined on
+/// [`DoctorArgs`]) because the same fields feed
+/// `commands::diagnose::cmd_diagnose`, which is the internal
+/// implementation behind `heddle doctor` with no subcommand.
 #[derive(Clone, Debug, clap::Args)]
 pub struct DiagnoseArgs {
-    /// Include local timing for the diagnosis read path.
+    /// Include local timing for the doctor health-read path.
     #[arg(long)]
     pub profile: bool,
 }
 
 /// Arguments for the `doctor` command (and its subcommands).
 ///
-/// `heddle doctor` with no subcommand runs the legacy diagnose summary
-/// (repository, thread, actor, workspace health). `heddle doctor docs`
-/// runs the documentation truthfulness checker — see [`DoctorDocsArgs`]
-/// for that surface.
+/// `heddle doctor` with no subcommand prints the repository health
+/// snapshot (mode, current thread + state, sync status, workspace
+/// counters, next-step suggestion). `heddle doctor docs` and
+/// `heddle doctor schemas` are drift-checkers — see [`DoctorDocsArgs`]
+/// for the docs flavour.
 #[derive(Clone, Debug, clap::Args)]
 pub struct DoctorArgs {
-    /// Include local timing for the diagnosis read path.
+    /// Include local timing for the health-read path.
     ///
-    /// Only honoured when no subcommand is given (i.e. when `heddle
-    /// doctor` runs the legacy diagnose summary). Subcommands like
+    /// Only honoured when no subcommand is given. Subcommands like
     /// `heddle doctor docs` ignore it.
     #[arg(long, global = false)]
     pub profile: bool,
@@ -67,6 +71,21 @@ pub struct DoctorArgs {
 }
 
 /// `heddle doctor <subcommand>` surface.
+///
+/// TODO(doctor-devtools-gating): the `Docs` and `Schemas` subcommands
+/// are maintainer drift-checkers, not end-user surface. A
+/// release-mode `cargo install heddle-cli` shouldn't ship them.
+/// Plan: gate these two variants — and the matching `DoctorDocsArgs`,
+/// `commands/doctor_docs.rs`, `commands/doctor_schemas.rs`, their
+/// `mod` entries, the integration tests in
+/// `crates/cli/tests/cli_integration/` that exercise them, and the
+/// help-text snapshots — behind
+/// `#[cfg(any(debug_assertions, feature = "devtools"))]`. Add a
+/// `devtools` cargo feature to `crates/cli/Cargo.toml` so CI and
+/// contributors can opt back in on release builds with
+/// `--features devtools`. The /docs/cli/doctor page in
+/// HeddleCo/tapestry already advertises this as "dev-build only";
+/// landing the cfg keeps the binary honest about that claim.
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum DoctorCommands {
     /// Diff-check markdown documentation against the actual CLI surface.

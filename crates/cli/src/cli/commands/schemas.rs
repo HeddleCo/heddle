@@ -14,12 +14,12 @@
 //!
 //! See [`super::doctor_schemas`] for the drift checker.
 
-use anyhow::{Result, anyhow};
-use schemars::{JsonSchema, schema_for};
+use anyhow::{anyhow, Result};
+use schemars::{schema_for, JsonSchema};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::cli::{Cli, should_output_json};
+use crate::cli::{should_output_json, Cli};
 
 /// All verbs whose `--json` output has a schema mirror.
 ///
@@ -48,7 +48,7 @@ pub const REGISTERED_VERBS: &[&str] = &[
     "bridge git sync",
     "bridge git push",
     "bridge git pull",
-    "diagnose",
+    "doctor",
     // Cross-cutting: every state-changing verb may emit this stderr
     // envelope on failure when JSON output is selected. The doc binds
     // this entry via an inline-verb hint above the `{"error","hint","kind"}`
@@ -80,7 +80,7 @@ pub fn schema_for_verb(verb: &str) -> Option<Value> {
         "bridge git sync" => schema_for!(BridgeSyncSchema),
         "bridge git push" => schema_for!(BridgePushSchema),
         "bridge git pull" => schema_for!(BridgePullSchema),
-        "diagnose" => schema_for!(DiagnoseSchema),
+        "doctor" => schema_for!(DiagnoseSchema),
         "error" => schema_for!(ErrorEnvelopeSchema),
         _ => return None,
     };

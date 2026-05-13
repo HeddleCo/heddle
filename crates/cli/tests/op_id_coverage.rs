@@ -22,7 +22,6 @@ use std::{collections::BTreeSet, path::PathBuf};
 const READ_ONLY_VARIANTS: &[&str] = &[
     "Status",
     "Watch",
-    "Diagnose",
     // Codex git-overlay foundation added these read-only surfaces.
     "Doctor",
     "GitOverlay",
