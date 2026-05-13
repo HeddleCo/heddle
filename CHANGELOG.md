@@ -4,22 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project follows calendar versioning for entries.
 
-## Unreleased
+## 0.2.0 - 2026-05-13
+
+First public release on crates.io. The CLI and its workspace ship as
+`heddle-*` crates under Apache-2.0. The hosted backend is closed and
+links these crates from a separate workspace.
 
 ### Added
 - `heddle clone --depth N`: Shallow clone support for partial history downloads
 - Packfiles with delta/zstd compression via `heddle gc --aggressive/--prune` (50-70% space savings)
-- Hooks system with `heddle hook list/install` for pre/post snapshot/push/pull/merge/rebase
+- Hooks system with `heddle hook list/install` for pre/post snapshot/merge/rebase
 - `heddle bridge git sync` for bidirectional git-heddle synchronization
 - `file://` protocol for local repository sync without network overhead
 - Extensible cryptographic state signing trait (Ed25519, RSA, P-256) via `heddle capture --sign key.pem`
+- Build flavors: `git-overlay`, `native`, both — pick at install time via Cargo features
+- `weft-client-shim` trait surface for closed-side hosted-client integration
 
 ### Changed
 - FsStore now reads from packfiles before falling back to loose objects
-- GC command creates packfiles instead of being a no-op
+- `gc` command creates packfiles instead of being a no-op
 
 ### Fixed
-- `hosted serve`: object store honors the `s3` feature when an `[s3]` config block (or `HEDDLE_SERVER_S3_*` env vars) is set — previously always wrote blobs to the local filesystem regardless of feature flags
 - `git_import`: `timestamp_opt().unwrap()` replaced with `.single().ok_or_else(...)` — prevents panic on out-of-range Git commit timestamps
 - `init`: `current_dir().unwrap()` replaced with proper error propagation — prevents panic when working directory is inaccessible
 - `packed_refs`: `save()` now uses a random temp-file suffix to prevent concurrent-write collisions
@@ -30,18 +35,15 @@ The format is based on Keep a Changelog, and this project follows calendar versi
 - `refs_manager`: `delete_remote_track` ignores `NotFound` errors from `remove_file` to handle concurrent deletes
 - `revert`: validates target tree exists before proceeding instead of silently using `unwrap_or_default()`
 - `clone`: `copy_worktree` and `copy_dir_recursive` now correctly handle symlinks instead of following them
-- Hosted thread summaries now prefer live ref state over stale stored metadata after captures and other ref updates
 - `State::with_change_id` now invalidates cached content hashes when it rewrites logical identity
 
 ### Tests
-- 450+ tests passing
-- Added regression coverage for hosted thread-summary overlays and logical-ID hash invalidation
+- 450+ tests passing across the OSS workspace
 
 ### Documentation
-- README.md: Updated feature list and test count
+- README.md: Install paths + feature flavors
 - AGENTS.md: Updated known limitations and status
 - docs: Added 2026-04-14 Rust workspace audit covering docs/code alignment, public surfaces, and verification results
-- docs: Corrected hosted admin and partial-fetch status language to match the current gRPC-first and foundation-level implementation
 
 ## 2026-02-17
 
@@ -75,20 +77,16 @@ The format is based on Keep a Changelog, and this project follows calendar versi
 - Improved: CLI test coverage and state spec resolution
 - Added: License and NOTICE metadata
 
-## Phase 4 (Wire Protocol)
+## Phase 4 (Wire protocol primitives)
 
-- Added: TCP-based wire protocol with length-delimited framing
+- Added: Length-delimited framing for the heddle wire protocol
 - Added: MessagePack serialization for all protocol messages
 - Added: Capability negotiation between client and server
-- Added: Token-based authentication
-- Added: Push/pull operations for remote sync
-- Added: Reference advertisement (ListRefs/RefsList)
-- Added: Object transfer with state closure computation
-- Added: Remote management commands (add, list, remove)
-- Added: Server mode with `heddle serve`
-- Documentation: PHASE4_SUMMARY.md with protocol details
+- Added: Reference advertisement (`ListRefs`/`RefsList`) shape
+- Added: Object-transfer message shape with state-closure computation
+- Note: the proto + grpc crates publish as `heddle-proto` and `heddle-grpc`; consumers can build their own client/server on top.
 
-## Phase 3 (Semantic Diff)
+## Phase 3 (Semantic diff)
 
 - Added: Tree-sitter based code parsing
 - Added: Function-level change detection
