@@ -102,6 +102,25 @@ pub enum OpRecord {
     /// physically removed from local storage. The Redaction record is
     /// preserved; only the bytes are gone. Non-reversible by design —
     /// `heddle undo` on a Purge fails with a clear message.
+    ///
+    /// TODO(purge-propagation): this record is currently local-only.
+    /// The product intent is that a purge invoked on one replica by
+    /// an authorized user should redact the bytes on every replica
+    /// lazily, at the next sync/pull, without the admin having to
+    /// touch each remote machine. That requires three things we
+    /// don't yet have:
+    ///   1. Include `OpRecord::Purge` in the wire-protocol object
+    ///      graph (crates/proto/src/object_graph.rs) and proto
+    ///      definitions so it ships during push/pull/fetch.
+    ///   2. Teach the sync handlers in `weft-client` and
+    ///      `weft-server` (or the OSS sync paths once they exist)
+    ///      to recognize incoming purge records.
+    ///   3. On receipt, replay the purge against the local store —
+    ///      drop matching loose objects and mark packfiles for
+    ///      repack — exactly as `Repository::purge_blob` does
+    ///      locally today.
+    /// Until that lands, `heddle purge` only redacts the replica it
+    /// runs on; sensitive bytes remain on every other clone.
     Purge {
         /// Content hash of the `Redaction` whose bytes were purged.
         redaction_id: ContentHash,
