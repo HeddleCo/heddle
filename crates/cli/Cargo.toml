@@ -162,7 +162,7 @@ mount = ["dep:mount", "mount?/fuse"]
 criterion = "0.8"
 gix-transport.workspace = true
 hyper-util.workspace = true
-review = { path = "../review", package = "heddle-review", version = "0.2" }
+review = { path = "../review", package = "heddle-review" }
 ntest.workspace = true
 proptest.workspace = true
 tokio-tungstenite.workspace = true

@@ -31,5 +31,8 @@ path = "src/lib.rs"
 
 name = "proto"
 [dev-dependencies]
-repo = { path = "../repo", package = "heddle-repo", version = "0.2" }
+# Circular: heddle-repo depends on heddle-proto. We keep the path-dep
+# for local testing but omit `version` so cargo strips this entry from
+# the published manifest (dev-deps without version are not packaged).
+repo = { path = "../repo", package = "heddle-repo" }
 tempfile.workspace = true

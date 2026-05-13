@@ -28,7 +28,7 @@ fuser = { version = "0.17", optional = true }
 
 [dev-dependencies]
 chrono.workspace = true
-oplog = { path = "../oplog", package = "heddle-oplog", version = "0.2" }
+oplog = { path = "../oplog", package = "heddle-oplog" }
 proptest.workspace = true
 tempfile.workspace = true
 
