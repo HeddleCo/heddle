@@ -1885,7 +1885,7 @@ fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
                 // obvious; shell wrappers can prefer `heddle start <name>
                 // --print-cd-path` to capture the path directly.
                 println!("Run this to switch shells:");
-                println!("    cd {}", style::accent(path));
+                println!("    cd {}", style::accent(&crate::cli::render::shell_quote(path)));
             } else if let Some(path) = &thread.execution_path {
                 println!("Execution root: {}", style::dim(path));
             }

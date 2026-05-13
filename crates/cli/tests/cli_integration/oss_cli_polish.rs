@@ -253,9 +253,8 @@ fn missing_repo_status_emits_structured_error_in_json_mode() {
     );
 
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: serde_json::Value = serde_json::from_str(stderr.trim()).expect(&format!(
-        "stderr should be a single-line JSON envelope: {stderr}"
-    ));
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|_| panic!("stderr should be a single-line JSON envelope: {stderr}"));
     assert_eq!(envelope["kind"], "repository_not_found");
     assert!(
         envelope["error"]
@@ -345,6 +344,39 @@ fn start_emits_cd_hint_in_text_mode() {
     assert!(
         output.contains("    cd "),
         "the cd hint should include the literal `cd` invocation: {output}"
+    );
+}
+
+#[test]
+fn cd_hint_quotes_paths_with_spaces() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("seed.txt"), "seed").unwrap();
+    heddle(
+        &["capture", "-m", "seed", "--confidence", "0.9"],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    let checkout = temp.path().join("scratch dir");
+    let checkout_str = checkout.to_str().expect("utf-8 path");
+    let output = heddle(
+        &[
+            "--output",
+            "text",
+            "start",
+            "spaced-thread",
+            "--path",
+            checkout_str,
+        ],
+        Some(temp.path()),
+    )
+    .expect("start with spaced path");
+
+    let quoted = format!("'{checkout_str}'");
+    assert!(
+        output.contains(&format!("    cd {quoted}")),
+        "cd hint must single-quote paths with spaces: {output}"
     );
 }
 
