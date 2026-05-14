@@ -1,0 +1,85 @@
+name: Spike
+description: A time-boxed investigation whose deliverable is a decision document, not shipped code.
+title: "Spike: [question to resolve]"
+labels: ["p1", "spike"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when the answer to "should we build it this way?" is unknown and worth a few hours / days to find out before committing to an implementation issue.
+
+        After filing: set `DoD Type = Spike`, `Size = S` or `M` (spikes that need `L` are usually two spikes), and `Priority` per how much it blocks downstream work. Spikes typically block one or more sub-issues — list those under `Blocked by → unblocks` so the orchestrator can re-route once the decision lands.
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What is the open question? Why can't we just decide it now? What downstream work is waiting on the answer?
+      placeholder: 2–4 sentences. Name the constraint that makes this a real question (perf budget, bundle size, security model, API surface, etc.).
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: A spike is "done" when the decision is committed. List the artifacts that must exist.
+      value: |
+        - [ ] Decision doc in `<repo>/docs/<EPIC>_<TOPIC>_DECISION.md` covering: problem statement, options considered, measured evidence, recommendation.
+        - [ ] PR description includes the headline numbers (KB / ms / lines / whatever the constraint is).
+        - [ ] Each downstream issue listed under "Unblocks" has its `Blocked by` line removed once this lands.
+        - [ ] Decision reviewed and signed off by a maintainer.
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Options to evaluate
+      description: Concrete options the spike will compare. Naming them up-front prevents scope creep mid-spike.
+      value: |
+        - Option A —
+        - Option B —
+        - Option C (do nothing / defer) —
+    validations:
+      required: true
+  - type: textarea
+    id: time-box
+    attributes:
+      label: Time box
+      description: How long until we either have an answer or escalate? Spikes that exceed their budget should post a BUDGET comment, not silently expand.
+      placeholder: "Examples: 1 day, half-day, 4h."
+    validations:
+      required: true
+  - type: textarea
+    id: file-scope
+    attributes:
+      label: File scope
+      description: Paths the spike expects to touch (often just a new doc file plus a throwaway POC dir).
+      value: |
+        - `<repo>/docs/<EPIC>_<TOPIC>_DECISION.md`
+        - `<repo>/spikes/<topic>/` (throwaway POC, may be deleted on merge)
+  - type: textarea
+    id: unblocks
+    attributes:
+      label: Unblocks
+      description: Sub-issues that are waiting on this decision. List them so the orchestrator can re-evaluate `Blocked by` once the spike closes.
+      placeholder: |
+        - HeddleCo/tapestry#42
+        - HeddleCo/weft#19
+  - type: textarea
+    id: blocked-by
+    attributes:
+      label: Blocked by
+      description: Issues that must close before this spike can start. Often empty for spikes.
+      placeholder: |
+        - HeddleCo/heddle#5
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of Done
+      description: Spike DoD — the deliverable is the decision, not code.
+      value: |
+        - [ ] **Spike output**: decision doc committed under the right `docs/` tree.
+        - [ ] PR description includes the measured evidence that drove the recommendation.
+        - [ ] All sub-issues listed in "Unblocks" have their `Blocked by` reference cleared once this lands.
+        - [ ] Reviewed by a maintainer.
+    validations:
+      required: true
