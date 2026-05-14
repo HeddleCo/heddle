@@ -55,7 +55,7 @@ pub use commands_hook::{HookCommands, HookInstallSource};
 pub use commands_integration::{
     IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs,
 };
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 pub use commands_main::PresenceCommands;
 pub use commands_main::{
     ActorCommands, Commands, DaemonCommands, MaintenanceCommands, SessionCommands, StoreCommands,
@@ -75,7 +75,7 @@ pub use commands_semantic::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
 pub use commands_stash::StashCommands;
 pub use commands_thread::{ThreadCleanupArgs, ThreadCommands, ThreadListArgs};
 pub use commands_workspace::{WorkspaceCommands, WorkspaceShowArgs};
-#[cfg(feature = "weft-client")]
-pub use weft_client::AuthCommands;
-#[cfg(feature = "weft-client")]
-pub use weft_client::{SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs};
+#[cfg(feature = "client")]
+pub use heddle_client::AuthCommands;
+#[cfg(feature = "client")]
+pub use heddle_client::{SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs};

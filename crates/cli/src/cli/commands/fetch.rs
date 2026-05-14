@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fetch command - download objects and refs from remote.
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use std::collections::HashSet;
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use objects::object::ChangeId;
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use proto::AuthToken;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 use crate::{
     bridge::GitBridge,
@@ -94,10 +94,10 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
     for remote_name in remotes {
         let token = user_config.remote_token();
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         let (target, server_key) =
             resolve_remote_with_key(&repo, Some(&remote_name)).map_err(anyhow::Error::msg)?;
-        #[cfg(not(feature = "weft-client"))]
+        #[cfg(not(feature = "client"))]
         let (target, _server_key) =
             resolve_remote_with_key(&repo, Some(&remote_name)).map_err(anyhow::Error::msg)?;
 
@@ -108,7 +108,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                 total_objects += objects;
             }
             RemoteTarget::Network { addr, repo_path } => {
-                #[cfg(feature = "weft-client")]
+                #[cfg(feature = "client")]
                 {
                     let (refs, objects) = match fetch_network(
                         &repo,
@@ -132,11 +132,11 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                     total_refs += refs;
                     total_objects += objects;
                 }
-                #[cfg(not(feature = "weft-client"))]
+                #[cfg(not(feature = "client"))]
                 {
                     let _ = (addr, repo_path, token);
                     anyhow::bail!(
-                        "network fetch support is not available in this build; enable the `hosted-client` feature"
+                        "network fetch support is not available in this build; enable the `client` feature"
                     );
                 }
             }
@@ -218,7 +218,7 @@ async fn fetch_local(
     Ok((refs_fetched, objects_fetched))
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 struct FetchNetworkOptions<'a> {
     addr: std::net::SocketAddr,
     repo_path: Option<&'a str>,
@@ -229,7 +229,7 @@ struct FetchNetworkOptions<'a> {
     cli: &'a Cli,
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 async fn fetch_network(
     repo: &Repository,
     options: FetchNetworkOptions<'_>,
@@ -238,7 +238,7 @@ async fn fetch_network(
         .repo_path
         .context("network remotes must include a hosted repository path")?;
 
-    let mut config = options.user_config.weft_client_config(options.token);
+    let mut config = options.user_config.heddle_client_config(options.token);
     if let Some(key) = options.server_key {
         config = config.with_server_key(key);
     }
@@ -303,7 +303,7 @@ async fn fetch_network(
     Ok((refs_fetched, objects_fetched))
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 async fn fetch_remote_state(
     client: &mut HostedGrpcClient,
     repo: &Repository,
@@ -317,7 +317,7 @@ async fn fetch_remote_state(
         .map_err(|e| anyhow!(e.to_string()))
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 fn augment_missing_blob_error(repo: &Repository, err: anyhow::Error) -> anyhow::Error {
     let Ok(missing) = repo.missing_blobs() else {
         return err;

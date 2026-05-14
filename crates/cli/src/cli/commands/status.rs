@@ -8,17 +8,17 @@ use std::{
 };
 
 use anyhow::Result;
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
 use repo::{
     AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus, Thread,
     ThreadFreshness, ThreadImpactCategory, ThreadMode, ThreadState, describe_thread_advice,
 };
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::time::{Duration, sleep};
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, http::header::AUTHORIZATION, protocol::Message},
@@ -33,7 +33,7 @@ use super::{
     },
 };
 use crate::cli::{Cli, should_output_json, style, worktree_status_options};
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use crate::config::UserConfig;
 
 #[derive(Serialize)]
@@ -568,7 +568,7 @@ async fn watch_status(
     let interval = Duration::from_millis(watch_interval_ms.unwrap_or(1000));
     let mut iterations = 0usize;
 
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     let mut hosted_watch = HostedPresenceWatch::connect_if_configured(cli).await;
 
     loop {
@@ -601,7 +601,7 @@ async fn watch_status(
             break;
         }
 
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         if let Some(watch) = hosted_watch.as_mut() {
             watch.wait_for_event(interval).await;
             continue;
@@ -1014,14 +1014,14 @@ fn render_status_parallel(output: &StatusOutput) {
     }
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 struct HostedPresenceWatch {
     stream: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 impl HostedPresenceWatch {
     async fn connect_if_configured(cli: &Cli) -> Option<Self> {
         let cwd = std::env::current_dir().ok()?;
@@ -1079,7 +1079,7 @@ impl HostedPresenceWatch {
     }
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PresenceClientFrame<'a> {
@@ -1089,7 +1089,7 @@ enum PresenceClientFrame<'a> {
     },
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PresenceServerFrame {
@@ -1098,7 +1098,7 @@ enum PresenceServerFrame {
     Error,
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 fn normalize_presence_ws_url(upstream: &str) -> Result<String> {
     let trimmed = upstream.trim_end_matches('/');
     if let Some(rest) = trimmed.strip_prefix("https://") {

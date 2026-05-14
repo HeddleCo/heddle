@@ -47,7 +47,7 @@ crypto = { path = "../crypto", package = "heddle-crypto", version = "0.2" }
 daemon = { path = "../daemon", package = "heddle-daemon", version = "0.2" }
 grpc = { path = "../grpc", package = "heddle-grpc", version = "0.2" }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.2" }
-weft-client = { version = "0.0", optional = true }
+heddle-client = { path = "../client", version = "0.2", optional = true }
 weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.2" }
 async-trait.workspace = true
 # `default-features = false` here matches the pattern used for
@@ -127,10 +127,10 @@ local = []
 # three OSS CLI flavors: `git-overlay` only (works on top of existing
 # Git repos; no native content-addressed init), `native` only (pure
 # content-addressed VCS; no Git bridge), or both. The closed `heddle-hosted`
-# build adds `hosted-client` on top of either / both.
+# build adds `client` on top of either / both.
 git-overlay = ["repo/git-overlay", "ingest"]
 native = ["repo/native"]
-weft-client = ["dep:weft-client", "dep:tokio-tungstenite"]
+client = ["dep:heddle-client", "dep:tokio-tungstenite"]
 # Deep git import + AI-session reasoning extraction. Pulls in `gix`'s
 # transport layer, `rusqlite` for OpenCode, and the transcript matchers.
 # Auto-enabled by `git-overlay` since import is part of the overlay flow;

@@ -7,8 +7,8 @@ pub mod local_daemon;
 pub mod local_sync;
 
 pub use cli_shared::ClientConfig;
-#[cfg(feature = "weft-client")]
-pub use weft_client::HostedGrpcClient;
+#[cfg(feature = "client")]
+pub use heddle_client::HostedGrpcClient;
 #[cfg(unix)]
 pub use local_daemon::{
     LocalDaemonChannel, connect_local_daemon_channel, detect_local_daemon_with_connect_probe,

@@ -12,11 +12,11 @@ pub mod style;
 pub mod tips;
 pub mod transaction_sentinel;
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 pub use cli_args::PresenceCommands;
 #[cfg(feature = "git-overlay")]
 pub use cli_args::{BridgeCommands, GitCommands};
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 pub use cli_args::{AuthCommands, SupportCommands};
 pub use cli_args::{
     ActorCommands, AgentCommands, AttemptArgs, BisectCommands,
