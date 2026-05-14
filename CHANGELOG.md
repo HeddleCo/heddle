@@ -11,6 +11,29 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
+## 0.2.4 - 2026-05-14
+
+### Added
+
+- **`RedactionTransfer` gRPC message + oneof variants**
+  (`crates/grpc/proto/heddle/v1/service.proto`). Out-of-pack
+  transport for redaction sidecars on hosted-gRPC push and pull.
+  - New `message RedactionTransfer { string blob_hash; bytes redactions_blob; }`.
+  - Added as variant 5 to `PushMessage.body` oneof and variant 6 to
+    `PullMessage.body` oneof.
+  - Sender emits one per blob hash with an active redaction in the
+    state closure; receiver routes through
+    `Repository::accept_wire_redactions` for signature + trust-list
+    verification.
+
+Sidecars live structurally outside `.heddle/objects/` (so GC can't
+reach them) and therefore can't ride the native-pack object
+channel. This release closes the follow-up flagged in 0.2.3's
+"hosted-gRPC redaction transport" note. Server-side biscuit
+capability gating + the actual handler wiring lives downstream of
+heddle (in `weft-server`), so this release is purely the wire-format
+addition.
+
 ## 0.2.3 - 2026-05-14
 
 ### Added

@@ -313,12 +313,32 @@ message PushComplete {
   TransferCheckpoint transfer = 4;
 }
 
+// Out-of-pack transport for redaction sidecars. Sidecars live
+// structurally outside `.heddle/objects/` (so GC can't reach them)
+// and therefore can't ride the native-pack object channel. The
+// sender emits one `RedactionTransfer` per blob hash with an active
+// redaction in the state closure; the receiver routes through
+// `Repository::accept_wire_redactions` for signature + trust-list
+// verification.
+//
+// `blob_hash` is the hex-encoded ContentHash of the *redacted blob*
+// (the redactions store is keyed by that hash, not by the
+// redaction-record content hash).
+// `redactions_blob` is the rmp-encoded `RedactionsBlob` byte payload
+// — byte-identical to what `Repository::put_redaction` wrote on the
+// sender's disk.
+message RedactionTransfer {
+  string blob_hash = 1;
+  bytes redactions_blob = 2;
+}
+
 message PushMessage {
   oneof body {
     PushRequest request = 1;
     PushReady ready = 2;
     PackChunk pack = 3;
     PushComplete complete = 4;
+    RedactionTransfer redaction = 5;
   }
 }
 
@@ -368,6 +388,7 @@ message PullMessage {
     WantObjects want = 3;
     PackChunk pack = 4;
     PullComplete complete = 5;
+    RedactionTransfer redaction = 6;
   }
 }
 
