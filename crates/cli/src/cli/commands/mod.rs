@@ -68,7 +68,7 @@ mod stash_ops;
 mod status;
 mod store_cmd;
 mod thread;
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 mod thread_approval;
 mod thread_cmd;
 mod thread_shaping;
@@ -97,8 +97,8 @@ pub use agent_cmd::{
     cmd_agent_release, cmd_agent_reserve,
 };
 pub use attempt::cmd_attempt;
-#[cfg(feature = "weft-client")]
-pub use weft_client::cmd_auth;
+#[cfg(feature = "client")]
+pub use heddle_client::cmd_auth;
 pub use bisect::cmd_bisect;
 pub use blame::cmd_blame;
 #[cfg(feature = "git-overlay")]
@@ -143,8 +143,8 @@ pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 #[cfg(feature = "git-overlay")]
 pub use oss::cmd_git_overlay_guide;
 pub use oss::cmd_version;
-#[cfg(feature = "weft-client")]
-pub use weft_client::{
+#[cfg(feature = "client")]
+pub use heddle_client::{
     PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher,
 };
 pub use purge::cmd_purge;
@@ -169,8 +169,8 @@ pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
 pub use stash::cmd_stash;
 pub use status::cmd_status;
 pub use store_cmd::cmd_store;
-#[cfg(feature = "weft-client")]
-pub use weft_client::cmd_support;
+#[cfg(feature = "client")]
+pub use heddle_client::cmd_support;
 pub use thread::{cmd_start, cmd_thread_show};
 pub use thread_cmd::cmd_thread;
 pub use thread_shaping::{

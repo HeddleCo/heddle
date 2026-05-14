@@ -13,7 +13,7 @@
 //! sharp assertion that the hello + first publish frames match the on-wire
 //! schema the server expects.
 
-#![cfg(all(feature = "weft-client", feature = "local"))]
+#![cfg(all(feature = "client", feature = "local"))]
 
 use std::{net::SocketAddr, time::Duration};
 

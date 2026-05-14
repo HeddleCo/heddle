@@ -180,37 +180,37 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         ThreadCommands::Resolve(args) => cmd_thread_resolve(cli, args.thread),
         ThreadCommands::Promote(args) => cmd_thread_promote(cli, &repo, &args.thread, args.path),
         ThreadCommands::Drop(args) => cmd_thread_drop(cli, &repo, &args.thread, args.delete_thread),
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         ThreadCommands::Approve(args) => {
             require_hosted_repo(&repo, "thread approvals")?;
             super::thread_approval::cmd_thread_approve(cli, args).await
         }
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         ThreadCommands::Approvals(args) => {
             require_hosted_repo(&repo, "thread approvals")?;
             super::thread_approval::cmd_thread_approvals(cli, args).await
         }
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         ThreadCommands::RevokeApproval(args) => {
             require_hosted_repo(&repo, "thread approvals")?;
             super::thread_approval::cmd_thread_revoke_approval(cli, args).await
         }
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         ThreadCommands::CheckMerge(args) => {
             require_hosted_repo(&repo, "hosted merge checks")?;
             super::thread_approval::cmd_thread_check_merge(cli, args).await
         }
-        #[cfg(not(feature = "weft-client"))]
+        #[cfg(not(feature = "client"))]
         ThreadCommands::Approve(_)
         | ThreadCommands::Approvals(_)
         | ThreadCommands::RevokeApproval(_)
         | ThreadCommands::CheckMerge(_) => Err(anyhow!(
-            "rebuild cli with --features hosted-client to use thread approvals"
+            "rebuild cli with --features client to use thread approvals"
         )),
     }
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 fn require_hosted_repo(repo: &Repository, feature: &str) -> Result<()> {
     if repo.hosted_enabled() {
         Ok(())

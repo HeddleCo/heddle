@@ -3,15 +3,15 @@
 
 use std::{fs, path::Path};
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use refs::Head;
 use repo::Repository;
 
-#[cfg(feature = "weft-client")]
-use weft_client::grpc_hosted::PullMaterialization;
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
+use heddle_client::grpc_hosted::PullMaterialization;
+#[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
     bridge::{
@@ -51,7 +51,7 @@ pub async fn cmd_clone(
     }
 
     // Parse the remote URL
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     let server_key = credential_key_from_remote_url(&remote);
     let target = match RemoteTarget::parse(&remote) {
         Ok(target) => target,
@@ -71,7 +71,7 @@ pub async fn cmd_clone(
             clone_local(cli, &remote_path, local_path, &options).await?;
         }
         RemoteTarget::Network { addr, repo_path } => {
-            #[cfg(feature = "weft-client")]
+            #[cfg(feature = "client")]
             clone_network(
                 cli,
                 addr,
@@ -81,11 +81,11 @@ pub async fn cmd_clone(
                 server_key,
             )
             .await?;
-            #[cfg(not(feature = "weft-client"))]
+            #[cfg(not(feature = "client"))]
             let _ = (addr, repo_path);
-            #[cfg(not(feature = "weft-client"))]
+            #[cfg(not(feature = "client"))]
             anyhow::bail!(
-                "network clone support is not available in this build; enable the `hosted-client` feature"
+                "network clone support is not available in this build; enable the `client` feature"
             );
         }
     }
@@ -304,7 +304,7 @@ async fn clone_local(
     Ok(())
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 async fn clone_network(
     cli: &Cli,
     addr: std::net::SocketAddr,
@@ -332,7 +332,7 @@ async fn clone_network(
     let user_config = UserConfig::load_default().unwrap_or_default();
 
     // Connect to remote
-    let mut config = user_config.weft_client_config(None);
+    let mut config = user_config.heddle_client_config(None);
     if let Some(key) = server_key {
         config = config.with_server_key(key);
     }

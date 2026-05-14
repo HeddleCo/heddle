@@ -21,7 +21,7 @@ use super::{
     RedactCommands, RemoteCommands, ReviewCommands, StashCommands, ThreadCommands,
     TransactionCommands, WorkspaceCommands,
 };
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use super::{AuthCommands, SupportCommands};
 
 #[derive(Subcommand)]
@@ -451,7 +451,7 @@ Examples:
     },
 
     /// Authenticate with a Heddle server.
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
@@ -485,7 +485,7 @@ Examples:
     /// Customer-issued temporary admin grants for Heddle staff.
     /// Time-bounded and audit-trailed; staff need an active grant to
     /// act on customer resources beyond the operator surface.
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     Support {
         #[command(subcommand)]
         command: SupportCommands,
@@ -692,7 +692,7 @@ Examples:
     /// `heddle presence publish` runs a foreground publisher that streams
     /// agent_start / agent_heartbeat / agent_done events to the configured
     /// hosted server over a bearer-authenticated WebSocket.
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     Presence {
         #[command(subcommand)]
         command: PresenceCommands,
@@ -700,7 +700,7 @@ Examples:
 }
 
 /// Presence subcommands.
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum PresenceCommands {
     /// Publish presence events for the given agent session.

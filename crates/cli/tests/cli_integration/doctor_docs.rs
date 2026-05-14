@@ -272,14 +272,14 @@ fn flags_unreadable_path_as_hard_failure() {
 
 #[test]
 fn skips_feature_gated_presence_verb() {
-    // `presence` lives behind the `hosted-client` feature; default
+    // `presence` lives behind the `client` feature; default
     // `cargo install --path crates/cli` builds don't see it. The
     // checker should NOT false-positive on docs that mention it.
     let temp = TempDir::new().expect("tempdir");
     let md = write_file(
         temp.path(),
         "presence.md",
-        "Run `heddle presence publish --session abc-123` (hosted-client only).\n",
+        "Run `heddle presence publish --session abc-123` (client feature only).\n",
     );
 
     let output = heddle_output(

@@ -134,8 +134,8 @@ pub fn cmd_version(cli: &Cli, verbose: bool) -> Result<()> {
 #[allow(clippy::vec_init_then_push)]
 fn enabled_features() -> Vec<&'static str> {
     let mut features = Vec::new();
-    #[cfg(feature = "weft-client")]
-    features.push("hosted-client");
+    #[cfg(feature = "client")]
+    features.push("client");
     #[cfg(feature = "ingest")]
     features.push("ingest");
     #[cfg(feature = "local")]

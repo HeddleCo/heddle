@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Trait surface separating the OSS Heddle CLI from the closed
-//! hosted-client implementation.
+//! heddle-client implementation.
 //!
 //! OSS builds use [`NoopWeftExtensions`], which returns a friendly
 //! "hosted features not enabled" error on every method. Closed builds
-//! ship a real implementation in the `hosted-client` crate and inject
+//! ship a real implementation in the `heddle-client` crate and inject
 //! it via Cargo features (today) or `[patch.crates-io]` (post-split).
 //!
 //! Why a separate crate (and not just a trait in `cli`)? When the
 //! repos physically split, the OSS `heddle-cli` crate ships on
-//! crates.io. The closed `heddle-hosted-client` crate published in the
+//! crates.io. The closed `heddle-client` crate published in the
 //! private workspace depends on this shim to satisfy `cli`'s trait
 //! bound without `cli` ever knowing about closed-source code. Same
 //! trait surface, two impls, no circular deps.
@@ -28,9 +28,9 @@ use async_trait::async_trait;
 
 /// Small projection of `cli::Cli` that hosted commands rely on.
 /// Defining the surface here rather than passing `&Cli` lets the
-/// closed `hosted-client` crate compile without depending on `cli` —
+/// closed `heddle-client` crate compile without depending on `cli` —
 /// breaking what would otherwise be a circular dep (cli optionally
-/// pulls in hosted-client, hosted-client would otherwise need cli for
+/// pulls in heddle-client, heddle-client would otherwise need cli for
 /// the `Cli` type).
 ///
 /// Keep this trait deliberately small. Every new method is a
@@ -59,13 +59,13 @@ pub trait CliContext: Send + Sync {
 
 /// Hosted-side command implementations. The CLI dispatches through a
 /// `&dyn WeftExtensions` reference; the active impl is selected at
-/// build time by the `hosted-client` Cargo feature.
+/// build time by the `heddle-client` Cargo feature.
 ///
 /// Implementations take CLI args opaquely (`&dyn Any`) so this shim
 /// crate doesn't need to depend on `cli` for type definitions —
 /// downstream concrete impls downcast to the real types. This avoids
 /// a circular dependency between `cli` (which defines `Cli`,
-/// `AuthCommands`, etc.) and the hosted-client crate.
+/// `AuthCommands`, etc.) and the heddle-client crate.
 #[async_trait]
 pub trait WeftExtensions: Send + Sync {
     /// `heddle auth <subcommand>` — login, logout, whoami, device
@@ -129,8 +129,8 @@ impl WeftExtensions for NoopWeftExtensions {
 
 fn not_enabled_error(command: &str) -> String {
     format!(
-        "`heddle {command}` requires the hosted-client build of Heddle. \
+        "`heddle {command}` requires the client build of Heddle. \
          Install it from https://heddleco.com or rebuild the CLI with \
-         `--features hosted-client` if you're working from source."
+         `--features client` if you're working from source."
     )
 }
