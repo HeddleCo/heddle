@@ -11,6 +11,26 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
+## 0.2.2 - 2026-05-14
+
+### Added
+- New `heddle-client` crate — the hosted-backend command implementations
+  (`auth`, `support`, `presence`), the gRPC client wrappers, and the
+  global credential store. Moved out of the closed `weft` workspace and
+  into OSS heddle so the workspace builds standalone with
+  `--all-features` and third-party hosted clients can extend via the
+  public gRPC protocol surface rather than a closed crate.
+
+### Changed
+- `heddle-cli`: optional dep `weft-client = "0.0"` → `heddle-client`.
+  The feature gating that dep renamed `weft-client` → `client`.
+- `heddle-cli-shared`: `UserConfig::weft_client_config` →
+  `UserConfig::heddle_client_config`.
+
+### Note
+- The `weft-client` placeholder crate on crates.io (v0.0.0) is now
+  unreferenced. Safe to yank.
+
 ## 0.2.1 - 2026-05-14
 
 ### Fixed

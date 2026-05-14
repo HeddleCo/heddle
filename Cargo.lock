@@ -2675,7 +2675,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "heddle-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -2753,7 +2753,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-cli-shared"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2820,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-crypto"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-daemon"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-stream",
  "chrono",
@@ -2869,7 +2869,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-devtools"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "protoc-bin-vendored",
@@ -2878,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-grpc"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "prost 0.14.3",
  "prost-types 0.14.3",
@@ -2890,7 +2890,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-ingest"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2914,7 +2914,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-mount"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "cbindgen",
@@ -2933,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-objects"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2972,7 +2972,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-oplog"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "fs2",
@@ -2990,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-proto"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "blake3",
  "heddle-objects",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-refs"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "heddle-objects",
@@ -3019,7 +3019,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-repo"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3049,7 +3049,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-review"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3066,7 +3066,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-semantic"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "heddle-objects",
@@ -3084,7 +3084,7 @@ dependencies = [
 
 [[package]]
 name = "heddle-state-review"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "heddle-objects",
@@ -7221,7 +7221,7 @@ dependencies = [
 
 [[package]]
 name = "weft-client-shim"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",

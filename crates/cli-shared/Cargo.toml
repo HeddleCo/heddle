@@ -1,6 +1,6 @@
 [package]
 name = "heddle-cli-shared"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 authors.workspace = true
 description = "CLI-side utilities shared between Heddle's OSS cli crate and the closed heddle-client crate: user config, remote target resolution, client config."
