@@ -1,0 +1,113 @@
+name: Project card sync
+
+# Auto-move project items based on PR + issue lifecycle.
+# - New issues → added to HeddleCo project #1 (Backlog)
+# - PR opened referencing an issue → linked issue moves to "In review"
+# - PR merged referencing an issue → linked issue moves to "Done" (and is closed)
+#
+# Requires repo secret `PROJECT_PAT`: a fine-grained PAT scoped to HeddleCo org with
+# read:org + project:write permissions. The default GITHUB_TOKEN cannot write to
+# org-level Projects v2.
+
+on:
+  issues:
+    types: [opened, reopened]
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, closed]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  add-issue-to-project:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/orgs/HeddleCo/projects/1
+          github-token: ${{ secrets.PROJECT_PAT }}
+
+  pr-to-status:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine target status
+        id: status
+        run: |
+          if [ "${{ github.event.action }}" = "closed" ] && [ "${{ github.event.pull_request.merged }}" = "true" ]; then
+            echo "status=Done" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.action }}" = "closed" ]; then
+            echo "status=Backlog" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=In review" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync linked issues
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          TARGET_STATUS: ${{ steps.status.outputs.status }}
+        run: |
+          set -eu
+          # Extract referenced issue numbers from PR body + title (closes #N, fixes #N, refs #N, etc.)
+          # Also pull from GitHub's "closingIssueReferences" if available.
+          mapfile -t LINKED < <(
+            gh api graphql -f query='
+              query($owner:String!,$repo:String!,$pr:Int!){
+                repository(owner:$owner,name:$repo){
+                  pullRequest(number:$pr){
+                    closingIssuesReferences(first:20){nodes{number repository{name owner{login}}}}
+                  }
+                }
+              }' -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$PR_NUMBER" \
+            --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[] | "\(.repository.owner.login)/\(.repository.name)#\(.number)"'
+          )
+          # Augment with body-text matches (cross-repo refs like HeddleCo/heddle#15)
+          BODY_REFS=$(printf '%s\n%s\n' "$PR_BODY" "$PR_TITLE" \
+            | grep -ohE '([Cc]loses|[Ff]ixes|[Rr]esolves|[Pp]art of|[Tt]racked by|[Rr]efs?) +([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+' \
+            | grep -ohE '([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+' || true)
+          while IFS= read -r ref; do
+            [ -z "$ref" ] && continue
+            if [[ "$ref" == *"/"*"#"* ]]; then
+              full="$ref"
+            else
+              full="${REPO}${ref}"
+            fi
+            LINKED+=("$full")
+          done <<< "$BODY_REFS"
+
+          # Dedup
+          mapfile -t LINKED < <(printf '%s\n' "${LINKED[@]}" | awk 'NF && !seen[$0]++')
+
+          if [ "${#LINKED[@]}" -eq 0 ]; then
+            echo "No linked issues found."
+            exit 0
+          fi
+
+          PROJECT_ID="PVT_kwDOEL3j0s4BXtwX"
+          STATUS_FIELD_ID="PVTSSF_lADOEL3j0s4BXtwXzhS4vkA"
+          case "$TARGET_STATUS" in
+            "Backlog")    OPT_ID="f75ad846" ;;
+            "In review")  OPT_ID="df73e18b" ;;
+            "Done")       OPT_ID="98236657" ;;
+            *) echo "Unknown status $TARGET_STATUS"; exit 1 ;;
+          esac
+
+          for ref in "${LINKED[@]}"; do
+            owner_repo="${ref%#*}"; num="${ref#*#}"
+            owner="${owner_repo%/*}"; rname="${owner_repo#*/}"
+            echo "Sync $ref -> $TARGET_STATUS"
+            node_id=$(gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){id}}}' \
+              -F o="$owner" -F r="$rname" -F n="$num" --jq '.data.repository.issue.id')
+            # Find or add project item
+            item_id=$(gh api graphql -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+              -F p="$PROJECT_ID" -F c="$node_id" --jq '.data.addProjectV2ItemById.item.id')
+            gh api graphql -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+              -F p="$PROJECT_ID" -F i="$item_id" -F f="$STATUS_FIELD_ID" -F o="$OPT_ID"
+          done
