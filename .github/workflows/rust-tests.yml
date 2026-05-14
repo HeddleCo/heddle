@@ -24,7 +24,7 @@ jobs:
   # parallelism in wall-clock terms.
   check-and-test:
     name: Check & test
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
 
     steps:
@@ -69,7 +69,7 @@ jobs:
   # with the regular profile, so it stays as its own job.
   coverage:
     name: Coverage
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
 
     steps:
