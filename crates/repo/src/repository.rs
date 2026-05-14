@@ -1274,17 +1274,23 @@ impl Repository {
     }
 
     pub fn op_scope(&self) -> String {
-        // HEAD always lives at <root>/.heddle/HEAD — for both main repos
-        // (where root/.heddle is the heddle_dir) and worktrees (where
-        // root/.heddle is the local pointer dir distinct from the shared
-        // heddle_dir). Using the local-checkout path here keeps op-log
-        // scoping unique per worktree.
-        let head_path = self.root.join(".heddle").join("HEAD");
-        if let Ok(path) = head_path.canonicalize() {
-            path.display().to_string()
-        } else {
-            head_path.display().to_string()
-        }
+        // The local HEAD pointer (`<root>/.heddle/HEAD`) is unique per
+        // worktree even when several worktrees share one oplog backend
+        // (via `.heddle/objectstore`). `undo`/`redo`/`--list` filter by
+        // exact-match scope, so the scope must distinguish each
+        // worktree's local HEAD pointer dir.
+        //
+        // Use a content-derived digest of the canonical pointer path:
+        //   * stable across heddle invocations from the same checkout
+        //   * unique per worktree (different absolute paths digest
+        //     differently), so worktree-local undo keeps working in
+        //     shared-oplog setups
+        //   * opaque on disk — the user's home directory and username
+        //     never end up serialized into oplog entries
+        let local_head = self.root.join(".heddle").join("HEAD");
+        let canonical = local_head.canonicalize().unwrap_or(local_head);
+        let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
+        format!("wt-{}", &digest.to_hex().as_str()[..16])
     }
 
     pub fn repo_config(&self) -> &RepoConfig {
