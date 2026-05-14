@@ -69,7 +69,7 @@ jobs:
   # with the regular profile, so it stays as its own job.
   coverage:
     name: Coverage
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 60
 
     steps:
