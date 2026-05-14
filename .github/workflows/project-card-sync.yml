@@ -42,7 +42,7 @@ env:
 jobs:
   add-issue-to-project:
     if: github.event_name == 'issues'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - name: Add issue to project
         uses: actions/add-to-project@v1.0.2
@@ -72,7 +72,7 @@ jobs:
     if: |
       github.event_name == 'pull_request_target' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     env:
       GH_TOKEN: ${{ secrets.PROJECT_PAT }}
     steps:
