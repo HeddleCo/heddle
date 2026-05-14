@@ -610,7 +610,7 @@ const GLOBAL_LONG_FLAGS: &[&str] = &[
 /// Keep this list short and grounded in the cli crate's feature
 /// table.
 const FEATURE_GATED_VERBS: &[&str] = &[
-    // `presence publish` — gated behind `hosted-client`.
+    // `presence publish` — gated behind `client`.
     "presence",
 ];
 

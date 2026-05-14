@@ -60,15 +60,15 @@ async fn main() -> Result<()> {
 
     // Pick the WeftExtensions implementation at startup. OSS builds
     // get NoopWeftExtensions (returns friendly errors for `auth`,
-    // `support`, `presence` commands). hosted-client builds get the
+    // `support`, `presence` commands). client builds get the
     // EnabledWeftExtensions adapter that delegates to the existing
     // in-cli command impls; Step 5 of the OSS extraction plan moves
     // those impls into a separate closed crate.
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     let hosted: Box<dyn weft_client_shim::WeftExtensions> =
         Box::new(cli::extensions::EnabledWeftExtensions);
     // OSS builds dispatch no hosted commands (those `Commands` variants
-    // are gated behind `hosted-client`), so the trait object is unused
+    // are gated behind `client`), so the trait object is unused
     // and we drop the binding entirely. Keeping the shim trait + Noop
     // visible for downstream consumers and post-split closed builds.
 
@@ -527,7 +527,7 @@ async fn main() -> Result<()> {
             cmd_remote(&cli, command.clone())
         }
 
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         Commands::Auth { command } => {
             resolve_operation_id(&cli)?;
             let cmd = command.clone();
@@ -636,7 +636,7 @@ async fn main() -> Result<()> {
             cmd_stash(&cli, command.clone())
         }
 
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         Commands::Support { command } => {
             resolve_operation_id(&cli)?;
             let cmd = command.clone();
@@ -840,7 +840,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         Commands::Presence { command } => match command {
             cli::cli::PresenceCommands::Publish {
                 session,
@@ -1089,12 +1089,12 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Push(_) => "push",
         Commands::Pull(_) => "pull",
         Commands::Remote { .. } => "remote",
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         Commands::Auth { .. } => "auth",
         Commands::Context { .. } => "context",
         Commands::Integration { .. } => "integration",
         Commands::Stash { .. } => "stash",
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         Commands::Support { .. } => "support",
         #[cfg(feature = "git-overlay")]
         Commands::Bridge { .. } => "bridge",
@@ -1124,7 +1124,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::HarnessBridge => "harness-bridge",
         Commands::Actor { .. } => "actor",
         Commands::Session { .. } => "session",
-        #[cfg(feature = "weft-client")]
+        #[cfg(feature = "client")]
         Commands::Presence { .. } => "presence",
     }
 }

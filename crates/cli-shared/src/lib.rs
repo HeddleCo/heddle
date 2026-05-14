@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! CLI-side utilities shared between the OSS `cli` crate and the
-//! closed `hosted-client` crate.
+//! closed `heddle-client` crate.
 //!
 //! These items would create a circular dependency if they stayed in
-//! `cli` (which depends on `hosted-client` when the `hosted-client`
-//! feature is on, and `hosted-client` needs `UserConfig` /
+//! `cli` (which depends on `heddle-client` when the `heddle-client`
+//! feature is on, and `heddle-client` needs `UserConfig` /
 //! `RemoteTarget` / `ClientConfig`). Pulling them out lets both sides
 //! resolve cleanly.
 

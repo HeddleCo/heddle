@@ -1064,7 +1064,7 @@ mod tests {
     #[serial_test::serial]
     fn codex_user_install_writes_notify_command() {
         // Serialize env-var access across tests. The credential store
-        // (in hosted-client when enabled) has its own mutex; this is
+        // (in heddle-client when the client feature is enabled) has its own mutex; this is
         // a local fallback for cli-only builds.
         static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

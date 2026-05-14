@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pull, remote management, and serve commands.
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use std::net::SocketAddr;
 use std::{collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Context, Result};
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use proto::AuthToken;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
-#[cfg(feature = "weft-client")]
-use weft_client::grpc_hosted::PullMaterialization;
+#[cfg(feature = "client")]
+use heddle_client::grpc_hosted::PullMaterialization;
 use crate::{
     bridge::GitBridge,
     cli::{Cli, RemoteCommands, should_output_json, style},
@@ -52,24 +52,24 @@ pub async fn cmd_pull(
     }
 
     let user_config = UserConfig::load_default().unwrap_or_default();
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     let mut token = user_config.remote_token();
-    #[cfg(not(feature = "weft-client"))]
+    #[cfg(not(feature = "client"))]
     let token = user_config.remote_token();
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     let (target, server_key) =
         resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
-    #[cfg(not(feature = "weft-client"))]
+    #[cfg(not(feature = "client"))]
     let (target, _server_key) =
         resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
 
     // Fall back to the credential store if no token was provided via env/config.
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     let mut credential_proof_key: Option<String> = None;
-    #[cfg(feature = "weft-client")]
+    #[cfg(feature = "client")]
     if token.is_none()
         && let Some(ref key) = server_key
-        && let Ok(Some(cred)) = weft_client::credentials::resolve_credential_for_server(key)
+        && let Ok(Some(cred)) = heddle_client::credentials::resolve_credential_for_server(key)
     {
         token = Some(AuthToken::new(cred.token, "credential-store"));
         credential_proof_key = cred.private_key_pem;
@@ -83,7 +83,7 @@ pub async fn cmd_pull(
             pull_local(&repo, &path, &remote_thread, local_thread_name, cli, lazy).await?;
         }
         RemoteTarget::Network { addr, repo_path } => {
-            #[cfg(feature = "weft-client")]
+            #[cfg(feature = "client")]
             pull_network(
                 &repo,
                 PullNetworkOptions {
@@ -100,11 +100,11 @@ pub async fn cmd_pull(
                 },
             )
             .await?;
-            #[cfg(not(feature = "weft-client"))]
+            #[cfg(not(feature = "client"))]
             let _ = (addr, repo_path, token);
-            #[cfg(not(feature = "weft-client"))]
+            #[cfg(not(feature = "client"))]
             anyhow::bail!(
-                "network pull support is not available in this build; enable the `hosted-client` feature"
+                "network pull support is not available in this build; enable the `client` feature"
             );
         }
     }
@@ -176,12 +176,12 @@ async fn pull_local(
     Ok(())
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Result<()> {
     let repo_path = options
         .repo_path
         .context("network remotes must include a hosted repository path")?;
-    let mut config = options.user_config.weft_client_config(options.token);
+    let mut config = options.user_config.heddle_client_config(options.token);
     if let Some(key) = options.server_key {
         config = config.with_server_key(key);
     }
@@ -377,7 +377,7 @@ fn parse_git_config_remotes(path: &Path, remotes: &mut BTreeMap<String, String>)
     }
 }
 
-#[cfg(feature = "weft-client")]
+#[cfg(feature = "client")]
 struct PullNetworkOptions<'a> {
     addr: SocketAddr,
     repo_path: Option<&'a str>,

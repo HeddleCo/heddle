@@ -323,7 +323,7 @@ impl UserConfig {
             })
     }
 
-    pub fn weft_client_config(&self, token_override: Option<AuthToken>) -> ClientConfig {
+    pub fn heddle_client_config(&self, token_override: Option<AuthToken>) -> ClientConfig {
         let token = token_override.or_else(|| self.remote_token());
         let mut config = token
             .map(|token| ClientConfig::default().with_token(token))

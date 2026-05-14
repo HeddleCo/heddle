@@ -2,20 +2,20 @@
 //! Local glue between cli's dispatch and the `WeftExtensions`
 //! trait surface.
 //!
-//! In OSS builds without `hosted-client`, `main.rs` constructs a
+//! In OSS builds without the `client` feature, `main.rs` constructs a
 //! `NoopWeftExtensions` from the shim crate directly. With
-//! `hosted-client` enabled, this module provides
+//! `client` enabled, this module provides
 //! [`EnabledWeftExtensions`], which downcasts the trait's opaque
 //! arguments back to the concrete `cli::cli::AuthCommands` /
 //! `SupportCommands` / `PresenceCommands` types and delegates to the
 //! existing in-`cli` command implementations.
 //!
 //! Step 5 of the OSS extraction plan moves the underlying command
-//! implementations out of `cli` into a separate `hosted-client`
+//! implementations out of `cli` into a separate `client`
 //! crate that ships the closed build. At that point this adapter goes
 //! away and the closed crate implements `WeftExtensions` directly.
 
-#![cfg(feature = "weft-client")]
+#![cfg(feature = "client")]
 
 use std::any::Any;
 

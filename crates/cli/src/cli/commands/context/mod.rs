@@ -454,7 +454,7 @@ mod tests {
     /// always fail there. The behaviour exercised here is what a
     /// release build does, and CI runs with `--features semantic`
     /// for cli tests; the default `cargo test -p cli` with
-    /// `hosted-client` alone does not.
+    /// `client` alone does not.
     #[cfg(feature = "semantic")]
     #[test]
     fn resolve_scope_at_target_stamps_lines_for_symbol_scope() {

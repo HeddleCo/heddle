@@ -12,7 +12,7 @@
 //! lookup happens locally — that's how the gate distinguishes a
 //! fresh approval from a stale one across pushes.
 
-#![cfg(feature = "weft-client")]
+#![cfg(feature = "client")]
 
 use anyhow::{Context, Result, anyhow};
 use repo::Repository;
@@ -76,7 +76,7 @@ struct EligibilityOutput {
 
 /// Resolve the named remote and its repo_path. Errors if the remote
 /// is local (approvals are a hosted-server concept) or has no path.
-async fn open_weft_client(
+async fn open_heddle_client(
     repo: &Repository,
     remote_name: &str,
 ) -> Result<(HostedGrpcClient, String)> {
@@ -100,7 +100,7 @@ async fn open_weft_client(
     // whatever the user-level config has and let `with_server_key`
     // resolve the rest.
     let token = user_config.remote_token();
-    let mut config = user_config.weft_client_config(token);
+    let mut config = user_config.heddle_client_config(token);
     if let Some(key) = server_key {
         config = config.with_server_key(key);
     }
@@ -122,7 +122,7 @@ fn thread_head_state(repo: &Repository, thread: &str) -> Result<String> {
 pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     let source_state = thread_head_state(&repo, &args.source)?;
-    let (mut client, repo_path) = open_weft_client(&repo, &args.remote).await?;
+    let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
     let approval = client
         .approve_thread(
             &repo_path,
@@ -169,7 +169,7 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
 
 pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
-    let (mut client, repo_path) = open_weft_client(&repo, &args.remote).await?;
+    let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
     let approvals = client
         .list_thread_approvals(&repo_path, &args.source, &args.target)
         .await?;
@@ -232,7 +232,7 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
 
 pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArgs) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
-    let (mut client, _repo_path) = open_weft_client(&repo, &args.remote).await?;
+    let (mut client, _repo_path) = open_heddle_client(&repo, &args.remote).await?;
     client.revoke_approval(&args.id).await?;
     if should_output_json(cli, Some(repo.config())) {
         println!("{{\"deleted\":true,\"id\":\"{}\"}}", args.id);
@@ -245,7 +245,7 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
 pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     let source_state = thread_head_state(&repo, &args.source)?;
-    let (mut client, repo_path) = open_weft_client(&repo, &args.remote).await?;
+    let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
     let resp = client
         .check_merge_eligibility(
             &repo_path,

@@ -2,6 +2,7 @@
 members = [
     "crates/cli",
     "crates/cli-shared",
+    "crates/client",
     "crates/crypto",
     "crates/daemon",
     "crates/devtools",
