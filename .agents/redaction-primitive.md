@@ -1,5 +1,27 @@
 # Build prompt — Redaction primitive
 
+> **Status:** historical — shipped in 0.2.3 (#12) and 0.2.4 (#14). This
+> file is the original build brief, kept for context. Sections marked
+> "for now" / "Single-repo only" / "verify" reflect the pre-implementation
+> plan and are *not* current. The shipped behaviour:
+>
+> - Cross-replica propagation works via `proto::ObjectType::Redaction`
+>   and the gRPC `RedactionTransfer` channel. Both `LocalSync` (peer-to-peer
+>   file sync) and `HostedGrpcClient` (network sync) route incoming
+>   redactions through `Repository::accept_wire_redactions`.
+> - The wire path is fail-closed: unsigned, tampered, and
+>   untrusted-key redactions are refused. Operators populate
+>   `[redact] trusted_keys` per repo via `heddle redact trust add`.
+> - `purge` propagates as a `Redaction` with `purged_at: Some(_)` and
+>   replays via the same `accept_wire_redactions` chokepoint on each
+>   replica. Bytes are dropped locally on the receiver, matching
+>   `Repository::purge_blob` semantics. Packfile repack after wire-purge
+>   remains an operator follow-up (`blob_remains_in_pack` flag).
+>
+> Current docs: `CHANGELOG.md` (0.2.3, 0.2.4 entries), the
+> `commands_redact.rs` module doc, and `Repository::accept_wire_redactions`
+> in `crates/repo/src/repository_redaction.rs`.
+
 > Self-contained brief for the agent implementing `heddle redact` + `heddle purge`. Don't dispatch sub-agents for the implementation itself — touch the crates directly. Dispatch reviewers only at the end if you want a second opinion before commit.
 
 ## Goal
