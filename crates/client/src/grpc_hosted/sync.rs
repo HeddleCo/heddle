@@ -6,8 +6,9 @@ use std::{
 use grpc::heddle::v1::{
     GetBlobRequest, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
     PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage, PushRequest,
-    ThreadConfidenceSummary, ThreadIntegrationPolicy, ThreadMetadata, ThreadVerificationSummary,
-    TransportMode, UpdateRefRequest, WantObjects, pull_message, push_message,
+    RedactionTransfer, ThreadConfidenceSummary, ThreadIntegrationPolicy, ThreadMetadata,
+    ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects, pull_message,
+    push_message,
 };
 use objects::{
     object::{ChangeId, ContentHash},
@@ -239,8 +240,17 @@ impl HostedGrpcClient {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        if !wanted_infos.is_empty() {
-            let bundle = proto::build_native_pack(repo.store(), &wanted_infos)?;
+        // Split want_objects: blob/tree/state/action → native pack;
+        // redactions → out-of-pack `RedactionTransfer` channel (the
+        // sidecar lives outside `.heddle/objects/` so GC can't reach
+        // it and it can't ride the pack — `build_native_pack` already
+        // skips Redaction entries on the sender side).
+        let (wanted_redactions, wanted_packable): (Vec<_>, Vec<_>) = wanted_infos
+            .into_iter()
+            .partition(|info| info.obj_type == proto::ObjectType::Redaction);
+
+        if !wanted_packable.is_empty() {
+            let bundle = proto::build_native_pack(repo.store(), &wanted_packable)?;
             for message in encode_native_pack_messages(
                 &bundle,
                 &transfer_id,
@@ -252,6 +262,42 @@ impl HostedGrpcClient {
                     ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
                 })?;
             }
+        }
+
+        for info in wanted_redactions {
+            let proto::ObjectId::Hash(blob) = info.id else {
+                return Err(ProtocolError::InvalidState(
+                    "wanted Redaction must be keyed by ObjectId::Hash(content_hash)".to_string(),
+                ));
+            };
+            // Sender-side: load the byte-identical sidecar payload
+            // that `Repository::put_redaction` wrote to disk. The
+            // receiver verifies the signature + trust list and then
+            // persists these bytes verbatim.
+            let bytes = repo
+                .store()
+                .get_redactions_bytes_for_blob(&blob)
+                .map_err(|err| {
+                    ProtocolError::InvalidState(format!(
+                        "load redactions sidecar for {}: {err}",
+                        blob.to_hex()
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState(format!(
+                        "server wants redaction for blob {} but sender has no sidecar",
+                        blob.to_hex()
+                    ))
+                })?;
+            let message = PushMessage {
+                body: Some(push_message::Body::Redaction(RedactionTransfer {
+                    blob_hash: blob.to_hex(),
+                    redactions_blob: bytes,
+                })),
+            };
+            tx.send(message).await.map_err(|_| {
+                ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
+            })?;
         }
         drop(tx);
 
@@ -675,6 +721,32 @@ impl HostedGrpcClient {
                     profile.pack_decode += decode_elapsed;
                     profile.pack_decode_apply += decode_elapsed;
                     profile.decode += decode_elapsed;
+                }
+                Some(pull_message::Body::Redaction(transfer)) => {
+                    // Out-of-pack channel: receive a redaction sidecar
+                    // and route through `Repository::accept_wire_redactions`
+                    // for signature + trust-list verification. The
+                    // server emitted these only for blobs in our want
+                    // set that carry an active redaction.
+                    profile.bytes_received = profile
+                        .bytes_received
+                        .saturating_add(transfer.redactions_blob.len());
+                    profile.object_mix.record(ObjectType::Redaction);
+                    let blob = ContentHash::from_hex(&transfer.blob_hash).map_err(|err| {
+                        ProtocolError::InvalidState(format!(
+                            "RedactionTransfer.blob_hash is not a valid content hash: {err}"
+                        ))
+                    })?;
+                    let decode_start = Instant::now();
+                    repo.accept_wire_redactions(blob, &transfer.redactions_blob)
+                        .map_err(|err| {
+                            ProtocolError::InvalidState(format!(
+                                "accept_wire_redactions for blob {}: {err}",
+                                transfer.blob_hash
+                            ))
+                        })?;
+                    let decode_elapsed = decode_start.elapsed();
+                    profile.store_receive_object += decode_elapsed;
                 }
                 Some(pull_message::Body::Complete(complete)) => {
                     profile.receive_and_apply = receive_start.elapsed();

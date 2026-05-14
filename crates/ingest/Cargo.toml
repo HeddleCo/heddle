@@ -1,6 +1,6 @@
 [package]
 name = "heddle-ingest"
-version = "0.2.3"
+version = "0.2.4"
 edition.workspace = true
 authors.workspace = true
 description = "Import git history (commits, refs, reflogs) into a native Heddle repository with agent attribution and reasoning annotations."
