@@ -1,0 +1,189 @@
+name: Project card sync
+
+# Syncs PR + issue lifecycle into the org-level HeddleCo project #1.
+#
+# - Issue opened   → added to project (defaults to Backlog).
+# - Issue reopened → reset Status to Backlog.
+# - PR opened/edited/synced/ready_for_review → linked issues move to "In review".
+# - PR merged into the *default branch* → CLOSING refs (closes/fixes/resolves) move to Done.
+#                                          TRACKING refs (refs/part of/tracked by) move to In review.
+# - PR closed without merge → CLOSING refs move back to Backlog.
+#
+# Closing references are sourced from GitHub's authoritative `closingIssuesReferences`
+# (so e.g. "fixes HeddleCo/heddle#15" in the PR body is honored). Tracking references
+# are parsed from PR body+title with case-insensitive matching and optional colon
+# (e.g. "Refs: #42", "PART OF #99", "tracked by HeddleCo/weft#100").
+#
+# Security: pull_request_target is required to access secrets, but the job is gated
+# to PRs originating from this repo (no fork PRs) so external contributors cannot
+# move kanban items by crafting refs.
+#
+# Required secret: PROJECT_PAT — fine-grained PAT with org "Projects: Read and write"
+# plus repo "Issues: Read", "Pull requests: Read", "Metadata: Read" on all three repos.
+
+on:
+  issues:
+    types: [opened, reopened]
+  pull_request_target:
+    types: [opened, reopened, edited, synchronize, ready_for_review, closed]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+env:
+  PROJECT_ID: PVT_kwDOEL3j0s4BXtwX
+  STATUS_FIELD_ID: PVTSSF_lADOEL3j0s4BXtwXzhS4vkA
+  OPT_BACKLOG: f75ad846
+  OPT_IN_REVIEW: df73e18b
+  OPT_DONE: 98236657
+
+jobs:
+  add-issue-to-project:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add issue to project
+        uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: https://github.com/orgs/HeddleCo/projects/1
+          github-token: ${{ secrets.PROJECT_PAT }}
+
+      - name: Reset reopened issue to Backlog
+        if: github.event.action == 'reopened'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+        run: |
+          set -eu
+          item_id=$(gh api graphql \
+            -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+            -F p="$PROJECT_ID" -F c="$ISSUE_NODE_ID" \
+            --jq '.data.addProjectV2ItemById.item.id')
+          gh api graphql \
+            -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+            -F p="$PROJECT_ID" -F i="$item_id" -F f="$STATUS_FIELD_ID" -F o="$OPT_BACKLOG"
+
+  pr-to-status:
+    # Skip fork PRs: secrets are still in scope (pull_request_target) but we refuse
+    # to act on untrusted PR body content. Same-repo PRs (incl. Dependabot, internal
+    # branches) pass this gate.
+    if: |
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PROJECT_PAT }}
+    steps:
+      - name: Sync linked issues
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          ACTION: ${{ github.event.action }}
+          MERGED: ${{ github.event.pull_request.merged }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -eu
+          OWNER="${REPO%/*}"
+          REPO_NAME="${REPO#*/}"
+
+          # ---- Authoritative closing references (GitHub-resolved) ----
+          mapfile -t CLOSING < <(
+            gh api graphql -f query='
+              query($owner:String!,$repo:String!,$pr:Int!){
+                repository(owner:$owner,name:$repo){
+                  pullRequest(number:$pr){
+                    closingIssuesReferences(first:50){
+                      nodes{ number repository{ name owner{ login } } }
+                    }
+                  }
+                }
+              }' -F owner="$OWNER" -F repo="$REPO_NAME" -F pr="$PR_NUMBER" \
+            --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[]?
+                  | "\(.repository.owner.login)/\(.repository.name)#\(.number)"' || true
+          )
+
+          # ---- Tracking references parsed from body+title ----
+          # Accepts: closes/closed/close, fix/fixes/fixed, resolve/resolves/resolved,
+          # part of, tracked by, ref/refs — case-insensitive, optional colon and
+          # repeated whitespace. Owner/repo prefix optional (defaults to current repo).
+          # The leading word boundary (^|[^A-Za-z]) prevents "preferences#1" from
+          # matching as "ref#1".
+          KEYWORDS='(closes?|closed|fix(es|ed)?|resolves?|resolved|part of|tracked by|refs?)'
+          REFPAT='(([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+)'
+
+          mapfile -t TRACKING < <(
+            printf '%s\n%s\n' "${PR_BODY:-}" "${PR_TITLE:-}" \
+              | grep -oiE "(^|[^A-Za-z])${KEYWORDS}[: ]+${REFPAT}" \
+              | grep -oE "${REFPAT}" \
+              | awk -v repo="$REPO" '/\// { print; next } { print repo $0 }' \
+              | sort -u || true
+          )
+
+          # ---- Decide target status per ref ----
+          # Use temp file as poor-man's map (bash assoc arrays can be flaky in CI matrices).
+          MAP=$(mktemp)
+          trap "rm -f $MAP" EXIT
+
+          set_target() {
+            # set_target <ref> <status>; first writer wins (closing > tracking)
+            grep -qE "^$1\b" "$MAP" 2>/dev/null && return 0
+            printf '%s\t%s\n' "$1" "$2" >> "$MAP"
+          }
+
+          if [ "$ACTION" = "closed" ] && [ "$MERGED" = "true" ] && [ "$BASE_REF" = "$DEFAULT_BRANCH" ]; then
+            for ref in "${CLOSING[@]}"; do [ -n "$ref" ] && set_target "$ref" "Done"; done
+            for ref in "${TRACKING[@]}"; do [ -n "$ref" ] && set_target "$ref" "In review"; done
+          elif [ "$ACTION" = "closed" ] && [ "$MERGED" != "true" ]; then
+            # PR closed without merge → only reset closing refs (tracking refs may
+            # still be in flight via other PRs).
+            for ref in "${CLOSING[@]}"; do [ -n "$ref" ] && set_target "$ref" "Backlog"; done
+          else
+            # PR open / edited / synced / ready_for_review → all linked refs to In review.
+            for ref in "${CLOSING[@]}"; do [ -n "$ref" ] && set_target "$ref" "In review"; done
+            for ref in "${TRACKING[@]}"; do [ -n "$ref" ] && set_target "$ref" "In review"; done
+          fi
+
+          if [ ! -s "$MAP" ]; then
+            echo "No linked issues to sync."
+            exit 0
+          fi
+
+          # ---- Apply updates ----
+          while IFS=$'\t' read -r ref status; do
+            owner_repo="${ref%#*}"
+            num="${ref#*#}"
+            o="${owner_repo%/*}"
+            r="${owner_repo#*/}"
+            case "$status" in
+              "Backlog")    OPT="$OPT_BACKLOG" ;;
+              "In review")  OPT="$OPT_IN_REVIEW" ;;
+              "Done")       OPT="$OPT_DONE" ;;
+              *) echo "  unknown status $status for $ref"; continue ;;
+            esac
+
+            # Only sync if the ref is actually an Issue (not a PR or missing). A PR
+            # number passed to repository.issue() returns null and the .id // empty
+            # fallback yields an empty string — we then skip.
+            node_id=$(gh api graphql \
+              -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){issue(number:$n){id}}}' \
+              -F o="$o" -F r="$r" -F n="$num" \
+              --jq '.data.repository.issue.id // empty' 2>/dev/null || true)
+            if [ -z "$node_id" ]; then
+              echo "  skip $ref → $status (not an issue, or not found)"
+              continue
+            fi
+
+            echo "  $ref → $status"
+            item_id=$(gh api graphql \
+              -f query='mutation($p:ID!,$c:ID!){addProjectV2ItemById(input:{projectId:$p,contentId:$c}){item{id}}}' \
+              -F p="$PROJECT_ID" -F c="$node_id" \
+              --jq '.data.addProjectV2ItemById.item.id')
+            gh api graphql \
+              -f query='mutation($p:ID!,$i:ID!,$f:ID!,$o:String!){updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f,value:{singleSelectOptionId:$o}}){projectV2Item{id}}}' \
+              -F p="$PROJECT_ID" -F i="$item_id" -F f="$STATUS_FIELD_ID" -F o="$OPT"
+          done < "$MAP"
