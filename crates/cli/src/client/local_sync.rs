@@ -156,6 +156,7 @@ impl LocalSync {
                         target.store().put_blob(&blob)?;
                         *copied += 1;
                     }
+                    self.propagate_redactions_for_blob(target, &entry.hash)?;
                 }
                 objects::object::EntryType::Tree => {
                     self.copy_tree_recursive(target, &entry.hash, copied)?;
@@ -166,6 +167,7 @@ impl LocalSync {
                         target.store().put_blob(&blob)?;
                         *copied += 1;
                     }
+                    self.propagate_redactions_for_blob(target, &entry.hash)?;
                 }
             }
         }
@@ -174,6 +176,24 @@ impl LocalSync {
         target.store().put_tree(&tree)?;
         *copied += 1;
 
+        Ok(())
+    }
+
+    /// If the source repository has any redactions for `blob`, ferry
+    /// the sidecar bytes through `Repository::accept_wire_redactions`
+    /// on the target so signatures are verified and any `purged_at`
+    /// records trigger a local purge on the target.
+    ///
+    /// `LocalSync` is local→local, so we use the same wire-side
+    /// contract as the network path — same signature requirement,
+    /// same idempotency. Operators who redact unsigned locally and
+    /// expect that to propagate via a local fetch will see a clear
+    /// rejection rather than a silent skip.
+    fn propagate_redactions_for_blob(&self, target: &Repository, blob: &ContentHash) -> Result<()> {
+        let Some(bytes) = self.source.store().get_redactions_bytes_for_blob(blob)? else {
+            return Ok(());
+        };
+        target.accept_wire_redactions(*blob, &bytes)?;
         Ok(())
     }
 

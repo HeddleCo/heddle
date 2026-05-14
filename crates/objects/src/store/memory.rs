@@ -34,6 +34,7 @@ pub struct InMemoryStore {
     trees: RwLock<HashMap<ContentHash, Vec<u8>>>,
     states: RwLock<HashMap<ChangeId, Vec<u8>>>,
     actions: RwLock<HashMap<ActionId, Vec<u8>>>,
+    redactions: RwLock<HashMap<ContentHash, Vec<u8>>>,
 }
 
 impl InMemoryStore {
@@ -151,6 +152,26 @@ impl ObjectStore for InMemoryStore {
 
     fn list_actions(&self) -> Result<Vec<ActionId>> {
         Ok(self.actions.read().unwrap().keys().copied().collect())
+    }
+
+    fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
+        Ok(self.redactions.read().unwrap().contains_key(blob))
+    }
+
+    fn get_redactions_bytes_for_blob(&self, blob: &ContentHash) -> Result<Option<Vec<u8>>> {
+        Ok(self.redactions.read().unwrap().get(blob).cloned())
+    }
+
+    fn put_redactions_bytes_for_blob(&self, blob: &ContentHash, bytes: &[u8]) -> Result<()> {
+        self.redactions
+            .write()
+            .unwrap()
+            .insert(*blob, bytes.to_vec());
+        Ok(())
+    }
+
+    fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
+        Ok(self.redactions.read().unwrap().keys().copied().collect())
     }
 }
 

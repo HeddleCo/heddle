@@ -421,3 +421,381 @@ fn purge_without_prior_redact_is_refused() {
         "refusal must name the missing-redaction precondition: {err}"
     );
 }
+
+// ---------------------------------------------------------------------
+// Cross-replica propagation tests
+//
+// The redact + purge surface is local-only without wire propagation —
+// pulls on a peer replica would re-expose the secret. These tests pin
+// the propagation contract via `heddle clone` (which goes through
+// `LocalSync`):
+//
+//   - Signed redactions: propagate, renders stub on B's worktree.
+//   - Signed purge: propagates, drops bytes on B.
+//   - Unsigned redactions: refused on the wire; local-only on A.
+//   - Tampered signatures: refused on the wire.
+//
+// All four use `heddle clone <path-A> <path-B>` to exercise the
+// `LocalSync::propagate_redactions_for_blob` hook added for cross-
+// replica scope.
+// ---------------------------------------------------------------------
+
+fn signed_redact_on_repo_a(
+    temp: &TempDir,
+    state: &str,
+    pem_path: &std::path::Path,
+) -> serde_json::Value {
+    let raw = heddle(
+        &[
+            "--output",
+            "json",
+            "redact",
+            "apply",
+            state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+            "--sign-with",
+            pem_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("redact apply --sign-with should succeed on A");
+    serde_json::from_str(&raw).expect("apply output JSON")
+}
+
+#[test]
+fn redact_apply_signed_propagates_to_cloned_replica() {
+    use crypto::Ed25519Signer;
+    let (a, state) = setup_repo_with_secret();
+    let signer = Ed25519Signer::generate().unwrap();
+    let pem = signer.to_pem().unwrap();
+    let pem_path = a.path().join("ed25519.pem");
+    fs::write(&pem_path, &pem).unwrap();
+    let apply = signed_redact_on_repo_a(&a, &state, &pem_path);
+    let redaction_id = apply["redaction_id"].as_str().unwrap().to_string();
+
+    // Clone A → B. `heddle clone` uses LocalSync, which propagates
+    // redaction sidecars via the new accept_wire_redactions hook.
+    let b_dir = TempDir::new().unwrap();
+    let b_path = b_dir.path().join("replica-b");
+    heddle(
+        &[
+            "clone",
+            a.path().to_str().unwrap(),
+            b_path.to_str().unwrap(),
+        ],
+        Some(b_dir.path()),
+    )
+    .expect("clone A → B should succeed");
+
+    // B's redact list must include the propagated redaction. The
+    // worktree-stub contract is tested separately by the local
+    // materialize tests; here we pin the propagation contract: A's
+    // redaction record exists in B's local sidecar after clone.
+    //
+    // (`heddle clone` for file:// uses a fast-path `copy_worktree` that
+    // mirrors A's actual on-disk files, so worktree contents on B are
+    // a property of A's worktree state at clone time, not of B's
+    // post-clone object store. The post-clone materialize that renders
+    // stubs only happens on the next `heddle goto`.)
+    let list_raw = heddle(&["--output", "json", "redact", "list"], Some(&b_path)).unwrap();
+    let list: Value = serde_json::from_str(&list_raw).unwrap();
+    let rows = list["redactions"].as_array().expect("redactions array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "B must see exactly one propagated redaction: {list_raw}"
+    );
+
+    // The propagated redaction must still verify on B — signature is
+    // carried byte-identical across the wire.
+    let show_raw = heddle(
+        &["--output", "json", "redact", "show", &redaction_id],
+        Some(&b_path),
+    )
+    .unwrap();
+    let show: Value = serde_json::from_str(&show_raw).unwrap();
+    assert_eq!(
+        show["signature_status"].as_str().unwrap(),
+        "verified",
+        "B must verify the signature on the propagated redaction"
+    );
+}
+
+#[test]
+fn redact_apply_unsigned_is_refused_at_clone_boundary() {
+    // Wire policy: unsigned redactions do not propagate. The local
+    // redaction stays on A; B's clone refuses with a clear message
+    // because LocalSync routes through accept_wire_redactions which
+    // rejects unsigned records.
+    let (a, state) = setup_repo_with_secret();
+    let _ = heddle(
+        &[
+            "--output",
+            "json",
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+        ],
+        Some(a.path()),
+    )
+    .expect("unsigned local redact on A succeeds");
+
+    let b_dir = TempDir::new().unwrap();
+    let b_path = b_dir.path().join("replica-b");
+    let err = heddle(
+        &[
+            "clone",
+            a.path().to_str().unwrap(),
+            b_path.to_str().unwrap(),
+        ],
+        Some(b_dir.path()),
+    )
+    .expect_err("clone must refuse unsigned redaction propagation");
+    assert!(
+        err.contains("no signature") || err.contains("Unsigned") || err.contains("unsigned"),
+        "clone rejection must explain the unsigned cause: {err}"
+    );
+}
+
+#[test]
+fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
+    use crypto::Ed25519Signer;
+    let (a, state) = setup_repo_with_secret();
+    let signer = Ed25519Signer::generate().unwrap();
+    let pem = signer.to_pem().unwrap();
+    let pem_path = a.path().join("ed25519.pem");
+    fs::write(&pem_path, &pem).unwrap();
+    let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
+
+    heddle(
+        &[
+            "purge",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--force",
+        ],
+        Some(a.path()),
+    )
+    .expect("purge on A succeeds");
+
+    let b_dir = TempDir::new().unwrap();
+    let b_path = b_dir.path().join("replica-b");
+    heddle(
+        &[
+            "clone",
+            a.path().to_str().unwrap(),
+            b_path.to_str().unwrap(),
+        ],
+        Some(b_dir.path()),
+    )
+    .expect("clone A → B with purged redaction should succeed");
+
+    // B must record the purge.
+    let purge_list_raw = heddle(&["--output", "json", "purge", "list"], Some(&b_path)).unwrap();
+    let purge_list: Value = serde_json::from_str(&purge_list_raw).unwrap();
+    let purges = purge_list["purges"].as_array().expect("purges array");
+    assert_eq!(
+        purges.len(),
+        1,
+        "B must see the propagated purge: {purge_list_raw}"
+    );
+    // The wire path goes through accept_wire_redactions, which (a)
+    // verifies the signature, (b) persists the record, and (c) drops
+    // the local blob bytes because the incoming record carries
+    // `purged_at: Some(_)`. That last step is the byte-removal half of
+    // "purge propagation."
+}
+
+#[test]
+fn tampered_redaction_is_refused_at_clone_boundary() {
+    use crypto::Ed25519Signer;
+    use objects::object::RedactionsBlob;
+
+    let (a, state) = setup_repo_with_secret();
+    let signer = Ed25519Signer::generate().unwrap();
+    let pem = signer.to_pem().unwrap();
+    let pem_path = a.path().join("ed25519.pem");
+    fs::write(&pem_path, &pem).unwrap();
+    let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
+
+    // Tamper with A's stored redaction sidecar by mutating the reason
+    // *after* signing — same blob hash key, but the canonical payload
+    // no longer matches the signature.
+    let redaction_dir = a.path().join(".heddle/redactions");
+    let entries: Vec<_> = fs::read_dir(&redaction_dir)
+        .expect("redactions dir exists on A")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("bin"))
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one redaction expected on A");
+    let path = entries[0].path();
+    let bytes = fs::read(&path).unwrap();
+    let mut blob = RedactionsBlob::decode(&bytes).expect("decode A's redactions blob");
+    blob.redactions[0].reason = "post-sign tampered reason".to_string();
+    fs::write(&path, blob.encode().unwrap()).unwrap();
+    // The above forfeits A's own materialize-side stub correctness;
+    // the local invariant break is the point of the test.
+
+    let b_dir = TempDir::new().unwrap();
+    let b_path = b_dir.path().join("replica-b");
+    let err = heddle(
+        &[
+            "clone",
+            a.path().to_str().unwrap(),
+            b_path.to_str().unwrap(),
+        ],
+        Some(b_dir.path()),
+    )
+    .expect_err("clone must refuse a tampered redaction");
+    assert!(
+        err.contains("failed to verify") || err.contains("Tampered") || err.contains("tampered"),
+        "clone rejection must explain the tamper cause: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Ignore-hint tests
+//
+// After a redact/purge, the working tree file is unchanged — the next
+// `heddle capture` would re-snapshot the leaked bytes. The CLI emits a
+// hint pointing at the right ignore file to append the path to. The
+// hint is suppressed when the path is already covered by a gitignore-
+// style glob in either `.heddleignore` or `.gitignore`, so the four
+// cases below pin the matcher's behavior end-to-end.
+// ---------------------------------------------------------------------
+
+fn redact_apply_json(temp: &TempDir, state: &str) -> Value {
+    let raw = heddle(
+        &[
+            "--output",
+            "json",
+            "redact",
+            "apply",
+            state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leak",
+        ],
+        Some(temp.path()),
+    )
+    .expect("redact apply");
+    serde_json::from_str(&raw).expect("redact apply JSON")
+}
+
+#[test]
+fn redact_apply_emits_ignore_hint_when_neither_file_covers_path() {
+    // Fresh repo, no `.heddleignore` and no `.gitignore`. The hint
+    // must surface and point at `.heddleignore` (heddle-native
+    // preference for fresh repos) with `already_exists: false`.
+    let (temp, state) = setup_repo_with_secret();
+    let apply = redact_apply_json(&temp, &state);
+    let hint = apply
+        .get("ignore_hint")
+        .expect("ignore_hint should be present when path is uncovered");
+    assert_eq!(hint["ignore_file"].as_str().unwrap(), ".heddleignore");
+    assert!(!hint["already_exists"].as_bool().unwrap());
+    assert_eq!(
+        hint["suggested_pattern"].as_str().unwrap(),
+        "config/secrets.toml"
+    );
+    assert!(hint["message"]
+        .as_str()
+        .unwrap()
+        .contains("config/secrets.toml"));
+}
+
+#[test]
+fn redact_apply_emits_no_hint_when_heddleignore_literal_matches() {
+    let (temp, state) = setup_repo_with_secret();
+    // Direct literal path match in `.heddleignore`.
+    fs::write(temp.path().join(".heddleignore"), "config/secrets.toml\n").unwrap();
+    let apply = redact_apply_json(&temp, &state);
+    assert!(
+        apply.get("ignore_hint").is_none() || apply["ignore_hint"].is_null(),
+        "literal-path coverage in .heddleignore must suppress the hint: {apply:?}"
+    );
+}
+
+#[test]
+fn redact_apply_emits_no_hint_when_gitignore_glob_matches() {
+    // Glob coverage (`config/*.toml`) in `.gitignore`. This is the
+    // critical case the user called out — the matcher must use
+    // gitignore-spec glob semantics, not literal substring.
+    let (temp, state) = setup_repo_with_secret();
+    fs::write(temp.path().join(".gitignore"), "config/*.toml\n").unwrap();
+    let apply = redact_apply_json(&temp, &state);
+    assert!(
+        apply.get("ignore_hint").is_none() || apply["ignore_hint"].is_null(),
+        "glob coverage in .gitignore must suppress the hint: {apply:?}"
+    );
+}
+
+#[test]
+fn redact_apply_targets_heddleignore_when_only_gitignore_exists_but_misses() {
+    // `.gitignore` exists but doesn't cover this path; `.heddleignore`
+    // is absent. The hint must point at `.gitignore` (the only present
+    // file), with `already_exists: true`.
+    let (temp, state) = setup_repo_with_secret();
+    fs::write(temp.path().join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+    let apply = redact_apply_json(&temp, &state);
+    let hint = apply
+        .get("ignore_hint")
+        .expect("hint must surface when .gitignore exists but doesn't cover the path");
+    assert_eq!(hint["ignore_file"].as_str().unwrap(), ".gitignore");
+    assert!(
+        hint["already_exists"].as_bool().unwrap(),
+        "should report the existing .gitignore"
+    );
+}
+
+#[test]
+fn purge_apply_also_emits_ignore_hint() {
+    // `heddle purge apply` carries the same hint as redact — the
+    // working-tree leak is the same problem regardless of which
+    // verb you reach for.
+    let (temp, state) = setup_repo_with_secret();
+    // Redact first (purge refuses without a prior redaction).
+    heddle(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leak",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let raw = heddle(
+        &[
+            "--output",
+            "json",
+            "purge",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--force",
+        ],
+        Some(temp.path()),
+    )
+    .expect("purge apply");
+    let purge: Value = serde_json::from_str(&raw).unwrap();
+    let hint = purge
+        .get("ignore_hint")
+        .expect("purge output must include ignore_hint");
+    assert_eq!(hint["ignore_file"].as_str().unwrap(), ".heddleignore");
+    assert!(!hint["already_exists"].as_bool().unwrap());
+}

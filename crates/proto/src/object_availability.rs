@@ -19,6 +19,13 @@ pub fn has_object(store: &dyn ObjectStore, info: &ObjectInfo) -> Result<bool> {
         (ObjectId::Hash(hash), ObjectType::Blob) => Ok(store.has_blob(hash)?),
         (ObjectId::Hash(hash), ObjectType::Tree) => Ok(store.has_tree(hash)?),
         (ObjectId::ChangeId(id), ObjectType::State) => Ok(store.has_state(id)?),
+        // Redactions are keyed by the redacted blob's hash. Two senders
+        // can declare different redactions on the same blob (different
+        // reason / signature / timestamp), so we conservatively report
+        // "do not have" and always re-fetch — `accept_wire_redactions`
+        // deduplicates via the content-addressed `put_redaction`
+        // idempotency rule. Cheap to refetch; correct under merge.
+        (ObjectId::Hash(_), ObjectType::Redaction) => Ok(false),
         _ => Ok(false),
     }
 }

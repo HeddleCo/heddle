@@ -42,3 +42,11 @@ pub(super) fn action_path(root: &Path, id: &ActionId) -> PathBuf {
 pub(super) fn packs_dir(root: &Path) -> PathBuf {
     root.join("packs")
 }
+
+pub(super) fn redactions_dir(root: &Path) -> PathBuf {
+    root.join("redactions")
+}
+
+pub(super) fn redaction_path(root: &Path, blob: &ContentHash) -> PathBuf {
+    redactions_dir(root).join(format!("{}.bin", blob.to_hex()))
+}

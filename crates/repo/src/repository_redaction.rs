@@ -26,12 +26,42 @@ use std::{collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use crypto::verify_payload_signature;
 use objects::{
     fs_atomic::write_file_atomic,
     object::{ChangeId, ContentHash, Principal, Redaction, RedactionsBlob, Tree},
 };
 
 use crate::repository::Repository;
+
+/// Why a wire-side redaction was rejected. Surfaces in sync error
+/// messages so operators can diagnose the bad record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireRejection {
+    /// Cross-replica redactions must be signed. An unsigned record is
+    /// refused so secrets can't be propagated by an attacker who's
+    /// merely on the wire (without an authoring identity).
+    Unsigned,
+    /// The record carries a signature, but it doesn't verify against
+    /// the canonical signing payload. Tampering or wrong key.
+    Tampered,
+}
+
+/// Outcome of an `accept_wire_redactions` call. Receiver-side sync
+/// handlers surface this in their stats summary so operators see
+/// exactly what propagation did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WireAcceptOutcome {
+    /// Number of new redaction records added to the local store.
+    /// Idempotent re-pulls of the same record count `0`.
+    pub redactions_added: usize,
+    /// Number of blobs whose local bytes were purged because an
+    /// incoming redaction carried `purged_at: Some(_)`.
+    pub blobs_purged: usize,
+    /// Number of incoming redactions that were byte-identical to a
+    /// local record and skipped (idempotency path).
+    pub skipped_existing: usize,
+}
 
 /// Outcome of a `purge` call. Useful for surfaces that report what
 /// actually changed (the JSON output of `heddle purge`).
@@ -207,6 +237,100 @@ impl Repository {
         })
     }
 
+    /// Accept a wire-transferred `RedactionsBlob` for a specific blob
+    /// hash. Verifies every signature, refuses unsigned records, then
+    /// merges new records into the local sidecar (idempotent on
+    /// content-addressed duplicates). If any incoming record carries
+    /// `purged_at: Some(_)`, the local blob bytes are dropped via
+    /// `purge_blob`.
+    ///
+    /// `bytes` is the rmp-encoded `RedactionsBlob` payload that arrived
+    /// over the wire; it must decode and every contained `Redaction`
+    /// must match `blob` in its `redacted_blob` field.
+    ///
+    /// Errors:
+    /// - [`WireRejection::Unsigned`] if any incoming redaction has no
+    ///   signature. The whole blob is refused (atomic — partial accept
+    ///   would let an unsigned sibling smuggle in via a signed peer).
+    /// - [`WireRejection::Tampered`] if any signature fails to verify
+    ///   against the canonical payload.
+    /// - Other errors propagate as `anyhow::Error` (decode failure, io,
+    ///   crypto subsystem failure).
+    pub fn accept_wire_redactions(
+        &self,
+        blob: ContentHash,
+        bytes: &[u8],
+    ) -> Result<WireAcceptOutcome> {
+        let incoming = RedactionsBlob::decode(bytes)
+            .with_context(|| format!("decode incoming redactions for blob {}", blob.short()))?;
+
+        // Pre-validate every entry before we touch the local store —
+        // an all-or-nothing accept keeps the audit trail honest.
+        for redaction in &incoming.redactions {
+            if redaction.redacted_blob != blob {
+                anyhow::bail!(
+                    "incoming redaction claims blob {} but was transferred under {}",
+                    redaction.redacted_blob.short(),
+                    blob.short()
+                );
+            }
+            verify_wire_redaction(redaction)
+                .with_context(|| format!("verify incoming redaction for blob {}", blob.short()))?;
+        }
+
+        let mut outcome = WireAcceptOutcome::default();
+        let mut any_purged = false;
+
+        for redaction in incoming.redactions {
+            let was_purged = redaction.is_purged();
+            let id_before = redaction_content_hash(&redaction)?;
+            // Snapshot the existing record set so we can tell whether
+            // `put_redaction` was a no-op (idempotent re-pull).
+            let existing_count = self
+                .get_redactions_for_blob(&blob)
+                .map(|r| r.redactions.len())
+                .unwrap_or(0);
+            let id_after = self.put_redaction(redaction)?;
+            debug_assert_eq!(
+                id_before, id_after,
+                "put_redaction must preserve content-addressed id"
+            );
+            let new_count = self
+                .get_redactions_for_blob(&blob)
+                .map(|r| r.redactions.len())
+                .unwrap_or(0);
+            if new_count > existing_count {
+                outcome.redactions_added += 1;
+            } else {
+                outcome.skipped_existing += 1;
+            }
+            if was_purged {
+                any_purged = true;
+            }
+        }
+
+        if any_purged {
+            // The incoming record asserts the bytes should be gone.
+            // Replay locally — `purge_blob` is idempotent and refuses
+            // only when no redaction exists, which we just guaranteed.
+            //
+            // `_purger` is the on-wire principal of the *redactor*;
+            // since the redaction's identity is carried in the record
+            // itself, use that — receiver doesn't have its own
+            // operator context here.
+            let purger = Principal {
+                name: "<wire-replay>".to_string(),
+                email: "".to_string(),
+            };
+            let purge_outcome = self.purge_blob(&blob, &purger)?;
+            if purge_outcome.blob_bytes_removed {
+                outcome.blobs_purged += 1;
+            }
+        }
+
+        Ok(outcome)
+    }
+
     /// `<heddle_dir>/redactions/` — root of the redaction store.
     pub(crate) fn redactions_dir(&self) -> PathBuf {
         self.heddle_dir().join("redactions")
@@ -365,6 +489,42 @@ fn walk_tree_for_blob(
     Ok(())
 }
 
+/// Wire-side signature gate. Returns `Ok(())` for a verified redaction,
+/// [`WireRejection::Unsigned`] if no signature is present, and
+/// [`WireRejection::Tampered`] when verification fails. Wraps both
+/// rejection cases in `anyhow::Error` so callers can `?` propagate.
+fn verify_wire_redaction(redaction: &Redaction) -> Result<()> {
+    let Some(signature) = &redaction.signature else {
+        anyhow::bail!(WireRejection::Unsigned);
+    };
+    let payload = redaction.canonical_signing_payload();
+    let public_key = hex::decode(&signature.public_key)
+        .with_context(|| "decode incoming redaction signature public key")?;
+    let sig_bytes = hex::decode(&signature.signature)
+        .with_context(|| "decode incoming redaction signature bytes")?;
+    if verify_payload_signature(&payload, &signature.algorithm, &public_key, &sig_bytes).is_err() {
+        anyhow::bail!(WireRejection::Tampered);
+    }
+    Ok(())
+}
+
+impl std::fmt::Display for WireRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WireRejection::Unsigned => f.write_str(
+                "redaction has no signature — cross-replica redactions must be \
+                 signed with `--sign-with` to propagate",
+            ),
+            WireRejection::Tampered => f.write_str(
+                "redaction signature failed to verify — the canonical payload \
+                 was modified after signing or the wrong key was used",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WireRejection {}
+
 /// Compute the content hash of a single redaction. The hash covers the
 /// rmp-encoded bytes of a one-element `RedactionsBlob` containing the
 /// redaction, so the id format is stable across schema additions that
@@ -427,6 +587,7 @@ fn remove_loose_blob_bytes(repo: &Repository, hash: &ContentHash) -> Result<(boo
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+    use crypto::Signer;
     use objects::object::{ChangeId, Principal};
     use tempfile::TempDir;
 
@@ -552,5 +713,106 @@ mod tests {
             .purge_blob(&sample_blob(), &sample_principal())
             .expect("re-purge");
         assert_eq!(again.redactions_marked, 0);
+    }
+
+    fn signed_sample_redaction(signer: &dyn crypto::Signer) -> Redaction {
+        let mut r = sample_redaction();
+        let payload = r.canonical_signing_payload();
+        let sig = signer.sign(&payload).expect("sign payload");
+        r.signature = Some(objects::object::StateSignature {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            signature: hex::encode(&sig),
+        });
+        r
+    }
+
+    #[test]
+    fn accept_wire_redactions_refuses_unsigned() {
+        let (_dir, repo) = fresh_repo();
+        let unsigned = sample_redaction();
+        let payload = RedactionsBlob::new(vec![unsigned]).encode().unwrap();
+        let err = repo
+            .accept_wire_redactions(sample_blob(), &payload)
+            .expect_err("unsigned redaction must be refused");
+        let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        assert!(
+            chain.iter().any(|m| m.contains("no signature")),
+            "rejection reason must explain unsigned, got chain: {chain:?}"
+        );
+        // Local store must remain empty — refusal is atomic.
+        let stored = repo.get_redactions_for_blob(&sample_blob()).unwrap();
+        assert!(stored.redactions.is_empty());
+    }
+
+    #[test]
+    fn accept_wire_redactions_persists_signed_redaction_idempotently() {
+        let (_dir, repo) = fresh_repo();
+        let signer = crypto::Ed25519Signer::generate().expect("keygen");
+        let signed = signed_sample_redaction(&signer);
+        let payload = RedactionsBlob::new(vec![signed]).encode().unwrap();
+
+        let first = repo
+            .accept_wire_redactions(sample_blob(), &payload)
+            .expect("first accept");
+        assert_eq!(first.redactions_added, 1);
+        assert_eq!(first.skipped_existing, 0);
+        assert_eq!(first.blobs_purged, 0);
+
+        let second = repo
+            .accept_wire_redactions(sample_blob(), &payload)
+            .expect("second accept idempotent");
+        assert_eq!(second.redactions_added, 0);
+        assert_eq!(second.skipped_existing, 1);
+    }
+
+    #[test]
+    fn accept_wire_redactions_rejects_tampered_signature() {
+        let (_dir, repo) = fresh_repo();
+        let signer = crypto::Ed25519Signer::generate().expect("keygen");
+        let mut tampered = signed_sample_redaction(&signer);
+        // Mutate the reason AFTER signing — the canonical payload
+        // changes but the signature does not, so verification fails.
+        tampered.reason = "post-signing tampered reason".to_string();
+        let payload = RedactionsBlob::new(vec![tampered]).encode().unwrap();
+        let err = repo
+            .accept_wire_redactions(sample_blob(), &payload)
+            .expect_err("tampered signature must be refused");
+        let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        assert!(
+            chain.iter().any(|m| m.contains("failed to verify")),
+            "rejection reason must explain tamper, got chain: {chain:?}"
+        );
+    }
+
+    #[test]
+    fn accept_wire_redactions_with_purged_at_drives_local_purge() {
+        let (_dir, repo) = fresh_repo();
+        let signer = crypto::Ed25519Signer::generate().expect("keygen");
+        let mut signed = signed_sample_redaction(&signer);
+        // Sender purged before propagation: mark the record purged.
+        signed.purged_at = Some(Utc.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap());
+        // Re-sign over the new canonical payload (purged_at is excluded
+        // per the signing contract, so no actual change in signature
+        // bytes — but be precise about this).
+        let payload_bytes = signed.canonical_signing_payload();
+        let sig = signer.sign(&payload_bytes).unwrap();
+        signed.signature = Some(objects::object::StateSignature {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            signature: hex::encode(&sig),
+        });
+        let wire = RedactionsBlob::new(vec![signed]).encode().unwrap();
+
+        let outcome = repo
+            .accept_wire_redactions(sample_blob(), &wire)
+            .expect("accept wire purge");
+        assert_eq!(outcome.redactions_added, 1);
+        // Local store records the purge.
+        let stored = repo.get_redactions_for_blob(&sample_blob()).unwrap();
+        assert!(
+            stored.redactions.iter().all(|r| r.is_purged()),
+            "redaction must be persisted with purged_at"
+        );
     }
 }

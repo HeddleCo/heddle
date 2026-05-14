@@ -35,6 +35,12 @@ pub enum ObjectType {
     Tree,
     State,
     Action,
+    /// A `RedactionsBlob` sidecar — the rmp-encoded record(s) declaring
+    /// that a specific blob has been redacted (and possibly purged) by
+    /// an authorized operator. Keyed on the wire by `ObjectId::Hash` of
+    /// the *redacted blob*, since `Repository`'s sidecar store is
+    /// indexed that way.
+    Redaction,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -236,6 +242,7 @@ fn enumerate_tree_closure_filtered(
                     size: blob.size() as u64,
                     delta_base: None,
                 });
+                emit_redaction_info(store, &entry.hash, out)?;
             }
             EntryType::Tree => {
                 enumerate_tree_closure_filtered(store, entry.hash, excluded, seen, out)?;
@@ -256,10 +263,36 @@ fn enumerate_tree_closure_filtered(
                     size: blob.size() as u64,
                     delta_base: None,
                 });
+                emit_redaction_info(store, &entry.hash, out)?;
             }
         }
     }
 
+    Ok(())
+}
+
+/// If `blob` carries a redaction sidecar, push a Redaction `ObjectInfo`
+/// keyed by the blob hash. No-op when the blob has no redactions.
+///
+/// Redactions are not deduped via the `seen: HashSet<ContentHash>` used
+/// for blob/tree dedup because the `ObjectId` for a redaction is the
+/// *redacted blob's* hash — and that hash is already inserted into
+/// `seen` by the blob's own emission. A blob can only appear once in
+/// the closure (dedup'd by hash), so its redaction can only be emitted
+/// once too.
+fn emit_redaction_info(
+    store: &dyn ObjectStore,
+    blob: &ContentHash,
+    out: &mut Vec<ObjectInfo>,
+) -> Result<()> {
+    if let Some(bytes) = store.get_redactions_bytes_for_blob(blob)? {
+        out.push(ObjectInfo {
+            id: ObjectId::Hash(*blob),
+            obj_type: ObjectType::Redaction,
+            size: bytes.len() as u64,
+            delta_base: None,
+        });
+    }
     Ok(())
 }
 
@@ -299,6 +332,7 @@ fn enumerate_tree_plan_filtered(
                     id: ObjectId::Hash(entry.hash),
                     obj_type: ObjectType::Blob,
                 });
+                emit_redaction_plan(store, &entry.hash, out)?;
             }
             EntryType::Tree => {
                 enumerate_tree_plan_filtered(store, entry.hash, excluded, seen, out)?;
@@ -306,6 +340,20 @@ fn enumerate_tree_plan_filtered(
         }
     }
 
+    Ok(())
+}
+
+fn emit_redaction_plan(
+    store: &dyn ObjectStore,
+    blob: &ContentHash,
+    out: &mut Vec<PlannedObject>,
+) -> Result<()> {
+    if store.has_redactions_for_blob(blob)? {
+        out.push(PlannedObject {
+            id: ObjectId::Hash(*blob),
+            obj_type: ObjectType::Redaction,
+        });
+    }
     Ok(())
 }
 
@@ -413,11 +461,13 @@ pub fn is_ancestor(
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+    use objects::object::{Principal, Redaction};
     use repo::Repository;
     use tempfile::TempDir;
 
     use super::{
-        ObjectId, StateClosureOptions, enumerate_state_closure_plan_with_options,
+        ObjectId, ObjectType, StateClosureOptions, enumerate_state_closure_plan_with_options,
         enumerate_state_closure_with_options,
     };
 
@@ -457,6 +507,71 @@ mod tests {
             full_pairs
                 .iter()
                 .any(|(id, _)| matches!(id, ObjectId::ChangeId(_)))
+        );
+    }
+
+    /// Once a redaction is declared for a blob in a snapshot, the
+    /// state closure must include an `ObjectType::Redaction` entry
+    /// keyed on that blob's hash — that's the wire-side signal the
+    /// receiver replays.
+    #[test]
+    fn enumerate_state_closure_emits_redaction_for_redacted_blob() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("secret.toml"), "api_token = \"x\"\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+
+        // Find the blob hash for secret.toml by walking the snapshot's tree.
+        let tree = repo
+            .store()
+            .get_tree(&state.tree)
+            .unwrap()
+            .expect("tree present");
+        let blob_hash = tree
+            .iter()
+            .find(|e| e.name == "secret.toml")
+            .expect("entry present")
+            .hash;
+
+        let redaction = Redaction {
+            redacted_blob: blob_hash,
+            state: state.change_id,
+            path: "secret.toml".to_string(),
+            reason: "test leak".to_string(),
+            redactor: Principal {
+                name: "Tester".into(),
+                email: "tester@heddle.sh".into(),
+            },
+            redacted_at: Utc::now(),
+            signature: None,
+            purged_at: None,
+            supersedes: None,
+        };
+        repo.put_redaction(redaction).unwrap();
+
+        let full = enumerate_state_closure_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+        let plan = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+
+        assert!(
+            full.iter()
+                .any(|info| info.obj_type == ObjectType::Redaction
+                    && info.id == ObjectId::Hash(blob_hash)),
+            "full closure must include a Redaction entry for the redacted blob"
+        );
+        assert!(
+            plan.iter()
+                .any(|p| p.obj_type == ObjectType::Redaction && p.id == ObjectId::Hash(blob_hash)),
+            "plan closure must include a Redaction entry for the redacted blob"
         );
     }
 }

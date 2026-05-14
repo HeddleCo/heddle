@@ -37,10 +37,17 @@ pub fn build_native_pack(
     let mut ids = Vec::with_capacity(objects.len());
 
     for info in objects {
+        // Redactions are sidecar records (live outside `.heddle/objects/`
+        // so GC cannot touch them) and must not be folded into the
+        // content-addressed pack. They ship via the per-object transfer
+        // path instead; callers split them out before packing.
+        if info.obj_type == ObjectType::Redaction {
+            continue;
+        }
         let object = load_object_data(store, &info.id, info.obj_type)?;
         let pack_id = to_pack_object_id(&object.id);
         ids.push(pack_id);
-        builder.add_id(pack_id, to_pack_object_type(object.obj_type), object.data);
+        builder.add_id(pack_id, to_pack_object_type(object.obj_type)?, object.data);
     }
 
     let (pack_data, index_data, _) = builder.build()?;
@@ -131,11 +138,15 @@ fn to_pack_object_id(id: &ObjectId) -> PackObjectId {
     }
 }
 
-fn to_pack_object_type(obj_type: ObjectType) -> PackObjectType {
+fn to_pack_object_type(obj_type: ObjectType) -> Result<PackObjectType> {
     match obj_type {
-        ObjectType::Blob => PackObjectType::Blob,
-        ObjectType::Tree => PackObjectType::Tree,
-        ObjectType::State => PackObjectType::State,
-        ObjectType::Action => PackObjectType::Action,
+        ObjectType::Blob => Ok(PackObjectType::Blob),
+        ObjectType::Tree => Ok(PackObjectType::Tree),
+        ObjectType::State => Ok(PackObjectType::State),
+        ObjectType::Action => Ok(PackObjectType::Action),
+        ObjectType::Redaction => Err(ProtocolError::InvalidState(
+            "Redaction sidecar records cannot be packed into the content-addressed object pack"
+                .to_string(),
+        )),
     }
 }

@@ -15,16 +15,19 @@
 //! path) so a leaked secret is scrubbed everywhere it appears — across
 //! renames, copies, and parallel branches.
 
-use anyhow::{Context, Result, anyhow};
+use std::path::Path;
+
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use crypto::{Signer, load_signer, verify_payload_signature};
+use crypto::{load_signer, verify_payload_signature, Signer};
+use ignore::gitignore::GitignoreBuilder;
 use objects::object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature};
 use repo::Repository;
 use serde::Serialize;
 
 use crate::{
     cli::{
-        Cli, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, should_output_json,
+        should_output_json, Cli, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs,
     },
     config::UserConfig,
 };
@@ -57,6 +60,12 @@ struct RedactApplyOutput {
     /// Signature algorithm (`ed25519`, `rsa`, `p256`) when `signed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     signature_algorithm: Option<String>,
+    /// Hint to add the redacted path to `.heddleignore` / `.gitignore`
+    /// so subsequent captures don't re-import the leaked bytes from
+    /// the working tree. `None` when the path is already covered by a
+    /// glob rule in either file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ignore_hint: Option<IgnoreHint>,
 }
 
 fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Result<()> {
@@ -152,6 +161,8 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
     }
     let _ = extra_oplog_entries; // surfaced via the redactions list/oplog; not in primary output
 
+    let ignore_hint = ignore_hint_for_path(repo.root(), &args.path);
+
     let output = RedactApplyOutput {
         redaction_id: primary_id.short(),
         blob: blob.short(),
@@ -164,9 +175,114 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
         states_redacted,
         signed: signer.is_some(),
         signature_algorithm,
+        ignore_hint,
     };
 
     emit_apply(cli, &output)
+}
+
+/// Suggestion to add a redacted path to an ignore file so it doesn't
+/// get re-captured on the next snapshot. Returned as `None` when the
+/// path is already covered by an existing `.heddleignore` or
+/// `.gitignore` rule — gitignore-style glob matching, not literal
+/// substring, so `config/*.toml` correctly suppresses the hint for
+/// `config/secrets.toml`.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct IgnoreHint {
+    /// Path to the ignore file we'd append to, relative to the repo
+    /// root (e.g. `.heddleignore` or `.gitignore`). Even when
+    /// `already_exists` is `false`, this names the recommended target.
+    pub ignore_file: String,
+    /// Whether the recommended ignore file is already present on disk.
+    /// `false` means the user would also create the file in the same
+    /// step as appending the pattern.
+    pub already_exists: bool,
+    /// The pattern to append. We suggest the literal redacted path
+    /// here; operators who want a broader glob (`config/*.toml`) can
+    /// edit before saving.
+    pub suggested_pattern: String,
+    /// Human-readable hint shown in text mode. Pre-formatted so the
+    /// JSON consumer can surface it verbatim if they prefer.
+    pub message: String,
+}
+
+/// If the redacted path is not yet covered by `.heddleignore` or
+/// `.gitignore` glob rules, return a hint pointing at the right file
+/// to append to. Returns `None` when the path is already ignored
+/// somewhere (because in that case adding a duplicate rule would just
+/// be noise).
+///
+/// Selection: prefer `.heddleignore` (heddle-native) when both are
+/// absent; fall back to whichever file exists. When both exist, the
+/// matcher checks both before deciding — if either covers the path,
+/// we emit no hint.
+pub(crate) fn ignore_hint_for_path(repo_root: &Path, path: &str) -> Option<IgnoreHint> {
+    let heddleignore = repo_root.join(".heddleignore");
+    let gitignore = repo_root.join(".gitignore");
+    let heddleignore_exists = heddleignore.is_file();
+    let gitignore_exists = gitignore.is_file();
+
+    // Already covered by either ignore file? Don't nag.
+    if heddleignore_exists && ignore_file_covers(repo_root, &heddleignore, path) {
+        return None;
+    }
+    if gitignore_exists && ignore_file_covers(repo_root, &gitignore, path) {
+        return None;
+    }
+
+    // Pick the file the operator should edit. `.heddleignore` first,
+    // then `.gitignore`, then a fresh `.heddleignore` if neither
+    // exists. Reasoning: in git-overlay mode `.gitignore` is the lived
+    // surface, but `.heddleignore` overrides for heddle-internal scans
+    // and is the right place to scope a heddle-specific exclusion.
+    let (file, exists) = if heddleignore_exists {
+        (".heddleignore", true)
+    } else if gitignore_exists {
+        (".gitignore", true)
+    } else {
+        (".heddleignore", false)
+    };
+
+    let message = if exists {
+        format!(
+            "hint: add `{path}` to {file} so the next `heddle capture` doesn't re-import the leaked bytes"
+        )
+    } else {
+        format!(
+            "hint: create {file} with `{path}` so the next `heddle capture` doesn't re-import the leaked bytes"
+        )
+    };
+
+    Some(IgnoreHint {
+        ignore_file: file.to_string(),
+        already_exists: exists,
+        suggested_pattern: path.to_string(),
+        message,
+    })
+}
+
+/// Whether `ignore_file` (a `.gitignore`-syntax file) covers
+/// `target_path` via any of its glob rules. Uses the standard
+/// `ignore::gitignore` matcher so `config/*.toml`, `**/*.pem`,
+/// `!keep.me`, and other gitignore-spec patterns all behave as
+/// operators expect.
+fn ignore_file_covers(repo_root: &Path, ignore_file: &Path, target_path: &str) -> bool {
+    let mut builder = GitignoreBuilder::new(repo_root);
+    if builder.add(ignore_file).is_some() {
+        // `GitignoreBuilder::add` returns Some(err) on failure. A
+        // missing or unreadable file isn't surfaced to the user — we
+        // can't usefully match against it either way; treat as
+        // "not covered" so the operator sees the hint.
+        return false;
+    }
+    let Ok(gi) = builder.build() else {
+        return false;
+    };
+    let absolute = repo_root.join(target_path);
+    matches!(
+        gi.matched(&absolute, /* is_dir */ false),
+        ignore::Match::Ignore(_)
+    )
 }
 
 /// Build a `StateSignature` over a redaction's canonical signing payload.
@@ -388,6 +504,9 @@ fn emit_apply(cli: &Cli, output: &RedactApplyOutput) -> Result<()> {
         );
         if !output.reason.is_empty() {
             println!("  reason: {}", output.reason);
+        }
+        if let Some(hint) = &output.ignore_hint {
+            println!("  {}", hint.message);
         }
     }
     Ok(())

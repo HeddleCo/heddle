@@ -38,6 +38,12 @@ pub fn chunk_offset(chunk_index: usize, chunk_size: usize) -> Option<usize> {
 }
 
 pub fn load_requested_object(store: &dyn ObjectStore, req: &ObjectRequest) -> Result<ObjectData> {
+    // Note on Redaction objects: a redaction sidecar is content-addressed by
+    // the *redacted blob's* hash, which also identifies a real blob in the
+    // store. `load_requested_object` resolves blob-vs-tree by content
+    // probe; it cannot disambiguate a Redaction request from a Blob request
+    // by ObjectId alone. Callers that need to fetch a redaction must use
+    // `load_object_data` with an explicit `ObjectType::Redaction`.
     let (obj_type, data) = match &req.id {
         ObjectId::Hash(hash) => {
             if let Some(blob) = store.get_blob(hash)? {
@@ -87,6 +93,9 @@ pub fn load_object_data(
                 .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string()))?;
             rmp_serde::to_vec_named(&state)?
         }
+        (ObjectId::Hash(hash), ObjectType::Redaction) => store
+            .get_redactions_bytes_for_blob(hash)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?,
         _ => {
             return Err(ProtocolError::InvalidState(
                 "object id/type mismatch".to_string(),
@@ -128,6 +137,17 @@ pub fn store_received_object(store: &dyn ObjectStore, data: &ObjectData) -> Resu
                 )));
             }
             store.put_state_serialized(&data.data, *change_id)?;
+        }
+        (_, ObjectType::Redaction) => {
+            // Redactions ship signed and need verification before any
+            // bytes hit the sidecar. Refuse here so callers route via
+            // `Repository::accept_wire_redactions` instead of silently
+            // landing an unverified record.
+            return Err(ProtocolError::InvalidState(
+                "Redaction objects must be persisted via Repository::accept_wire_redactions, \
+                 not store_received_object — signature verification is required"
+                    .to_string(),
+            ));
         }
         _ => {
             return Err(ProtocolError::InvalidState(

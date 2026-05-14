@@ -6,13 +6,13 @@
 //! brief; the Biscuit verifier rule is a future-work item. For now,
 //! `--force` is the explicit confirmation step.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use objects::object::ChangeId;
 use repo::Repository;
 use serde::Serialize;
 
 use crate::{
-    cli::{Cli, PurgeApplyArgs, PurgeCommands, PurgeListArgs, should_output_json},
+    cli::{should_output_json, Cli, PurgeApplyArgs, PurgeCommands, PurgeListArgs},
     config::UserConfig,
 };
 
@@ -39,6 +39,12 @@ struct PurgeApplyOutput {
     blob_remains_in_pack: bool,
     purger: String,
     message: String,
+    /// Hint to add the purged path to `.heddleignore` / `.gitignore`
+    /// so subsequent captures don't re-import the leaked bytes from
+    /// the working tree. `None` when the path is already covered by a
+    /// glob rule in either file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ignore_hint: Option<super::redact::IgnoreHint>,
 }
 
 fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result<()> {
@@ -79,6 +85,8 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
         );
     }
 
+    let ignore_hint = super::redact::ignore_hint_for_path(repo.root(), &args.path);
+
     let output = PurgeApplyOutput {
         redaction_id: outcome.redaction_id.map(|h| h.short()),
         blob: blob.short(),
@@ -89,12 +97,16 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
         blob_remains_in_pack: outcome.blob_remains_in_pack,
         purger: format!("{} <{}>", principal.name, principal.email),
         message,
+        ignore_hint,
     };
 
     if should_output_json(cli, None) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
         println!("{}", output.message);
+        if let Some(hint) = &output.ignore_hint {
+            println!("  {}", hint.message);
+        }
     }
     Ok(())
 }

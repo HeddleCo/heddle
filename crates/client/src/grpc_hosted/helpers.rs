@@ -1,6 +1,7 @@
 use core::convert::TryFrom;
 
 use base64::Engine as _;
+use cli_shared::ClientConfig;
 use grpc::heddle::v1::{
     HostedGrant, HostedNamespace, HostedRepository, ObjectAvailabilityStatus, ObjectDescriptor,
     TransferCheckpoint, TransportMode,
@@ -12,8 +13,6 @@ use proto::{
     CAPABILITY_RESUMABLE_TRANSFER,
 };
 use tonic::Status;
-
-use cli_shared::ClientConfig;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HostedTransportPolicy {
@@ -110,10 +109,11 @@ pub(super) fn parse_object_id(
         ObjectType::State => Ok(ObjectId::ChangeId(
             ChangeId::parse(value).map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
         )),
-        ObjectType::Blob | ObjectType::Tree | ObjectType::Action => Ok(ObjectId::Hash(
-            ContentHash::from_hex(value)
-                .map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
-        )),
+        ObjectType::Blob | ObjectType::Tree | ObjectType::Action | ObjectType::Redaction => {
+            Ok(ObjectId::Hash(ContentHash::from_hex(value).map_err(
+                |err| ProtocolError::InvalidState(err.to_string()),
+            )?))
+        }
     }
 }
 
@@ -123,6 +123,7 @@ pub(super) fn parse_object_type(value: &str) -> Result<ObjectType, ProtocolError
         "tree" => Ok(ObjectType::Tree),
         "state" => Ok(ObjectType::State),
         "action" => Ok(ObjectType::Action),
+        "redaction" => Ok(ObjectType::Redaction),
         _ => Err(ProtocolError::InvalidState(format!(
             "unknown object type: {value}"
         ))),
@@ -170,6 +171,7 @@ pub(super) fn object_type_name(obj_type: ObjectType) -> &'static str {
         ObjectType::Tree => "tree",
         ObjectType::State => "state",
         ObjectType::Action => "action",
+        ObjectType::Redaction => "redaction",
     }
 }
 

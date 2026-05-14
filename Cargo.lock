@@ -2993,6 +2993,7 @@ name = "heddle-proto"
 version = "0.2.2"
 dependencies = [
  "blake3",
+ "chrono",
  "heddle-objects",
  "heddle-repo",
  "rmp-serde",
