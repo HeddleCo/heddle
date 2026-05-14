@@ -1030,3 +1030,24 @@ fn test_op_scope_is_stable_unique_and_does_not_leak_absolute_path() {
     );
     drop(other_dir);
 }
+
+/// `op_scope` must be invariant to the directory heddle is invoked
+/// from. `Repository::open()` walks upward to find `.heddle/`, so a
+/// capture run from `<root>/src/foo/` and one from `<root>` should
+/// both write the same scope into the shared oplog. Otherwise
+/// subdirectory invocations would record a stranger scope and break
+/// undo/redo continuity from the root.
+#[test]
+fn test_op_scope_is_invariant_to_invocation_cwd() {
+    let (temp_dir, repo_from_root) = create_test_repo();
+    let nested = temp_dir.path().join("src").join("nested");
+    fs::create_dir_all(&nested).unwrap();
+
+    let repo_from_nested = Repository::open(&nested).unwrap();
+
+    assert_eq!(
+        repo_from_root.op_scope(),
+        repo_from_nested.op_scope(),
+        "op_scope must be cwd-invariant; opening from {nested:?} produced a different scope",
+    );
+}
