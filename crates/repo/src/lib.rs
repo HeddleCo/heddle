@@ -58,11 +58,11 @@ pub use repository::{
     GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD,
     HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD,
     MissingBlob, OperationKind, OperationScope, OutputFormat, PackFilesInspection,
-    PartialFetchInspection, PullPlannerCacheInspection, RefCountsInspection,
+    PartialFetchInspection, PullPlannerCacheInspection, RedactConfig, RefCountsInspection,
     RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability,
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,
     RepositoryPerformanceInspectionReport, SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile,
-    TreeBuildProfile, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats,
+    TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats,
     WorktreeCompareProfile, WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct,
     find_merge_base, is_major_rewrite, is_synthetic_root,
 };

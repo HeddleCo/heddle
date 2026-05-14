@@ -11,7 +11,10 @@ use tracing::{debug, instrument, trace};
 use super::{
     FsStore,
     fs_io::{list_hashes_from_dir, read_file_bytes, read_file_header},
-    fs_paths::{action_path, actions_dir, blobs_dir, hash_path, state_path, states_dir, trees_dir},
+    fs_paths::{
+        action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir, state_path,
+        states_dir, trees_dir,
+    },
 };
 use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
@@ -827,5 +830,50 @@ impl ObjectStore for FsStore {
     #[instrument(skip(self))]
     fn abort_snapshot_write_batch(&self) {
         self.abort_snapshot_write_batch_impl();
+    }
+
+    fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
+        Ok(redaction_path(&self.root, blob).exists())
+    }
+
+    fn get_redactions_bytes_for_blob(&self, blob: &ContentHash) -> Result<Option<Vec<u8>>> {
+        let path = redaction_path(&self.root, blob);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(HeddleError::Io(err)),
+        }
+    }
+
+    fn put_redactions_bytes_for_blob(&self, blob: &ContentHash, bytes: &[u8]) -> Result<()> {
+        let dir = redactions_dir(&self.root);
+        if !dir.exists() {
+            fs::create_dir_all(&dir)?;
+        }
+        let path = redaction_path(&self.root, blob);
+        crate::fs_atomic::write_file_atomic(&path, bytes)?;
+        Ok(())
+    }
+
+    fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
+        let dir = redactions_dir(&self.root);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("bin") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if let Ok(hash) = ContentHash::from_hex(stem) {
+                out.push(hash);
+            }
+        }
+        Ok(out)
     }
 }

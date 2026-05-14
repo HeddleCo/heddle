@@ -1,11 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Compiled-once `.heddleignore` matcher for hot-path walker use.
+//!
+//! Backed by `ignore::gitignore::Gitignore` so `.heddleignore`
+//! supports the full gitignore syntax: `*` / `**` globs, character
+//! classes (`[abc]`), `!` negation, leading `/` for root-anchored,
+//! trailing `/` for directory-only. See
+//! `crates/objects/src/worktree/worktree_ignore.rs` for the matcher
+//! contract documentation; this file mirrors the same rules but
+//! pre-compiles them once per walk instead of rebuilding for each
+//! path test.
+
 use std::path::{Path, PathBuf};
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use objects::object::ContentHash;
 
 #[derive(Debug, Default, Clone)]
 pub(crate) struct WorktreeIgnoreMatcher {
-    patterns: Vec<CompiledPattern>,
+    /// Compiled gitignore matcher. `None` only for the
+    /// `Default::default()` empty matcher; otherwise always set.
+    matcher: Option<Gitignore>,
+    /// Raw pattern strings, retained for `fingerprint()` — the
+    /// fingerprint stays stable across walker re-entries iff the
+    /// patterns are byte-identical, modulo ordering.
+    raw_patterns: Vec<String>,
     /// Canonical absolute paths of *other* threads' worktrees that
     /// happen to be nested under the walk root. Populated once per
     /// scan via [`Repository::nested_thread_worktree_exclusions`] and
@@ -16,21 +34,11 @@ pub(crate) struct WorktreeIgnoreMatcher {
     nested_worktree_exclusions: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
-enum CompiledPattern {
-    RootAdmin(String),
-    Directory(String),
-    Suffix(String),
-    Component(String),
-}
-
 impl WorktreeIgnoreMatcher {
     pub(crate) fn new(patterns: &[String]) -> Self {
         Self {
-            patterns: patterns
-                .iter()
-                .map(|pattern| compile_pattern(pattern))
-                .collect(),
+            matcher: Some(build_matcher(patterns)),
+            raw_patterns: patterns.to_vec(),
             nested_worktree_exclusions: Vec::new(),
         }
     }
@@ -60,130 +68,76 @@ impl WorktreeIgnoreMatcher {
             .any(|excluded| paths_equivalent(excluded, absolute))
     }
 
+    /// Top-level "is this path ignored" probe. Matches the free-function
+    /// matcher in `objects::worktree::should_ignore`: passes
+    /// `is_dir = true` so trailing-slash rules (`build/`) fire on the
+    /// bare directory entry as well as on paths inside it.
     #[cfg(test)]
     pub(crate) fn should_ignore(&self, path: &Path) -> bool {
-        self.patterns.iter().any(|pattern| pattern.matches(path))
+        self.matched_relative(path, /* is_dir */ true)
     }
 
+    /// Test-only "would this child be ignored as a file/dir entry"
+    /// probe. Asserts agreement with the free-function matcher (which
+    /// also uses `is_dir = true`); production callers reach for
+    /// `should_prune_directory_child` instead.
+    #[cfg(test)]
     pub(crate) fn should_ignore_child(&self, parent: &Path, name: &str) -> bool {
-        self.patterns
-            .iter()
-            .any(|pattern| pattern.matches_child(parent, name))
+        let path = parent.join(name);
+        self.matched_relative(&path, /* is_dir */ true)
     }
 
     pub(crate) fn should_prune_directory_child(&self, parent: &Path, name: &str) -> bool {
-        self.should_ignore_child(parent, name)
+        let path = parent.join(name);
+        // Directory descent: tell gitignore the entry is a dir so
+        // `build/` rules fire. The walker uses this signal to decide
+        // whether to descend; it's the right place to be strict.
+        self.matched_relative(&path, /* is_dir */ true)
+    }
+
+    fn matched_relative(&self, path: &Path, is_dir: bool) -> bool {
+        let Some(gi) = &self.matcher else {
+            return false;
+        };
+        matches!(
+            gi.matched_path_or_any_parents(path, is_dir),
+            ignore::Match::Ignore(_)
+        )
     }
 
     pub(crate) fn fingerprint(&self) -> ContentHash {
-        let mut canonical_patterns: Vec<String> = self
-            .patterns
-            .iter()
-            .map(CompiledPattern::canonical_repr)
-            .collect();
-        canonical_patterns.sort();
-        ContentHash::compute_typed("heddle.ignore", canonical_patterns.join("\0").as_bytes())
+        // Hash patterns in declaration order — gitignore semantics are
+        // *order-sensitive*. `*.log` followed by `!keep.log` ignores
+        // every log file except `keep.log`; the same rules in reverse
+        // (`!keep.log` then `*.log`) ignore *every* log file because the
+        // negation is unset by the later catch-all. Two `.heddleignore`
+        // files with identical rule sets but different orders produce
+        // different ignore semantics, and the untracked-cache layer
+        // needs cache keys to reflect that.
+        ContentHash::compute_typed("heddle.ignore", self.raw_patterns.join("\0").as_bytes())
     }
 }
 
-impl CompiledPattern {
-    #[cfg(test)]
-    fn matches(&self, path: &Path) -> bool {
-        match self {
-            Self::RootAdmin(pattern) => is_root_path_match(path, pattern),
-            Self::Directory(pattern) => is_dir_match(path, pattern),
-            Self::Suffix(suffix) => matches_suffix(path, suffix),
-            Self::Component(pattern) => has_matching_component(path, pattern),
-        }
+/// Build a `Gitignore` matcher from raw pattern strings, applying
+/// heddle's root-admin special-cases (`.heddle`, `.heddleignore`,
+/// `.git` become root-anchored `/.heddle`, etc.). See the matching
+/// helper in `objects::worktree::worktree_ignore`.
+fn build_matcher(patterns: &[String]) -> Gitignore {
+    let mut builder = GitignoreBuilder::new("");
+    for pattern in patterns {
+        let line = canonical_line(pattern);
+        let _ = builder.add_line(None, &line);
     }
-
-    fn matches_child(&self, parent: &Path, name: &str) -> bool {
-        match self {
-            Self::RootAdmin(pattern) => {
-                root_component(parent, name).is_some_and(|value| value == pattern)
-            }
-            Self::Directory(pattern) => {
-                name == pattern || parent_components(parent).any(|component| component == pattern)
-            }
-            Self::Suffix(suffix) => {
-                name.ends_with(suffix)
-                    || parent_components(parent).any(|component| component.ends_with(suffix))
-            }
-            Self::Component(pattern) => {
-                name == pattern || parent_components(parent).any(|component| component == pattern)
-            }
-        }
-    }
-
-    fn canonical_repr(&self) -> String {
-        match self {
-            Self::RootAdmin(pattern) => format!("root:{pattern}"),
-            Self::Directory(pattern) => format!("directory:{pattern}"),
-            Self::Suffix(pattern) => format!("suffix:{pattern}"),
-            Self::Component(pattern) => format!("component:{pattern}"),
-        }
-    }
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
 }
 
-fn compile_pattern(pattern: &str) -> CompiledPattern {
-    if is_root_admin_pattern(pattern) {
-        return CompiledPattern::RootAdmin(pattern.to_string());
+fn canonical_line(pattern: &str) -> String {
+    match pattern {
+        ".heddle" => "/.heddle".to_string(),
+        ".heddleignore" => "/.heddleignore".to_string(),
+        ".git" => "/.git".to_string(),
+        other => other.to_string(),
     }
-    if pattern.ends_with('/') {
-        return CompiledPattern::Directory(pattern.trim_end_matches('/').to_string());
-    }
-    if let Some(suffix) = pattern.strip_prefix('*') {
-        return CompiledPattern::Suffix(suffix.to_string());
-    }
-    CompiledPattern::Component(pattern.to_string())
-}
-
-fn is_root_admin_pattern(pattern: &str) -> bool {
-    matches!(pattern, ".heddle" | ".heddleignore" | ".git")
-}
-
-#[cfg(test)]
-fn is_root_path_match(path: &Path, pattern: &str) -> bool {
-    root_component(path, "").is_some_and(|value| value == pattern)
-}
-
-#[cfg(test)]
-fn is_dir_match(path: &Path, dir_pattern: &str) -> bool {
-    let path_str = path.to_string_lossy();
-    if path_str.starts_with(&format!("{dir_pattern}/")) {
-        return true;
-    }
-    has_matching_component(path, dir_pattern)
-}
-
-#[cfg(test)]
-fn matches_suffix(path: &Path, suffix: &str) -> bool {
-    let path_str = path.to_string_lossy();
-    if path_str.ends_with(suffix) {
-        return true;
-    }
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|value| value.ends_with(suffix))
-    })
-}
-
-#[cfg(test)]
-fn has_matching_component(path: &Path, pattern: &str) -> bool {
-    parent_components(path).any(|component| component == pattern)
-}
-
-fn root_component<'a>(parent: &'a Path, name: &'a str) -> Option<&'a str> {
-    parent_components(parent)
-        .next()
-        .or_else(|| (!name.is_empty()).then_some(name))
-}
-
-fn parent_components(path: &Path) -> impl Iterator<Item = &str> {
-    path.components()
-        .filter_map(|component| component.as_os_str().to_str())
 }
 
 /// Compare two paths for equivalence. Tries the cheap pointer-equal
@@ -238,7 +192,9 @@ mod tests {
         for path in paths {
             assert_eq!(
                 matcher.should_ignore(&path),
-                should_ignore(&path, &patterns)
+                should_ignore(&path, &patterns),
+                "compiled matcher must agree with the free-function matcher on '{}'",
+                path.display(),
             );
         }
     }
@@ -277,25 +233,26 @@ mod tests {
                 .unwrap_or("");
             assert_eq!(
                 matcher.should_ignore_child(parent, name),
-                should_ignore(&path, &patterns)
+                should_ignore(&path, &patterns),
+                "should_ignore_child must agree with the free-function matcher on '{}'",
+                path.display(),
             );
         }
     }
 
     #[test]
-    fn matcher_fingerprint_is_order_independent_for_equivalent_patterns() {
-        let matcher_a = WorktreeIgnoreMatcher::new(&[
-            "build/".to_string(),
-            "*.log".to_string(),
-            ".git".to_string(),
-        ]);
-        let matcher_b = WorktreeIgnoreMatcher::new(&[
-            ".git".to_string(),
-            "*.log".to_string(),
-            "build/".to_string(),
-        ]);
-
-        assert_eq!(matcher_a.fingerprint(), matcher_b.fingerprint());
+    fn matcher_fingerprint_changes_when_pattern_order_changes() {
+        // Gitignore semantics are order-sensitive — `*.log` followed
+        // by `!keep.log` matches differently from the reverse order.
+        // The fingerprint must reflect that so cached untracked-walk
+        // results invalidate when an operator reorders rules.
+        let matcher_a = WorktreeIgnoreMatcher::new(&["*.log".to_string(), "!keep.log".to_string()]);
+        let matcher_b = WorktreeIgnoreMatcher::new(&["!keep.log".to_string(), "*.log".to_string()]);
+        assert_ne!(
+            matcher_a.fingerprint(),
+            matcher_b.fingerprint(),
+            "fingerprint must distinguish rule orders (negation semantics)"
+        );
     }
 
     #[test]
@@ -304,5 +261,37 @@ mod tests {
         let matcher_b = WorktreeIgnoreMatcher::new(&["build".to_string()]);
 
         assert_ne!(matcher_a.fingerprint(), matcher_b.fingerprint());
+    }
+
+    // ---- New gitignore-spec coverage on the compiled matcher ----
+
+    #[test]
+    fn compiled_matcher_supports_path_relative_globs() {
+        let matcher = WorktreeIgnoreMatcher::new(&["config/*.toml".to_string()]);
+        assert!(matcher.should_ignore(&PathBuf::from("config/secrets.toml")));
+        assert!(!matcher.should_ignore(&PathBuf::from("secrets.toml")));
+        assert!(!matcher.should_ignore(&PathBuf::from("other/secrets.toml")));
+    }
+
+    #[test]
+    fn compiled_matcher_supports_double_star_globs() {
+        let matcher = WorktreeIgnoreMatcher::new(&["**/*.pem".to_string()]);
+        assert!(matcher.should_ignore(&PathBuf::from("dev.pem")));
+        assert!(matcher.should_ignore(&PathBuf::from("keys/dev.pem")));
+        assert!(matcher.should_ignore(&PathBuf::from("nested/deeper/key.pem")));
+    }
+
+    #[test]
+    fn compiled_matcher_supports_negation_rules() {
+        let matcher = WorktreeIgnoreMatcher::new(&["*.log".to_string(), "!keep.log".to_string()]);
+        assert!(matcher.should_ignore(&PathBuf::from("debug.log")));
+        assert!(!matcher.should_ignore(&PathBuf::from("keep.log")));
+    }
+
+    #[test]
+    fn compiled_matcher_supports_root_anchored_patterns() {
+        let matcher = WorktreeIgnoreMatcher::new(&["/build".to_string()]);
+        assert!(matcher.should_ignore(&PathBuf::from("build/output")));
+        assert!(!matcher.should_ignore(&PathBuf::from("nested/build/file")));
     }
 }

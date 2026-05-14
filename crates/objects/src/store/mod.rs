@@ -130,6 +130,18 @@ impl ObjectStore for SharedStore {
     fn abort_snapshot_write_batch(&self) {
         self.0.abort_snapshot_write_batch()
     }
+    fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
+        self.0.has_redactions_for_blob(blob)
+    }
+    fn get_redactions_bytes_for_blob(&self, blob: &ContentHash) -> Result<Option<Vec<u8>>> {
+        self.0.get_redactions_bytes_for_blob(blob)
+    }
+    fn put_redactions_bytes_for_blob(&self, blob: &ContentHash, bytes: &[u8]) -> Result<()> {
+        self.0.put_redactions_bytes_for_blob(blob, bytes)
+    }
+    fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
+        self.0.list_blobs_with_redactions()
+    }
 }
 
 /// Trait for object storage backends.
@@ -412,4 +424,54 @@ pub trait ObjectStore: Send + Sync {
     }
 
     fn abort_snapshot_write_batch(&self) {}
+
+    /// Whether the store holds any redaction record for the given blob.
+    ///
+    /// Redactions live in a sidecar (`<heddle_dir>/redactions/`) that is
+    /// structurally outside the content-addressed object graph so GC
+    /// can't reach them. The wire layer needs a cheap probe to decide
+    /// whether to ship a redaction for a blob in the closure, so this
+    /// is a separate method rather than a `get_*` + null check.
+    ///
+    /// Default impl returns `Ok(false)` — stores that don't model
+    /// redactions silently report "no redactions," which is the
+    /// correct behaviour for purely in-memory or remote-shim stores.
+    fn has_redactions_for_blob(&self, _blob: &ContentHash) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Return the raw rmp-encoded `RedactionsBlob` bytes for the given
+    /// blob, or `Ok(None)` if no redaction record exists. The bytes
+    /// are byte-identical to what was written by `put_redactions_bytes_for_blob`
+    /// (or by `Repository::put_redaction`); this is the wire-transfer
+    /// payload, not a re-serialized view.
+    ///
+    /// Default impl returns `Ok(None)`.
+    fn get_redactions_bytes_for_blob(&self, _blob: &ContentHash) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Persist the rmp-encoded `RedactionsBlob` bytes for the given
+    /// blob. Receiver-side replay calls this after signature
+    /// verification so the bytes land in the same sidecar that the
+    /// sender's `Repository::put_redaction` writes to.
+    ///
+    /// Default impl returns an "unsupported" error — stores that don't
+    /// model redactions (e.g. read-only shims) refuse rather than
+    /// silently dropping the record.
+    fn put_redactions_bytes_for_blob(&self, _blob: &ContentHash, _bytes: &[u8]) -> Result<()> {
+        Err(HeddleError::InvalidObject(
+            "this object store does not support persisting redactions".to_string(),
+        ))
+    }
+
+    /// List every blob that has at least one redaction record. Used by
+    /// the GC pin guard and by sync to enumerate redactions for the
+    /// state closure. Order is unspecified; callers that need stable
+    /// ordering should sort.
+    ///
+    /// Default impl returns `Ok(vec![])`.
+    fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
+        Ok(Vec::new())
+    }
 }

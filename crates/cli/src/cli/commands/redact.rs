@@ -15,16 +15,22 @@
 //! path) so a leaked secret is scrubbed everywhere it appears — across
 //! renames, copies, and parallel branches.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use crypto::{Signer, load_signer, verify_payload_signature};
-use objects::object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature};
+use objects::{
+    object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature},
+    worktree::should_ignore,
+};
 use repo::Repository;
 use serde::Serialize;
 
 use crate::{
     cli::{
-        Cli, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, should_output_json,
+        Cli, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, RedactTrustAddArgs,
+        RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, should_output_json,
     },
     config::UserConfig,
 };
@@ -36,6 +42,7 @@ pub fn cmd_redact(cli: &Cli, command: RedactCommands) -> Result<()> {
         RedactCommands::Apply(args) => cmd_redact_apply(cli, &repo, args),
         RedactCommands::List(args) => cmd_redact_list(cli, &repo, args),
         RedactCommands::Show(args) => cmd_redact_show(cli, &repo, args),
+        RedactCommands::Trust(sub) => cmd_redact_trust(cli, &repo, sub),
     }
 }
 
@@ -57,6 +64,12 @@ struct RedactApplyOutput {
     /// Signature algorithm (`ed25519`, `rsa`, `p256`) when `signed`.
     #[serde(skip_serializing_if = "Option::is_none")]
     signature_algorithm: Option<String>,
+    /// Hint to add the redacted path to `.heddleignore` / `.gitignore`
+    /// so subsequent captures don't re-import the leaked bytes from
+    /// the working tree. `None` when the path is already covered by a
+    /// glob rule in either file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ignore_hint: Option<IgnoreHint>,
 }
 
 fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Result<()> {
@@ -152,6 +165,8 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
     }
     let _ = extra_oplog_entries; // surfaced via the redactions list/oplog; not in primary output
 
+    let ignore_hint = ignore_hint_for_path(repo, &args.path)?;
+
     let output = RedactApplyOutput {
         redaction_id: primary_id.short(),
         blob: blob.short(),
@@ -164,9 +179,74 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
         states_redacted,
         signed: signer.is_some(),
         signature_algorithm,
+        ignore_hint,
     };
 
     emit_apply(cli, &output)
+}
+
+/// Suggestion to add a redacted path to `.heddleignore` so it doesn't
+/// get re-captured on the next `heddle capture`. Returned as `None`
+/// when the path is already covered by heddle's *effective* ignore
+/// set — i.e. `Repository::ignore_patterns()`, which is what the
+/// capture/walker actually consults: `.heddleignore` + the
+/// `worktree.ignore` patterns in `.heddle/config.toml`.
+///
+/// Crucially we do NOT treat `.gitignore` coverage as suppression:
+/// `heddle capture` never reads `.gitignore`, so a path covered only
+/// there can still be re-captured. The hint must surface in that case.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct IgnoreHint {
+    /// Path to the ignore file we'd append to, relative to the repo
+    /// root. Always `.heddleignore` — heddle's capture path doesn't
+    /// read `.gitignore`, so suggesting `.gitignore` would be a
+    /// false-negative on the leak-prevention guidance.
+    pub ignore_file: String,
+    /// Whether `.heddleignore` is already present on disk. `false`
+    /// means the operator would also create the file in the same
+    /// step as appending the pattern.
+    pub already_exists: bool,
+    /// The pattern to append. We suggest the literal redacted path
+    /// here; operators who want a broader glob (`config/*.toml`) can
+    /// edit before saving.
+    pub suggested_pattern: String,
+    /// Human-readable hint shown in text mode. Pre-formatted so the
+    /// JSON consumer can surface it verbatim if they prefer.
+    pub message: String,
+}
+
+/// If `path` is not yet covered by heddle's effective ignore set,
+/// return a hint pointing at `.heddleignore`. Suppression mirrors the
+/// exact patterns `heddle capture` consults
+/// (`Repository::ignore_patterns()` = `.heddleignore` + repo config
+/// `worktree.ignore`), so the hint never gives a false sense of
+/// safety just because `.gitignore` happens to mention the path.
+pub(crate) fn ignore_hint_for_path(repo: &Repository, path: &str) -> Result<Option<IgnoreHint>> {
+    let patterns = repo
+        .ignore_patterns()
+        .with_context(|| "load .heddleignore patterns for redact-hint coverage check")?;
+    if should_ignore(&PathBuf::from(path), &patterns) {
+        return Ok(None);
+    }
+
+    let heddleignore = repo.root().join(".heddleignore");
+    let exists = heddleignore.is_file();
+    let message = if exists {
+        format!(
+            "hint: add `{path}` to .heddleignore so the next `heddle capture` doesn't re-import the leaked bytes"
+        )
+    } else {
+        format!(
+            "hint: create .heddleignore with `{path}` so the next `heddle capture` doesn't re-import the leaked bytes"
+        )
+    };
+
+    Ok(Some(IgnoreHint {
+        ignore_file: ".heddleignore".to_string(),
+        already_exists: exists,
+        suggested_pattern: path.to_string(),
+        message,
+    }))
 }
 
 /// Build a `StateSignature` over a redaction's canonical signing payload.
@@ -389,6 +469,9 @@ fn emit_apply(cli: &Cli, output: &RedactApplyOutput) -> Result<()> {
         if !output.reason.is_empty() {
             println!("  reason: {}", output.reason);
         }
+        if let Some(hint) = &output.ignore_hint {
+            println!("  {}", hint.message);
+        }
     }
     Ok(())
 }
@@ -496,4 +579,238 @@ fn hex_encode(bytes: &[u8]) -> String {
         let _ = write!(out, "{:02x}", b);
     }
     out
+}
+
+// ---------------------------------------------------------------------
+// `heddle redact trust` — manage the operator trust list
+//
+// The trust list lives in `[redact] trusted_keys` of
+// `.heddle/config.toml`. `Repository::accept_wire_redactions` consults
+// it at wire-receive time; an empty list rejects every signed
+// redaction (fail-closed). Operators run `trust add` after an
+// out-of-band exchange of public key bytes with the redaction's
+// signer — same workflow as gpg/ssh trust setup.
+// ---------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct TrustEntryOutput {
+    algorithm: String,
+    public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TrustListOutput {
+    trusted_keys: Vec<TrustEntryOutput>,
+    count: usize,
+}
+
+fn cmd_redact_trust(cli: &Cli, repo: &Repository, command: RedactTrustCommands) -> Result<()> {
+    match command {
+        RedactTrustCommands::Add(args) => cmd_redact_trust_add(cli, repo, args),
+        RedactTrustCommands::List(args) => cmd_redact_trust_list(cli, repo, args),
+        RedactTrustCommands::Remove(args) => cmd_redact_trust_remove(cli, repo, args),
+    }
+}
+
+fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) -> Result<()> {
+    let (algorithm, public_key) = match (args.from_pem, args.algorithm, args.public_key) {
+        (Some(pem_path), _, _) => {
+            // Reuse the existing PEM loader — same code path operators
+            // hit via `--sign-with`, so a PEM that works for signing
+            // works for trust-add too.
+            let signer = crypto::load_signer(&pem_path, None)
+                .with_context(|| format!("load signer from '{}'", pem_path.display()))?;
+            (
+                signer.algorithm().to_string(),
+                hex::encode(signer.public_key()),
+            )
+        }
+        (None, Some(algorithm), Some(public_key)) => (algorithm, public_key),
+        (None, _, _) => {
+            return Err(anyhow!(
+                "supply either `--from-pem <PATH>` or both `--algorithm` and `--public-key`"
+            ));
+        }
+    };
+
+    // Round-trip the config through toml::Value so we don't have to
+    // re-serialize the entire typed config (which would lose
+    // operator-added comments and table ordering).
+    let config_path = repo.heddle_dir().join("config.toml");
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("read '{}'", config_path.display()))?;
+    let mut value: toml::Value = toml::from_str(&raw).with_context(|| "parse repo config")?;
+    let root = value
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("repo config root must be a TOML table"))?;
+    let redact = root
+        .entry("redact".to_string())
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("[redact] section must be a table"))?;
+    let trusted_keys = redact
+        .entry("trusted_keys".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| anyhow!("`trusted_keys` must be an array"))?;
+
+    // Refuse duplicates — operators get a clear signal that the key
+    // is already trusted rather than silently adding a second entry
+    // (`accept_wire_redactions` would tolerate dupes but the on-disk
+    // config drifts away from `cargo fmt`-clean noise-free state).
+    let already_trusted = trusted_keys.iter().any(|entry| {
+        entry
+            .get("algorithm")
+            .and_then(|v| v.as_str())
+            .map(|a| a.eq_ignore_ascii_case(&algorithm))
+            .unwrap_or(false)
+            && entry
+                .get("public_key")
+                .and_then(|v| v.as_str())
+                .map(|k| k.eq_ignore_ascii_case(&public_key))
+                .unwrap_or(false)
+    });
+    if already_trusted {
+        return Err(anyhow!(
+            "key {algorithm}:{public_key} is already in the trust list"
+        ));
+    }
+
+    let mut entry = toml::value::Table::new();
+    entry.insert(
+        "algorithm".to_string(),
+        toml::Value::String(algorithm.clone()),
+    );
+    entry.insert(
+        "public_key".to_string(),
+        toml::Value::String(public_key.clone()),
+    );
+    if let Some(label) = &args.label {
+        entry.insert("label".to_string(), toml::Value::String(label.clone()));
+    }
+    trusted_keys.push(toml::Value::Table(entry));
+
+    let serialized = toml::to_string(&value).with_context(|| "serialize patched repo config")?;
+    std::fs::write(&config_path, serialized)
+        .with_context(|| format!("write '{}'", config_path.display()))?;
+
+    let output = TrustEntryOutput {
+        algorithm,
+        public_key,
+        label: args.label,
+    };
+    if should_output_json(cli, None) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!(
+            "trusted {} key {} ({})",
+            output.algorithm,
+            short_key(&output.public_key),
+            output.label.as_deref().unwrap_or("unlabeled"),
+        );
+    }
+    Ok(())
+}
+
+fn cmd_redact_trust_list(cli: &Cli, repo: &Repository, _args: RedactTrustListArgs) -> Result<()> {
+    let keys: Vec<TrustEntryOutput> = repo
+        .config()
+        .redact
+        .trusted_keys
+        .iter()
+        .map(|k| TrustEntryOutput {
+            algorithm: k.algorithm.clone(),
+            public_key: k.public_key.clone(),
+            label: k.label.clone(),
+        })
+        .collect();
+    let count = keys.len();
+    let output = TrustListOutput {
+        trusted_keys: keys,
+        count,
+    };
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else if count == 0 {
+        println!("no trusted operator keys");
+    } else {
+        println!("{count} trusted operator key(s):");
+        for k in &output.trusted_keys {
+            println!(
+                "  {} {} ({})",
+                k.algorithm,
+                short_key(&k.public_key),
+                k.label.as_deref().unwrap_or("unlabeled"),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_redact_trust_remove(
+    cli: &Cli,
+    repo: &Repository,
+    args: RedactTrustRemoveArgs,
+) -> Result<()> {
+    let config_path = repo.heddle_dir().join("config.toml");
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("read '{}'", config_path.display()))?;
+    let mut value: toml::Value = toml::from_str(&raw).with_context(|| "parse repo config")?;
+    let root = value
+        .as_table_mut()
+        .ok_or_else(|| anyhow!("repo config root must be a TOML table"))?;
+    let Some(redact) = root.get_mut("redact").and_then(|v| v.as_table_mut()) else {
+        return Err(anyhow!("no [redact] section in config; nothing to remove"));
+    };
+    let Some(trusted_keys) = redact
+        .get_mut("trusted_keys")
+        .and_then(|v| v.as_array_mut())
+    else {
+        return Err(anyhow!(
+            "no `trusted_keys` array in [redact]; nothing to remove"
+        ));
+    };
+
+    let before = trusted_keys.len();
+    trusted_keys.retain(|entry| {
+        entry
+            .get("public_key")
+            .and_then(|v| v.as_str())
+            .map(|k| !k.eq_ignore_ascii_case(&args.public_key))
+            .unwrap_or(true)
+    });
+    let removed = before - trusted_keys.len();
+    if removed == 0 {
+        return Err(anyhow!(
+            "no trusted key matched `{}` — nothing removed",
+            args.public_key
+        ));
+    }
+
+    let serialized = toml::to_string(&value).with_context(|| "serialize patched repo config")?;
+    std::fs::write(&config_path, serialized)
+        .with_context(|| format!("write '{}'", config_path.display()))?;
+
+    if should_output_json(cli, None) {
+        println!("{{\"removed\":{removed}}}");
+    } else {
+        println!(
+            "removed {removed} trust entry/entries matching {}",
+            args.public_key
+        );
+    }
+    Ok(())
+}
+
+/// Short-form display for a hex-encoded public key. Same length as
+/// the redaction-id shortener: first 16 chars, which is plenty to
+/// disambiguate within a single repo's trust list.
+fn short_key(hex: &str) -> String {
+    if hex.len() <= 16 {
+        hex.to_string()
+    } else {
+        format!("{}…", &hex[..16])
+    }
 }

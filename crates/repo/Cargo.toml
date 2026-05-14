@@ -13,6 +13,7 @@ categories.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 chrono.workspace = true
+hex.workspace = true
 gix.workspace = true
 ignore.workspace = true
 libc.workspace = true

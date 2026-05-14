@@ -10,7 +10,7 @@ use std::{
 
 use objects::{
     object::{Blob, ChangeId, ContentHash},
-    store::{CompressionConfig, PackBuilder, PackObjectId, pack::ObjectType as PackObjectType},
+    store::{pack::ObjectType as PackObjectType, CompressionConfig, PackBuilder, PackObjectId},
 };
 use proto::{ObjectData, ObjectId, ObjectType};
 use repo::Repository;
@@ -591,6 +591,11 @@ fn encode_native_pack(objects: &[ObjectData]) -> (Vec<u8>, Vec<u8>) {
             ObjectType::Tree => PackObjectType::Tree,
             ObjectType::State => PackObjectType::State,
             ObjectType::Action => PackObjectType::Action,
+            ObjectType::Redaction => {
+                // Redaction sidecars never enter the content-addressed
+                // pack; the test fixture doesn't construct them.
+                unreachable!("performance harness does not synthesize Redaction objects");
+            }
         };
         builder.add_id(id, obj_type, object.data.clone());
     }

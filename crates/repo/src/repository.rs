@@ -75,7 +75,7 @@ use objects::{
 use oplog::{OpLog, OpLogBackend};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefManager};
-pub use repo_config::{HostedConfig, OutputFormat, RepoConfig};
+pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
 // custom signals config) don't need to reach into a private module path.

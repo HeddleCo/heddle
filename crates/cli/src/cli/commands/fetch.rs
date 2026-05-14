@@ -192,12 +192,15 @@ async fn fetch_local(
     let mut refs_fetched = 0;
     let mut objects_fetched = 0;
 
-    // Fetch all threads from source
+    // Fetch all threads from source. `fetch_state` is invoked
+    // unconditionally — not just when the state is missing locally —
+    // so `LocalSync` can sweep the tree for redaction sidecars the
+    // peer declared after we last synced. The internal walk is cheap
+    // when no objects need copying, but it must still run for
+    // `accept_wire_redactions` to fire.
     for (track_name, change_id) in source.list_threads()? {
-        if !repo.store().has_state(&change_id)? {
-            let count = source.fetch_state(repo, &change_id)?;
-            objects_fetched += count;
-        }
+        let count = source.fetch_state(repo, &change_id)?;
+        objects_fetched += count;
         repo.refs()
             .set_remote_thread(remote_name, &track_name, &change_id)?;
         refs_fetched += 1;
@@ -205,10 +208,8 @@ async fn fetch_local(
 
     // Fetch all markers from source (copy locally, not as remote refs)
     for (marker_name, change_id) in source.list_markers()? {
-        if !repo.store().has_state(&change_id)? {
-            let count = source.fetch_state(repo, &change_id)?;
-            objects_fetched += count;
-        }
+        let count = source.fetch_state(repo, &change_id)?;
+        objects_fetched += count;
         // Create local marker if it doesn't exist
         if repo.refs().get_marker(&marker_name)?.is_none() {
             repo.refs().create_marker(&marker_name, &change_id)?;
