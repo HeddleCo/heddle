@@ -85,28 +85,56 @@ impl LocalSync {
         }
         visited.insert(*state_id);
 
-        // Check if target already has this state
-        if target.store().has_state(state_id)? {
-            return Ok(());
-        }
+        // Whether the target already has this state. We do NOT
+        // early-return on this — even when the object graph is fully
+        // present, an operator may have declared a redaction on the
+        // source *after* the target previously fetched the content.
+        // Subsequent syncs must still propagate the sidecar. We
+        // therefore always walk the tree(s) to surface redactions,
+        // and condition just the object-copy step on the
+        // `state_already_present` flag.
+        let state_already_present = target.store().has_state(state_id)?;
 
-        // Get the state from source
-        let state = self
-            .source
-            .store()
-            .get_state(state_id)?
-            .ok_or_else(|| anyhow!("State {} not found in source", state_id))?;
+        // Source-side state read drives both the object copy (when
+        // needed) and the redaction-propagation tree walk (always).
+        // If the source no longer has the state but the target does,
+        // we can't enumerate blob hashes for propagation — skip with
+        // no error in that case.
+        let state = match self.source.store().get_state(state_id)? {
+            Some(state) => state,
+            None if state_already_present => return Ok(()),
+            None => return Err(anyhow!("State {} not found in source", state_id)),
+        };
 
-        // Copy tree recursively
-        self.copy_tree_recursive(target, &state.tree, copied)?;
+        // Always propagate redactions for every blob in the state's
+        // trees, regardless of whether the trees themselves need
+        // copying. `propagate_redactions_in_tree` walks the trees
+        // without the has_tree fast-path so re-syncs after a redact
+        // still ferry the sidecar.
+        let mut propagated_trees: HashSet<ContentHash> = HashSet::new();
+        self.propagate_redactions_in_tree(target, &state.tree, &mut propagated_trees)?;
         if let Some(provenance_root) = state.provenance {
-            self.copy_tree_recursive(target, &provenance_root, copied)?;
+            self.propagate_redactions_in_tree(target, &provenance_root, &mut propagated_trees)?;
         }
         if let Some(context_root) = state.context {
-            self.copy_tree_recursive(target, &context_root, copied)?;
+            self.propagate_redactions_in_tree(target, &context_root, &mut propagated_trees)?;
         }
 
-        // Copy parent states recursively (if depth allows)
+        if !state_already_present {
+            // Copy tree recursively
+            self.copy_tree_recursive(target, &state.tree, copied)?;
+            if let Some(provenance_root) = state.provenance {
+                self.copy_tree_recursive(target, &provenance_root, copied)?;
+            }
+            if let Some(context_root) = state.context {
+                self.copy_tree_recursive(target, &context_root, copied)?;
+            }
+        }
+
+        // Copy parent states recursively (if depth allows). We recurse
+        // on parents even when the current state was already present —
+        // a redaction declared on an ancestor blob still needs to
+        // reach the target's redactions store.
         if let Some(depth) = max_depth {
             if depth > 0 {
                 for parent in &state.parents {
@@ -114,7 +142,9 @@ impl LocalSync {
                 }
             } else {
                 // Shallow state - mark parents as grafted
-                target.set_shallow(state_id, &state.parents)?;
+                if !state_already_present {
+                    target.set_shallow(state_id, &state.parents)?;
+                }
             }
         } else {
             for parent in &state.parents {
@@ -122,9 +152,10 @@ impl LocalSync {
             }
         }
 
-        // Store the state in target
-        target.store().put_state(&state)?;
-        *copied += 1;
+        if !state_already_present {
+            target.store().put_state(&state)?;
+            *copied += 1;
+        }
 
         Ok(())
     }
@@ -147,7 +178,10 @@ impl LocalSync {
             .get_tree(tree_hash)?
             .ok_or_else(|| anyhow!("Tree {} not found in source", tree_hash))?;
 
-        // Copy all blobs and sub-trees
+        // Copy all blobs and sub-trees. Redaction propagation lives
+        // in `propagate_redactions_in_tree`, called by
+        // `copy_state_recursive` regardless of whether the tree was
+        // already present — so it's intentionally absent here.
         for entry in tree.entries() {
             match entry.entry_type {
                 objects::object::EntryType::Blob => {
@@ -156,7 +190,6 @@ impl LocalSync {
                         target.store().put_blob(&blob)?;
                         *copied += 1;
                     }
-                    self.propagate_redactions_for_blob(target, &entry.hash)?;
                 }
                 objects::object::EntryType::Tree => {
                     self.copy_tree_recursive(target, &entry.hash, copied)?;
@@ -167,7 +200,6 @@ impl LocalSync {
                         target.store().put_blob(&blob)?;
                         *copied += 1;
                     }
-                    self.propagate_redactions_for_blob(target, &entry.hash)?;
                 }
             }
         }
@@ -176,6 +208,46 @@ impl LocalSync {
         target.store().put_tree(&tree)?;
         *copied += 1;
 
+        Ok(())
+    }
+
+    /// Walk a source-side tree and propagate any redaction sidecars
+    /// found for the blobs it references. Runs regardless of whether
+    /// the tree (or its parent state) is already present on the
+    /// target — the whole point is to recover from the "redact-after-
+    /// peer-fetched" flow where the object graph is unchanged but a
+    /// new sidecar exists upstream.
+    ///
+    /// `propagated_trees` dedups within a single sync so we don't
+    /// re-walk the same subtree across `state.tree`, `provenance`,
+    /// and `context` roots that happen to share content.
+    fn propagate_redactions_in_tree(
+        &self,
+        target: &Repository,
+        tree_hash: &ContentHash,
+        propagated_trees: &mut HashSet<ContentHash>,
+    ) -> Result<()> {
+        if !propagated_trees.insert(*tree_hash) {
+            return Ok(());
+        }
+
+        // Tree must come from the source — if it's missing there, we
+        // can't enumerate blob hashes for sidecar lookup. Treat as a
+        // gap in propagation (best-effort), not a hard failure.
+        let Some(tree) = self.source.store().get_tree(tree_hash)? else {
+            return Ok(());
+        };
+
+        for entry in tree.entries() {
+            match entry.entry_type {
+                objects::object::EntryType::Blob | objects::object::EntryType::Symlink => {
+                    self.propagate_redactions_for_blob(target, &entry.hash)?;
+                }
+                objects::object::EntryType::Tree => {
+                    self.propagate_redactions_in_tree(target, &entry.hash, propagated_trees)?;
+                }
+            }
+        }
         Ok(())
     }
 

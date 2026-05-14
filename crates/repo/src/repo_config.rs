@@ -33,6 +33,44 @@ pub struct RepoConfig {
     pub hosted: HostedConfig,
     #[serde(default)]
     pub review: ReviewConfig,
+    #[serde(default)]
+    pub redact: RedactConfig,
+}
+
+/// `[redact]` config section. Houses the list of operator public keys
+/// that the receiver trusts when accepting redactions over the wire
+/// (`Repository::accept_wire_redactions`). The list is fail-closed:
+/// an empty list rejects every incoming signed redaction. Operators
+/// populate it via `heddle redact trust <pem>` (planned) or by
+/// hand-editing `.heddle/config.toml`.
+///
+/// The reason the trust list lives in repo config rather than in the
+/// signed payload itself: a signature only proves *who* declared the
+/// redaction, not whether the receiver should *honor* that operator's
+/// authority for this workspace. Without a separate trust anchor an
+/// attacker can mint a redaction with their own key and pass
+/// signature verification trivially.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RedactConfig {
+    /// Trusted operator public keys. Every signed redaction received
+    /// over the wire must match one of these (algorithm + hex-encoded
+    /// public key) before the receiver persists the sidecar.
+    #[serde(default)]
+    pub trusted_keys: Vec<TrustedKey>,
+}
+
+/// One trusted operator key entry. Algorithm and key strings use the
+/// same wire-format as `StateSignature`: `algorithm` is `ed25519`,
+/// `p256`, or `rsa`; `public_key` is hex-encoded raw key bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustedKey {
+    pub algorithm: String,
+    pub public_key: String,
+    /// Free-text label so operators can name keys in the config
+    /// (`"luke-laptop"`, `"ci-signing"`) without changing trust
+    /// semantics. Optional; doesn't affect matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// Review-epic configuration. Houses the `[review.signals]` sub-table read by
@@ -346,6 +384,7 @@ impl Default for RepoConfig {
             storage: StorageConfig::default(),
             hosted: HostedConfig::default(),
             review: ReviewConfig::default(),
+            redact: RedactConfig::default(),
         }
     }
 }

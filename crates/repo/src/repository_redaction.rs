@@ -45,6 +45,16 @@ pub enum WireRejection {
     /// The record carries a signature, but it doesn't verify against
     /// the canonical signing payload. Tampering or wrong key.
     Tampered,
+    /// The signature verifies, but the public key isn't on this
+    /// receiver's `[redact] trusted_keys` list. Signing proves *who*
+    /// declared the redaction; the trust list proves the receiver
+    /// has *authorized* that operator to act on this workspace.
+    /// Without this gate an attacker can mint and sign their own
+    /// redaction and pass verification trivially.
+    UntrustedKey {
+        algorithm: String,
+        public_key: String,
+    },
 }
 
 /// Outcome of an `accept_wire_redactions` call. Receiver-side sync
@@ -254,6 +264,11 @@ impl Repository {
     ///   would let an unsigned sibling smuggle in via a signed peer).
     /// - [`WireRejection::Tampered`] if any signature fails to verify
     ///   against the canonical payload.
+    /// - [`WireRejection::UntrustedKey`] if the signer's public key is
+    ///   not on this receiver's `[redact] trusted_keys` list. The list
+    ///   is fail-closed: an empty list rejects every incoming signed
+    ///   redaction, forcing operators to make an explicit trust
+    ///   decision before secrets-scrubbing primitives are accepted.
     /// - Other errors propagate as `anyhow::Error` (decode failure, io,
     ///   crypto subsystem failure).
     pub fn accept_wire_redactions(
@@ -263,6 +278,10 @@ impl Repository {
     ) -> Result<WireAcceptOutcome> {
         let incoming = RedactionsBlob::decode(bytes)
             .with_context(|| format!("decode incoming redactions for blob {}", blob.short()))?;
+
+        // Snapshot the trust list once. Cheap to clone (operator key
+        // counts are O(individuals), not O(blobs)).
+        let trusted_keys = self.config().redact.trusted_keys.clone();
 
         // Pre-validate every entry before we touch the local store —
         // an all-or-nothing accept keeps the audit trail honest.
@@ -274,7 +293,7 @@ impl Repository {
                     blob.short()
                 );
             }
-            verify_wire_redaction(redaction)
+            verify_wire_redaction(redaction, &trusted_keys)
                 .with_context(|| format!("verify incoming redaction for blob {}", blob.short()))?;
         }
 
@@ -489,14 +508,28 @@ fn walk_tree_for_blob(
     Ok(())
 }
 
-/// Wire-side signature gate. Returns `Ok(())` for a verified redaction,
-/// [`WireRejection::Unsigned`] if no signature is present, and
-/// [`WireRejection::Tampered`] when verification fails. Wraps both
-/// rejection cases in `anyhow::Error` so callers can `?` propagate.
-fn verify_wire_redaction(redaction: &Redaction) -> Result<()> {
+/// Wire-side signature gate. Returns `Ok(())` for a verified,
+/// trusted redaction. Rejection variants:
+///
+/// - [`WireRejection::Unsigned`] when no signature is present.
+/// - [`WireRejection::UntrustedKey`] when the signer's public key is
+///   not on the trust list. Checked *before* `verify_payload_signature`
+///   so an attacker can't probe the trust list via a timing oracle —
+///   the cryptographic cost is paid only for keys we trust.
+/// - [`WireRejection::Tampered`] when verification fails.
+///
+/// `trusted_keys` is the snapshot from `RepoConfig::redact::trusted_keys`.
+/// An empty list rejects every signed redaction (fail-closed).
+fn verify_wire_redaction(redaction: &Redaction, trusted_keys: &[crate::TrustedKey]) -> Result<()> {
     let Some(signature) = &redaction.signature else {
         anyhow::bail!(WireRejection::Unsigned);
     };
+    if !key_is_trusted(trusted_keys, &signature.algorithm, &signature.public_key) {
+        anyhow::bail!(WireRejection::UntrustedKey {
+            algorithm: signature.algorithm.clone(),
+            public_key: signature.public_key.clone(),
+        });
+    }
     let payload = redaction.canonical_signing_payload();
     let public_key = hex::decode(&signature.public_key)
         .with_context(|| "decode incoming redaction signature public key")?;
@@ -506,6 +539,17 @@ fn verify_wire_redaction(redaction: &Redaction) -> Result<()> {
         anyhow::bail!(WireRejection::Tampered);
     }
     Ok(())
+}
+
+/// Whether `(algorithm, public_key)` is in the configured trust list.
+/// Hex comparison is case-insensitive to match the storage format
+/// produced by `hex::encode` (lowercase) without surprising operators
+/// who copy-paste keys that happen to be uppercase.
+fn key_is_trusted(trusted: &[crate::TrustedKey], algorithm: &str, public_key_hex: &str) -> bool {
+    trusted.iter().any(|t| {
+        t.algorithm.eq_ignore_ascii_case(algorithm)
+            && t.public_key.eq_ignore_ascii_case(public_key_hex)
+    })
 }
 
 impl std::fmt::Display for WireRejection {
@@ -518,6 +562,14 @@ impl std::fmt::Display for WireRejection {
             WireRejection::Tampered => f.write_str(
                 "redaction signature failed to verify — the canonical payload \
                  was modified after signing or the wrong key was used",
+            ),
+            WireRejection::UntrustedKey {
+                algorithm,
+                public_key,
+            } => write!(
+                f,
+                "redaction signed by an untrusted operator key ({algorithm}:{public_key}) — \
+                 add the key to `[redact] trusted_keys` in `.heddle/config.toml` to accept it",
             ),
         }
     }
@@ -727,6 +779,42 @@ mod tests {
         r
     }
 
+    /// Initialize a repo and add `signer`'s public key to its
+    /// `[redact] trusted_keys` list. The signed-path acceptance tests
+    /// use this so the receiver actually trusts the signer (the
+    /// fail-closed default rejects every key).
+    ///
+    /// Round-trips the config through toml::Value rather than
+    /// string-appending a `[redact]` section: the default emit may or
+    /// may not already include `[redact]` (depending on
+    /// serde-skip-empty behaviour), and appending a duplicate header
+    /// is a TOML parse error.
+    fn fresh_repo_trusting(signer: &dyn crypto::Signer) -> (TempDir, Repository) {
+        let (dir, _) = fresh_repo();
+        let config_path = dir.path().join(".heddle/config.toml");
+        let raw = std::fs::read_to_string(&config_path).expect("read default config");
+        let mut value: toml::Value = toml::from_str(&raw).expect("parse default config");
+        let entry: toml::Value = toml::Value::try_from(crate::TrustedKey {
+            algorithm: signer.algorithm().to_string(),
+            public_key: hex::encode(signer.public_key()),
+            label: Some("test-fixture".to_string()),
+        })
+        .expect("encode trusted key");
+        let table = value
+            .as_table_mut()
+            .expect("config root must be a TOML table");
+        let redact = table
+            .entry("redact".to_string())
+            .or_insert_with(|| toml::Value::Table(Default::default()))
+            .as_table_mut()
+            .expect("[redact] must be a table");
+        redact.insert("trusted_keys".to_string(), toml::Value::Array(vec![entry]));
+        let serialized = toml::to_string(&value).expect("serialize patched config");
+        std::fs::write(&config_path, serialized).expect("write config");
+        let reopened = Repository::open(dir.path()).expect("re-open repo");
+        (dir, reopened)
+    }
+
     #[test]
     fn accept_wire_redactions_refuses_unsigned() {
         let (_dir, repo) = fresh_repo();
@@ -746,9 +834,34 @@ mod tests {
     }
 
     #[test]
-    fn accept_wire_redactions_persists_signed_redaction_idempotently() {
+    fn accept_wire_redactions_refuses_untrusted_signer_even_with_valid_signature() {
+        // The codex-flagged spoof vector: an attacker mints a redaction,
+        // signs it with their own key, and ships it. Signature
+        // verification by itself passes (the math is fine — the key
+        // matches the signature) but the receiver MUST reject because
+        // the key isn't on the trust list. Fail-closed default: an
+        // empty trust list rejects every signed key.
         let (_dir, repo) = fresh_repo();
+        let attacker = crypto::Ed25519Signer::generate().expect("keygen");
+        let forged = signed_sample_redaction(&attacker);
+        let payload = RedactionsBlob::new(vec![forged]).encode().unwrap();
+        let err = repo
+            .accept_wire_redactions(sample_blob(), &payload)
+            .expect_err("untrusted signer must be refused");
+        let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        assert!(
+            chain.iter().any(|m| m.contains("untrusted operator key")),
+            "rejection reason must explain untrusted-key, got chain: {chain:?}"
+        );
+        // Local store must remain empty — refusal is atomic.
+        let stored = repo.get_redactions_for_blob(&sample_blob()).unwrap();
+        assert!(stored.redactions.is_empty());
+    }
+
+    #[test]
+    fn accept_wire_redactions_persists_signed_redaction_idempotently() {
         let signer = crypto::Ed25519Signer::generate().expect("keygen");
+        let (_dir, repo) = fresh_repo_trusting(&signer);
         let signed = signed_sample_redaction(&signer);
         let payload = RedactionsBlob::new(vec![signed]).encode().unwrap();
 
@@ -768,8 +881,8 @@ mod tests {
 
     #[test]
     fn accept_wire_redactions_rejects_tampered_signature() {
-        let (_dir, repo) = fresh_repo();
         let signer = crypto::Ed25519Signer::generate().expect("keygen");
+        let (_dir, repo) = fresh_repo_trusting(&signer);
         let mut tampered = signed_sample_redaction(&signer);
         // Mutate the reason AFTER signing — the canonical payload
         // changes but the signature does not, so verification fails.
@@ -787,8 +900,8 @@ mod tests {
 
     #[test]
     fn accept_wire_redactions_with_purged_at_drives_local_purge() {
-        let (_dir, repo) = fresh_repo();
         let signer = crypto::Ed25519Signer::generate().expect("keygen");
+        let (_dir, repo) = fresh_repo_trusting(&signer);
         let mut signed = signed_sample_redaction(&signer);
         // Sender purged before propagation: mark the record purged.
         signed.purged_at = Some(Utc.with_ymd_and_hms(2026, 5, 12, 9, 0, 0).unwrap());

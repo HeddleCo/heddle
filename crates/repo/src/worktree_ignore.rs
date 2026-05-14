@@ -68,19 +68,23 @@ impl WorktreeIgnoreMatcher {
             .any(|excluded| paths_equivalent(excluded, absolute))
     }
 
+    /// Top-level "is this path ignored" probe. Matches the free-function
+    /// matcher in `objects::worktree::should_ignore`: passes
+    /// `is_dir = true` so trailing-slash rules (`build/`) fire on the
+    /// bare directory entry as well as on paths inside it.
     #[cfg(test)]
     pub(crate) fn should_ignore(&self, path: &Path) -> bool {
-        self.matched_relative(path, /* is_dir */ false)
+        self.matched_relative(path, /* is_dir */ true)
     }
 
-    /// Test-only file-shape probe — production callers go through
-    /// `should_prune_directory_child` for directories. Asserts
-    /// agreement between the compiled matcher and the free-function
-    /// matcher in `objects::worktree::should_ignore`.
+    /// Test-only "would this child be ignored as a file/dir entry"
+    /// probe. Asserts agreement with the free-function matcher (which
+    /// also uses `is_dir = true`); production callers reach for
+    /// `should_prune_directory_child` instead.
     #[cfg(test)]
     pub(crate) fn should_ignore_child(&self, parent: &Path, name: &str) -> bool {
         let path = parent.join(name);
-        self.matched_relative(&path, /* is_dir */ false)
+        self.matched_relative(&path, /* is_dir */ true)
     }
 
     pub(crate) fn should_prune_directory_child(&self, parent: &Path, name: &str) -> bool {
@@ -102,15 +106,15 @@ impl WorktreeIgnoreMatcher {
     }
 
     pub(crate) fn fingerprint(&self) -> ContentHash {
-        // Sort the raw pattern strings so the fingerprint is
-        // order-independent: two `.heddleignore` files with the same
-        // rules but different line orders cache-hit each other.
-        // Syntactically distinct rules (`build` vs `build/`) still
-        // hash differently — gitignore-spec gives them different
-        // semantics, and the caching layer needs that distinction.
-        let mut canonical = self.raw_patterns.clone();
-        canonical.sort();
-        ContentHash::compute_typed("heddle.ignore", canonical.join("\0").as_bytes())
+        // Hash patterns in declaration order — gitignore semantics are
+        // *order-sensitive*. `*.log` followed by `!keep.log` ignores
+        // every log file except `keep.log`; the same rules in reverse
+        // (`!keep.log` then `*.log`) ignore *every* log file because the
+        // negation is unset by the later catch-all. Two `.heddleignore`
+        // files with identical rule sets but different orders produce
+        // different ignore semantics, and the untracked-cache layer
+        // needs cache keys to reflect that.
+        ContentHash::compute_typed("heddle.ignore", self.raw_patterns.join("\0").as_bytes())
     }
 }
 
@@ -237,19 +241,18 @@ mod tests {
     }
 
     #[test]
-    fn matcher_fingerprint_is_order_independent_for_equivalent_patterns() {
-        let matcher_a = WorktreeIgnoreMatcher::new(&[
-            "build/".to_string(),
-            "*.log".to_string(),
-            ".git".to_string(),
-        ]);
-        let matcher_b = WorktreeIgnoreMatcher::new(&[
-            ".git".to_string(),
-            "*.log".to_string(),
-            "build/".to_string(),
-        ]);
-
-        assert_eq!(matcher_a.fingerprint(), matcher_b.fingerprint());
+    fn matcher_fingerprint_changes_when_pattern_order_changes() {
+        // Gitignore semantics are order-sensitive — `*.log` followed
+        // by `!keep.log` matches differently from the reverse order.
+        // The fingerprint must reflect that so cached untracked-walk
+        // results invalidate when an operator reorders rules.
+        let matcher_a = WorktreeIgnoreMatcher::new(&["*.log".to_string(), "!keep.log".to_string()]);
+        let matcher_b = WorktreeIgnoreMatcher::new(&["!keep.log".to_string(), "*.log".to_string()]);
+        assert_ne!(
+            matcher_a.fingerprint(),
+            matcher_b.fingerprint(),
+            "fingerprint must distinguish rule orders (negation semantics)"
+        );
     }
 
     #[test]

@@ -476,30 +476,37 @@ fn redact_apply_signed_propagates_to_cloned_replica() {
     let apply = signed_redact_on_repo_a(&a, &state, &pem_path);
     let redaction_id = apply["redaction_id"].as_str().unwrap().to_string();
 
-    // Clone A → B. `heddle clone` uses LocalSync, which propagates
-    // redaction sidecars via the new accept_wire_redactions hook.
+    // Set up B: init empty repo, trust A's signing key, then fetch.
+    // Operators do this on their own machine the first time they
+    // accept signed redactions from a new collaborator; the trust
+    // gate is fail-closed so signed records won't propagate until
+    // the operator explicitly authorizes the key.
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
+    fs::create_dir_all(&b_path).unwrap();
+    heddle(&["init"], Some(&b_path)).expect("init B");
     heddle(
         &[
-            "clone",
-            a.path().to_str().unwrap(),
-            b_path.to_str().unwrap(),
+            "redact",
+            "trust",
+            "add",
+            "--from-pem",
+            pem_path.to_str().unwrap(),
         ],
-        Some(b_dir.path()),
+        Some(&b_path),
     )
-    .expect("clone A → B should succeed");
+    .expect("B trusts A's signing key");
+    heddle(
+        &["remote", "add", "origin", a.path().to_str().unwrap()],
+        Some(&b_path),
+    )
+    .expect("remote add origin");
+    heddle(&["fetch", "origin"], Some(&b_path)).expect("fetch propagates signed redaction to B");
 
     // B's redact list must include the propagated redaction. The
     // worktree-stub contract is tested separately by the local
     // materialize tests; here we pin the propagation contract: A's
-    // redaction record exists in B's local sidecar after clone.
-    //
-    // (`heddle clone` for file:// uses a fast-path `copy_worktree` that
-    // mirrors A's actual on-disk files, so worktree contents on B are
-    // a property of A's worktree state at clone time, not of B's
-    // post-clone object store. The post-clone materialize that renders
-    // stubs only happens on the next `heddle goto`.)
+    // redaction record exists in B's local sidecar after fetch.
     let list_raw = heddle(&["--output", "json", "redact", "list"], Some(&b_path)).unwrap();
     let list: Value = serde_json::from_str(&list_raw).unwrap();
     let rows = list["redactions"].as_array().expect("redactions array");
@@ -587,17 +594,29 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
     )
     .expect("purge on A succeeds");
 
+    // Set up B with explicit trust for A's signing key, then fetch.
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
+    fs::create_dir_all(&b_path).unwrap();
+    heddle(&["init"], Some(&b_path)).expect("init B");
     heddle(
         &[
-            "clone",
-            a.path().to_str().unwrap(),
-            b_path.to_str().unwrap(),
+            "redact",
+            "trust",
+            "add",
+            "--from-pem",
+            pem_path.to_str().unwrap(),
         ],
-        Some(b_dir.path()),
+        Some(&b_path),
     )
-    .expect("clone A → B with purged redaction should succeed");
+    .expect("B trusts A's signing key");
+    heddle(
+        &["remote", "add", "origin", a.path().to_str().unwrap()],
+        Some(&b_path),
+    )
+    .expect("remote add origin");
+    heddle(&["fetch", "origin"], Some(&b_path))
+        .expect("fetch propagates signed redaction + purge to B");
 
     // B must record the purge.
     let purge_list_raw = heddle(&["--output", "json", "purge", "list"], Some(&b_path)).unwrap();
@@ -616,7 +635,7 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
 }
 
 #[test]
-fn tampered_redaction_is_refused_at_clone_boundary() {
+fn tampered_redaction_is_refused_at_fetch_boundary() {
     use crypto::Ed25519Signer;
     use objects::object::RedactionsBlob;
 
@@ -645,20 +664,34 @@ fn tampered_redaction_is_refused_at_clone_boundary() {
     // The above forfeits A's own materialize-side stub correctness;
     // the local invariant break is the point of the test.
 
+    // B trusts the signing key, so the trust gate passes — the
+    // rejection comes from signature verification failing on the
+    // tampered canonical payload (Tampered, not UntrustedKey).
     let b_dir = TempDir::new().unwrap();
     let b_path = b_dir.path().join("replica-b");
-    let err = heddle(
+    fs::create_dir_all(&b_path).unwrap();
+    heddle(&["init"], Some(&b_path)).expect("init B");
+    heddle(
         &[
-            "clone",
-            a.path().to_str().unwrap(),
-            b_path.to_str().unwrap(),
+            "redact",
+            "trust",
+            "add",
+            "--from-pem",
+            pem_path.to_str().unwrap(),
         ],
-        Some(b_dir.path()),
+        Some(&b_path),
     )
-    .expect_err("clone must refuse a tampered redaction");
+    .expect("B trusts A's signing key");
+    heddle(
+        &["remote", "add", "origin", a.path().to_str().unwrap()],
+        Some(&b_path),
+    )
+    .expect("remote add origin");
+    let err = heddle(&["fetch", "origin"], Some(&b_path))
+        .expect_err("fetch must refuse a tampered redaction");
     assert!(
         err.contains("failed to verify") || err.contains("Tampered") || err.contains("tampered"),
-        "clone rejection must explain the tamper cause: {err}"
+        "fetch rejection must explain the tamper cause: {err}"
     );
 }
 
@@ -708,10 +741,12 @@ fn redact_apply_emits_ignore_hint_when_neither_file_covers_path() {
         hint["suggested_pattern"].as_str().unwrap(),
         "config/secrets.toml"
     );
-    assert!(hint["message"]
-        .as_str()
-        .unwrap()
-        .contains("config/secrets.toml"));
+    assert!(
+        hint["message"]
+            .as_str()
+            .unwrap()
+            .contains("config/secrets.toml")
+    );
 }
 
 #[test]
@@ -727,34 +762,65 @@ fn redact_apply_emits_no_hint_when_heddleignore_literal_matches() {
 }
 
 #[test]
-fn redact_apply_emits_no_hint_when_gitignore_glob_matches() {
-    // Glob coverage (`config/*.toml`) in `.gitignore`. This is the
-    // critical case the user called out — the matcher must use
-    // gitignore-spec glob semantics, not literal substring.
+fn redact_apply_emits_no_hint_when_heddleignore_glob_matches() {
+    // Glob coverage (`config/*.toml`) in `.heddleignore` — the matcher
+    // uses gitignore-spec globs, not literal substring, so a broad
+    // rule that already covers the leaked path suppresses the hint.
     let (temp, state) = setup_repo_with_secret();
-    fs::write(temp.path().join(".gitignore"), "config/*.toml\n").unwrap();
+    fs::write(temp.path().join(".heddleignore"), "config/*.toml\n").unwrap();
     let apply = redact_apply_json(&temp, &state);
     assert!(
         apply.get("ignore_hint").is_none() || apply["ignore_hint"].is_null(),
-        "glob coverage in .gitignore must suppress the hint: {apply:?}"
+        "glob coverage in .heddleignore must suppress the hint: {apply:?}"
     );
 }
 
 #[test]
-fn redact_apply_targets_heddleignore_when_only_gitignore_exists_but_misses() {
-    // `.gitignore` exists but doesn't cover this path; `.heddleignore`
-    // is absent. The hint must point at `.gitignore` (the only present
-    // file), with `already_exists: true`.
+fn redact_apply_emits_hint_when_only_gitignore_covers_the_path() {
+    // `.gitignore` covers `config/*.toml` but `.heddleignore` doesn't.
+    // `heddle capture` reads `.heddleignore` + repo config, NOT
+    // `.gitignore`, so the next snapshot would still re-import the
+    // leaked bytes. The hint must surface, pointing at `.heddleignore`
+    // (the file heddle actually consults).
     let (temp, state) = setup_repo_with_secret();
-    fs::write(temp.path().join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+    fs::write(temp.path().join(".gitignore"), "config/*.toml\n").unwrap();
     let apply = redact_apply_json(&temp, &state);
     let hint = apply
         .get("ignore_hint")
-        .expect("hint must surface when .gitignore exists but doesn't cover the path");
-    assert_eq!(hint["ignore_file"].as_str().unwrap(), ".gitignore");
+        .expect(".gitignore coverage must NOT suppress the heddle-ignore hint");
+    assert_eq!(
+        hint["ignore_file"].as_str().unwrap(),
+        ".heddleignore",
+        ".gitignore is not consulted by heddle capture; hint must target .heddleignore"
+    );
     assert!(
-        hint["already_exists"].as_bool().unwrap(),
-        "should report the existing .gitignore"
+        !hint["already_exists"].as_bool().unwrap(),
+        "should report .heddleignore as not-yet-present"
+    );
+}
+
+#[test]
+fn redact_apply_emits_no_hint_when_repo_config_ignore_covers_path() {
+    // `worktree.ignore` in `.heddle/config.toml` is part of heddle's
+    // effective ignore set (see `Repository::ignore_patterns`). A
+    // pattern in repo config must suppress the hint even with no
+    // `.heddleignore` file on disk. Splice the additional pattern
+    // into the existing `[worktree] ignore = [...]` array instead of
+    // appending a duplicate section header (which `heddle init`
+    // already writes).
+    let (temp, state) = setup_repo_with_secret();
+    let config_path = temp.path().join(".heddle/config.toml");
+    let existing = fs::read_to_string(&config_path).expect("read default config");
+    let patched = existing.replace("ignore = [", "ignore = [\n    \"config/*.toml\",");
+    assert_ne!(
+        existing, patched,
+        "test fixture expected `ignore = [` in default config"
+    );
+    fs::write(&config_path, patched).unwrap();
+    let apply = redact_apply_json(&temp, &state);
+    assert!(
+        apply.get("ignore_hint").is_none() || apply["ignore_hint"].is_null(),
+        "repo-config worktree.ignore coverage must suppress the hint: {apply:?}"
     );
 }
 
@@ -798,4 +864,193 @@ fn purge_apply_also_emits_ignore_hint() {
         .expect("purge output must include ignore_hint");
     assert_eq!(hint["ignore_file"].as_str().unwrap(), ".heddleignore");
     assert!(!hint["already_exists"].as_bool().unwrap());
+}
+
+#[test]
+fn redact_after_peer_fetch_still_propagates_on_resync() {
+    // Scenario the codex review flagged: peer B clones A *first*,
+    // then A declares a redaction. A second clone-from-A would find
+    // every state/tree/blob already present locally and previously
+    // would short-circuit before propagating the sidecar. The
+    // post-fix behavior: redactions ferry through even when the
+    // object graph hasn't changed.
+    use crypto::Ed25519Signer;
+
+    let (a, state) = setup_repo_with_secret();
+
+    // Peer B clones BEFORE the redaction is declared on A.
+    let b_dir = TempDir::new().unwrap();
+    let b_path = b_dir.path().join("replica-b");
+    heddle(
+        &[
+            "clone",
+            a.path().to_str().unwrap(),
+            b_path.to_str().unwrap(),
+        ],
+        Some(b_dir.path()),
+    )
+    .expect("initial clone A → B");
+    let list_before: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "redact", "list"], Some(&b_path)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        list_before["redactions"].as_array().unwrap().len(),
+        0,
+        "B has no redactions yet (declared on A only after clone)"
+    );
+
+    // Now A declares + signs the redaction.
+    let signer = Ed25519Signer::generate().unwrap();
+    let pem = signer.to_pem().unwrap();
+    let pem_path = a.path().join("ed25519.pem");
+    fs::write(&pem_path, &pem).unwrap();
+    let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
+
+    // Re-sync: B trusts A's signing key, registers A as a remote,
+    // then `heddle fetch origin` should ferry the sidecar even
+    // though every state/tree/blob is already present on B. Trust
+    // setup happens after the initial clone (which used no signed
+    // redactions, so didn't need trust) — same operator pattern
+    // they'd run once after a peer publishes their signing key.
+    heddle(
+        &[
+            "redact",
+            "trust",
+            "add",
+            "--from-pem",
+            pem_path.to_str().unwrap(),
+        ],
+        Some(&b_path),
+    )
+    .expect("B trusts A's signing key");
+    heddle(
+        &["remote", "add", "origin", a.path().to_str().unwrap()],
+        Some(&b_path),
+    )
+    .expect("remote add origin");
+    heddle(&["fetch", "origin"], Some(&b_path)).expect("re-fetch A → B after redaction declared");
+
+    let list_after: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "redact", "list"], Some(&b_path)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        list_after["redactions"].as_array().unwrap().len(),
+        1,
+        "B must see the post-clone redaction after re-fetch: {list_after:?}"
+    );
+}
+
+#[test]
+fn untrusted_signed_redaction_is_refused_at_fetch_boundary() {
+    // Codex P1: signature verification alone is integrity, not
+    // authentication. Without a trust check the receiver accepts
+    // *any* mathematically-valid signature, including one minted by
+    // an attacker with their own key.
+    //
+    // This test pins the fail-closed default end-to-end: B receives
+    // a signed redaction from A, but B has *not* added A's key to
+    // its trust list. The fetch must refuse with `UntrustedKey`,
+    // and B's local store must be unchanged.
+    use crypto::Ed25519Signer;
+
+    let (a, state) = setup_repo_with_secret();
+    let attacker = Ed25519Signer::generate().unwrap();
+    let pem = attacker.to_pem().unwrap();
+    let pem_path = a.path().join("attacker.pem");
+    fs::write(&pem_path, &pem).unwrap();
+    let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
+
+    let b_dir = TempDir::new().unwrap();
+    let b_path = b_dir.path().join("replica-b");
+    fs::create_dir_all(&b_path).unwrap();
+    heddle(&["init"], Some(&b_path)).expect("init B");
+    // Intentionally skip `heddle redact trust add` — B does NOT
+    // trust the attacker's key.
+    heddle(
+        &["remote", "add", "origin", a.path().to_str().unwrap()],
+        Some(&b_path),
+    )
+    .expect("remote add origin");
+    let err = heddle(&["fetch", "origin"], Some(&b_path))
+        .expect_err("fetch must refuse untrusted signed redaction");
+    assert!(
+        err.contains("untrusted operator key"),
+        "fetch rejection must explain the untrusted-key cause: {err}"
+    );
+
+    // B's local redaction store must remain empty.
+    let list: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "redact", "list"], Some(&b_path)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        list["redactions"].as_array().unwrap().len(),
+        0,
+        "B must have no redactions after refusal; refusal is atomic"
+    );
+}
+
+#[test]
+fn redact_trust_add_and_list_round_trip() {
+    // Operator-facing smoke: `heddle redact trust add --from-pem`
+    // produces an entry that `heddle redact trust list` surfaces.
+    use crypto::Ed25519Signer;
+
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    let signer = Ed25519Signer::generate().unwrap();
+    let pem = signer.to_pem().unwrap();
+    let pem_path = temp.path().join("key.pem");
+    fs::write(&pem_path, &pem).unwrap();
+
+    let add_raw = heddle(
+        &[
+            "--output",
+            "json",
+            "redact",
+            "trust",
+            "add",
+            "--from-pem",
+            pem_path.to_str().unwrap(),
+            "--label",
+            "test-key",
+        ],
+        Some(temp.path()),
+    )
+    .expect("trust add");
+    let add: Value = serde_json::from_str(&add_raw).unwrap();
+    assert_eq!(add["algorithm"].as_str().unwrap(), "ed25519");
+    assert_eq!(add["label"].as_str().unwrap(), "test-key");
+    let pubkey_hex = add["public_key"].as_str().unwrap().to_string();
+
+    let list_raw = heddle(
+        &["--output", "json", "redact", "trust", "list"],
+        Some(temp.path()),
+    )
+    .expect("trust list");
+    let list: Value = serde_json::from_str(&list_raw).unwrap();
+    assert_eq!(list["count"].as_u64().unwrap(), 1);
+    let entries = list["trusted_keys"].as_array().unwrap();
+    assert_eq!(entries[0]["public_key"].as_str().unwrap(), pubkey_hex);
+    assert_eq!(entries[0]["label"].as_str().unwrap(), "test-key");
+
+    // Re-adding the same key fails — operators get a clear signal
+    // rather than silent duplicate entries.
+    let err = heddle(
+        &[
+            "redact",
+            "trust",
+            "add",
+            "--from-pem",
+            pem_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect_err("re-add must refuse duplicates");
+    assert!(
+        err.contains("already in the trust list"),
+        "duplicate-trust rejection must be clear: {err}"
+    );
 }

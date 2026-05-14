@@ -64,7 +64,8 @@ pub use commands_marker::MarkerCommands;
 pub use commands_query::QueryArgs;
 pub use commands_redact::{
     PurgeApplyArgs, PurgeCommands, PurgeListArgs, RedactApplyArgs, RedactCommands, RedactListArgs,
-    RedactShowArgs,
+    RedactShowArgs, RedactTrustAddArgs, RedactTrustCommands, RedactTrustListArgs,
+    RedactTrustRemoveArgs,
 };
 pub use commands_remote::RemoteCommands;
 pub use commands_review::{

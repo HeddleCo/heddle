@@ -21,6 +21,20 @@ use std::path::Path;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+/// Whether `path` is covered by any of the `.heddleignore` patterns.
+///
+/// `is_dir = true` is passed to the underlying gitignore matcher so
+/// trailing-slash rules (`target/`, `build/`) match the bare directory
+/// entry itself — not just paths *inside* it. This preserves the
+/// pre-existing in-house matcher's behavior, where `build/` on a bare
+/// `build` path returned `true`. Walker callers depend on this to
+/// prune entire directory subtrees before descending; the alternative
+/// (`is_dir = false`) caused unnecessary traversal of `target/`,
+/// `node_modules/`, and other build trees.
+///
+/// Non-directory rules (`*.log`, `node_modules`, `[Mm]akefile`) are
+/// unaffected — gitignore-spec rules without a trailing slash match
+/// regardless of the `is_dir` flag.
 pub fn should_ignore(path: &Path, patterns: &[String]) -> bool {
     matched(&build_matcher(patterns), path)
 }
@@ -62,9 +76,13 @@ fn canonical_line(pattern: &str) -> String {
 
 /// Apply the matcher to a relative path. Whitelist (`!negation`)
 /// rules unset the match; we surface only the `Ignore` outcome.
+///
+/// `is_dir = true`: trailing-slash rules (`build/`) match the bare
+/// directory entry as well as paths inside it. See the docstring on
+/// `should_ignore` for the migration rationale.
 fn matched(gi: &Gitignore, path: &Path) -> bool {
     matches!(
-        gi.matched_path_or_any_parents(path, /* is_dir */ false),
+        gi.matched_path_or_any_parents(path, /* is_dir */ true),
         ignore::Match::Ignore(_)
     )
 }
@@ -87,12 +105,13 @@ mod tests {
     fn test_directory_pattern() {
         let patterns = vec!["build/".to_string()];
         assert!(should_ignore(&PathBuf::from("build/output.txt"), &patterns));
-        // `build` alone (no trailing /) matches the literal name
-        // anywhere; the gitignore-spec rule for `build/` is
-        // "directory-only". When asked about the bare path `build`
-        // we pass `is_dir = false`, so gitignore-spec says no match.
-        // Walker callers ask via `should_ignore_child(parent, name)`
-        // which sees `build/` materialize the directory test.
+        // Bare directory match: walker callers ask `should_ignore` to
+        // decide whether to prune `build/` before descending. With
+        // `is_dir = true` plumbed into the gitignore matcher, the
+        // trailing-slash rule fires on the directory entry itself.
+        // Without this, walks of large dependency / build trees
+        // (`target/`, `node_modules/`) recurse unnecessarily.
+        assert!(should_ignore(&PathBuf::from("build"), &patterns));
         assert!(should_ignore(&PathBuf::from("build/anything"), &patterns));
         assert!(!should_ignore(&PathBuf::from("builder.txt"), &patterns));
     }

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Command-line interface for Heddle.
 
-use std::io::IsTerminal;
-use std::sync::OnceLock;
+use std::{io::IsTerminal, sync::OnceLock};
 
 pub mod cli_args;
 pub mod commands;
@@ -14,25 +13,26 @@ pub mod transaction_sentinel;
 
 #[cfg(feature = "client")]
 pub use cli_args::PresenceCommands;
-#[cfg(feature = "git-overlay")]
-pub use cli_args::{BridgeCommands, GitCommands};
+pub use cli_args::{
+    ActorCommands, AgentCommands, AttemptArgs, BisectCommands, CheckpointArgs, Cli, CloneArgs,
+    CollapseArgs, Commands, ContextCommands, DaemonCommands, DiagnoseArgs, DiffArgs, DoctorArgs,
+    DoctorCommands, DoctorDocsArgs, HookCommands, HookInstallSource, InitArgs, IntegrationCommands,
+    IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs, LogArgs,
+    MaintenanceCommands, MarkerCommands, MergeArgs, OutputMode, PullArgs, PurgeApplyArgs,
+    PurgeCommands, PurgeListArgs, PushArgs, ReadyArgs, RedactApplyArgs, RedactCommands,
+    RedactListArgs, RedactShowArgs, RedactTrustAddArgs, RedactTrustCommands, RedactTrustListArgs,
+    RedactTrustRemoveArgs, RemoteCommands, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
+    SessionCommands, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
+    SessionStartArgs, SnapshotArgs, StashCommands, StoreCommands, ThreadAbsorbArgs,
+    ThreadCleanupArgs, ThreadCommands, ThreadDropArgs, ThreadListArgs, ThreadMoveArgs,
+    ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs,
+    ThreadStartArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceCommands, WorkspaceModeArg,
+    WorkspaceShowArgs,
+};
 #[cfg(feature = "client")]
 pub use cli_args::{AuthCommands, SupportCommands};
-pub use cli_args::{
-    ActorCommands, AgentCommands, AttemptArgs, BisectCommands,
-    CheckpointArgs, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands, DaemonCommands,
-    DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, HookCommands,
-    HookInstallSource, InitArgs, IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs,
-    IntegrationTargetArgs, LogArgs, MaintenanceCommands, MarkerCommands, MergeArgs, OutputMode,
-    PullArgs, PurgeApplyArgs, PurgeCommands, PurgeListArgs, PushArgs, ReadyArgs, RedactApplyArgs,
-    RedactCommands, RedactListArgs, RedactShowArgs, RemoteCommands, ResolveArgs, RetroArgs,
-    RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs, SessionSegmentArgs,
-    SessionShowArgs, SessionStartArgs, SnapshotArgs, StashCommands, StoreCommands,
-    ThreadAbsorbArgs, ThreadCleanupArgs, ThreadCommands, ThreadDropArgs, ThreadListArgs,
-    ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs,
-    ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceCommands,
-    WorkspaceModeArg, WorkspaceShowArgs,
-};
+#[cfg(feature = "git-overlay")]
+pub use cli_args::{BridgeCommands, GitCommands};
 #[cfg(feature = "semantic")]
 pub use cli_args::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
 use repo::{Config, OutputFormat};

@@ -6,13 +6,13 @@
 //! brief; the Biscuit verifier rule is a future-work item. For now,
 //! `--force` is the explicit confirmation step.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use objects::object::ChangeId;
 use repo::Repository;
 use serde::Serialize;
 
 use crate::{
-    cli::{should_output_json, Cli, PurgeApplyArgs, PurgeCommands, PurgeListArgs},
+    cli::{Cli, PurgeApplyArgs, PurgeCommands, PurgeListArgs, should_output_json},
     config::UserConfig,
 };
 
@@ -85,7 +85,7 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
         );
     }
 
-    let ignore_hint = super::redact::ignore_hint_for_path(repo.root(), &args.path);
+    let ignore_hint = super::redact::ignore_hint_for_path(repo, &args.path)?;
 
     let output = PurgeApplyOutput {
         redaction_id: outcome.redaction_id.map(|h| h.short()),
