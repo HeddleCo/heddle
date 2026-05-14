@@ -991,3 +991,25 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
         ),
     }
 }
+
+/// Regression: `op_scope` must return a repo-relative path, not the
+/// canonicalized absolute path. The previous behavior embedded the
+/// user's home dir and username into every oplog entry — when an oplog
+/// containing those paths shipped in `examples/calculator/.heddle/`,
+/// it was a PII leak for anyone who cloned the public repo.
+#[test]
+fn test_op_scope_does_not_leak_absolute_path() {
+    let (temp_dir, repo) = create_test_repo();
+    let scope = repo.op_scope();
+
+    let abs_root = temp_dir.path().display().to_string();
+    assert!(
+        !scope.contains(&abs_root),
+        "op_scope leaked absolute path: scope={scope:?} contains repo root {abs_root:?}",
+    );
+    assert!(
+        !scope.starts_with('/'),
+        "op_scope must be repo-relative, got absolute: {scope:?}",
+    );
+    assert_eq!(scope, ".heddle/HEAD");
+}

@@ -1275,16 +1275,11 @@ impl Repository {
 
     pub fn op_scope(&self) -> String {
         // HEAD always lives at <root>/.heddle/HEAD — for both main repos
-        // (where root/.heddle is the heddle_dir) and worktrees (where
-        // root/.heddle is the local pointer dir distinct from the shared
-        // heddle_dir). Using the local-checkout path here keeps op-log
-        // scoping unique per worktree.
-        let head_path = self.root.join(".heddle").join("HEAD");
-        if let Ok(path) = head_path.canonicalize() {
-            path.display().to_string()
-        } else {
-            head_path.display().to_string()
-        }
+        // and worktree-local pointer dirs. Record the repo-relative form
+        // so the oplog doesn't embed the user's absolute filesystem path,
+        // which would leak their home directory and username into every
+        // recorded op.
+        ".heddle/HEAD".to_string()
     }
 
     pub fn repo_config(&self) -> &RepoConfig {
