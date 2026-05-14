@@ -1,6 +1,6 @@
 [package]
 name = "weft-client-shim"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 authors.workspace = true
 description = "Trait surface for hosted-client extensions to the Heddle CLI. OSS default is a noop impl; closed builds replace it via [patch.crates-io]."
