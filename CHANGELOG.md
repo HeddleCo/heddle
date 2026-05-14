@@ -11,6 +11,80 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
+## 0.2.3 - 2026-05-14
+
+### Added
+
+- **Cross-replica redaction wire propagation** (#12). A signed
+  `Redaction` declared on one replica now propagates via the existing
+  object-transfer machinery and the receiver replays it: verifies the
+  signature, checks the signer against the trust list, persists the
+  sidecar, and replays any `purged_at` byte-removal locally.
+  - New `proto::ObjectType::Redaction` variant; `enumerate_state_closure`
+    emits a Redaction entry for every blob in the closure that has a
+    sidecar.
+  - New `ObjectStore` trait methods for sidecar access:
+    `has_redactions_for_blob`, `get_redactions_bytes_for_blob`,
+    `put_redactions_bytes_for_blob`, `list_blobs_with_redactions`.
+    Default impls return empty; `FsStore` and `InMemoryStore` implement.
+  - New `Repository::accept_wire_redactions`: decodes the incoming
+    `RedactionsBlob`, refuses unsigned records, rejects signatures from
+    untrusted keys, rejects tampered records, then merges via
+    content-addressed idempotency. Records with `purged_at: Some(_)`
+    drive a local `purge_blob`.
+  - New `WireRejection` enum: `Unsigned` | `Tampered` |
+    `UntrustedKey { algorithm, public_key }`. Trust gate is fail-closed:
+    an empty trust list rejects every signed redaction.
+  - New `[redact] trusted_keys` repo config section. Operators manage
+    via the new CLI subcommands:
+    - `heddle redact trust add --from-pem <path>` (or
+      `--algorithm <a> --public-key <hex>`)
+    - `heddle redact trust list`
+    - `heddle redact trust remove <hex>`
+  - `LocalSync` ferries redaction sidecars during local→local copies.
+    Propagation runs unconditionally on every state walk, so the
+    redact-after-peer-fetched flow re-syncs correctly even when no new
+    objects are copied.
+  - `heddle fetch <remote>` no longer short-circuits when the state is
+    already present locally; the redaction sweep needs the walk to run.
+- **Ignore-hint on `redact`/`purge` output** (#12). After a
+  redact/purge, the working-tree file is unchanged — the next
+  `heddle capture` would re-snapshot the leaked bytes. The CLI now
+  emits a hint pointing at `.heddleignore` if the path isn't already
+  covered by heddle's effective ignore set (`.heddleignore` + repo
+  config `worktree.ignore`). Coverage check uses gitignore-spec globs.
+- **`.heddleignore` upgraded to full gitignore-spec** (#12). `*` and
+  `**` globs, character classes (`[abc]`), `!` negation rules, leading
+  `/` for root-anchored matches, trailing `/` for directory-only.
+  Both matchers (`objects::worktree::should_ignore` and the compiled
+  `WorktreeIgnoreMatcher`) delegate to `ignore::gitignore`. Legacy
+  patterns behave identically; the three root-admin special-cases
+  (`.heddle`, `.heddleignore`, `.git`) stay root-anchored.
+
+### Changed
+
+- `WorktreeIgnoreMatcher::fingerprint` hashes raw pattern strings in
+  declaration order (was: sorted). Gitignore semantics are
+  order-sensitive — `*.log` then `!keep.log` is not the same as the
+  reverse. Cache keys reflect that now.
+- `proto::native_pack::build_native_pack` skips `Redaction` entries;
+  sidecars live structurally outside `.heddle/objects/` so GC can't
+  reach them and they don't enter the content-addressed pack.
+- `proto::object_transfer::store_received_object` refuses
+  `ObjectType::Redaction` so callers route via
+  `Repository::accept_wire_redactions` (forcing signature verification).
+
+### Security
+
+- Closed a spoof vector in cross-replica redaction propagation:
+  before this release, `verify_wire_redaction` accepted any
+  mathematically-valid signature because it verified using the public
+  key embedded in the redaction itself. An attacker could mint a
+  redaction, sign with their own key, and pass. The new trust gate
+  ties acceptance to an operator-configured `[redact] trusted_keys`
+  list. Fail-closed default rejects every signed redaction until the
+  operator explicitly trusts a key via `heddle redact trust add`.
+
 ## 0.2.2 - 2026-05-14
 
 ### Added
