@@ -11,6 +11,16 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
+## 0.2.1 - 2026-05-14
+
+### Fixed
+- `oplog`: `Repository::op_scope` no longer canonicalizes HEAD to its
+  absolute filesystem path. Every recorded op was embedding the user's
+  home directory and username (`/Users/<name>/.../.heddle/HEAD`) into
+  the oplog. The fix records a blake3 digest of the canonical pointer
+  path (`wt-<16-hex>`) — stable per checkout, unique across worktrees
+  that share an oplog backend, opaque on disk.
+
 ## 0.2.0 - 2026-05-13
 
 First public release on crates.io. The CLI and its workspace ship as

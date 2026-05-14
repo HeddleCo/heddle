@@ -1,6 +1,6 @@
 [package]
 name = "heddle-devtools"
-version = "0.2.0"
+version = "0.2.1"
 edition.workspace = true
 authors.workspace = true
 description = "Developer tooling for the Heddle workspace"
