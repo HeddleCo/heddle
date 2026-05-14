@@ -1164,7 +1164,7 @@ mod tests {
     fn normalize_target_path_strips_slashless_absolute_same_repo_path() {
         let root = Path::new("/Users/lukethorne/.codex/worktrees/60c1/heddle");
         let got = normalize_target_path(
-            "Users/lukethorne/dev/heddle/crates/repo/src/worktree_index_storage.rs",
+            "Users/lukethorne/dev/HeddleCo/weft/crates/repo/src/worktree_index_storage.rs",
             root,
         );
         assert_eq!(got, "crates/repo/src/worktree_index_storage.rs");
@@ -1174,7 +1174,7 @@ mod tests {
     fn normalize_target_path_strips_absolute_other_checkout_of_same_repo() {
         let root = Path::new("/Users/lukethorne/.codex/worktrees/60c1/heddle");
         let got = normalize_target_path(
-            "/Users/lukethorne/dev/heddle/crates/repo/src/status_untracked_scan.rs",
+            "/Users/lukethorne/dev/HeddleCo/weft/crates/repo/src/status_untracked_scan.rs",
             root,
         );
         assert_eq!(got, "crates/repo/src/status_untracked_scan.rs");
@@ -1268,7 +1268,7 @@ mod tests {
         // absolute inputs. We don't short-circuit the agent-worktree
         // helper for absolute paths because that would leave a stray
         // `heddle/` prefix on the output.
-        let root = Path::new("/Users/lukethorne/dev/heddle");
+        let root = Path::new("/Users/lukethorne/dev/HeddleCo/weft");
         let got = normalize_target_path(
             "/Users/lukethorne/.codex/worktrees/89d4/heddle/src/auth.rs",
             root,

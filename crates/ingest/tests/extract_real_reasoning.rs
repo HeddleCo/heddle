@@ -3,7 +3,7 @@
 //! for the Heddle repo and print the top candidates. Ignored by default.
 //!
 //! ```text
-//! HEDDLE_MATCHER_SMOKE_REPO=/Users/lukethorne/dev/heddle \
+//! HEDDLE_MATCHER_SMOKE_REPO=/Users/lukethorne/dev/HeddleCo/weft \
 //!   cargo test -p ingest --test extract_real_reasoning -- --ignored --nocapture
 //! ```
 //!

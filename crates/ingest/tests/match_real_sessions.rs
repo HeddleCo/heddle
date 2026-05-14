@@ -5,7 +5,7 @@
 //! Run manually from the repo root:
 //!
 //! ```text
-//! HEDDLE_MATCHER_SMOKE_REPO=/Users/lukethorne/dev/heddle \
+//! HEDDLE_MATCHER_SMOKE_REPO=/Users/lukethorne/dev/HeddleCo/weft \
 //!   cargo test -p ingest --test match_real_sessions -- --ignored --nocapture
 //! ```
 //!
