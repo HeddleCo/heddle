@@ -992,24 +992,41 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
     }
 }
 
-/// Regression: `op_scope` must return a repo-relative path, not the
-/// canonicalized absolute path. The previous behavior embedded the
-/// user's home dir and username into every oplog entry — when an oplog
-/// containing those paths shipped in `examples/calculator/.heddle/`,
-/// it was a PII leak for anyone who cloned the public repo.
+/// Regression: `op_scope` must not embed the user's absolute filesystem
+/// path. The previous behavior canonicalized HEAD to its absolute path
+/// and recorded that on every oplog entry — when an oplog containing
+/// those paths shipped in `examples/calculator/.heddle/`, it was a PII
+/// leak for anyone who cloned the repo.
+///
+/// The scope must also distinguish worktrees that share one oplog
+/// backend (`undo`/`redo`/`--list` filter by exact-match scope), so the
+/// fix must preserve per-worktree uniqueness.
 #[test]
-fn test_op_scope_does_not_leak_absolute_path() {
+fn test_op_scope_is_stable_unique_and_does_not_leak_absolute_path() {
     let (temp_dir, repo) = create_test_repo();
     let scope = repo.op_scope();
 
+    // Stable across calls from the same checkout.
+    assert_eq!(scope, repo.op_scope(), "op_scope must be deterministic");
+
+    // No absolute path or home-dir leak.
     let abs_root = temp_dir.path().display().to_string();
     assert!(
         !scope.contains(&abs_root),
         "op_scope leaked absolute path: scope={scope:?} contains repo root {abs_root:?}",
     );
     assert!(
-        !scope.starts_with('/'),
-        "op_scope must be repo-relative, got absolute: {scope:?}",
+        !scope.contains('/'),
+        "op_scope must not contain path separators: {scope:?}",
     );
-    assert_eq!(scope, ".heddle/HEAD");
+
+    // Different worktrees produce different scopes — preserves
+    // checkout-local undo/redo when worktrees share an oplog.
+    let (other_dir, other_repo) = create_test_repo();
+    assert_ne!(
+        scope,
+        other_repo.op_scope(),
+        "different worktrees must have different op_scopes",
+    );
+    drop(other_dir);
 }
