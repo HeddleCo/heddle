@@ -23,7 +23,7 @@ fn main() -> Result<()> {
 /// `--gate <crate>=<pct>` argument falls below its threshold.
 ///
 /// Invocation:
-///   heddle-devtools audit-coverage <lcov-path> --gate objects=80 --gate repo=78 --gate refs=80
+///   heddle-devtools audit-coverage <lcov-path> --gate objects=80 --gate repo=78.66 --gate refs=80
 ///
 /// Used from `.github/workflows/rust-tests.yml` after `cargo llvm-cov`
 /// emits `lcov.info`. The gate is per-crate (not workspace-global) so
