@@ -394,6 +394,7 @@ tests/              # integration and property tests
 
 - `SPEC.md` - formal behavior and storage/protocol truth
 - `docs/ARCHITECTURE.md` - system architecture
+- `docs/STABILITY.md` - 1.0 stability criterion: coverage, perf, format, SemVer, and deprecation policy
 - `docs/HOSTED_NAMESPACES.md` - hosted namespace and grant model
 - `docs/HOSTED_ADMIN.md` - hosted admin surfaces and command/API usage
 - `docs/ENTERPRISE_BACKEND_ROADMAP.md` - platform roadmap
@@ -435,4 +436,4 @@ Contributions are welcome. Start with `AGENTS.md` and the relevant docs before c
 
 ---
 
-Heddle is still alpha software. Storage formats, APIs, and hosted product surfaces are evolving quickly.
+Heddle is still alpha software. Storage formats, APIs, and hosted product surfaces are evolving quickly. The criterion for when Heddle commits to a stable 1.0 — coverage thresholds, performance budgets, API/format stability, SemVer policy, and the deprecation cycle — lives in [docs/STABILITY.md](docs/STABILITY.md).
