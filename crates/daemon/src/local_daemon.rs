@@ -283,11 +283,15 @@ pub async fn serve(
     // prior `kill -9` cannot race with a brand-new `begin_transaction`.
     // See [`crate::transaction_replay`] for the state machine.
     let report = crate::transaction_replay::replay_active_transactions(&repo);
-    if !report.recovered_transaction_ids.is_empty() || report.orphan_temp_files_removed > 0 {
+    if !report.is_clean() {
         tracing::info!(
             recovered_txns = report.recovered_transaction_ids.len(),
             orphan_tmps = report.orphan_temp_files_removed,
             unparseable = report.unparseable_sentinels.len(),
+            failed_sentinel_writes = report.failed_sentinel_writes.len(),
+            failed_oplog_appends = report.failed_oplog_appends.len(),
+            unreadable_entries = report.unreadable_entries,
+            scan_error = report.scan_error.as_deref().unwrap_or(""),
             "local-daemon: transaction replay recovered prior in-flight state"
         );
     }

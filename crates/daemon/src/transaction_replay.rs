@@ -79,10 +79,9 @@ pub const REPLAY_RECOVERY_REASON: &str = "recovered from crash on startup";
 
 /// Outcome of a single replay pass over the sentinel directory.
 ///
-/// All fields together: the number of in-flight transactions that were
-/// resolved, the number of orphan temp files cleaned up, and the
-/// (hopefully empty) list of sentinels that could not be parsed at all
-/// and were left in place for an operator to inspect.
+/// Success and partial-failure modes are split into distinct fields so
+/// callers (and operators reading the startup log) can tell a clean
+/// recovery from one that left work undone.
 #[derive(Debug, Default, Clone)]
 pub struct ReplayReport {
     /// Transaction ids that were in state `active` and have been
@@ -96,16 +95,45 @@ pub struct ReplayReport {
     /// Replay leaves them alone — they are not classified as
     /// recoverable until an operator inspects them.
     pub unparseable_sentinels: Vec<PathBuf>,
+    /// Sentinels that were `active` on disk but whose rewrite to
+    /// `aborted` failed (e.g. read-only filesystem, disk full). They
+    /// remain `active` on disk; the next startup will retry. Surface
+    /// these so callers do not treat the pass as clean when crash
+    /// recovery actually stalled.
+    pub failed_sentinel_writes: Vec<PathBuf>,
+    /// Transaction ids whose sentinel rewrite to `aborted` succeeded
+    /// but whose `OpRecord::TransactionAbort` append to the oplog
+    /// failed. The recovery itself completed; the audit-trail entry
+    /// for those transactions was lost. Subsequent replay passes will
+    /// skip the now-`aborted` sentinel, so this is the only signal
+    /// callers get that the audit event is missing.
+    pub failed_oplog_appends: Vec<String>,
+    /// `Some(err)` when `read_dir` on the sentinel directory failed
+    /// for a reason other than the directory being missing
+    /// (permission denied, I/O error, path is not a directory). When
+    /// set, no scan ran and the other fields are uninformative.
+    pub scan_error: Option<String>,
+    /// Count of directory entries that `read_dir` yielded as `Err`
+    /// (transient I/O / permission issues mid-iteration). Each one
+    /// might have been a recoverable `active` sentinel; surfacing the
+    /// count prevents a silent clean-pass when entries cannot be
+    /// examined at all.
+    pub unreadable_entries: usize,
 }
 
 impl ReplayReport {
     /// `true` when the pass had nothing to do — every sentinel was
-    /// already terminal and there were no orphan tmp files. Useful
-    /// for idempotence assertions in tests.
+    /// already terminal, no orphan tmp files were removed, and no
+    /// recoverable failure modes were observed. Useful for
+    /// idempotence assertions in tests.
     pub fn is_clean(&self) -> bool {
         self.recovered_transaction_ids.is_empty()
             && self.orphan_temp_files_removed == 0
             && self.unparseable_sentinels.is_empty()
+            && self.failed_sentinel_writes.is_empty()
+            && self.failed_oplog_appends.is_empty()
+            && self.scan_error.is_none()
+            && self.unreadable_entries == 0
     }
 }
 
@@ -139,18 +167,35 @@ fn is_orphan_temp_name(name: &str) -> bool {
 /// Idempotent: calling twice in a row leaves [`ReplayReport::is_clean`]
 /// returning `true` on the second call.
 ///
-/// Errors from individual sentinel writes are tracing-warned and
-/// swallowed so a single corrupt sentinel cannot block daemon startup;
-/// the unparseable path is surfaced in the returned report.
+/// Per-sentinel errors are tracing-warned and surfaced in the returned
+/// report (under `unparseable_sentinels`, `failed_sentinel_writes`, or
+/// `failed_oplog_appends` depending on which step failed) so a single
+/// corrupt sentinel cannot block daemon startup but its failure is
+/// still visible to the operator.
 pub fn replay_active_transactions(repo: &Repository) -> ReplayReport {
     let mut report = ReplayReport::default();
     let dir = repo.heddle_dir().join("state").join("transactions");
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => return report,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(err) => {
+            tracing::warn!(error = %err, dir = %dir.display(),
+                "transaction-replay: failed to read sentinel directory");
+            report.scan_error = Some(err.to_string());
+            return report;
+        }
     };
 
-    for entry in entries.flatten() {
+    for entry_result in entries {
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::warn!(error = %err, dir = %dir.display(),
+                    "transaction-replay: failed to read directory entry");
+                report.unreadable_entries += 1;
+                continue;
+            }
+        };
         let path = entry.path();
         let name = match path.file_name().and_then(|n| n.to_str()) {
             Some(n) => n,
@@ -204,20 +249,27 @@ pub fn replay_active_transactions(repo: &Repository) -> ReplayReport {
             Err(err) => {
                 tracing::warn!(error = %err, txn = %txn_id,
                     "transaction-replay: failed to serialize recovered sentinel");
+                report.failed_sentinel_writes.push(path.clone());
                 continue;
             }
         };
         if let Err(err) = write_file_atomic(&path, serialized.as_bytes()) {
             tracing::warn!(error = %err, txn = %txn_id,
                 "transaction-replay: failed to persist recovered sentinel");
+            report.failed_sentinel_writes.push(path.clone());
             continue;
         }
+        // Sentinel is now `aborted` on disk; from here the recovery
+        // itself has succeeded. An oplog append failure only loses the
+        // audit-trail entry — track it on the report rather than
+        // pretending the transaction is unrecovered.
         if let Err(err) = repo.oplog().record_batch(vec![OpRecord::TransactionAbort {
             transaction_id: txn_id.clone(),
             reason: REPLAY_RECOVERY_REASON.to_string(),
         }]) {
             tracing::warn!(error = %err, txn = %txn_id,
                 "transaction-replay: failed to record TransactionAbort");
+            report.failed_oplog_appends.push(txn_id.clone());
         }
         report.recovered_transaction_ids.push(txn_id);
     }
@@ -397,6 +449,79 @@ buffered_ops = {buffered}
             second.is_clean(),
             "second pass should be a no-op (was {second:?})"
         );
+    }
+
+    #[test]
+    fn scan_error_set_when_sentinel_dir_is_not_a_directory() {
+        // read_dir on a non-directory path returns a non-NotFound
+        // error. Replay must surface it on the report rather than
+        // returning a clean default that looks like a no-op.
+        let (_t, repo) = fresh_repo();
+        let dir = sentinel_dir(&repo);
+        fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        // Plant a regular file where the transactions/ directory
+        // would be — read_dir will yield ErrorKind::NotADirectory.
+        fs::write(&dir, b"not a directory").unwrap();
+
+        let report = replay_active_transactions(&repo);
+        assert!(
+            report.scan_error.is_some(),
+            "expected scan_error to be set, got {report:?}"
+        );
+        assert!(!report.is_clean());
+        assert!(report.recovered_transaction_ids.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_sentinel_write_surfaced_on_readonly_dir() {
+        // Read-only sentinel directory: the sentinel parses fine but
+        // write_file_atomic cannot create its tmp file. Replay must
+        // surface the failure path on the report instead of treating
+        // the pass as clean — the transaction is still `active` on
+        // disk and crash recovery has actually stalled.
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses DAC permission checks, so r-x on the dir
+        // would not actually block tmp-file creation and the test's
+        // assertion would be a no-op. Skip rather than mislead.
+        // SAFETY: getuid() is always safe.
+        if unsafe { libc::getuid() } == 0 {
+            eprintln!(
+                "skipping failed_sentinel_write_surfaced_on_readonly_dir: \
+                 running as root, DAC checks bypassed"
+            );
+            return;
+        }
+
+        let (_t, repo) = fresh_repo();
+        let dir = sentinel_dir(&repo);
+        write_sentinel_raw(&dir, "tx-ro", "active", &[]);
+        let path = dir.join("tx-ro.toml");
+
+        // Make the parent r-x: existing files still readable, but no
+        // new files can be created (so write_file_atomic's tmp-create
+        // step fails).
+        let mut perms = fs::metadata(&dir).unwrap().permissions();
+        let original = perms.mode();
+        perms.set_mode(0o555);
+        fs::set_permissions(&dir, perms).unwrap();
+
+        let report = replay_active_transactions(&repo);
+
+        // Restore writable perms so TempDir can clean up.
+        let mut restore = fs::metadata(&dir).unwrap().permissions();
+        restore.set_mode(original);
+        fs::set_permissions(&dir, restore).unwrap();
+
+        assert_eq!(report.failed_sentinel_writes, vec![path]);
+        // The sentinel write failed, so the recovery did not complete
+        // and the txn id must NOT appear in recovered_transaction_ids.
+        assert!(report.recovered_transaction_ids.is_empty());
+        assert!(!report.is_clean());
+        // Sentinel is still in `active` on disk so the next startup
+        // retries.
+        assert_eq!(read_state(&dir, "tx-ro"), STATE_ACTIVE);
     }
 
     #[test]
