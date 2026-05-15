@@ -100,6 +100,18 @@ jobs:
       - name: Generate HTML coverage report
         run: cargo llvm-cov report --html
 
+      # Per-crate coverage gate. Keep the --gate thresholds in sync with
+      # codecov.yml's `coverage.status.project.<crate>.target` and with
+      # the table in CONTRIBUTING.md. See heddle-devtools::run_audit_coverage
+      # for the parsing and reporting logic.
+      - name: Coverage gate (objects / repo / refs)
+        run: |
+          cargo run -p heddle-devtools --quiet -- \
+            audit-coverage lcov.info \
+              --gate objects=80 \
+              --gate repo=78 \
+              --gate refs=80
+
       - name: Upload coverage to Codecov
         if: ${{ env.HAVE_CODECOV_TOKEN == 'true' }}
         env:

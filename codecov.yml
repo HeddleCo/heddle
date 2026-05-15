@@ -1,0 +1,83 @@
+# Codecov configuration for HeddleCo/heddle.
+#
+# Keep the per-component `target` values in sync with the
+# `--gate <crate>=<pct>` flags in `.github/workflows/rust-tests.yml`
+# (job `coverage`, step `Coverage gate`) and with the table in
+# `CONTRIBUTING.md` § "Coverage gate". The Rust-side gate in
+# `heddle-devtools audit-coverage` is the authoritative check (it
+# fails the CI job before the Codecov upload runs); Codecov mirrors
+# the same numbers so PR-level reporting matches CI-level enforcement.
+
+coverage:
+  # Round percentages to two decimal places; show down-arrows on drops.
+  precision: 2
+  round: down
+  range: "70...95"
+
+  status:
+    project:
+      # Workspace-wide target — informational, no enforcement here;
+      # per-crate gates below are what fail the build.
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+
+      objects:
+        target: 80%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/objects/
+
+      repo:
+        # Ratchet floor: current main is 78.66%. Goal is 80% — raise
+        # this as the `repo` crate gains tests. See CONTRIBUTING.md.
+        target: 78%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/repo/
+
+      refs:
+        target: 80%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/refs/
+
+    patch:
+      # New-or-changed lines in a PR must clear 80% — this is the
+      # forward-going floor; existing-line drift is caught by the
+      # per-crate project gates above.
+      default:
+        target: 80%
+        threshold: 1%
+
+# Codecov status posts on PRs, but Codecov is not the gate of record:
+# the in-CI `Coverage gate` step fails the run before this upload
+# happens, so the build will be red even if Codecov is unreachable.
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+
+# Component coverage breakdown (shows up in the PR comment so reviewers
+# can see per-crate deltas at a glance).
+component_management:
+  individual_components:
+    - component_id: objects
+      name: objects
+      paths:
+        - crates/objects/**
+    - component_id: repo
+      name: repo
+      paths:
+        - crates/repo/**
+    - component_id: refs
+      name: refs
+      paths:
+        - crates/refs/**

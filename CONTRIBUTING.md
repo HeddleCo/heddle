@@ -223,6 +223,72 @@ Same shape as license additions: discuss first. The banned list in
 no OpenSSL coupling), not arbitrary preferences. If you have a real
 need, the PR should explain why the alternative isn't viable.
 
+## Coverage gate
+
+The `Coverage` job in
+[`.github/workflows/rust-tests.yml`](.github/workflows/rust-tests.yml)
+runs `cargo llvm-cov` over the OSS feature set and then enforces a
+per-crate line-coverage floor on the resulting `lcov.info`. The gate
+is the `Coverage gate (objects / repo / refs)` step; it shells out to
+the `audit-coverage` subcommand of `heddle-devtools`:
+
+```bash
+cargo run -p heddle-devtools --quiet -- \
+  audit-coverage lcov.info \
+    --gate objects=80 \
+    --gate repo=78 \
+    --gate refs=80
+```
+
+`audit-coverage` parses `SF:` / `LF:` / `LH:` records in the lcov
+output, aggregates by workspace crate (matched on
+`crates/<name>/...`), and exits non-zero when any gated crate is
+below its threshold. The CI step fails *before* the Codecov upload,
+so the build stays red whether or not Codecov is reachable.
+
+### Current thresholds
+
+| Crate | Threshold | Goal |
+|---|---|---|
+| `objects` | 80% | 80% |
+| `repo` | 78% | 80% (ratchet) |
+| `refs` | 80% | 80% |
+
+The `repo` threshold is a ratchet floor: current main is **78.66%**,
+so the gate locks that as the no-regression line. Raise the number
+in this table, in
+[`.github/workflows/rust-tests.yml`](.github/workflows/rust-tests.yml),
+and in [`codecov.yml`](codecov.yml) in the same PR that adds the
+tests that push `repo`'s coverage to ≥80%.
+
+### Codecov mirror
+
+[`codecov.yml`](codecov.yml) declares `coverage.status.project.<crate>`
+entries with the same `target:` values as the CI gate, so Codecov's
+PR comment reports the same numbers the build enforces. Codecov is
+not the gate of record — the in-CI step is — but the two must agree.
+When you change a threshold, change it in all three places
+(`rust-tests.yml`, `codecov.yml`, this table).
+
+### Running the gate locally
+
+```bash
+cargo llvm-cov --locked --workspace \
+  --features git-overlay,native,semantic,zstd \
+  --lcov --output-path lcov.info
+
+cargo run -p heddle-devtools --quiet -- \
+  audit-coverage lcov.info \
+    --gate objects=80 --gate repo=78 --gate refs=80
+```
+
+A green local run means a green CI run, modulo lcov's normal
+sensitivity to feature flags. The `--features` list above mirrors
+the one the CI `Coverage` job uses (see
+[`.github/workflows/rust-tests.yml`](.github/workflows/rust-tests.yml)
+— the comment above the `Generate coverage report` step explains why
+this set, not `--all-features`).
+
 ## Getting unstuck
 
 - Quick how-to questions: open a GitHub Discussion.
