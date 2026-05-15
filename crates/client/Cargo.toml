@@ -29,7 +29,6 @@ prost-types.workspace = true
 reqwest.workspace = true
 rmp-serde.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
