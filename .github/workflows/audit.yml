@@ -1,0 +1,81 @@
+name: Supply-chain audit
+
+# Blocking gate for the Rust supply chain.
+#
+# - cargo-deny enforces the policy in deny.toml (licenses, banned crates,
+#   advisories, registry/git sources).
+# - cargo-audit cross-checks the RustSec advisory DB. cargo-deny already
+#   reads the same DB; running cargo-audit too gives us a second tool's
+#   take and surfaces yanked-crate warnings explicitly.
+#
+# The weekly cron catches advisories filed against unchanged dependencies
+# (a new CVE against a crate we already ship will trip the gate on Monday
+# even if no one has pushed code).
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/audit.yml'
+  push:
+    branches:
+      - main
+  schedule:
+    # Weekly: Mondays 05:17 UTC. Offset minute avoids the top-of-the-hour
+    # GitHub-Actions scheduling stampede.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    name: cargo-deny
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # `check all` runs advisories + bans + licenses + sources in one pass.
+          command: check all
+
+  cargo-audit:
+    name: cargo-audit
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Run cargo-audit
+        # --deny warnings escalates yanked / unmaintained / notice advisories
+        # to errors. The --ignore list below MUST mirror deny.toml's
+        # [advisories].ignore — cargo-audit doesn't read deny.toml. If you add
+        # an ignore there, add it here too (and update CONTRIBUTING's Security
+        # section so the rationale stays discoverable).
+        run: |
+          cargo audit \
+            --deny warnings \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2025-0134 \
+            --ignore RUSTSEC-2026-0098 \
+            --ignore RUSTSEC-2026-0099 \
+            --ignore RUSTSEC-2026-0104

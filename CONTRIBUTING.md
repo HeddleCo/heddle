@@ -139,6 +139,68 @@ From [docs/PRINCIPLES.md](docs/PRINCIPLES.md):
 If a proposed change makes any of those weaker — even slightly — the
 change is wrong. Argue from the principles, not around them.
 
+## Security
+
+Heddle gates every PR (and runs a weekly cron) through a supply-chain
+audit. The gate is enforced by
+[`.github/workflows/audit.yml`](.github/workflows/audit.yml) and lives
+across two tools:
+
+- **cargo-deny** — reads [`deny.toml`](deny.toml). Enforces the license
+  allow-list, the banned-crates list (e.g. `openssl` / `openssl-sys` /
+  `native-tls` — Heddle standardizes on rustls), the registry/git source
+  allow-list, and the RustSec advisory database.
+- **cargo-audit** — second-opinion advisory scan against the same
+  RustSec DB, run with `--deny warnings` so yanked / unmaintained /
+  notice advisories also fail the build.
+
+### Running the gate locally
+
+```bash
+cargo install --locked cargo-deny  # once
+cargo install --locked cargo-audit # once
+
+cargo deny check                   # full policy run
+cargo audit --deny warnings        # advisory check
+```
+
+Both should be green before you push. CI runs them on every push to
+`main`, every PR that touches `Cargo.toml` / `Cargo.lock` / `deny.toml`
+/ `audit.yml`, and on a weekly schedule (Mondays 05:17 UTC) so a fresh
+advisory against an unchanged dependency surfaces without anyone
+having to push code.
+
+### Ignoring an advisory
+
+If a RustSec advisory cannot be fixed by a version bump (upstream
+hasn't released; advisory doesn't apply to our usage; etc.), add an
+entry to **both** of:
+
+1. `deny.toml` — `[advisories].ignore` with `{ id, reason }`. The
+   `reason` must explain *why* it's safe to ignore in Heddle's context,
+   not just acknowledge the advisory exists.
+2. `.github/workflows/audit.yml` — `cargo audit --ignore <ID>` in the
+   `cargo-audit` step. cargo-audit doesn't read `deny.toml`, so the
+   two lists must be kept in sync by hand.
+
+When upstream ships a fix, remove the entry from both places in the
+same PR that bumps the dependency.
+
+### Adding a license to the allow-list
+
+Adding a license is a policy decision. Discuss in the PR before
+extending `[licenses].allow` in `deny.toml`. Copyleft licenses
+(GPL-*, AGPL-*, LGPL-*) are not on the allow-list by design and
+should not be added without sign-off — Heddle ships under Apache-2.0
+and we don't want copyleft obligations leaking into binaries.
+
+### Lifting a crate ban
+
+Same shape as license additions: discuss first. The banned list in
+`[bans].deny` reflects intentional architectural choices (rustls only,
+no OpenSSL coupling), not arbitrary preferences. If you have a real
+need, the PR should explain why the alternative isn't viable.
+
 ## Getting unstuck
 
 - Quick how-to questions: open a GitHub Discussion.
