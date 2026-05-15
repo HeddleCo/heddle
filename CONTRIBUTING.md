@@ -24,9 +24,13 @@ When your change touches a stable surface (a public API on one of the
 crates listed in [docs/STABILITY.md](docs/STABILITY.md) §2.1, a format-
 version constant under `crates/objects/src/object/`, the oplog or
 ref-summary version, the `heddle.v1` proto package, or a Tier-`Everyday`
-CLI verb / flag), read [docs/STABILITY.md](docs/STABILITY.md) first —
-it sets the SemVer and deprecation rules that govern when such a change
-needs a major bump and when it needs a deprecation cycle.
+CLI verb / flag), read [docs/STABILITY.md](docs/STABILITY.md) first.
+The document is currently a **strawman under maintainer review** — its
+`<TBD: maintainer>` placeholders are policy decisions still being
+finalized — so treat it as proposed-and-likely guidance rather than
+binding rules until those markers are resolved. The SemVer and
+deprecation framing it proposes is the direction we expect to ship,
+and aligning to it now will avoid churn when it's ratified.
 
 ## Build and test
 
