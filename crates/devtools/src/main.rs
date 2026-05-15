@@ -136,10 +136,15 @@ impl LineStats {
 /// Given an absolute or repo-relative path from an lcov `SF:` record,
 /// return the owning workspace crate name (i.e. the directory under
 /// `crates/`). Returns `None` for files outside `crates/`.
+///
+/// Uses the *last* occurrence of `crates/` rather than the first, so a
+/// path like `/home/user/crates/heddle/crates/repo/src/lib.rs` resolves
+/// to `repo` (the workspace member), not `heddle` (a parent directory
+/// that happens to be named `crates`).
 fn crate_of(path: &str) -> Option<String> {
     let normalized = path.replace('\\', "/");
     let needle = "crates/";
-    let idx = normalized.find(needle)?;
+    let idx = normalized.rfind(needle)?;
     let rest = &normalized[idx + needle.len()..];
     let end = rest.find('/')?;
     if end == 0 {

@@ -236,7 +236,7 @@ the `audit-coverage` subcommand of `heddle-devtools`:
 cargo run -p heddle-devtools --quiet -- \
   audit-coverage lcov.info \
     --gate objects=80 \
-    --gate repo=78 \
+    --gate repo=78.66 \
     --gate refs=80
 ```
 
@@ -251,7 +251,7 @@ so the build stays red whether or not Codecov is reachable.
 | Crate | Threshold | Goal |
 |---|---|---|
 | `objects` | 80% | 80% |
-| `repo` | 78% | 80% (ratchet) |
+| `repo` | 78.66% | 80% (ratchet) |
 | `refs` | 80% | 80% |
 
 The `repo` threshold is a ratchet floor: current main is **78.66%**,
@@ -279,7 +279,7 @@ cargo llvm-cov --locked --workspace \
 
 cargo run -p heddle-devtools --quiet -- \
   audit-coverage lcov.info \
-    --gate objects=80 --gate repo=78 --gate refs=80
+    --gate objects=80 --gate repo=78.66 --gate refs=80
 ```
 
 A green local run means a green CI run, modulo lcov's normal

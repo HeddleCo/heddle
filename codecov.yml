@@ -32,9 +32,9 @@ coverage:
           - crates/objects/
 
       repo:
-        # Ratchet floor: current main is 78.66%. Goal is 80% — raise
-        # this as the `repo` crate gains tests. See CONTRIBUTING.md.
-        target: 78%
+        # Ratchet floor: pinned at current main (78.66%). Goal is 80% —
+        # raise this as the `repo` crate gains tests. See CONTRIBUTING.md.
+        target: 78.66%
         threshold: 0%
         flags:
           - rust

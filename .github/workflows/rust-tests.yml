@@ -109,7 +109,7 @@ jobs:
           cargo run -p heddle-devtools --quiet -- \
             audit-coverage lcov.info \
               --gate objects=80 \
-              --gate repo=78 \
+              --gate repo=78.66 \
               --gate refs=80
 
       - name: Upload coverage to Codecov
