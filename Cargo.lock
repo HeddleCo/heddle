@@ -2761,7 +2761,6 @@ dependencies = [
  "heddle-proto",
  "heddle-repo",
  "rustls 0.23.40",
- "rustls-pemfile",
  "rustls-webpki 0.103.13",
  "serde",
  "serde_json",
@@ -2800,7 +2799,6 @@ dependencies = [
  "reqwest 0.13.3",
  "rmp-serde",
  "rustls 0.23.40",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5277,15 +5275,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
