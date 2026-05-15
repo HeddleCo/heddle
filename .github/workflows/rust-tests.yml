@@ -101,6 +101,9 @@ jobs:
         run: cargo llvm-cov report --html
 
       - name: Upload coverage to Codecov
+        if: ${{ env.HAVE_CODECOV_TOKEN == 'true' }}
+        env:
+          HAVE_CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
