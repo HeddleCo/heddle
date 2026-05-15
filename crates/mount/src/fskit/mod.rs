@@ -47,11 +47,10 @@
 //!   * Programmatic `FSResource.mount(...)` invocation.
 
 use std::{
-    ffi::{CStr, CString, OsStr, c_char, c_int, c_void},
+    ffi::{c_char, c_int, c_void, CStr, CString, OsStr},
     os::unix::ffi::OsStrExt,
     path::Path,
     sync::Arc,
-    time::SystemTime,
 };
 
 use tracing::warn;
@@ -59,10 +58,11 @@ use tracing::warn;
 use crate::{
     core::ContentAddressedMount,
     error::{MountError, Result},
-    shell::{Attrs, DIR_UNIX_MODE, Entry, NodeId, NodeKind, PlatformShell},
+    shell::{Entry, NodeId, PlatformShell},
 };
 
 pub mod c_abi;
+pub mod readiness;
 
 // The C ABI is declared *once*, in [`c_abi`]. The Swift bridging
 // header (`swift/HeddleFSKit/HeddleFSKit-Bridging.h`) is regenerated
@@ -70,9 +70,9 @@ pub mod c_abi;
 // throughout this file so any signature change in `c_abi` propagates
 // here at the type-checker, not at runtime.
 use c_abi::{
-    HeddleEnumerateEmit, HeddleFSKitSessionHandle, heddle_fskit_is_available,
-    heddle_fskit_session_free, heddle_fskit_session_mount, heddle_fskit_session_new,
-    heddle_fskit_session_unmount,
+    heddle_fskit_is_available, heddle_fskit_session_free, heddle_fskit_session_mount,
+    heddle_fskit_session_new, heddle_fskit_session_unmount, HeddleEnumerateEmit,
+    HeddleFSKitSessionHandle,
 };
 
 // ----------------------------------------------------------------
@@ -142,6 +142,19 @@ impl FSKitShell {
     pub fn is_runtime_available() -> bool {
         // SAFETY: pure Swift function, no preconditions.
         unsafe { heddle_fskit_is_available() == 1 }
+    }
+
+    /// Consume the shell and return the raw session handle.
+    ///
+    /// The caller becomes responsible for releasing the handle via
+    /// [`heddle_fskit_session_free`]. Used by the System Extension
+    /// bootstrap path ([`heddle_fskit_open_thread`]) where the
+    /// handle is handed to Swift code that manages the lifetime
+    /// rather than wrapping it in a Rust RAII type.
+    pub fn into_handle(self) -> HeddleFSKitSessionHandle {
+        let handle = self.handle;
+        std::mem::forget(self);
+        handle
     }
 
     /// Mount in a background session. Caller holds the returned
@@ -238,6 +251,69 @@ impl Drop for FSKitSession {
 }
 
 // ----------------------------------------------------------------
+// open_thread — implementation backing `c_abi::heddle_fskit_open_thread`
+// ----------------------------------------------------------------
+
+/// Open a content-addressed mount for `thread_id` at `repo_path`
+/// and return a raw FSKit session handle. Returns a null handle on
+/// any failure; the C ABI wrapper logs the details.
+///
+/// The caller (Swift, via `c_abi::heddle_fskit_open_thread`) owns
+/// the returned handle and must call
+/// [`c_abi::heddle_fskit_session_free`] when the volume is
+/// destroyed.
+/// File-based logger for the extension. macOS doesn't route
+/// stderr from ExtensionKit extensions to os_log, and the Rust
+/// `tracing` crate has no subscriber in this context — so we
+/// append to a known file the user can `cat` after a mount
+/// attempt. `/tmp/heddle-fskit.log` is covered by our absolute-
+/// path temp-exception entitlement.
+fn fskit_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/heddle-fskit.log")
+    {
+        let _ = writeln!(
+            f,
+            "[{}] {}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            msg
+        );
+    }
+}
+
+pub(super) fn open_thread(repo_path: &str, thread_id: &str) -> c_abi::HeddleFSKitSessionHandle {
+    fskit_log(&format!("open_thread: repo={repo_path} thread={thread_id}"));
+    let repo = match repo::Repository::open(repo_path) {
+        Ok(r) => {
+            fskit_log("Repository::open succeeded");
+            r
+        }
+        Err(e) => {
+            fskit_log(&format!("Repository::open FAILED: {e:?}"));
+            return std::ptr::null_mut();
+        }
+    };
+    let mount = match ContentAddressedMount::new(repo, thread_id) {
+        Ok(m) => {
+            fskit_log("ContentAddressedMount::new succeeded");
+            m
+        }
+        Err(e) => {
+            fskit_log(&format!("ContentAddressedMount::new FAILED: {e:?}"));
+            return std::ptr::null_mut();
+        }
+    };
+    fskit_log("open_thread returning handle");
+    FSKitShell::new(mount).into_handle()
+}
+
+// ----------------------------------------------------------------
 // C-ABI trampolines: convert raw C arguments back into trait calls.
 //
 // All trampolines follow the same shape:
@@ -310,6 +386,7 @@ unsafe extern "C" fn trampoline_getattr(
     out_unix_mode: *mut u32,
     out_size: *mut u64,
     out_nlink: *mut u32,
+    out_mtime_sec: *mut i64,
 ) -> c_int {
     // SAFETY: see `trampoline_lookup`.
     unsafe {
@@ -321,11 +398,20 @@ unsafe extern "C" fn trampoline_getattr(
                 write_out(out_unix_mode, attrs.unix_mode);
                 write_out(out_size, attrs.size);
                 write_out(out_nlink, attrs.nlink);
+                write_out(out_mtime_sec, mtime_to_secs(attrs.mtime));
                 0
             }
             Err(err) => errno_from(err),
         }
     }
+}
+
+/// Convert a `SystemTime` to seconds-since-UNIX-epoch. Pre-epoch
+/// times collapse to 0 (the mount's bootstrap clock is post-2025).
+fn mtime_to_secs(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 unsafe extern "C" fn trampoline_read(
@@ -409,6 +495,16 @@ unsafe extern "C" fn trampoline_enumerate(
             Ok(e) => e,
             Err(err) => return errno_from(err),
         };
+        // Resolve the mount's mtime once per directory listing
+        // rather than per entry. `ContentAddressedMount` returns
+        // `mounted_at` for every node, so a single `attrs` call on
+        // the parent directory is representative; if it fails we
+        // fall back to epoch (same as the prior placeholder).
+        let dir_mtime_sec = shell
+            .attrs(NodeId(dir_inode))
+            .ok()
+            .map(|a| mtime_to_secs(a.mtime))
+            .unwrap_or(0);
         for entry in entries {
             // Convert the OS string to a NUL-terminated C string.
             // `OsString` may contain a NUL on bizarre filesystems,
@@ -426,6 +522,7 @@ unsafe extern "C" fn trampoline_enumerate(
                 c_name.as_ptr(),
                 entry.unix_mode,
                 entry.size,
+                dir_mtime_sec,
             );
             if rc != 0 {
                 // Swift signalled "stop" (typically because its
@@ -474,68 +571,16 @@ fn write_out<T: Copy>(ptr: *mut T, value: T) {
     }
 }
 
-// Suppress "unused" lints when the module compiles without ever
-// constructing an `Attrs` (used by the test mock below). Not needed
-// in production paths — kept as a no-op import gate.
-#[allow(dead_code)]
-fn _attrs_in_scope_check() -> Option<(Attrs, NodeKind, SystemTime, u32)> {
-    let _ = DIR_UNIX_MODE;
-    None
-}
-
 // ----------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::atomic::{AtomicUsize, Ordering},
-        time::UNIX_EPOCH,
-    };
+    use std::sync::atomic::Ordering;
 
     use super::*;
-
-    /// Trivial in-memory shell that lets us validate the FSKit
-    /// session construct-and-drop lifecycle without needing a real
-    /// `ContentAddressedMount` (which requires a Repository).
-    struct CountingShell {
-        drops: Arc<AtomicUsize>,
-    }
-
-    impl Drop for CountingShell {
-        fn drop(&mut self) {
-            self.drops.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    impl PlatformShell for CountingShell {
-        fn lookup(&self, _parent: NodeId, _name: &OsStr) -> Result<Option<Entry>> {
-            Ok(None)
-        }
-        fn read(&self, _node: NodeId, _offset: u64, _buf: &mut [u8]) -> Result<usize> {
-            Ok(0)
-        }
-        fn write(&self, _node: NodeId, _offset: u64, _data: &[u8]) -> Result<usize> {
-            Err(MountError::ReadOnly)
-        }
-        fn enumerate(&self, _dir: NodeId) -> Result<Vec<Entry>> {
-            Ok(vec![])
-        }
-        fn attrs(&self, node: NodeId) -> Result<Attrs> {
-            Ok(Attrs {
-                node,
-                kind: NodeKind::Directory,
-                size: 0,
-                unix_mode: DIR_UNIX_MODE,
-                nlink: 2,
-                mtime: UNIX_EPOCH,
-            })
-        }
-        fn invalidate(&self, _node: NodeId) -> Result<()> {
-            Ok(())
-        }
-    }
+    use crate::tests::mocks::CountingShell;
 
     /// Construct an FSKitShell, drop it, and verify the drop
     /// callback fired (releasing the boxed shell exactly once).
@@ -547,10 +592,8 @@ mod tests {
     #[test]
     #[ignore = "requires the fskit feature; opt-in via --features fskit"]
     fn fskit_session_lifecycle_drops_inner_shell() {
-        let drops = Arc::new(AtomicUsize::new(0));
-        let shell = Arc::new(CountingShell {
-            drops: Arc::clone(&drops),
-        });
+        let (counting, drops) = CountingShell::new();
+        let shell = Arc::new(counting);
         let fskit = FSKitShell::from_shell(shell);
         // Construction alone shouldn't drop the inner shell.
         assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -607,6 +650,7 @@ mod tests {
             "heddle_fskit_session_unmount",
             "heddle_fskit_session_free",
             "heddle_fskit_is_available",
+            "heddle_fskit_open_thread",
         ];
 
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

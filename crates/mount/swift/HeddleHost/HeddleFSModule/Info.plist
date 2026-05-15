@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EXAppExtensionAttributes</key>
+	<dict>
+		<key>EXExtensionPointIdentifier</key>
+		<string>com.apple.fskit.fsmodule</string>
+		<key>EXExtensionPrincipalClass</key>
+		<string>HeddleFSModuleFileSystem</string>
+		<key>FSShortName</key>
+		<string>heddle</string>
+		<key>FSPersonalities</key>
+		<dict/>
+		<key>FSMediaTypes</key>
+		<dict/>
+		<key>FSRequiresSecurityScopedPathURLResources</key>
+		<false/>
+		<key>FSSupportsBlockResources</key>
+		<false/>
+		<key>FSSupportsPathURLs</key>
+		<true/>
+		<key>FSSupportsGenericURLResources</key>
+		<false/>
+		<key>FSSupportsServerURLs</key>
+		<false/>
+		<key>FSActivateOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>t:</string>
+		</dict>
+		<key>FSCheckOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>nqy</string>
+		</dict>
+		<key>FSFormatOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>v</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

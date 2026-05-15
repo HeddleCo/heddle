@@ -29,7 +29,8 @@ typedef int32_t (*HeddleGetattrCallback)(void *user_data,
                                          uint64_t inode,
                                          uint32_t *out_unix_mode,
                                          uint64_t *out_size,
-                                         uint32_t *out_nlink);
+                                         uint32_t *out_nlink,
+                                         int64_t *out_mtime_sec);
 
 typedef int32_t (*HeddleReadCallback)(void *user_data,
                                       uint64_t inode,
@@ -49,7 +50,8 @@ typedef int32_t (*HeddleEnumerateEmit)(void *emit_user_data,
                                        uint64_t child_inode,
                                        const char *child_name_utf8,
                                        uint32_t unix_mode,
-                                       uint64_t size);
+                                       uint64_t size,
+                                       int64_t mtime_sec);
 
 typedef int32_t (*HeddleEnumerateCallback)(void *user_data,
                                            uint64_t dir_inode,
@@ -81,6 +83,9 @@ extern int32_t heddle_fskit_session_unmount(HeddleFSKitSessionHandle handle);
 extern void heddle_fskit_session_free(HeddleFSKitSessionHandle handle);
 
 extern int32_t heddle_fskit_is_available(void);
+
+HeddleFSKitSessionHandle heddle_fskit_open_thread(const char *repo_path_utf8,
+                                                  const char *thread_id_utf8);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -1,0 +1,12 @@
+# Xcode per-user state. Re-generated on every open; never useful in git.
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+
+# macOS Finder cruft.
+.DS_Store
+
+# Xcode build outputs. The real artefacts live in DerivedData;
+# nothing in this directory should be a build product.
+build/
+DerivedData/

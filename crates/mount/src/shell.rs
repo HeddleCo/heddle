@@ -98,6 +98,24 @@ pub struct Attrs {
 /// Implementations MAY also promote a hot buffer opportunistically
 /// (e.g. after an idle window) — this is a safety net for files that
 /// the kernel never explicitly closes.
+///
+/// ## Platform notes
+///
+/// The three-call write lifecycle above describes the Linux/FUSE
+/// path verbatim — `fuser` delivers each `write(2)` syscall as a
+/// `write` callback, then `close(2)` triggers `flush` and `release`.
+/// FSKit on macOS exposes the same per-write granularity.
+///
+/// On Windows, ProjFS does not intercept individual writes: after a
+/// virtualized file is "hydrated" by the first read, subsequent
+/// writes go straight to NTFS and ProjFS only notifies the provider
+/// after the handle closes. The ProjFS adapter bridges this by
+/// reading the now-fully-hydrated file at close time and synthesizing
+/// a single `write(node, 0, full_contents)` + `flush(node)` against
+/// this trait. The hot-tier per-write buffer is therefore a
+/// Linux/FUSE (and FSKit) optimization — implementations of this
+/// trait can rely on the buffer being non-empty only on platforms
+/// that deliver per-write callbacks.
 pub trait PlatformShell {
     /// Look up `name` inside `parent`. Returns `None` for ENOENT.
     fn lookup(&self, parent: NodeId, name: &OsStr) -> Result<Option<Entry>>;

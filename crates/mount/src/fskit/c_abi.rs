@@ -22,7 +22,12 @@
 //!   * Keep the `unsafe extern "C"` block at the bottom — cbindgen
 //!     emits prototypes for these in declaration order.
 
-use std::ffi::{c_char, c_void};
+use std::{
+    ffi::{c_char, c_void, CStr},
+    ptr,
+};
+
+use tracing::warn;
 
 // ----------------------------------------------------------------
 // Opaque handle
@@ -51,7 +56,10 @@ pub type HeddleLookupCallback = Option<
 >;
 
 /// Fetch attributes for `inode`. Mode includes type bits (S_IFREG /
-/// S_IFDIR / etc.).
+/// S_IFDIR / etc.). `out_mtime_sec` receives the modification time
+/// as seconds-since-UNIX-epoch — zero is a valid value (means
+/// "epoch"), so callers should treat the out-pointer as the only
+/// signal of success.
 pub type HeddleGetattrCallback = Option<
     unsafe extern "C" fn(
         user_data: *mut c_void,
@@ -59,6 +67,7 @@ pub type HeddleGetattrCallback = Option<
         out_unix_mode: *mut u32,
         out_size: *mut u64,
         out_nlink: *mut u32,
+        out_mtime_sec: *mut i64,
     ) -> i32,
 >;
 
@@ -90,7 +99,9 @@ pub type HeddleWriteCallback = Option<
 
 /// Per-entry callback invoked from inside [`HeddleEnumerateCallback`].
 /// Return 0 to keep iterating, non-zero to stop early (typically when
-/// the FSKit reply buffer is full).
+/// the FSKit reply buffer is full). `mtime_sec` is the modification
+/// time of the entry as seconds-since-UNIX-epoch; for content-addressed
+/// mounts every entry currently shares the mount's bootstrap time.
 pub type HeddleEnumerateEmit = Option<
     unsafe extern "C" fn(
         emit_user_data: *mut c_void,
@@ -98,6 +109,7 @@ pub type HeddleEnumerateEmit = Option<
         child_name_utf8: *const c_char,
         unix_mode: u32,
         size: u64,
+        mtime_sec: i64,
     ) -> i32,
 >;
 
@@ -159,4 +171,58 @@ unsafe extern "C" {
 
     /// Returns 1 when the host can load FSKit (macOS 15.4+), else 0.
     pub fn heddle_fskit_is_available() -> i32;
+}
+
+// ----------------------------------------------------------------
+// High-level entry point used by the System Extension.
+//
+// `heddle_fskit_open_thread` is the C ABI Swift-extension code calls
+// to bootstrap a mount session: it parses the repo path + thread
+// name into Rust types, opens the repository, builds a
+// `ContentAddressedMount`, and hands back the same session handle
+// shape `FSKitShell::new(mount)` produces in-process. The Swift
+// caller dispatches per-syscall through the callbacks held on the
+// returned session, and releases the handle via
+// [`heddle_fskit_session_free`].
+//
+// Implementation lives in `super::open_thread` so it has visibility
+// into the trampolines + `FSKitShell::into_handle`. This shim is
+// only here so cbindgen (which only scans this file) emits the
+// prototype in the generated bridging header.
+// ----------------------------------------------------------------
+
+/// Open a content-addressed mount for `thread_id_utf8` rooted at
+/// `repo_path_utf8`. Returns a session handle suitable for the
+/// FSKit `FSVolume` to dispatch through, or NULL if any step
+/// fails (bad UTF-8, missing repo, unknown thread).
+///
+/// The caller owns the returned handle and must release it with
+/// [`heddle_fskit_session_free`] when the volume is torn down.
+///
+/// # Safety
+/// Both arguments must be NUL-terminated UTF-8 C strings owned by
+/// the caller for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn heddle_fskit_open_thread(
+    repo_path_utf8: *const c_char,
+    thread_id_utf8: *const c_char,
+) -> HeddleFSKitSessionHandle {
+    if repo_path_utf8.is_null() || thread_id_utf8.is_null() {
+        return ptr::null_mut();
+    }
+    let repo_path = match unsafe { CStr::from_ptr(repo_path_utf8) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("heddle_fskit_open_thread: repo_path not UTF-8: {e}");
+            return ptr::null_mut();
+        }
+    };
+    let thread_id = match unsafe { CStr::from_ptr(thread_id_utf8) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("heddle_fskit_open_thread: thread_id not UTF-8: {e}");
+            return ptr::null_mut();
+        }
+    };
+    super::open_thread(repo_path, thread_id)
 }

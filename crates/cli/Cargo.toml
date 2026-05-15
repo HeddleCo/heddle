@@ -101,12 +101,19 @@ tracing-subscriber.workspace = true
 walkdir.workspace = true
 zstd = { workspace = true, optional = true }
 
-# Mount is platform-agnostic in source, but its FUSE shell only
-# compiles on Linux behind the `fuse` feature. We only depend on
-# `mount` from the Linux target so the CLI's `mount` feature can
-# transitively pull in `fuse` without breaking the macOS/Windows
-# build (where `fuser` doesn't exist).
+# Mount is platform-agnostic in source, but each adapter only
+# compiles for one OS — FUSE on Linux (`fuse`), FSKit on macOS
+# (`fskit`), ProjFS on Windows (`projfs`). We take the `mount`
+# dep on each target separately so the CLI's `mount` feature can
+# propagate the right per-OS backend without any one platform
+# being forced to drag in another platform's kernel bindings.
 [target.'cfg(target_os = "linux")'.dependencies]
+mount = { path = "../mount", package = "heddle-mount", version = "0.2", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mount = { path = "../mount", package = "heddle-mount", version = "0.2", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
 mount = { path = "../mount", package = "heddle-mount", version = "0.2", optional = true }
 
 [features]
@@ -156,14 +163,30 @@ zstd = [
     "repo/zstd",
     "ingest?/zstd",
 ]
-# Wire the content-addressed FUSE mount through the CLI. Off by
-# default — adds a Linux-only kernel-side dependency (`fuser`) and
-# the related runtime requirements (`fusermount` on PATH, kernel
-# CONFIG_FUSE_FS). Activate with `cargo build --features mount` on
-# Linux. On macOS/Windows enabling this feature is a no-op because
-# the underlying `mount` crate dep is target-gated to Linux —
-# `--workspace light` will surface a runtime error there.
-mount = ["dep:mount", "mount?/fuse"]
+# Wire the content-addressed mount through the CLI. Off by
+# default — each native backend pulls in a kernel-side dep that
+# only exists on its target OS (`fuser` on Linux, `swiftc`-compiled
+# FSKit shim on macOS, `windows` crate's ProjFS bindings on
+# Windows). Activate with `cargo build --features mount` on any
+# of the three; the per-target cfg gates in `crates/mount/src/lib.rs`
+# select the correct native backend. Cargo features are
+# platform-blind so all backend features propagate from this one —
+# the inactive ones compile to zero code via the cfg gates.
+#
+# The `nfs` feature is the universal fallback: a platform-agnostic
+# adapter that stands up an in-process NFSv3 server and asks the
+# host's built-in NFS client to mount it. The CLI's mount
+# lifecycle prefers the host's native adapter and falls back to
+# NFS at runtime when the native one is unavailable (missing
+# kernel module, missing System Extension, missing optional
+# feature, etc).
+mount = [
+    "dep:mount",
+    "mount?/fuse",
+    "mount?/fskit",
+    "mount?/projfs",
+    "mount?/nfs",
+]
 
 [dev-dependencies]
 criterion = "0.8"
