@@ -7,7 +7,7 @@ use std::{
     process,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use objects::{
     object::{ChangeId, State},
@@ -16,9 +16,10 @@ use objects::{
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
-    RepositoryOperationStatus, Thread, ThreadConfidenceSummary, ThreadFreshness,
-    ThreadImpactCategory, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadRuntimeOverlay,
-    ThreadState, ThreadVerificationSummary, ThreadView, describe_thread_advice,
+    RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
+    ThreadFreshness, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadManager, ThreadMode,
+    ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
+    describe_thread_advice,
 };
 use serde::Serialize;
 
@@ -1531,6 +1532,47 @@ pub(crate) fn cmd_thread_create(
 }
 
 pub(crate) fn cmd_thread_switch(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
+    // Auto-capture-on-switch (jj-style): before flipping HEAD,
+    // capture any uncommitted edits in the *source* thread so the
+    // user never has the "you have uncommitted changes" experience
+    // git inflicts. Errors here surface loudly — silently losing
+    // the agent's work is the failure mode we are most allergic to.
+    //
+    // Only runs when:
+    //   * HEAD is currently attached to a thread (so there's a
+    //     source thread to capture), AND
+    //   * that thread has a dedicated worktree we can walk
+    //     (`find_by_thread` returns a non-empty execution path).
+    //
+    // For the legacy shared-worktree case (the thread shares
+    // `repo.root()`), the user typically runs `heddle capture`
+    // themselves and we don't auto-capture here — `goto` further
+    // down would overwrite an unflagged dirty worktree. Surfacing
+    // that case with a clear error is a follow-up.
+    let auto_capture_outcome = match repo.head_ref()? {
+        Head::Attached { thread: source_thread } if source_thread != name => {
+            let manager = ThreadManager::new(repo.heddle_dir());
+            let source_path = manager
+                .find_by_thread(&source_thread)?
+                .map(|t| t.execution_path)
+                .filter(|p| !p.as_os_str().is_empty() && p != repo.root());
+            match source_path {
+                Some(path) if path.exists() => {
+                    let outcome = repo
+                        .capture_thread_from_disk(&source_thread, &path)
+                        .with_context(|| {
+                            format!(
+                                "auto-capture of '{source_thread}' before switch to '{name}'"
+                            )
+                        })?;
+                    Some((source_thread, outcome))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
     let state = repo
         .refs()
         .get_thread(&name)?
@@ -1594,6 +1636,13 @@ pub(crate) fn cmd_thread_switch(cli: &Cli, repo: &Repository, name: String) -> R
         && thread.coordination_status != CoordinationStatus::Clean
     {
         message.push_str(&format!(" [{}]", thread.coordination_status));
+    }
+    if let Some((source_thread, ThreadCaptureOutcome::Captured { state_id })) = auto_capture_outcome
+    {
+        message.push_str(&format!(
+            " (auto-captured '{source_thread}' → {})",
+            state_id.short()
+        ));
     }
 
     render_thread_op(
