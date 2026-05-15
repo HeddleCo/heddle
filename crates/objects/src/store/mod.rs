@@ -69,6 +69,9 @@ impl ObjectStore for SharedStore {
     fn clear_recent_caches(&self) {
         self.0.clear_recent_caches()
     }
+    fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
+        self.0.get_blob_bytes(hash)
+    }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         self.0.get_tree(hash)
     }
@@ -151,6 +154,22 @@ impl ObjectStore for SharedStore {
 pub trait ObjectStore: Send + Sync {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
     fn put_blob(&self, blob: &Blob) -> Result<ContentHash>;
+
+    /// Zero-copy variant of `get_blob`. Returns a [`bytes::Bytes`]
+    /// view of the blob's content, which for `FsStore` reads is a
+    /// slice into the pack file's mmap when the entry is non-delta
+    /// and uncompressed — no allocation, no memcpy.
+    ///
+    /// Default impl wraps `get_blob`'s `Vec<u8>` in a `Bytes` (one
+    /// Arc allocation, no body copy) so backends without a native
+    /// fast path still satisfy the contract. The mount's hot read
+    /// path goes through this method instead of `get_blob` so the
+    /// pack-mmap fast path lights up automatically.
+    fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
+        Ok(self
+            .get_blob(hash)?
+            .map(|blob| bytes::Bytes::from(blob.into_content())))
+    }
 
     /// Return the *uncompressed* byte length of the blob identified by
     /// `hash`, or `Ok(None)` when the blob is not in the store.

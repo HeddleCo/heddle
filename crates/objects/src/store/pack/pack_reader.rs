@@ -3,9 +3,11 @@
 
 use std::path::Path;
 
+use bytes::Bytes;
+
 use super::{
-    ObjectType, PackObjectId, PackObjectRecord, decompress_pack_payload, has_zstd_magic,
-    pack_container_spec, pack_index::PackIndex, varint, verify_container,
+    decompress_pack_payload, has_zstd_magic, pack_container_spec, pack_index::PackIndex, varint,
+    verify_container, ObjectType, PackObjectId, PackObjectRecord,
 };
 use crate::{
     object::ContentHash,
@@ -16,25 +18,40 @@ const MAX_PACK_DELTA_OUTPUT_SIZE: usize = crate::delta::MAX_DELTA_OUTPUT_SIZE;
 const MAX_DELTA_CHAIN_DEPTH: usize = 50;
 
 /// Pack reader for extracting objects.
+///
+/// `data` is a refcounted [`Bytes`] view of the pack file. For
+/// uncompressed entries we hand back a zero-copy `Bytes::slice` into
+/// this buffer — no per-blob memcpy, no per-blob allocation. Mmap-
+/// backed `Bytes` (via [`Bytes::from_owner`] on the
+/// `memmap2::Mmap`) survives across reads without copying the
+/// whole pack into the heap.
 pub struct PackReader {
-    data: Vec<u8>,
+    data: Bytes,
     index: PackIndex,
     content_end: usize,
 }
 
 impl PackReader {
-    /// Open a pack file.
+    /// Open a pack file. mmap-backed when the pack is large enough
+    /// to benefit (the same threshold the loose-blob path uses for
+    /// its own mmap decision); read-into-heap otherwise.
     pub fn open(pack_path: &Path, index_path: &Path) -> Result<Self> {
-        let pack_data = std::fs::read(pack_path)?;
+        let pack_bytes = crate::store::fs::read_file_bytes_for_pack(pack_path)?;
         let index_data = std::fs::read(index_path)?;
-        Self::from_bytes(pack_data, index_data)
+        let (_, _, content_end) = verify_container(&pack_bytes, pack_container_spec())?;
+        let index = PackIndex::from_bytes(&index_data)?;
+        Ok(Self {
+            data: pack_bytes,
+            index,
+            content_end,
+        })
     }
 
     pub fn from_bytes(pack_data: Vec<u8>, index_data: Vec<u8>) -> Result<Self> {
         let (_, _, content_end) = verify_container(&pack_data, pack_container_spec())?;
         let index = PackIndex::from_bytes(&index_data)?;
         Ok(Self {
-            data: pack_data,
+            data: Bytes::from(pack_data),
             index,
             content_end,
         })
@@ -72,6 +89,68 @@ impl PackReader {
 
     pub fn get_hashed_object(&self, hash: &ContentHash) -> Result<Option<(ObjectType, Vec<u8>)>> {
         self.get_object(&PackObjectId::Hash(*hash))
+    }
+
+    /// Zero-copy fast path: when the entry is non-delta and stored
+    /// uncompressed, returns `Bytes::slice` into the pack's
+    /// (mmap-backed) buffer — no allocation, no memcpy. Compressed
+    /// or delta entries fall back to `get_object` and wrap the
+    /// resulting `Vec<u8>` in a `Bytes` (one Arc, no body copy).
+    ///
+    /// Use this from the hot read path. The 10 MB benchmark gap
+    /// between the mount and vanilla FS at the 1 MB+ tier is the
+    /// per-blob memcpy this method eliminates.
+    pub fn get_object_bytes(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Bytes)>> {
+        let Some(offset) = self.index.find(id) else {
+            return Ok(None);
+        };
+        let offset = offset as usize;
+        if offset >= self.content_end {
+            return Err(StoreError::InvalidObject(
+                "Entry offset out of bounds".to_string(),
+            ));
+        }
+
+        let (_, id_len) = PackObjectId::decode_tagged(&self.data[offset..])?;
+        let header_start = offset + id_len;
+        let (obj_type, uncompressed_size, type_len) =
+            varint::decode_type_and_size(&self.data[header_start..]).ok_or_else(|| {
+                StoreError::InvalidObject("Truncated type+size varint".to_string())
+            })?;
+        let uncompressed_size = uncompressed_size as usize;
+        let varint_start = header_start + type_len;
+        let (compressed_size, comp_len) = varint::decode_varint(&self.data[varint_start..])
+            .ok_or_else(|| {
+                StoreError::InvalidObject("Truncated compressed_size varint".to_string())
+            })?;
+        let compressed_size = compressed_size as usize;
+
+        // Fast path: non-delta entry stored uncompressed. The most
+        // common shape for snapshot-time packs (the builder skips
+        // the delta search for unrelated blobs).
+        if obj_type != ObjectType::Delta && compressed_size == uncompressed_size {
+            let data_start = varint_start + comp_len;
+            let data_end = data_start + compressed_size;
+            if data_end > self.content_end {
+                return Err(StoreError::InvalidObject(
+                    "Entry data out of bounds".to_string(),
+                ));
+            }
+            return Ok(Some((obj_type, self.data.slice(data_start..data_end))));
+        }
+
+        // Slow path: defer to the full record reader (it handles
+        // decompression + delta chains) and Bytes-wrap the Vec.
+        // Bytes::from(Vec) is a single Arc allocation, no body copy.
+        let record = self.read_record_at_depth(offset, 0)?;
+        Ok(Some((record.obj_type, Bytes::from(record.data))))
+    }
+
+    pub fn get_hashed_object_bytes(
+        &self,
+        hash: &ContentHash,
+    ) -> Result<Option<(ObjectType, Bytes)>> {
+        self.get_object_bytes(&PackObjectId::Hash(*hash))
     }
 
     /// Read just the type+size header for an object without

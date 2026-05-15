@@ -2955,6 +2955,7 @@ dependencies = [
  "aws-smithy-async",
  "base32",
  "blake3",
+ "bytes",
  "chrono",
  "fs2",
  "hex",

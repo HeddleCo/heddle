@@ -15,13 +15,66 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, anyhow};
-use mount::{ContentAddressedMount, FuseShell};
+use anyhow::{anyhow, Context, Result};
+use mount::{BlobCachePool, ContentAddressedMount, FuseShell, MountOptions, PrewarmHandle};
 use repo::{
+    daemon::{mount_daemon_registry_path, MountRegistryFile, PersistedMount},
     Repository,
-    daemon::{MountRegistryFile, PersistedMount, mount_daemon_registry_path},
 };
 use tracing::{debug, warn};
+
+/// Default blob-cache cap for the daemon: `min(4 GiB, 25% of
+/// physical RAM)`. Sized large enough that a typical agent
+/// workspace fits without pre-warmer churn, capped so the daemon
+/// doesn't dominate machine RSS on memory-constrained hosts.
+/// Probed once via `sysctl hw.memsize` (macOS) / `sysinfo`
+/// (Linux); on probe failure falls back to a 1 GiB heuristic that
+/// matches the typical M-series laptop sweet spot.
+fn default_blob_cache_cap_bytes() -> usize {
+    const FOUR_GIB: usize = 4 * 1024 * 1024 * 1024;
+    const FALLBACK: usize = 1024 * 1024 * 1024;
+    let physical = probe_physical_ram_bytes().unwrap_or(0);
+    if physical == 0 {
+        return FALLBACK;
+    }
+    std::cmp::min(FOUR_GIB, physical / 4)
+}
+
+/// Best-effort physical-RAM probe. `None` when we can't determine
+/// the host's memory size; callers fall back to a fixed default.
+fn probe_physical_ram_bytes() -> Option<usize> {
+    #[cfg(target_os = "macos")]
+    {
+        // `sysctl hw.memsize` returns a u64 in bytes. Wired this
+        // way (rather than via the `sysctl` crate) to avoid pulling
+        // in a dep for a single byte-shaped value.
+        use std::process::Command;
+        let out = Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let s = std::str::from_utf8(&out.stdout).ok()?.trim();
+        s.parse::<usize>().ok()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in s.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let n = rest.split_whitespace().next()?.parse::<usize>().ok()?;
+                return Some(n * 1024); // /proc/meminfo reports KiB
+            }
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
 
 /// Active mount entry inside the daemon. The `BackgroundSession`
 /// drop is what triggers the unmount, so we keep it alive in the
@@ -33,6 +86,11 @@ pub struct LiveMount {
     session: Option<mount::BackgroundSession>,
     pub mount_path: PathBuf,
     pub since_ms: u64,
+    /// Pre-warm handle. Held only so the prewarmer keeps running
+    /// until the cache is filled (or the cache is ≥90% full). On
+    /// unmount the handle drops and the workers cancel-and-join.
+    /// `None` after the handle has been moved out by shutdown.
+    _prewarm: Option<PrewarmHandle>,
 }
 
 impl LiveMount {
@@ -41,6 +99,7 @@ impl LiveMount {
     /// flaky FS layer.
     pub fn shutdown(&mut self) {
         self.session = None;
+        self._prewarm = None;
     }
 }
 
@@ -56,14 +115,33 @@ pub enum MountOutcome {
 pub struct MountRegistry {
     repo_root: PathBuf,
     mounts: HashMap<String, LiveMount>,
+    /// Process-shared blob cache pool. Every mount we spawn gets the
+    /// same `Arc<BlobCachePool>`, so forked-thread mounts inherit
+    /// fully-warm cache for any blob a sibling already touched.
+    /// Sized once at daemon construction based on available RAM.
+    blob_cache: Arc<BlobCachePool>,
 }
 
 impl MountRegistry {
     pub fn new(repo_root: PathBuf) -> Self {
+        Self::with_blob_cache_capacity(repo_root, default_blob_cache_cap_bytes())
+    }
+
+    /// Construct with an explicit blob-cache cap. Daemon `main`
+    /// uses this when sizing the cache from `sysctl hw.memsize` /
+    /// `/proc/meminfo`; tests use the default-cap shim above.
+    pub fn with_blob_cache_capacity(repo_root: PathBuf, cap_bytes: usize) -> Self {
         Self {
             repo_root,
             mounts: HashMap::new(),
+            blob_cache: Arc::new(BlobCachePool::with_capacity(cap_bytes)),
         }
+    }
+
+    /// Share the daemon's blob cache pool with other in-process
+    /// consumers (e.g. a future direct-RPC read endpoint).
+    pub fn blob_cache_pool(&self) -> &Arc<BlobCachePool> {
+        &self.blob_cache
     }
 
     /// Companion to `len()` for symmetry; reserved for the daemon's
@@ -100,8 +178,18 @@ impl MountRegistry {
 
         let repo = Repository::open(&self.repo_root)
             .with_context(|| format!("open repo at {} for mount", self.repo_root.display()))?;
-        let mount = ContentAddressedMount::new(repo, thread_id)
-            .map_err(|e| anyhow!("open content-addressed mount for {thread_id}: {e}"))?;
+        let mount = ContentAddressedMount::with_options(
+            repo,
+            thread_id,
+            MountOptions {
+                blob_cache: Some(Arc::clone(&self.blob_cache)),
+            },
+        )
+        .map_err(|e| anyhow!("open content-addressed mount for {thread_id}: {e}"))?;
+        // Kick off a background tree-walker so the agent's first
+        // reads land on a hot cache. Handle stays in `LiveMount`
+        // until shutdown so the prewarmer can run to completion.
+        let prewarm = mount.prewarm();
         let shell = FuseShell::new(mount);
         let session = shell.mount_background(mount_path).map_err(|e| {
             anyhow!(
@@ -117,6 +205,7 @@ impl MountRegistry {
                 session: Some(session),
                 mount_path: mount_path.to_path_buf(),
                 since_ms,
+                _prewarm: Some(prewarm),
             },
         );
         self.persist()?;
@@ -199,6 +288,7 @@ impl MountRegistry {
                 session: None,
                 mount_path,
                 since_ms: current_millis(),
+                _prewarm: None,
             },
         );
     }

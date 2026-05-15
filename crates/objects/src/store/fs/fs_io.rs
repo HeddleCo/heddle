@@ -9,10 +9,12 @@ use std::{
     sync::Mutex,
 };
 
+use bytes::Bytes;
+
 use crate::{
     error::HeddleError,
     fs_atomic::{enrich_fs_error, enrich_rename_error, sync_directory},
-    store::{Result, atomic::temp_path},
+    store::{atomic::temp_path, Result},
 };
 
 const MMAP_THRESHOLD_BYTES: u64 = 256 * 1024;
@@ -150,6 +152,33 @@ pub(super) fn read_file_header(path: &Path, header_len: usize) -> Result<Option<
         file.read_exact(&mut header)?;
     }
     Ok(Some((header, len)))
+}
+
+/// Read a pack file as zero-copy [`Bytes`]. For packs that clear the
+/// mmap threshold, the underlying memory is the mmap'd region —
+/// every `Bytes::slice` into it is a zero-copy view. Smaller packs
+/// fall back to a heap read wrapped in `Bytes`. Public because the
+/// pack reader lives in a sibling module and needs to bypass the
+/// `pub(super)` gate on `read_file_bytes`.
+pub fn read_file_bytes_for_pack(path: &Path) -> Result<Bytes> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(Bytes::new());
+    }
+    if len >= MMAP_THRESHOLD_BYTES {
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        if mmap.len() != len as usize {
+            return Err(HeddleError::InvalidObject(
+                "pack file size changed during memory mapping".to_string(),
+            ));
+        }
+        return Ok(Bytes::from_owner(mmap));
+    }
+    let mut data = Vec::with_capacity(len as usize);
+    let mut reader = file;
+    reader.read_to_end(&mut data)?;
+    Ok(Bytes::from(data))
 }
 
 pub(super) fn read_file_bytes(path: &Path) -> Result<Option<FileBytes>> {

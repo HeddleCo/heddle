@@ -25,14 +25,12 @@
 //! the cap bypasses the cache entirely so one giant file can't
 //! evict the rest of the working set.
 
-use std::{
-    sync::Arc,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
-    },
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
 };
 
+use bytes::Bytes;
 use lru::LruCache;
 use objects::object::ContentHash;
 
@@ -57,8 +55,8 @@ pub struct BlobCachePool {
 }
 
 struct BlobCacheInner {
-    lru: LruCache<ContentHash, Arc<[u8]>>,
-    /// Running sum of `Arc<[u8]>.len()` over every live entry. Kept
+    lru: LruCache<ContentHash, Bytes>,
+    /// Running sum of `Bytes.len()` over every live entry. Kept
     /// in sync with `lru` mutations so eviction can stop the moment
     /// the working total drops back under `cap_bytes`.
     bytes: usize,
@@ -89,7 +87,7 @@ impl BlobCachePool {
 
     /// Look up a blob. Returns `Some(Arc::clone)` on hit, `None` on
     /// miss. Bumps the entry to MRU.
-    pub(crate) fn get(&self, hash: &ContentHash) -> Option<Arc<[u8]>> {
+    pub(crate) fn get(&self, hash: &ContentHash) -> Option<Bytes> {
         let mut guard = self.inner.lock().expect("blob cache lock");
         match guard.lru.get(hash).cloned() {
             Some(bytes) => {
@@ -107,7 +105,7 @@ impl BlobCachePool {
     /// total falls back below cap. A blob larger than cap bypasses
     /// the cache entirely so one giant file can't displace the rest
     /// of the working set.
-    pub(crate) fn insert(&self, hash: ContentHash, bytes: Arc<[u8]>) {
+    pub(crate) fn insert(&self, hash: ContentHash, bytes: Bytes) {
         let size = bytes.len();
         if size > self.cap_bytes {
             return;
@@ -174,6 +172,8 @@ pub struct BlobCacheStats {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     fn h(byte: u8) -> ContentHash {
@@ -182,9 +182,9 @@ mod tests {
         ContentHash::from_bytes(buf)
     }
 
-    fn payload(byte: u8, len: usize) -> Arc<[u8]> {
+    fn payload(byte: u8, len: usize) -> Bytes {
         let v: Vec<u8> = std::iter::repeat(byte).take(len).collect();
-        Arc::from(v.into_boxed_slice())
+        Bytes::from(v)
     }
 
     #[test]

@@ -308,6 +308,24 @@ impl ObjectStore for FsStore {
         self.clear_recent_object_caches();
     }
 
+    /// Zero-copy pack fast path. When the blob lives in a packfile
+    /// and is non-delta + uncompressed, returns a `Bytes::slice`
+    /// view of the pack's mmap — no decompression, no allocation,
+    /// no memcpy. Compressed pack entries, delta entries, and
+    /// loose blobs fall back to `get_blob` and wrap the result in a
+    /// `Bytes` (the `Vec` → `Bytes` conversion is itself zero-copy).
+    fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
+        if let Ok(manager) = self.pack_manager().read()
+            && let Some((obj_type, data)) = manager.get_hashed_object_bytes(hash)?
+            && obj_type == crate::store::pack::ObjectType::Blob
+        {
+            return Ok(Some(data));
+        }
+        Ok(self
+            .get_blob(hash)?
+            .map(|blob| bytes::Bytes::from(blob.into_content())))
+    }
+
     #[instrument(skip(self), fields(hash = %hash.short()))]
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         if let Some(blob) = self.try_get_blob_once(hash)? {

@@ -412,14 +412,52 @@ pub(crate) struct MountInner {
 
 /// Owns the worker thread + its shutdown signal. Dropping this joins
 /// the worker.
+///
+/// Shutdown is event-driven via a `Condvar` rather than polling: the
+/// worker parks on `wait_timeout(interval)` and is woken either by
+/// the timer firing (run a sweep) or by `signal_and_join` flipping
+/// `shutdown` + notifying the condvar (exit immediately). Mount drop
+/// used to pay up to 50 ms per `Drop` for a polled-AtomicBool worker
+/// to notice — visible in any churn-y workload (the prewarm bench
+/// uncovered this) — and now pays only the per-OS thread join cost.
 struct SweepHandle {
-    shutdown: Arc<AtomicBool>,
+    state: Arc<SweepShutdown>,
     join: Option<JoinHandle<()>>,
+}
+
+struct SweepShutdown {
+    shutdown: Mutex<bool>,
+    cv: std::sync::Condvar,
+}
+
+impl SweepShutdown {
+    fn new() -> Self {
+        Self {
+            shutdown: Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn signal(&self) {
+        *self.shutdown.lock().expect("sweep shutdown lock") = true;
+        self.cv.notify_all();
+    }
+
+    /// Park the calling thread for up to `dur`, returning early if
+    /// `shutdown` flips. Returns `true` when shutdown was requested.
+    fn wait(&self, dur: Duration) -> bool {
+        let guard = self.shutdown.lock().expect("sweep shutdown lock");
+        let (guard, _timeout) = self
+            .cv
+            .wait_timeout_while(guard, dur, |s| !*s)
+            .expect("sweep shutdown wait");
+        *guard
+    }
 }
 
 impl SweepHandle {
     fn signal_and_join(&mut self) {
-        self.shutdown.store(true, Ordering::SeqCst);
+        self.state.signal();
         if let Some(handle) = self.join.take() {
             // Best-effort: panics from a sweep iteration shouldn't
             // poison the mount drop. Worst case we leak the OS thread
@@ -620,10 +658,8 @@ fn prewarm_run(weak: Weak<MountInner>, cancel: Arc<AtomicBool>) -> PrewarmStats 
                         stop_full.store(true, Ordering::Relaxed);
                         return;
                     }
-                    match inner.repo.store().get_blob(&hash) {
-                        Ok(Some(blob)) => {
-                            let bytes: Arc<[u8]> =
-                                Arc::from(blob.into_content().into_boxed_slice());
+                    match inner.repo.store().get_blob_bytes(&hash) {
+                        Ok(Some(bytes)) => {
                             pool.insert(hash, bytes);
                             loaded.fetch_add(1, Ordering::Relaxed);
                         }
@@ -820,16 +856,15 @@ impl ContentAddressedMount {
         PrewarmHandle::start(Arc::downgrade(&self.inner))
     }
 
-    fn load_blob_bytes(&self, hash: &ContentHash) -> Result<Arc<[u8]>> {
+    fn load_blob_bytes(&self, hash: &ContentHash) -> Result<bytes::Bytes> {
         if let Some(hit) = self.inner.blob_cache.get(hash) {
             return Ok(hit);
         }
-        let blob = self
+        let bytes = self
             .store()
-            .get_blob(hash)?
+            .get_blob_bytes(hash)?
             .ok_or_else(|| MountError::NotFound(format!("blob {hash}")))?;
-        let bytes: Arc<[u8]> = Arc::from(blob.into_content().into_boxed_slice());
-        self.inner.blob_cache.insert(*hash, Arc::clone(&bytes));
+        self.inner.blob_cache.insert(*hash, bytes.clone());
         Ok(bytes)
     }
 
@@ -1260,50 +1295,41 @@ fn spawn_sweep_worker(inner: &Arc<MountInner>) -> Option<SweepHandle> {
         .expect("promotion lock")
         .sweep_interval?;
     let weak = Arc::downgrade(inner);
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_for_thread = shutdown.clone();
+    let state = Arc::new(SweepShutdown::new());
+    let state_for_thread = Arc::clone(&state);
     let join = std::thread::Builder::new()
         .name("heddle-mount-sweep".into())
-        .spawn(move || sweep_worker_loop(weak, shutdown_for_thread, interval))
+        .spawn(move || sweep_worker_loop(weak, state_for_thread, interval))
         .ok()?;
     Some(SweepHandle {
-        shutdown,
+        state,
         join: Some(join),
     })
 }
 
-/// Tick body for the safety-sweep worker. Runs until either the
-/// `Weak<MountInner>` can no longer be upgraded (mount dropped) or
-/// `shutdown` is set. Sleeps via small slices so a `with_promotion_policy`
-/// rebuild doesn't have to wait a full interval to terminate the
-/// worker.
+/// Tick body for the safety-sweep worker. Parks on the shutdown
+/// condvar until either the timer interval elapses (run a sweep) or
+/// `signal_and_join` wakes us (exit). Also exits when the weak
+/// `MountInner` reference can no longer be upgraded.
 fn sweep_worker_loop(
     inner: std::sync::Weak<MountInner>,
-    shutdown: Arc<AtomicBool>,
+    state: Arc<SweepShutdown>,
     interval: Duration,
 ) {
-    // Sleep slice — small enough that shutdown signals get noticed
-    // promptly, but large enough not to busy-loop.
-    let slice = std::cmp::min(interval, Duration::from_millis(50));
-    let mut elapsed = Duration::ZERO;
-    while !shutdown.load(Ordering::SeqCst) {
-        std::thread::sleep(slice);
-        if shutdown.load(Ordering::SeqCst) {
-            break;
+    loop {
+        // Wait returns true on shutdown, false on timeout — either
+        // way we re-check the upgrade afterwards.
+        if state.wait(interval) {
+            return;
         }
-        elapsed += slice;
-        if elapsed < interval {
-            continue;
-        }
-        elapsed = Duration::ZERO;
         let Some(mount) = inner.upgrade() else {
-            break;
+            return;
         };
         if let Err(err) = mount.sweep_idle_buffers() {
             warn!(?err, "sweep worker hit error promoting idle buffers");
         }
         // Drop the strong-count immediately so the mount can drop
-        // even if our next sleep slice is still pending.
+        // even if our next wait is still pending.
         drop(mount);
     }
 }

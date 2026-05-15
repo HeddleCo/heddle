@@ -13,6 +13,7 @@ categories.workspace = true
 anyhow.workspace = true
 base32.workspace = true
 blake3.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 fs2.workspace = true
 hex.workspace = true
