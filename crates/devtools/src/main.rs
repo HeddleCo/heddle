@@ -12,8 +12,161 @@ fn main() -> Result<()> {
     match args.next().as_deref() {
         Some("web-proto") => run_web_proto(args.collect()),
         Some("audit-idempotency") => run_audit_idempotency(),
+        Some("audit-coverage") => run_audit_coverage(args.collect()),
         Some(command) => bail!("unknown command '{command}'"),
         None => bail!("expected a command (for example: web-proto)"),
+    }
+}
+
+/// Audit-coverage gate: parse an `lcov.info` report, aggregate line
+/// coverage per workspace crate, and fail when any crate listed in a
+/// `--gate <crate>=<pct>` argument falls below its threshold.
+///
+/// Invocation:
+///   heddle-devtools audit-coverage <lcov-path> --gate objects=80 --gate repo=78 --gate refs=80
+///
+/// Used from `.github/workflows/rust-tests.yml` after `cargo llvm-cov`
+/// emits `lcov.info`. The gate is per-crate (not workspace-global) so
+/// that low-coverage crates can't be masked by high-coverage neighbors.
+fn run_audit_coverage(_args: Vec<String>) -> Result<()> {
+    bail!("audit-coverage: not implemented")
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct LineStats {
+    /// Lines executed at least once. lcov spelling: `LH:`.
+    hit: u64,
+    /// Lines counted for coverage. lcov spelling: `LF:`.
+    found: u64,
+}
+
+impl LineStats {
+    #[allow(dead_code)] // wired in the green commit that ships the lcov parser.
+    fn percent(&self) -> f64 {
+        if self.found == 0 {
+            0.0
+        } else {
+            (self.hit as f64) / (self.found as f64) * 100.0
+        }
+    }
+}
+
+/// Given an absolute or repo-relative path from an lcov `SF:` record,
+/// return the owning workspace crate name (i.e. the directory under
+/// `crates/`). Returns `None` for files outside `crates/`.
+#[allow(dead_code)] // wired in the green commit that ships the lcov parser.
+fn crate_of(_path: &str) -> Option<String> {
+    None
+}
+
+/// Parse an lcov.info body and return aggregated `LineStats` per
+/// workspace crate. Records whose `SF:` path is outside `crates/<x>/`
+/// (build scripts, examples at workspace root, etc.) are ignored.
+#[allow(dead_code)] // wired in the green commit that ships the lcov parser.
+fn aggregate_per_crate(_lcov: &str) -> std::collections::HashMap<String, LineStats> {
+    std::collections::HashMap::new()
+}
+
+#[cfg(test)]
+mod tests_coverage {
+    use super::*;
+
+    const SAMPLE: &str = "\
+TN:
+SF:/work/crates/objects/src/lib.rs
+LF:100
+LH:90
+end_of_record
+TN:
+SF:/work/crates/repo/src/lib.rs
+LF:200
+LH:120
+end_of_record
+TN:
+SF:/work/crates/repo/src/store.rs
+LF:50
+LH:40
+end_of_record
+TN:
+SF:/work/crates/refs/src/main.rs
+LF:80
+LH:72
+end_of_record
+TN:
+SF:/work/build.rs
+LF:10
+LH:0
+end_of_record
+";
+
+    #[test]
+    fn crate_of_extracts_top_level_crate_dir() {
+        assert_eq!(
+            crate_of("/work/crates/objects/src/lib.rs").as_deref(),
+            Some("objects")
+        );
+        assert_eq!(
+            crate_of("crates/refs/src/store.rs").as_deref(),
+            Some("refs")
+        );
+        assert_eq!(
+            crate_of("crates/cli-shared/src/lib.rs").as_deref(),
+            Some("cli-shared")
+        );
+    }
+
+    #[test]
+    fn crate_of_returns_none_outside_crates_dir() {
+        assert!(crate_of("/work/build.rs").is_none());
+        assert!(crate_of("proto/heddle/v1/service.proto").is_none());
+        assert!(crate_of("crates/").is_none());
+    }
+
+    #[test]
+    fn aggregate_sums_lines_within_each_crate() {
+        let agg = aggregate_per_crate(SAMPLE);
+        assert_eq!(
+            agg.get("objects").copied(),
+            Some(LineStats {
+                hit: 90,
+                found: 100,
+            })
+        );
+        assert_eq!(
+            agg.get("repo").copied(),
+            Some(LineStats {
+                hit: 160,
+                found: 250,
+            })
+        );
+        assert_eq!(
+            agg.get("refs").copied(),
+            Some(LineStats { hit: 72, found: 80 })
+        );
+    }
+
+    #[test]
+    fn aggregate_ignores_files_outside_crates_dir() {
+        let agg = aggregate_per_crate(SAMPLE);
+        assert!(!agg.contains_key("build.rs"));
+        assert!(!agg.contains_key(""));
+        assert!(!agg.contains_key("work"));
+    }
+
+    #[test]
+    fn line_stats_percent_is_ratio_times_hundred() {
+        assert!(
+            (LineStats {
+                hit: 60,
+                found: 100
+            }
+            .percent()
+                - 60.0)
+                .abs()
+                < 1e-9
+        );
+        assert!((LineStats { hit: 1, found: 3 }.percent() - 33.333_333_333).abs() < 1e-6);
+        assert_eq!(LineStats { hit: 0, found: 0 }.percent(), 0.0);
     }
 }
 
