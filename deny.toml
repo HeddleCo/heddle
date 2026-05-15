@@ -1,0 +1,131 @@
+# cargo-deny configuration — Heddle supply-chain gate.
+#
+# Enforced by .github/workflows/audit.yml on push + PR + weekly cron.
+# Run locally with: cargo deny check
+#
+# Schema reference: https://embarkstudios.github.io/cargo-deny/
+
+# ---------------------------------------------------------------------------
+# Target scope
+# ---------------------------------------------------------------------------
+# Heddle ships for Linux, macOS, and Windows on x86_64 + aarch64. Scoping the
+# graph to these triples cuts noise from platform-specific deps we never link
+# (e.g. wasm shims, redox, openbsd-only crates).
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories — RustSec database
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Any advisory not explicitly ignored below is a hard fail. Yanked crates
+# warn rather than fail so a yank during CI flight doesn't break unrelated PRs;
+# the weekly cron will still surface them.
+yanked = "warn"
+ignore = [
+    # rsa 0.9.x: Marvin timing sidechannel on RSA decryption. Upstream-tracked
+    # (https://github.com/RustCrypto/RSA/issues/19); no fixed release in the
+    # 0.9 line yet. Heddle's use is signature verification on hosted control-
+    # plane tokens, not RSA decryption with attacker-chosen ciphertexts, so the
+    # Marvin attack precondition is not present on our paths. Revisit when
+    # rsa 0.10 (with constant-time decryption) ships.
+    { id = "RUSTSEC-2023-0071", reason = "rsa 0.9 Marvin timing sidechannel; precondition (attacker-chosen ciphertext decryption) not present in Heddle's signature-verification use; tracked upstream" },
+]
+
+# ---------------------------------------------------------------------------
+# Licenses — permissive allow-list with explicit exceptions
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+# SPDX expressions. Every license in a dependency's expression must appear
+# here (AND-joined expressions require all components). Adding a license is a
+# policy decision — discuss in the PR before extending this list.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    # MPL-2.0 is file-level copyleft; safe to consume as a dependency without
+    # modification. Used by webpki-roots and a handful of other ecosystem
+    # crates. If we ever vendor or fork an MPL crate, revisit.
+    "MPL-2.0",
+    # OpenSSL license: required by ring and aws-lc-sys, which are upstream
+    # of rustls. Both crates carry permissive-OR-OpenSSL composite licenses;
+    # the OpenSSL component is OSI-approved and BSD-style with an advertising
+    # clause we satisfy via README attribution.
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+# Per-crate exceptions go here if a single dependency needs a license that
+# we do NOT want to bless wholesale. Empty for now; the allow-list above
+# covers everything we've encountered.
+exceptions = []
+
+# Note: ring (>= 0.17) and aws-lc-sys (>= 0.30) now ship SPDX expressions in
+# their Cargo.toml manifests, so cargo-deny reads the license expression
+# directly and no [[licenses.clarify]] entry is required. If we ever pin an
+# older ring (0.16.x) we will need to add a clarify block with a verified
+# LICENSE file hash.
+
+# ---------------------------------------------------------------------------
+# Bans — crates we refuse to depend on
+# ---------------------------------------------------------------------------
+[bans]
+# Multiple versions of the same crate bloat the supply-chain surface but are
+# common in large workspaces (transitive disagreement on semver). Warn so the
+# growth is visible; do not block on it.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+deny = [
+    # Heddle standardizes on rustls (see workspace Cargo.toml: reqwest,
+    # gix, tonic, tokio-rustls all pin the rustls flavor explicitly).
+    # Pulling in OpenSSL would re-introduce system-OpenSSL coupling, widen
+    # the CVE-relevant surface, and break our reproducible-build story on
+    # platforms without a system libssl. If you have a justified need,
+    # discuss in #infra before lifting the ban.
+    { crate = "openssl", reason = "rustls is the project standard; OpenSSL would widen supply-chain surface and break the rustls-only invariant" },
+    { crate = "openssl-sys", reason = "see openssl ban — sys crate is the actual native-link offender" },
+    { crate = "native-tls", reason = "wraps OpenSSL/SChannel/SecureTransport; rustls is the project standard" },
+    { crate = "openssl-probe", reason = "only useful alongside openssl; banning it keeps OpenSSL adjacency out of the graph" },
+]
+
+# Crates that legitimately appear multiple times in the graph today. Each
+# entry is a known-and-accepted duplication; revisit when the upstream
+# ecosystem converges.
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Sources — registries and git remotes
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Git deps must be explicitly listed. Empty list means "crates.io only" — if
+# you add a `git = "..."` dependency, add the remote here with a comment
+# explaining why crates.io isn't sufficient.
+allow-git = []
