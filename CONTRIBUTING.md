@@ -161,20 +161,28 @@ cargo install --locked cargo-deny  # once
 cargo install --locked cargo-audit # once
 
 cargo deny check                   # full policy run
-cargo audit --deny warnings        # advisory check
+
+# advisory check — flags MUST mirror .github/workflows/audit.yml so a green
+# local run means a green CI run. If you add/remove an --ignore here, also
+# update the workflow (cargo-audit doesn't read deny.toml's ignore list).
+cargo audit \
+  --deny warnings \
+  --ignore RUSTSEC-2023-0071 \
+  --ignore RUSTSEC-2026-0098 \
+  --ignore RUSTSEC-2026-0099 \
+  --ignore RUSTSEC-2026-0104
 ```
 
-Both should be green before you push. CI runs them on every push to
-`main`, every PR that touches `Cargo.toml` / `Cargo.lock` / `deny.toml`
-/ `audit.yml`, and on a weekly schedule (Mondays 05:17 UTC) so a fresh
-advisory against an unchanged dependency surfaces without anyone
-having to push code.
+Both should be green before you push. CI runs them on every PR (no
+paths filter — see `audit.yml` for why), every push to `main`, and on a
+weekly schedule (Mondays 05:17 UTC) so a fresh advisory against an
+unchanged dependency surfaces without anyone having to push code.
 
 ### Ignoring an advisory
 
 If a RustSec advisory cannot be fixed by a version bump (upstream
 hasn't released; advisory doesn't apply to our usage; etc.), add an
-entry to **both** of:
+entry to **all three** of:
 
 1. `deny.toml` — `[advisories].ignore` with `{ id, reason }`. The
    `reason` must explain *why* it's safe to ignore in Heddle's context,
@@ -182,9 +190,11 @@ entry to **both** of:
 2. `.github/workflows/audit.yml` — `cargo audit --ignore <ID>` in the
    `cargo-audit` step. cargo-audit doesn't read `deny.toml`, so the
    two lists must be kept in sync by hand.
+3. The local-run command in this file (above) — so contributors running
+   `cargo audit` locally see the same advisories pass that CI does.
 
-When upstream ships a fix, remove the entry from both places in the
-same PR that bumps the dependency.
+When upstream ships a fix, remove the entry from all three places in
+the same PR that bumps the dependency.
 
 ### Adding a license to the allow-list
 
