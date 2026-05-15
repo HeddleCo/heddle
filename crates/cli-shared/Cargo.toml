@@ -16,7 +16,6 @@ objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
 proto = { path = "../proto", package = "heddle-proto", version = "0.2", default-features = false }
 repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false, features = ["git-overlay", "native"] }
 rustls.workspace = true
-rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
