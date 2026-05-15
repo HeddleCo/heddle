@@ -1410,6 +1410,11 @@ fn git_overlay_matrix_native_worktree_branch_switch_and_remote_drift_surface_cle
         ],
         temp.path(),
     );
+    // Clone does not inherit user identity from the remote; configure it
+    // explicitly so `git commit` succeeds on CI runners without a global
+    // git config.
+    git(&["config", "user.name", "Heddle Test"], other.path());
+    git(&["config", "user.email", "heddle@example.com"], other.path());
     git(&["checkout", "feature/drop-in"], other.path());
     std::fs::write(other.path().join("tracked.txt"), "remote advanced\n").unwrap();
     git_commit_all(other.path(), "remote advance");
@@ -1516,6 +1521,11 @@ fn git_overlay_matrix_sync_and_primary_guidance_prefer_heddle_verbs() {
         ],
         temp.path(),
     );
+    // Clone does not inherit user identity from the remote; configure it
+    // explicitly so `git commit` succeeds on CI runners without a global
+    // git config.
+    git(&["config", "user.name", "Heddle Test"], other.path());
+    git(&["config", "user.email", "heddle@example.com"], other.path());
     git(&["checkout", "feature/drop-in"], other.path());
     std::fs::write(other.path().join("tracked.txt"), "remote advanced\n").unwrap();
     git_commit_all(other.path(), "remote advance");
