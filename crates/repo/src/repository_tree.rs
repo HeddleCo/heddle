@@ -97,6 +97,22 @@ impl Repository {
         self.build_tree_profiled_inner(dir, None)
     }
 
+    /// Profiled tree-build that reuses a manifest's stat-cache. Same
+    /// contract as [`Self::build_tree_profiled`] — returns the full
+    /// `(Tree, TreeBuildProfile)` for downstream timing — but skips
+    /// the `read + hash + put_blob` cycle for files whose stat fields
+    /// match the cache. The fall-through path for changed/new files
+    /// is identical, so the resulting tree is byte-identical to what
+    /// the un-cached build would produce.
+    #[instrument(skip(self, manifest), fields(dir = %dir.display()))]
+    pub fn build_tree_profiled_with_stat_cache(
+        &self,
+        dir: &Path,
+        manifest: &crate::thread_manifest::ThreadManifest,
+    ) -> Result<(Tree, TreeBuildProfile)> {
+        self.build_tree_profiled_inner(dir, Some(manifest))
+    }
+
     fn build_tree_profiled_inner(
         &self,
         dir: &Path,

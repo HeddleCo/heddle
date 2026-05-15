@@ -203,7 +203,7 @@ impl Repository {
 /// disappeared but we still record what *should* be there per the
 /// captured state. Capture-from-disk decides what to do about
 /// missing files at its own scan time.
-fn populate_manifest_from_tree(
+pub(crate) fn populate_manifest_from_tree(
     repo: &Repository,
     tree: &Tree,
     dest: &Path,
@@ -599,6 +599,63 @@ mod tests {
             !stat_cache_no_op(&repo, &manifest, &dest).unwrap(),
             "added file must invalidate the fast path"
         );
+    }
+
+    /// Plain `heddle capture` (via `Repository::snapshot`) detects the
+    /// materialized-thread context — HEAD attached to a thread that has
+    /// a manifest — and refreshes the manifest to the new state after
+    /// the capture lands. This is the path the user hits when they edit
+    /// inside a materialized thread worktree and run `heddle capture`
+    /// directly (as opposed to `thread switch`, which is the auto-capture
+    /// path covered by `capture_after_edit_advances_thread`).
+    #[test]
+    fn snapshot_in_materialized_thread_refreshes_manifest() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("alpha.txt"), b"v1\n").unwrap();
+        fs::write(repo_dir.path().join("beta.txt"), b"steady\n").unwrap();
+        let initial = repo.snapshot(Some("seed".into()), None).unwrap();
+
+        // Stand up a manifest for `main` whose stat fields match the
+        // worktree as it is right now. Mimics the post-materialize
+        // state when the user is `cd`'d into the materialized
+        // worktree (`self.root` == materialized path).
+        let initial_tree = repo
+            .store()
+            .get_tree(&initial.tree)
+            .unwrap()
+            .expect("seed tree");
+        let mut manifest =
+            crate::thread_manifest::ThreadManifest::new(initial.change_id, initial.tree);
+        populate_manifest_from_tree(
+            &repo,
+            &initial_tree,
+            repo_dir.path(),
+            "",
+            &mut manifest.files,
+        )
+        .unwrap();
+        crate::thread_manifest::write_manifest(repo.heddle_dir(), "main", &manifest).unwrap();
+
+        // Sleep long enough that the new mtime is observably distinct
+        // on ext4's 1-second-granularity ctime (APFS is sub-ms).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(repo_dir.path().join("alpha.txt"), b"v2\n").unwrap();
+
+        let captured = repo.snapshot(Some("after edit".into()), None).unwrap();
+        assert_ne!(captured.change_id, initial.change_id);
+        assert_ne!(captured.tree, initial.tree);
+
+        // Manifest got refreshed to point at the new state and tree.
+        let refreshed = crate::thread_manifest::read_manifest(repo.heddle_dir(), "main")
+            .unwrap()
+            .expect("manifest persists");
+        assert_eq!(refreshed.state_id, captured.change_id);
+        assert_eq!(refreshed.tree_hash, captured.tree);
+        // beta.txt was untouched — its stat fields (and hash) should
+        // still appear in the refreshed manifest.
+        assert!(refreshed.files.contains_key("alpha.txt"));
+        assert!(refreshed.files.contains_key("beta.txt"));
     }
 
     /// Deleted file → fast path declines.
