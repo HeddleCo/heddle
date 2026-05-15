@@ -29,9 +29,9 @@ use cli::{
             cmd_merge, cmd_monitor, cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo,
             cmd_remote, cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas,
             cmd_session_end, cmd_session_list, cmd_session_segment, cmd_session_show,
-            cmd_session_start, cmd_ship, cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status,
-            cmd_store, cmd_sync_smart, cmd_thread, cmd_thread_show, cmd_transaction, cmd_try,
-            cmd_undo, cmd_version, cmd_watch, cmd_workspace,
+            cmd_session_start, cmd_shell, cmd_ship, cmd_show, cmd_snapshot, cmd_start, cmd_stash,
+            cmd_status, cmd_store, cmd_sync_smart, cmd_thread, cmd_thread_show, cmd_transaction,
+            cmd_try, cmd_undo, cmd_version, cmd_watch, cmd_workspace,
         },
     },
     config::UserConfig,
@@ -468,6 +468,8 @@ async fn main() -> Result<()> {
             resolve_operation_id(&cli)?;
             cmd_thread(&cli, command.clone()).await
         }
+
+        Commands::Shell { command } => cmd_shell(command.clone()),
 
         Commands::Workspace { command } => {
             resolve_operation_id(&cli)?;
@@ -1093,6 +1095,7 @@ fn command_name(command: &Commands) -> &'static str {
         Commands::Compare { .. } => "compare",
         Commands::Marker { .. } => "marker",
         Commands::Thread { .. } => "thread",
+        Commands::Shell { .. } => "shell",
         Commands::Workspace { .. } => "workspace",
         Commands::Merge(_) => "merge",
         Commands::Resolve(_) => "resolve",

@@ -18,7 +18,7 @@ use super::{
     },
     AgentCommands, BisectCommands, CheckpointArgs, ConflictCommands, ContextCommands,
     DiscussCommands, HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs,
-    RedactCommands, RemoteCommands, ReviewCommands, StashCommands, ThreadCommands,
+    RedactCommands, RemoteCommands, ReviewCommands, ShellCommands, StashCommands, ThreadCommands,
     TransactionCommands, WorkspaceCommands,
 };
 #[cfg(feature = "client")]
@@ -395,6 +395,12 @@ Examples:
     Thread {
         #[command(subcommand)]
         command: ThreadCommands,
+    },
+
+    /// Shell integration helpers (auto-cd on thread start/switch/cd).
+    Shell {
+        #[command(subcommand)]
+        command: ShellCommands,
     },
 
     /// Show the repo-wide workspace control tower.

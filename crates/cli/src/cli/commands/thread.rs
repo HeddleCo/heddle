@@ -1531,7 +1531,68 @@ pub(crate) fn cmd_thread_create(
     render_thread_op(cli, output)
 }
 
-pub(crate) fn cmd_thread_switch(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
+/// If `repo` was opened against a dedicated thread worktree, open
+/// and return a fresh `Repository` handle rooted at the **main**
+/// repo. Returns `Ok(None)` when `repo` IS the main repo.
+///
+/// Detection signal: in `Repository::open`, when a worktree pointer
+/// (`.heddle/objectstore`) is followed, the resulting Repository
+/// has `root = <worktree_root>` but `heddle_dir = <shared_main_heddle>`.
+/// For the main repo, `heddle_dir == root.join(".heddle")`. So a
+/// mismatch between `repo.root().join(".heddle")` and
+/// `repo.heddle_dir()` is the worktree fingerprint.
+///
+/// Used by `cmd_thread_switch` to route HEAD writes at the main
+/// repo when the user runs the command from inside a worktree —
+/// otherwise `repo.refs().write_head()` lands on the worktree's
+/// local HEAD file (see `RefManager::with_local_head` in
+/// `crates/repo/src/repository.rs::open`) and clobbers the
+/// source worktree's identity.
+fn open_main_repo_from_worktree_if_needed(repo: &Repository) -> Result<Option<Repository>> {
+    let expected_for_main = repo.root().join(".heddle");
+    if expected_for_main == repo.heddle_dir() {
+        return Ok(None);
+    }
+    let main_root = repo.heddle_dir().parent().ok_or_else(|| {
+        anyhow!(
+            "heddle dir {} has no parent (the main repo root); cannot route HEAD write",
+            repo.heddle_dir().display()
+        )
+    })?;
+    Ok(Some(Repository::open(main_root)?))
+}
+
+/// Look up the on-disk path for `name` and print it on stdout. Read-only;
+/// no auto-capture, no state change. Powers the shell hook's
+/// `heddle thread cd` (the function `cd`s into the printed path).
+pub(crate) fn cmd_thread_cd(repo: &Repository, name: String) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let thread = manager
+        .find_by_thread(&name)?
+        .ok_or_else(|| anyhow!("Thread not found: {}", name))?;
+    let path = thread.execution_path;
+    if path.as_os_str().is_empty() {
+        return Err(anyhow!(
+            "thread '{name}' has no on-disk worktree (was it started with `--workspace virtualized`?)"
+        ));
+    }
+    if !path.exists() {
+        return Err(anyhow!(
+            "thread '{name}' was registered at '{}' but that path no longer exists; \
+             re-run `heddle start --workspace heavy {name}` to re-materialize",
+            path.display()
+        ));
+    }
+    println!("{}", path.display());
+    Ok(())
+}
+
+pub(crate) fn cmd_thread_switch(
+    cli: &Cli,
+    repo: &Repository,
+    name: String,
+    print_cd_path: bool,
+) -> Result<()> {
     // Auto-capture-on-switch (jj-style): before flipping HEAD,
     // capture any uncommitted edits in the *source* thread so the
     // user never has the "you have uncommitted changes" experience
@@ -1618,9 +1679,41 @@ pub(crate) fn cmd_thread_switch(cli: &Cli, repo: &Repository, name: String) -> R
         // we only need to flip HEAD. Importantly: this does NOT touch
         // CWD. Intentional raw `write_head` (not `fast_forward_attached`):
         // we're attaching to a *new* thread.
-        repo.refs().write_head(&Head::Attached {
+        //
+        // The HEAD we want to update is the *main repo's*. When the
+        // user is `cd`'d into a thread's dedicated worktree, `repo`
+        // refers to that worktree (which has its own `.heddle/HEAD`
+        // pointing at the source thread). Writing through `repo.refs()`
+        // would clobber the source worktree's HEAD with the target
+        // thread name — which (a) loses the source-worktree's
+        // identity, and (b) makes the next auto-capture-on-switch
+        // think source == target and skip itself. Found in dogfood.
+        // Fix: route the HEAD write to the main repo when we're
+        // inside a worktree.
+        let head_target_repo = open_main_repo_from_worktree_if_needed(repo)?;
+        let head_repo = head_target_repo.as_ref().unwrap_or(repo);
+        head_repo.refs().write_head(&Head::Attached {
             thread: name.clone(),
         })?;
+    } else if open_main_repo_from_worktree_if_needed(repo)?.is_some() {
+        // Switching to a target thread that has *no* dedicated
+        // worktree, from *inside* another thread's dedicated worktree.
+        // The legacy `goto` path would materialize the target's tree
+        // at the current worktree's root — overwriting the source
+        // worktree's files with the target's content. The bytes
+        // aren't lost (the auto-capture above wrote them to the
+        // source thread's history) but the disk state suddenly
+        // shows a different thread's content, which is jarring and
+        // makes it look like edits vanished.
+        //
+        // Refuse with a clear next step. The user either runs
+        // `heddle start --workspace heavy <target>` to give the
+        // target its own worktree, or cd's to the main repo root
+        // first.
+        anyhow::bail!(
+            "thread '{name}' has no dedicated worktree, and switching to it from inside another thread's worktree would overwrite this directory's files. \
+             Run `heddle start --workspace heavy {name}` to give it a dedicated worktree, or cd to the main repo root and try again."
+        );
     } else {
         // Legacy shared-worktree path: materialize the target tree at
         // CWD and reattach HEAD to the thread. Intentional raw `goto`:
@@ -1633,6 +1726,23 @@ pub(crate) fn cmd_thread_switch(cli: &Cli, repo: &Repository, name: String) -> R
     }
 
     let summary = find_thread_summary(repo, &name)?;
+
+    // Shell-hook mode: print only the target's on-disk path so the
+    // wrapper function can `cd` into it. Auto-capture still ran
+    // above; only the rich JSON/text output is suppressed.
+    if print_cd_path {
+        let path = summary
+            .as_ref()
+            .and_then(|t| t.execution_path.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "thread '{name}' has no on-disk worktree; `--print-cd-path` only works for materialized threads"
+                )
+            })?;
+        println!("{path}");
+        return Ok(());
+    }
+
     let mut message = format!("Switched to thread '{}'", name);
     if let Some(thread) = &summary
         && thread.coordination_status != CoordinationStatus::Clean

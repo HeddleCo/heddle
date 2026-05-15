@@ -19,8 +19,8 @@ use super::{
     operator_core::OperatorCommandOutput,
     operator_loop::primary_next_action,
     thread::{
-        cmd_thread_create, cmd_thread_delete, cmd_thread_list, cmd_thread_rename, cmd_thread_show,
-        cmd_thread_switch, find_thread_summary, show_thread_summary,
+        cmd_thread_cd, cmd_thread_create, cmd_thread_delete, cmd_thread_list, cmd_thread_rename,
+        cmd_thread_show, cmd_thread_switch, find_thread_summary, show_thread_summary,
     },
     thread_shaping::{cmd_thread_absorb, cmd_thread_move, cmd_thread_resolve},
     worktree_cmd::helpers::{prepare_worktree_target, write_isolated_checkout},
@@ -144,7 +144,11 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
             ephemeral,
             ttl_secs,
         } => cmd_thread_create(cli, &repo, name, ephemeral, ttl_secs),
-        ThreadCommands::Switch { name } => cmd_thread_switch(cli, &repo, name),
+        ThreadCommands::Switch {
+            name,
+            print_cd_path,
+        } => cmd_thread_switch(cli, &repo, name, print_cd_path),
+        ThreadCommands::Cd { name } => cmd_thread_cd(&repo, name),
         ThreadCommands::List(args) => cmd_thread_list(cli, &repo, args),
         ThreadCommands::Cleanup(args) => cmd_thread_cleanup(cli, &repo, args),
         ThreadCommands::Show(args) => {
