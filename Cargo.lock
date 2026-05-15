@@ -2851,6 +2851,7 @@ dependencies = [
  "heddle-state-review",
  "hex",
  "libc",
+ "proptest",
  "prost 0.14.3",
  "prost-types 0.14.3",
  "serde",
