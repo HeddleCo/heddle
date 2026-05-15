@@ -57,12 +57,19 @@ they tune the 1.0 targets the next sections propose against it.
   fail the build on a coverage delta. The lift mechanism is
   [`.github/workflows/rust-tests.yml`](../.github/workflows/rust-tests.yml)
   (`coverage` job).
-- **Performance baseline.** Snapshot-time microbench harness lives
-  in [`crates/cli/tests/performance.rs`](../crates/cli/tests/performance.rs).
-  No criterion-style benchmark suite, no Bencher/Codspeed
-  integration, no perf-regression gate in CI today
-  (`grep -r criterion crates/*/Cargo.toml` matches `heddle-cli` only,
-  for `bench`-target metadata, not a `criterion` dep).
+- **Performance baseline.** Two perf surfaces today, neither gated:
+  - Snapshot-time microbench *cargo-test* harness at
+    [`crates/cli/tests/performance.rs`](../crates/cli/tests/performance.rs)
+    (asserts on phase timings; runs as part of the test suite).
+  - A real Criterion benchmark crate-target at
+    [`crates/cli/benches/local_ops.rs`](../crates/cli/benches/local_ops.rs)
+    (declared via `[[bench]]` in `crates/cli/Cargo.toml`). Run with
+    `cargo bench -p heddle-cli`. Not currently invoked by any CI
+    workflow.
+  No Bencher/Codspeed integration; no perf-regression gate in CI;
+  Criterion exists only in `heddle-cli`, not in the workspace crates
+  whose performance characteristics most matter for 1.0 (objects,
+  repo, refs, oplog).
 - **Soak / long-running tests.** No continuous long-running soak
   harness today. One large-blob *stress* fixture exists at
   [`crates/cli/tests/cli_integration/realworld_git.rs:242`](../crates/cli/tests/cli_integration/realworld_git.rs)
@@ -190,13 +197,18 @@ Tradeoffs:
   start with the ratchet (10 % regression on the existing
   `performance.rs` snapshot timings), promote to absolutes as the
   bench corpus stabilises.
-- **Where the bench harness lives.** The existing
+- **Where the bench harness lives.** Two seeds exist:
   [`crates/cli/tests/performance.rs`](../crates/cli/tests/performance.rs)
-  is a `cargo test` target, not a criterion suite. Either extend it
-  with timing-assertion guards or stand up a separate bench crate
-  (`crates/bench/`). Proposed: extend in place — the snapshot
-  harness already collects per-phase timings; assertions over those
-  timings are the minimum viable gate.
+  (cargo-test, timing-assertion shape, runs every CI) and
+  [`crates/cli/benches/local_ops.rs`](../crates/cli/benches/local_ops.rs)
+  (real Criterion, runs only on demand via `cargo bench`). Neither
+  covers `crates/objects`, `crates/repo`, `crates/refs`,
+  `crates/oplog` — the formats most sensitive to 1.0 perf claims.
+  Proposed: keep `performance.rs` as the cheap test-suite gate;
+  expand `local_ops.rs` (or peer Criterion benches under each
+  format crate) into a CI-invoked `cargo bench --no-run` smoke check
+  + a nightly perf-regression workflow that runs the suite and
+  compares against a stored baseline.
 - **What gets gated, what gets observed.** Not every CLI verb needs
   a budget. Proposed: budget the verbs in the AGENTS.md "core thread
   workflow" (`status`, `capture`, `checkpoint`, `log`, `show`,
