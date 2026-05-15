@@ -10,7 +10,10 @@
 //! This module ships only the *detection* primitive — recording each
 //! verb into the sentinel's buffered_ops list (and replaying them at
 //! commit) is the larger follow-on the local transaction service
-//! already flags with `TODO(transaction-replay)`.
+//! already flags as future work. Startup-time crash recovery of stuck
+//! `active` sentinels (write/sync/rename crash matrix) is implemented
+//! in `daemon::transaction_replay`, which the local daemon invokes
+//! before accepting RPCs.
 //!
 //! Sentinel files live at `<heddle_dir>/state/transactions/<id>.toml`
 //! (the same path the local `TransactionService` uses), so the

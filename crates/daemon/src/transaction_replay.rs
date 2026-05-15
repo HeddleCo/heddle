@@ -43,13 +43,7 @@
 
 use std::path::PathBuf;
 
-// Imported by the real implementation (lands in the follow-up commit);
-// kept here so the module compiles in the red state and the test module
-// can rely on the same surface. The `unused_imports` allow falls away
-// once the stubbed body is replaced.
-#[allow(unused_imports)]
 use objects::fs_atomic::write_file_atomic;
-#[allow(unused_imports)]
 use oplog::OpRecord;
 use repo::Repository;
 use serde::{Deserialize, Serialize};
@@ -59,7 +53,6 @@ use serde::{Deserialize, Serialize};
 /// lockstep; a mismatch on either side produces a parse error and the
 /// sentinel falls through to `unparseable_sentinels` instead of being
 /// recovered.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReplaySentinel {
     transaction_id: String,
@@ -76,9 +69,7 @@ struct ReplaySentinel {
     aborted_reason: Option<String>,
 }
 
-#[allow(dead_code)]
 const STATE_ACTIVE: &str = "active";
-#[allow(dead_code)]
 const STATE_ABORTED: &str = "aborted";
 
 /// Reason recorded on every sentinel that replay flipped from `active`
@@ -130,7 +121,6 @@ impl ReplayReport {
 /// directory could in theory hold other dotfiles. We anchor on the
 /// literal `.tmp-` infix because `temp_path` always emits it and no
 /// committed sentinel name would.
-#[allow(dead_code)]
 fn is_orphan_temp_name(name: &str) -> bool {
     name.starts_with('.') && name.contains(".tmp-")
 }
@@ -152,10 +142,87 @@ fn is_orphan_temp_name(name: &str) -> bool {
 /// Errors from individual sentinel writes are tracing-warned and
 /// swallowed so a single corrupt sentinel cannot block daemon startup;
 /// the unparseable path is surfaced in the returned report.
-pub fn replay_active_transactions(_repo: &Repository) -> ReplayReport {
-    // Red-commit stub: contract is defined by the tests below; the real
-    // implementation lands in the follow-up commit.
-    ReplayReport::default()
+pub fn replay_active_transactions(repo: &Repository) -> ReplayReport {
+    let mut report = ReplayReport::default();
+    let dir = repo.heddle_dir().join("state").join("transactions");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return report,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        if is_orphan_temp_name(name) {
+            if std::fs::remove_file(&path).is_ok() {
+                report.orphan_temp_files_removed += 1;
+            }
+            continue;
+        }
+
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => {
+                report.unparseable_sentinels.push(path.clone());
+                continue;
+            }
+        };
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(t) => t,
+            Err(_) => {
+                report.unparseable_sentinels.push(path.clone());
+                continue;
+            }
+        };
+        let mut sentinel: ReplaySentinel = match toml::from_str(text) {
+            Ok(s) => s,
+            Err(_) => {
+                report.unparseable_sentinels.push(path.clone());
+                continue;
+            }
+        };
+
+        if sentinel.state != STATE_ACTIVE {
+            continue;
+        }
+
+        let txn_id = sentinel.transaction_id.clone();
+        sentinel.state = STATE_ABORTED.to_string();
+        sentinel.aborted_reason = Some(REPLAY_RECOVERY_REASON.to_string());
+        sentinel.buffered_ops.clear();
+
+        let serialized = match toml::to_string_pretty(&sentinel) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(error = %err, txn = %txn_id,
+                    "transaction-replay: failed to serialize recovered sentinel");
+                continue;
+            }
+        };
+        if let Err(err) = write_file_atomic(&path, serialized.as_bytes()) {
+            tracing::warn!(error = %err, txn = %txn_id,
+                "transaction-replay: failed to persist recovered sentinel");
+            continue;
+        }
+        if let Err(err) = repo.oplog().record_batch(vec![OpRecord::TransactionAbort {
+            transaction_id: txn_id.clone(),
+            reason: REPLAY_RECOVERY_REASON.to_string(),
+        }]) {
+            tracing::warn!(error = %err, txn = %txn_id,
+                "transaction-replay: failed to record TransactionAbort");
+        }
+        report.recovered_transaction_ids.push(txn_id);
+    }
+
+    report
 }
 
 #[cfg(test)]
@@ -252,7 +319,10 @@ buffered_ops = {buffered}
         write_sentinel_raw(&dir, "tx-stuck", "active", &["capture", "merge"]);
 
         let report = replay_active_transactions(&repo);
-        assert_eq!(report.recovered_transaction_ids, vec!["tx-stuck".to_string()]);
+        assert_eq!(
+            report.recovered_transaction_ids,
+            vec!["tx-stuck".to_string()]
+        );
         assert_eq!(report.orphan_temp_files_removed, 0);
         assert!(report.unparseable_sentinels.is_empty());
 

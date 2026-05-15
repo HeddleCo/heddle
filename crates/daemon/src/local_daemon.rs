@@ -278,6 +278,20 @@ pub async fn serve(
     // Mode 0600 — same-user only. The PidGuard cleans up at drop.
     set_socket_mode_0600(&config.socket_path)?;
 
+    // Crash recovery for the transaction sentinel directory. Runs before
+    // any service starts handling RPCs so an in-flight transaction from a
+    // prior `kill -9` cannot race with a brand-new `begin_transaction`.
+    // See [`crate::transaction_replay`] for the state machine.
+    let report = crate::transaction_replay::replay_active_transactions(&repo);
+    if !report.recovered_transaction_ids.is_empty() || report.orphan_temp_files_removed > 0 {
+        tracing::info!(
+            recovered_txns = report.recovered_transaction_ids.len(),
+            orphan_tmps = report.orphan_temp_files_removed,
+            unparseable = report.unparseable_sentinels.len(),
+            "local-daemon: transaction replay recovered prior in-flight state"
+        );
+    }
+
     let dedup = Arc::new(OperationDedupStore::open(repo.heddle_dir())?);
     let inner = GrpcLocalService::new(Arc::new(repo), dedup);
 
