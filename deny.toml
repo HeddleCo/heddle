@@ -111,6 +111,11 @@ exceptions = []
 # growth is visible; do not block on it.
 multiple-versions = "warn"
 wildcards = "deny"
+# Intra-workspace path deps (e.g. `{ path = "../foo", package = "heddle-foo" }`)
+# resolve to a wildcard version requirement and would otherwise trip the
+# `wildcards = "deny"` gate. Allow them — they're not the supply-chain risk
+# we're guarding against; crates.io wildcard requirements are.
+allow-wildcard-paths = true
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
@@ -125,7 +130,10 @@ deny = [
     { crate = "openssl", reason = "rustls is the project standard; OpenSSL would widen supply-chain surface and break the rustls-only invariant" },
     { crate = "openssl-sys", reason = "see openssl ban — sys crate is the actual native-link offender" },
     { crate = "native-tls", reason = "wraps OpenSSL/SChannel/SecureTransport; rustls is the project standard" },
-    { crate = "openssl-probe", reason = "only useful alongside openssl; banning it keeps OpenSSL adjacency out of the graph" },
+    # Note: openssl-probe is intentionally NOT banned. It's a small helper
+    # for locating the system CA-bundle path (env vars + file probes) and
+    # does not link libssl. rustls-native-certs depends on it on Linux,
+    # which is reached transitively via aws-sdk-s3 → smithy-http-client.
 ]
 
 # Crates that legitimately appear multiple times in the graph today. Each
