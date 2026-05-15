@@ -1,9 +1,11 @@
 # Clonefile-backed Lightweight Threads — Design Note
 
-**Status:** Proposed. Prototype validated against the heddle workspace
-(48.68 s `cargo build` against a clonefile-materialized tree vs 48.94 s
-vanilla baseline — par within noise — plus 91 ms upfront materialize for
-643 files). No CLI surface yet.
+**Status:** Approved, day-one default on reflink-capable hosts.
+Prototype validated against the heddle workspace (48.68 s `cargo build`
+against a clonefile-materialized tree vs 48.94 s vanilla baseline — par
+within noise — plus 91 ms upfront materialize for 643 files). CLI
+surface in flight; virtualized mounts stay supported as the opt-in for
+very-large-repo and remote-backed-CAS workflows.
 
 **Owner:** mount + materialization (`crates/mount/`, `crates/repo/`).
 
@@ -457,20 +459,19 @@ implementation).
 
 ## Migration path
 
-This lands alongside FSKit/FUSE/ProjFS, not replacing them.
+`materialized` ships as the day-one default on reflink-capable hosts
+(macOS APFS, Linux btrfs/XFS-reflink/bcachefs, Windows ReFS).
+Virtualized stays as a flag for the very-large-repo case and remote-
+backed CAS; we keep that path supported because both code paths are
+production users from day one. The CLI auto-selects based on the
+filesystem detection table above; users override with `--workspace`.
 
-**Phase 1**: ship as `--workspace materialized`. Default stays
-`--workspace virtualized` until we've burned in.
-
-**Phase 2** (after one or two release cycles of bug-soak): flip the
-default for reflink-capable hosts. Virtualized stays as a flag for
-the very-large-repo case.
-
-**Phase 3**: revisit whether FSKit/FUSE is still worth maintaining as
-a primary mount path. Likely answer: yes — for remote-backed CAS
-(lazy fetch over the wire) and for repos so large that even a
-clonefile walk is too expensive. The complexity stays, but it stops
-being on the hot path of every agent thread.
+FSKit/FUSE/ProjFS are not deprecated. The structural argument is
+that they're the right tool when blobs aren't all on local disk
+(remote-fetch-on-demand) or when a tree is too large to fully
+materialize. For the lightweight-thread workflow that is heddle's
+headline, `materialized` is the right default and we ship it as
+such.
 
 ## Open questions
 
@@ -493,10 +494,14 @@ being on the hot path of every agent thread.
    materialize. Decision: clean on next materialize + daemon sweep.
 
 4. **What does `heddle thread switch` do when there are uncaptured
-   changes in the current thread?** Refuse (git-style) or
-   auto-capture (jj-style)? Probably: refuse by default, surface a
-   `--auto-capture` flag, mirror the existing `heddle merge`
-   behaviour. Decision pending product input.
+   changes in the current thread?** Auto-capture (jj-style). Every
+   `thread switch` is a checkpoint: walk the current thread root with
+   the stat-cache, write a new state if anything changed, advance
+   the current thread's head, then switch. The user never has the
+   "you have uncommitted changes" experience that git inflicts.
+   Mirrors heddle's broader stance that the agent's edits are
+   recoverable provenance and should never silently disappear.
+   `--no-auto-capture` is the opt-out.
 
 5. **Does the daemon need to know about materialized threads?** For
    its own bookkeeping (idle GC, status reporting), probably yes —

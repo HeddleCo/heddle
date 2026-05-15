@@ -36,6 +36,8 @@ mod repository_snapshot;
 #[cfg(test)]
 #[path = "repository_tests.rs"]
 mod repository_tests;
+#[path = "repository_thread_materialize.rs"]
+mod repository_thread_materialize;
 #[path = "repository_tree.rs"]
 mod repository_tree;
 #[path = "repository_worktree_apply.rs"]

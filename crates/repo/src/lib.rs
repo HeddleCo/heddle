@@ -31,6 +31,7 @@ mod stash;
 #[cfg(feature = "tree-sitter-symbols")]
 pub use semantic::symbol_resolver;
 mod thread_advice;
+pub mod thread_manifest;
 mod thread_model;
 mod thread_record_store;
 mod thread_storage;
