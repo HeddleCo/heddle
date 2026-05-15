@@ -25,11 +25,14 @@ use crate::{
     },
 };
 
-/// Bytes we read off disk to recover a blob's uncompressed size: the
-/// 9-byte compression header is enough for both modern and legacy
-/// (5-byte) headers — `header_uncompressed_size` picks the right
-/// width.
-const BLOB_HEADER_PEEK: usize = 9;
+/// Bytes we read off disk to recover a blob's uncompressed size.
+/// Must cover the 9-byte modern header **plus** the 4-byte ZSTD
+/// magic that `header_uncompressed_size` uses to disambiguate
+/// modern from legacy (5-byte) headers — without the magic in the
+/// peek buffer the lookup silently returns the on-disk byte length
+/// instead of the recorded uncompressed size, which left `stat`
+/// reporting the compressed size of every loose blob.
+const BLOB_HEADER_PEEK: usize = 13;
 
 fn validate_loaded_tree(tree: Tree) -> Result<Tree> {
     tree.validate()?;
