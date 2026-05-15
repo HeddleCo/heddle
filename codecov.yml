@@ -53,9 +53,14 @@ coverage:
       # New-or-changed lines in a PR must clear 80% — this is the
       # forward-going floor; existing-line drift is caught by the
       # per-crate project gates above.
+      #
+      # `threshold` is Codecov's permitted-drop tolerance from `target`,
+      # not an absolute floor. With `threshold: 1%`, patch coverage of
+      # 79% would still report success — defeating the stated 80% gate.
+      # `threshold: 0%` enforces the gate strictly.
       default:
         target: 80%
-        threshold: 1%
+        threshold: 0%
 
 # Codecov status posts on PRs, but Codecov is not the gate of record:
 # the in-CI `Coverage gate` step fails the run before this upload

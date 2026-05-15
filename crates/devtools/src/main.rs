@@ -137,20 +137,23 @@ impl LineStats {
 /// return the owning workspace crate name (i.e. the directory under
 /// `crates/`). Returns `None` for files outside `crates/`.
 ///
-/// Uses the *last* occurrence of `crates/` rather than the first, so a
-/// path like `/home/user/crates/heddle/crates/repo/src/lib.rs` resolves
-/// to `repo` (the workspace member), not `heddle` (a parent directory
-/// that happens to be named `crates`).
+/// Matches on path-segment boundaries: only an exact `crates` segment
+/// (between `/`s, or at the start/end of the path) counts. This rejects
+/// false matches like `.../crates/repo/src/mycrates/foo.rs` (where
+/// `mycrates` ends with `crates` but is a different directory) and
+/// correctly picks the deepest workspace-member segment for nested
+/// checkouts like `/home/user/crates/heddle/crates/repo/src/lib.rs`.
 fn crate_of(path: &str) -> Option<String> {
     let normalized = path.replace('\\', "/");
-    let needle = "crates/";
-    let idx = normalized.rfind(needle)?;
-    let rest = &normalized[idx + needle.len()..];
-    let end = rest.find('/')?;
-    if end == 0 {
-        return None;
+    let segments: Vec<&str> = normalized.split('/').collect();
+    // Walk segments right-to-left; the last exact "crates" segment with
+    // a non-empty successor is the workspace-member parent.
+    for i in (0..segments.len().saturating_sub(1)).rev() {
+        if segments[i] == "crates" && !segments[i + 1].is_empty() {
+            return Some(segments[i + 1].to_string());
+        }
     }
-    Some(rest[..end].to_string())
+    None
 }
 
 /// Parse an lcov.info body and return aggregated `LineStats` per
@@ -233,6 +236,28 @@ end_of_record
         assert!(crate_of("/work/build.rs").is_none());
         assert!(crate_of("proto/heddle/v1/service.proto").is_none());
         assert!(crate_of("crates/").is_none());
+    }
+
+    #[test]
+    fn crate_of_matches_only_on_path_segment_boundaries() {
+        // Substring match is wrong: a path containing `mycrates/` or
+        // `some_crates/` must not be parsed as a crate. Using
+        // path-segment-aware matching, only an exact `crates` segment counts.
+        assert_eq!(crate_of("/foo/some_crates/bar.rs"), None);
+        assert_eq!(crate_of("/foo/mycrates/bar.rs"), None);
+        // A real `crates/` parent followed by a directory whose name *contains*
+        // `crates` later in the path resolves to the workspace crate, not the
+        // confusing inner directory.
+        assert_eq!(
+            crate_of("crates/repo/src/mycrates/foo.rs").as_deref(),
+            Some("repo")
+        );
+        // Nested checkouts where a parent dir is also literally `crates`
+        // resolve to the deepest exact `crates` segment (the workspace member).
+        assert_eq!(
+            crate_of("/home/user/crates/heddle/crates/repo/src/lib.rs").as_deref(),
+            Some("repo")
+        );
     }
 
     #[test]
