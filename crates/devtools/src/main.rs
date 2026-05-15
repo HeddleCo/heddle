@@ -28,8 +28,91 @@ fn main() -> Result<()> {
 /// Used from `.github/workflows/rust-tests.yml` after `cargo llvm-cov`
 /// emits `lcov.info`. The gate is per-crate (not workspace-global) so
 /// that low-coverage crates can't be masked by high-coverage neighbors.
-fn run_audit_coverage(_args: Vec<String>) -> Result<()> {
-    bail!("audit-coverage: not implemented")
+fn run_audit_coverage(args: Vec<String>) -> Result<()> {
+    let mut lcov_path: Option<PathBuf> = None;
+    let mut gates: Vec<(String, f64)> = Vec::new();
+    let mut it = args.into_iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--gate" => {
+                let spec = it
+                    .next()
+                    .context("--gate expects an argument of the form <crate>=<pct>")?;
+                let (krate, pct_str) = spec
+                    .split_once('=')
+                    .with_context(|| format!("--gate value '{spec}' is not <crate>=<pct>"))?;
+                let pct: f64 = pct_str
+                    .parse()
+                    .with_context(|| format!("--gate threshold '{pct_str}' is not a number"))?;
+                if !(0.0..=100.0).contains(&pct) {
+                    bail!("--gate threshold {pct} for '{krate}' is outside 0..=100");
+                }
+                gates.push((krate.to_string(), pct));
+            }
+            other if other.starts_with("--") => bail!("unknown flag '{other}'"),
+            other => {
+                if lcov_path.is_some() {
+                    bail!("unexpected positional argument '{other}'");
+                }
+                lcov_path = Some(PathBuf::from(other));
+            }
+        }
+    }
+
+    let lcov_path = lcov_path
+        .context("audit-coverage: expected a path to lcov.info as the first positional argument")?;
+    if gates.is_empty() {
+        bail!(
+            "audit-coverage: at least one --gate <crate>=<pct> is required (CI passes objects/repo/refs)"
+        );
+    }
+
+    let source =
+        fs::read_to_string(&lcov_path).with_context(|| format!("read {}", lcov_path.display()))?;
+    let coverage = aggregate_per_crate(&source);
+
+    let mut failed: Vec<(String, f64, f64)> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for (krate, threshold) in &gates {
+        match coverage.get(krate) {
+            Some(stats) if stats.found > 0 => {
+                let pct = stats.percent();
+                let mark = if pct >= *threshold { "OK  " } else { "FAIL" };
+                println!(
+                    "{mark} {krate:<20} lines {hit:>6}/{found:<6} = {pct:6.2}%  (>= {threshold:.2}%)",
+                    hit = stats.hit,
+                    found = stats.found,
+                );
+                if pct < *threshold {
+                    failed.push((krate.clone(), pct, *threshold));
+                }
+            }
+            _ => missing.push(krate.clone()),
+        }
+    }
+
+    if !missing.is_empty() {
+        bail!(
+            "audit-coverage: no lines counted for crate(s): {} (lcov SF: paths did not match `crates/<name>/`)",
+            missing.join(", ")
+        );
+    }
+    if !failed.is_empty() {
+        eprintln!(
+            "\naudit-coverage: {} crate(s) below threshold:",
+            failed.len()
+        );
+        for (krate, pct, threshold) in &failed {
+            eprintln!("  {krate}: {pct:.2}% < {threshold:.2}%");
+        }
+        bail!("audit-coverage failed");
+    }
+
+    println!(
+        "\naudit-coverage: {} crate(s) at or above their per-crate line-coverage threshold.",
+        gates.len()
+    );
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +124,6 @@ struct LineStats {
 }
 
 impl LineStats {
-    #[allow(dead_code)] // wired in the green commit that ships the lcov parser.
     fn percent(&self) -> f64 {
         if self.found == 0 {
             0.0
@@ -54,17 +136,43 @@ impl LineStats {
 /// Given an absolute or repo-relative path from an lcov `SF:` record,
 /// return the owning workspace crate name (i.e. the directory under
 /// `crates/`). Returns `None` for files outside `crates/`.
-#[allow(dead_code)] // wired in the green commit that ships the lcov parser.
-fn crate_of(_path: &str) -> Option<String> {
-    None
+fn crate_of(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let needle = "crates/";
+    let idx = normalized.find(needle)?;
+    let rest = &normalized[idx + needle.len()..];
+    let end = rest.find('/')?;
+    if end == 0 {
+        return None;
+    }
+    Some(rest[..end].to_string())
 }
 
 /// Parse an lcov.info body and return aggregated `LineStats` per
 /// workspace crate. Records whose `SF:` path is outside `crates/<x>/`
 /// (build scripts, examples at workspace root, etc.) are ignored.
-#[allow(dead_code)] // wired in the green commit that ships the lcov parser.
-fn aggregate_per_crate(_lcov: &str) -> std::collections::HashMap<String, LineStats> {
-    std::collections::HashMap::new()
+fn aggregate_per_crate(lcov: &str) -> std::collections::HashMap<String, LineStats> {
+    let mut out: std::collections::HashMap<String, LineStats> = std::collections::HashMap::new();
+    let mut current: Option<String> = None;
+    for raw in lcov.lines() {
+        let line = raw.trim_end();
+        if let Some(path) = line.strip_prefix("SF:") {
+            current = crate_of(path);
+        } else if line == "end_of_record" {
+            current = None;
+        } else if let Some(krate) = &current {
+            if let Some(rest) = line.strip_prefix("LF:")
+                && let Ok(n) = rest.parse::<u64>()
+            {
+                out.entry(krate.clone()).or_default().found += n;
+            } else if let Some(rest) = line.strip_prefix("LH:")
+                && let Ok(n) = rest.parse::<u64>()
+            {
+                out.entry(krate.clone()).or_default().hit += n;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
