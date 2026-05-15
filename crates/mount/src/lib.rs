@@ -27,6 +27,7 @@
 //! See [`PlatformShell`] for the trait every adapter implements,
 //! and [`ContentAddressedMount`] for the heddle-aware core.
 
+pub mod cache;
 pub mod core;
 pub mod error;
 pub mod shell;
@@ -58,7 +59,8 @@ pub use crate::nfs::{NfsSession, NfsShell};
 #[cfg(all(target_os = "windows", feature = "projfs"))]
 pub use crate::projfs::{ProjFsSession, ProjFsShell};
 pub use crate::{
-    core::{ContentAddressedMount, PromotionPolicy},
+    cache::{BlobCachePool, BlobCacheStats, DEFAULT_BLOB_CACHE_BYTES},
+    core::{ContentAddressedMount, MountOptions, PrewarmHandle, PrewarmStats, PromotionPolicy},
     error::{MountError, Result},
     shell::{Attrs, Entry, NodeId, NodeKind, PlatformShell},
 };

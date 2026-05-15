@@ -36,11 +36,27 @@ use std::{
     path::PathBuf,
 };
 
+use std::sync::Arc;
+
+use std::time::Duration;
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use mount::{ContentAddressedMount, NodeId, PlatformShell};
+use mount::{
+    BlobCachePool, ContentAddressedMount, MountOptions, NodeId, PlatformShell, PromotionPolicy,
+};
 use objects::store::compression::{compress, decompress, CompressionConfig};
 use repo::Repository;
 use tempfile::TempDir;
+
+/// Disable the idle-promotion sweep worker. Its 50 ms shutdown-poll
+/// adds tens of ms to every `Drop` and was masking the prewarm
+/// signal in earlier runs of the bench.
+fn no_sweep() -> PromotionPolicy {
+    PromotionPolicy {
+        idle_after: Duration::from_secs(60),
+        sweep_interval: None,
+    }
+}
 
 // ---------------------------------------------------------------------
 // Fixture
@@ -619,6 +635,206 @@ fn bench_cold_stages(c: &mut Criterion) {
     group.finish();
 }
 
+/// Prewarm bench: model the daemon workflow where the mount kicks
+/// off a background hydrator the moment it opens, then the agent
+/// hits the mount slightly later. The two metrics we care about:
+///
+///   `prewarm_then_read` — total time from "open mount" through
+///     "prewarm finished" + read every file. This bounds the wall-
+///     clock when the agent races the prewarmer.
+///   `read_after_prewarm` — time to read every file after the
+///     prewarmer has completed. This is the steady-state cost
+///     the agent actually sees if their first read happens after
+///     the prewarm window.
+///   `fork_warm_inherit` — open mount A, prewarm it, drop it,
+///     then open mount B against the same Repository + the same
+///     `Arc<BlobCachePool>`, and read all of B's files. Measures
+///     the fork-thread case: mount B reuses A's warm bytes for
+///     free, paying only walk-the-tree cost.
+fn bench_prewarm(c: &mut Criterion) {
+    const SOURCE_COUNT: usize = 50;
+    const SOURCE_SIZE: usize = 32 * 1024;
+    const DEP_COUNT: usize = 4;
+    const DEP_SIZE: usize = 2 * 1024 * 1024;
+    let total_bytes = SOURCE_COUNT * SOURCE_SIZE + DEP_COUNT * DEP_SIZE;
+
+    fn fixture() -> (TempDir, Repository) {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        for i in 0..SOURCE_COUNT {
+            fs::write(
+                temp.path().join(format!("src_{i:03}.rs")),
+                fill(SOURCE_SIZE),
+            )
+            .expect("write src");
+        }
+        for i in 0..DEP_COUNT {
+            fs::write(temp.path().join(format!("dep_{i}.rmeta")), fill(DEP_SIZE))
+                .expect("write dep");
+        }
+        repo.snapshot(Some("prewarm fixture".into()), None)
+            .expect("snapshot");
+        (temp, repo)
+    }
+
+    let mut group = c.benchmark_group("prewarm");
+    group.throughput(Throughput::Bytes(total_bytes as u64));
+    // Each iter rebuilds the mount + clears caches, so reduce sample
+    // count to keep total bench time reasonable.
+    group.sample_size(15);
+
+    let mut chunk = vec![0u8; 16 * 1024];
+
+    // 1. Read-all-files end-to-end with prewarm in-flight. Worst
+    //    case: agent races the prewarmer; some files hit warm, some
+    //    cold, depending on race outcomes.
+    group.bench_function("prewarm_then_read", |b| {
+        let (_temp, repo) = fixture();
+        let pool = Arc::new(BlobCachePool::with_default_capacity());
+        let opts = MountOptions {
+            blob_cache: Some(Arc::clone(&pool)),
+        };
+        b.iter(|| {
+            pool.clear();
+            let mount = ContentAddressedMount::with_options(
+                Repository::open(repo.root()).unwrap(),
+                "main",
+                opts.clone(),
+            )
+            .expect("open mount")
+            .with_promotion_policy(no_sweep());
+            let handle = mount.prewarm();
+            let entries = mount.enumerate(NodeId::ROOT).expect("enum");
+            for entry in &entries {
+                let mut offset = 0u64;
+                loop {
+                    let n = mount
+                        .read(entry.node, offset, black_box(&mut chunk))
+                        .expect("read");
+                    if n == 0 {
+                        break;
+                    }
+                    offset += n as u64;
+                }
+            }
+            // Wait for prewarmer too so we charge the full cost.
+            let _stats = handle.wait();
+        });
+    });
+
+    // 2. Read-all-files AFTER prewarm completed. This is the
+    //    realistic steady-state for an agent whose first FS access
+    //    happens >100ms after thread start.
+    group.bench_function("read_after_prewarm", |b| {
+        let (_temp, repo) = fixture();
+        let pool = Arc::new(BlobCachePool::with_default_capacity());
+        let opts = MountOptions {
+            blob_cache: Some(Arc::clone(&pool)),
+        };
+        // Build the mount + prewarm ONCE outside the timed loop so
+        // we measure the steady-state hot-cache read, not the
+        // prewarm cost itself.
+        let mount = ContentAddressedMount::with_options(
+            Repository::open(repo.root()).unwrap(),
+            "main",
+            opts.clone(),
+        )
+        .expect("open mount");
+        let _stats = mount.prewarm().wait();
+        b.iter(|| {
+            let entries = mount.enumerate(NodeId::ROOT).expect("enum");
+            for entry in &entries {
+                let mut offset = 0u64;
+                loop {
+                    let n = mount
+                        .read(entry.node, offset, black_box(&mut chunk))
+                        .expect("read");
+                    if n == 0 {
+                        break;
+                    }
+                    offset += n as u64;
+                }
+            }
+        });
+    });
+
+    // 3. Fork-thread case: pool stays warm across mount drops.
+    //    Setup (outside timed loop): open mount A, prewarm + drop.
+    //    Timed: open mount B against the same shared pool, read all
+    //    files. We're measuring "spin up a sibling and serve its
+    //    first reads" — which is exactly the workflow when one
+    //    daemon hosts multiple threads forked from a common parent.
+    group.bench_function("fork_warm_inherit", |b| {
+        let (_temp, repo) = fixture();
+        let pool = Arc::new(BlobCachePool::with_default_capacity());
+        // One-time: prewarm into the shared pool via a throwaway
+        // mount, so subsequent mounts inherit a fully-warm cache.
+        {
+            let warmer = ContentAddressedMount::with_options(
+                Repository::open(repo.root()).unwrap(),
+                "main",
+                MountOptions {
+                    blob_cache: Some(Arc::clone(&pool)),
+                },
+            )
+            .expect("open warmer mount")
+            .with_promotion_policy(no_sweep());
+            let _ = warmer.prewarm().wait();
+        }
+        b.iter(|| {
+            let mount = ContentAddressedMount::with_options(
+                Repository::open(repo.root()).unwrap(),
+                "main",
+                MountOptions {
+                    blob_cache: Some(Arc::clone(&pool)),
+                },
+            )
+            .expect("open mount B")
+            .with_promotion_policy(no_sweep());
+            let entries = mount.enumerate(NodeId::ROOT).expect("enum");
+            for entry in &entries {
+                let mut offset = 0u64;
+                loop {
+                    let n = mount
+                        .read(entry.node, offset, black_box(&mut chunk))
+                        .expect("read");
+                    if n == 0 {
+                        break;
+                    }
+                    offset += n as u64;
+                }
+            }
+        });
+    });
+
+    // 4. Cold baseline: same fixture, fresh per-mount pool, no
+    //    prewarm — what a CLI one-shot pays. Establishes how much
+    //    work the prewarmer is actually saving the user.
+    group.bench_function("cold_no_prewarm", |b| {
+        let (_temp, repo) = fixture();
+        b.iter(|| {
+            let mount = ContentAddressedMount::new(Repository::open(repo.root()).unwrap(), "main")
+                .expect("open mount")
+                .with_promotion_policy(no_sweep());
+            let entries = mount.enumerate(NodeId::ROOT).expect("enum");
+            for entry in &entries {
+                let mut offset = 0u64;
+                loop {
+                    let n = mount
+                        .read(entry.node, offset, black_box(&mut chunk))
+                        .expect("read");
+                    if n == 0 {
+                        break;
+                    }
+                    offset += n as u64;
+                }
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_full_read,
@@ -628,5 +844,6 @@ criterion_group!(
     bench_enumerate_then_attrs,
     bench_build_walk,
     bench_cold_stages,
+    bench_prewarm,
 );
 criterion_main!(benches);

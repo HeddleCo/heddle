@@ -55,18 +55,18 @@
 //! to two different files write *one* blob.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
+        Arc, Mutex, RwLock, Weak,
     },
     thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
 };
 
-use lru::LruCache;
+use crate::cache::BlobCachePool;
 
 use objects::{
     object::{
@@ -399,64 +399,15 @@ pub(crate) struct MountInner {
     pending: Mutex<Pending>,
     promotion: RwLock<PromotionPolicy>,
     mounted_at: SystemTime,
-    /// Materialised-blob cache. Without this every kernel `read`
-    /// syscall re-decompresses the full blob from the object store,
-    /// which makes chunked + mmap reads ~200× slower than vanilla FS
-    /// on multi-MB files (see `crates/mount/benches/mount_read_paths.rs`).
-    /// Bounded by `BLOB_CACHE_TOTAL_BYTES` to keep daemon memory in
-    /// check; an Arc clone is the hot-path cost on hit.
-    blob_cache: Mutex<BlobCache>,
-}
-
-/// Total bytes the per-mount blob cache will retain across all
-/// entries before evicting the least-recently-used. Chosen so a
-/// medium working set (~mid-size cargo target dir) fits in memory
-/// without the cache dominating RSS.
-const BLOB_CACHE_TOTAL_BYTES: usize = 256 * 1024 * 1024;
-
-/// Per-blob LRU keyed by content hash. Holds `Arc<[u8]>` so hits
-/// are a pointer bump rather than a copy. Eviction is byte-bounded:
-/// inserting a new entry evicts the oldest until the running total
-/// fits under [`BLOB_CACHE_TOTAL_BYTES`].
-struct BlobCache {
-    inner: LruCache<ContentHash, Arc<[u8]>>,
-    bytes: usize,
-}
-
-impl BlobCache {
-    fn new() -> Self {
-        Self {
-            inner: LruCache::unbounded(),
-            bytes: 0,
-        }
-    }
-
-    fn get(&mut self, hash: &ContentHash) -> Option<Arc<[u8]>> {
-        self.inner.get(hash).cloned()
-    }
-
-    fn insert(&mut self, hash: ContentHash, bytes: Arc<[u8]>) {
-        let size = bytes.len();
-        // A single oversized blob bypasses the cache entirely so it
-        // doesn't evict the whole working set. Callers still get the
-        // freshly-loaded `Arc` for this read; the next read on the
-        // same hash will reload — accepted, since the alternative is
-        // a 256 MB churn on every 300 MB blob touch.
-        if size > BLOB_CACHE_TOTAL_BYTES {
-            return;
-        }
-        if let Some(prev) = self.inner.put(hash, bytes) {
-            self.bytes = self.bytes.saturating_sub(prev.len());
-        }
-        self.bytes += size;
-        while self.bytes > BLOB_CACHE_TOTAL_BYTES {
-            let Some((_evicted_hash, evicted)) = self.inner.pop_lru() else {
-                break;
-            };
-            self.bytes = self.bytes.saturating_sub(evicted.len());
-        }
-    }
-
+    /// Shared materialised-blob cache. Without this every kernel
+    /// `read` syscall re-decompresses the full blob from the object
+    /// store, which makes chunked + mmap reads ~200× slower than
+    /// vanilla FS on multi-MB files (see
+    /// `crates/mount/benches/mount_read_paths.rs`). Held as an `Arc`
+    /// so multiple mounts in the same process share warm state —
+    /// forked-thread mounts inherit fully-warm cache for any blob
+    /// the parent already touched.
+    blob_cache: Arc<BlobCachePool>,
 }
 
 /// Owns the worker thread + its shutdown signal. Dropping this joins
@@ -485,6 +436,224 @@ impl Drop for SweepHandle {
     }
 }
 
+/// Number of parallel workers the pre-warmer spawns. Decompression
+/// is CPU-bound and our blobs are independent, so this scales
+/// linearly with cores. Picked low enough to leave headroom for
+/// rustc (or whatever the agent is doing) — bumping past 4 wins on
+/// idle machines but contends with compile workloads on every
+/// laptop I tested.
+const PREWARM_WORKERS: usize = 4;
+
+/// Stop hydrating new blobs once the cache is this fraction full.
+/// Without a cap the workers would happily decompress more blobs
+/// than fit, then immediately watch the LRU evict them — pure churn
+/// with no hit-rate benefit. 90% leaves a small headroom for
+/// concurrent user reads that arrive while we're still warming.
+const PREWARM_FULL_FRACTION: u8 = 90;
+
+/// Cumulative outcome of a prewarm pass. Returned from
+/// [`PrewarmHandle::wait`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PrewarmStats {
+    /// Blob hashes the tree walk discovered (file + symlink entries
+    /// across every reachable tree).
+    pub hashes_discovered: u64,
+    /// Hashes the workers tried to hydrate. Equal to `hashes_discovered`
+    /// for a run that completed, less when workers exited early
+    /// because the cache filled up or the caller cancelled.
+    pub hashes_visited: u64,
+    /// Hashes that hit the cache (sibling mount already warmed
+    /// them — the fork-thread fast path).
+    pub already_cached: u64,
+    /// Hashes loaded from the object store and inserted into the
+    /// cache by this pass.
+    pub loaded: u64,
+    /// Whether the pass terminated naturally vs. early-stopped on
+    /// cache fill / cancel.
+    pub completed: bool,
+}
+
+/// Handle to a running prewarm pass. See [`ContentAddressedMount::prewarm`].
+pub struct PrewarmHandle {
+    cancel: Arc<AtomicBool>,
+    join: Option<JoinHandle<PrewarmStats>>,
+}
+
+impl PrewarmHandle {
+    fn start(weak: Weak<MountInner>) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_worker = Arc::clone(&cancel);
+        let join = std::thread::Builder::new()
+            .name("heddle-prewarm-coordinator".to_string())
+            .spawn(move || prewarm_run(weak, cancel_for_worker))
+            // If we can't even spawn the coordinator, surface that
+            // as an empty completed run rather than panicking — the
+            // mount stays fully usable, just lukewarm.
+            .ok();
+        Self { cancel, join }
+    }
+
+    /// Signal cancellation. Workers exit at the next poll point.
+    /// Non-blocking; pair with [`Self::wait`] if you want to be
+    /// sure the threads have actually stopped.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Block until the prewarm pass finishes (naturally or via
+    /// cancel) and return its stats. Returns the default-zero
+    /// stats if the coordinator thread couldn't be spawned.
+    pub fn wait(mut self) -> PrewarmStats {
+        self.join
+            .take()
+            .and_then(|h| h.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for PrewarmHandle {
+    fn drop(&mut self) {
+        // Cancel-on-drop so leaking the handle doesn't keep workers
+        // running past the point the caller stopped caring. Workers
+        // also self-terminate when the mount drops (Weak upgrade
+        // fails), so this is belt-and-braces.
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+/// Coordinator thread body: walk the tree to collect blob hashes,
+/// then fan the hashes out across [`PREWARM_WORKERS`] worker
+/// threads. Returns aggregate stats.
+fn prewarm_run(weak: Weak<MountInner>, cancel: Arc<AtomicBool>) -> PrewarmStats {
+    let Some(inner) = weak.upgrade() else {
+        return PrewarmStats::default();
+    };
+
+    // Phase 1: tree walk. Cheap (in-memory tree + recent-trees
+    // cache) so we just do it on the coordinator thread.
+    let mut stats = PrewarmStats::default();
+    let mut hashes: Vec<ContentHash> = Vec::new();
+    let root_tree = inner.state.read().expect("mount state lock").tree;
+    let mut queue: VecDeque<ContentHash> = VecDeque::from([root_tree]);
+    let mut seen_trees: std::collections::HashSet<ContentHash> =
+        std::collections::HashSet::new();
+    while let Some(tree_hash) = queue.pop_front() {
+        if cancel.load(Ordering::Relaxed) {
+            return stats;
+        }
+        if !seen_trees.insert(tree_hash) {
+            continue;
+        }
+        let Ok(Some(tree)) = inner.repo.store().get_tree(&tree_hash) else {
+            continue;
+        };
+        for entry in tree.entries() {
+            match entry.entry_type {
+                EntryType::Tree => queue.push_back(entry.hash),
+                EntryType::Blob | EntryType::Symlink => {
+                    hashes.push(entry.hash);
+                    stats.hashes_discovered += 1;
+                }
+            }
+        }
+    }
+    drop(inner);
+
+    if hashes.is_empty() {
+        stats.completed = true;
+        return stats;
+    }
+
+    // Phase 2: fan out. Each worker pulls indices off a shared
+    // atomic counter — no per-worker chunking required, naturally
+    // load-balances across blobs of varying sizes.
+    let hashes = Arc::new(hashes);
+    let cursor = Arc::new(AtomicUsize::new(0));
+    let visited = Arc::new(AtomicU32::new(0));
+    let already = Arc::new(AtomicU32::new(0));
+    let loaded = Arc::new(AtomicU32::new(0));
+    let stop_full = Arc::new(AtomicBool::new(false));
+
+    let mut workers = Vec::with_capacity(PREWARM_WORKERS);
+    for worker_id in 0..PREWARM_WORKERS {
+        let weak = weak.clone();
+        let cancel = Arc::clone(&cancel);
+        let hashes = Arc::clone(&hashes);
+        let cursor = Arc::clone(&cursor);
+        let visited = Arc::clone(&visited);
+        let already = Arc::clone(&already);
+        let loaded = Arc::clone(&loaded);
+        let stop_full = Arc::clone(&stop_full);
+        let handle = std::thread::Builder::new()
+            .name(format!("heddle-prewarm-{worker_id}"))
+            .spawn(move || {
+                loop {
+                    if cancel.load(Ordering::Relaxed) || stop_full.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let idx = cursor.fetch_add(1, Ordering::Relaxed);
+                    if idx >= hashes.len() {
+                        return;
+                    }
+                    let hash = hashes[idx];
+                    let Some(inner) = weak.upgrade() else {
+                        return;
+                    };
+                    visited.fetch_add(1, Ordering::Relaxed);
+                    if inner.blob_cache.get(&hash).is_some() {
+                        already.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    // Cooperative fill-stop: if the cache is already
+                    // near-full when *we* are about to insert, drop
+                    // out. Lets the agent's reads stay hot rather
+                    // than us evicting our own work.
+                    let pool = &inner.blob_cache;
+                    let full_threshold = pool
+                        .cap_bytes()
+                        .saturating_mul(PREWARM_FULL_FRACTION as usize)
+                        / 100;
+                    if pool.resident_bytes() >= full_threshold {
+                        stop_full.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    match inner.repo.store().get_blob(&hash) {
+                        Ok(Some(blob)) => {
+                            let bytes: Arc<[u8]> =
+                                Arc::from(blob.into_content().into_boxed_slice());
+                            pool.insert(hash, bytes);
+                            loaded.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(None) | Err(_) => {
+                            // Best-effort: a missing or unreadable
+                            // blob is the user's problem to surface
+                            // on the real read path. The prewarmer
+                            // silently skips so a corrupted blob
+                            // doesn't take down the whole pass.
+                        }
+                    }
+                }
+            })
+            .ok();
+        if let Some(h) = handle {
+            workers.push(h);
+        }
+    }
+
+    for w in workers {
+        let _ = w.join();
+    }
+
+    stats.hashes_visited = visited.load(Ordering::Relaxed) as u64;
+    stats.already_cached = already.load(Ordering::Relaxed) as u64;
+    stats.loaded = loaded.load(Ordering::Relaxed) as u64;
+    stats.completed = !cancel.load(Ordering::Relaxed) && !stop_full.load(Ordering::Relaxed);
+    stats
+}
+
 impl Drop for ContentAddressedMount {
     fn drop(&mut self) {
         // Signal the worker before dropping the Arc<MountInner> so
@@ -502,6 +671,20 @@ struct MountState {
     tree: ContentHash,
 }
 
+/// Knobs handed to [`ContentAddressedMount::with_options`]. The
+/// default-constructed value is what [`ContentAddressedMount::new`]
+/// uses internally; build one explicitly when the caller wants to
+/// share a blob cache across mounts or tune the cache cap.
+#[derive(Clone, Default)]
+pub struct MountOptions {
+    /// Shared blob cache. `None` means "give me a fresh pool with
+    /// the default cap"; clone an existing `Arc<BlobCachePool>` here
+    /// to share warm state with sibling mounts. The daemon pattern
+    /// is to construct one pool at startup (sized from physical
+    /// RAM) and hand the same `Arc` to every mount it spawns.
+    pub blob_cache: Option<Arc<BlobCachePool>>,
+}
+
 impl ContentAddressedMount {
     /// Open a writable mount of `thread` against `repo`.
     ///
@@ -509,10 +692,29 @@ impl ContentAddressedMount {
     /// `lookup`/`read` walks from a fixed snapshot. Writes accumulate
     /// in the pending tier until [`Self::capture`] folds them into a
     /// new state. To advance to a newer state, call [`Self::refresh`].
+    ///
+    /// Equivalent to [`Self::with_options`] with default options:
+    /// a fresh per-mount blob cache. Daemon callers that want
+    /// cross-mount cache reuse should construct an
+    /// [`Arc<BlobCachePool>`] once and use `with_options` instead.
     pub fn new(repo: Repository, thread: impl Into<String>) -> Result<Self> {
+        Self::with_options(repo, thread, MountOptions::default())
+    }
+
+    /// Construct a mount with explicit options. Lets the caller share
+    /// a blob cache across mounts in the same process — see
+    /// [`MountOptions::blob_cache`].
+    pub fn with_options(
+        repo: Repository,
+        thread: impl Into<String>,
+        options: MountOptions,
+    ) -> Result<Self> {
         let thread = thread.into();
         let state = resolve_thread(&repo, &thread)?;
         let inodes = Mutex::new(Inodes::new(state.tree));
+        let blob_cache = options
+            .blob_cache
+            .unwrap_or_else(|| Arc::new(BlobCachePool::with_default_capacity()));
         let inner = Arc::new(MountInner {
             repo,
             thread,
@@ -521,13 +723,20 @@ impl ContentAddressedMount {
             pending: Mutex::new(Pending::default()),
             promotion: RwLock::new(PromotionPolicy::default()),
             mounted_at: SystemTime::now(),
-            blob_cache: Mutex::new(BlobCache::new()),
+            blob_cache,
         });
         let sweeper = spawn_sweep_worker(&inner);
         Ok(Self {
             inner,
             sweeper: Mutex::new(sweeper),
         })
+    }
+
+    /// Borrow the shared blob cache pool. Useful when the caller
+    /// wants to spawn a [`BlobCachePool`]-aware pre-warmer or
+    /// inspect cache stats.
+    pub fn blob_cache_pool(&self) -> &Arc<BlobCachePool> {
+        &self.inner.blob_cache
     }
 
     /// Override the promotion policy. Re-spawns (or terminates) the
@@ -585,22 +794,34 @@ impl ContentAddressedMount {
     /// measure the true cold-cache path without rebuilding the
     /// whole mount.
     pub fn clear_blob_cache(&self) {
-        {
-            let mut cache = self.inner.blob_cache.lock().expect("blob cache lock");
-            cache.inner.clear();
-            cache.bytes = 0;
-        }
+        self.inner.blob_cache.clear();
         self.inner.repo.store().clear_recent_caches();
     }
 
+    /// Spawn a background tree-walker that hydrates every file blob
+    /// in the captured tree into the shared blob cache. The first
+    /// kernel `read` after this finishes is served from memory at
+    /// `Arc::clone` + `memcpy` cost — beats `std::fs::read` on every
+    /// tier we benchmark.
+    ///
+    /// The returned [`PrewarmHandle`] is the caller's lever:
+    ///   * Drop it without calling anything → the prewarmer keeps
+    ///     running until natural completion or the mount drops
+    ///     (the workers hold `Weak<MountInner>` and self-terminate
+    ///     when the strong count hits zero).
+    ///   * `.cancel()` signals shutdown without joining.
+    ///   * `.wait()` joins all workers and returns the final stats.
+    ///
+    /// Workers stop early when the cache is ≥ 90% full to avoid
+    /// churn-evicting work they just did. Blobs already cached
+    /// (from a sibling mount sharing the same pool) are skipped
+    /// cheaply — this is the fork-thread fast path.
+    pub fn prewarm(&self) -> PrewarmHandle {
+        PrewarmHandle::start(Arc::downgrade(&self.inner))
+    }
+
     fn load_blob_bytes(&self, hash: &ContentHash) -> Result<Arc<[u8]>> {
-        if let Some(hit) = self
-            .inner
-            .blob_cache
-            .lock()
-            .expect("blob cache lock")
-            .get(hash)
-        {
+        if let Some(hit) = self.inner.blob_cache.get(hash) {
             return Ok(hit);
         }
         let blob = self
@@ -608,11 +829,7 @@ impl ContentAddressedMount {
             .get_blob(hash)?
             .ok_or_else(|| MountError::NotFound(format!("blob {hash}")))?;
         let bytes: Arc<[u8]> = Arc::from(blob.into_content().into_boxed_slice());
-        self.inner
-            .blob_cache
-            .lock()
-            .expect("blob cache lock")
-            .insert(*hash, Arc::clone(&bytes));
+        self.inner.blob_cache.insert(*hash, Arc::clone(&bytes));
         Ok(bytes)
     }
 
