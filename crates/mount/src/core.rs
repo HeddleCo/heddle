@@ -578,15 +578,19 @@ impl ContentAddressedMount {
             .ok_or_else(|| MountError::NotFound(format!("tree {hash}")))
     }
 
-    /// Drop every cached blob. The next `read` on each blob will hit
-    /// the object store again. Exposed for benchmarks that want to
-    /// measure cold-cache cost without rebuilding the whole mount.
-    /// Cheap (single Mutex lock + HashMap clear) so it's safe to call
-    /// per Criterion iteration.
+    /// Drop every cached blob — both the mount-side LRU and the
+    /// underlying `ObjectStore`'s `recent_blobs`/`recent_trees`
+    /// caches. The next `read` on each blob pays full I/O +
+    /// decompression cost. Exposed for benchmarks that want to
+    /// measure the true cold-cache path without rebuilding the
+    /// whole mount.
     pub fn clear_blob_cache(&self) {
-        let mut cache = self.inner.blob_cache.lock().expect("blob cache lock");
-        cache.inner.clear();
-        cache.bytes = 0;
+        {
+            let mut cache = self.inner.blob_cache.lock().expect("blob cache lock");
+            cache.inner.clear();
+            cache.bytes = 0;
+        }
+        self.inner.repo.store().clear_recent_caches();
     }
 
     fn load_blob_bytes(&self, hash: &ContentHash) -> Result<Arc<[u8]>> {

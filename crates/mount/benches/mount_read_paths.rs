@@ -38,6 +38,7 @@ use std::{
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use mount::{ContentAddressedMount, NodeId, PlatformShell};
+use objects::store::compression::{compress, decompress, CompressionConfig};
 use repo::Repository;
 use tempfile::TempDir;
 
@@ -495,6 +496,129 @@ fn bench_build_walk(c: &mut Criterion) {
     group.finish();
 }
 
+/// Decompose the cold-cache `read` path into the stages it actually
+/// executes. Each row in the report is the average per-iteration
+/// cost of that stage in isolation, so we can attribute the cold-
+/// path budget concretely:
+///
+///   `read_uncompressed_file`   — vanilla `std::fs::File::open` + `read_to_end`
+///                                of the SAME bytes the mount serves.
+///                                Establishes the bar we're trying to beat.
+///   `read_compressed_file`     — same syscalls but reading the smaller
+///                                on-disk blob (no decompression). Bound for
+///                                "I/O only" of the cold path.
+///   `decompress_only`          — zstd decompress of already-loaded
+///                                compressed bytes. The CPU half of the cold
+///                                path.
+///   `store_get_blob`           — `ObjectStore::get_blob` end-to-end (the
+///                                composition of open + read + decompress).
+///   `load_blob_bytes_cold`     — `ContentAddressedMount::read` after
+///                                `clear_blob_cache()` (full mount cold path
+///                                including Arc wrap + cache insert).
+///
+/// Numbers comparing the same blob across all rows are the apples-to-
+/// apples picture we need to pick the right optimization.
+fn bench_cold_stages(c: &mut Criterion) {
+    // We need:
+    //   * A heddle repo so `mount.read` works (cold path end-to-end).
+    //   * Pre-compressed bytes for each tier, plus that same payload
+    //     written to a sibling file on disk so we can isolate
+    //     "read compressed bytes from disk" vs "decompress in memory".
+    // `Repository::snapshot` writes blobs into a packfile, so we
+    // can't point a bench loop at a loose blob path. We sidestep
+    // that by calling `compress(...)` ourselves on each tier and
+    // writing the result alongside the vanilla fixture.
+    let (_temp_repo, mount) = build_mount_fixture();
+    let blobs_tmp = TempDir::new().expect("blobs tmp");
+    let cfg = CompressionConfig::default();
+
+    struct Resolved {
+        tier: Tier,
+        node: NodeId,
+        /// `None` when `compress` decided the input wasn't worth
+        /// compressing for this size (skipped by zstd's heuristic).
+        /// The `decompress_only` and `read_compressed_file` rows
+        /// are omitted in that case — there's no compressed payload
+        /// to bench against.
+        compressed: Option<(Vec<u8>, PathBuf)>,
+    }
+    let resolved: Vec<Resolved> = TIERS
+        .iter()
+        .map(|tier| {
+            let node = mount.lookup_path(tier.path).expect("lookup");
+            let raw = fill(tier.size);
+            let compressed = compress(&raw, &cfg).expect("compress").map(|bytes| {
+                let path = blobs_tmp.path().join(format!("{}.zst", tier.name));
+                fs::write(&path, &bytes).expect("write compressed");
+                (bytes, path)
+            });
+            Resolved {
+                tier: *tier,
+                node,
+                compressed,
+            }
+        })
+        .collect();
+
+    // Vanilla side: same bytes laid out on disk.
+    let vanilla = build_vanilla_fixture();
+
+    let mut group = c.benchmark_group("cold_stages");
+    for r in &resolved {
+        group.throughput(Throughput::Bytes(r.tier.size as u64));
+
+        let vanilla_path = vanilla.path().join(r.tier.path);
+        group.bench_with_input(
+            BenchmarkId::new("read_uncompressed_file", r.tier.name),
+            &vanilla_path,
+            |b, path| {
+                b.iter(|| {
+                    let bytes = fs::read(path).expect("read uncompressed");
+                    black_box(bytes.len());
+                });
+            },
+        );
+
+        if let Some((compressed_bytes, compressed_path)) = &r.compressed {
+            group.bench_with_input(
+                BenchmarkId::new("read_compressed_file", r.tier.name),
+                compressed_path,
+                |b, path| {
+                    b.iter(|| {
+                        let bytes = fs::read(path).expect("read compressed");
+                        black_box(bytes.len());
+                    });
+                },
+            );
+
+            group.bench_with_input(
+                BenchmarkId::new("decompress_only", r.tier.name),
+                compressed_bytes,
+                |b, compressed| {
+                    b.iter(|| {
+                        let out = decompress(black_box(compressed)).expect("decompress");
+                        black_box(out.len());
+                    });
+                },
+            );
+        }
+
+        group.bench_with_input(
+            BenchmarkId::new("mount_read_cold", r.tier.name),
+            &r.node,
+            |b, node| {
+                let mut buf = vec![0u8; r.tier.size];
+                b.iter(|| {
+                    mount.clear_blob_cache();
+                    let n = mount.read(*node, 0, black_box(&mut buf)).expect("read");
+                    black_box(n);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_full_read,
@@ -503,5 +627,6 @@ criterion_group!(
     bench_mmap_pattern,
     bench_enumerate_then_attrs,
     bench_build_walk,
+    bench_cold_stages,
 );
 criterion_main!(benches);

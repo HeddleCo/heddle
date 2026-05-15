@@ -66,6 +66,9 @@ impl ObjectStore for SharedStore {
     fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
         self.0.promote_to_loose_uncompressed(hash)
     }
+    fn clear_recent_caches(&self) {
+        self.0.clear_recent_caches()
+    }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         self.0.get_tree(hash)
     }
@@ -221,6 +224,16 @@ pub trait ObjectStore: Send + Sync {
     fn promote_to_loose_uncompressed(&self, _hash: &ContentHash) -> Result<bool> {
         Ok(false)
     }
+
+    /// Drop any in-memory caches of decompressed blobs / trees /
+    /// states. The next access to any object pays full I/O +
+    /// decompression cost. No-op for stores that don't cache
+    /// (`InMemoryStore` is already the source of truth).
+    ///
+    /// Exposed primarily for benchmarks that want to measure the
+    /// true cold-cache path without rebuilding the store from
+    /// scratch. Production callers don't need to invoke this.
+    fn clear_recent_caches(&self) {}
 
     fn put_blob_with_hash(&self, blob: &Blob, hash: ContentHash) -> Result<ContentHash> {
         if blob.hash() != hash {
