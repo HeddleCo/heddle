@@ -362,6 +362,139 @@ fn bench_chunked_read_cold(c: &mut Criterion) {
     group.finish();
 }
 
+/// Build-shaped macro bench. Models what `cargo check` does to a
+/// source tree: enumerate one directory, then for each file open +
+/// fully read it. We do 50 source-ish files (≈ what a small crate
+/// has) plus a few rlib-sized blobs that get re-read across calls
+/// (the dep-graph pattern). Two passes — cold (cache cleared) and
+/// warm — to expose the cache's contribution end-to-end.
+///
+/// This is the macro signal closest to a real cargo build that
+/// fits in a microbench: no kernel, no Cargo subprocess, no
+/// toolchain dep. End-to-end FSKit/FUSE timing is a follow-up; the
+/// numbers here bound the mount-core ceiling for the workflow.
+fn bench_build_walk(c: &mut Criterion) {
+    use std::ffi::OsStr;
+
+    const SOURCE_COUNT: usize = 50;
+    const SOURCE_SIZE: usize = 32 * 1024; // typical .rs
+    const DEP_COUNT: usize = 4;
+    const DEP_SIZE: usize = 2 * 1024 * 1024; // .rmeta-ish
+
+    fn build_walk_fixture() -> (TempDir, ContentAddressedMount) {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        for i in 0..SOURCE_COUNT {
+            let name = format!("src_{i:03}.rs");
+            fs::write(temp.path().join(&name), fill(SOURCE_SIZE)).expect("write src");
+        }
+        for i in 0..DEP_COUNT {
+            let name = format!("dep_{i}.rmeta");
+            fs::write(temp.path().join(&name), fill(DEP_SIZE)).expect("write dep");
+        }
+        repo.snapshot(Some("build-walk fixture".into()), None)
+            .expect("snapshot");
+        let mount = ContentAddressedMount::new(repo, "main").expect("open mount");
+        (temp, mount)
+    }
+
+    fn build_walk_vanilla() -> TempDir {
+        let temp = TempDir::new().expect("tempdir");
+        for i in 0..SOURCE_COUNT {
+            let name = format!("src_{i:03}.rs");
+            fs::write(temp.path().join(&name), fill(SOURCE_SIZE)).expect("write src");
+        }
+        for i in 0..DEP_COUNT {
+            let name = format!("dep_{i}.rmeta");
+            fs::write(temp.path().join(&name), fill(DEP_SIZE)).expect("write dep");
+        }
+        temp
+    }
+
+    let (_temp_repo, mount) = build_walk_fixture();
+    let vanilla = build_walk_vanilla();
+
+    let total_bytes = SOURCE_COUNT * SOURCE_SIZE + DEP_COUNT * DEP_SIZE;
+    let mut group = c.benchmark_group("build_walk");
+    group.throughput(Throughput::Bytes(total_bytes as u64));
+
+    // Heddle warm: cache pre-populated by the bench itself after
+    // the first sample. This is the steady-state cost of a repeat
+    // build that re-touches the same files.
+    let mut chunk = vec![0u8; 16 * 1024];
+    group.bench_function("heddle_warm", |b| {
+        b.iter(|| {
+            let entries = mount.enumerate(NodeId::ROOT).expect("enumerate");
+            for entry in &entries {
+                let mut offset = 0u64;
+                loop {
+                    let n = mount
+                        .read(entry.node, offset, black_box(&mut chunk))
+                        .expect("heddle read");
+                    if n == 0 {
+                        break;
+                    }
+                    offset += n as u64;
+                }
+            }
+            black_box(entries.len());
+        });
+    });
+
+    // Heddle cold: clear the cache between iters so every file
+    // pays the hydration cost. Bounds the cold-build case.
+    group.bench_function("heddle_cold", |b| {
+        b.iter(|| {
+            mount.clear_blob_cache();
+            let entries = mount.enumerate(NodeId::ROOT).expect("enumerate");
+            for entry in &entries {
+                let mut offset = 0u64;
+                loop {
+                    let n = mount
+                        .read(entry.node, offset, black_box(&mut chunk))
+                        .expect("heddle read");
+                    if n == 0 {
+                        break;
+                    }
+                    offset += n as u64;
+                }
+            }
+            black_box(entries.len());
+        });
+    });
+
+    // Vanilla baseline: readdir + open + read every file. Host
+    // page cache is warm after the first iter, so this is the
+    // best-case `cargo check` against unchanged files.
+    let dir = vanilla.path().to_path_buf();
+    group.bench_function("vanilla", |b| {
+        b.iter(|| {
+            let mut paths: Vec<PathBuf> = Vec::new();
+            for entry in fs::read_dir(&dir).expect("readdir") {
+                let entry = entry.expect("entry");
+                if entry
+                    .path()
+                    .extension()
+                    .is_some_and(|e| e == OsStr::new("rs") || e == OsStr::new("rmeta"))
+                {
+                    paths.push(entry.path());
+                }
+            }
+            for path in &paths {
+                let mut f = fs::File::open(path).expect("vanilla open");
+                loop {
+                    let n = f.read(black_box(&mut chunk)).expect("vanilla read");
+                    if n == 0 {
+                        break;
+                    }
+                }
+            }
+            black_box(paths.len());
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_full_read,
@@ -369,5 +502,6 @@ criterion_group!(
     bench_chunked_read_cold,
     bench_mmap_pattern,
     bench_enumerate_then_attrs,
+    bench_build_walk,
 );
 criterion_main!(benches);

@@ -28,6 +28,22 @@ private let log = Logger(
     category: "HeddleVolume"
 )
 
+/// Instruments signpost emitter. Each FSKit hot op (`lookupItem`,
+/// `getAttributes`, `read`, `enumerateDirectory`) brackets its
+/// Swift body + Rust dispatch in a signpost interval, so Instruments
+/// shows per-op latency in a swimlane and the difference between
+/// "Swift took N µs" and "Rust took M µs" is visible without an
+/// attached debugger.
+///
+/// Profile with: `xcrun xctrace record --template 'Time Profiler'
+/// --launch HeddleHost` and add a signpost lane filtered to the
+/// `sh.heddle.HeddleFSModule` subsystem.
+@available(macOS 12.0, *)
+private let signposter = OSSignposter(
+    subsystem: "sh.heddle.HeddleFSModule",
+    category: "FSOps"
+)
+
 /// Our convention: Rust `NodeId::ROOT == 1`.
 let heddleRootInode: UInt64 = 1
 
@@ -188,6 +204,9 @@ extension HeddleVolume: FSVolume.Operations {
         of item: FSItem,
         replyHandler: @escaping (FSItem.Attributes?, Error?) -> Void
     ) {
+        let interval = signposter.beginInterval("getAttributes")
+        defer { signposter.endInterval("getAttributes", interval) }
+
         guard let inode = nodeID(forItem: item) else {
             replyHandler(nil, POSIXError(.EINVAL))
             return
@@ -227,6 +246,9 @@ extension HeddleVolume: FSVolume.Operations {
         inDirectory directory: FSItem,
         replyHandler: @escaping (FSItem?, FSFileName?, Error?) -> Void
     ) {
+        let interval = signposter.beginInterval("lookupItem")
+        defer { signposter.endInterval("lookupItem", interval) }
+
         guard let parentInode = nodeID(forItem: directory) else {
             replyHandler(nil, nil, POSIXError(.EINVAL))
             return
@@ -328,6 +350,9 @@ extension HeddleVolume: FSVolume.Operations {
         packer: FSDirectoryEntryPacker,
         replyHandler: @escaping (FSDirectoryVerifier, Error?) -> Void
     ) {
+        let interval = signposter.beginInterval("enumerateDirectory")
+        defer { signposter.endInterval("enumerateDirectory", interval) }
+
         guard let dirInode = nodeID(forItem: directory) else {
             replyHandler(verifier, POSIXError(.EINVAL))
             return
@@ -466,6 +491,9 @@ extension HeddleVolume: FSVolume.ReadWriteOperations {
         into buffer: FSMutableFileDataBuffer,
         replyHandler: @escaping (Int, Error?) -> Void
     ) {
+        let interval = signposter.beginInterval("read")
+        defer { signposter.endInterval("read", interval) }
+
         guard let inode = nodeID(forItem: item) else {
             replyHandler(0, POSIXError(.EINVAL))
             return
