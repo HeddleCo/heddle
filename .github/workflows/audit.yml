@@ -13,14 +13,14 @@ name: Supply-chain audit
 # even if no one has pushed code).
 
 on:
+  # Run on every PR (no paths filter). If we limited to Cargo*/deny.toml
+  # changes and this workflow is set as a Required check, GitHub leaves the
+  # required-but-skipped run pending forever for PRs that don't touch those
+  # files, blocking merge. Always-run keeps the gate workable as a Required
+  # check; the work itself is fast enough that it doesn't matter.
   pull_request:
     branches:
       - main
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - 'deny.toml'
-      - '.github/workflows/audit.yml'
   push:
     branches:
       - main
@@ -50,6 +50,11 @@ jobs:
         with:
           # `check all` runs advisories + bans + licenses + sources in one pass.
           command: check all
+          # Pin a modern toolchain explicitly. The action's default falls
+          # back to Rust 1.71, but this workspace is `edition = "2024"`
+          # (workspace Cargo.toml), which requires Rust 1.85+. Without
+          # this, cargo-deny errors out before policy checks run.
+          rust-version: stable
 
   cargo-audit:
     name: cargo-audit
