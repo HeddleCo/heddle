@@ -117,6 +117,62 @@ pub fn manifest_path(heddle_dir: &Path, thread: &str) -> PathBuf {
         .join("manifest.toml")
 }
 
+/// Summary of a single materialized thread, gathered by walking
+/// `<heddle_dir>/threads/`. Stable enough for `heddle daemon status`
+/// and `heddle thread list` to render; expand as the daemon grows
+/// new observability needs.
+#[derive(Clone, Debug)]
+pub struct MaterializedThreadSummary {
+    /// Thread name (the directory under `threads/`).
+    pub thread: String,
+    /// Recorded state at materialize time.
+    pub state_id: ChangeId,
+    /// Recorded uncompressed tree hash at materialize time.
+    pub tree_hash: ContentHash,
+    /// UNIX-epoch seconds at materialize time.
+    pub materialized_at: u64,
+    /// Number of files tracked by the manifest.
+    pub file_count: usize,
+}
+
+/// Walk `<heddle_dir>/threads/` and return one summary per thread
+/// whose manifest parses. Threads with malformed or schema-mismatch
+/// manifests are silently skipped — callers that care can re-read
+/// individual manifests via [`read_manifest`].
+pub fn list_thread_manifests(heddle_dir: &Path) -> io::Result<Vec<MaterializedThreadSummary>> {
+    let threads_dir = heddle_dir.join("threads");
+    let entries = match fs::read_dir(&threads_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(enrich_fs_error(&threads_dir, "listing", e)),
+    };
+    let mut summaries = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        match read_manifest(heddle_dir, &name) {
+            Ok(Some(m)) => summaries.push(MaterializedThreadSummary {
+                thread: name,
+                state_id: m.state_id,
+                tree_hash: m.tree_hash,
+                materialized_at: m.materialized_at,
+                file_count: m.files.len(),
+            }),
+            // Malformed / wrong schema / missing: skip rather than
+            // poison the whole listing. The user can introspect the
+            // bad one directly if they care.
+            Ok(None) | Err(_) => continue,
+        }
+    }
+    summaries.sort_by(|a, b| a.thread.cmp(&b.thread));
+    Ok(summaries)
+}
+
 /// Read the on-disk manifest for `thread`. Returns `Ok(None)` when no
 /// manifest exists yet (thread has never been materialized through
 /// this code path). Returns an error on malformed TOML or a
@@ -236,6 +292,41 @@ mod tests {
     fn read_missing_returns_none() {
         let dir = TempDir::new().unwrap();
         assert!(read_manifest(dir.path(), "no-such").unwrap().is_none());
+    }
+
+    #[test]
+    fn list_returns_sorted_summaries_for_present_manifests() {
+        let dir = TempDir::new().unwrap();
+        let m1 = ThreadManifest::new(cid(), h(1));
+        let mut m2 = ThreadManifest::new(cid(), h(2));
+        m2.files.insert(
+            "a.txt".to_string(),
+            ManifestFile {
+                hash: h(9),
+                inode: 1,
+                mtime_ns: 0,
+                ctime_ns: 0,
+                mode: 0o100644,
+            },
+        );
+        write_manifest(dir.path(), "zebra", &m1).unwrap();
+        write_manifest(dir.path(), "alpha", &m2).unwrap();
+        let summaries = list_thread_manifests(dir.path()).unwrap();
+        assert_eq!(summaries.len(), 2);
+        // Sorted by name → alpha first.
+        assert_eq!(summaries[0].thread, "alpha");
+        assert_eq!(summaries[0].tree_hash, h(2));
+        assert_eq!(summaries[0].file_count, 1);
+        assert_eq!(summaries[1].thread, "zebra");
+        assert_eq!(summaries[1].tree_hash, h(1));
+        assert_eq!(summaries[1].file_count, 0);
+    }
+
+    #[test]
+    fn list_empty_when_no_threads_dir() {
+        let dir = TempDir::new().unwrap();
+        let summaries = list_thread_manifests(dir.path()).unwrap();
+        assert!(summaries.is_empty());
     }
 
     #[test]
