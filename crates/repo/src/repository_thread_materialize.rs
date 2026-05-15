@@ -134,8 +134,16 @@ impl Repository {
         }
 
         // 1. Walk the on-disk worktree → fresh Tree (also stores
-        //    every blob it sees as a side effect).
-        let new_tree = self.build_tree(root)?;
+        //    every blob it sees as a side effect). When we have a
+        //    manifest, pass it as a stat-cache so unchanged files
+        //    skip the read+hash cycle entirely. Files that DID
+        //    change still get the full treatment, so correctness
+        //    is preserved; we just avoid the redundant work for
+        //    the (usually large) majority.
+        let new_tree = match existing_manifest.as_ref() {
+            Some(m) => self.build_tree_with_stat_cache(root, m)?,
+            None => self.build_tree(root)?,
+        };
         let new_tree_hash = self.store().put_tree(&new_tree)?;
 
         // 2. Content-hash no-op (slow path equivalent of the
