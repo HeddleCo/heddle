@@ -1538,24 +1538,26 @@ pub(crate) fn cmd_thread_switch(cli: &Cli, repo: &Repository, name: String) -> R
     // git inflicts. Errors here surface loudly — silently losing
     // the agent's work is the failure mode we are most allergic to.
     //
-    // Only runs when:
+    // Fires when:
     //   * HEAD is currently attached to a thread (so there's a
-    //     source thread to capture), AND
-    //   * that thread has a dedicated worktree we can walk
-    //     (`find_by_thread` returns a non-empty execution path).
-    //
-    // For the legacy shared-worktree case (the thread shares
-    // `repo.root()`), the user typically runs `heddle capture`
-    // themselves and we don't auto-capture here — `goto` further
-    // down would overwrite an unflagged dirty worktree. Surfacing
-    // that case with a clear error is a follow-up.
+    //     source thread to capture).
+    //   * Target differs from source (no-op self-switch).
+    //   * The source thread has a non-empty recorded execution
+    //     path that exists on disk. We capture there regardless of
+    //     whether it equals `repo.root()` — when the user runs
+    //     `heddle thread switch` from inside the source's own
+    //     worktree, `repo.root()` IS the execution path, and that's
+    //     exactly when we MOST want to capture (the user has been
+    //     editing here). Found during dogfood.
     let auto_capture_outcome = match repo.head_ref()? {
-        Head::Attached { thread: source_thread } if source_thread != name => {
+        Head::Attached {
+            thread: source_thread,
+        } if source_thread != name => {
             let manager = ThreadManager::new(repo.heddle_dir());
             let source_path = manager
                 .find_by_thread(&source_thread)?
                 .map(|t| t.execution_path)
-                .filter(|p| !p.as_os_str().is_empty() && p != repo.root());
+                .filter(|p| !p.as_os_str().is_empty());
             match source_path {
                 Some(path) if path.exists() => {
                     let outcome = repo
