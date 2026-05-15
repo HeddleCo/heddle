@@ -19,7 +19,6 @@ targets = [
     "aarch64-apple-darwin",
     "x86_64-pc-windows-msvc",
 ]
-all-features = false
 
 [output]
 feature-depth = 1
@@ -42,6 +41,18 @@ ignore = [
     # Marvin attack precondition is not present on our paths. Revisit when
     # rsa 0.10 (with constant-time decryption) ships.
     { id = "RUSTSEC-2023-0071", reason = "rsa 0.9 Marvin timing sidechannel; precondition (attacker-chosen ciphertext decryption) not present in Heddle's signature-verification use; tracked upstream" },
+
+    # The next four advisories all stem from a single transitive dep chain:
+    #   aws-sdk-s3 → aws-smithy-runtime → aws-smithy-http-client → hyper-rustls 0.24 → rustls 0.21 → rustls-webpki 0.101 / rustls-pemfile 2
+    # Heddle's *direct* deps pin rustls 0.23 (see workspace Cargo.toml) but
+    # aws-smithy-http-client 1.1.x is on the old rustls 0.21 line. Fixing it
+    # requires bumping aws-sdk-s3 to a version whose smithy stack uses
+    # rustls 0.23 — out of scope for this gate-landing PR. Tracked as a
+    # follow-up; remove these ignores in the same PR that bumps aws-sdk-s3.
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101: wildcard SAN constraint bypass. Transitive via aws-sdk-s3 → smithy-http-client → old rustls 0.21. Heddle doesn't validate certificates with wildcard name constraints on attacker-supplied trust anchors; mitigation is the aws-sdk-s3 bump tracked as a follow-up." },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101: URI name constraint accepted. Same transitive chain as RUSTSEC-2026-0099; same mitigation path." },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101: reachable panic parsing malformed CRL. Heddle does not consume attacker-supplied CRLs over the aws-sdk-s3 path (S3 endpoint TLS uses a small fixed root set); same mitigation path." },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 2.2: unmaintained notice (not a vulnerability). Declared by heddle-client and heddle-cli-shared via Cargo.toml but not actually imported by any .rs file in those crates — likely vestigial. Recommended follow-up: remove the dep, which would eliminate this advisory entirely. Out of scope for the gate-landing PR." },
 ]
 
 # ---------------------------------------------------------------------------
@@ -73,6 +84,11 @@ allow = [
     # the OpenSSL component is OSI-approved and BSD-style with an advertising
     # clause we satisfy via README attribution.
     "OpenSSL",
+    # CDLA-Permissive-2.0: data license (Community Data License Agreement —
+    # Permissive), used by webpki-roots to ship Mozilla's CA root certificate
+    # bundle. It's a permissive license tailored for datasets; including the
+    # cert bundle in our distribution is the intended use. Allow.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 # Per-crate exceptions go here if a single dependency needs a license that
