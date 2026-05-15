@@ -20,6 +20,14 @@ public surface:
    verify-hook fail-closed, attribution propagation, `heddle start`
    cwd, and Stop-hook timing.
 
+When your change touches a stable surface (a public API on one of the
+crates listed in [docs/STABILITY.md](docs/STABILITY.md) §2.1, a format-
+version constant under `crates/objects/src/object/`, the oplog or
+ref-summary version, the `heddle.v1` proto package, or a Tier-`Everyday`
+CLI verb / flag), read [docs/STABILITY.md](docs/STABILITY.md) first —
+it sets the SemVer and deprecation rules that govern when such a change
+needs a major bump and when it needs a deprecation cycle.
+
 ## Build and test
 
 ```bash
