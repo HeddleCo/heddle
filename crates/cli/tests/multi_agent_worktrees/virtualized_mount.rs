@@ -135,6 +135,7 @@ fn mount_path_from_start(raw: &str) -> String {
 }
 
 #[test]
+#[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn virtualized_from_other_thread_head_serves_that_threads_tip() {
     // S1: setup_repo's initial snapshot. greet.txt = "S1".
     let main = setup_repo("greet.txt", "S1");
@@ -205,6 +206,7 @@ fn virtualized_from_other_thread_head_serves_that_threads_tip() {
 }
 
 #[test]
+#[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn virtualized_from_short_change_id_serves_that_state() {
     // S1: setup_repo's initial snapshot. greet.txt = "S1".
     let main = setup_repo("greet.txt", "S1");
@@ -252,6 +254,7 @@ fn virtualized_from_short_change_id_serves_that_state() {
 }
 
 #[test]
+#[ignore = "requires Linux + FUSE + heddle built with --features mount"]
 fn virtualized_from_head_tilde_serves_parent_state() {
     // S1: setup_repo's initial snapshot. greet.txt = "S1".
     let main = setup_repo("greet.txt", "S1");
