@@ -130,6 +130,14 @@ fn git_overlay_interop_fetch_sync_then_heddle_status_stays_clean() {
         ],
     );
     configure_git(&upstream);
+    // The bare origin's HEAD still points to the pre-seed `master` ref
+    // (which was never pushed), so git warns "remote HEAD refers to
+    // nonexistent ref" and leaves the clone on an unborn `master`.
+    // Explicitly switch to the only branch that actually exists so that
+    // the subsequent commit lands on `main`, not `master`, and the push
+    // of `origin main` succeeds on CI runners where init.defaultBranch
+    // is not configured to `main`.
+    git(&upstream, &["switch", "main"]);
     commit_file(&upstream, "story.txt", "one\ntwo\n", "advance upstream");
     git(&upstream, &["push", "origin", "main"]);
     git(&work, &["fetch", "origin"]);

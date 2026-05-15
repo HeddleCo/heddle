@@ -93,6 +93,12 @@ fn every_state_changing_rpc_routes_through_dedup() {
         .join("src")
         .join("server")
         .join("grpc_hosted_impl");
+    // The `crates/server` tree lives in the closed-source weft workspace
+    // and is not present in the OSS heddle repo. Skip the directory scan
+    // (and implicitly pass) when building outside that monorepo.
+    if !server_impl_dir.exists() {
+        return;
+    }
     let mut handlers: BTreeMap<String, (PathBuf, usize, String)> = BTreeMap::new();
     for entry in std::fs::read_dir(&server_impl_dir)
         .unwrap_or_else(|e| panic!("read dir {}: {e}", server_impl_dir.display()))

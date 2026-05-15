@@ -508,6 +508,7 @@ fn test_native_pack_size_vs_raw_payload() {
 }
 
 #[test]
+#[ignore = "release-build perf budget; run with --include-ignored --release"]
 fn test_native_pack_encode_decode_benchmark() {
     let objects = sample_transport_objects();
     let iterations = 10;
@@ -533,6 +534,7 @@ fn test_native_pack_encode_decode_benchmark() {
 }
 
 #[test]
+#[ignore = "release-build perf budget; run with --include-ignored --release"]
 fn test_fs_pack_build_and_read_benchmark() {
     let objects = sample_fs_pack_objects();
     let mut builder = PackBuilder::new(CompressionConfig::default());

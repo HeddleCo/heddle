@@ -57,6 +57,11 @@ s3 = ["objects/s3", "dep:tokio"]
 # resolver supports. `semantic`'s `common-languages` covers Rust,
 # Python, JS, TS; `lang-go` adds Go.
 tree-sitter-symbols = ["dep:semantic", "semantic/lang-go", "dep:state_review"]
+# Alias so that `--workspace --features semantic` (used by the
+# Coverage CI job) resolves cleanly across all crates.  The dep is
+# declared with the `dep:` prefix, so Cargo does not auto-create an
+# implicit `semantic` feature; this line makes it explicit.
+semantic = ["tree-sitter-symbols"]
 
 [dev-dependencies]
 hex.workspace = true
