@@ -66,6 +66,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use lru::LruCache;
+
 use objects::{
     object::{
         Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
@@ -397,6 +399,64 @@ pub(crate) struct MountInner {
     pending: Mutex<Pending>,
     promotion: RwLock<PromotionPolicy>,
     mounted_at: SystemTime,
+    /// Materialised-blob cache. Without this every kernel `read`
+    /// syscall re-decompresses the full blob from the object store,
+    /// which makes chunked + mmap reads ~200× slower than vanilla FS
+    /// on multi-MB files (see `crates/mount/benches/mount_read_paths.rs`).
+    /// Bounded by `BLOB_CACHE_TOTAL_BYTES` to keep daemon memory in
+    /// check; an Arc clone is the hot-path cost on hit.
+    blob_cache: Mutex<BlobCache>,
+}
+
+/// Total bytes the per-mount blob cache will retain across all
+/// entries before evicting the least-recently-used. Chosen so a
+/// medium working set (~mid-size cargo target dir) fits in memory
+/// without the cache dominating RSS.
+const BLOB_CACHE_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+
+/// Per-blob LRU keyed by content hash. Holds `Arc<[u8]>` so hits
+/// are a pointer bump rather than a copy. Eviction is byte-bounded:
+/// inserting a new entry evicts the oldest until the running total
+/// fits under [`BLOB_CACHE_TOTAL_BYTES`].
+struct BlobCache {
+    inner: LruCache<ContentHash, Arc<[u8]>>,
+    bytes: usize,
+}
+
+impl BlobCache {
+    fn new() -> Self {
+        Self {
+            inner: LruCache::unbounded(),
+            bytes: 0,
+        }
+    }
+
+    fn get(&mut self, hash: &ContentHash) -> Option<Arc<[u8]>> {
+        self.inner.get(hash).cloned()
+    }
+
+    fn insert(&mut self, hash: ContentHash, bytes: Arc<[u8]>) {
+        let size = bytes.len();
+        // A single oversized blob bypasses the cache entirely so it
+        // doesn't evict the whole working set. Callers still get the
+        // freshly-loaded `Arc` for this read; the next read on the
+        // same hash will reload — accepted, since the alternative is
+        // a 256 MB churn on every 300 MB blob touch.
+        if size > BLOB_CACHE_TOTAL_BYTES {
+            return;
+        }
+        if let Some(prev) = self.inner.put(hash, bytes) {
+            self.bytes = self.bytes.saturating_sub(prev.len());
+        }
+        self.bytes += size;
+        while self.bytes > BLOB_CACHE_TOTAL_BYTES {
+            let Some((_evicted_hash, evicted)) = self.inner.pop_lru() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(evicted.len());
+        }
+    }
+
 }
 
 /// Owns the worker thread + its shutdown signal. Dropping this joins
@@ -461,6 +521,7 @@ impl ContentAddressedMount {
             pending: Mutex::new(Pending::default()),
             promotion: RwLock::new(PromotionPolicy::default()),
             mounted_at: SystemTime::now(),
+            blob_cache: Mutex::new(BlobCache::new()),
         });
         let sweeper = spawn_sweep_worker(&inner);
         Ok(Self {
@@ -517,12 +578,38 @@ impl ContentAddressedMount {
             .ok_or_else(|| MountError::NotFound(format!("tree {hash}")))
     }
 
-    fn load_blob_bytes(&self, hash: &ContentHash) -> Result<Vec<u8>> {
+    /// Drop every cached blob. The next `read` on each blob will hit
+    /// the object store again. Exposed for benchmarks that want to
+    /// measure cold-cache cost without rebuilding the whole mount.
+    /// Cheap (single Mutex lock + HashMap clear) so it's safe to call
+    /// per Criterion iteration.
+    pub fn clear_blob_cache(&self) {
+        let mut cache = self.inner.blob_cache.lock().expect("blob cache lock");
+        cache.inner.clear();
+        cache.bytes = 0;
+    }
+
+    fn load_blob_bytes(&self, hash: &ContentHash) -> Result<Arc<[u8]>> {
+        if let Some(hit) = self
+            .inner
+            .blob_cache
+            .lock()
+            .expect("blob cache lock")
+            .get(hash)
+        {
+            return Ok(hit);
+        }
         let blob = self
             .store()
             .get_blob(hash)?
             .ok_or_else(|| MountError::NotFound(format!("blob {hash}")))?;
-        Ok(blob.into_content())
+        let bytes: Arc<[u8]> = Arc::from(blob.into_content().into_boxed_slice());
+        self.inner
+            .blob_cache
+            .lock()
+            .expect("blob cache lock")
+            .insert(*hash, Arc::clone(&bytes));
+        Ok(bytes)
     }
 
     /// Header-only size lookup. Avoids loading the full blob just to
@@ -830,25 +917,22 @@ impl ContentAddressedMount {
         out.into_iter().collect()
     }
 
-    /// Read the bytes currently buffered (hot) or promoted (warm) for
-    /// `path`. Used by `read` when serving from the pending tier.
-    fn pending_bytes(&self, path: &Path) -> Result<Option<Vec<u8>>> {
-        // Snapshot the hot buffer or the warm entry under the lock,
-        // then drop it before doing any IO.
-        let warm_blob = {
-            let pending = self.inner.pending.lock().expect("pending lock");
-            if let Some(node_id) = pending.hot_by_path.get(path)
-                && let Some(buf) = pending.hot.get(node_id)
-            {
-                return Ok(Some(buf.bytes.clone()));
-            }
-            pending.warm.get(path).map(|e| e.blob)
-        };
-        match warm_blob {
-            Some(blob) => Ok(Some(self.load_blob_bytes(&blob)?)),
-            None => Ok(None),
-        }
+}
+
+/// Copy `[offset, offset+buf.len())` from `src` into `buf`, returning
+/// the number of bytes actually copied (0 when `offset` is past EOF,
+/// or `min(buf.len(), src.len() - offset)` otherwise). Pulled out so
+/// the `read` hot path is a single slice copy rather than a Vec
+/// allocation per call.
+#[inline]
+fn copy_into(src: &[u8], offset: u64, buf: &mut [u8]) -> usize {
+    let offset = offset as usize;
+    if offset >= src.len() {
+        return 0;
     }
+    let take = std::cmp::min(buf.len(), src.len() - offset);
+    buf[..take].copy_from_slice(&src[offset..offset + take]);
+    take
 }
 
 /// What `pending_lookup` found at a given path.
@@ -1101,39 +1185,51 @@ impl PlatformShell for ContentAddressedMount {
 
     fn read(&self, node: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize> {
         let record = self.record_for(node)?;
-        let bytes = match &record {
-            NodeRecord::PendingFile { path, .. } => self
-                .pending_bytes(path)?
-                .ok_or_else(|| MountError::Stale(format!("pending file {}", path.display())))?,
-            NodeRecord::File { blob, .. } | NodeRecord::Symlink { blob } => {
-                // Even for File records we may have a buffered
-                // overwrite — handled by the `hot_by_path` lookup
-                // above when the platform shell goes through `lookup`.
-                // Direct reads through a stable inode bypass that
-                // path; if there's a hot buffer for this NodeId we
-                // serve it first.
-                let pending = self.inner.pending.lock().expect("pending lock");
-                if let Some(buf) = pending.hot.get(&node.0) {
-                    buf.bytes.clone()
-                } else {
-                    drop(pending);
-                    self.load_blob_bytes(blob)?
+
+        // Hot-tier fast path: if there's an in-flight buffer for
+        // *this* NodeId, copy the requested slice directly under the
+        // lock without cloning the whole buffer. Sub-microsecond on
+        // small writes; avoids one `Vec::clone` per `read` callback.
+        {
+            let pending = self.inner.pending.lock().expect("pending lock");
+            if let Some(hot) = pending.hot.get(&node.0) {
+                return Ok(copy_into(&hot.bytes, offset, buf));
+            }
+        }
+
+        match &record {
+            NodeRecord::PendingFile { path, .. } => {
+                // Same shape, keyed by path: another NodeId may own
+                // the buffer (e.g. after rename/coalesce).
+                let warm_blob = {
+                    let pending = self.inner.pending.lock().expect("pending lock");
+                    if let Some(id) = pending.hot_by_path.get(path).copied()
+                        && let Some(hot) = pending.hot.get(&id)
+                    {
+                        return Ok(copy_into(&hot.bytes, offset, buf));
+                    }
+                    pending.warm.get(path).map(|e| e.blob)
+                };
+                match warm_blob {
+                    Some(blob) => {
+                        let bytes = self.load_blob_bytes(&blob)?;
+                        Ok(copy_into(&bytes, offset, buf))
+                    }
+                    None => Err(MountError::Stale(format!(
+                        "pending file {}",
+                        path.display()
+                    ))),
                 }
             }
-            _ => {
-                return Err(MountError::NotFound(format!(
-                    "read on non-file node {}",
-                    node.0
-                )));
+            NodeRecord::File { blob, .. } | NodeRecord::Symlink { blob } => {
+                let bytes = self.load_blob_bytes(blob)?;
+                Ok(copy_into(&bytes, offset, buf))
             }
-        };
-        let offset = offset as usize;
-        if offset >= bytes.len() {
-            return Ok(0);
+            _ => Err(MountError::NotFound(format!(
+                "read on non-file node {}",
+                node.0
+            ))),
         }
-        let take = std::cmp::min(buf.len(), bytes.len() - offset);
-        buf[..take].copy_from_slice(&bytes[offset..offset + take]);
-        Ok(take)
     }
 
     fn write(&self, node: NodeId, offset: u64, data: &[u8]) -> Result<usize> {
@@ -1201,7 +1297,10 @@ impl PlatformShell for ContentAddressedMount {
         };
         let seed_bytes = match seed {
             Seed::None => None,
-            Seed::Blob(hash) => Some(self.load_blob_bytes(&hash)?),
+            // The hot buffer is owned + mutated, so we materialize a
+            // Vec here. One alloc + copy per first-write per file;
+            // subsequent writes hit the existing buffer.
+            Seed::Blob(hash) => Some((*self.load_blob_bytes(&hash)?).to_vec()),
         };
 
         // Phase 2: re-acquire the lock, install or update the hot

@@ -12,6 +12,11 @@ categories.workspace = true
 [dependencies]
 bytes.workspace = true
 libc.workspace = true
+# Bounded LRU cache for materialised blob bytes. Read benchmarks
+# showed chunked / mmap-style reads were dominated by re-hydrating
+# the same blob from the object store on every kernel `read` call.
+# This cache short-circuits that into an `Arc<[u8]>` clone.
+lru = { workspace = true }
 objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
 refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.2" }
@@ -52,9 +57,18 @@ windows = { version = "0.58", features = [
 
 [dev-dependencies]
 chrono.workspace = true
+criterion = "0.8"
 oplog = { path = "../oplog", package = "heddle-oplog" }
 proptest.workspace = true
 tempfile.workspace = true
+
+# Cross-platform PlatformShell microbench. Walks `lookup`, `read`,
+# `enumerate`, `attrs` against both `ContentAddressedMount` and a
+# `std::fs` baseline so we can see how far each operation sits from
+# vanilla-FS time.
+[[bench]]
+name = "mount_read_paths"
+harness = false
 
 [features]
 default = []

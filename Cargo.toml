@@ -54,6 +54,7 @@ hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
 libc = "0.2"
+lru = "0.16"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 memmap2 = "0.9"
 notify = "8"
