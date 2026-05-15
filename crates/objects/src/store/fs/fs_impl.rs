@@ -437,9 +437,13 @@ impl ObjectStore for FsStore {
     /// the slow way.
     fn loose_blob_path(&self, hash: &ContentHash) -> Option<PathBuf> {
         let path = hash_path(&blobs_dir(&self.root), hash);
-        // 9 bytes is enough to recognise the modern compression header
-        // (LEGACY_COMPRESSED_HEADER_LEN = 5 also fits inside).
-        let header = read_file_header(&path, 9).ok().flatten()?;
+        // Must cover the 9-byte modern header **plus** the 4-byte
+        // ZSTD magic that `is_compressed` checks. Reading only 9
+        // bytes makes `is_compressed` return false on a properly-
+        // compressed blob, and we'd hand the caller the compressed
+        // file path — `clonefile`/copy would then materialize
+        // gibberish. Same off-by-4 we fixed in `BLOB_HEADER_PEEK`.
+        let header = read_file_header(&path, BLOB_HEADER_PEEK).ok().flatten()?;
         if is_compressed(&header.0) {
             return None;
         }
