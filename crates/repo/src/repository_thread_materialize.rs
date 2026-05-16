@@ -362,10 +362,41 @@ fn stat_cache_no_op(
     let ignore_matcher = crate::worktree_ignore::WorktreeIgnoreMatcher::new(&ignore_patterns)
         .with_nested_worktree_exclusions(nested_exclusions);
 
+    // Manifests only record files+symlinks, but Heddle's tree
+    // builder materialises empty directories as their own tree
+    // entries. So a no-op predicate that only checks `manifest.files`
+    // would miss "user added or removed an empty directory" —
+    // `seen.len() == manifest.files.len()` is still true on the file
+    // side, but the on-disk tree no longer matches what `build_tree`
+    // would produce.
+    //
+    // Derive the set of directories implied by every manifest file's
+    // ancestors (the "expected dirs") so the directory leg of the
+    // walk has something to compare against. Empty-dir additions
+    // surface as a walk-side dir that isn't in `expected_dirs`;
+    // empty-dir removals surface as an expected dir that the walk
+    // never visited.
+    let expected_dirs: HashSet<String> = {
+        let mut set = HashSet::new();
+        for key in manifest.files.keys() {
+            let path = Path::new(key);
+            let mut cur = path.parent();
+            while let Some(p) = cur {
+                if p.as_os_str().is_empty() {
+                    break;
+                }
+                set.insert(p.to_string_lossy().into_owned());
+                cur = p.parent();
+            }
+        }
+        set
+    };
+
     // Walk the worktree. For every file we see, check it against the
     // manifest. Track which manifest paths we've actually seen so we
     // can detect deletions afterwards.
     let mut seen: HashSet<String> = HashSet::with_capacity(manifest.files.len());
+    let mut seen_dirs: HashSet<String> = HashSet::with_capacity(expected_dirs.len());
     let mut walker = WalkBuilder::new(root);
     walker
         .hidden(false)
@@ -418,6 +449,15 @@ fn stat_cache_no_op(
             None => return Ok(false),
         };
         if file_type.is_dir() {
+            // Directory leg: an empty dir added by the user has no
+            // manifest entry (manifests only record files +
+            // symlinks) but a tree-build *would* emit a tree entry
+            // for it. Bail on any directory the manifest doesn't
+            // imply; the slow path will incorporate the addition.
+            if !expected_dirs.contains(&rel_str) {
+                return Ok(false);
+            }
+            seen_dirs.insert(rel_str);
             continue;
         }
 
@@ -447,9 +487,17 @@ fn stat_cache_no_op(
         seen.insert(rel_str);
     }
 
-    // Final pass: every manifest entry must have been seen. If
-    // any wasn't, a file was deleted out of band.
+    // Final pass: every manifest entry must have been seen (file
+    // deletion check) and every manifest-implied directory must
+    // have been seen (directory deletion check). The dir-side
+    // check catches `rmdir` of an empty directory that was part
+    // of the materialised tree — its files are also gone (so the
+    // file side already declines) but if it had no files to begin
+    // with the file side alone would false-pass.
     if seen.len() != manifest.files.len() {
+        return Ok(false);
+    }
+    if seen_dirs.len() != expected_dirs.len() {
         return Ok(false);
     }
     Ok(true)
@@ -721,6 +769,105 @@ mod tests {
         // still appear in the refreshed manifest.
         assert!(refreshed.files.contains_key("alpha.txt"));
         assert!(refreshed.files.contains_key("beta.txt"));
+    }
+
+    /// Capture from a *dedicated* thread worktree (one whose path
+    /// differs from `repo.root()`) must validate symlinks against
+    /// that worktree's path, not against the main repo root.
+    /// Pre-fix the walker passed `repo.root()` as the symlink-
+    /// escape base, so every symlink inside a dedicated thread
+    /// path was rejected as "outside the repo" the moment the
+    /// slow path ran — `thread switch` auto-capture broke for any
+    /// thread that contained a symlink. Reproduces the codex P2
+    /// from review pass 2.
+    #[cfg(unix)]
+    #[test]
+    fn capture_thread_from_disk_accepts_symlinks_in_dedicated_worktree() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        // Seed with a file + a symlink pointing inside the repo.
+        fs::write(repo_dir.path().join("target.txt"), b"target\n").unwrap();
+        std::os::unix::fs::symlink("target.txt", repo_dir.path().join("link")).unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        // Materialise into a dedicated worktree — path differs
+        // from `repo.root()`, which is exactly the case that
+        // exposes the bug.
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("thread-worktree");
+        repo.materialize_thread("main", &dest).unwrap();
+
+        // Edit a non-symlink file so the slow path fires (the fast
+        // stat-cache no-op would mask the bug). Sleep so the mtime
+        // observably moves on coarse-granularity filesystems.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(dest.join("target.txt"), b"target v2\n").unwrap();
+
+        // Pre-fix this errored with "symlink target escapes repo"
+        // because `validate_symlink_target` was using `repo.root()`
+        // as the allowed base instead of the walk root.
+        let outcome = repo
+            .capture_thread_from_disk("main", &dest)
+            .expect("capture must accept symlinks inside the dedicated worktree");
+        match outcome {
+            ThreadCaptureOutcome::Captured { .. } => {}
+            ThreadCaptureOutcome::NoOp => panic!("expected Captured; got NoOp"),
+        }
+    }
+
+    /// Empty directory added by the user — manifests only record
+    /// files, but Heddle's tree builder emits a tree entry for the
+    /// new dir. The stat-cache no-op predicate must decline so the
+    /// slow path picks the change up; pre-fix it false-passed and
+    /// `thread switch`'s auto-capture silently dropped the addition.
+    #[test]
+    fn stat_cache_detects_added_empty_directory() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("only.txt"), b"a\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        let manifest = repo.materialize_thread("main", &dest).unwrap();
+
+        // Add an empty directory that has no manifest entry.
+        fs::create_dir_all(dest.join("brand-new-empty-dir")).unwrap();
+
+        assert!(
+            !stat_cache_no_op(&repo, &manifest, &dest).unwrap(),
+            "an added empty directory must invalidate the fast path"
+        );
+    }
+
+    /// Empty directory removed by the user — the manifest expects it
+    /// (its parent path appears as an ancestor of files) but the
+    /// walk never visits it. The dir-side check must decline. Pre-
+    /// fix the fast path would false-pass on this case too.
+    #[test]
+    fn stat_cache_detects_removed_empty_directory() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::create_dir_all(repo_dir.path().join("nested/deep")).unwrap();
+        fs::write(repo_dir.path().join("nested/deep/leaf.txt"), b"leaf\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        let manifest = repo.materialize_thread("main", &dest).unwrap();
+
+        // Remove the leaf file AND its parent dir. The file-side
+        // check already catches the file removal, but if we then
+        // synthesise a fresh leaf elsewhere we'd want the dir-side
+        // check to catch the missing parent on its own too. Use a
+        // slightly different shape: create + remove a sibling dir
+        // whose ancestor matches the manifest's expected set.
+        fs::create_dir_all(dest.join("nested/sibling-empty")).unwrap();
+
+        assert!(
+            !stat_cache_no_op(&repo, &manifest, &dest).unwrap(),
+            "an added empty directory inside an existing parent must invalidate"
+        );
     }
 
     /// Deleted file → fast path declines.

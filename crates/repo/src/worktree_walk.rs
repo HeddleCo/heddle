@@ -133,9 +133,23 @@ pub(crate) fn walk_worktree<P: WorktreeWalkPolicy>(
     policy: &mut P,
 ) -> Result<P::Output> {
     let root_key = String::new();
+    // The `base` argument is what `validate_symlink_target` uses
+    // as the allowed root for symlink-escape checks. Use `dir`
+    // (the walk root), not `repo.root()`, so symlinks inside a
+    // dedicated worktree like `capture_thread_from_disk`'s
+    // materialised thread path validate against that path.
+    //
+    // Pre-fix, base was always `repo.root()`. For the common
+    // `build_tree(self.root)` case the two are identical so
+    // behaviour is unchanged. For `build_tree(thread_path)` —
+    // used by `capture_thread_from_disk` on a dedicated thread
+    // worktree — `dir` and `repo.root()` diverge and the old
+    // wiring rejected *every* symlink inside the thread tree as
+    // "outside the repo", breaking `thread switch` auto-capture
+    // for any thread that contained a symlink.
     walk_directory(
         repo,
-        repo.root(),
+        dir,
         WalkLocation {
             dir,
             key: &root_key,

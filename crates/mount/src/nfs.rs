@@ -376,12 +376,45 @@ impl NFSFileSystem for HeddleNFS {
         Ok(fattr_from(id, attrs.kind, attrs.size, attrs.unix_mode, attrs.nlink, attrs.mtime))
     }
 
-    async fn setattr(&self, id: fileid3, _setattr: sattr3) -> std::result::Result<fattr3, nfsstat3> {
-        // We ignore the requested changes and return the current
-        // attrs. This is the pragmatic minimum that keeps vim and
-        // similar editors happy: they call setattr to truncate
-        // before write, then the write itself overwrites whatever
-        // was there. Mode/uid/gid changes are silently dropped.
+    async fn setattr(&self, id: fileid3, setattr: sattr3) -> std::result::Result<fattr3, nfsstat3> {
+        // Mode/uid/gid/atime/mtime: silently dropped. These are
+        // pure metadata edits with no observable effect on the
+        // captured tree, and refusing them would break the typical
+        // editor save flow (vim, etc. SETATTR-then-WRITE).
+        //
+        // **Size** changes are the dangerous case and we reject
+        // them explicitly. NFS clients commonly issue
+        // `SETATTR size=0` immediately before saving a shorter
+        // version of a file ("truncate-then-write"). Pre-fix this
+        // handler returned `Ok` for the truncation, then the
+        // follow-up `write(offset=0, shorter_bytes)` seeded the
+        // node from the *old* blob and left the old file's tail
+        // bytes hanging off the end — silent data corruption that
+        // any editor save could trigger.
+        //
+        // The mount's `PlatformShell` doesn't yet have a truncate
+        // primitive, so we have no way to honour the request
+        // correctly. Rejecting `NFS3ERR_NOTSUPP` makes the
+        // failure loud and forces the client into a delete+create
+        // path (or surfaces a clear error to the user); that's
+        // strictly better than silently producing wrong bytes in
+        // the CAS.
+        if let nfsserve::nfs::set_size3::size(requested) = setattr.size {
+            let current = self
+                .inner
+                .attrs(NodeId(id))
+                .map_err(|e| mount_err_to_nfs(&e))?
+                .size;
+            if requested != current {
+                tracing::warn!(
+                    node = id,
+                    requested,
+                    current,
+                    "nfs: rejecting setattr size change — truncation not yet supported in shell"
+                );
+                return Err(nfsstat3::NFS3ERR_NOTSUPP);
+            }
+        }
         self.getattr(id).await
     }
 
