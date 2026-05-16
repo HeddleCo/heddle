@@ -358,3 +358,33 @@ impl OpLogBackend for PgOpLogBackend {
         Ok(updated)
     }
 }
+
+// ── Issue #62 regression: current-thread runtime panic ──────────────────────
+#[cfg(test)]
+mod current_thread_runtime_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    /// Issue #62: `PgOpLogBackend`'s sync methods must not panic when the
+    /// caller is on a `current_thread` Tokio runtime. The pre-fix
+    /// `tokio::task::block_in_place(...)` path is only valid on a
+    /// `multi_thread` runtime; on `current_thread` it panics with
+    /// `"can call blocking only when running on the multi-threaded runtime"`.
+    ///
+    /// The pool is built with `connect_lazy` — no real database is required.
+    /// Method calls return an `Err` when the bridged future fails to
+    /// connect, which is fine: this test only asserts that the call returns
+    /// a `Result` instead of panicking.
+    #[tokio::test(flavor = "current_thread")]
+    async fn pg_oplog_methods_do_not_panic_on_current_thread_runtime() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://heddle-test@127.0.0.1:1/heddle_test")
+            .expect("connect_lazy accepts the URL");
+        let backend = PgOpLogBackend::new(Arc::new(pool), Uuid::new_v4());
+        // `last()` is the cheapest read; the panic surfaces inside
+        // `self.block(...)` regardless of which sync method we pick. Result
+        // can be `Ok(None)` or `Err(...)` — only the absence of a panic
+        // matters here.
+        let _ = backend.last();
+    }
+}
