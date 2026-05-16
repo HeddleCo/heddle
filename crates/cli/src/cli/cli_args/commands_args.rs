@@ -1011,6 +1011,22 @@ pub struct CloneArgs {
     /// Leave blob content absent by design and hydrate it explicitly later.
     #[arg(long)]
     pub lazy: bool,
+
+    /// Partial-clone filter spec. Currently only `blob:none` is supported,
+    /// which is a synonym for `--lazy` (skip blob content; hydrate on demand
+    /// later). Other git-style filters such as `tree:0` or `blob:limit=…`
+    /// are rejected.
+    #[arg(long, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
+    pub filter: Option<String>,
+}
+
+fn parse_clone_filter_spec(s: &str) -> Result<String, String> {
+    match s {
+        "blob:none" => Ok(s.to_string()),
+        other => Err(format!(
+            "unsupported --filter spec `{other}`; only `blob:none` is supported today"
+        )),
+    }
 }
 
 /// Arguments for the `session start` command.

@@ -29,6 +29,7 @@ struct CloneOptions {
     thread: Option<String>,
     depth: Option<u32>,
     lazy: bool,
+    filter: Option<String>,
 }
 
 pub async fn cmd_clone(
@@ -38,12 +39,14 @@ pub async fn cmd_clone(
     thread: Option<String>,
     depth: Option<u32>,
     lazy: bool,
+    filter: Option<String>,
 ) -> Result<()> {
     let local_path = Path::new(&local);
     let options = CloneOptions {
         thread,
         depth: depth.filter(|depth| *depth > 0),
         lazy,
+        filter,
     };
 
     if local_path.exists() {
@@ -122,6 +125,12 @@ fn finish_git_overlay_clone(
     options: &CloneOptions,
     remote_label: String,
 ) -> Result<()> {
+    if let Some(filter) = options.filter.as_deref() {
+        return Err(anyhow!(
+            "--filter {} is not available for Git-overlay clones yet; run a full clone",
+            filter
+        ));
+    }
     if options.lazy {
         return Err(anyhow!(
             "lazy clone is not available for Git-overlay clones yet; run a full clone"
@@ -227,8 +236,15 @@ async fn clone_local(
         thread,
         depth,
         lazy,
+        filter,
     } = options;
     let depth = *depth;
+    if let Some(filter) = filter.as_deref() {
+        return Err(anyhow!(
+            "--filter {} is only supported for hosted/network remotes",
+            filter
+        ));
+    }
     if *lazy {
         return Err(anyhow!(
             "lazy clone is only supported for hosted/network remotes"
@@ -319,9 +335,12 @@ async fn clone_network(
         thread,
         depth,
         lazy,
+        filter,
     } = options;
     let depth = *depth;
-    let lazy = *lazy;
+    // `--filter blob:none` is a synonym for `--lazy` on hosted/network
+    // remotes; both produce a clone whose blob content is hydrated on demand.
+    let lazy = *lazy || filter.is_some();
 
     // Create the local directory
     fs::create_dir_all(local_path)?;

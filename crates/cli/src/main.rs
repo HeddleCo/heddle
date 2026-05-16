@@ -757,6 +757,7 @@ async fn main() -> Result<()> {
             thread,
             depth,
             lazy,
+            filter,
         }) => {
             resolve_operation_id(&cli)?;
             cmd_clone(
@@ -766,6 +767,7 @@ async fn main() -> Result<()> {
                 thread.clone(),
                 *depth,
                 *lazy,
+                filter.clone(),
             )
             .await
         }
