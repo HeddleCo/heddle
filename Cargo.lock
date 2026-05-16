@@ -3008,6 +3008,7 @@ name = "heddle-refs"
 version = "0.2.4"
 dependencies = [
  "chrono",
+ "criterion",
  "heddle-objects",
  "heddle-runtime-bridge",
  "rand 0.10.1",
