@@ -228,6 +228,31 @@ impl S3StoreBuilder {
         self
     }
 
+    /// Build the S3 store synchronously.
+    ///
+    /// Equivalent to [`Self::build`] but callable from a sync context — even
+    /// from inside a caller's Tokio runtime, where `Handle::block_on(self.build())`
+    /// would panic with "Cannot start a runtime from within a runtime".
+    ///
+    /// Routes the async `build()` future through a short-lived
+    /// [`RuntimeBridge`] worker thread (its own private current-thread
+    /// runtime), so the caller's runtime is never re-entered. The bridge
+    /// is dropped on return; the resulting [`S3Store`] carries its own
+    /// lazy `OnceLock<RuntimeBridge>` for subsequent sync `ObjectStore`
+    /// calls, so no worker thread lingers beyond the build phase.
+    ///
+    /// `Repository::open` uses this entry point to construct an S3-backed
+    /// store from sync code that may itself be running on a Tokio
+    /// runtime (`#[tokio::main]`, `#[tokio::test]`, a daemon worker).
+    pub fn build_blocking(self) -> crate::store::Result<S3Store> {
+        let bridge = RuntimeBridge::new().map_err(|err| {
+            crate::store::StoreError::Config(format!(
+                "S3 store: spawn worker thread for builder: {err}"
+            ))
+        })?;
+        bridge.block_on(self.build())
+    }
+
     /// Build the S3 store.
     pub async fn build(self) -> crate::store::Result<S3Store> {
         let bucket = self.bucket.ok_or_else(|| {
