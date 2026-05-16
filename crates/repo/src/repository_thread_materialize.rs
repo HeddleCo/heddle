@@ -442,16 +442,46 @@ fn walk_for_no_op(
             return Ok(false);
         };
         let rel_str = rel.to_string_lossy().into_owned();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return Ok(false);
+        };
 
-        // Manifest-first dispatch. The dominant case on the
-        // happy no-op path is "every file is exactly where it
-        // was at materialise time" — those files are *known* to
-        // be past the ignore filter (the materialiser ran the
-        // same matcher), so the hashmap hit lets us skip the
-        // matcher's per-pattern + per-component cost entirely.
-        // The ignore-matcher fall-throughs below cover the
-        // less-common cases (new files, ignored dirs, etc.) and
-        // pay the full check.
+        // Run the ignore matcher *first*, before consulting the
+        // manifest. The previous "manifest-first" dispatch
+        // accepted any manifest hit without re-checking the
+        // matcher, which silently false-passed if the user had
+        // tightened `.heddleignore` (or the in-config ignore set)
+        // between materialise and this capture — `build_tree`
+        // would now exclude the previously-tracked path and
+        // produce a different tree, but the predicate said
+        // "no-op". Always running the matcher first costs a
+        // pattern check per entry but is what makes the
+        // predicate's output match what `build_tree` would do.
+        //
+        // Three outcomes from the matcher:
+        //   * Pruned + in manifest → ignore-config drift; bail
+        //     to slow path so the new tree reflects the new
+        //     exclusion.
+        //   * Pruned + not in manifest → genuinely ignored;
+        //     silently skip without recursing.
+        //   * Not pruned → standard manifest / new-entry
+        //     dispatch below.
+        let pruned = ignore_matcher.should_prune_absolute_path(&path)
+            || ignore_matcher.should_ignore_child(cur, name);
+        if pruned {
+            if manifest.files.contains_key(&rel_str) {
+                // The matcher now wants this path excluded, but
+                // it's in the manifest from materialise time.
+                // Ignore-config drift — let the slow path
+                // rebuild the tree without it.
+                return Ok(false);
+            }
+            continue;
+        }
+
+        // Not pruned. Manifest lookup is the fast path for
+        // tracked files; un-tracked entries fall through to
+        // dir-recursion / new-file detection below.
         if let Some(manifest_entry) = manifest.files.get(&rel_str) {
             // `symlink_metadata` (not `metadata`) so a symlink
             // doesn't transparently follow into the target's
@@ -471,21 +501,6 @@ fn walk_for_no_op(
                 return Ok(false);
             }
             seen.insert(rel_str);
-            continue;
-        }
-
-        // Entry not in the manifest. Could be:
-        //   * a new file/symlink (must bail to slow path), or
-        //   * a subdirectory we need to recurse into, or
-        //   * an ignored entry we should silently skip.
-        // Pay the full ignore-matcher check here; this is the
-        // not-hot fork.
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            return Ok(false);
-        };
-        if ignore_matcher.should_prune_absolute_path(&path)
-            || ignore_matcher.should_ignore_child(cur, name)
-        {
             continue;
         }
 
@@ -924,6 +939,44 @@ mod tests {
             ThreadCaptureOutcome::Captured { .. } => {}
             ThreadCaptureOutcome::NoOp => panic!("expected Captured; got NoOp"),
         }
+    }
+
+    /// Codex pass-5 P1: when the ignore set tightens between
+    /// materialise and capture (e.g. user adds an entry to
+    /// `.heddleignore` covering an already-tracked path), the
+    /// no-op predicate must bail to the slow path so `build_tree`
+    /// can produce the tree that *now* matches the matcher. Pre-
+    /// fix the manifest-first dispatch accepted any manifest hit
+    /// without re-running the matcher, so the predicate silently
+    /// false-passed and `thread switch`'s auto-capture missed
+    /// the real tree delta.
+    #[test]
+    fn stat_cache_detects_ignore_config_tightening() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        // Seed: two files, no .heddleignore yet.
+        fs::write(repo_dir.path().join("keep.txt"), b"keep\n").unwrap();
+        fs::write(repo_dir.path().join("secret.txt"), b"secret\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        let manifest = repo.materialize_thread("main", &dest).unwrap();
+        assert!(manifest.files.contains_key("secret.txt"));
+
+        // Tighten the ignore set in the source repo to exclude
+        // `secret.txt`. The materialised worktree still has it
+        // on disk (we just put it there), but `build_tree` would
+        // now skip it and produce a different tree hash.
+        fs::write(repo_dir.path().join(".heddleignore"), b"secret.txt\n").unwrap();
+
+        assert!(
+            !stat_cache_no_op(&repo, &manifest, &dest).unwrap(),
+            "ignore-config tightening over a tracked path must \
+             invalidate the fast path; pre-fix the predicate \
+             false-passed and auto-capture silently dropped \
+             the resulting tree delta"
+        );
     }
 
     /// Codex pass-3 P2: a *tree-only* empty directory — one that
