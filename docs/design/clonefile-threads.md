@@ -418,11 +418,20 @@ Apple M3 Pro / APFS / release build /
 and in-process probe matching the same shape (20 hashed
 directories, ~64-byte files).
 
-| File count | Cold materialize | Warm materialize | Capture no-op (stat-cache) | Capture single edit |
-|---:        |---:              |---:              |---:                        |---:                 |
-|         1k |           318 ms |           165 ms |                    (≲5 ms) |             (≲20 ms) |
-|        10k |          2.88 s  |          1.55 s  |                    (≲50 ms)|             (≲50 ms) |
-|       100k |     (≈25 s est.) |     (≈15 s est.) |                  (≲500 ms) |             (~1 s est.) |
+| File count | Cold materialize | Capture no-op (stat-cache) | Capture single edit |
+|---:        |---:              |---:                        |---:                 |
+|         1k |           186 ms |                       8 ms |               89 ms |
+|        10k |          2.91 s  |                     103 ms |              284 ms |
+|       100k |     (≈30 s est.) |                  (≈1 s est.) |          (~3 s est.) |
+
+Numbers are post-3-codex-review-passes (commits through `911d64b`).
+The earlier table reported `iter_batched` results that included the
+recursive `TempDir` drop of the per-iteration materialised worktree
+inside the timed region — at 10k files that destructor was 95% of
+the reported time, drowning the actual routine. The bench has since
+been switched to `iter_batched_ref` so the input drops outside the
+measurement; the numbers above are the real routine cost. Probe-
+binary results match within a few percent.
 
 * **Cold materialize** = first time materializing the blobs in this
   store's lifetime; pays for one pack-read + decompress + loose-mirror
@@ -430,23 +439,20 @@ directories, ~64-byte files).
   `~0.29 ms/file` post `AtomicWriteMode::NoSync` + read-side
   hash-verify; the pre-fix per-file cost was ~5 ms dominated by
   `sync_data` + `sync_directory` per loose mirror.
-* **Warm materialize** = same store, second-or-later thread start.
-  The loose mirror already exists from the previous cold run, so
-  this collapses to one `clonefile`/`reflink` + `stat` per file
-  (the per-file `chmod` is gone — loose blobs are opened at mode
-  `0o644` so clonefile already produces the right permissions for
-  non-executable files; the `set_file_mode` call only fires for the
-  executable bit). Bounded by `~0.15 ms/file` — within range of
-  the kernel syscall floor for the pair.
 * **Capture no-op** = `heddle thread switch` from inside a
-  freshly-materialized thread to another thread. The stat-cache
-  fast no-op in `capture_thread_from_disk` short-circuits the entire
-  hash cycle when every manifest entry's `(inode, mtime, ctime,
-  mode)` still matches; cost is one `stat` per tracked file.
+  freshly-materialized thread to another thread, or `heddle capture`
+  in an unchanged worktree. The stat-cache fast no-op in
+  `capture_thread_from_disk` short-circuits the entire hash cycle
+  when every manifest entry's `(inode, mtime, ctime, mode)` still
+  matches; cost is one `lstat` per tracked file plus a constant
+  per-call manifest read (~55 ms for a 10k-entry manifest).
+  Per-file rate is ~10 µs — the kernel's stat-syscall floor.
 * **Capture single edit** = same scenario after touching one file.
   Stat-cache reuse via `build_tree_with_stat_cache` keeps the
-  read+hash work bounded to the single changed file; everything
-  else short-circuits through the cache.
+  read+hash work bounded to the single changed file; constant
+  overhead from the new state write + manifest refresh + ref
+  update accounts for the per-file ratio being worse at 1k than
+  at 10k (the constants amortize better over more files).
 
 100k entries listed as estimates because `/tmp` on the bench host
 runs out of inodes before the fixture finishes; run on a host with
@@ -476,12 +482,14 @@ to ≈12 k clones/sec across cores on M-series APFS).
 
 Scaling:
 - Materialize cold: linear in file count. ~0.29 ms/file × N.
-- Materialize warm: linear in file count. ~0.15 ms/file × N.
-- Capture no-op: linear in file count via `lstat`. ~10 µs/file × N
-  (5 ms for 1k, 50 ms for 10k).
-- Capture small edit: ~10 µs/file × N (stat) + hash-cost of changed
-  bytes. The changed-file count, not the total file count, drives
-  the hash cost.
+- Capture no-op: linear in file count via `lstat`. ~10 µs/file × N.
+  Constant per-call manifest TOML read (~55 ms at 10k entries)
+  becomes the dominant term as N shrinks — at 1k files it's
+  ~7× the stat-walk cost.
+- Capture small edit: same ~10 µs/file × N stat walk plus the new
+  state write + manifest refresh constants (~50 ms each).
+  Changed-byte count drives the hash cost, not the total file
+  count.
 
 ## Cross-platform story
 

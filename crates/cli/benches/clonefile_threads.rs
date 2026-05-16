@@ -84,7 +84,12 @@ fn bench_materialize_cold(c: &mut Criterion) {
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             let (_fixture, repo) = fixture_repo_with_files(count);
-            b.iter_batched(
+            // `iter_batched_ref` so the destination TempDir's
+            // recursive `unlink` of `count` materialised files
+            // happens outside the timed region. Without this, the
+            // 10k+ variants were dominated by destructor noise
+            // rather than the materialize cost itself.
+            b.iter_batched_ref(
                 || TempDir::new().unwrap(),
                 |dest| {
                     let path = dest.path().join("out");
@@ -92,7 +97,6 @@ fn bench_materialize_cold(c: &mut Criterion) {
                         .materialize_thread("main", &path)
                         .expect("materialize");
                     black_box(manifest);
-                    dest
                 },
                 BatchSize::PerIteration,
             );
@@ -108,7 +112,16 @@ fn bench_capture_noop_fast_path(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             // One fresh materialise per iteration: stat-cache no-op
             // is the post-materialise state we want to measure.
-            b.iter_batched(
+            //
+            // Use `iter_batched_ref` (not `iter_batched`): the
+            // closure borrows `&mut input` instead of consuming it,
+            // so the recursive TempDir drop for `count` files
+            // happens *outside* the timed region. With
+            // `iter_batched` the per-iteration cost at 10k files
+            // was ≈98% TempDir destructor noise (≈2 s of
+            // recursive `unlink`) drowning the ≈90 ms actual
+            // routine — measurements were unusable.
+            b.iter_batched_ref(
                 || {
                     let (fixture, repo) = fixture_repo_with_files(count);
                     let dest = TempDir::new().unwrap();
@@ -118,7 +131,7 @@ fn bench_capture_noop_fast_path(c: &mut Criterion) {
                 },
                 |(_fixture, repo, _dest, dest_path)| {
                     let outcome = repo
-                        .capture_thread_from_disk("main", &dest_path)
+                        .capture_thread_from_disk("main", dest_path)
                         .expect("capture");
                     black_box(outcome);
                 },
@@ -134,7 +147,7 @@ fn bench_capture_single_edit(c: &mut Criterion) {
     for &count in &synthetic_file_counts() {
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
-            b.iter_batched(
+            b.iter_batched_ref(
                 || {
                     let (fixture, repo) = fixture_repo_with_files(count);
                     let dest = TempDir::new().unwrap();
@@ -150,7 +163,7 @@ fn bench_capture_single_edit(c: &mut Criterion) {
                 },
                 |(_fixture, repo, _dest, dest_path)| {
                     let outcome = repo
-                        .capture_thread_from_disk("main", &dest_path)
+                        .capture_thread_from_disk("main", dest_path)
                         .expect("capture");
                     black_box(outcome);
                 },
