@@ -36,9 +36,10 @@ tokio = { workspace = true, optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
 aws-smithy-async = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.2", optional = true }
 
 [features]
-s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:async-trait", "dep:tokio"]
+s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:async-trait", "dep:tokio", "dep:runtime-bridge"]
 memory-backend = []
 zstd = ["dep:zstd"]
 

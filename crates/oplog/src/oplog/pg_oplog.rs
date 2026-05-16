@@ -88,7 +88,15 @@ impl PgOpLogBackend {
         F: std::future::Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
     {
-        self.bridge()?.block_on(f)
+        // `block_on` returns `Result<Result<T, HeddleError>, BridgeError>`:
+        // the outer error reports worker liveness (dead / lost reply), the
+        // inner error is the sqlx Result the future produces. Both are
+        // surfaced to callers as `HeddleError::Io`; the bridge error
+        // string identifies which liveness mode tripped so a stuck
+        // PgPool isn't confused with a panicked worker.
+        self.bridge()?.block_on(f).map_err(|err| {
+            HeddleError::Io(io::Error::other(format!("pg-oplog runtime bridge: {err}")))
+        })?
     }
 
     fn row_to_entry(r: &sqlx::postgres::PgRow) -> Result<OpEntry> {

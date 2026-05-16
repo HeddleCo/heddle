@@ -2942,6 +2942,7 @@ dependencies = [
  "blake3",
  "chrono",
  "fs2",
+ "heddle-runtime-bridge",
  "hex",
  "hyper-util",
  "ignore",
