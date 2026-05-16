@@ -268,12 +268,44 @@ pub fn read_manifest(heddle_dir: &Path, thread: &str) -> io::Result<Option<Threa
 /// (verification artefacts, capture journals, etc.) clean up with
 /// the same call.
 pub fn remove_thread_manifest_dir(heddle_dir: &Path, thread: &str) -> io::Result<bool> {
-    let dir = heddle_dir.join("threads").join(thread);
-    match fs::remove_dir_all(&dir) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(enrich_fs_error(&dir, "removing", e)),
+    let threads_root = heddle_dir.join("threads");
+    let dir = threads_root.join(thread);
+    let removed = match fs::remove_dir_all(&dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => return Err(enrich_fs_error(&dir, "removing", e)),
+    };
+    // Sweep empty parent directories left over by slash-namespaced
+    // threads. Dropping `feature/m-thread` removes
+    // `threads/feature/m-thread/` but `threads/feature/` would
+    // otherwise linger — purely cosmetic, but after many dropped
+    // threads the on-disk tree grows visually messy and the user
+    // ends up with a `ls .heddle/threads/` full of empty husks.
+    // Walk upward stopping at the first non-empty parent (another
+    // thread might still live there) or at `threads/` itself
+    // (we don't reap the root, that's heddle-managed).
+    if removed
+        && let Some(mut parent) = dir.parent()
+    {
+        while parent != threads_root {
+            match fs::read_dir(parent).map(|mut it| it.next().is_some()) {
+                Ok(true) => break,                  // sibling thread present
+                Ok(false) => match fs::remove_dir(parent) {
+                    Ok(()) => {}
+                    // Race: another process refilled the dir
+                    // between the read_dir check and the remove —
+                    // treat as "stop, that's their problem now".
+                    Err(_) => break,
+                },
+                Err(_) => break,
+            }
+            match parent.parent() {
+                Some(next) => parent = next,
+                None => break,
+            }
+        }
     }
+    Ok(removed)
 }
 
 /// Atomically write `manifest` to disk for `thread`. Writes to a
@@ -417,5 +449,68 @@ mod tests {
         let mut d = a;
         d.mode = 0o100755;
         assert!(!a.matches(&d));
+    }
+
+    /// `remove_thread_manifest_dir` must reap empty parent directories
+    /// left behind by slash-namespaced thread names so the on-disk
+    /// inventory doesn't grow visually messy after many drops. Stop
+    /// reaping when a sibling thread is still around, and never reap
+    /// the `threads/` root itself.
+    #[test]
+    fn remove_thread_manifest_dir_reaps_empty_parents() {
+        let dir = TempDir::new().unwrap();
+        // Two threads under the same `feature/` parent. Drop one;
+        // `feature/` must survive because the other is still there.
+        let m = ThreadManifest::new(cid(), h(1));
+        write_manifest(dir.path(), "feature/keeper", &m).unwrap();
+        write_manifest(dir.path(), "feature/dropme", &m).unwrap();
+
+        assert!(remove_thread_manifest_dir(dir.path(), "feature/dropme").unwrap());
+        assert!(
+            dir.path().join("threads").join("feature").is_dir(),
+            "sibling thread must keep the `feature/` parent alive"
+        );
+        assert!(
+            dir.path()
+                .join("threads")
+                .join("feature")
+                .join("keeper")
+                .is_dir(),
+            "keeper's directory must be untouched"
+        );
+
+        // Now drop the second one. `feature/` should be reaped, and
+        // `threads/` itself must stay (heddle-managed root).
+        assert!(remove_thread_manifest_dir(dir.path(), "feature/keeper").unwrap());
+        assert!(
+            !dir.path().join("threads").join("feature").exists(),
+            "empty `feature/` parent must be reaped"
+        );
+        assert!(
+            dir.path().join("threads").is_dir(),
+            "the `threads/` root is heddle-managed and must never be reaped"
+        );
+    }
+
+    /// Dropping a non-slash thread name is the trivial case: the
+    /// thread dir vanishes and there are no parents to reap (the
+    /// only ancestor inside `threads/` is `threads/` itself).
+    #[test]
+    fn remove_thread_manifest_dir_handles_flat_names() {
+        let dir = TempDir::new().unwrap();
+        let m = ThreadManifest::new(cid(), h(1));
+        write_manifest(dir.path(), "main", &m).unwrap();
+        assert!(remove_thread_manifest_dir(dir.path(), "main").unwrap());
+        assert!(!dir.path().join("threads").join("main").exists());
+        assert!(dir.path().join("threads").is_dir());
+    }
+
+    /// Missing thread reports `false` rather than erroring — drops
+    /// are idempotent so a double-drop is a no-op success.
+    #[test]
+    fn remove_thread_manifest_dir_is_idempotent_on_missing() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("threads")).unwrap();
+        assert!(!remove_thread_manifest_dir(dir.path(), "never-existed").unwrap());
     }
 }

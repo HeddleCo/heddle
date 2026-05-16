@@ -855,6 +855,38 @@ pub(crate) fn visibility_label(mode: &ThreadMode) -> &'static str {
     }
 }
 
+/// Compact glyph appended to a thread-list row to indicate whether
+/// the thread's worktree is live on disk *right now*. Three states:
+///
+/// * `" ●"` (accent-coloured) — a path is recorded and exists. The
+///   common case for a thread the user is actively working in.
+/// * `" ✗"` (warn-coloured)   — a path is recorded but the directory
+///   is gone (user did `rm -rf` or the disk was reset). Surfacing
+///   this is the whole point of the glyph — silent "ghost" threads
+///   are the friction we're trying to remove.
+/// * `""` (empty)             — no path recorded (pure-ref thread,
+///   never started; or `thread create` without `thread start`).
+///   Glyphless because there's nothing meaningful to indicate.
+///
+/// Virtualised threads with a recorded mount point go through the
+/// same `Path::exists()` check — if the FUSE/FSKit/ProjFS daemon is
+/// dead the mount directory is still a real (empty) dir, so this
+/// is honest. A `(stale)` advisory would be misleading.
+fn thread_liveness_glyph(entry: &ThreadSummary) -> String {
+    let path = entry
+        .path
+        .as_deref()
+        .or(entry.execution_path.as_deref());
+    let Some(path) = path else {
+        return String::new();
+    };
+    if std::path::Path::new(path).exists() {
+        format!(" {}", style::accent("●"))
+    } else {
+        format!(" {}", style::warn("✗"))
+    }
+}
+
 pub(crate) fn git_history_label(history_imported: bool) -> &'static str {
     if history_imported {
         "full history available"
@@ -982,13 +1014,20 @@ fn render_thread_entry(entry: &ThreadSummary) {
         style::dim("-")
     };
     let state = entry.current_state.as_deref().unwrap_or("(no state)");
+    // Worktree-liveness glyph after the mode label. Lets the user
+    // tell at a glance which threads have an actual on-disk worktree
+    // they can `cd` to vs. which are pure refs (or virtual mounts
+    // whose daemon may or may not be up). One stat per row — cheap
+    // for any sane thread count, no I/O at all on ref-only threads.
+    let liveness = thread_liveness_glyph(entry);
     println!(
-        "{} {} {} {} {}",
+        "{} {} {} {} {}{}",
         prefix,
         style::bold(&entry.name),
         style::dim(state),
         style::thread_state(&entry.coordination_status.to_string()),
-        style::dim(&entry.visibility)
+        style::dim(&entry.visibility),
+        liveness,
     );
     if let Some(path) = &entry.path {
         println!("    path: {}", path);
@@ -1147,6 +1186,26 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     }
 
     let thread_mode = resolve_thread_mode(repo, &args);
+    // Honesty pass for explicit `--workspace materialized` on a
+    // filesystem that doesn't support reflinks. `resolve_thread_mode`
+    // already downgrades Auto silently to `solid` in this case (the
+    // mode label should match disk truth), but an explicit user
+    // choice we respect — and then we owe the user a stderr note so
+    // they know why their disk usage will be higher than the design-
+    // doc promises. Fires once per `thread start` invocation, goes
+    // to stderr so JSON consumers on stdout are unaffected.
+    if args.workspace == WorkspaceModeArg::Materialized
+        && !objects::fs_clone::filesystem_supports_reflink(repo.root())
+    {
+        eprintln!(
+            "{}: this filesystem doesn't support reflinks/clonefile, so \
+             `--workspace materialized` will fall back to per-file copies — \
+             disk usage will match `--workspace solid`. \
+             Use `--workspace solid` to make this explicit, or `--workspace auto` \
+             to let heddle pick the right mode for this host.",
+            style::warn("note"),
+        );
+    }
     let path = match thread_mode {
         // Bytes-on-disk modes honour an explicit `--path`. Clonefile
         // (`Materialized`) doesn't care where the destination lives;

@@ -85,13 +85,16 @@ pub(crate) struct StatusOutput {
     git_checkpoint: Option<GitCheckpointInfo>,
     changes: ChangesInfo,
     /// Inventory of clonefile-backed thread worktrees discovered on
-    /// disk. Read-only diagnostic. Included in JSON always and in
-    /// verbose text; the default short text only prints a one-line
-    /// advisory when at least one thread is stale (manifest's
-    /// recorded state lags the thread's actual head), because that's
-    /// the case where the user may want to act (re-materialize or
-    /// re-capture). Healthy materialized threads stay invisible.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// disk. Read-only diagnostic. Included in JSON always (as `[]`
+    /// when no threads are materialized — the JSON contract is "the
+    /// field is always an array", which lets consumers index into
+    /// it without a null-guard) and in verbose text; the default
+    /// short text only prints a one-line advisory when at least one
+    /// thread is stale (manifest's recorded state lags the thread's
+    /// actual head), because that's the case where the user may
+    /// want to act (re-materialize or re-capture). Healthy
+    /// materialized threads stay invisible.
+    #[serde(default)]
     materialized_threads: Vec<MaterializedThreadInfo>,
 }
 
