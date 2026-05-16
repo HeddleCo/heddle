@@ -11,6 +11,7 @@
 //! `grpc` crate but implement it against different state stores.
 
 pub mod grpc_local_impl;
+pub mod transaction_replay;
 
 #[cfg(unix)]
 pub mod local_daemon;
