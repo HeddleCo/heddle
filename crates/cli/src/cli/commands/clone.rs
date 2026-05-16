@@ -10,8 +10,6 @@ use refs::Head;
 use repo::Repository;
 
 #[cfg(feature = "client")]
-use heddle_client::grpc_hosted::PullMaterialization;
-#[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
     bridge::{
@@ -23,6 +21,8 @@ use crate::{
     client::LocalSync,
     remote::RemoteTarget,
 };
+#[cfg(feature = "client")]
+use heddle_client::grpc_hosted::PullMaterialization;
 
 /// Pull/materialization options shared by local and network clone paths.
 struct CloneOptions {
@@ -102,13 +102,12 @@ fn clone_git_overlay_url(
     local_path: &Path,
     options: &CloneOptions,
 ) -> Result<()> {
-    reject_unsupported_for_git_overlay(options)?;
     fs::create_dir_all(local_path)?;
     clone_url_to_bare(
         url,
         &local_path.join(".git"),
         options.depth,
-        options.filter.as_deref(),
+        git_overlay_filter_spec(options),
     )
     .map_err(anyhow::Error::msg)?;
     finish_git_overlay_clone(cli, local_path, options, url.to_string())
@@ -120,37 +119,43 @@ fn clone_git_overlay_path(
     local_path: &Path,
     options: &CloneOptions,
 ) -> Result<()> {
-    reject_unsupported_for_git_overlay(options)?;
+    // The local-copy path (used when both source and dest are on the
+    // same filesystem) bypasses the gix fetch builder entirely, so
+    // `--depth` / `--filter` would have nothing to plug into. Reject
+    // those explicitly here rather than silently dropping them.
+    if let Some(filter) = options.filter.as_deref() {
+        return Err(anyhow!(
+            "--filter {} is not supported when cloning from a local Git path; use a file:// URL instead",
+            filter
+        ));
+    }
+    if options.lazy {
+        return Err(anyhow!(
+            "--lazy is not supported when cloning from a local Git path; use a file:// URL instead"
+        ));
+    }
+    if options.depth.is_some() {
+        return Err(anyhow!(
+            "--depth is not supported when cloning from a local Git path; use a file:// URL instead"
+        ));
+    }
     fs::create_dir_all(local_path)?;
     gix::init(local_path).map_err(anyhow::Error::msg)?;
     copy_local_repo_to_bare(remote_path, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
     finish_git_overlay_clone(cli, local_path, options, remote_path.display().to_string())
 }
 
-/// Reject options the Git-overlay path doesn't support yet, BEFORE any
-/// filesystem or network work runs. Without this, the user pays the
-/// full clone cost (potentially seconds-to-minutes) and is left with a
-/// partially-initialized destination directory before seeing the error.
-/// Tracked separately for `--filter`, `--lazy`, and `--depth` so each
-/// rejection message stays scannable.
-fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
+/// `--filter blob:none` is a synonym for `--lazy` on the Git-overlay
+/// path too, mirroring the hosted/network mapping in `clone_network`.
+/// Returns `None` if neither was requested.
+fn git_overlay_filter_spec(options: &CloneOptions) -> Option<&str> {
     if let Some(filter) = options.filter.as_deref() {
-        return Err(anyhow!(
-            "--filter {} is not available for Git-overlay clones yet; run a full clone",
-            filter
-        ));
+        return Some(filter);
     }
     if options.lazy {
-        return Err(anyhow!(
-            "lazy clone is not available for Git-overlay clones yet; run a full clone"
-        ));
+        return Some("blob:none");
     }
-    if options.depth.is_some() {
-        return Err(anyhow!(
-            "shallow Git-overlay clone is not available yet; run a full clone"
-        ));
-    }
-    Ok(())
+    None
 }
 
 fn finish_git_overlay_clone(

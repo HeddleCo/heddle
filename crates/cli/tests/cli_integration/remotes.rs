@@ -124,7 +124,13 @@ fn test_cli_clone_local_lazy_is_rejected() {
 }
 
 #[test]
-fn test_cli_clone_git_overlay_filter_is_rejected() {
+fn test_cli_clone_git_overlay_filter_is_rejected_for_local_path() {
+    // `--filter` on the Git-overlay path is only wired through when
+    // the source is a `file://` (or other URL) remote — the
+    // direct-filesystem variant (`copy_local_repo_to_bare`) has no
+    // wire to negotiate filter capability over, so we still reject
+    // it explicitly. Issue #49 lifted the URL-side guard but kept
+    // this one with a clearer redirection message.
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -142,8 +148,8 @@ fn test_cli_clone_git_overlay_filter_is_rejected() {
     )
     .unwrap_err();
     assert!(
-        err.contains("--filter") && err.contains("Git-overlay"),
-        "Git-overlay clone with --filter should fail with a tailored message: {err}"
+        err.contains("--filter") && err.contains("file://"),
+        "filter-on-local-path should redirect to file:// URL form: {err}"
     );
 }
 

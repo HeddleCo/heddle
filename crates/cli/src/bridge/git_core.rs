@@ -5,7 +5,9 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::Write,
+    num::NonZeroU32,
     path::{Path, PathBuf},
+    process::Command,
     sync::atomic::AtomicBool,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -1139,7 +1141,24 @@ pub fn clone_url_to_bare(
     depth: Option<u32>,
     filter: Option<&str>,
 ) -> GitResult<()> {
-    let _ = (depth, filter);
+    // gix 0.80's high-level fetch builder (`Connection::prepare_fetch` →
+    // `Prepare`) does not expose the v2 partial-clone `filter`
+    // capability — there is no `with_filter` analogue to `with_shallow`,
+    // and `gix_protocol::fetch::Arguments::filter` is only reachable
+    // from inside a `Negotiate` impl whose surrounding struct gix keeps
+    // private. We therefore split the path: depth-only clones stay on
+    // gix (its `with_shallow(DepthAtRemote(_))` plumbs the deepen
+    // capability correctly even from a fresh `init_bare`), and clones
+    // that ask for a filter delegate to the user's `git` binary, which
+    // speaks the full wire protocol including filter spec negotiation
+    // and writes the partial-clone markers into the resulting config.
+    if filter.is_some() {
+        return clone_url_to_bare_via_git(url, dest, depth, filter);
+    }
+    clone_url_to_bare_via_gix(url, dest, depth)
+}
+
+fn clone_url_to_bare_via_gix(url: &gix::Url, dest: &Path, depth: Option<u32>) -> GitResult<()> {
     fs::create_dir_all(dest)?;
     let repo = gix::init_bare(dest).map_err(git_err)?;
     let mut remote = repo.remote_at(url.clone()).map_err(git_err)?;
@@ -1153,18 +1172,74 @@ pub fn clone_url_to_bare(
     let connection = remote
         .connect(gix::remote::Direction::Fetch)
         .map_err(git_err)?;
-    let prepare = connection
+    let mut prepare = connection
         .prepare_fetch(
             gix::progress::Discard,
             gix::remote::ref_map::Options::default(),
         )
         .map_err(git_err)?;
+    if let Some(d) = depth.and_then(NonZeroU32::new) {
+        prepare = prepare.with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(d));
+    }
     prepare
         .with_reflog_message(gix::remote::fetch::RefLogMessage::Override {
             message: format!("heddle: clone from {url}").into(),
         })
         .receive(gix::progress::Discard, &AtomicBool::new(false))
         .map_err(|err| GitBridgeError::Git(format!("clone failed for {url}: {err}")))?;
+    Ok(())
+}
+
+fn clone_url_to_bare_via_git(
+    url: &gix::Url,
+    dest: &Path,
+    depth: Option<u32>,
+    filter: Option<&str>,
+) -> GitResult<()> {
+    // `git clone` refuses to write into a directory that already
+    // exists and is non-empty; callers in this crate, however, often
+    // pre-create the destination as an empty leaf (e.g. `ScratchDir`
+    // in `bridge.rs`). Remove that empty shell so `git clone` can
+    // create it itself. We deliberately only remove an *empty* dir —
+    // anything else suggests the caller already wrote to the dest and
+    // refusing is the safer behaviour.
+    if dest.exists() {
+        let is_empty = fs::read_dir(dest)?.next().is_none();
+        if is_empty {
+            fs::remove_dir(dest)?;
+        }
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.arg("clone").arg("--bare");
+    // Force the regular wire protocol even when `url` is `file://`,
+    // so the server-side `git upload-pack` advertises (and our
+    // request honours) the v2 `filter` capability. Without
+    // `--no-local`, git uses hardlinks or a direct pack copy and
+    // skips capability negotiation entirely, which would silently
+    // ignore `--filter`.
+    cmd.arg("--no-local");
+    if let Some(d) = depth {
+        cmd.arg(format!("--depth={d}"));
+    }
+    if let Some(spec) = filter {
+        cmd.arg(format!("--filter={spec}"));
+    }
+    cmd.arg(url.to_string()).arg(dest);
+
+    let output = cmd.output().map_err(|err| {
+        GitBridgeError::Git(format!("failed to spawn `git` to clone {url}: {err}"))
+    })?;
+    if !output.status.success() {
+        return Err(GitBridgeError::Git(format!(
+            "git clone failed for {url} (exit {:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
     Ok(())
 }
 

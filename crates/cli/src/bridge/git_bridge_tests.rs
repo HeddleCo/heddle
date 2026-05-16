@@ -1357,8 +1357,12 @@ fn clone_url_to_bare_populates_destination_from_file_url() {
 /// Build a source repo with a chain of three commits, where each commit
 /// adds a new blob file. Returns the (`temp`, `repo`, `[c1, c2, c3]`,
 /// `[blob1, blob2, blob3]`) tuple. The caller owns the TempDir lifetime.
-fn build_source_repo_three_commits_with_blobs(
-) -> (TempDir, gix::Repository, [gix::hash::ObjectId; 3], [gix::hash::ObjectId; 3]) {
+fn build_source_repo_three_commits_with_blobs() -> (
+    TempDir,
+    gix::Repository,
+    [gix::hash::ObjectId; 3],
+    [gix::hash::ObjectId; 3],
+) {
     let (temp, repo) = init_git_repo();
     let blob1 = repo.write_blob(b"alpha\n").expect("blob1").detach();
     let blob2 = repo.write_blob(b"beta\n").expect("blob2").detach();
@@ -1469,6 +1473,24 @@ fn clone_url_to_bare_honours_blob_none_filter() {
         .expect("workdir")
         .canonicalize()
         .expect("canonicalize");
+
+    // Default `upload-pack` (which is what `git clone` spawns for
+    // file:// URLs) only advertises the `filter` capability when the
+    // *server* repo has `uploadpack.allowFilter = true`. Without
+    // this, the server logs "filtering not recognized by server,
+    // ignoring" and ships every blob anyway, leaving the assertions
+    // below to fail. Enable it on the fixture so we exercise the
+    // real filter wire-up.
+    let cfg = src_path.join(".git").join("config");
+    let mut text = std::fs::read_to_string(&cfg).expect("read source config");
+    if !text.contains("allowFilter") {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("[uploadpack]\n\tallowFilter = true\n");
+        std::fs::write(&cfg, text).expect("write source config");
+    }
+
     let url_str = format!("file://{}", src_path.display());
     let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
 
