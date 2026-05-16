@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! S3 storage implementation.
 
-use std::sync::Arc;
+use std::{
+    future::Future,
+    io,
+    pin::Pin,
+    sync::{Arc, OnceLock, mpsc},
+    thread,
+};
 
 use aws_sdk_s3::{Client, config::BehaviorVersion};
 use aws_smithy_async::rt::sleep::TokioSleep;
@@ -15,6 +21,11 @@ pub struct S3Store {
     pub(super) client: Arc<Client>,
     pub(super) bucket: String,
     pub(super) prefix: String,
+    /// Lazy worker-thread + Tokio runtime that drives async S3 calls off
+    /// the caller's runtime. See [`RuntimeBridge`]. Wrapped in
+    /// `Arc<OnceLock<_>>` so every clone of `S3Store` shares one bridge
+    /// (one worker thread) and the spawn cost is paid on first sync use.
+    pub(super) bridge: Arc<OnceLock<RuntimeBridge>>,
 }
 
 impl S3Store {
@@ -24,6 +35,7 @@ impl S3Store {
             client: Arc::new(client),
             bucket: bucket.into(),
             prefix: prefix.into(),
+            bridge: Arc::new(OnceLock::new()),
         }
     }
 
@@ -52,14 +64,33 @@ impl S3Store {
         format!("{}actions/{}.bin", self.prefix, id)
     }
 
-    /// Get a handle to the current Tokio runtime.
-    pub(super) fn runtime(&self) -> crate::store::Result<tokio::runtime::Handle> {
-        tokio::runtime::Handle::try_current().map_err(|e| {
-            crate::store::StoreError::Io(std::io::Error::other(format!(
-                "No async runtime available: {}",
-                e
+    /// Lazily-initialized accessor for the runtime bridge.
+    ///
+    /// The synchronous `ObjectStore` methods route every `.send().await`
+    /// call through this bridge so they can be invoked from inside a
+    /// caller's Tokio runtime (`#[tokio::main]`, `#[tokio::test]`, a
+    /// daemon worker, etc.) without the nested-`block_on` panic that
+    /// `Handle::try_current().block_on(...)` triggers. See
+    /// [`RuntimeBridge`] for the design rationale.
+    pub(super) fn bridge(&self) -> crate::store::Result<&RuntimeBridge> {
+        if let Some(bridge) = self.bridge.get() {
+            return Ok(bridge);
+        }
+        let new = RuntimeBridge::new().map_err(|err| {
+            crate::store::StoreError::Io(io::Error::other(format!(
+                "S3 runtime bridge: spawn worker thread: {err}",
             )))
-        })
+        })?;
+        // If a concurrent caller already populated the slot, `set` drops
+        // our worker; its tx side dies with it and the spawned thread
+        // exits cleanly when `rx.recv()` returns Err. First-use only, so
+        // the wasted spawn is acceptable in exchange for keeping
+        // `bridge()` lock-free on the hot path.
+        let _ = self.bridge.set(new);
+        Ok(self
+            .bridge
+            .get()
+            .expect("OnceLock populated above or by a concurrent caller"))
     }
 
     /// List objects with a given prefix.
@@ -259,5 +290,99 @@ impl S3StoreBuilder {
 impl Default for S3StoreBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Worker thread + private current-thread Tokio runtime used to drive the
+/// async `aws_sdk_s3` client off the caller's runtime.
+///
+/// ## Why
+///
+/// Every method on the [`crate::ObjectStore`] impl for [`S3Store`] is
+/// synchronous, but the AWS SDK is async. The previous design called
+/// `tokio::runtime::Handle::try_current().block_on(...)` from inside each
+/// method. When the caller was itself running on a Tokio runtime
+/// (`#[tokio::main]`, `#[tokio::test]`, a daemon worker task), that
+/// `block_on` panicked with `"Cannot start a runtime from within a
+/// runtime"` because nesting `block_on` on a runtime you are already
+/// inside is disallowed.
+///
+/// This bridge owns its own current-thread Tokio runtime on a dedicated
+/// worker thread. Synchronous calls hand each request to the worker over
+/// a channel and block on a reply channel; the worker drives the future
+/// inside its private runtime. The caller's runtime (if any) is never
+/// re-entered, so no nesting occurs.
+///
+/// The pattern mirrors
+/// [`client::grpc_hosted::hydration::LazyHostedHydrator`] (issue #50),
+/// which solved the same shape for the sync `BlobHydrator` trait.
+///
+/// ## Shutdown
+///
+/// Dropping the bridge drops the `Sender`; the worker's `Receiver::recv`
+/// then returns `Err` and the worker exits and the runtime is dropped.
+/// The `JoinHandle` is retained as `_worker` so the thread is tied to
+/// the bridge's lifetime and isn't reaped before its requests drain.
+pub(super) struct RuntimeBridge {
+    tx: mpsc::Sender<BridgedTask>,
+    _worker: thread::JoinHandle<()>,
+}
+
+type BridgedTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+impl RuntimeBridge {
+    fn new() -> io::Result<Self> {
+        let (tx, rx) = mpsc::channel::<BridgedTask>();
+        let worker = thread::Builder::new()
+            .name("heddle-s3-bridge".into())
+            .spawn(move || {
+                // current_thread is sufficient: every request is serialized
+                // through the mpsc channel anyway, and an idle store costs
+                // exactly one thread + one runtime instead of one per
+                // worker-pool slot.
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build heddle-s3-bridge worker runtime");
+                runtime.block_on(async move {
+                    // Blocking `rx.recv()` parks the runtime between
+                    // requests. Acceptable: nothing else lives on this
+                    // runtime, so there are no other tasks to starve.
+                    while let Ok(task) = rx.recv() {
+                        task.await;
+                    }
+                });
+            })?;
+        Ok(Self {
+            tx,
+            _worker: worker,
+        })
+    }
+
+    /// Run `future` on the worker's runtime and block the caller until it
+    /// completes, returning the future's output.
+    ///
+    /// `future` must be `Send + 'static`; call sites compose it from
+    /// `Arc<Client>` clones plus owned `String` keys / serialized bodies,
+    /// never borrows of `&self`.
+    pub(super) fn block_on<F, T>(&self, future: F) -> T
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Capacity 1: each call sends exactly one value and then drops.
+        let (reply_tx, reply_rx) = mpsc::sync_channel::<T>(1);
+        let task: BridgedTask = Box::pin(async move {
+            let value = future.await;
+            // The receiver is held on the caller's stack until `recv`
+            // returns, so `send` is infallible in practice.
+            let _ = reply_tx.send(value);
+        });
+        self.tx
+            .send(task)
+            .expect("heddle-s3-bridge worker thread terminated unexpectedly");
+        reply_rx
+            .recv()
+            .expect("heddle-s3-bridge worker dropped reply channel without sending")
     }
 }
