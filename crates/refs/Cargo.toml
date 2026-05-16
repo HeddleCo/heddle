@@ -17,6 +17,7 @@ rmp-serde.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.2", optional = true }
 sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
@@ -25,7 +26,7 @@ uuid = { workspace = true, optional = true }
 tempfile.workspace = true
 
 [features]
-postgres = ["dep:sqlx", "dep:tokio", "dep:uuid"]
+postgres = ["dep:sqlx", "dep:tokio", "dep:uuid", "dep:runtime-bridge"]
 
 [lib]
 path = "src/lib.rs"

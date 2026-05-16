@@ -34,7 +34,7 @@ impl ObjectStore for S3Store {
         let hash = *hash;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -88,7 +88,7 @@ impl ObjectStore for S3Store {
         let content = blob.content().to_vec();
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -135,7 +135,7 @@ impl ObjectStore for S3Store {
         let key = self.blob_key(hash);
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -164,7 +164,7 @@ impl ObjectStore for S3Store {
 
     fn list_blobs(&self) -> Result<Vec<ContentHash>> {
         let store = self.clone();
-        let keys = self.bridge()?.block_on(async move {
+        let keys = self.block(async move {
             retry_with(RetryPolicy::S3_DEFAULT, should_retry_store_error, || {
                 store.list_with_prefix("blobs/")
             })
@@ -190,7 +190,7 @@ impl ObjectStore for S3Store {
         let hash = *hash;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -244,7 +244,7 @@ impl ObjectStore for S3Store {
         let serialized = rmp_serde::to_vec(tree)?;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -292,7 +292,7 @@ impl ObjectStore for S3Store {
         let key = self.tree_key(hash);
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -321,7 +321,7 @@ impl ObjectStore for S3Store {
 
     fn list_trees(&self) -> Result<Vec<ContentHash>> {
         let store = self.clone();
-        let keys = self.bridge()?.block_on(async move {
+        let keys = self.block(async move {
             retry_with(RetryPolicy::S3_DEFAULT, should_retry_store_error, || {
                 store.list_with_prefix("trees/")
             })
@@ -347,7 +347,7 @@ impl ObjectStore for S3Store {
         let id = *id;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -395,7 +395,7 @@ impl ObjectStore for S3Store {
         let serialized = rmp_serde::to_vec(state)?;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -428,7 +428,7 @@ impl ObjectStore for S3Store {
         let key = self.state_key(id);
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -457,7 +457,7 @@ impl ObjectStore for S3Store {
 
     fn list_states(&self) -> Result<Vec<ChangeId>> {
         let store = self.clone();
-        let keys = self.bridge()?.block_on(async move {
+        let keys = self.block(async move {
             retry_with(RetryPolicy::S3_DEFAULT, should_retry_store_error, || {
                 store.list_with_prefix("states/")
             })
@@ -483,7 +483,7 @@ impl ObjectStore for S3Store {
         let id = *id;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -532,7 +532,7 @@ impl ObjectStore for S3Store {
         let serialized = rmp_serde::to_vec(action)?;
         let client = Arc::clone(&self.client);
         let bucket = self.bucket.clone();
-        self.bridge()?.block_on(async move {
+        self.block(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -563,7 +563,7 @@ impl ObjectStore for S3Store {
 
     fn list_actions(&self) -> Result<Vec<ActionId>> {
         let store = self.clone();
-        let keys = self.bridge()?.block_on(async move {
+        let keys = self.block(async move {
             retry_with(RetryPolicy::S3_DEFAULT, should_retry_store_error, || {
                 store.list_with_prefix("actions/")
             })

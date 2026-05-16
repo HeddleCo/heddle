@@ -2942,6 +2942,7 @@ dependencies = [
  "blake3",
  "chrono",
  "fs2",
+ "heddle-runtime-bridge",
  "hex",
  "hyper-util",
  "ignore",
@@ -2976,6 +2977,7 @@ dependencies = [
  "chrono",
  "fs2",
  "heddle-objects",
+ "heddle-runtime-bridge",
  "rand 0.10.1",
  "rmp-serde",
  "serde",
@@ -3007,6 +3009,7 @@ version = "0.2.4"
 dependencies = [
  "chrono",
  "heddle-objects",
+ "heddle-runtime-bridge",
  "rand 0.10.1",
  "rmp-serde",
  "serde",
@@ -3062,6 +3065,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "heddle-runtime-bridge"
+version = "0.2.4"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

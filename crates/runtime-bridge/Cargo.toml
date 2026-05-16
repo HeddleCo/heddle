@@ -1,0 +1,17 @@
+[package]
+name = "heddle-runtime-bridge"
+version = "0.2.4"
+edition.workspace = true
+authors.workspace = true
+description = "Sync→async runtime bridge for Heddle: worker thread + private Tokio runtime, safe to call from any caller flavor."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+name = "runtime_bridge"
