@@ -718,6 +718,146 @@ mod tests {
         let ptr = RepoPtr(&repo as *const _);
         assert_send(&ptr);
     }
+
+    /// Round-4 patch-coverage fill: exercise the `hydrate` early-return
+    /// taken when the persisted `local_thread` has no recorded tip in the
+    /// current repo (e.g. the lazy clone was interrupted before the first
+    /// thread write landed). The hydrator must surface this as a clean
+    /// `Config` error rather than calling `ensure_bridge` and dialing the
+    /// network for a state we don't have.
+    #[test]
+    fn hydrate_returns_config_error_when_local_thread_missing() {
+        let (_temp, repo) = temp_repo();
+        // Pre-set the bridge so `ensure_bridge` would succeed if reached —
+        // that way a failure here proves the early-return fired before the
+        // bridge was consulted.
+        let hydrator = offline_lazy_hydrator("thread-that-was-never-written");
+        let blake3 = Blob::new(b"placeholder".to_vec()).hash();
+        let err = hydrator
+            .hydrate(&repo, &blake3)
+            .expect_err("missing thread must surface as Config error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no recorded tip") && msg.contains("thread-that-was-never-written"),
+            "error must name the missing thread and explain why hydration was skipped; got: {msg}"
+        );
+    }
+
+    /// Round-4 patch-coverage fill: drive the real `ensure_bridge` path
+    /// (no pre-installed bridge) against an unresolvable hostname. The
+    /// DNS error must propagate back through `HydrationBridge::connect`
+    /// → `ensure_bridge` → `hydrate` rather than panicking or hanging.
+    ///
+    /// The `.invalid` TLD is RFC 2606-reserved and guaranteed never to
+    /// resolve, so this test stays hermetic in CI environments without
+    /// outbound DNS.
+    #[test]
+    fn ensure_bridge_propagates_dns_failure() {
+        let (_temp, repo) = temp_repo();
+        // Note: no `offline_lazy_hydrator` — this constructor leaves
+        // `bridge` empty so the first `hydrate()` exercises the real
+        // ensure_bridge → HydrationBridge::connect path including DNS.
+        let hydrator = LazyHostedHydrator::new(
+            "definitely-nonexistent-host-for-tests.invalid:443",
+            "org/acme/repo",
+            "main",
+            "main",
+        );
+        let blake3 = Blob::new(b"placeholder".to_vec()).hash();
+        let err = hydrator
+            .hydrate(&repo, &blake3)
+            .expect_err("unresolvable endpoint must surface as a Config error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("resolve endpoint")
+                || msg.contains("DNS returned no addresses")
+                || msg.contains(".invalid"),
+            "error must identify the DNS-resolution failure; got: {msg}"
+        );
+        // Repeat the call — second attempt must also fail-fast (no
+        // half-initialized bridge cached on disk / in OnceLock).
+        let err2 = hydrator
+            .hydrate(&repo, &blake3)
+            .expect_err("second call must also fail rather than reuse a partial bridge");
+        assert!(
+            !err2.to_string().is_empty(),
+            "second call must surface a real error"
+        );
+    }
+}
+
+#[cfg(test)]
+mod register_factory_tests {
+    //! Round-4 patch-coverage fill for `register_hosted_factory` and the
+    //! closure it installs in the lazy-hydrator registry. Both branches
+    //! of the closure (missing `[hydrator.hosted]` table → Config error;
+    //! present table → ready-to-install adapter) are exercised here.
+
+    use std::sync::Mutex;
+
+    use repo::lazy_hydrator::{HostedHydratorConfig, HydratorSection, KIND_HOSTED, lookup_factory};
+    use tempfile::TempDir;
+
+    use super::register_hosted_factory;
+
+    /// Serialize tests that mutate the process-wide hydrator registry so
+    /// they don't race on the global `"hosted"` key.
+    static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn register_hosted_factory_installs_factory_for_kind_hosted() {
+        let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        register_hosted_factory();
+        assert!(
+            lookup_factory(KIND_HOSTED).is_some(),
+            "register_hosted_factory must populate the registry under KIND_HOSTED"
+        );
+    }
+
+    #[test]
+    fn registered_factory_builds_adapter_for_hosted_section() {
+        let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        register_hosted_factory();
+        let factory =
+            lookup_factory(KIND_HOSTED).expect("factory present after register_hosted_factory");
+        let temp = TempDir::new().expect("temp");
+        let section = HydratorSection {
+            kind: KIND_HOSTED.to_string(),
+            hosted: Some(HostedHydratorConfig {
+                endpoint: "example.heddle.cloud:443".to_string(),
+                repo_path: "org/acme/repo".to_string(),
+                remote_thread: "main".to_string(),
+                local_thread: "main".to_string(),
+            }),
+            git_overlay: None,
+        };
+        let _hydrator = factory(temp.path(), &section)
+            .expect("factory must produce an adapter when [hydrator.hosted] is present");
+    }
+
+    #[test]
+    fn registered_factory_errors_when_hosted_section_absent() {
+        let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        register_hosted_factory();
+        let factory = lookup_factory(KIND_HOSTED).expect("factory present");
+        let temp = TempDir::new().expect("temp");
+        let section = HydratorSection {
+            kind: KIND_HOSTED.to_string(),
+            hosted: None,
+            git_overlay: None,
+        };
+        let err = match factory(temp.path(), &section) {
+            Ok(_) => panic!(
+                "factory must reject a kind=hosted section that omits the [hydrator.hosted] table"
+            ),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("[hydrator.hosted]") || msg.contains("hydrator.hosted"),
+            "error must name the missing TOML table; got: {msg}"
+        );
+    }
 }
 
 #[cfg(test)]

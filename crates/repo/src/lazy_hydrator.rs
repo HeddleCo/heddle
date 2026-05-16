@@ -104,7 +104,12 @@ pub struct GitOverlayHydratorConfig {}
 
 impl LazyHydratorConfig {
     /// Construct a hosted-kind config in one call.
-    pub fn hosted(endpoint: impl Into<String>, repo_path: impl Into<String>, remote_thread: impl Into<String>, local_thread: impl Into<String>) -> Self {
+    pub fn hosted(
+        endpoint: impl Into<String>,
+        repo_path: impl Into<String>,
+        remote_thread: impl Into<String>,
+        local_thread: impl Into<String>,
+    ) -> Self {
         Self {
             hydrator: HydratorSection {
                 kind: KIND_HOSTED.to_string(),
@@ -144,10 +149,7 @@ impl LazyHydratorConfig {
         }
         let raw = fs::read_to_string(&path)?;
         let config: Self = toml::from_str(&raw).map_err(|err| {
-            HeddleError::Config(format!(
-                "failed to parse {}: {err}",
-                path.display()
-            ))
+            HeddleError::Config(format!("failed to parse {}: {err}", path.display()))
         })?;
         Ok(Some(config))
     }
@@ -158,9 +160,7 @@ impl LazyHydratorConfig {
         fs::create_dir_all(heddle_dir)?;
         let path = Self::path_in(heddle_dir);
         let contents = toml::to_string_pretty(self).map_err(|err| {
-            HeddleError::Config(format!(
-                "failed to serialize lazy hydrator config: {err}"
-            ))
+            HeddleError::Config(format!("failed to serialize lazy hydrator config: {err}"))
         })?;
         write_file_atomic(&path, contents.as_bytes())?;
         Ok(())
@@ -219,7 +219,10 @@ pub fn lookup_factory(kind: &str) -> Option<BlobHydratorFactory> {
 /// if no metadata is on disk OR if no factory is registered for the
 /// recorded kind (the latter logs a warning so misconfigured deploys
 /// surface in logs rather than silently failing reads).
-pub fn try_reconstruct(repo_root: &Path, heddle_dir: &Path) -> Result<Option<Arc<dyn BlobHydrator>>> {
+pub fn try_reconstruct(
+    repo_root: &Path,
+    heddle_dir: &Path,
+) -> Result<Option<Arc<dyn BlobHydrator>>> {
     let Some(config) = LazyHydratorConfig::load(heddle_dir)? else {
         return Ok(None);
     };
@@ -239,7 +242,10 @@ pub fn try_reconstruct(repo_root: &Path, heddle_dir: &Path) -> Result<Option<Arc
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use objects::object::{Blob, ContentHash};
     use tempfile::TempDir;
@@ -251,12 +257,8 @@ mod tests {
     fn save_roundtrips_hosted_config() {
         let temp = TempDir::new().unwrap();
         let heddle = temp.path().join(".heddle");
-        let original = LazyHydratorConfig::hosted(
-            "127.0.0.1:8443",
-            "org/acme/repo",
-            "main",
-            "main",
-        );
+        let original =
+            LazyHydratorConfig::hosted("127.0.0.1:8443", "org/acme/repo", "main", "main");
         original.save(&heddle).unwrap();
         let loaded = LazyHydratorConfig::load(&heddle).unwrap().unwrap();
         assert_eq!(loaded, original);
@@ -319,7 +321,7 @@ mod tests {
 
     #[test]
     fn try_reconstruct_invokes_registered_factory() {
-        let _guard = TEST_REGISTRY_LOCK.lock().unwrap();
+        let _guard = TEST_REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let temp = TempDir::new().unwrap();
         let heddle = temp.path().join(".heddle");
         fs::create_dir_all(&heddle).unwrap();
@@ -331,14 +333,16 @@ mod tests {
         let made_for_factory = Arc::clone(&made);
         register_factory(
             kind,
-            Arc::new(move |_root: &Path, _section: &HydratorSection| -> Result<Arc<dyn BlobHydrator>> {
-                let h = Arc::new(CountingHydrator {
-                    bytes: payload_for_factory.clone(),
-                    calls: AtomicUsize::new(0),
-                });
-                *made_for_factory.lock().unwrap() = Some(Arc::clone(&h));
-                Ok(h)
-            }),
+            Arc::new(
+                move |_root: &Path, _section: &HydratorSection| -> Result<Arc<dyn BlobHydrator>> {
+                    let h = Arc::new(CountingHydrator {
+                        bytes: payload_for_factory.clone(),
+                        calls: AtomicUsize::new(0),
+                    });
+                    *made_for_factory.lock().unwrap() = Some(Arc::clone(&h));
+                    Ok(h)
+                },
+            ),
         );
 
         // Write a config that points at the custom kind.
@@ -360,8 +364,88 @@ mod tests {
     }
 
     #[test]
+    fn load_surfaces_parse_errors_with_path_context() {
+        let temp = TempDir::new().unwrap();
+        let heddle = temp.path().join(".heddle");
+        fs::create_dir_all(&heddle).unwrap();
+        let path = LazyHydratorConfig::path_in(&heddle);
+        fs::write(&path, b"this is = not ][ valid toml").unwrap();
+        let err = LazyHydratorConfig::load(&heddle)
+            .expect_err("corrupt TOML must surface as Config error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to parse") && msg.contains(LAZY_HYDRATOR_FILE),
+            "parse error must include the offending path; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn remove_deletes_file_when_present() {
+        let temp = TempDir::new().unwrap();
+        let heddle = temp.path().join(".heddle");
+        let cfg = LazyHydratorConfig::git_overlay();
+        cfg.save(&heddle).unwrap();
+        assert!(LazyHydratorConfig::path_in(&heddle).exists());
+        LazyHydratorConfig::remove(&heddle).unwrap();
+        assert!(
+            !LazyHydratorConfig::path_in(&heddle).exists(),
+            "remove must delete the file when present"
+        );
+    }
+
+    #[test]
+    fn try_reconstruct_invokes_hydrate_on_factory_built_hydrator() {
+        // Drives the CountingHydrator's `hydrate` body end-to-end via
+        // try_reconstruct → factory closure → invocation, which covers
+        // the in-test helper's body (otherwise reachable only as a type-
+        // check) and confirms the factory hands back a *working* hydrator.
+        let _guard = TEST_REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let heddle = temp.path().join(".heddle");
+
+        let kind = "test-kind-tr-3";
+        let payload = b"hydrated-blob".to_vec();
+        let payload_for_factory = payload.clone();
+        register_factory(
+            kind,
+            Arc::new(
+                move |_root: &Path, _section: &HydratorSection| -> Result<Arc<dyn BlobHydrator>> {
+                    Ok(Arc::new(CountingHydrator {
+                        bytes: payload_for_factory.clone(),
+                        calls: AtomicUsize::new(0),
+                    }))
+                },
+            ),
+        );
+
+        let cfg = LazyHydratorConfig {
+            hydrator: HydratorSection {
+                kind: kind.to_string(),
+                hosted: None,
+                git_overlay: None,
+            },
+        };
+        cfg.save(&heddle).unwrap();
+
+        let hydrator = try_reconstruct(temp.path(), &heddle)
+            .unwrap()
+            .expect("hydrator");
+        let blake3 = Blob::new(payload.clone()).hash();
+        hydrator.hydrate(&repo, &blake3).expect("hydrate runs");
+        // The blob the hydrator wrote must now be retrievable from the
+        // store — proves the factory-built hydrator's body executed.
+        let loaded = repo
+            .store()
+            .get_blob(&blake3)
+            .expect("get_blob ok")
+            .expect("blob present after hydrate");
+        assert_eq!(loaded.content(), payload.as_slice());
+    }
+
+    #[test]
     fn try_reconstruct_returns_none_when_no_factory_registered_for_kind() {
-        let _guard = TEST_REGISTRY_LOCK.lock().unwrap();
+        let _guard = TEST_REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let temp = TempDir::new().unwrap();
         let heddle = temp.path().join(".heddle");
         fs::create_dir_all(&heddle).unwrap();
