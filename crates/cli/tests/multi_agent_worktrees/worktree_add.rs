@@ -37,15 +37,21 @@ fn top_level_start_defaults_to_lightweight_in_auto_mode() {
     .unwrap();
     let started: Value = serde_json::from_str(&output).unwrap();
 
-    // Top-level `start` with no `--path` resolves to ThreadMode::Materialized.
-    // The thread is materialized at a Heddle-managed path that is surfaced
-    // both as `path` and `execution_path` for callers that want to cd
-    // into the work site without naming a directory themselves.
-    assert_eq!(started["thread"]["thread_mode"], "materialized");
+    // Top-level `start` with no `--path` resolves to ThreadMode::Materialized
+    // on filesystems that support reflinks (APFS, btrfs, xfs+reflink). On
+    // ext4 / HFS+ / NTFS the auto-mode probe downgrades to `solid` so the
+    // mode label matches what's actually on disk. Both outcomes are correct
+    // — assert the FS-conditional shape.
+    let expected_mode = if objects::fs_clone::filesystem_supports_reflink(main.path()) {
+        "materialized"
+    } else {
+        "solid"
+    };
+    assert_eq!(started["thread"]["thread_mode"], expected_mode);
     assert_eq!(started["path"], started["execution_path"]);
     assert!(
         started["execution_path"].as_str().is_some(),
-        "lightweight thread still has a managed execution path"
+        "auto-mode thread still has a managed execution path"
     );
 }
 

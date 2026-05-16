@@ -183,8 +183,7 @@ mod tests {
     }
 
     fn payload(byte: u8, len: usize) -> Bytes {
-        let v: Vec<u8> = std::iter::repeat(byte).take(len).collect();
-        Bytes::from(v)
+        Bytes::from(vec![byte; len])
     }
 
     #[test]

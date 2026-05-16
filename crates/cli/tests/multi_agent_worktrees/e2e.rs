@@ -701,8 +701,16 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     let started: Value = serde_json::from_str(&start_json).unwrap();
     let thread_path = started["execution_path"].as_str().unwrap();
     let thread = std::path::PathBuf::from(thread_path);
-    assert_eq!(started["thread"]["thread_mode"], "materialized");
-    // Lightweight threads materialize at a Heddle-managed path, surfaced
+    // Auto-mode resolves to materialized on reflink-capable filesystems
+    // (APFS, btrfs, xfs+reflink) and downgrades to solid on ext4 / HFS+ /
+    // NTFS so the mode label reflects on-disk truth.
+    let expected_mode = if objects::fs_clone::filesystem_supports_reflink(main.path()) {
+        "materialized"
+    } else {
+        "solid"
+    };
+    assert_eq!(started["thread"]["thread_mode"], expected_mode);
+    // Auto-mode threads materialize at a Heddle-managed path, surfaced
     // both as the user-visible `path` and the work-site `execution_path`.
     assert_eq!(started["path"], started["execution_path"]);
 
@@ -731,7 +739,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(thread_info["path"], thread_path);
     assert_eq!(thread_info["execution_path"], thread_path);
     assert_eq!(thread_info["actor"]["provider"], "anthropic");
-    assert_eq!(thread_info["thread_mode"], "materialized");
+    assert_eq!(thread_info["thread_mode"], expected_mode);
 
     std::fs::write(thread.join("native.txt"), "heddle-native").unwrap();
     let capture_json = heddle(
@@ -759,7 +767,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     .unwrap();
     let thread_show: Value = serde_json::from_str(&thread_show_json).unwrap();
     assert_eq!(thread_show["name"], "feature/native-cli");
-    assert_eq!(thread_show["thread_mode"], "materialized");
+    assert_eq!(thread_show["thread_mode"], expected_mode);
     assert_eq!(thread_show["thread_state"], "active");
 
     let status_json = heddle(&["--json", "status"], Some(&thread)).unwrap();

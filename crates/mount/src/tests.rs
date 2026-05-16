@@ -33,6 +33,14 @@ use crate::{
 /// Shared test mocks. Lives under `tests::mocks` so the per-platform
 /// adapter unit tests (FSKit on macOS, ProjFS on Windows) can reuse
 /// the same in-memory shell without duplicating it inline.
+///
+/// Gated on the features that actually consume the mocks so OSS-only
+/// Linux builds (no `fskit` / `projfs`) don't trip clippy's
+/// `-D warnings` on dead test code.
+#[cfg(any(
+    all(target_os = "macos", feature = "fskit"),
+    all(target_os = "windows", feature = "projfs"),
+))]
 pub(crate) mod mocks {
     use std::{
         ffi::OsStr,
