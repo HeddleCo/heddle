@@ -466,8 +466,14 @@ fn walk_for_no_op(
         //     silently skip without recursing.
         //   * Not pruned → standard manifest / new-entry
         //     dispatch below.
+        // `should_prune_directory_child` matches the production
+        // walker's per-entry probe (`worktree_walk.rs`). It calls
+        // `matched_relative(path, is_dir=true)` so gitignore rules
+        // with trailing `/` still fire, and the same patterns
+        // exclude both file and directory entries — same behaviour
+        // `build_tree` would observe at materialise time.
         let pruned = ignore_matcher.should_prune_absolute_path(&path)
-            || ignore_matcher.should_ignore_child(cur, name);
+            || ignore_matcher.should_prune_directory_child(cur, name);
         if pruned {
             if manifest.files.contains_key(&rel_str) {
                 // The matcher now wants this path excluded, but
