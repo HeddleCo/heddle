@@ -36,7 +36,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 use super::{heddle, setup_repo};

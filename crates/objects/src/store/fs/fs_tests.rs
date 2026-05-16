@@ -485,14 +485,20 @@ fn loose_blob_path_rejects_torn_cache_mirror() {
     let probed = store.loose_blob_path(&hash);
     assert_eq!(probed, Some(path.clone()));
     assert!(
-        store.verified_loose_blobs.read().unwrap().contains(&hash),
+        store
+            .verified_loose_blobs
+            .read()
+            .unwrap()
+            .get(&hash)
+            .is_some(),
         "verified cache should pick up the hash after first probe"
     );
 
     // Drop the in-process verified cache and corrupt the file. This
     // is the post-crash state we're guarding against: cache empty,
     // file's bytes don't match the hash any more.
-    store.verified_loose_blobs.write().unwrap().clear();
+    *store.verified_loose_blobs.write().unwrap() =
+        super::fs_store::RecentObjectCache::with_capacity(65_536);
     std::fs::write(&path, b"torn-write garbage").unwrap();
 
     let probed = store.loose_blob_path(&hash);

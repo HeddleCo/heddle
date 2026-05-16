@@ -858,13 +858,7 @@ fn sync_refreshes_stale_thread_when_replay_is_clean() {
     let main = setup_repo("base.txt", "base");
     let started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/sync-me",
-                "--workspace",
-                "auto",
-            ],
+            &["--json", "start", "feature/sync-me", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -907,13 +901,7 @@ fn ship_auto_captures_and_merges_clean_thread() {
     let main = setup_repo("base.txt", "base");
     let started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/ship-it",
-                "--workspace",
-                "auto",
-            ],
+            &["--json", "start", "feature/ship-it", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1109,13 +1097,7 @@ fn undo_is_scoped_to_the_current_thread() {
     .unwrap();
     let search_thread: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/search",
-                "--workspace",
-                "auto",
-            ],
+            &["--json", "start", "feature/search", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1406,13 +1388,7 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
     let main = setup_repo("base.txt", "base");
     let source_started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/source",
-                "--workspace",
-                "auto",
-            ],
+            &["--json", "start", "feature/source", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1420,13 +1396,7 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
     .unwrap();
     let target_started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/target",
-                "--workspace",
-                "auto",
-            ],
+            &["--json", "start", "feature/target", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1467,13 +1437,7 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
     let main = setup_repo("base.txt", "base");
     let source_started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/source",
-                "--workspace",
-                "auto",
-            ],
+            &["--json", "start", "feature/source", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1481,13 +1445,7 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
     .unwrap();
     let target_started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/target",
-                "--workspace",
-                "auto",
-            ],
+            &["--json", "start", "feature/target", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),

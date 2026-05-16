@@ -2,7 +2,7 @@
 //! Core FsStore structure.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     hash::Hash,
     path::{Path, PathBuf},
     sync::{Mutex, RwLock},
@@ -23,6 +23,13 @@ use crate::{
 
 const RECENT_BLOB_CACHE_CAPACITY: usize = 2_048;
 const RECENT_TREE_CACHE_CAPACITY: usize = 1_024;
+/// Soft cap on the in-process loose-blob verification cache. Each
+/// entry is one `ContentHash` (~32 bytes) so this is ≈2 MB of memory
+/// for the upper bound, and the FIFO eviction is bounded by hash
+/// hits rather than store size. 65k entries covers the typical hot
+/// working set for million-blob monorepos; a daemon that materialises
+/// dozens of unrelated trees won't drift toward unbounded growth.
+const VERIFIED_LOOSE_BLOB_CACHE_CAPACITY: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LooseObjectWriteMode {
@@ -41,7 +48,7 @@ impl<K, V> RecentObjectCache<K, V>
 where
     K: Copy + Eq + Hash,
 {
-    fn with_capacity(capacity: usize) -> Self {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
             order: VecDeque::new(),
@@ -99,18 +106,26 @@ pub struct FsStore {
     snapshot_write_batch_depth: Mutex<usize>,
     pending_directory_syncs: Mutex<BTreeSet<PathBuf>>,
     /// In-process trust cache for loose-blob cache mirrors. A hash
-    /// enters this set when this process either (a) wrote the blob
+    /// enters this LRU when this process either (a) wrote the blob
     /// itself via `promote_to_loose_uncompressed` or (b) successfully
     /// hash-verified it on first read. Bytes-on-disk for any entry
-    /// in this set can be trusted without a re-hash by subsequent
-    /// `loose_blob_path` calls within the same process — bounded by
-    /// the working set of accessed blobs, not the total store size.
+    /// in this cache can be trusted without a re-hash by subsequent
+    /// `loose_blob_path` calls within the same process.
+    ///
+    /// Capped at [`VERIFIED_LOOSE_BLOB_CACHE_CAPACITY`] entries so a
+    /// long-lived process (`heddled`) materialising many unrelated
+    /// trees doesn't drift into unbounded memory growth. FIFO
+    /// eviction; an evicted hash pays one extra BLAKE3 on its next
+    /// read (cost-of-evict ≈ working-set-size BLAKE3 ops). Stored as
+    /// `RecentObjectCache<…, ()>` to share the FIFO-eviction
+    /// machinery with the other on-store caches; the unit value is
+    /// a marker that the corresponding loose mirror was verified.
     ///
     /// Pairs with `AtomicWriteMode::NoSync` on the write side: a
     /// crashed promote leaves a torn cache-mirror file, but its
     /// hash won't match on the next process's first-read verify,
     /// so the reader falls through to a fresh promote off the pack.
-    pub(super) verified_loose_blobs: RwLock<HashSet<ContentHash>>,
+    pub(super) verified_loose_blobs: RwLock<RecentObjectCache<ContentHash, ()>>,
 }
 
 impl FsStore {
@@ -132,7 +147,9 @@ impl FsStore {
             loose_object_write_mode: LooseObjectWriteMode::Durable,
             snapshot_write_batch_depth: Mutex::new(0),
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
-            verified_loose_blobs: RwLock::new(HashSet::new()),
+            verified_loose_blobs: RwLock::new(RecentObjectCache::with_capacity(
+                VERIFIED_LOOSE_BLOB_CACHE_CAPACITY,
+            )),
         }
     }
 
@@ -152,7 +169,9 @@ impl FsStore {
             loose_object_write_mode: LooseObjectWriteMode::Durable,
             snapshot_write_batch_depth: Mutex::new(0),
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
-            verified_loose_blobs: RwLock::new(HashSet::new()),
+            verified_loose_blobs: RwLock::new(RecentObjectCache::with_capacity(
+                VERIFIED_LOOSE_BLOB_CACHE_CAPACITY,
+            )),
         }
     }
 

@@ -82,6 +82,50 @@ impl Repository {
         Ok(manifest)
     }
 
+    /// Write the [`ThreadManifest`] sidecar for a worktree that's
+    /// already been materialised to `dest` against `state_id`. Used
+    /// by the CLI's `start` path, which calls `materialize_tree`
+    /// directly via `write_isolated_checkout` and then needs the
+    /// matching manifest written so the rest of the clonefile-thread
+    /// machinery (`heddle status` advisory, `Repository::snapshot`
+    /// auto-detection, `capture_thread_from_disk` fast no-op) sees a
+    /// fully-formed sidecar.
+    ///
+    /// `state_id` is the captured state the worktree was materialised
+    /// against; its tree is resolved and walked to populate the
+    /// manifest's per-file stat-cache entries (one `lstat` per file).
+    /// Atomic write: a torn manifest can't half-land. Idempotent at
+    /// the manifest-key level: rewriting a manifest for the same
+    /// thread is supported (and is what `capture_thread_from_disk`
+    /// does post-capture).
+    #[instrument(skip(self), fields(thread = %thread, dest = %dest.display(), state = %state_id))]
+    pub fn record_thread_manifest(
+        &self,
+        thread: &str,
+        state_id: &ChangeId,
+        dest: &Path,
+    ) -> Result<ThreadManifest> {
+        let state = self
+            .store()
+            .get_state(state_id)?
+            .ok_or_else(|| HeddleError::Config(format!("state {state_id} missing")))?;
+        let tree = self
+            .store()
+            .get_tree(&state.tree)?
+            .ok_or_else(|| HeddleError::Config(format!("tree for state {state_id} missing")))?;
+        let mut manifest = ThreadManifest::new(*state_id, state.tree);
+        populate_manifest_from_tree(self, &tree, dest, "", &mut manifest.files)?;
+        crate::thread_manifest::write_manifest(self.heddle_dir(), thread, &manifest)
+            .map_err(HeddleError::Io)?;
+        debug!(
+            thread = %thread,
+            state_id = %state_id,
+            files = manifest.files.len(),
+            "thread manifest recorded post-materialize"
+        );
+        Ok(manifest)
+    }
+
     /// Scan the materialized worktree at `root`, build a fresh tree
     /// from the on-disk bytes, and (if anything changed) advance
     /// `thread`'s head to a new state pointing at that tree. The

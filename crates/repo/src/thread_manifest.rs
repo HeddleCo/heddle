@@ -139,38 +139,90 @@ pub struct MaterializedThreadSummary {
 /// whose manifest parses. Threads with malformed or schema-mismatch
 /// manifests are silently skipped — callers that care can re-read
 /// individual manifests via [`read_manifest`].
+///
+/// Walks recursively. Thread names conventionally contain slashes
+/// (`feature/m-thread`, `bugfix/issue-123`) which `manifest_path`
+/// passes through to `Path::join`, so the on-disk layout mirrors
+/// the conceptual hierarchy. A single-level read_dir would miss
+/// every nested thread; recursing reconstructs the thread name from
+/// the relative path of each `manifest.toml`'s parent directory.
 pub fn list_thread_manifests(heddle_dir: &Path) -> io::Result<Vec<MaterializedThreadSummary>> {
     let threads_dir = heddle_dir.join("threads");
-    let entries = match fs::read_dir(&threads_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(enrich_fs_error(&threads_dir, "listing", e)),
-    };
     let mut summaries = Vec::new();
+    walk_thread_manifests(&threads_dir, &threads_dir, &mut summaries)?;
+    summaries.sort_by(|a, b| a.thread.cmp(&b.thread));
+    Ok(summaries)
+}
+
+/// Depth-first walk under `threads_dir`. For every directory found
+/// to contain a `manifest.toml`, parse it and collect a summary; the
+/// thread name is the relative path of that directory from the root
+/// (`feature/m-thread` for a manifest at `threads/feature/m-thread/`).
+/// Subdirectories of a manifest-bearing directory are *not* recursed
+/// into — a thread directory shouldn't contain another thread.
+fn walk_thread_manifests(
+    threads_dir: &Path,
+    cur: &Path,
+    out: &mut Vec<MaterializedThreadSummary>,
+) -> io::Result<()> {
+    let entries = match fs::read_dir(cur) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(enrich_fs_error(cur, "listing", e)),
+    };
+    // Two-pass: first look for `manifest.toml` (treat this dir as a
+    // thread root and stop), otherwise recurse into subdirectories.
+    // Collected so we can short-circuit cheaply without re-stating.
+    let mut subdirs = Vec::new();
+    let mut has_manifest = false;
     for entry in entries {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            subdirs.push(entry.path());
+        } else if ft.is_file() && entry.file_name() == "manifest.toml" {
+            has_manifest = true;
         }
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        match read_manifest(heddle_dir, &name) {
-            Ok(Some(m)) => summaries.push(MaterializedThreadSummary {
+    }
+    if has_manifest {
+        // Reconstruct the thread name from the path relative to
+        // `threads_dir`. On Windows the separator is `\`; the on-
+        // disk schema is always `/`-joined per `manifest_path`'s use
+        // of `Path::join` plus the convention that thread names use
+        // forward slashes. Normalise here so the returned summary's
+        // `thread` field round-trips through `read_manifest` and
+        // `manifest_path` cleanly.
+        let rel = cur.strip_prefix(threads_dir).unwrap_or(cur);
+        let mut name_parts: Vec<String> = Vec::new();
+        for component in rel.components() {
+            if let std::path::Component::Normal(s) = component
+                && let Some(s) = s.to_str()
+            {
+                name_parts.push(s.to_string());
+            } else {
+                // Non-utf8 or weird path component → skip silently.
+                return Ok(());
+            }
+        }
+        if name_parts.is_empty() {
+            return Ok(());
+        }
+        let name = name_parts.join("/");
+        if let Ok(Some(m)) = read_manifest(threads_dir.parent().unwrap_or(threads_dir), &name) {
+            out.push(MaterializedThreadSummary {
                 thread: name,
                 state_id: m.state_id,
                 tree_hash: m.tree_hash,
                 materialized_at: m.materialized_at,
                 file_count: m.files.len(),
-            }),
-            // Malformed / wrong schema / missing: skip rather than
-            // poison the whole listing. The user can introspect the
-            // bad one directly if they care.
-            Ok(None) | Err(_) => continue,
+            });
         }
+        return Ok(());
     }
-    summaries.sort_by(|a, b| a.thread.cmp(&b.thread));
-    Ok(summaries)
+    for sub in subdirs {
+        walk_thread_manifests(threads_dir, &sub, out)?;
+    }
+    Ok(())
 }
 
 /// Read the on-disk manifest for `thread`. Returns `Ok(None)` when no
@@ -203,6 +255,25 @@ pub fn read_manifest(heddle_dir: &Path, thread: &str) -> io::Result<Option<Threa
         ));
     }
     Ok(Some(manifest))
+}
+
+/// Delete the on-disk manifest directory for `thread`. Used by
+/// `heddle thread drop` to keep the materialized-thread inventory
+/// (`heddle status` / `heddle daemon status`) in sync with the live
+/// thread set. Idempotent: a missing directory is reported as
+/// "deleted = false" rather than an error.
+///
+/// Removes the whole `<heddle_dir>/threads/<thread>/` directory —
+/// not just `manifest.toml` — so future per-thread sidecars
+/// (verification artefacts, capture journals, etc.) clean up with
+/// the same call.
+pub fn remove_thread_manifest_dir(heddle_dir: &Path, thread: &str) -> io::Result<bool> {
+    let dir = heddle_dir.join("threads").join(thread);
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(enrich_fs_error(&dir, "removing", e)),
+    }
 }
 
 /// Atomically write `manifest` to disk for `thread`. Writes to a

@@ -1225,6 +1225,15 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     match thread_mode {
         ThreadMode::Solid | ThreadMode::Materialized => {
             write_isolated_checkout(repo, &abs_path, &base_state, Some(&args.name))?;
+            // Materialized threads ship with a manifest sidecar that
+            // ties the on-disk worktree to the captured state via a
+            // per-file stat-cache. Solid threads are full file copies
+            // with no shared extents and stat-cache reuse wouldn't be
+            // semantically right (the bytes can drift without us
+            // noticing the way clonefile shares would expose).
+            if matches!(thread_mode, ThreadMode::Materialized) {
+                repo.record_thread_manifest(&args.name, &base_state, &abs_path)?;
+            }
             if let Some(dir) = shared_target_dir_path.as_ref() {
                 let applied = shared_target::write_cargo_config(&abs_path, dir)?;
                 if !applied {
@@ -1402,7 +1411,12 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 fn resolve_thread_mode(repo: &Repository, args: &ThreadStartArgs) -> ThreadMode {
     // Explicit `--workspace` wins. `--path` only changes *where* the
     // worktree lives; the mode dispatch decides *how* the bytes get
-    // there (clonefile vs mount vs full copy).
+    // there (clonefile vs mount vs full copy). We respect explicit
+    // modes even on filesystems that won't deliver their full
+    // performance promise (e.g. `--workspace materialized` on ext4
+    // silently falls through to per-blob `fs::copy` inside the
+    // materializer); the auto path probes the FS instead so the
+    // mode label in `heddle status` stays accurate.
     match args.workspace {
         WorkspaceModeArg::Materialized => ThreadMode::Materialized,
         WorkspaceModeArg::Virtualized => ThreadMode::Virtualized,
@@ -1412,15 +1426,37 @@ fn resolve_thread_mode(repo: &Repository, args: &ThreadStartArgs) -> ThreadMode 
             // a checkout I can navigate to" — point Auto away from
             // `virtualized` (which is always managed) toward the
             // bytes-on-disk modes.
-            if args.path.is_some() {
-                return ThreadMode::Materialized;
+            let candidate = if args.path.is_some() {
+                ThreadMode::Materialized
+            } else {
+                match resolve_auto_workspace_default(repo, args) {
+                    UserThreadWorkspaceMode::Materialized => ThreadMode::Materialized,
+                    UserThreadWorkspaceMode::Virtualized => ThreadMode::Virtualized,
+                    UserThreadWorkspaceMode::Solid => ThreadMode::Solid,
+                    UserThreadWorkspaceMode::Auto => ThreadMode::Materialized,
+                }
+            };
+            // Auto-only reflink-capability probe. `materialized`
+            // implies "clonefile/reflink the captured tree into a
+            // thread dir"; on ext4 / HFS+ / NTFS the clonefile call
+            // returns `EOPNOTSUPP` and `materialize_blob` falls back
+            // to per-blob `fs::copy`. That works but uses N× the disk
+            // a CoW share would, and a user-facing `Workspace:
+            // materialized` line would be misleading. Downgrade to
+            // `solid` so the mode label matches what's actually on
+            // disk. One-shot syscall pair (write + clonefile on a
+            // tiny probe file under repo root), measured at <1 ms.
+            if candidate == ThreadMode::Materialized
+                && !objects::fs_clone::filesystem_supports_reflink(repo.root())
+            {
+                tracing::debug!(
+                    root = %repo.root().display(),
+                    "Auto workspace: filesystem does not support reflinks; \
+                     falling back to `solid` so the mode label reflects disk truth"
+                );
+                return ThreadMode::Solid;
             }
-            match resolve_auto_workspace_default(repo, args) {
-                UserThreadWorkspaceMode::Materialized => ThreadMode::Materialized,
-                UserThreadWorkspaceMode::Virtualized => ThreadMode::Virtualized,
-                UserThreadWorkspaceMode::Solid => ThreadMode::Solid,
-                UserThreadWorkspaceMode::Auto => ThreadMode::Materialized,
-            }
+            candidate
         }
     }
 }

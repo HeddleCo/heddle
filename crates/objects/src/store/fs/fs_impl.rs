@@ -450,7 +450,7 @@ impl ObjectStore for FsStore {
         // Trust without re-hashing — `path.exists()` is the only
         // I/O we need.
         if let Ok(verified) = self.verified_loose_blobs.read()
-            && verified.contains(hash)
+            && verified.get(hash).is_some()
             && path.exists()
         {
             return Some(path);
@@ -481,7 +481,7 @@ impl ObjectStore for FsStore {
             return None;
         }
         if let Ok(mut verified) = self.verified_loose_blobs.write() {
-            verified.insert(*hash);
+            verified.insert(*hash, ());
         }
         Some(path)
     }
@@ -538,7 +538,7 @@ impl ObjectStore for FsStore {
         );
         self.write_loose_object_cache(&path, blob.content())?;
         if let Ok(mut verified) = self.verified_loose_blobs.write() {
-            verified.insert(*hash);
+            verified.insert(*hash, ());
         }
         Ok(true)
     }

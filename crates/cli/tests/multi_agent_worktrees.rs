@@ -19,6 +19,8 @@ mod agent_registry;
 mod daemon_lifecycle;
 #[path = "multi_agent_worktrees/e2e.rs"]
 mod e2e;
+#[path = "multi_agent_worktrees/materialized_threads_e2e.rs"]
+mod materialized_threads_e2e;
 #[path = "multi_agent_worktrees/objectstore_pointer.rs"]
 mod objectstore_pointer;
 #[path = "multi_agent_worktrees/thread_create.rs"]

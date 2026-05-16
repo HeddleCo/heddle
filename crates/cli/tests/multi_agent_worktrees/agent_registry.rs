@@ -55,16 +55,12 @@ fn thread_list_returns_all_started_threads() {
     let v: Value = serde_json::from_str(&out).unwrap();
     let threads = v["threads"].as_array().unwrap();
 
-    assert!(
-        threads
-            .iter()
-            .any(|thread| thread["name"] == "feature/list-a")
-    );
-    assert!(
-        threads
-            .iter()
-            .any(|thread| thread["name"] == "feature/list-b")
-    );
+    assert!(threads
+        .iter()
+        .any(|thread| thread["name"] == "feature/list-a"));
+    assert!(threads
+        .iter()
+        .any(|thread| thread["name"] == "feature/list-b"));
 }
 
 #[test]
@@ -155,12 +151,10 @@ fn actor_explain_reports_attach_reason_for_current_actor() {
             .unwrap();
 
     assert_eq!(explained["thread"].as_str(), Some("feature/explain-actor"));
-    assert!(
-        explained["attach_reason"]
-            .as_str()
-            .unwrap_or("")
-            .contains("thread")
-    );
+    assert!(explained["attach_reason"]
+        .as_str()
+        .unwrap_or("")
+        .contains("thread"));
 }
 
 #[test]

@@ -602,6 +602,13 @@ pub(crate) fn drop_thread_silent(
         // will also fail and the user gets a clear error.
         remove_path_recursively(&thread.execution_path)?;
     }
+    // Drop the manifest sidecar last — it has no on-disk dependencies
+    // and a leftover would surface as a phantom entry in
+    // `heddle status` and `heddle daemon status`. Best-effort: a
+    // missing dir reports `false` rather than erroring, an inaccessible
+    // dir bubbles up the io error so the drop reports the actual
+    // problem instead of silently leaving inventory inconsistent.
+    repo::thread_manifest::remove_thread_manifest_dir(repo.heddle_dir(), &thread.thread)?;
     thread.state = ThreadState::Abandoned;
     thread.updated_at = Utc::now();
     manager.save(&thread)?;
