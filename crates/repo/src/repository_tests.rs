@@ -1051,3 +1051,177 @@ fn test_op_scope_is_invariant_to_invocation_cwd() {
         "op_scope must be cwd-invariant; opening from {nested:?} produced a different scope",
     );
 }
+
+mod blob_hydrator_callback {
+    //! Read-time hydration hook (issue #50).
+    //!
+    //! When `Repository::require_blob` is called for a hash recorded in
+    //! `partial-fetch`, the repo must invoke a registered hydrator,
+    //! retry the store read, and clear the missing marker on success.
+    //! On failure the underlying error must surface — partial-clone
+    //! hydration is not allowed to silently degrade to "blob is just
+    //! missing", which would mask network outages.
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use objects::{
+        error::Result,
+        object::{Blob, ContentHash},
+    };
+
+    use super::create_test_repo;
+    use crate::{BlobHydrator, HeddleError, Repository};
+
+    /// Test double that records every call and lets the test script the
+    /// outcome (success-by-write, hard error, or refuse-to-write).
+    struct ScriptedHydrator {
+        calls: AtomicUsize,
+        seen: Mutex<Vec<ContentHash>>,
+        mode: HydratorMode,
+    }
+
+    enum HydratorMode {
+        /// On hydrate, write `payload` to `repo.store()` so the retry-read finds it.
+        WritePayload(Vec<u8>),
+        /// Return Err without writing — simulates network failure.
+        Fail(String),
+        /// Return Ok without writing — caller should still surface MissingObject.
+        Lie,
+    }
+
+    impl ScriptedHydrator {
+        fn new(mode: HydratorMode) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                seen: Mutex::new(Vec::new()),
+                mode,
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn hashes_seen(&self) -> Vec<ContentHash> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl BlobHydrator for ScriptedHydrator {
+        fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.seen.lock().unwrap().push(*hash);
+            match &self.mode {
+                HydratorMode::WritePayload(payload) => {
+                    repo.store().put_blob(&Blob::new(payload.clone()))?;
+                    Ok(())
+                }
+                HydratorMode::Fail(msg) => Err(HeddleError::Config(msg.clone())),
+                HydratorMode::Lie => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn require_blob_invokes_hydrator_and_clears_marker_on_success() {
+        let (_temp, repo) = create_test_repo();
+        let payload = b"hydrated bytes".to_vec();
+        let hash = ContentHash::compute(&payload);
+
+        repo.record_missing_blob(hash).unwrap();
+        assert!(
+            repo.is_missing_blob(&hash).unwrap(),
+            "precondition: blob must be recorded missing"
+        );
+
+        let hydrator = Arc::new(ScriptedHydrator::new(HydratorMode::WritePayload(
+            payload.clone(),
+        )));
+        repo.set_blob_hydrator(hydrator.clone());
+
+        let blob = repo
+            .require_blob(&hash)
+            .expect("require_blob must hydrate and return the blob");
+        assert_eq!(blob.content(), payload.as_slice());
+        assert_eq!(hydrator.call_count(), 1, "hydrator must fire exactly once");
+        assert_eq!(hydrator.hashes_seen(), vec![hash]);
+        assert!(
+            !repo.is_missing_blob(&hash).unwrap(),
+            "missing marker must be cleared after successful hydration",
+        );
+
+        // Subsequent reads must be a cache hit — hydrator stays at 1 call.
+        let _ = repo.require_blob(&hash).unwrap();
+        assert_eq!(
+            hydrator.call_count(),
+            1,
+            "hydrator must not be re-invoked for a cache hit"
+        );
+    }
+
+    #[test]
+    fn require_blob_surfaces_hydration_error_without_silent_fallback() {
+        let (_temp, repo) = create_test_repo();
+        let hash = ContentHash::compute(b"will-never-arrive");
+        repo.record_missing_blob(hash).unwrap();
+
+        let hydrator = Arc::new(ScriptedHydrator::new(HydratorMode::Fail(
+            "upstream offline".to_string(),
+        )));
+        repo.set_blob_hydrator(hydrator.clone());
+
+        let err = repo
+            .require_blob(&hash)
+            .expect_err("require_blob must surface the hydrator error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("upstream offline"),
+            "the hydrator's error message must reach the caller verbatim; got: {msg}"
+        );
+        assert_eq!(hydrator.call_count(), 1);
+        assert!(
+            repo.is_missing_blob(&hash).unwrap(),
+            "marker must remain set when hydration fails so the next attempt also tries to hydrate",
+        );
+    }
+
+    #[test]
+    fn require_blob_returns_missing_object_if_hydrator_lies() {
+        // Defensive: if a hydrator returns Ok but doesn't actually write
+        // the blob, require_blob must NOT return stale data. It must
+        // raise MissingObject so the caller learns the contract was violated.
+        let (_temp, repo) = create_test_repo();
+        let hash = ContentHash::compute(b"phantom-blob");
+        repo.record_missing_blob(hash).unwrap();
+
+        let hydrator = Arc::new(ScriptedHydrator::new(HydratorMode::Lie));
+        repo.set_blob_hydrator(hydrator.clone());
+
+        let err = repo
+            .require_blob(&hash)
+            .expect_err("require_blob must not succeed when the blob is still absent");
+        assert!(
+            matches!(err, HeddleError::MissingObject { .. }),
+            "expected MissingObject, got: {err:?}"
+        );
+        assert_eq!(hydrator.call_count(), 1);
+    }
+
+    #[test]
+    fn require_blob_without_hydrator_still_returns_missing_object() {
+        // Backwards-compatibility guard: callers that never registered a
+        // hydrator (the common path today) must see the same
+        // MissingObject error as before #50.
+        let (_temp, repo) = create_test_repo();
+        let hash = ContentHash::compute(b"no-hydrator");
+        repo.record_missing_blob(hash).unwrap();
+
+        let err = repo.require_blob(&hash).expect_err("must error");
+        assert!(
+            matches!(err, HeddleError::MissingObject { .. }),
+            "expected MissingObject, got: {err:?}"
+        );
+    }
+}

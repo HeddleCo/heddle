@@ -53,7 +53,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
-    sync::RwLock,
+    sync::{Arc, RwLock},
 };
 
 use chrono::Utc;
@@ -204,6 +204,27 @@ struct GitBridgeMappingFile {
     entries: Vec<GitBridgeMappingEntry>,
 }
 
+/// Lazy-clone read-time hydration hook.
+///
+/// When `Repository::require_blob` is called for a blob that's recorded
+/// in `.heddle/partial-fetch` (the marker the lazy-pull plumbing leaves
+/// behind) and absent from the local object store, the repo delegates to
+/// a registered `BlobHydrator` to fetch the bytes from the upstream.
+///
+/// Two production implementations exist:
+/// - Git-overlay clones: `cli::commands::clone::GitOverlayBlobHydrator`
+///   uses gix promisor-fetch semantics against the bare `.git/` repo.
+/// - Hosted clones: `heddle_client::grpc_hosted::HostedBlobHydrator`
+///   calls `HostedGrpcClient::hydrate_pulled_state`.
+///
+/// On success the hydrator is expected to write the blob into
+/// `repo.store()`; the read path then clears the missing marker and
+/// returns the blob. On failure the error is propagated verbatim — the
+/// hook is deliberately not allowed to swallow upstream outages.
+pub trait BlobHydrator: Send + Sync {
+    fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> Result<()>;
+}
+
 /// A Heddle repository.
 pub struct Repository {
     root: PathBuf,
@@ -213,6 +234,7 @@ pub struct Repository {
     oplog: Box<dyn OpLogBackend>,
     config: RepoConfig,
     shallow: RwLock<ShallowInfo>,
+    blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
 }
 
 impl RepositoryLockExt for Repository {
@@ -250,6 +272,7 @@ impl Repository {
             oplog,
             config,
             shallow: RwLock::new(shallow),
+            blob_hydrator: RwLock::new(None),
         }
     }
 
@@ -389,6 +412,7 @@ impl Repository {
             oplog: Box::new(oplog),
             config,
             shallow: RwLock::new(ShallowInfo::load(&heddle_dir)?),
+            blob_hydrator: RwLock::new(None),
         })
     }
 
@@ -1527,6 +1551,20 @@ impl Repository {
         }
 
         Err(HeddleError::NotFound(hash.to_hex()))
+    }
+
+    /// Register a `BlobHydrator` to fetch blobs on demand from the
+    /// upstream when `require_blob` hits a missing-blob marker. Used by
+    /// the clone command after a `--lazy` / `--filter blob:none` clone.
+    /// Replaces any previously registered hydrator. Process-local: not
+    /// persisted across `Repository::open` calls.
+    pub fn set_blob_hydrator(&self, hydrator: Arc<dyn BlobHydrator>) {
+        *self.blob_hydrator.write().unwrap() = Some(hydrator);
+    }
+
+    /// The currently registered hydrator, if any.
+    pub fn blob_hydrator(&self) -> Option<Arc<dyn BlobHydrator>> {
+        self.blob_hydrator.read().unwrap().clone()
     }
 
     fn partial_fetch_metadata(&self) -> repository_partial_fetch::PartialFetchMetadataManager {
