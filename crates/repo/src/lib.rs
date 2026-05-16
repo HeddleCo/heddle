@@ -11,6 +11,7 @@ pub mod daemon;
 mod ephemeral_thread;
 mod fsmonitor;
 mod hooks;
+pub mod lazy_hydrator;
 mod merge_state;
 pub mod migration;
 pub mod operation_dedup;

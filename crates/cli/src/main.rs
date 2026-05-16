@@ -58,6 +58,16 @@ async fn main() -> Result<()> {
     // ~0ms on macOS — defensive ordering rather than a perf hot spot.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Register lazy-clone hydrator factories with the `repo` crate's
+    // global registry. This must happen before any `Repository::open`
+    // call so that opening a lazy-cloned repo can reconstruct + install
+    // the on-read blob hydrator transparently. Without these
+    // registrations, the second-and-subsequent CLI invocation against a
+    // `--lazy` clone would see `MissingObject` on every blob read.
+    cli::cli::commands::register_git_overlay_factory();
+    #[cfg(feature = "client")]
+    heddle_client::grpc_hosted::register_hosted_factory();
+
     // Pick the WeftExtensions implementation at startup. OSS builds
     // get NoopWeftExtensions (returns friendly errors for `auth`,
     // `support`, `presence` commands). client builds get the

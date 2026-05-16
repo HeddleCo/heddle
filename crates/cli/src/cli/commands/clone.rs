@@ -410,6 +410,23 @@ async fn clone_network(
         )
         .await?;
     if result.success {
+        // Lazy clone: persist the hydrator metadata so future
+        // `Repository::open` calls (in any process) can reconstruct
+        // the on-read hydrator. Without this, lazy clones would only
+        // hydrate inside the single `cmd_clone` process — every
+        // subsequent `heddle <verb>` would surface MissingObject on
+        // any blob read.
+        if lazy {
+            use repo::lazy_hydrator::LazyHydratorConfig;
+            let cfg = LazyHydratorConfig::hosted(
+                addr.to_string(),
+                repo_path,
+                track_name,
+                track_name,
+            );
+            cfg.save(local_repo.heddle_dir())
+                .context("failed to persist lazy-hydrator.toml")?;
+        }
         if should_output_json(cli, Some(local_repo.config())) {
             println!(
                 "{{\"status\": \"cloned\", \"remote\": \"{}\", \"local\": \"{}\", \"state\": \"{}\"}}",
@@ -611,6 +628,37 @@ impl GitOverlayBlobHydrator {
         }
         Ok(output.stdout)
     }
+}
+
+/// Register the `"git-overlay"` factory in the global lazy-hydrator
+/// registry. Call once at process startup (from `main()`) so a
+/// `Repository::open` on a lazy-cloned repo can reconstruct the
+/// hydrator without re-running `cmd_clone`.
+///
+/// Note: the rebuilt hydrator's `blob_oid_map` starts empty, since the
+/// blake3 → git-OID map is populated only by the importer (currently
+/// in-process only). Cross-process git-overlay lazy reads are not yet
+/// fully wired — `--lazy` for git-overlay clones is rejected at the
+/// flag-validation surface (see `reject_unsupported_for_git_overlay`),
+/// so this factory is registered for symmetry and forward-compat with
+/// follow-up work that persists the OID map sidecar. Until then the
+/// hydrator returns the descriptive `"no Git OID mapping"` error if a
+/// missing blob is requested.
+pub fn register_git_overlay_factory() {
+    use std::path::Path as StdPath;
+    use std::sync::Arc as StdArc;
+
+    use repo::lazy_hydrator::{
+        BlobHydratorFactory, HydratorSection, KIND_GIT_OVERLAY, register_factory,
+    };
+
+    let factory: BlobHydratorFactory = StdArc::new(
+        |root: &StdPath, _section: &HydratorSection| -> HeddleResult<StdArc<dyn BlobHydrator>> {
+            let bare = root.join(".git");
+            Ok(StdArc::new(GitOverlayBlobHydrator::new(bare)))
+        },
+    );
+    register_factory(KIND_GIT_OVERLAY, factory);
 }
 
 #[cfg(test)]

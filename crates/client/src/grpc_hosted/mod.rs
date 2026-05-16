@@ -340,4 +340,6 @@ impl HostedGrpcClient {
     }
 }
 
-pub use hydration::{HostedBlobHydrator, PullMaterialization};
+pub use hydration::{
+    HostedBlobHydrator, LazyHostedHydrator, PullMaterialization, register_hosted_factory,
+};

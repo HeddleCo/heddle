@@ -104,7 +104,7 @@ pub use bridge::cmd_bridge_git;
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clean::cmd_clean;
-pub use clone::{GitOverlayBlobHydrator, cmd_clone};
+pub use clone::{GitOverlayBlobHydrator, cmd_clone, register_git_overlay_factory};
 pub use collapse::cmd_collapse;
 pub use compare::cmd_compare;
 pub use completion::cmd_completion;

@@ -1224,4 +1224,130 @@ mod blob_hydrator_callback {
             "expected MissingObject, got: {err:?}"
         );
     }
+
+    /// Regression test for the Codex-flagged P1 (PR #53): the lazy-clone
+    /// hydrator must survive a `Repository::open` boundary. Without
+    /// cross-open reconstruction, `heddle clone --lazy` would work
+    /// in-process but every subsequent `heddle <verb>` invocation in a
+    /// fresh CLI process would see `MissingObject` because no hydrator
+    /// is registered. The factory registry in
+    /// [`crate::lazy_hydrator`] closes that gap; this test pins it.
+    ///
+    /// We register a custom test-only kind so the assertion is
+    /// independent of the production git-overlay / hosted factory
+    /// implementations.
+    #[test]
+    fn require_blob_uses_factory_registered_hydrator_after_reopen() {
+        use std::path::Path;
+
+        use crate::lazy_hydrator::{
+            HydratorSection, LazyHydratorConfig, register_factory,
+        };
+
+        // Test-isolated kind name — does not collide with the production
+        // "git-overlay" / "hosted" kinds that other tests / CLI startup
+        // register.
+        const KIND: &str = "test-kind-cross-open-reopen";
+
+        // Build a payload + its blake3 first.
+        let payload = b"persisted-and-reopened".to_vec();
+        let hash = Blob::new(payload.clone()).hash();
+
+        // Set up a fresh repo and persist the lazy-hydrator metadata
+        // pointing at our custom kind. Drop the repo before reopening
+        // so we know the hydrator install is happening on the second
+        // open, not lingering from the first construction.
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let heddle_dir = repo.heddle_dir().to_path_buf();
+        repo.record_missing_blob(hash).unwrap();
+        // Crucially: do NOT call `set_blob_hydrator` here. The hydrator
+        // must come from the factory, not from in-process state.
+        let cfg = LazyHydratorConfig {
+            hydrator: HydratorSection {
+                kind: KIND.to_string(),
+                hosted: None,
+                git_overlay: None,
+            },
+        };
+        cfg.save(&heddle_dir).unwrap();
+        drop(repo);
+
+        // Register the factory that the open path will look up. Done
+        // *after* the first repo is dropped to make the order
+        // explicit: open → load metadata → consult registry → install.
+        let payload_for_factory = payload.clone();
+        register_factory(
+            KIND,
+            Arc::new(
+                move |_root: &Path,
+                      _section: &HydratorSection|
+                      -> Result<Arc<dyn BlobHydrator>> {
+                    let bytes = payload_for_factory.clone();
+                    let calls = Arc::new(AtomicUsize::new(0));
+                    let calls_for_hydrator = Arc::clone(&calls);
+                    Ok(Arc::new(InlineHydrator {
+                        bytes,
+                        calls: calls_for_hydrator,
+                    }))
+                },
+            ),
+        );
+
+        // First reopen: the open path should pick up the metadata,
+        // consult the registry, and install the factory-built hydrator.
+        // require_blob then transparently hydrates.
+        let reopened = Repository::open(temp.path()).unwrap();
+        let blob = reopened
+            .require_blob(&hash)
+            .expect("hydrator must be re-installed by Repository::open");
+        assert_eq!(blob.content(), payload.as_slice());
+        // Marker should now be cleared after the successful hydrate.
+        assert!(!reopened.is_missing_blob(&hash).unwrap());
+        drop(reopened);
+
+        // Second reopen with a *different* missing blob proves
+        // reconstruction isn't a one-shot: each `Repository::open`
+        // freshly installs the hydrator from the persisted metadata.
+        let payload2 = b"second-reopen".to_vec();
+        let hash2 = Blob::new(payload2.clone()).hash();
+        // Re-register the factory under the same kind but with the
+        // new payload, so the second hydrator delivers `payload2`.
+        let payload2_for_factory = payload2.clone();
+        register_factory(
+            KIND,
+            Arc::new(
+                move |_root: &Path,
+                      _section: &HydratorSection|
+                      -> Result<Arc<dyn BlobHydrator>> {
+                    let bytes = payload2_for_factory.clone();
+                    Ok(Arc::new(InlineHydrator {
+                        bytes,
+                        calls: Arc::new(AtomicUsize::new(0)),
+                    }))
+                },
+            ),
+        );
+        let reopened2 = Repository::open(temp.path()).unwrap();
+        reopened2.record_missing_blob(hash2).unwrap();
+        let blob2 = reopened2
+            .require_blob(&hash2)
+            .expect("second reopen must also have the hydrator installed");
+        assert_eq!(blob2.content(), payload2.as_slice());
+    }
+
+    /// Minimal hydrator that writes a fixed payload on each call. Only
+    /// used by `require_blob_uses_factory_registered_hydrator_after_reopen`.
+    struct InlineHydrator {
+        bytes: Vec<u8>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl BlobHydrator for InlineHydrator {
+        fn hydrate(&self, repo: &Repository, _hash: &ContentHash) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            repo.store().put_blob(&Blob::new(self.bytes.clone()))?;
+            Ok(())
+        }
+    }
 }

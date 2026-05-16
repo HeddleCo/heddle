@@ -152,6 +152,104 @@ fn hydration_fires_against_local_git_overlay() {
     eprintln!("local hydration round-trip: {elapsed:?}");
 }
 
+/// Cross-process / multi-`Repository::open` regression test for the
+/// Codex P1 on PR #53: verify the factory registry reconstructs a
+/// hydrator on every fresh open of a lazy-cloned repo, not just the
+/// one created by `cmd_clone`.
+///
+/// Drives the same fixture as `hydration_fires_against_local_git_overlay`
+/// but takes the persistence path: writes
+/// `.heddle/lazy-hydrator.toml`, drops the repo handle, registers a
+/// custom test factory under the same kind, then re-opens with
+/// `Repository::open` and confirms `require_blob` transparently
+/// hydrates without anyone calling `set_blob_hydrator` directly.
+///
+/// Done as two open-and-drop cycles to prove the registry isn't a
+/// one-shot install.
+#[test]
+fn hydration_survives_repository_reopen() {
+    use objects::error::Result as HResult;
+    use repo::{
+        BlobHydrator,
+        lazy_hydrator::{
+            BlobHydratorFactory, HydratorSection, KIND_GIT_OVERLAY, LazyHydratorConfig,
+            register_factory,
+        },
+    };
+
+    let (_bare_temp, bare, blob_oid, blob_bytes) = build_local_bare_with_one_blob();
+    let blake3 = Blob::new(blob_bytes.clone()).hash();
+
+    // Build a heddle repo and persist the metadata for git-overlay
+    // kind. Importantly, do NOT call set_blob_hydrator — the test
+    // verifies that `Repository::open` installs the hydrator via the
+    // registry, not in-process state.
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let heddle_root = heddle_temp.path().to_path_buf();
+    let repo = Repository::init_default(&heddle_root).expect("init heddle repo");
+    let heddle_dir = repo.heddle_dir().to_path_buf();
+    repo.record_missing_blob(blake3).expect("record marker");
+    LazyHydratorConfig::git_overlay()
+        .save(&heddle_dir)
+        .expect("write lazy-hydrator.toml");
+    drop(repo);
+
+    // Register a test factory that builds a GitOverlayBlobHydrator
+    // pointing at the bare repo and seeds the OID mapping before
+    // returning. The production git-overlay factory does the same
+    // structural job; the only test-specific wrinkle is OID-map
+    // seeding (the production path doesn't yet persist the map; see
+    // the Rule-7 follow-up note in the PR description).
+    let bare_for_factory = bare.clone();
+    let factory: BlobHydratorFactory = std::sync::Arc::new(
+        move |_root: &Path, _section: &HydratorSection| -> HResult<Arc<dyn BlobHydrator>> {
+            let h = GitOverlayBlobHydrator::new(bare_for_factory.clone());
+            h.record_blob_oid(blake3, blob_oid);
+            Ok(Arc::new(h))
+        },
+    );
+    register_factory(KIND_GIT_OVERLAY, factory);
+
+    // First reopen: hydrator must come from the registry.
+    let reopened = Repository::open(&heddle_root).expect("reopen heddle repo");
+    let blob = reopened
+        .require_blob(&blake3)
+        .expect("first reopen: hydrator must be installed by Repository::open");
+    assert_eq!(
+        blob.content(),
+        blob_bytes.as_slice(),
+        "hydrated bytes must match upstream",
+    );
+    assert!(!reopened.is_missing_blob(&blake3).unwrap());
+    drop(reopened);
+
+    // Second reopen with a *new* missing blob in the bare repo to
+    // confirm the registry isn't a one-shot install.
+    let bare_open = gix::open(&bare).expect("open bare for second blob");
+    let payload2 = b"second-blob-after-reopen\n".to_vec();
+    let oid2 = bare_open.write_blob(payload2.as_slice()).expect("write blob 2").detach();
+    let blake3_2 = Blob::new(payload2.clone()).hash();
+    // Re-register the factory under the same kind to seed the new
+    // OID — last-write-wins, mirroring how the production path could
+    // refresh its map after a `pull --lazy`.
+    let bare_for_factory_2 = bare.clone();
+    let factory_2: BlobHydratorFactory = std::sync::Arc::new(
+        move |_root: &Path, _section: &HydratorSection| -> HResult<Arc<dyn BlobHydrator>> {
+            let h = GitOverlayBlobHydrator::new(bare_for_factory_2.clone());
+            h.record_blob_oid(blake3_2, oid2);
+            Ok(Arc::new(h))
+        },
+    );
+    register_factory(KIND_GIT_OVERLAY, factory_2);
+
+    let reopened2 = Repository::open(&heddle_root).expect("reopen 2");
+    reopened2.record_missing_blob(blake3_2).expect("mark blob 2 missing");
+    let blob2 = reopened2
+        .require_blob(&blake3_2)
+        .expect("second reopen: hydrator must be re-installed");
+    assert_eq!(blob2.content(), payload2.as_slice());
+}
+
 /// `#[ignore]`-gated acceptance test from the issue body. Requires
 /// network access and the `git` binary; skips gracefully when either
 /// is missing so the gate doesn't flake in offline CI.

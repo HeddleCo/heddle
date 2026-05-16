@@ -308,6 +308,26 @@ impl Repository {
         if let Err(err) = crate::migration::apply_pending(&repo) {
             tracing::warn!("declarative migrations failed during repo open: {err}");
         }
+        // Reconstruct any persisted lazy-clone blob hydrator. When
+        // `.heddle/lazy-hydrator.toml` exists, look up the registered
+        // factory for its `kind` and install the hydrator on the
+        // freshly-opened repo so a subsequent `require_blob` against a
+        // missing-blob marker can fetch transparently — without this
+        // reconstruction, lazy clones would only work inside the single
+        // `cmd_clone` process. See `lazy_hydrator.rs` for the shape.
+        match crate::lazy_hydrator::try_reconstruct(repo.root(), repo.heddle_dir()) {
+            Ok(Some(hydrator)) => repo.set_blob_hydrator(hydrator),
+            Ok(None) => {}
+            Err(err) => {
+                // Hydrator construction failed (factory error or
+                // malformed metadata). Surface as a warning rather
+                // than blocking `open` — eager `heddle status` calls
+                // shouldn't fail just because a stale hosted
+                // endpoint is unreachable; the user will get the real
+                // error on the first `require_blob` that needs it.
+                tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
+            }
+        }
         Ok(repo)
     }
 
@@ -1570,8 +1590,15 @@ impl Repository {
     /// Register a `BlobHydrator` to fetch blobs on demand from the
     /// upstream when `require_blob` hits a missing-blob marker. Used by
     /// the clone command after a `--lazy` / `--filter blob:none` clone.
-    /// Replaces any previously registered hydrator. Process-local: not
-    /// persisted across `Repository::open` calls.
+    /// Replaces any previously registered hydrator.
+    ///
+    /// The trait-object handle itself is process-local, but persistence
+    /// across `Repository::open` calls is handled by the
+    /// [`crate::lazy_hydrator`] module: clone writes
+    /// `.heddle/lazy-hydrator.toml` recording the hydrator kind +
+    /// config, and `Repository::open` consults
+    /// [`crate::lazy_hydrator::try_reconstruct`] to look up the
+    /// registered factory and re-install the hydrator automatically.
     pub fn set_blob_hydrator(&self, hydrator: Arc<dyn BlobHydrator>) {
         *self.blob_hydrator.write().unwrap() = Some(hydrator);
     }

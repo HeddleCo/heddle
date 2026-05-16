@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use objects::{
     error::HeddleError,
@@ -112,6 +112,186 @@ impl BlobHydrator for HostedBlobHydrator {
             .map(|_count| ())
             .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))
     }
+}
+
+/// Lazy wrapper around [`HostedBlobHydrator`] that defers gRPC connect
+/// (and tokio runtime construction) to first `hydrate()` call.
+///
+/// The lazy-hydrator factory registry runs inside `Repository::open`,
+/// which is sync and may execute outside any tokio runtime — so the
+/// hosted factory cannot eagerly construct a `HostedBlobHydrator`
+/// (which needs both an `Arc<Mutex<HostedGrpcClient>>` and a
+/// `tokio::runtime::Handle`). Instead the factory hands back this
+/// adapter, which stores the persisted config and constructs the
+/// runtime + client + inner hydrator on the first `hydrate()` call.
+///
+/// The runtime lives for the process lifetime (held by the
+/// `OnceLock`) — there's no clean shutdown path because `BlobHydrator`
+/// has no `drop` hook, but a hydrator is created once per
+/// `Repository::open` and dropped with the repo, and the runtime is
+/// reused across every hydrate on that repo. The cost is one
+/// multi-threaded runtime per lazy clone in active use.
+pub struct LazyHostedHydrator {
+    endpoint: String,
+    repo_path: String,
+    remote_thread: String,
+    /// Local thread name to resolve at hydrate time. Kept separately
+    /// so a future `pull --lazy` that advances the thread continues to
+    /// hydrate against the new tip without rewriting
+    /// `lazy-hydrator.toml`.
+    local_thread: String,
+    inner: OnceLock<HostedBlobHydrator>,
+    /// Owned runtime backing the hydrator's blocking calls. Holds the
+    /// runtime alive for the hydrator's lifetime; never dropped before
+    /// the `OnceLock<HostedBlobHydrator>` it serves.
+    runtime: OnceLock<tokio::runtime::Runtime>,
+}
+
+impl LazyHostedHydrator {
+    pub fn new(
+        endpoint: impl Into<String>,
+        repo_path: impl Into<String>,
+        remote_thread: impl Into<String>,
+        local_thread: impl Into<String>,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            repo_path: repo_path.into(),
+            remote_thread: remote_thread.into(),
+            local_thread: local_thread.into(),
+            inner: OnceLock::new(),
+            runtime: OnceLock::new(),
+        }
+    }
+
+    /// Build the inner `HostedBlobHydrator` on first call. Subsequent
+    /// calls reuse the cached instance.
+    fn ensure_inner(&self, repo: &Repository) -> objects::error::Result<&HostedBlobHydrator> {
+        if let Some(inner) = self.inner.get() {
+            return Ok(inner);
+        }
+
+        // Resolve the current thread tip at hydrate time so a `pull
+        // --lazy` that advanced the thread is picked up automatically.
+        let target_state = match repo.refs().get_thread(&self.local_thread) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                return Err(HeddleError::Config(format!(
+                    "lazy hosted hydrator: local thread '{}' has no recorded tip — \
+                     was the lazy clone interrupted? Try `heddle pull --lazy` to refresh.",
+                    self.local_thread,
+                )));
+            }
+            Err(err) => {
+                return Err(HeddleError::Config(format!(
+                    "lazy hosted hydrator: failed to read local thread '{}': {err}",
+                    self.local_thread,
+                )));
+            }
+        };
+
+        // Parse the persisted endpoint into a SocketAddr. The wire
+        // format is `host:port`; reject early with a clear error so a
+        // typo doesn't surface as an opaque connection failure later.
+        let addr: std::net::SocketAddr = self.endpoint.parse().map_err(|err| {
+            HeddleError::Config(format!(
+                "lazy hosted hydrator: invalid endpoint '{}' in lazy-hydrator.toml: {err}",
+                self.endpoint,
+            ))
+        })?;
+
+        // Build a dedicated multi-thread runtime so `handle.block_on`
+        // works regardless of what runtime (if any) the caller is
+        // running on. One worker is enough for the hydrator's serial
+        // RPC pattern; multi-thread (vs current_thread) is required so
+        // `block_on` from a different thread doesn't deadlock.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .map_err(|err| {
+                HeddleError::Config(format!(
+                    "lazy hosted hydrator: failed to build tokio runtime: {err}",
+                ))
+            })?;
+        let handle = runtime.handle().clone();
+
+        // Connect with the user's stored credentials (the same path
+        // the clone command uses). UserConfig load is best-effort: on
+        // a fresh CLI invocation against a previously-cloned repo,
+        // ~/.heddle/config.toml is the natural source of truth.
+        let user_config = cli_shared::UserConfig::load_default().unwrap_or_default();
+        let client_config = user_config.heddle_client_config(None);
+
+        let client = handle
+            .block_on(async { HostedGrpcClient::connect(addr, &client_config).await })
+            .map_err(|err: ProtocolError| {
+                HeddleError::Config(format!(
+                    "lazy hosted hydrator: failed to connect to '{addr}': {err}",
+                ))
+            })?;
+
+        // Cache the runtime; OnceLock guarantees we only ever have
+        // one. set() returns Err if a racing thread won — that's
+        // fine, we then drop our runtime and use theirs (the inner
+        // we'd build would also race below).
+        let _ = self.runtime.set(runtime);
+
+        let inner = HostedBlobHydrator::new(
+            Arc::new(Mutex::new(client)),
+            self.repo_path.clone(),
+            self.remote_thread.clone(),
+            target_state,
+            handle,
+        );
+        let _ = self.inner.set(inner);
+        // Read back through `get` rather than returning the local
+        // `inner`, because the racing-set case may have stashed a
+        // peer's value. Either is functionally equivalent.
+        Ok(self.inner.get().expect("inner just set"))
+    }
+}
+
+impl BlobHydrator for LazyHostedHydrator {
+    fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> objects::error::Result<()> {
+        let inner = self.ensure_inner(repo)?;
+        inner.hydrate(repo, hash)
+    }
+}
+
+/// Register the `"hosted"` factory in the global lazy-hydrator
+/// registry. Call once at process startup. The factory reads the
+/// hosted-section fields out of `lazy-hydrator.toml` and hands back a
+/// `LazyHostedHydrator` adapter that defers the actual gRPC connect
+/// until the first `require_blob` call needs it.
+pub fn register_hosted_factory() {
+    use std::path::Path as StdPath;
+    use std::sync::Arc as StdArc;
+
+    use repo::lazy_hydrator::{
+        BlobHydratorFactory, HydratorSection, KIND_HOSTED, register_factory,
+    };
+
+    let factory: BlobHydratorFactory = StdArc::new(
+        |_root: &StdPath,
+         section: &HydratorSection|
+         -> objects::error::Result<StdArc<dyn BlobHydrator>> {
+            let hosted = section.hosted.as_ref().ok_or_else(|| {
+                HeddleError::Config(
+                    "lazy hosted hydrator: lazy-hydrator.toml has kind=\"hosted\" \
+                     but no [hydrator.hosted] table was found"
+                        .to_string(),
+                )
+            })?;
+            Ok(StdArc::new(LazyHostedHydrator::new(
+                hosted.endpoint.clone(),
+                hosted.repo_path.clone(),
+                hosted.remote_thread.clone(),
+                hosted.local_thread.clone(),
+            )))
+        },
+    );
+    register_factory(KIND_HOSTED, factory);
 }
 
 #[cfg(test)]
