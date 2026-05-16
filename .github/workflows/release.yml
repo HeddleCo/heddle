@@ -61,6 +61,9 @@ jobs:
     timeout-minutes: 5
     outputs:
       tag: ${{ steps.classify.outputs.tag }}
+      # The validated commit SHA. Downstream jobs MUST check out this
+      # SHA, not refs/tags/<tag> — see TOCTOU note in the classify step.
+      tag_sha: ${{ steps.classify.outputs.tag_sha }}
       kind: ${{ steps.classify.outputs.kind }}
     steps:
       - uses: actions/checkout@v4
@@ -137,6 +140,18 @@ jobs:
           fi
 
           if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            # Dispatch is the RC/dry-run path. Stable tags MUST go through
+            # the push trigger so they cannot be retroactively downgraded:
+            # softprops/action-gh-release UPDATES an existing release when
+            # tag_name already exists, and dispatch always sets
+            # kind=prerelease+draft. Without this guard, an operator (or
+            # an attacker with workflow-dispatch rights) could re-dispatch
+            # a previously-published vX.Y.Z and silently mark the public
+            # release as prerelease+draft. Refuse loudly.
+            if [[ "$tag" =~ $stable_re ]]; then
+              echo "::error::workflow_dispatch refuses stable tag '${tag}'. Stable releases (vX.Y.Z) must go through the push trigger; dispatch is for prerelease dry-runs only (vX.Y.Z-(rc|alpha|beta)[.N]). See RELEASING.md."
+              exit 1
+            fi
             kind=prerelease
           elif [[ "$tag" =~ $stable_re ]]; then
             kind=stable
@@ -148,8 +163,16 @@ jobs:
             exit 1
           fi
 
+          # tag_sha is the only ref downstream jobs are allowed to act on.
+          # Emitting it as an output (rather than re-resolving the tag in
+          # each downstream job) closes the TOCTOU window: if the tag is
+          # force-moved AFTER validate-tag passes but BEFORE build/release
+          # check it out, those jobs would otherwise operate on the
+          # attacker-controlled commit. Pinning to the SHA we just
+          # ancestor-checked means every step works on the same commit.
           echo "Resolved: tag=${tag} commit=${tag_sha} kind=${kind}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "tag_sha=${tag_sha}" >> "$GITHUB_OUTPUT"
           echo "kind=${kind}" >> "$GITHUB_OUTPUT"
 
   build:
@@ -179,7 +202,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ needs.validate-tag.outputs.tag }}
+          # Pin to the SHA validate-tag verified, not the tag ref. If the
+          # tag is force-moved between validate-tag and this step, we
+          # still build the commit that passed the trust check. The
+          # cosign signature is therefore over an artifact derived from a
+          # known-ancestor commit, not from whatever the tag currently
+          # points at.
+          ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -267,7 +296,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ needs.validate-tag.outputs.tag }}
+          # Same SHA pin as the build job — see comment there.
+          ref: ${{ needs.validate-tag.outputs.tag_sha }}
 
       - name: Download all build outputs
         uses: actions/download-artifact@v4

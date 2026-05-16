@@ -32,7 +32,16 @@ pipeline from the one described here.
    - rejects tags whose commit isn't reachable from `origin/main`
      (catches tags accidentally — or maliciously — placed on a feature
      branch)
+   - rejects stable (`vX.Y.Z`) tags fed to `workflow_dispatch`. Stable
+     releases must arrive via the push trigger; dispatch is the
+     prerelease/dry-run path only. See [Dry-runs](#dry-runs) for why.
    - classifies the run as `stable` or `prerelease`
+   - emits the resolved commit SHA as `tag_sha`. Every downstream job
+     (build, release) checks out **that SHA**, not `refs/tags/<tag>`.
+     A tag is mutable; force-moving it after `validate-tag` passes
+     would otherwise redirect the build to an attacker-controlled
+     commit (TOCTOU). The SHA pin keeps every signed artifact tied to
+     the commit that passed the ancestry check.
 
    If `validate-tag` fails, no build, sign, or publish step runs. If it
    passes, the matrix proceeds to:
@@ -70,14 +79,24 @@ fire the push trigger — only `vX.Y.Z` does. To rehearse a release:
    with `tag: v0.3.0-rc.1`.
 
 3. The run goes through `validate-tag` exactly as a real release would.
-   On publish, the GitHub Release is created as **draft + prerelease**
-   — even if you hand-type a stable-looking tag, dispatch-triggered
-   runs never auto-publish a normal release. Inspect the draft release,
-   then delete the draft release and the RC tag/assets when done.
+   On publish, the GitHub Release is created as **draft + prerelease**.
+   Inspect the draft release, then delete the draft release and the RC
+   tag/assets when done.
 
-Accepted tag patterns: `vX.Y.Z` (stable), or
-`vX.Y.Z-(rc|alpha|beta)[.N]` (prerelease). Anything else fails
-`validate-tag`.
+Accepted tag patterns:
+
+| Trigger | Accepted | Rejected |
+|---|---|---|
+| `push` (tag) | `vX.Y.Z` | everything else (push filter is strict) |
+| `workflow_dispatch` | `vX.Y.Z-(rc\|alpha\|beta)[.N]` | `vX.Y.Z` (stable), anything else |
+
+Stable tags (`vX.Y.Z`) are deliberately refused on the dispatch path.
+The dispatch path always classifies the run as `kind=prerelease+draft`,
+and `softprops/action-gh-release` updates an existing release when its
+`tag_name` already matches — so dispatching a previously-published
+stable tag would silently overwrite the public release with a
+draft/prerelease shell. Refusing the combination in `validate-tag`
+makes that downgrade attack syntactically impossible.
 
 ## Artifact contract
 
@@ -160,11 +179,23 @@ similar projects).
 
 ## Pipeline-contract check
 
-A lightweight `release-pipeline-check` job runs on every PR. It greps
-`.github/workflows/release.yml` for the five target triples, the
-strict-semver tag-push trigger, the `validate-tag` trust gate (with
-ancestry check + downstream `needs:` wiring + draft/prerelease keyed
-off its outputs), packaging, checksum, signing, and upload steps, and
-greps `RELEASING.md` for each target. The contract above is the
-contract it enforces. If you intentionally change the contract,
-update `scripts/check-release-pipeline.sh` in the same PR.
+A lightweight `release-pipeline-check` job runs on every PR. It
+checks `.github/workflows/release.yml` and `RELEASING.md` in two
+passes:
+
+- **Smoke (grep).** Cheap content checks: the five target triples, the
+  strict-semver push trigger, presence of the `validate-tag` trust gate
+  with its ancestry check, packaging/checksum/signing/upload steps, the
+  draft+prerelease keying off `validate-tag.outputs.kind`, and the
+  stable-tag-refusal on the dispatch path.
+- **Strict (parsed YAML).** Per-job structural checks: `validate-tag`
+  exports `tag_sha`, and every downstream job (`build`, `release`) both
+  declares `needs: validate-tag` and pins its `actions/checkout` `ref`
+  to `${{ needs.validate-tag.outputs.tag_sha }}` rather than the
+  mutable `refs/tags/<tag>`. Grep alone would pass if *any* job kept
+  the `needs:` line; the parser confirms each downstream job
+  individually.
+
+The contract above is the contract it enforces. If you intentionally
+change the contract, update `scripts/check-release-pipeline.sh` in
+the same PR.
