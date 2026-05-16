@@ -400,6 +400,7 @@ tests/              # integration and property tests
 - `docs/ENTERPRISE_BACKEND_ROADMAP.md` - platform roadmap
 - `docs/RUNNERS_AND_BUILDS.md` - hosted workflows/builds plan
 - `docs/LINE_PROVENANCE_PLAN.md` - provenance status, shipped behavior, and next steps
+- `docs/SELF_SOVEREIGN_AUTH.md` - how a self-sovereign client mints its own Biscuit and attenuates for sub-agents
 - `AGENTS.md` - contributor rules and documentation truth guidance
 - `.agents/agent-workflows.md` - durable automation guidance
 - `web/PRODUCT_SPEC.md` - web product scope and future-state surfaces
