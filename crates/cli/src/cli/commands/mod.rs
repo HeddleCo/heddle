@@ -97,8 +97,6 @@ pub use agent_cmd::{
     cmd_agent_release, cmd_agent_reserve,
 };
 pub use attempt::cmd_attempt;
-#[cfg(feature = "client")]
-pub use heddle_client::cmd_auth;
 pub use bisect::cmd_bisect;
 pub use blame::cmd_blame;
 #[cfg(feature = "git-overlay")]
@@ -106,7 +104,7 @@ pub use bridge::cmd_bridge_git;
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clean::cmd_clean;
-pub use clone::cmd_clone;
+pub use clone::{GitOverlayBlobHydrator, cmd_clone};
 pub use collapse::cmd_collapse;
 pub use compare::cmd_compare;
 pub use completion::cmd_completion;
@@ -129,6 +127,14 @@ pub use fsck::cmd_fsck;
 pub use gc::cmd_gc;
 pub use goto::cmd_goto;
 pub use harness_bridge::cmd_harness_bridge;
+#[cfg(feature = "client")]
+pub use heddle_client::cmd_auth;
+#[cfg(feature = "client")]
+pub use heddle_client::cmd_support;
+#[cfg(feature = "client")]
+pub use heddle_client::{
+    PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher,
+};
 pub use hook::cmd_hook;
 pub use index::cmd_index;
 pub use init::cmd_init;
@@ -143,10 +149,6 @@ pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 #[cfg(feature = "git-overlay")]
 pub use oss::cmd_git_overlay_guide;
 pub use oss::cmd_version;
-#[cfg(feature = "client")]
-pub use heddle_client::{
-    PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher,
-};
 pub use purge::cmd_purge;
 pub use query::run as cmd_query;
 pub use ready_cmd::cmd_ready;
@@ -169,8 +171,6 @@ pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
 pub use stash::cmd_stash;
 pub use status::cmd_status;
 pub use store_cmd::cmd_store;
-#[cfg(feature = "client")]
-pub use heddle_client::cmd_support;
 pub use thread::{cmd_start, cmd_thread_show};
 pub use thread_cmd::cmd_thread;
 pub use thread_shaping::{

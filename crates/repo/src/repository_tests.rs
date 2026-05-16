@@ -1128,7 +1128,7 @@ mod blob_hydrator_callback {
     fn require_blob_invokes_hydrator_and_clears_marker_on_success() {
         let (_temp, repo) = create_test_repo();
         let payload = b"hydrated bytes".to_vec();
-        let hash = ContentHash::compute(&payload);
+        let hash = Blob::new(payload.clone()).hash();
 
         repo.record_missing_blob(hash).unwrap();
         assert!(
@@ -1164,7 +1164,7 @@ mod blob_hydrator_callback {
     #[test]
     fn require_blob_surfaces_hydration_error_without_silent_fallback() {
         let (_temp, repo) = create_test_repo();
-        let hash = ContentHash::compute(b"will-never-arrive");
+        let hash = Blob::new(b"will-never-arrive".to_vec()).hash();
         repo.record_missing_blob(hash).unwrap();
 
         let hydrator = Arc::new(ScriptedHydrator::new(HydratorMode::Fail(
@@ -1193,7 +1193,7 @@ mod blob_hydrator_callback {
         // the blob, require_blob must NOT return stale data. It must
         // raise MissingObject so the caller learns the contract was violated.
         let (_temp, repo) = create_test_repo();
-        let hash = ContentHash::compute(b"phantom-blob");
+        let hash = Blob::new(b"phantom-blob".to_vec()).hash();
         repo.record_missing_blob(hash).unwrap();
 
         let hydrator = Arc::new(ScriptedHydrator::new(HydratorMode::Lie));
@@ -1215,7 +1215,7 @@ mod blob_hydrator_callback {
         // hydrator (the common path today) must see the same
         // MissingObject error as before #50.
         let (_temp, repo) = create_test_repo();
-        let hash = ContentHash::compute(b"no-hydrator");
+        let hash = Blob::new(b"no-hydrator".to_vec()).hash();
         repo.record_missing_blob(hash).unwrap();
 
         let err = repo.require_blob(&hash).expect_err("must error");

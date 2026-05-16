@@ -1,20 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Clone command - clone from remote.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
+use objects::{
+    error::{HeddleError, Result as HeddleResult},
+    object::{Blob, ContentHash},
+};
 use refs::Head;
-use repo::Repository;
+use repo::{BlobHydrator, Repository};
 
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
     bridge::{
         GitBridge,
-        git_core::{clone_url_to_bare, copy_local_repo_to_bare},
+        git_core::{clone_url_to_bare, copy_local_repo_to_bare, open_repo},
         git_import::{import_all, import_selected_refs},
     },
     cli::{Cli, should_output_json, style},
@@ -481,6 +489,130 @@ fn copy_entry(path: &Path, dest_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read-time blob hydrator for **Git-overlay** lazy clones (issue #50).
+///
+/// Plugs into [`repo::Repository::set_blob_hydrator`]. When
+/// [`Repository::require_blob`] hits a missing-blob marker — i.e. the
+/// blake3-hashed blob is recorded in `.heddle/partial-fetch` but is
+/// absent from the local object store — the read path delegates here.
+/// This hydrator looks up the corresponding Git object id, fetches the
+/// blob from the underlying gix repo (which triggers the gix promisor
+/// fetch against the original remote when `extensions.partialClone =
+/// origin` is set in `.git/config`), and writes the bytes into the
+/// heddle store. The retry-read then surfaces the blob normally.
+///
+/// ## Why a side-table?
+///
+/// `PartialFetchMetadata` records blake3 hashes only, but
+/// `gix::Repository::find_blob` is keyed by Git OID. The bridge
+/// already computes blake3↔git mappings *for commits* (see
+/// `SyncMapping` in `bridge/git_core.rs`); blob mappings are
+/// constructed on-the-fly during import. We accept the same shape of
+/// mapping here, populated by the caller (clone-time or test-time)
+/// before [`Self::hydrate`] fires. Future work: persist a sidecar
+/// blob mapping during import so a fresh `Repository::open` in a
+/// separate process can rebuild this map without re-walking history.
+pub struct GitOverlayBlobHydrator {
+    git_repo_path: PathBuf,
+    /// Pre-seeded blake3 → git OID mapping for missing blobs. Held
+    /// behind `Mutex` so a long-lived `Arc<GitOverlayBlobHydrator>` is
+    /// `Send + Sync` while still allowing the mapping to grow over
+    /// time (e.g. if the import path is later extended to record new
+    /// blobs as it walks).
+    blob_oid_map: Mutex<std::collections::HashMap<ContentHash, gix::ObjectId>>,
+}
+
+impl GitOverlayBlobHydrator {
+    pub fn new(git_repo_path: PathBuf) -> Self {
+        Self {
+            git_repo_path,
+            blob_oid_map: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Pre-seed the blake3 → git OID mapping. Called by the importer
+    /// (or by tests) as missing blobs are discovered.
+    pub fn record_blob_oid(&self, hash: ContentHash, oid: gix::ObjectId) {
+        self.blob_oid_map.lock().unwrap().insert(hash, oid);
+    }
+}
+
+impl BlobHydrator for GitOverlayBlobHydrator {
+    fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> HeddleResult<()> {
+        let oid = self
+            .blob_oid_map
+            .lock()
+            .unwrap()
+            .get(hash)
+            .copied()
+            .ok_or_else(|| {
+                HeddleError::Config(format!(
+                    "Git-overlay hydrator has no Git OID mapping for blake3 {}; \
+                     the importer must call `record_blob_oid` for every missing blob \
+                     before reads can be served lazily",
+                    hash.to_hex()
+                ))
+            })?;
+
+        // Try the local ODB first; if absent, shell out to git which
+        // honours `extensions.partialClone = <remote>` and triggers
+        // the promisor fetch on miss. gix 0.80 cannot do the
+        // promisor fetch itself (the v2 `filter` capability isn't
+        // surfaced through its fetch builder), but it CAN read the
+        // bytes after `git` has populated them — so a follow-up
+        // local lookup is enough to keep the loose-blob bookkeeping
+        // in one place.
+        let bytes = self.read_blob_bytes(oid)?;
+        let heddle_blob = Blob::new(bytes);
+        // Sanity-check the upstream gave us bytes that match the
+        // blake3 we were asked for — protects against an oid mapping
+        // corruption silently delivering the wrong content.
+        let computed = heddle_blob.hash();
+        if computed != *hash {
+            return Err(HeddleError::Corruption {
+                expected: *hash,
+                found: computed,
+            });
+        }
+        repo.store().put_blob(&heddle_blob)?;
+        Ok(())
+    }
+}
+
+impl GitOverlayBlobHydrator {
+    fn read_blob_bytes(&self, oid: gix::ObjectId) -> HeddleResult<Vec<u8>> {
+        let local_first = open_repo(&self.git_repo_path)
+            .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))?
+            .find_blob(oid)
+            .ok()
+            .map(|mut blob| blob.take_data());
+        if let Some(bytes) = local_first {
+            return Ok(bytes);
+        }
+
+        // Promisor refetch via the git CLI. The git binary speaks the
+        // full v2 wire protocol and honours `extensions.partialClone`,
+        // so a `cat-file -p` against a missing blob transparently
+        // fetches it from the recorded remote. `--batch-command` or
+        // `-p` both work; `-p` is the simpler one-shot.
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.git_repo_path)
+            .args(["cat-file", "-p"])
+            .arg(oid.to_string())
+            .output()
+            .map_err(HeddleError::Io)?;
+        if !output.status.success() {
+            return Err(HeddleError::Io(std::io::Error::other(format!(
+                "git cat-file -p {oid} in {} failed: {}",
+                self.git_repo_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))));
+        }
+        Ok(output.stdout)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,7 +636,10 @@ mod tests {
         let err = reject_unsupported_for_git_overlay(&opts(None, false, Some("blob:none")))
             .expect_err("filter must be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("--filter"), "message must name --filter: {msg}");
+        assert!(
+            msg.contains("--filter"),
+            "message must name --filter: {msg}"
+        );
         assert!(
             msg.contains("not yet supported"),
             "message must say not yet supported: {msg}"

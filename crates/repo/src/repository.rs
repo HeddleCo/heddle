@@ -1544,6 +1544,20 @@ impl Repository {
         }
 
         if self.is_missing_blob(hash)? {
+            // Lazy-clone read-time hydration (issue #50). If a hydrator
+            // is registered (by `heddle clone --lazy` / `--filter`),
+            // delegate; otherwise surface MissingObject as before.
+            if let Some(hydrator) = self.blob_hydrator() {
+                hydrator.hydrate(self, hash)?;
+                if let Some(blob) = self.store.get_blob(hash)? {
+                    self.clear_missing_blob(hash)?;
+                    return Ok(blob);
+                }
+                // Hydrator returned Ok but did not actually deliver the
+                // blob — defensive guard so callers never see stale
+                // state. Leaves the missing marker in place so a future
+                // attempt re-tries hydration.
+            }
             return Err(HeddleError::MissingObject {
                 object_type: "blob".to_string(),
                 id: hash.to_hex(),
