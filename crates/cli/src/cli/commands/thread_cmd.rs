@@ -99,7 +99,7 @@ pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
         thread,
         target_thread: None,
         parent_thread: None,
-        mode: ThreadMode::Lightweight,
+        mode: ThreadMode::Materialized,
         state: ThreadState::Active,
         base_state: current_state.clone().unwrap_or_default(),
         base_root,
@@ -506,7 +506,7 @@ fn cmd_thread_promote(
     let abs_path = prepare_worktree_target(repo, &path)?;
     write_isolated_checkout(repo, &abs_path, &state_id, Some(&thread.thread))?;
 
-    thread.mode = ThreadMode::Materialized;
+    thread.mode = ThreadMode::Solid;
     thread.state = ThreadState::Promoted;
     thread.materialized_path = Some(abs_path.clone());
     thread.updated_at = Utc::now();

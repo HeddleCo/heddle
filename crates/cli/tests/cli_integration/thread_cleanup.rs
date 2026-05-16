@@ -71,7 +71,7 @@ fn seed_thread(
         thread: name.to_string(),
         target_thread: Some("main".to_string()),
         parent_thread: None,
-        mode: ThreadMode::Lightweight,
+        mode: ThreadMode::Materialized,
         state,
         base_state: head_short.clone(),
         base_root,

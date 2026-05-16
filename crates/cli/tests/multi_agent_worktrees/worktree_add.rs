@@ -13,7 +13,7 @@ fn materialized_start_writes_base_state_files() {
             "start",
             "feature/materialized",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             thread_dir.path().to_str().unwrap(),
         ],
@@ -37,11 +37,11 @@ fn top_level_start_defaults_to_lightweight_in_auto_mode() {
     .unwrap();
     let started: Value = serde_json::from_str(&output).unwrap();
 
-    // Top-level `start` with no `--path` resolves to ThreadMode::Lightweight.
+    // Top-level `start` with no `--path` resolves to ThreadMode::Materialized.
     // The thread is materialized at a Heddle-managed path that is surfaced
     // both as `path` and `execution_path` for callers that want to cd
     // into the work site without naming a directory themselves.
-    assert_eq!(started["thread"]["thread_mode"], "lightweight");
+    assert_eq!(started["thread"]["thread_mode"], "materialized");
     assert_eq!(started["path"], started["execution_path"]);
     assert!(
         started["execution_path"].as_str().is_some(),
@@ -62,7 +62,7 @@ fn materialized_start_honors_from_state() {
             "start",
             "feature/from-old",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             thread_dir.path().to_str().unwrap(),
             "--from",
@@ -82,7 +82,7 @@ fn thread_promote_preserves_thread_identity() {
     let thread_dir = TempDir::new().unwrap();
 
     heddle(
-        &["start", "feature/promote-me", "--workspace", "private"],
+        &["start", "feature/promote-me", "--workspace", "auto"],
         Some(main.path()),
     )
     .unwrap();
@@ -101,7 +101,7 @@ fn thread_promote_preserves_thread_identity() {
 
     let v: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["thread"]["id"].as_str(), Some("feature/promote-me"));
-    assert_eq!(v["thread"]["mode"].as_str(), Some("materialized"));
+    assert_eq!(v["thread"]["mode"].as_str(), Some("solid"));
     assert!(thread_dir.path().join(".heddle").join("HEAD").exists());
 }
 
@@ -115,7 +115,7 @@ fn thread_drop_removes_materialized_checkout_and_optionally_thread_ref() {
             "start",
             "feature/remove-thread",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             checkout.path().to_str().unwrap(),
         ],
@@ -133,11 +133,9 @@ fn thread_drop_removes_materialized_checkout_and_optionally_thread_ref() {
     let out = heddle(&["--json", "thread", "list"], Some(main.path())).unwrap();
     let v: Value = serde_json::from_str(&out).unwrap();
     let threads = v["threads"].as_array().unwrap();
-    assert!(
-        !threads
-            .iter()
-            .any(|thread| thread["name"] == "feature/remove-thread")
-    );
+    assert!(!threads
+        .iter()
+        .any(|thread| thread["name"] == "feature/remove-thread"));
 }
 
 #[test]
@@ -154,7 +152,7 @@ fn rejects_symlink_target_path_for_materialized_start() {
             "start",
             "feature/symlink",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             symlink_target.to_str().unwrap(),
         ],
@@ -180,7 +178,7 @@ fn test_snapshot_excludes_nested_thread_worktrees() {
             "start",
             "feature/nested-x",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             nested.to_str().unwrap(),
         ],
@@ -232,7 +230,7 @@ fn test_status_distinguishes_own_worktree_from_nested_threads() {
             "start",
             "feature/nested-y",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             nested.to_str().unwrap(),
         ],
@@ -281,7 +279,7 @@ fn test_delegate_warns_when_path_prefix_inside_repo() {
         "delegate",
         "task-inside",
         "--workspace",
-        "visible",
+        "materialized",
         "--path-prefix",
     ]);
     cmd.arg(inside_prefix.to_str().unwrap());
@@ -301,7 +299,7 @@ fn test_delegate_warns_when_path_prefix_inside_repo() {
         "delegate",
         "task-sibling",
         "--workspace",
-        "visible",
+        "materialized",
         "--path-prefix",
     ]);
     cmd2.arg(sibling_temp.path().to_str().unwrap());

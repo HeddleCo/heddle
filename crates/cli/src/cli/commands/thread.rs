@@ -465,7 +465,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
             mode: summary
                 .thread_mode
                 .clone()
-                .unwrap_or(ThreadMode::Lightweight),
+                .unwrap_or(ThreadMode::Materialized),
             state: summary.thread_state.clone().unwrap_or(ThreadState::Active),
             base_state: summary.base_state.clone().unwrap_or_default(),
             base_root: summary.base_root.clone().unwrap_or_default(),
@@ -686,7 +686,7 @@ fn build_thread_view(
                 thread: name.clone(),
                 target_thread: None,
                 parent_thread: None,
-                mode: ThreadMode::Lightweight,
+                mode: ThreadMode::Materialized,
                 state: ThreadState::Active,
                 base_state: base_state.unwrap_or_default(),
                 base_root: base_root.unwrap_or_default(),
@@ -793,7 +793,7 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
         mode: summary
             .thread_mode
             .clone()
-            .unwrap_or(ThreadMode::Lightweight),
+            .unwrap_or(ThreadMode::Materialized),
         state: summary.thread_state.clone().unwrap_or(ThreadState::Active),
         base_state: summary.base_state.clone().unwrap_or_default(),
         base_root: summary.base_root.clone().unwrap_or_default(),
@@ -849,8 +849,9 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
 
 pub(crate) fn visibility_label(mode: &ThreadMode) -> &'static str {
     match mode {
-        ThreadMode::Materialized | ThreadMode::Lightweight => "heavy",
-        ThreadMode::Virtualized => "light",
+        ThreadMode::Materialized => "materialized",
+        ThreadMode::Virtualized => "virtualized",
+        ThreadMode::Solid => "solid",
     }
 }
 
@@ -1147,11 +1148,23 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 
     let thread_mode = resolve_thread_mode(repo, &args);
     let path = match thread_mode {
+        // Bytes-on-disk modes honour an explicit `--path`. Clonefile
+        // (`Materialized`) doesn't care where the destination lives;
+        // full-copy (`Solid`) doesn't either. Default to a managed
+        // path when `--path` is absent — heddle-internal layout for
+        // Materialized so we can sweep it cleanly; the top-level
+        // `default_thread_path` for Solid because users typically
+        // want a navigable sibling directory.
         ThreadMode::Materialized => args
             .path
             .clone()
+            .unwrap_or_else(|| default_lightweight_thread_path(repo, &args.name)),
+        ThreadMode::Solid => args
+            .path
+            .clone()
             .unwrap_or_else(|| default_thread_path(repo, &args.name)),
-        ThreadMode::Lightweight => default_lightweight_thread_path(repo, &args.name),
+        // Virtualised mounts must live at a Heddle-managed path so a
+        // user-named directory never gets shadowed by a kernel mount.
         ThreadMode::Virtualized => default_virtualized_thread_path(repo, &args.name),
     };
     let abs_path = prepare_worktree_target(repo, &path)?;
@@ -1175,7 +1188,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let shared_target_dir_path: Option<PathBuf> = if args.shared_target
         && matches!(
             thread_mode,
-            ThreadMode::Materialized | ThreadMode::Lightweight
+            ThreadMode::Solid | ThreadMode::Materialized
         ) {
         if shared_target::workspace_root_is_rust(repo) {
             Some(shared_target::shared_target_dir(repo)?)
@@ -1196,7 +1209,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     if !args.shared_target
         && matches!(
             thread_mode,
-            ThreadMode::Materialized | ThreadMode::Lightweight
+            ThreadMode::Solid | ThreadMode::Materialized
         )
         && shared_target::should_advise_shared_target(repo)
     {
@@ -1210,7 +1223,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // would otherwise lie about a redirect that isn't in effect.
     let mut shared_target_dir_path = shared_target_dir_path;
     match thread_mode {
-        ThreadMode::Materialized | ThreadMode::Lightweight => {
+        ThreadMode::Solid | ThreadMode::Materialized => {
             write_isolated_checkout(repo, &abs_path, &base_state, Some(&args.name))?;
             if let Some(dir) = shared_target_dir_path.as_ref() {
                 let applied = shared_target::write_cargo_config(&abs_path, dir)?;
@@ -1283,7 +1296,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         task: task.clone(),
         execution_path: abs_path.clone(),
         materialized_path: match thread_mode {
-            ThreadMode::Materialized | ThreadMode::Lightweight => Some(abs_path.clone()),
+            ThreadMode::Solid | ThreadMode::Materialized => Some(abs_path.clone()),
             // Virtualized records the mount point as the materialized
             // path so `heddle thread show` reports it; it's not a
             // checkout, but it is the path the user `cd`s into.
@@ -1326,7 +1339,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             anchor_root: Some(base_root.clone()),
             reservation_token: Some(objects::store::generate_agent_id()),
             path: match thread_mode {
-                ThreadMode::Materialized | ThreadMode::Lightweight | ThreadMode::Virtualized => {
+                ThreadMode::Solid | ThreadMode::Materialized | ThreadMode::Virtualized => {
                     Some(path_for_entry.clone())
                 }
             },
@@ -1355,7 +1368,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 
     let summary = find_thread_summary(repo, &args.name)?;
     let message = match thread_mode {
-        ThreadMode::Lightweight | ThreadMode::Materialized => {
+        ThreadMode::Materialized | ThreadMode::Solid => {
             format!(
                 "Started heavy thread '{}' at '{}'",
                 args.name,
@@ -1387,21 +1400,28 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 }
 
 fn resolve_thread_mode(repo: &Repository, args: &ThreadStartArgs) -> ThreadMode {
-    if args.path.is_some() {
-        // An explicit `--path` means "put the heavy checkout here".
-        // Light workspaces stay Heddle-managed so a mount never shadows
-        // a user-named directory.
-        return ThreadMode::Materialized;
-    }
-
+    // Explicit `--workspace` wins. `--path` only changes *where* the
+    // worktree lives; the mode dispatch decides *how* the bytes get
+    // there (clonefile vs mount vs full copy).
     match args.workspace {
-        WorkspaceModeArg::Heavy => ThreadMode::Lightweight,
-        WorkspaceModeArg::Light => ThreadMode::Virtualized,
-        WorkspaceModeArg::Auto => match resolve_auto_workspace_default(repo, args) {
-            UserThreadWorkspaceMode::Heavy => ThreadMode::Lightweight,
-            UserThreadWorkspaceMode::Light => ThreadMode::Virtualized,
-            UserThreadWorkspaceMode::Auto => ThreadMode::Lightweight,
-        },
+        WorkspaceModeArg::Materialized => ThreadMode::Materialized,
+        WorkspaceModeArg::Virtualized => ThreadMode::Virtualized,
+        WorkspaceModeArg::Solid => ThreadMode::Solid,
+        WorkspaceModeArg::Auto => {
+            // Explicit `--path` with no explicit mode reads as "I want
+            // a checkout I can navigate to" — point Auto away from
+            // `virtualized` (which is always managed) toward the
+            // bytes-on-disk modes.
+            if args.path.is_some() {
+                return ThreadMode::Materialized;
+            }
+            match resolve_auto_workspace_default(repo, args) {
+                UserThreadWorkspaceMode::Materialized => ThreadMode::Materialized,
+                UserThreadWorkspaceMode::Virtualized => ThreadMode::Virtualized,
+                UserThreadWorkspaceMode::Solid => ThreadMode::Solid,
+                UserThreadWorkspaceMode::Auto => ThreadMode::Materialized,
+            }
+        }
     }
 }
 
@@ -1415,7 +1435,7 @@ fn resolve_auto_workspace_default(
             .worktree
             .thread_workspace
             .delegated_default
-            .unwrap_or(UserThreadWorkspaceMode::Heavy)
+            .unwrap_or(UserThreadWorkspaceMode::Materialized)
     } else {
         user_config.worktree.thread_workspace.top_level_default
     }
@@ -1486,7 +1506,7 @@ pub(crate) fn cmd_thread_create(
         thread: name.clone(),
         target_thread,
         parent_thread: None,
-        mode: ThreadMode::Lightweight,
+        mode: ThreadMode::Materialized,
         state: ThreadState::Active,
         base_state: base_short.clone(),
         base_root,
@@ -1579,7 +1599,7 @@ pub(crate) fn cmd_thread_cd(repo: &Repository, name: String) -> Result<()> {
     if !path.exists() {
         return Err(anyhow!(
             "thread '{name}' was registered at '{}' but that path no longer exists; \
-             re-run `heddle start --workspace heavy {name}` to re-materialize",
+             re-run `heddle start --workspace materialized {name}` to re-materialize",
             path.display()
         ));
     }
@@ -1707,12 +1727,12 @@ pub(crate) fn cmd_thread_switch(
         // makes it look like edits vanished.
         //
         // Refuse with a clear next step. The user either runs
-        // `heddle start --workspace heavy <target>` to give the
+        // `heddle start --workspace materialized <target>` to give the
         // target its own worktree, or cd's to the main repo root
         // first.
         anyhow::bail!(
             "thread '{name}' has no dedicated worktree, and switching to it from inside another thread's worktree would overwrite this directory's files. \
-             Run `heddle start --workspace heavy {name}` to give it a dedicated worktree, or cd to the main repo root and try again."
+             Run `heddle start --workspace materialized {name}` to give it a dedicated worktree, or cd to the main repo root and try again."
         );
     } else {
         // Legacy shared-worktree path: materialize the target tree at

@@ -110,12 +110,12 @@ fn heavy_thread_start_explains_non_empty_workspace_recovery() {
         ],
         Some(temp.path()),
     )
-    .expect_err("non-empty heavy worktree should fail with guidance");
+    .expect_err("non-empty materialized worktree should fail with guidance");
 
     assert!(
         error.contains("is not empty")
             && error.contains("heddle capture")
-            && error.contains("heddle start --workspace heavy"),
+            && error.contains("heddle start --workspace materialized"),
         "thread start should give premium recovery guidance: {error}"
     );
 }

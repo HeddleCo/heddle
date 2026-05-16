@@ -328,24 +328,34 @@ pub struct UndoArgs {
     pub preview: bool,
 }
 
+/// User-facing `--workspace` flag values. Vocabulary is the same as
+/// [`crate::cli::commands::repo::ThreadMode`] (and the on-wire
+/// `thread.mode` JSON field) so a single name carries through the
+/// CLI, the daemon, and the thread record on disk. See
+/// `docs/design/clonefile-threads.md` for the rationale.
 #[derive(Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
 pub enum WorkspaceModeArg {
-    /// Let Heddle choose the right mode for this thread (the default).
-    /// Also accepts the legacy alias `private`.
-    #[value(alias = "private")]
+    /// Let Heddle choose the right mode for this thread (the default):
+    /// `materialized` on reflink-capable filesystems, `virtualized`
+    /// elsewhere when the mount feature is available, `solid`
+    /// otherwise.
     Auto,
-    /// Create a real checkout. By default Heddle chooses a managed path;
-    /// pass `--path` to place the checkout somewhere explicit. Also
-    /// accepts the legacy alias `visible`.
-    #[value(alias = "visible")]
-    Heavy,
-    /// Project the thread through a content-addressed filesystem.
-    /// Linux-only at the moment, and requires `heddle` to have been
-    /// built with the `mount` feature enabled. The mount is owned by
-    /// the long-lived `heddled` daemon by default (it survives the
-    /// CLI exit and can be shared across invocations); pass
+    /// Clonefile/reflink the captured tree into a thread directory
+    /// (APFS / btrfs / XFS w/ reflinks / bcachefs / ReFS). Real
+    /// `read(2)`-able bytes; ~zero disk cost until the agent diverges
+    /// blocks. Day-one default on reflink-capable hosts.
+    Materialized,
+    /// Project the captured tree through a content-addressed
+    /// FUSE/FSKit/ProjFS mount. Nothing on disk until the kernel
+    /// asks. Requires `heddle` built with the `mount` feature. By
+    /// default the mount is owned by the long-lived `heddled` daemon
+    /// (survives the CLI exit, shareable across invocations); pass
     /// `--no-daemon` to keep it in this process.
-    Light,
+    Virtualized,
+    /// Full file copies with no shared extents. Strong isolation;
+    /// the right choice on ext4 / NTFS hosts that have neither
+    /// reflinks nor a usable mount API.
+    Solid,
 }
 
 /// Arguments for the `thread start` and top-level `start` commands.
@@ -353,7 +363,7 @@ pub enum WorkspaceModeArg {
 #[command(after_help = "\
 Examples:
   heddle start feature/auth                       # create or resume a thread
-  heddle start feature/auth --workspace heavy     # real checkout on disk
+  heddle start feature/auth --workspace materialized     # real checkout on disk
   heddle start scratch --path ../scratch          # place the checkout explicitly
   heddle start fix-flake --task 'fix CI flake'    # attach a task description
 ")]
@@ -402,7 +412,7 @@ pub struct ThreadStartArgs {
     #[arg(long, conflicts_with_all = ["agent_provider", "agent_model"])]
     pub print_cd_path: bool,
 
-    /// For `--workspace light`: hand the filesystem mount off to the
+    /// For `--workspace virtualized`: hand the filesystem mount off to the
     /// long-lived `heddled` daemon (default). The daemon owns the
     /// mount across CLI invocations, so the mount survives `heddle
     /// thread start` exiting. Linux-only; no-op for heavy
@@ -416,7 +426,7 @@ pub struct ThreadStartArgs {
     )]
     pub daemon: bool,
 
-    /// For `--workspace light`: keep the filesystem mount in this CLI
+    /// For `--workspace virtualized`: keep the filesystem mount in this CLI
     /// process instead of handing it to the `heddled` daemon. The
     /// mount unmounts when this `heddle thread start` exits — useful
     /// for one-shot inspections, debugging the in-process mount path,
@@ -504,7 +514,7 @@ pub struct TryArgs {
     /// Workspace mode for the ephemeral thread. Defaults to `heavy`
     /// (a real isolated checkout) so `<cmd>` runs against a proper
     /// filesystem.
-    #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Heavy)]
+    #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Materialized)]
     pub workspace: WorkspaceModeArg,
     /// On zero exit, automatically merge the resulting thread into
     /// the current thread. The merge runs with `--with-diff` so the
@@ -545,7 +555,7 @@ pub struct AttemptArgs {
     /// Workspace mode for each ephemeral thread. Defaults to `heavy`
     /// (a real isolated checkout) so `<cmd>` runs against a proper
     /// filesystem.
-    #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Heavy)]
+    #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Materialized)]
     pub workspace: WorkspaceModeArg,
 
     /// Redirect cargo's `target/` for each attempt thread to a shared
@@ -1302,7 +1312,7 @@ pub struct WatchArgs {
 mod clone_filter_tests {
     use clap::Parser;
 
-    use crate::cli::{Cli, Commands, CloneArgs};
+    use crate::cli::{Cli, CloneArgs, Commands};
 
     fn parse_clone(extra: &[&str]) -> Result<CloneArgs, clap::Error> {
         let mut argv: Vec<&str> = vec!["heddle", "clone", "remote", "local"];

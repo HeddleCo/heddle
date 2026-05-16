@@ -271,7 +271,7 @@ need them.\n";
 const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are not interchangeable.\n\
 \n\
 `heddle daemon`        — FUSE mount-daemon control plane. Owns FUSE sessions for\n\
-                         `--workspace light --daemon` threads. Linux only.\n\
+                         `--workspace virtualized --daemon` threads. Linux only.\n\
                          Subcommands: serve | status | stop.\n\
 \n\
 `heddle agent serve`   — Local gRPC daemon over a Unix socket inside the repo's\n\

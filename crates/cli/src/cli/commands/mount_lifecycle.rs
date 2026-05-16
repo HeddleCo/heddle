@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Lifecycle helpers for `--workspace light` threads.
+//! Lifecycle helpers for `--workspace virtualized` threads.
 //!
 //! Virtualized threads project the thread's content-addressed tree
 //! through a kernel-side mount instead of materializing a checkout.
@@ -564,7 +564,7 @@ impl MountOwnership {
     }
 }
 
-/// Establish the FUSE mount for a `--workspace light` thread,
+/// Establish the FUSE mount for a `--workspace virtualized` thread,
 /// honoring the user's daemon preference. This is the dispatch
 /// point that flipped on 2026-05-02:
 ///

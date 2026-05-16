@@ -177,7 +177,7 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
 }
 
 /// Count active materialized threads on the repo. "Active" means
-/// `ThreadState::Active` and `ThreadMode::Lightweight | Materialized`
+/// `ThreadState::Active` and `ThreadMode::Materialized | Materialized`
 /// — both are heavy (real on-disk) checkouts. Used by the advisory
 /// path; not load-bearing for correctness.
 fn count_active_materialized_threads(repo: &Repository) -> usize {
@@ -190,7 +190,7 @@ fn count_active_materialized_threads(repo: &Repository) -> usize {
         .filter(|thread| {
             matches!(
                 thread.mode,
-                ThreadMode::Materialized | ThreadMode::Lightweight
+                ThreadMode::Solid | ThreadMode::Materialized
             ) && thread.state == repo::ThreadState::Active
         })
         .count()

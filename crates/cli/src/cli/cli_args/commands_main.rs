@@ -564,7 +564,7 @@ Examples:
     /// FUSE mount-daemon control plane — distinct from `agent`.
     ///
     /// `heddle daemon serve` runs a foreground mount daemon that
-    /// owns FUSE sessions for `--workspace light --daemon`
+    /// owns FUSE sessions for `--workspace virtualized --daemon`
     /// threads. It is normally spawned on demand by the per-thread
     /// CLI; running it interactively is for debugging.
     /// `status` reports liveness/uptime/mount count without spawning;

@@ -1459,10 +1459,7 @@ fn build_preview_summary(report: Option<&ThreadPreviewReport>) -> Vec<String> {
         if report.thread_state == "blocked" && !report.blockers.is_empty() {
             lines.push(format!("blocked: {}", report.blockers.join("; ")));
         }
-        lines.push(format!(
-            "workspace: {}",
-            human_thread_mode_label(&report.thread_mode)
-        ));
+        lines.push(format!("workspace: {}", report.thread_mode));
         lines.push(format!("sync: {}", report.freshness));
         if let Some(task) = &report.task {
             lines.push(format!("task: {}", task));
@@ -1497,14 +1494,6 @@ fn build_preview_summary(report: Option<&ThreadPreviewReport>) -> Vec<String> {
         }
     }
     lines
-}
-
-fn human_thread_mode_label(mode: &str) -> &str {
-    match mode {
-        "materialized" | "lightweight" => "heavy",
-        "virtualized" => "light",
-        other => other,
-    }
 }
 
 #[cfg(test)]

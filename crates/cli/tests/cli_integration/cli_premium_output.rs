@@ -38,7 +38,7 @@ fn merged_thread_list_reads_integrated_not_actionable() {
                 "start",
                 "feature/polish",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(temp.path()),
         )
@@ -91,7 +91,7 @@ fn human_thread_and_status_output_use_polished_labels() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     heddle(
-        &["start", "feature/visible", "--workspace", "visible"],
+        &["start", "feature/visible", "--workspace", "materialized"],
         Some(temp.path()),
     )
     .unwrap();
@@ -127,9 +127,9 @@ fn human_thread_and_status_output_use_polished_labels() {
     )
     .unwrap();
     // `--workspace visible` (alias of heavy) without `--path` resolves
-    // to ThreadMode::Lightweight: a real on-disk checkout managed by
+    // to ThreadMode::Materialized: a real on-disk checkout managed by
     // Heddle. Materialized is reserved for explicit `--path` callers.
-    assert_eq!(json["thread_mode"], "lightweight");
+    assert_eq!(json["thread_mode"], "materialized");
     assert_eq!(json["freshness"], "current");
 }
 

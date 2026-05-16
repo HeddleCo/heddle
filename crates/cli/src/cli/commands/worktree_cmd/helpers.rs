@@ -21,7 +21,7 @@ pub(crate) fn prepare_worktree_target(repo: &Repository, path: &Path) -> Result<
         anyhow::anyhow!(
             "Could not prepare heavy thread workspace '{}': {}.\n\
              This checkout may have uncaptured work or a protected parent directory. \
-             Use `heddle capture`, `heddle start --workspace heavy <name>`, or choose an empty writable path with `--path`.",
+             Use `heddle capture`, `heddle start --workspace materialized <name>`, or choose an empty writable path with `--path`.",
             requested.display(),
             error
         )
@@ -92,7 +92,7 @@ fn validate_worktree_target(repo: &Repository, path: &Path) -> Result<()> {
         if std::fs::read_dir(path)?.next().transpose()?.is_some() {
             return Err(anyhow::anyhow!(
                 "worktree target '{}' is not empty.\n\
-                 Use an empty path, capture current work with `heddle capture`, or let Heddle pick a managed heavy checkout with `heddle start --workspace heavy <name>`.",
+                 Use an empty path, capture current work with `heddle capture`, or let Heddle pick a managed heavy checkout with `heddle start --workspace materialized <name>`.",
                 path.display()
             ));
         }

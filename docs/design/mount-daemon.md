@@ -1,7 +1,7 @@
 # Long-lived Mount Daemon — Design Note
 
 **Status:** Shipped. **Default: daemon. Opt out with `--no-daemon`.**
-`heddle start --workspace light` hands the FUSE mount to
+`heddle start --workspace virtualized` hands the FUSE mount to
 the long-lived `heddled` daemon by default; `--no-daemon` keeps the
 mount in-process and tied to the CLI process. See "Operator guide"
 below for `heddle daemon serve|status|stop` usage and "History" at the
@@ -16,7 +16,7 @@ plus `crates/cli/src/cli/commands/daemon/` (the daemon itself) and
 
 `heddle daemon serve` runs a foreground mount daemon for the current
 repository. Normally spawned on demand by `heddle start
---workspace light` (the daemon is the default; pass
+--workspace virtualized` (the daemon is the default; pass
 `--no-daemon` to keep the mount in this CLI process instead).
 Running `daemon serve` interactively is for debugging.
 
@@ -46,7 +46,7 @@ fsmonitor helper. Single-user dev workstation.
 
 ## Problem
 
-`heddle start --workspace light` projects a thread's tree through
+`heddle start --workspace virtualized` projects a thread's tree through
 a FUSE mount. The mount is owned by the CLI process: when the user kills
 heddle (or the process exits), `BackgroundSession::drop` unmounts the FS.
 
@@ -57,7 +57,7 @@ product implies:
   the mount from any shell, not the one that started it.
 - `heddle status`, `heddle log`, and IDE integrations want to stat the mount
   path *between* CLI invocations.
-- A second `heddle start <thread> --workspace light` against an
+- A second `heddle start <thread> --workspace virtualized` against an
   already-mounted thread should attach to the existing kernel mount, not race
   it.
 
@@ -162,7 +162,7 @@ measurable user benefit.
 Co-existence is straightforward because the daemon path falls back
 silently to in-process when the daemon can't be reached.
 
-- **Default**: `--workspace light` hands the FUSE mount to the
+- **Default**: `--workspace virtualized` hands the FUSE mount to the
   long-lived `heddled` daemon. The mount survives the CLI exit and
   can be shared across subsequent invocations.
 - **Opt-out**: `--no-daemon` keeps the mount in this CLI process
@@ -182,7 +182,7 @@ silently to in-process when the daemon can't be reached.
 - **2025-Q4**: daemon shipped, opt-in via `--daemon`. Default
   remained in-process so the existing virtualized-mount tests and
   workflows kept their behaviour unchanged.
-- **2026-05-02**: default flipped. `--workspace light` now
+- **2026-05-02**: default flipped. `--workspace virtualized` now
   defaults to the daemon path; `--no-daemon` is the escape hatch.
   Canary-surface gating from the original migration plan was
   collapsed once the failure-mode coverage in

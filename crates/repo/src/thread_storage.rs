@@ -481,7 +481,7 @@ mod tests {
             thread: "feature/thread-1".to_string(),
             target_thread: Some("main".to_string()),
             parent_thread: None,
-            mode: ThreadMode::Materialized,
+            mode: ThreadMode::Solid,
             state: ThreadState::Active,
             base_state: "abc123".to_string(),
             base_root: "def456".to_string(),

@@ -331,7 +331,7 @@ fn ensure_thread_record(
         thread: thread_name.to_string(),
         target_thread,
         parent_thread: None,
-        mode: ThreadMode::Lightweight,
+        mode: ThreadMode::Materialized,
         state: ThreadState::Active,
         base_state: base_short.clone(),
         base_root,

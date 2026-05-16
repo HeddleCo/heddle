@@ -89,7 +89,7 @@ mod tests {
             thread: format!("thread/{id}"),
             target_thread: None,
             parent_thread: None,
-            mode: crate::ThreadMode::Lightweight,
+            mode: crate::ThreadMode::Materialized,
             state,
             base_state: ChangeId::from_bytes([1; 16]).to_string_full(),
             base_root: ChangeId::from_bytes([2; 16]).to_string_full(),

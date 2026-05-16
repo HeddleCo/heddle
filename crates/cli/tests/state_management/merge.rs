@@ -331,7 +331,7 @@ fn test_merge_from_main_worktree_targets_active_thread_lightweight_worktree() {
     // Start a private (lightweight) thread — its worktree lives at
     // a metadata-recorded path *outside* of `temp.path()`.
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -405,7 +405,7 @@ fn test_goto_from_main_worktree_targets_active_thread_lightweight_worktree() {
 
     heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -450,7 +450,7 @@ fn test_rebase_from_main_worktree_targets_active_thread_lightweight_worktree() {
     // Roll back so the lightweight thread starts behind `main`.
     heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -607,7 +607,7 @@ fn test_thread_switch_does_not_modify_cwd_worktree() {
 
     // Build a feature thread with content distinct from main.
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -701,7 +701,7 @@ fn test_thread_switch_only_updates_head() {
     heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
 
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -762,7 +762,7 @@ fn test_thread_switch_works_from_inside_thread_worktree() {
     // Two lightweight agent threads. CWD-of-the-test is main's root,
     // each agent has its own dedicated worktree.
     heddle(
-        &["start", "alpha", "--workspace", "private"],
+        &["start", "alpha", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -783,7 +783,7 @@ fn test_thread_switch_works_from_inside_thread_worktree() {
     .unwrap();
 
     heddle(
-        &["start", "beta", "--workspace", "private"],
+        &["start", "beta", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -867,7 +867,7 @@ fn test_thread_switch_to_thread_with_missing_worktree_handles_gracefully() {
     heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
 
     heddle(
-        &["start", "ghost", "--workspace", "private"],
+        &["start", "ghost", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -1149,7 +1149,7 @@ fn test_thread_refresh_with_disjoint_sibling_changes_succeeds() {
             "start",
             "alpha",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             alpha_path.to_str().unwrap(),
         ],
@@ -1164,7 +1164,7 @@ fn test_thread_refresh_with_disjoint_sibling_changes_succeeds() {
             "start",
             "beta",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             beta_path.to_str().unwrap(),
         ],
@@ -1227,7 +1227,7 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
             "start",
             "alpha",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             alpha_path.to_str().unwrap(),
         ],
@@ -1240,7 +1240,7 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
             "start",
             "beta",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             beta_path.to_str().unwrap(),
         ],

@@ -325,7 +325,7 @@ fn diagnose_health(
         mode: summary
             .thread_mode
             .clone()
-            .unwrap_or(ThreadMode::Lightweight),
+            .unwrap_or(ThreadMode::Materialized),
         state: summary.thread_state.clone().unwrap_or(ThreadState::Active),
         base_state: summary.base_state.clone().unwrap_or_default(),
         base_root: summary.base_root.clone().unwrap_or_default(),

@@ -495,7 +495,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         mode: output
             .thread_mode
             .clone()
-            .unwrap_or(ThreadMode::Lightweight),
+            .unwrap_or(ThreadMode::Materialized),
         state: output.thread_state.clone().unwrap_or(ThreadState::Active),
         base_state: output.base_state.clone().unwrap_or_default(),
         base_root: output.base_root.clone().unwrap_or_default(),
@@ -862,11 +862,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
             println!("{}", style::dim("Worktree"));
             emitted = true;
         }
-        let visibility = match mode {
-            ThreadMode::Materialized | ThreadMode::Lightweight => "heavy",
-            ThreadMode::Virtualized => "light",
-        };
-        println!("Workspace: {}", visibility);
+        println!("Workspace: {}", mode);
     }
     if let Some(state) = &output.thread_state {
         if !emitted {
