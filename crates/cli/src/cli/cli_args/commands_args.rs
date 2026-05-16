@@ -1281,3 +1281,38 @@ pub struct WatchArgs {
 // file. A second copy was left here by the rebase (the workstreams
 // commit added them twice when the cherry-pick had lost the
 // originals and we re-added them mid-rebase). Removed.
+
+#[cfg(test)]
+mod clone_filter_tests {
+    use clap::Parser;
+
+    use crate::cli::{Cli, Commands, CloneArgs};
+
+    fn parse_clone(extra: &[&str]) -> Result<CloneArgs, clap::Error> {
+        let mut argv: Vec<&str> = vec!["heddle", "clone", "remote", "local"];
+        argv.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(argv)?;
+        match cli.command {
+            Commands::Clone(args) => Ok(args),
+            _ => panic!("expected Commands::Clone"),
+        }
+    }
+
+    #[test]
+    fn parses_clone_filter_blob_none() {
+        let args = parse_clone(&["--filter", "blob:none"]).expect("parse --filter blob:none");
+        assert_eq!(args.filter.as_deref(), Some("blob:none"));
+        assert!(!args.lazy);
+    }
+
+    #[test]
+    fn rejects_unknown_filter_spec() {
+        let err = parse_clone(&["--filter", "tree:0"])
+            .expect_err("unknown --filter spec should fail to parse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tree:0") && msg.contains("blob:none"),
+            "error should name the bad spec and the supported one: {msg}"
+        );
+    }
+}
