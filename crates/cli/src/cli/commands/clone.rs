@@ -29,6 +29,7 @@ struct CloneOptions {
     thread: Option<String>,
     depth: Option<u32>,
     lazy: bool,
+    filter: Option<String>,
 }
 
 pub async fn cmd_clone(
@@ -38,12 +39,14 @@ pub async fn cmd_clone(
     thread: Option<String>,
     depth: Option<u32>,
     lazy: bool,
+    filter: Option<String>,
 ) -> Result<()> {
     let local_path = Path::new(&local);
     let options = CloneOptions {
         thread,
         depth: depth.filter(|depth| *depth > 0),
         lazy,
+        filter,
     };
 
     if local_path.exists() {
@@ -99,6 +102,7 @@ fn clone_git_overlay_url(
     local_path: &Path,
     options: &CloneOptions,
 ) -> Result<()> {
+    reject_unsupported_for_git_overlay(options)?;
     fs::create_dir_all(local_path)?;
     clone_url_to_bare(url, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
     finish_git_overlay_clone(cli, local_path, options, url.to_string())
@@ -110,18 +114,26 @@ fn clone_git_overlay_path(
     local_path: &Path,
     options: &CloneOptions,
 ) -> Result<()> {
+    reject_unsupported_for_git_overlay(options)?;
     fs::create_dir_all(local_path)?;
     gix::init(local_path).map_err(anyhow::Error::msg)?;
     copy_local_repo_to_bare(remote_path, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
     finish_git_overlay_clone(cli, local_path, options, remote_path.display().to_string())
 }
 
-fn finish_git_overlay_clone(
-    cli: &Cli,
-    local_path: &Path,
-    options: &CloneOptions,
-    remote_label: String,
-) -> Result<()> {
+/// Reject options the Git-overlay path doesn't support yet, BEFORE any
+/// filesystem or network work runs. Without this, the user pays the
+/// full clone cost (potentially seconds-to-minutes) and is left with a
+/// partially-initialized destination directory before seeing the error.
+/// Tracked separately for `--filter`, `--lazy`, and `--depth` so each
+/// rejection message stays scannable.
+fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
+    if let Some(filter) = options.filter.as_deref() {
+        return Err(anyhow!(
+            "--filter {} is not available for Git-overlay clones yet; run a full clone",
+            filter
+        ));
+    }
     if options.lazy {
         return Err(anyhow!(
             "lazy clone is not available for Git-overlay clones yet; run a full clone"
@@ -132,7 +144,15 @@ fn finish_git_overlay_clone(
             "shallow Git-overlay clone is not available yet; run a full clone"
         ));
     }
+    Ok(())
+}
 
+fn finish_git_overlay_clone(
+    cli: &Cli,
+    local_path: &Path,
+    options: &CloneOptions,
+    remote_label: String,
+) -> Result<()> {
     write_git_overlay_origin(local_path, &remote_label)?;
     let repo = Repository::init(local_path)?;
     let mut bridge = GitBridge::new(&repo);
@@ -227,8 +247,15 @@ async fn clone_local(
         thread,
         depth,
         lazy,
+        filter,
     } = options;
     let depth = *depth;
+    if let Some(filter) = filter.as_deref() {
+        return Err(anyhow!(
+            "--filter {} is only supported for hosted/network remotes",
+            filter
+        ));
+    }
     if *lazy {
         return Err(anyhow!(
             "lazy clone is only supported for hosted/network remotes"
@@ -319,9 +346,12 @@ async fn clone_network(
         thread,
         depth,
         lazy,
+        filter,
     } = options;
     let depth = *depth;
-    let lazy = *lazy;
+    // `--filter blob:none` is a synonym for `--lazy` on hosted/network
+    // remotes; both produce a clone whose blob content is hydrated on demand.
+    let lazy = *lazy || filter.is_some();
 
     // Create the local directory
     fs::create_dir_all(local_path)?;

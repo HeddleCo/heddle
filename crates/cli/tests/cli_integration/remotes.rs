@@ -124,6 +124,30 @@ fn test_cli_clone_local_lazy_is_rejected() {
 }
 
 #[test]
+fn test_cli_clone_git_overlay_filter_is_rejected() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    gix::init_bare(&origin).expect("init bare git origin");
+
+    let err = heddle(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            work.to_str().expect("work path utf8"),
+            "--filter",
+            "blob:none",
+        ],
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("--filter") && err.contains("Git-overlay"),
+        "Git-overlay clone with --filter should fail with a tailored message: {err}"
+    );
+}
+
+#[test]
 fn test_cli_pull_local_lazy_is_rejected() {
     let source = TempDir::new().unwrap();
     let target = TempDir::new().unwrap();
