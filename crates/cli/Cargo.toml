@@ -216,3 +216,7 @@ path = "src/lib.rs"
 name = "local_ops"
 harness = false
 required-features = ["semantic"]
+
+[[bench]]
+name = "clonefile_threads"
+harness = false
