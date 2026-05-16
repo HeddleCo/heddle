@@ -47,6 +47,9 @@ const READ_ONLY_VARIANTS: &[&str] = &[
     // Schema registry: prints the JSON schemas embedded in the CLI
     // and the registry index. No oplog mutation.
     "Schemas",
+    // Shell integration: prints a `cd`-hook snippet to stdout. No
+    // oplog mutation — installs nothing, edits no files.
+    "Shell",
 ];
 
 #[test]
