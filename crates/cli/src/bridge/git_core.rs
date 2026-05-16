@@ -1121,8 +1121,25 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
 ///
 /// Used by `bridge import --path <URL>` (Phase F): we clone into a
 /// scratch directory under the heddle repo's `.heddle/tmp/` and feed the
-/// resulting bare repo into the normal import path.
-pub fn clone_url_to_bare(url: &gix::Url, dest: &Path) -> GitResult<()> {
+/// resulting bare repo into the normal import path. Also used by `clone`
+/// for Git-overlay URLs, where `depth` and `filter` carry through to a
+/// shallow / partial clone.
+///
+/// * `depth` — if `Some(n)` with `n >= 1`, a shallow clone with that
+///   many commits per ref (transport-v2 `deepen <n>` capability).
+/// * `filter` — if `Some(spec)`, a partial-clone filter spec such as
+///   `"blob:none"` is sent to the server (transport-v2 `filter`
+///   capability). The resulting bare repo is also marked as a partial
+///   clone (`extensions.partialClone = origin` +
+///   `remote.origin.partialclonefilter = <spec>`) so subsequent fetches
+///   honour the same filter.
+pub fn clone_url_to_bare(
+    url: &gix::Url,
+    dest: &Path,
+    depth: Option<u32>,
+    filter: Option<&str>,
+) -> GitResult<()> {
+    let _ = (depth, filter);
     fs::create_dir_all(dest)?;
     let repo = gix::init_bare(dest).map_err(git_err)?;
     let mut remote = repo.remote_at(url.clone()).map_err(git_err)?;

@@ -104,7 +104,13 @@ fn clone_git_overlay_url(
 ) -> Result<()> {
     reject_unsupported_for_git_overlay(options)?;
     fs::create_dir_all(local_path)?;
-    clone_url_to_bare(url, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
+    clone_url_to_bare(
+        url,
+        &local_path.join(".git"),
+        options.depth,
+        options.filter.as_deref(),
+    )
+    .map_err(anyhow::Error::msg)?;
     finish_git_overlay_clone(cli, local_path, options, url.to_string())
 }
 

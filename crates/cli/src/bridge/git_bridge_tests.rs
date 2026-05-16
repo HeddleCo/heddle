@@ -1334,7 +1334,7 @@ fn clone_url_to_bare_populates_destination_from_file_url() {
     // Clone into a fresh dest dir.
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    clone_url_to_bare(&url, &dest).expect("clone file url");
+    clone_url_to_bare(&url, &dest, None, None).expect("clone file url");
 
     // Verify the dest has main + the v1.0 tag with the original commit OID.
     let dest_repo = gix::open(&dest).expect("open dest");
@@ -1352,6 +1352,156 @@ fn clone_url_to_bare_populates_destination_from_file_url() {
         dest_repo.find_reference("refs/tags/v1.0").is_ok(),
         "Phase F: tags must be fetched too (with_fetch_tags::All)"
     );
+}
+
+/// Build a source repo with a chain of three commits, where each commit
+/// adds a new blob file. Returns the (`temp`, `repo`, `[c1, c2, c3]`,
+/// `[blob1, blob2, blob3]`) tuple. The caller owns the TempDir lifetime.
+fn build_source_repo_three_commits_with_blobs(
+) -> (TempDir, gix::Repository, [gix::hash::ObjectId; 3], [gix::hash::ObjectId; 3]) {
+    let (temp, repo) = init_git_repo();
+    let blob1 = repo.write_blob(b"alpha\n").expect("blob1").detach();
+    let blob2 = repo.write_blob(b"beta\n").expect("blob2").detach();
+    let blob3 = repo.write_blob(b"gamma\n").expect("blob3").detach();
+
+    let mut e1 = repo.edit_tree(empty_tree_oid(&repo)).expect("e1");
+    e1.upsert("a.txt", gix::object::tree::EntryKind::Blob, blob1)
+        .expect("e1 upsert");
+    let t1 = e1.write().expect("write t1").detach();
+    let c1 = commit_with_tree(&repo, None, t1, "c1: add a.txt", &[]);
+
+    let mut e2 = repo.edit_tree(empty_tree_oid(&repo)).expect("e2");
+    e2.upsert("a.txt", gix::object::tree::EntryKind::Blob, blob1)
+        .expect("e2 upsert a");
+    e2.upsert("b.txt", gix::object::tree::EntryKind::Blob, blob2)
+        .expect("e2 upsert b");
+    let t2 = e2.write().expect("write t2").detach();
+    let c2 = commit_with_tree(&repo, None, t2, "c2: add b.txt", &[c1]);
+
+    let mut e3 = repo.edit_tree(empty_tree_oid(&repo)).expect("e3");
+    e3.upsert("a.txt", gix::object::tree::EntryKind::Blob, blob1)
+        .expect("e3 upsert a");
+    e3.upsert("b.txt", gix::object::tree::EntryKind::Blob, blob2)
+        .expect("e3 upsert b");
+    e3.upsert("c.txt", gix::object::tree::EntryKind::Blob, blob3)
+        .expect("e3 upsert c");
+    let t3 = e3.write().expect("write t3").detach();
+    let c3 = commit_with_tree(&repo, Some("refs/heads/main"), t3, "c3: add c.txt", &[c2]);
+
+    (temp, repo, [c1, c2, c3], [blob1, blob2, blob3])
+}
+
+/// Issue 49 (20b): `clone_url_to_bare` must honour `depth = Some(1)` by
+/// writing a `shallow` boundary file at the dest and only pulling the
+/// tip commit per ref. Without the wire-level deepen capability, the
+/// fixture's full three-commit chain comes across.
+#[test]
+fn clone_url_to_bare_honours_depth_for_shallow_clone() {
+    use gix::bstr::ByteSlice;
+
+    use crate::bridge::git_core::clone_url_to_bare;
+
+    let (_src_temp, source_repo, commits, _blobs) = build_source_repo_three_commits_with_blobs();
+    let [_c1, _c2, c3] = commits;
+
+    let src_path = source_repo
+        .workdir()
+        .expect("workdir")
+        .canonicalize()
+        .expect("canonicalize");
+    let url_str = format!("file://{}", src_path.display());
+    let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest = dest_root.path().join("clone-dest");
+    clone_url_to_bare(&url, &dest, Some(1), None).expect("shallow clone");
+
+    let dest_repo = gix::open(&dest).expect("open dest");
+    let dest_main = dest_repo
+        .find_reference("refs/heads/main")
+        .expect("main ref present")
+        .peel_to_id()
+        .expect("peel main")
+        .detach();
+    assert_eq!(dest_main, c3, "main must point at the tip commit");
+
+    let shallow_path = dest.join("shallow");
+    assert!(
+        shallow_path.exists(),
+        "issue#49: shallow boundary file `.git/shallow` must exist when --depth was applied"
+    );
+    let shallow_contents = std::fs::read_to_string(&shallow_path).expect("read shallow");
+    assert!(
+        shallow_contents.contains(&c3.to_string()),
+        "issue#49: shallow file must list the tip OID at the boundary; got `{}`",
+        shallow_contents.trim()
+    );
+
+    let walk = dest_repo
+        .rev_walk([c3])
+        .all()
+        .expect("rev walk")
+        .map(|info| info.expect("walk step").id().detach())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        walk.len(),
+        1,
+        "issue#49: depth=1 must yield exactly one commit in the local history; got {:?}",
+        walk
+    );
+}
+
+/// Issue 49 (20b): with `filter = Some("blob:none")` the wire must send
+/// the v2 `filter` capability, the resulting bare repo must record the
+/// partial-clone markers in its config, and no blob objects must land
+/// in the destination ODB.
+#[test]
+fn clone_url_to_bare_honours_blob_none_filter() {
+    use gix::bstr::ByteSlice;
+
+    use crate::bridge::git_core::clone_url_to_bare;
+
+    let (_src_temp, source_repo, commits, blobs) = build_source_repo_three_commits_with_blobs();
+    let [_c1, _c2, c3] = commits;
+
+    let src_path = source_repo
+        .workdir()
+        .expect("workdir")
+        .canonicalize()
+        .expect("canonicalize");
+    let url_str = format!("file://{}", src_path.display());
+    let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest = dest_root.path().join("clone-dest");
+    clone_url_to_bare(&url, &dest, Some(1), Some("blob:none")).expect("partial clone");
+
+    let dest_repo = gix::open(&dest).expect("open dest");
+    let dest_main = dest_repo
+        .find_reference("refs/heads/main")
+        .expect("main ref present")
+        .peel_to_id()
+        .expect("peel main")
+        .detach();
+    assert_eq!(dest_main, c3, "main must point at the tip commit");
+
+    let config = std::fs::read_to_string(dest.join("config")).expect("read config");
+    assert!(
+        config.contains("partialclonefilter")
+            || config.contains("partialClone")
+            || config.contains("partialclone"),
+        "issue#49: config must record partial-clone markers; got:\n{}",
+        config
+    );
+
+    use gix::objs::Exists;
+    for blob in blobs {
+        assert!(
+            !dest_repo.objects.exists(&blob),
+            "issue#49: blob {} must be absent from a `--filter=blob:none` clone",
+            blob
+        );
+    }
 }
 
 /// Phase A: `bridge export --destination DEST` must populate DEST with
