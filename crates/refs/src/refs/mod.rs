@@ -14,6 +14,7 @@ mod refs_manager;
 mod refs_storage;
 mod refs_transactions;
 mod refs_types;
+mod reftable_model;
 mod resolve;
 mod text;
 mod types;
@@ -27,11 +28,15 @@ mod refs_tests;
 #[cfg(test)]
 mod refs_packed_tests;
 
+#[cfg(test)]
+mod reftable_tests;
+
 pub use backend::CoreRefBackend;
 pub use head::{Head, HeadParseError};
 pub use name::{RefNameError, validate_ref_name};
 pub use operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
 pub use packed_model::PackedRefsModel;
+pub use reftable_model::{ReftableError, ReftableModel};
 #[cfg(feature = "postgres")]
 pub use pg_refs::PgRefBackend;
 pub use ref_backend::RefBackend;
