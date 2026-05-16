@@ -1526,6 +1526,86 @@ fn clone_url_to_bare_honours_blob_none_filter() {
     }
 }
 
+/// Issue 49 (20b): `clone_url_to_bare` must succeed when the caller
+/// pre-creates the destination as an empty directory — both `bridge.rs`
+/// (via `ScratchDir`) and `clone.rs` (via `local_path.join(".git")` when
+/// `local_path` is a fresh `mkdir`) rely on this for the subprocess
+/// path that handles filter clones. The function should detect the
+/// empty leaf and let `git clone` populate it. This also exercises the
+/// filter-without-depth wiring.
+#[test]
+fn clone_url_to_bare_via_git_handles_pre_created_empty_dest() {
+    use gix::bstr::ByteSlice;
+
+    use crate::bridge::git_core::clone_url_to_bare;
+
+    let (_src_temp, source_repo, commits, _blobs) = build_source_repo_three_commits_with_blobs();
+    let [_c1, _c2, c3] = commits;
+
+    let src_path = source_repo
+        .workdir()
+        .expect("workdir")
+        .canonicalize()
+        .expect("canonicalize");
+    let cfg = src_path.join(".git").join("config");
+    let mut text = std::fs::read_to_string(&cfg).expect("read source config");
+    if !text.contains("allowFilter") {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("[uploadpack]\n\tallowFilter = true\n");
+        std::fs::write(&cfg, text).expect("write source config");
+    }
+
+    let url_str = format!("file://{}", src_path.display());
+    let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest = dest_root.path().join("clone-dest");
+    std::fs::create_dir(&dest).expect("pre-create empty dest");
+    assert!(dest.exists() && dest.read_dir().expect("read empty").next().is_none());
+
+    clone_url_to_bare(&url, &dest, None, Some("blob:none")).expect("partial clone");
+
+    let dest_repo = gix::open(&dest).expect("open dest");
+    let dest_main = dest_repo
+        .find_reference("refs/heads/main")
+        .expect("main ref present")
+        .peel_to_id()
+        .expect("peel main")
+        .detach();
+    assert_eq!(
+        dest_main, c3,
+        "main must point at the tip commit even when no depth was applied"
+    );
+}
+
+/// Issue 49 (20b): if the underlying `git clone` invocation fails (e.g.
+/// the URL is unreachable), the subprocess path must surface the
+/// stderr-derived message rather than panicking. Uses a `file://` URL
+/// pointing at a path that doesn't exist.
+#[test]
+fn clone_url_to_bare_via_git_surfaces_subprocess_failure() {
+    use gix::bstr::ByteSlice;
+
+    use crate::bridge::git_core::clone_url_to_bare;
+
+    let scratch = TempDir::new().expect("scratch");
+    let nowhere = scratch.path().join("does-not-exist");
+    let url_str = format!("file://{}", nowhere.display());
+    let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest = dest_root.path().join("clone-dest");
+
+    let err = clone_url_to_bare(&url, &dest, Some(1), Some("blob:none")).expect_err("must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("git clone failed"),
+        "subprocess failure must be surfaced via GitBridgeError::Git: got `{msg}`"
+    );
+}
+
 /// Phase A: `bridge export --destination DEST` must populate DEST with
 /// reachable git objects + refs. Auto-creates DEST as a bare repo when it
 /// doesn't exist (so users don't have to pre-init the destination).

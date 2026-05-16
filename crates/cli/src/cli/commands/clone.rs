@@ -483,3 +483,36 @@ fn copy_entry(path: &Path, dest_path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(depth: Option<u32>, lazy: bool, filter: Option<&str>) -> CloneOptions {
+        CloneOptions {
+            thread: None,
+            depth,
+            lazy,
+            filter: filter.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn lazy_alone_maps_to_blob_none_on_git_overlay() {
+        assert_eq!(
+            git_overlay_filter_spec(&opts(None, true, None)),
+            Some("blob:none"),
+        );
+    }
+
+    #[test]
+    fn explicit_filter_takes_precedence_over_lazy() {
+        let filtered = opts(None, true, Some("tree:0"));
+        assert_eq!(git_overlay_filter_spec(&filtered), Some("tree:0"));
+    }
+
+    #[test]
+    fn neither_filter_nor_lazy_yields_none() {
+        assert_eq!(git_overlay_filter_spec(&opts(None, false, None)), None);
+    }
+}

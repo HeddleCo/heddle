@@ -124,6 +124,58 @@ fn test_cli_clone_local_lazy_is_rejected() {
 }
 
 #[test]
+fn test_cli_clone_git_overlay_depth_is_rejected_for_local_path() {
+    // Issue 49: --depth on a direct-filesystem Git-overlay clone has no
+    // wire to negotiate `deepen N` over. Reject explicitly.
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    gix::init_bare(&origin).expect("init bare git origin");
+
+    let err = heddle(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            work.to_str().expect("work path utf8"),
+            "--depth",
+            "1",
+        ],
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("--depth") && err.contains("file://"),
+        "depth-on-local-path should redirect to file:// URL form: {err}"
+    );
+}
+
+#[test]
+fn test_cli_clone_git_overlay_lazy_is_rejected_for_local_path() {
+    // Issue 49: --lazy (the filter:blob:none synonym) on a
+    // direct-filesystem Git-overlay clone is also redirected to the
+    // file:// form so the wire path is engaged.
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    gix::init_bare(&origin).expect("init bare git origin");
+
+    let err = heddle(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            work.to_str().expect("work path utf8"),
+            "--lazy",
+        ],
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("--lazy") && err.contains("file://"),
+        "lazy-on-local-path should redirect to file:// URL form: {err}"
+    );
+}
+
+#[test]
 fn test_cli_clone_git_overlay_filter_is_rejected_for_local_path() {
     // `--filter` on the Git-overlay path is only wired through when
     // the source is a `file://` (or other URL) remote — the
