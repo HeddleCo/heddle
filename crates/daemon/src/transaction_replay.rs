@@ -91,6 +91,12 @@ pub struct ReplayReport {
     /// Number of `.<name>.tmp-*` files removed from the sentinel
     /// directory (orphans of an interrupted [`write_file_atomic`]).
     pub orphan_temp_files_removed: usize,
+    /// Orphan `.<name>.tmp-*` paths whose `remove_file` returned an
+    /// error (read-only filesystem, permission-restricted directory,
+    /// disk I/O). They remain on disk; the next startup will retry.
+    /// Surface these so callers do not treat the pass as clean when
+    /// orphan cleanup actually stalled.
+    pub failed_orphan_deletes: Vec<PathBuf>,
     /// Sentinel paths that could not be read or parsed as TOML.
     /// Replay leaves them alone — they are not classified as
     /// recoverable until an operator inspects them.
@@ -129,11 +135,34 @@ impl ReplayReport {
     pub fn is_clean(&self) -> bool {
         self.recovered_transaction_ids.is_empty()
             && self.orphan_temp_files_removed == 0
+            && self.failed_orphan_deletes.is_empty()
             && self.unparseable_sentinels.is_empty()
             && self.failed_sentinel_writes.is_empty()
             && self.failed_oplog_appends.is_empty()
             && self.scan_error.is_none()
             && self.unreadable_entries == 0
+    }
+
+    /// `true` when the pass hit a hard-failure condition that
+    /// operators must triage immediately: either the directory scan
+    /// itself never ran ([`Self::scan_error`]) or a recovered
+    /// transaction's audit-trail oplog append was lost
+    /// ([`Self::failed_oplog_appends`]). Both are non-retryable on
+    /// the next startup.
+    pub fn has_hard_failures(&self) -> bool {
+        self.scan_error.is_some() || !self.failed_oplog_appends.is_empty()
+    }
+
+    /// `true` when the pass hit a recoverable failure that left
+    /// on-disk state for the next startup to retry or for an
+    /// operator to inspect: a failed sentinel rewrite, a failed
+    /// orphan-tmp delete, an unparseable sentinel, or a directory
+    /// entry that `read_dir` could not yield.
+    pub fn has_recoverable_failures(&self) -> bool {
+        !self.failed_sentinel_writes.is_empty()
+            || !self.failed_orphan_deletes.is_empty()
+            || !self.unparseable_sentinels.is_empty()
+            || self.unreadable_entries > 0
     }
 }
 
@@ -168,10 +197,11 @@ fn is_orphan_temp_name(name: &str) -> bool {
 /// returning `true` on the second call.
 ///
 /// Per-sentinel errors are tracing-warned and surfaced in the returned
-/// report (under `unparseable_sentinels`, `failed_sentinel_writes`, or
-/// `failed_oplog_appends` depending on which step failed) so a single
-/// corrupt sentinel cannot block daemon startup but its failure is
-/// still visible to the operator.
+/// report (under `unparseable_sentinels`, `failed_sentinel_writes`,
+/// `failed_oplog_appends`, or `failed_orphan_deletes` depending on
+/// which step failed) so a single corrupt sentinel or undeletable
+/// orphan cannot block daemon startup but its failure is still visible
+/// to the operator.
 pub fn replay_active_transactions(repo: &Repository) -> ReplayReport {
     let mut report = ReplayReport::default();
     let dir = repo.heddle_dir().join("state").join("transactions");
@@ -203,8 +233,13 @@ pub fn replay_active_transactions(repo: &Repository) -> ReplayReport {
         };
 
         if is_orphan_temp_name(name) {
-            if std::fs::remove_file(&path).is_ok() {
-                report.orphan_temp_files_removed += 1;
+            match std::fs::remove_file(&path) {
+                Ok(()) => report.orphan_temp_files_removed += 1,
+                Err(err) => {
+                    tracing::warn!(error = %err, path = %path.display(),
+                        "transaction-replay: failed to remove orphan temp file");
+                    report.failed_orphan_deletes.push(path.clone());
+                }
             }
             continue;
         }
@@ -522,6 +557,61 @@ buffered_ops = {buffered}
         // Sentinel is still in `active` on disk so the next startup
         // retries.
         assert_eq!(read_state(&dir, "tx-ro"), STATE_ACTIVE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_orphan_delete_surfaced_on_readonly_dir() {
+        // Read-only sentinel directory: the orphan tmp file is
+        // present and matches `is_orphan_temp_name`, but
+        // `remove_file` cannot unlink it because the parent denies
+        // write. Replay must surface the failure path on the report
+        // instead of silently incrementing nothing — the orphan is
+        // still on disk and the operator needs to know.
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root bypasses DAC permission checks, so r-x on the dir
+        // would not actually block file deletion and the test's
+        // assertion would be a no-op. Skip rather than mislead.
+        // SAFETY: getuid() is always safe.
+        if unsafe { libc::getuid() } == 0 {
+            eprintln!(
+                "skipping failed_orphan_delete_surfaced_on_readonly_dir: \
+                 running as root, DAC checks bypassed"
+            );
+            return;
+        }
+
+        let (_t, repo) = fresh_repo();
+        let dir = sentinel_dir(&repo);
+        fs::create_dir_all(&dir).unwrap();
+        let orphan = dir.join(".tx-stuck.toml.tmp-1-2-3");
+        fs::write(&orphan, b"partial").unwrap();
+
+        // Make the parent r-x: existing files still readable, but no
+        // new files can be created AND existing files cannot be
+        // unlinked (unlink requires write+execute on the directory).
+        let mut perms = fs::metadata(&dir).unwrap().permissions();
+        let original = perms.mode();
+        perms.set_mode(0o555);
+        fs::set_permissions(&dir, perms).unwrap();
+
+        let report = replay_active_transactions(&repo);
+
+        // Restore writable perms so TempDir can clean up.
+        let mut restore = fs::metadata(&dir).unwrap().permissions();
+        restore.set_mode(original);
+        fs::set_permissions(&dir, restore).unwrap();
+
+        assert_eq!(report.failed_orphan_deletes, vec![orphan.clone()]);
+        // The delete failed, so the removed-count must NOT be
+        // incremented.
+        assert_eq!(report.orphan_temp_files_removed, 0);
+        assert!(!report.is_clean());
+        assert!(report.has_recoverable_failures());
+        assert!(!report.has_hard_failures());
+        // Orphan is still on disk so the next startup retries.
+        assert!(orphan.exists());
     }
 
     #[test]
