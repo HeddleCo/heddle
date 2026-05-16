@@ -214,8 +214,11 @@ struct GitBridgeMappingFile {
 /// Two production implementations exist:
 /// - Git-overlay clones: `cli::commands::clone::GitOverlayBlobHydrator`
 ///   uses gix promisor-fetch semantics against the bare `.git/` repo.
-/// - Hosted clones: `heddle_client::grpc_hosted::HostedBlobHydrator`
-///   calls `HostedGrpcClient::hydrate_pulled_state`.
+/// - Hosted clones: `heddle_client::grpc_hosted::LazyHostedHydrator`
+///   bridges sync `hydrate` calls to async gRPC via a dedicated worker
+///   thread + private Tokio runtime; on each call the worker invokes
+///   `HostedGrpcClient::hydrate_pulled_state` for the current local-thread
+///   tip.
 ///
 /// On success the hydrator is expected to write the blob into
 /// `repo.store()`; the read path then clears the missing marker and

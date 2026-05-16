@@ -90,6 +90,7 @@ pub async fn cmd_clone(
                 local_path,
                 &options,
                 server_key,
+                hosted_endpoint_spec(&remote),
             )
             .await?;
             #[cfg(not(feature = "client"))]
@@ -347,6 +348,20 @@ async fn clone_local(
     Ok(())
 }
 
+/// Extract the `host:port` substring from a raw remote URL so the lazy
+/// hydrator config can persist it instead of the post-DNS `SocketAddr`.
+/// Keeping the hostname matters when the upstream service rotates IPs
+/// (e.g. behind a load balancer): a SocketAddr baked into the marker at
+/// clone time would pin to a stale IP and break later hydrate calls even
+/// though the original URL still resolves. The hydrator re-resolves DNS
+/// on every process start when given a hostname spec.
+#[cfg(feature = "client")]
+fn hosted_endpoint_spec(remote: &str) -> String {
+    let trimmed = remote.strip_prefix("heddle://").unwrap_or(remote);
+    // The address ends at the first slash that introduces a repo path.
+    trimmed.split('/').next().unwrap_or(trimmed).to_string()
+}
+
 #[cfg(feature = "client")]
 async fn clone_network(
     cli: &Cli,
@@ -355,6 +370,7 @@ async fn clone_network(
     local_path: &Path,
     options: &CloneOptions,
     server_key: Option<String>,
+    endpoint_spec: String,
 ) -> Result<()> {
     use crate::{client::HostedGrpcClient, config::UserConfig};
 
@@ -418,12 +434,11 @@ async fn clone_network(
         // any blob read.
         if lazy {
             use repo::lazy_hydrator::LazyHydratorConfig;
-            let cfg = LazyHydratorConfig::hosted(
-                addr.to_string(),
-                repo_path,
-                track_name,
-                track_name,
-            );
+            // Persist the original `host:port` spec (not `addr.to_string()`,
+            // which is a resolved IP). The hydrator re-resolves DNS on
+            // every process start so a future LB rotation doesn't pin us
+            // to a stale IP.
+            let cfg = LazyHydratorConfig::hosted(endpoint_spec, repo_path, track_name, track_name);
             cfg.save(local_repo.heddle_dir())
                 .context("failed to persist lazy-hydrator.toml")?;
         }
@@ -679,6 +694,41 @@ mod tests {
         assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
     }
 
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_endpoint_spec_preserves_hostname_with_port() {
+        // The lazy-hydrator marker must carry the original hostname so
+        // the hydrator can re-resolve DNS on every process start. If we
+        // accidentally persist a resolved IP, hosts behind a rotating-IP
+        // load balancer break on the next process restart.
+        assert_eq!(
+            hosted_endpoint_spec("example.heddle.cloud:443"),
+            "example.heddle.cloud:443",
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_endpoint_spec_strips_scheme_prefix() {
+        assert_eq!(
+            hosted_endpoint_spec("heddle://example.heddle.cloud:443"),
+            "example.heddle.cloud:443",
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_endpoint_spec_strips_repo_path_suffix() {
+        assert_eq!(
+            hosted_endpoint_spec("example.heddle.cloud:443/org/acme/repo"),
+            "example.heddle.cloud:443",
+        );
+        assert_eq!(
+            hosted_endpoint_spec("heddle://example.heddle.cloud:443/org/acme/repo"),
+            "example.heddle.cloud:443",
+        );
+    }
+
     #[test]
     fn reject_unsupported_rejects_filter() {
         let err = reject_unsupported_for_git_overlay(&opts(None, false, Some("blob:none")))
@@ -779,8 +829,7 @@ mod tests {
             let real_bytes = b"genuine content".to_vec();
             let oid = write_local_blob(&bare, &real_bytes);
 
-            let lying_blake3 =
-                objects::object::Blob::new(b"different content".to_vec()).hash();
+            let lying_blake3 = objects::object::Blob::new(b"different content".to_vec()).hash();
             let hydrator = GitOverlayBlobHydrator::new(bare);
             hydrator.record_blob_oid(lying_blake3, oid);
 
@@ -856,8 +905,9 @@ mod tests {
             // OIDs to the SAME blake3 (the blake3 of bytes_b) so the
             // hydrate call ends up reading whichever OID is currently
             // recorded for that blake3 — that's what the test is about.
-            let blake3 = ContentHash::from_hex(&objects::object::Blob::new(bytes_b.clone()).hash().to_hex())
-                .unwrap();
+            let blake3 =
+                ContentHash::from_hex(&objects::object::Blob::new(bytes_b.clone()).hash().to_hex())
+                    .unwrap();
 
             let hydrator = GitOverlayBlobHydrator::new(bare.clone());
             hydrator.record_blob_oid(blake3, oid_a);
