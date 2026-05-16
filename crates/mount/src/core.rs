@@ -391,6 +391,39 @@ pub struct ContentAddressedMount {
 ///
 /// `promotion` is wrapped in an `RwLock` so `with_promotion_policy`
 /// can swap the active policy without having to rebuild the Arc.
+///
+/// # Lock ordering invariant
+///
+/// Three locks coexist inside `MountInner` (`state`, `pending`,
+/// `inodes`) and the call sites use them in nested combinations.
+/// To avoid deadlock, every code path that acquires more than one
+/// MUST follow this order, top-to-bottom:
+///
+/// ```text
+///   state    (RwLock — read or write)
+///     │
+///     ▼
+///   pending  (Mutex)
+///     │
+///     ▼
+///   inodes   (Mutex)
+/// ```
+///
+/// Equivalently: never take `state` while holding `pending` or
+/// `inodes`; never take `pending` while holding `inodes`. The
+/// reverse direction (drop the inner first, then the outer) is the
+/// only safe unwind. `promotion` is independent of all three — it
+/// guards a config knob that's read everywhere but never co-locked
+/// with the others — so it can be sequenced freely.
+///
+/// The discipline is currently safe-by-convention: there's no
+/// lock-ordering enforcement at the type system level. When adding
+/// a new code path that touches more than one of these locks,
+/// audit against the diagram above before merging. The existing
+/// call sites that take all three in the right order are good
+/// templates — search for `state.write` / `state.read` and trace
+/// the subsequent `pending.lock()` / `inodes.lock()` to see the
+/// pattern in action.
 pub(crate) struct MountInner {
     repo: Repository,
     thread: String,

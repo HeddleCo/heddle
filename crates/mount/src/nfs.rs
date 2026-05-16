@@ -133,6 +133,26 @@ impl NfsShell {
         // Bind the listener on an ephemeral port so multiple
         // concurrent threads don't fight over a fixed one. The
         // kernel hands us a real port we then pass to `mount`.
+        //
+        // Threat model — explicit because this is a localhost TCP
+        // server with **no authentication**: any local process on
+        // the host that can reach `127.0.0.1:<port>` can
+        // `mount.nfs` against it and read the entire projected
+        // thread tree without permission checks. The bind is
+        // `127.0.0.1` (not `0.0.0.0`) so the surface is limited to
+        // the local machine, and the ephemeral port reduces the
+        // window for a co-resident process to guess it, but
+        // neither is a defence against another logged-in user or
+        // a browser/renderer process running on the same box.
+        //
+        // Operationally this is fine on a single-user dev laptop
+        // (the model this crate's mount surface is built for) but
+        // it's not appropriate for shared dev VMs, multi-tenant
+        // CI runners, or any host where you can't trust every
+        // local process to behave. The follow-up is to switch to
+        // a UNIX-domain socket (nfsserve supports it), which
+        // limits the surface to filesystem permissions — the
+        // sentinel we want at this layer. Tracked separately.
         let listener = runtime.block_on(NFSTcpListener::bind("127.0.0.1:0", fs)).map_err(
             |e| MountError::Store(objects::error::HeddleError::Io(e)),
         )?;

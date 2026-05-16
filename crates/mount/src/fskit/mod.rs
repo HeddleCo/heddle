@@ -746,4 +746,73 @@ mod tests {
             );
         }
     }
+
+    /// FFI panic-resilience: a panic deep in a `PlatformShell` call
+    /// must be caught by the trampoline's `guarded_c_int` wrapper
+    /// and converted to `EIO`, not allowed to unwind across the
+    /// `extern "C"` boundary (which Rust ≥1.81 converts to abort,
+    /// taking the whole System Extension process — and every
+    /// materialised volume — with it).
+    ///
+    /// Driving the trampoline directly with a boxed `PanicShell`
+    /// exercises exactly the unwind path. No Swift static lib
+    /// needed: the trampolines are plain Rust functions reachable
+    /// from the test binary regardless of `--features fskit`.
+    ///
+    /// `Box::into_raw` mirrors the production setup in
+    /// `FSKitShell::from_shell`, so the test also exercises the
+    /// pointer-shape contract that `shell_ref` decodes.
+    #[test]
+    fn trampoline_lookup_recovers_eio_on_panic() {
+        use crate::tests::mocks::PanicShell;
+
+        // Box::into_raw a fat-pointer Arc the same way the
+        // production constructor does. `Arc<dyn PlatformShell>` is
+        // what the trampolines downcast back to via `shell_ref`.
+        let shell: Arc<dyn PlatformShell + Send + Sync> = Arc::new(PanicShell);
+        let boxed: Box<Arc<dyn PlatformShell + Send + Sync>> = Box::new(shell);
+        let user_data = Box::into_raw(boxed) as *mut c_void;
+
+        // Outparams ProjFS-style — stack slots the trampoline may
+        // or may not write to. Default-zeroed so we can also assert
+        // the trampoline didn't tear them on the error path.
+        let mut child_inode: u64 = 0;
+        let mut unix_mode: u32 = 0;
+        let mut size: u64 = 0;
+        let name = std::ffi::CString::new("anything").unwrap();
+
+        // SAFETY: `user_data` is the exact pointer shape
+        // `trampoline_lookup` expects (Box<Arc<dyn …>>), the name
+        // is a NUL-terminated C string owned by this stack frame,
+        // and the outparam pointers live until this call returns.
+        let rc = unsafe {
+            trampoline_lookup(
+                user_data,
+                /* parent_inode */ 1,
+                name.as_ptr(),
+                &mut child_inode as *mut u64,
+                &mut unix_mode as *mut u32,
+                &mut size as *mut u64,
+            )
+        };
+
+        assert_eq!(
+            rc,
+            libc::EIO,
+            "panic in PlatformShell::lookup must surface as EIO, \
+             not propagate across the C ABI (got rc={rc})"
+        );
+        // Outparams stayed zero — the trampoline must not have
+        // partially written through them on the error path.
+        assert_eq!(child_inode, 0, "child_inode must not be torn on error");
+        assert_eq!(unix_mode, 0, "unix_mode must not be torn on error");
+        assert_eq!(size, 0, "size must not be torn on error");
+
+        // Reclaim the box via the same trampoline production uses
+        // for cleanup. A panic in this body would compound the
+        // test failure, but `guarded_drop` should also catch.
+        // SAFETY: `user_data` was produced by `Box::into_raw` above
+        // and is reclaimed exactly once here.
+        unsafe { trampoline_drop(user_data) };
+    }
 }

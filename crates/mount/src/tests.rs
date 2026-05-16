@@ -104,6 +104,37 @@ pub(crate) mod mocks {
             Ok(())
         }
     }
+
+    /// Shell that panics on every PlatformShell call. Used by the
+    /// FFI panic-resilience tests to drive an unwind into a
+    /// trampoline body — the `catch_unwind` wrappers in
+    /// `fskit::guarded_c_int` and `projfs::guarded_hresult` must
+    /// translate the panic into `EIO` / a Win32 I/O HRESULT instead
+    /// of letting the unwind cross the C ABI boundary (which Rust
+    /// ≥1.81 turns into an abort that would crash the host process
+    /// and every projected/materialised volume with it).
+    pub struct PanicShell;
+
+    impl PlatformShell for PanicShell {
+        fn lookup(&self, _parent: NodeId, _name: &OsStr) -> Result<Option<Entry>> {
+            panic!("panic-shell: lookup intentionally panics")
+        }
+        fn read(&self, _node: NodeId, _offset: u64, _buf: &mut [u8]) -> Result<usize> {
+            panic!("panic-shell: read intentionally panics")
+        }
+        fn write(&self, _node: NodeId, _offset: u64, _data: &[u8]) -> Result<usize> {
+            panic!("panic-shell: write intentionally panics")
+        }
+        fn enumerate(&self, _dir: NodeId) -> Result<Vec<Entry>> {
+            panic!("panic-shell: enumerate intentionally panics")
+        }
+        fn attrs(&self, _node: NodeId) -> Result<Attrs> {
+            panic!("panic-shell: attrs intentionally panics")
+        }
+        fn invalidate(&self, _node: NodeId) -> Result<()> {
+            panic!("panic-shell: invalidate intentionally panics")
+        }
+    }
 }
 
 /// Build a repository with a small, deterministic tree:
