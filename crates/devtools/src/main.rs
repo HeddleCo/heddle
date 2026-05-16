@@ -137,20 +137,38 @@ impl LineStats {
 /// return the owning workspace crate name (i.e. the directory under
 /// `crates/`). Returns `None` for files outside `crates/`.
 ///
-/// Matches on path-segment boundaries: only an exact `crates` segment
-/// (between `/`s, or at the start/end of the path) counts. This rejects
-/// false matches like `.../crates/repo/src/mycrates/foo.rs` (where
-/// `mycrates` ends with `crates` but is a different directory) and
-/// correctly picks the deepest workspace-member segment for nested
-/// checkouts like `/home/user/crates/heddle/crates/repo/src/lib.rs`.
+/// Matches the workspace-member shape `crates/<name>/<role>/...` where
+/// `<role>` is one of `src` / `tests` / `benches` / `examples` — i.e.,
+/// the segment-triple that uniquely identifies a Cargo workspace member
+/// directory. This rejects three classes of false match:
+///
+/// - **substring matches** like `.../mycrates/foo.rs` (the segment must
+///   be exactly `crates`),
+/// - **inner-`crates`-dir matches** like `crates/repo/src/crates/mod.rs`
+///   (the inner `crates` segment doesn't have a `<name>/<role>/`
+///   triple after it, so it's skipped and `repo` wins), and
+/// - **nested-checkout false matches** like `/work/crates/heddle/crates/repo/src/lib.rs`
+///   (both `crates` segments exist, but only the second has the
+///   `repo/src/` shape, so it wins — `heddle` is rejected because the
+///   segment after it is `crates`, not a role dir).
+///
+/// Walks segments right-to-left so the deepest valid match wins, which
+/// is the workspace-member dir for any normal cargo-llvm-cov path.
 fn crate_of(path: &str) -> Option<String> {
+    const ROLE_DIRS: &[&str] = &["src", "tests", "benches", "examples"];
     let normalized = path.replace('\\', "/");
     let segments: Vec<&str> = normalized.split('/').collect();
-    // Walk segments right-to-left; the last exact "crates" segment with
-    // a non-empty successor is the workspace-member parent.
-    for i in (0..segments.len().saturating_sub(1)).rev() {
-        if segments[i] == "crates" && !segments[i + 1].is_empty() {
-            return Some(segments[i + 1].to_string());
+    for i in (0..segments.len().saturating_sub(2)).rev() {
+        if segments[i] != "crates" {
+            continue;
+        }
+        let name = segments[i + 1];
+        if name.is_empty() {
+            continue;
+        }
+        let role = segments[i + 2];
+        if ROLE_DIRS.contains(&role) {
+            return Some(name.to_string());
         }
     }
     None
@@ -253,10 +271,47 @@ end_of_record
             Some("repo")
         );
         // Nested checkouts where a parent dir is also literally `crates`
-        // resolve to the deepest exact `crates` segment (the workspace member).
+        // resolve to the workspace-member match (the segment whose successor
+        // is a role dir like `src`/`tests`).
         assert_eq!(
             crate_of("/home/user/crates/heddle/crates/repo/src/lib.rs").as_deref(),
             Some("repo")
+        );
+    }
+
+    #[test]
+    fn crate_of_skips_inner_crates_dir_inside_workspace_member() {
+        // A workspace member that itself happens to have an inner directory
+        // literally named `crates/` (e.g., `crates/repo/src/crates/mod.rs`)
+        // must not be parsed as crate `mod.rs`. The role-dir requirement
+        // (`crates/<name>/<src|tests|...>`) ensures the inner `crates` is
+        // skipped and the outer one (with `src/` after) wins.
+        assert_eq!(
+            crate_of("crates/repo/src/crates/mod.rs").as_deref(),
+            Some("repo")
+        );
+        assert_eq!(
+            crate_of("crates/repo/tests/crates/integration.rs").as_deref(),
+            Some("repo")
+        );
+        assert_eq!(
+            crate_of("/work/crates/objects/benches/crates/perf.rs").as_deref(),
+            Some("objects")
+        );
+    }
+
+    #[test]
+    fn crate_of_returns_none_for_non_workspace_paths_under_crates() {
+        // A `crates/<name>/<other>/...` shape where `<other>` isn't a
+        // recognized role dir is rejected — typical for generated files
+        // (target/, build/) that shouldn't count toward the gate.
+        assert_eq!(
+            crate_of("crates/repo/target/debug/build/foo.rs"),
+            None
+        );
+        assert_eq!(
+            crate_of("/work/crates/repo/.cargo/config.toml"),
+            None
         );
     }
 
