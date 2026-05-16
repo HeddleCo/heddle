@@ -6,10 +6,14 @@
 
 #![cfg(feature = "postgres")]
 
-use std::sync::Arc;
+use std::{
+    io,
+    sync::{Arc, OnceLock},
+};
 
 use chrono::{DateTime, Utc};
 use objects::error::{HeddleError, Result};
+use runtime_bridge::RuntimeBridge;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -23,22 +27,68 @@ fn sqlx_err(e: sqlx::Error) -> HeddleError {
 }
 
 /// Postgres-backed operation log backend for the stateless server.
+///
+/// Synchronous `OpLogBackend` methods drive their `sqlx` futures through a
+/// shared [`RuntimeBridge`] so the backend is safe to call from any caller
+/// flavor — including a current-thread Tokio runtime and non-Tokio
+/// threads. See [`PgOpLogBackend::bridge`] for the lazy-init pattern.
 #[derive(Clone)]
 pub struct PgOpLogBackend {
     pool: Arc<PgPool>,
     repo_id: Uuid,
+    /// Lazy worker-thread + private Tokio runtime that drives the sync
+    /// `OpLogBackend` surface. Wrapped in `Arc<OnceLock<_>>` so every
+    /// clone of `PgOpLogBackend` shares one bridge (one worker thread),
+    /// and the spawn cost is paid on first sync use.
+    bridge: Arc<OnceLock<RuntimeBridge>>,
 }
 
 impl PgOpLogBackend {
     pub fn new(pool: Arc<PgPool>, repo_id: Uuid) -> Self {
-        Self { pool, repo_id }
+        Self {
+            pool,
+            repo_id,
+            bridge: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// Lazily-initialized accessor for the runtime bridge.
+    ///
+    /// The pre-fix `block_in_place(Handle::current().block_on(...))` path
+    /// was only valid on a multi-thread Tokio runtime; on a
+    /// `current_thread` runtime (e.g. `#[tokio::test(flavor =
+    /// "current_thread")]`) it panicked with `"can call blocking only
+    /// when running on the multi-threaded runtime"`, and on a non-Tokio
+    /// thread the inner `Handle::current()` panicked outright. Routing
+    /// through the bridge sidesteps both: the bridge's own current-thread
+    /// runtime polls the future regardless of who called.
+    fn bridge(&self) -> Result<&RuntimeBridge> {
+        if let Some(bridge) = self.bridge.get() {
+            return Ok(bridge);
+        }
+        let new = RuntimeBridge::with_thread_name("heddle-pg-oplog-bridge").map_err(|err| {
+            HeddleError::Io(io::Error::other(format!(
+                "pg-oplog runtime bridge: spawn worker thread: {err}",
+            )))
+        })?;
+        // If a concurrent caller already populated the slot, `set` drops
+        // our worker; its tx side dies with it and the spawned thread
+        // exits cleanly when `rx.recv()` returns Err. First-use only, so
+        // the wasted spawn is acceptable in exchange for keeping
+        // `bridge()` lock-free on the hot path.
+        let _ = self.bridge.set(new);
+        Ok(self
+            .bridge
+            .get()
+            .expect("OnceLock populated above or by a concurrent caller"))
     }
 
     fn block<F, T>(&self, f: F) -> Result<T>
     where
-        F: std::future::Future<Output = Result<T>> + Send,
+        F: std::future::Future<Output = Result<T>> + Send + 'static,
+        T: Send + 'static,
     {
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+        self.bridge()?.block_on(f)
     }
 
     fn row_to_entry(r: &sqlx::postgres::PgRow) -> Result<OpEntry> {
@@ -377,7 +427,11 @@ mod current_thread_runtime_tests {
     /// a `Result` instead of panicking.
     #[tokio::test(flavor = "current_thread")]
     async fn pg_oplog_methods_do_not_panic_on_current_thread_runtime() {
+        // Short `acquire_timeout` keeps the test snappy: the future will
+        // resolve to `Err(PoolTimedOut)` instead of waiting for sqlx's
+        // 30 s default against the unreachable endpoint.
         let pool = PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
             .connect_lazy("postgres://heddle-test@127.0.0.1:1/heddle_test")
             .expect("connect_lazy accepts the URL");
         let backend = PgOpLogBackend::new(Arc::new(pool), Uuid::new_v4());

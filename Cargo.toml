@@ -15,6 +15,7 @@ members = [
     "crates/refs",
     "crates/repo",
     "crates/review",
+    "crates/runtime-bridge",
     "crates/semantic",
     "crates/state_review",
     "crates/weft-client-shim",
