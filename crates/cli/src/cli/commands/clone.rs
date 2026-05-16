@@ -102,14 +102,9 @@ fn clone_git_overlay_url(
     local_path: &Path,
     options: &CloneOptions,
 ) -> Result<()> {
+    reject_unsupported_for_git_overlay(options)?;
     fs::create_dir_all(local_path)?;
-    clone_url_to_bare(
-        url,
-        &local_path.join(".git"),
-        options.depth,
-        git_overlay_filter_spec(options),
-    )
-    .map_err(anyhow::Error::msg)?;
+    clone_url_to_bare(url, &local_path.join(".git"), None, None).map_err(anyhow::Error::msg)?;
     finish_git_overlay_clone(cli, local_path, options, url.to_string())
 }
 
@@ -119,43 +114,45 @@ fn clone_git_overlay_path(
     local_path: &Path,
     options: &CloneOptions,
 ) -> Result<()> {
-    // The local-copy path (used when both source and dest are on the
-    // same filesystem) bypasses the gix fetch builder entirely, so
-    // `--depth` / `--filter` would have nothing to plug into. Reject
-    // those explicitly here rather than silently dropping them.
-    if let Some(filter) = options.filter.as_deref() {
-        return Err(anyhow!(
-            "--filter {} is not supported when cloning from a local Git path; use a file:// URL instead",
-            filter
-        ));
-    }
-    if options.lazy {
-        return Err(anyhow!(
-            "--lazy is not supported when cloning from a local Git path; use a file:// URL instead"
-        ));
-    }
-    if options.depth.is_some() {
-        return Err(anyhow!(
-            "--depth is not supported when cloning from a local Git path; use a file:// URL instead"
-        ));
-    }
+    reject_unsupported_for_git_overlay(options)?;
     fs::create_dir_all(local_path)?;
     gix::init(local_path).map_err(anyhow::Error::msg)?;
     copy_local_repo_to_bare(remote_path, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
     finish_git_overlay_clone(cli, local_path, options, remote_path.display().to_string())
 }
 
-/// `--filter blob:none` is a synonym for `--lazy` on the Git-overlay
-/// path too, mirroring the hosted/network mapping in `clone_network`.
-/// Returns `None` if neither was requested.
-fn git_overlay_filter_spec(options: &CloneOptions) -> Option<&str> {
+/// Reject `--depth` / `--lazy` / `--filter` for Git-overlay clones before
+/// any filesystem or network work runs. The wire-level plumbing in
+/// `clone_url_to_bare` can already negotiate shallow + partial-clone
+/// capabilities, but the import step (`import_all` →
+/// `GitTreeImporter::import_blob` + ancestry walk) requires every blob
+/// and parent commit to be present locally. Until the importer learns
+/// to tolerate missing objects, accepting these flags would just trade
+/// an upfront rejection for a half-built clone that fails partway
+/// through import. Each flag has its own message so the error stays
+/// scannable.
+fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
     if let Some(filter) = options.filter.as_deref() {
-        return Some(filter);
+        return Err(anyhow!(
+            "--filter {} is not yet supported for Git-overlay clones; \
+             the import step requires all blobs locally. Run a full clone for now.",
+            filter
+        ));
     }
     if options.lazy {
-        return Some("blob:none");
+        return Err(anyhow!(
+            "--lazy is not yet supported for Git-overlay clones; \
+             the import step requires all blobs locally. Run a full clone for now."
+        ));
     }
-    None
+    if options.depth.is_some() {
+        return Err(anyhow!(
+            "--depth is not yet supported for Git-overlay clones; \
+             the import step walks ancestry past the shallow boundary. \
+             Run a full clone for now."
+        ));
+    }
+    Ok(())
 }
 
 fn finish_git_overlay_clone(
@@ -498,21 +495,43 @@ mod tests {
     }
 
     #[test]
-    fn lazy_alone_maps_to_blob_none_on_git_overlay() {
-        assert_eq!(
-            git_overlay_filter_spec(&opts(None, true, None)),
-            Some("blob:none"),
+    fn reject_unsupported_passes_when_no_flags_set() {
+        assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
+    }
+
+    #[test]
+    fn reject_unsupported_rejects_filter() {
+        let err = reject_unsupported_for_git_overlay(&opts(None, false, Some("blob:none")))
+            .expect_err("filter must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("--filter"), "message must name --filter: {msg}");
+        assert!(
+            msg.contains("not yet supported"),
+            "message must say not yet supported: {msg}"
         );
     }
 
     #[test]
-    fn explicit_filter_takes_precedence_over_lazy() {
-        let filtered = opts(None, true, Some("tree:0"));
-        assert_eq!(git_overlay_filter_spec(&filtered), Some("tree:0"));
+    fn reject_unsupported_rejects_lazy() {
+        let err = reject_unsupported_for_git_overlay(&opts(None, true, None))
+            .expect_err("lazy must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("--lazy"), "message must name --lazy: {msg}");
+        assert!(
+            msg.contains("not yet supported"),
+            "message must say not yet supported: {msg}"
+        );
     }
 
     #[test]
-    fn neither_filter_nor_lazy_yields_none() {
-        assert_eq!(git_overlay_filter_spec(&opts(None, false, None)), None);
+    fn reject_unsupported_rejects_depth() {
+        let err = reject_unsupported_for_git_overlay(&opts(Some(1), false, None))
+            .expect_err("depth must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("--depth"), "message must name --depth: {msg}");
+        assert!(
+            msg.contains("not yet supported"),
+            "message must say not yet supported: {msg}"
+        );
     }
 }
