@@ -77,6 +77,7 @@ exercise.
 
 ```toml
 [dependencies]
+anyhow = "1"
 biscuit-auth = "6"
 chrono = "0.4"
 heddle-client = "0.2"
