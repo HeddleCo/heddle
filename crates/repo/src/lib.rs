@@ -11,6 +11,7 @@ pub mod daemon;
 mod ephemeral_thread;
 mod fsmonitor;
 mod hooks;
+pub mod lazy_hydrator;
 mod merge_state;
 pub mod migration;
 pub mod operation_dedup;
@@ -53,7 +54,7 @@ pub use objects::{
     },
 };
 pub use repository::{
-    ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters, CommitGraphIndex,
+    BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters, CommitGraphIndex,
     CommitGraphInspection, ContextSuggestion, ContextSuggestionTier, DiffKind, GitCheckpointRecord,
     GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD,
     HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD,

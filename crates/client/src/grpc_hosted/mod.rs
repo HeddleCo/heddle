@@ -340,4 +340,4 @@ impl HostedGrpcClient {
     }
 }
 
-pub use hydration::PullMaterialization;
+pub use hydration::{LazyHostedHydrator, PullMaterialization, register_hosted_factory};

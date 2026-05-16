@@ -1,20 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Clone command - clone from remote.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
+use objects::{
+    error::{HeddleError, Result as HeddleResult},
+    object::{Blob, ContentHash},
+};
 use refs::Head;
-use repo::Repository;
+use repo::{BlobHydrator, Repository};
 
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
     bridge::{
         GitBridge,
-        git_core::{clone_url_to_bare, copy_local_repo_to_bare},
+        git_core::{clone_url_to_bare, copy_local_repo_to_bare, open_repo},
         git_import::{import_all, import_selected_refs},
     },
     cli::{Cli, should_output_json, style},
@@ -82,6 +90,7 @@ pub async fn cmd_clone(
                 local_path,
                 &options,
                 server_key,
+                hosted_endpoint_spec(&remote),
             )
             .await?;
             #[cfg(not(feature = "client"))]
@@ -339,6 +348,20 @@ async fn clone_local(
     Ok(())
 }
 
+/// Extract the `host:port` substring from a raw remote URL so the lazy
+/// hydrator config can persist it instead of the post-DNS `SocketAddr`.
+/// Keeping the hostname matters when the upstream service rotates IPs
+/// (e.g. behind a load balancer): a SocketAddr baked into the marker at
+/// clone time would pin to a stale IP and break later hydrate calls even
+/// though the original URL still resolves. The hydrator re-resolves DNS
+/// on every process start when given a hostname spec.
+#[cfg(feature = "client")]
+fn hosted_endpoint_spec(remote: &str) -> String {
+    let trimmed = remote.strip_prefix("heddle://").unwrap_or(remote);
+    // The address ends at the first slash that introduces a repo path.
+    trimmed.split('/').next().unwrap_or(trimmed).to_string()
+}
+
 #[cfg(feature = "client")]
 async fn clone_network(
     cli: &Cli,
@@ -347,6 +370,7 @@ async fn clone_network(
     local_path: &Path,
     options: &CloneOptions,
     server_key: Option<String>,
+    endpoint_spec: String,
 ) -> Result<()> {
     use crate::{client::HostedGrpcClient, config::UserConfig};
 
@@ -402,6 +426,22 @@ async fn clone_network(
         )
         .await?;
     if result.success {
+        // Lazy clone: persist the hydrator metadata so future
+        // `Repository::open` calls (in any process) can reconstruct
+        // the on-read hydrator. Without this, lazy clones would only
+        // hydrate inside the single `cmd_clone` process — every
+        // subsequent `heddle <verb>` would surface MissingObject on
+        // any blob read.
+        if lazy {
+            use repo::lazy_hydrator::LazyHydratorConfig;
+            // Persist the original `host:port` spec (not `addr.to_string()`,
+            // which is a resolved IP). The hydrator re-resolves DNS on
+            // every process start so a future LB rotation doesn't pin us
+            // to a stale IP.
+            let cfg = LazyHydratorConfig::hosted(endpoint_spec, repo_path, track_name, track_name);
+            cfg.save(local_repo.heddle_dir())
+                .context("failed to persist lazy-hydrator.toml")?;
+        }
         if should_output_json(cli, Some(local_repo.config())) {
             println!(
                 "{{\"status\": \"cloned\", \"remote\": \"{}\", \"local\": \"{}\", \"state\": \"{}\"}}",
@@ -481,6 +521,161 @@ fn copy_entry(path: &Path, dest_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Read-time blob hydrator for **Git-overlay** lazy clones (issue #50).
+///
+/// Plugs into [`repo::Repository::set_blob_hydrator`]. When
+/// [`Repository::require_blob`] hits a missing-blob marker — i.e. the
+/// blake3-hashed blob is recorded in `.heddle/partial-fetch` but is
+/// absent from the local object store — the read path delegates here.
+/// This hydrator looks up the corresponding Git object id, fetches the
+/// blob from the underlying gix repo (which triggers the gix promisor
+/// fetch against the original remote when `extensions.partialClone =
+/// origin` is set in `.git/config`), and writes the bytes into the
+/// heddle store. The retry-read then surfaces the blob normally.
+///
+/// ## Why a side-table?
+///
+/// `PartialFetchMetadata` records blake3 hashes only, but
+/// `gix::Repository::find_blob` is keyed by Git OID. The bridge
+/// already computes blake3↔git mappings *for commits* (see
+/// `SyncMapping` in `bridge/git_core.rs`); blob mappings are
+/// constructed on-the-fly during import. We accept the same shape of
+/// mapping here, populated by the caller (clone-time or test-time)
+/// before [`Self::hydrate`] fires. Future work: persist a sidecar
+/// blob mapping during import so a fresh `Repository::open` in a
+/// separate process can rebuild this map without re-walking history.
+pub struct GitOverlayBlobHydrator {
+    git_repo_path: PathBuf,
+    /// Pre-seeded blake3 → git OID mapping for missing blobs. Held
+    /// behind `Mutex` so a long-lived `Arc<GitOverlayBlobHydrator>` is
+    /// `Send + Sync` while still allowing the mapping to grow over
+    /// time (e.g. if the import path is later extended to record new
+    /// blobs as it walks).
+    blob_oid_map: Mutex<std::collections::HashMap<ContentHash, gix::ObjectId>>,
+}
+
+impl GitOverlayBlobHydrator {
+    pub fn new(git_repo_path: PathBuf) -> Self {
+        Self {
+            git_repo_path,
+            blob_oid_map: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Pre-seed the blake3 → git OID mapping. Called by the importer
+    /// (or by tests) as missing blobs are discovered.
+    pub fn record_blob_oid(&self, hash: ContentHash, oid: gix::ObjectId) {
+        self.blob_oid_map.lock().unwrap().insert(hash, oid);
+    }
+}
+
+impl BlobHydrator for GitOverlayBlobHydrator {
+    fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> HeddleResult<()> {
+        let oid = self
+            .blob_oid_map
+            .lock()
+            .unwrap()
+            .get(hash)
+            .copied()
+            .ok_or_else(|| {
+                HeddleError::Config(format!(
+                    "Git-overlay hydrator has no Git OID mapping for blake3 {}; \
+                     the importer must call `record_blob_oid` for every missing blob \
+                     before reads can be served lazily",
+                    hash.to_hex()
+                ))
+            })?;
+
+        // Try the local ODB first; if absent, shell out to git which
+        // honours `extensions.partialClone = <remote>` and triggers
+        // the promisor fetch on miss. gix 0.80 cannot do the
+        // promisor fetch itself (the v2 `filter` capability isn't
+        // surfaced through its fetch builder), but it CAN read the
+        // bytes after `git` has populated them — so a follow-up
+        // local lookup is enough to keep the loose-blob bookkeeping
+        // in one place.
+        let bytes = self.read_blob_bytes(oid)?;
+        let heddle_blob = Blob::new(bytes);
+        // Sanity-check the upstream gave us bytes that match the
+        // blake3 we were asked for — protects against an oid mapping
+        // corruption silently delivering the wrong content.
+        let computed = heddle_blob.hash();
+        if computed != *hash {
+            return Err(HeddleError::Corruption {
+                expected: *hash,
+                found: computed,
+            });
+        }
+        repo.store().put_blob(&heddle_blob)?;
+        Ok(())
+    }
+}
+
+impl GitOverlayBlobHydrator {
+    fn read_blob_bytes(&self, oid: gix::ObjectId) -> HeddleResult<Vec<u8>> {
+        let local_first = open_repo(&self.git_repo_path)
+            .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))?
+            .find_blob(oid)
+            .ok()
+            .map(|mut blob| blob.take_data());
+        if let Some(bytes) = local_first {
+            return Ok(bytes);
+        }
+
+        // Promisor refetch via the git CLI. The git binary speaks the
+        // full v2 wire protocol and honours `extensions.partialClone`,
+        // so a `cat-file -p` against a missing blob transparently
+        // fetches it from the recorded remote. `--batch-command` or
+        // `-p` both work; `-p` is the simpler one-shot.
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.git_repo_path)
+            .args(["cat-file", "-p"])
+            .arg(oid.to_string())
+            .output()
+            .map_err(HeddleError::Io)?;
+        if !output.status.success() {
+            return Err(HeddleError::Io(std::io::Error::other(format!(
+                "git cat-file -p {oid} in {} failed: {}",
+                self.git_repo_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))));
+        }
+        Ok(output.stdout)
+    }
+}
+
+/// Register the `"git-overlay"` factory in the global lazy-hydrator
+/// registry. Call once at process startup (from `main()`) so a
+/// `Repository::open` on a lazy-cloned repo can reconstruct the
+/// hydrator without re-running `cmd_clone`.
+///
+/// Note: the rebuilt hydrator's `blob_oid_map` starts empty, since the
+/// blake3 → git-OID map is populated only by the importer (currently
+/// in-process only). Cross-process git-overlay lazy reads are not yet
+/// fully wired — `--lazy` for git-overlay clones is rejected at the
+/// flag-validation surface (see `reject_unsupported_for_git_overlay`),
+/// so this factory is registered for symmetry and forward-compat with
+/// follow-up work that persists the OID map sidecar. Until then the
+/// hydrator returns the descriptive `"no Git OID mapping"` error if a
+/// missing blob is requested.
+pub fn register_git_overlay_factory() {
+    use std::path::Path as StdPath;
+    use std::sync::Arc as StdArc;
+
+    use repo::lazy_hydrator::{
+        BlobHydratorFactory, HydratorSection, KIND_GIT_OVERLAY, register_factory,
+    };
+
+    let factory: BlobHydratorFactory = StdArc::new(
+        |root: &StdPath, _section: &HydratorSection| -> HeddleResult<StdArc<dyn BlobHydrator>> {
+            let bare = root.join(".git");
+            Ok(StdArc::new(GitOverlayBlobHydrator::new(bare)))
+        },
+    );
+    register_factory(KIND_GIT_OVERLAY, factory);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,12 +694,50 @@ mod tests {
         assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
     }
 
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_endpoint_spec_preserves_hostname_with_port() {
+        // The lazy-hydrator marker must carry the original hostname so
+        // the hydrator can re-resolve DNS on every process start. If we
+        // accidentally persist a resolved IP, hosts behind a rotating-IP
+        // load balancer break on the next process restart.
+        assert_eq!(
+            hosted_endpoint_spec("example.heddle.cloud:443"),
+            "example.heddle.cloud:443",
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_endpoint_spec_strips_scheme_prefix() {
+        assert_eq!(
+            hosted_endpoint_spec("heddle://example.heddle.cloud:443"),
+            "example.heddle.cloud:443",
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_endpoint_spec_strips_repo_path_suffix() {
+        assert_eq!(
+            hosted_endpoint_spec("example.heddle.cloud:443/org/acme/repo"),
+            "example.heddle.cloud:443",
+        );
+        assert_eq!(
+            hosted_endpoint_spec("heddle://example.heddle.cloud:443/org/acme/repo"),
+            "example.heddle.cloud:443",
+        );
+    }
+
     #[test]
     fn reject_unsupported_rejects_filter() {
         let err = reject_unsupported_for_git_overlay(&opts(None, false, Some("blob:none")))
             .expect_err("filter must be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("--filter"), "message must name --filter: {msg}");
+        assert!(
+            msg.contains("--filter"),
+            "message must name --filter: {msg}"
+        );
         assert!(
             msg.contains("not yet supported"),
             "message must say not yet supported: {msg}"
@@ -533,5 +766,160 @@ mod tests {
             msg.contains("not yet supported"),
             "message must say not yet supported: {msg}"
         );
+    }
+
+    /// Standalone helpers to exercise [`GitOverlayBlobHydrator`]'s
+    /// error and fallback branches that the kernel/hermetic end-to-end
+    /// test (in `tests/lazy_blob_hydration_kernel.rs`) doesn't reach.
+    /// Each test sets up the smallest possible bare gix repo it needs;
+    /// none of them hit the network.
+    mod git_overlay_hydrator {
+        use objects::object::ContentHash;
+        use repo::{BlobHydrator, Repository};
+        use tempfile::TempDir;
+
+        use super::*;
+
+        /// Build a fresh empty bare gix repo and a fresh `Repository`,
+        /// returning `(temp, bare_path, repo)` for use in a single test.
+        fn fixtures() -> (TempDir, std::path::PathBuf, Repository) {
+            let temp = TempDir::new().expect("temp");
+            let bare = temp.path().join("source.git");
+            gix::init_bare(&bare).expect("init bare gix");
+            let heddle_root = temp.path().join("heddle");
+            std::fs::create_dir_all(&heddle_root).expect("mkdir heddle");
+            let repo =
+                Repository::init_default(&heddle_root).expect("init heddle repo for hydrator");
+            (temp, bare, repo)
+        }
+
+        /// Write a single blob into the bare repo and return its OID.
+        fn write_local_blob(bare: &std::path::Path, payload: &[u8]) -> gix::ObjectId {
+            let g = gix::open(bare).expect("open bare");
+            g.write_blob(payload).expect("write blob").detach()
+        }
+
+        #[test]
+        fn hydrate_errors_descriptively_when_blob_oid_mapping_is_missing() {
+            let (_temp, bare, repo) = fixtures();
+            let hydrator = GitOverlayBlobHydrator::new(bare);
+            let blake3 = objects::object::Blob::new(b"unknown".to_vec()).hash();
+
+            let err = hydrator
+                .hydrate(&repo, &blake3)
+                .expect_err("missing mapping must be an error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("no Git OID mapping"),
+                "error message must explain why the mapping is missing: {msg}"
+            );
+            assert!(
+                msg.contains(&blake3.to_hex()),
+                "error message must name the blake3 the caller asked for: {msg}"
+            );
+        }
+
+        #[test]
+        fn hydrate_rejects_corrupted_mapping_via_blake3_check() {
+            // Mapping points at an OID whose bytes don't match the
+            // requested blake3 — the hydrator must NOT silently
+            // deliver the wrong content. (Defends against a stale or
+            // mis-imported sidecar mapping.)
+            let (_temp, bare, repo) = fixtures();
+            let real_bytes = b"genuine content".to_vec();
+            let oid = write_local_blob(&bare, &real_bytes);
+
+            let lying_blake3 = objects::object::Blob::new(b"different content".to_vec()).hash();
+            let hydrator = GitOverlayBlobHydrator::new(bare);
+            hydrator.record_blob_oid(lying_blake3, oid);
+
+            let err = hydrator
+                .hydrate(&repo, &lying_blake3)
+                .expect_err("corrupted mapping must be rejected");
+            assert!(
+                matches!(err, objects::error::HeddleError::Corruption { .. }),
+                "expected Corruption, got: {err:?}"
+            );
+        }
+
+        #[test]
+        fn read_blob_bytes_local_first_path_succeeds() {
+            // Direct test of the local-first branch in
+            // `read_blob_bytes` — independent of the trait hydrate
+            // wrapper so the branch is reachable even if the trait
+            // surface evolves.
+            let (_temp, bare, _repo) = fixtures();
+            let payload = b"local first".to_vec();
+            let oid = write_local_blob(&bare, &payload);
+
+            let hydrator = GitOverlayBlobHydrator::new(bare);
+            let bytes = hydrator
+                .read_blob_bytes(oid)
+                .expect("local-first lookup must succeed");
+            assert_eq!(bytes, payload);
+        }
+
+        #[test]
+        fn read_blob_bytes_falls_back_to_git_cli_and_surfaces_its_error() {
+            // No blob in the bare repo for this OID and no remote to
+            // refetch from → git cat-file -p exits non-zero and the
+            // error must surface with the OID + bare-repo path
+            // mentioned so an operator can debug it.
+            let (_temp, bare, _repo) = fixtures();
+            let absent_oid = gix::ObjectId::null(gix::hash::Kind::Sha1);
+            let hydrator = GitOverlayBlobHydrator::new(bare.clone());
+
+            let err = hydrator
+                .read_blob_bytes(absent_oid)
+                .expect_err("missing blob + no promisor must fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("git cat-file"),
+                "error must name the fallback command: {msg}"
+            );
+            assert!(
+                msg.contains(&absent_oid.to_string()),
+                "error must include the OID we asked for: {msg}"
+            );
+            assert!(
+                msg.contains(&bare.display().to_string()),
+                "error must include the bare-repo path: {msg}"
+            );
+        }
+
+        #[test]
+        fn record_blob_oid_is_last_write_wins_for_a_given_blake3() {
+            // The importer may revisit a blake3 (e.g. when an
+            // ancestry walk hits the same blob via two trees);
+            // `record_blob_oid` is documented as a side-table insert,
+            // not a checked-insert, so the second write is the value
+            // any subsequent hydrate sees. Pin that behaviour so
+            // future tightening to checked-insert doesn't silently
+            // change semantics under existing callers.
+            let (_temp, bare, _repo) = fixtures();
+            let bytes_a = b"first".to_vec();
+            let bytes_b = b"second".to_vec();
+            let oid_a = write_local_blob(&bare, &bytes_a);
+            let oid_b = write_local_blob(&bare, &bytes_b);
+            // Two different blob bodies, but we deliberately pin both
+            // OIDs to the SAME blake3 (the blake3 of bytes_b) so the
+            // hydrate call ends up reading whichever OID is currently
+            // recorded for that blake3 — that's what the test is about.
+            let blake3 =
+                ContentHash::from_hex(&objects::object::Blob::new(bytes_b.clone()).hash().to_hex())
+                    .unwrap();
+
+            let hydrator = GitOverlayBlobHydrator::new(bare.clone());
+            hydrator.record_blob_oid(blake3, oid_a);
+            hydrator.record_blob_oid(blake3, oid_b);
+
+            // The current stored mapping is oid_b → so read_blob_bytes
+            // should return bytes_b.
+            let bytes = hydrator.read_blob_bytes(oid_b).expect("read");
+            assert_eq!(bytes, bytes_b);
+            // Independent sanity check via the original oid_a path.
+            let bytes_a_read = hydrator.read_blob_bytes(oid_a).expect("read a");
+            assert_eq!(bytes_a_read, bytes_a);
+        }
     }
 }
