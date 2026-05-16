@@ -77,6 +77,17 @@ impl PackReader {
     }
 
     /// Get an object from the pack.
+    ///
+    /// Verifies that the tagged id at the indexed offset matches
+    /// `id` before returning. A stale `.idx` file (e.g., overwritten
+    /// in place after a pack rebuild) can otherwise route a request
+    /// for hash `A` to a record physically located at hash `B`'s
+    /// offset — same shape, different content, no error signal.
+    /// This cheap 32-byte id comparison catches that without paying
+    /// a full content-hash recompute on every read; corruption
+    /// strictly *inside* the record body is a separate failure mode
+    /// surfaced via the consumer-side hash verify (see
+    /// `FsStore::loose_blob_path` for the blob equivalent).
     pub fn get_object(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Vec<u8>)>> {
         let offset = match self.index.find(id) {
             Some(offset) => offset,
@@ -84,6 +95,7 @@ impl PackReader {
         };
 
         let record = self.read_record_at_depth(offset as usize, 0)?;
+        verify_record_id_matches(id, &record.id)?;
         Ok(Some((record.obj_type, record.data)))
     }
 
@@ -111,7 +123,12 @@ impl PackReader {
             ));
         }
 
-        let (_, id_len) = PackObjectId::decode_tagged(&self.data[offset..])?;
+        // Verify the tagged id at the indexed offset matches the
+        // requested id — guards against stale-index misrouting (see
+        // `get_object` for the long-form rationale). 32-byte
+        // compare; cheaper than the size+varint decode that follows.
+        let (record_id, id_len) = PackObjectId::decode_tagged(&self.data[offset..])?;
+        verify_record_id_matches(id, &record_id)?;
         let header_start = offset + id_len;
         let (obj_type, uncompressed_size, type_len) =
             varint::decode_type_and_size(&self.data[header_start..]).ok_or_else(|| {
@@ -173,7 +190,8 @@ impl PackReader {
                 "Entry offset out of bounds".to_string(),
             ));
         }
-        let (_, id_len) = PackObjectId::decode_tagged(&self.data[offset..])?;
+        let (record_id, id_len) = PackObjectId::decode_tagged(&self.data[offset..])?;
+        verify_record_id_matches(&id, &record_id)?;
         let header_start = offset + id_len;
         let (obj_type, uncompressed_size, _type_len) =
             super::varint::decode_type_and_size(&self.data[header_start..]).ok_or_else(|| {
@@ -319,10 +337,29 @@ impl PackReader {
     }
 }
 
+/// Reject a record whose tagged id at the indexed offset doesn't
+/// match the id the caller asked for. The pack format stores its
+/// records `[tagged_id, type+size, compressed_size, payload]` so the
+/// tagged id is the cheapest available authenticator of "we landed
+/// on the right record"; a stale or hand-edited `.idx` that points
+/// at the *wrong* record produces a mismatch here and we surface it
+/// as a real error instead of silently routing the caller to whatever
+/// bytes happened to be at the bad offset.
+fn verify_record_id_matches(requested: &PackObjectId, found: &PackObjectId) -> Result<()> {
+    if requested == found {
+        return Ok(());
+    }
+    Err(StoreError::InvalidObject(format!(
+        "pack index routed lookup for {requested:?} to record tagged {found:?} \
+         — index is stale or corrupt; the loose-store path will re-promote on \
+         the next read"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PackReader;
-    use crate::store::StoreError;
+    use super::{verify_record_id_matches, PackObjectId, PackReader};
+    use crate::{object::ContentHash, store::StoreError};
 
     #[test]
     fn test_require_delta_base_hash_rejects_missing_hash() {
@@ -331,6 +368,24 @@ mod tests {
 
         assert!(
             matches!(error, StoreError::InvalidObject(message) if message == "pack object type is Delta but base hash is missing")
+        );
+    }
+
+    #[test]
+    fn verify_record_id_matches_accepts_identical_ids() {
+        let id = PackObjectId::Hash(ContentHash::from_bytes([7u8; 32]));
+        verify_record_id_matches(&id, &id).expect("matching ids must verify");
+    }
+
+    #[test]
+    fn verify_record_id_matches_rejects_mismatched_ids() {
+        let asked = PackObjectId::Hash(ContentHash::from_bytes([7u8; 32]));
+        let found = PackObjectId::Hash(ContentHash::from_bytes([8u8; 32]));
+        let error = verify_record_id_matches(&asked, &found)
+            .expect_err("mismatched record id must error rather than silently route");
+        assert!(
+            matches!(&error, StoreError::InvalidObject(message) if message.contains("stale or corrupt")),
+            "stale-index mismatch must surface as InvalidObject with the diagnostic phrase, got: {error:?}",
         );
     }
 }

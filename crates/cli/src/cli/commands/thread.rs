@@ -1708,16 +1708,36 @@ pub(crate) fn cmd_thread_switch(
     name: String,
     print_cd_path: bool,
 ) -> Result<()> {
+    // Resolve the *target* before touching the source. A typo'd
+    // thread name otherwise produces (1) a new state on the source
+    // thread, (2) the source's head advancing, then (3) a
+    // `Thread not found` error — the bad side-effects already
+    // landed by the time the user sees the failure. Resolve first;
+    // bail before mutating anything if the target doesn't exist.
+    let state = repo
+        .refs()
+        .get_thread(&name)?
+        .ok_or_else(|| anyhow!("Thread not found: {}", name))?;
+
     // Auto-capture-on-switch (jj-style): before flipping HEAD,
     // capture any uncommitted edits in the *source* thread so the
     // user never has the "you have uncommitted changes" experience
     // git inflicts. Errors here surface loudly — silently losing
     // the agent's work is the failure mode we are most allergic to.
     //
-    // Fires when:
+    // Fires when ALL of the following hold:
     //   * HEAD is currently attached to a thread (so there's a
     //     source thread to capture).
     //   * Target differs from source (no-op self-switch).
+    //   * The source thread is `Materialized` or `Solid`. We
+    //     deliberately skip `Virtualized`: a dead FUSE/FSKit/ProjFS
+    //     mount leaves an empty real directory at the mount point,
+    //     `path.exists()` is true, `capture_thread_from_disk` walks
+    //     the empty dir, and the slow-path captures an *empty tree*
+    //     as the thread's new state — silent destruction of the
+    //     work the agent did inside the mount. Virtualised threads
+    //     are kept in sync by the daemon's write notifications; the
+    //     CLI doesn't second-guess that on switch.
     //   * The source thread has a non-empty recorded execution
     //     path that exists on disk. We capture there regardless of
     //     whether it equals `repo.root()` — when the user runs
@@ -1730,12 +1750,17 @@ pub(crate) fn cmd_thread_switch(
             thread: source_thread,
         } if source_thread != name => {
             let manager = ThreadManager::new(repo.heddle_dir());
-            let source_path = manager
-                .find_by_thread(&source_thread)?
+            let source_record = manager.find_by_thread(&source_thread)?;
+            let source_mode = source_record.as_ref().map(|t| t.mode.clone());
+            let source_path = source_record
                 .map(|t| t.execution_path)
                 .filter(|p| !p.as_os_str().is_empty());
-            match source_path {
-                Some(path) if path.exists() => {
+            let mode_safe_to_capture = matches!(
+                source_mode,
+                Some(ThreadMode::Materialized) | Some(ThreadMode::Solid)
+            );
+            match (mode_safe_to_capture, source_path) {
+                (true, Some(path)) if path.exists() => {
                     let outcome = repo
                         .capture_thread_from_disk(&source_thread, &path)
                         .with_context(|| {
@@ -1750,11 +1775,6 @@ pub(crate) fn cmd_thread_switch(
         }
         _ => None,
     };
-
-    let state = repo
-        .refs()
-        .get_thread(&name)?
-        .ok_or_else(|| anyhow!("Thread not found: {}", name))?;
 
     // "Invisible thread directories" rule: switching to a thread that has
     // its *own* dedicated worktree (the one `heddle start --workspace

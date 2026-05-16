@@ -152,10 +152,27 @@ impl ProjFsShell {
             .map_err(|e| hresult_to_mount_error(e.code()))?;
         }
 
-        // Box the shell once and leak the pointer into the ProjFS
-        // InstanceContext. The session's Drop reclaims it.
-        let boxed: Box<Arc<dyn PlatformShell + Send + Sync>> = Box::new(self.inner);
-        let instance_context = Box::into_raw(boxed) as *const std::ffi::c_void;
+        // Box the shell *and* the virtualization root together and
+        // leak the pointer into the ProjFS InstanceContext. The
+        // session's Drop reclaims it.
+        //
+        // Bundling the root in is what makes the close-modified
+        // notification trampoline correct: ProjFS hands us a path
+        // relative to the virtualization root but does not give us
+        // the root itself on every API version, so the trampoline
+        // needs a stable source for "where on NTFS is this file
+        // actually living?". Pre-fix the trampoline reached for
+        // `std::env::current_dir()` — wrong as soon as the host
+        // process chdir'd elsewhere; the kernel still delivered the
+        // notification (because it's the *file* that closed, not the
+        // process) but the read-back-from-NTFS step landed at a
+        // bogus path and the edit silently never made it back into
+        // the CAS.
+        let context = Box::new(InstanceContext {
+            shell: self.inner,
+            virtualization_root: root.clone(),
+        });
+        let instance_context = Box::into_raw(context) as *const std::ffi::c_void;
 
         let callbacks = PRJ_CALLBACKS {
             StartDirectoryEnumerationCallback: Some(start_dir_enum_trampoline),
@@ -207,9 +224,7 @@ impl ProjFsShell {
             // SAFETY: `instance_context` was produced by Box::into_raw
             // above and the kernel never took ownership.
             unsafe {
-                drop(Box::from_raw(
-                    instance_context as *mut Arc<dyn PlatformShell + Send + Sync>,
-                ));
+                drop(Box::from_raw(instance_context as *mut InstanceContext));
             }
             return Err(hresult_to_mount_error(e.code()));
         }
@@ -271,12 +286,22 @@ impl ProjFsSession {
         // `PrjStopVirtualizing` has returned by this point, so no
         // callback is in flight.
         unsafe {
-            drop(Box::from_raw(
-                self.instance_context as *mut Arc<dyn PlatformShell + Send + Sync>,
-            ));
+            drop(Box::from_raw(self.instance_context as *mut InstanceContext));
         }
         self.instance_context = std::ptr::null();
     }
+}
+
+/// Per-mount state the ProjFS trampolines need access to. Boxed and
+/// handed to the kernel as the `InstanceContext` pointer; pulled back
+/// out on each callback. Holds the shell pointer (the same `Arc` we
+/// would have boxed naked before) plus the virtualization root path
+/// so the close-modified bridge can read the hydrated NTFS file at
+/// `virtualization_root.join(rel_path)` regardless of the host
+/// process's current working directory.
+struct InstanceContext {
+    shell: Arc<dyn PlatformShell + Send + Sync>,
+    virtualization_root: PathBuf,
 }
 
 impl Drop for ProjFsSession {
@@ -396,17 +421,62 @@ fn errno_to_win32(errno: i32) -> u32 {
     }
 }
 
-unsafe fn shell_from_context<'a>(
+unsafe fn instance_from_context<'a>(
     context: *const std::ffi::c_void,
-) -> Option<&'a Arc<dyn PlatformShell + Send + Sync>> {
+) -> Option<&'a InstanceContext> {
     if context.is_null() {
         return None;
     }
     // SAFETY: per `PrjStartVirtualizing`'s contract, ProjFS hands us
     // back the same `instance_context` pointer we registered. The
-    // boxed `Arc<dyn PlatformShell>` lives until the matching
+    // boxed `InstanceContext` lives until the matching
     // `PrjStopVirtualizing` returns.
-    Some(unsafe { &*(context as *const Arc<dyn PlatformShell + Send + Sync>) })
+    Some(unsafe { &*(context as *const InstanceContext) })
+}
+
+unsafe fn shell_from_context<'a>(
+    context: *const std::ffi::c_void,
+) -> Option<&'a Arc<dyn PlatformShell + Send + Sync>> {
+    unsafe { instance_from_context(context) }.map(|ctx| &ctx.shell)
+}
+
+/// Catch any panic inside a ProjFS trampoline and convert it to an
+/// HRESULT instead of letting the unwind cross the C ABI boundary.
+/// Same rationale as `fskit::guarded_c_int`: Rust ≥1.81 converts
+/// unwind-across-`extern "system"` to abort, so a panic in a
+/// trampoline body would otherwise crash the whole host process and
+/// take every projected mount with it. Each trampoline now logs the
+/// panic and returns an EIO-class HRESULT for the one callback that
+/// hit the bad path; the kernel surfaces it to the userland reader
+/// as a normal I/O failure and the rest of the virtualization keeps
+/// serving.
+#[inline]
+fn guarded_hresult<F: FnOnce() -> HRESULT>(label: &'static str, f: F) -> HRESULT {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(rc) => rc,
+        Err(payload) => {
+            let msg = panic_payload_str(&payload);
+            tracing::error!(
+                trampoline = label,
+                %msg,
+                "ProjFS trampoline panicked; returning HRESULT_FROM_WIN32(ERROR_IO_DEVICE)",
+            );
+            // ERROR_IO_DEVICE = 1117, the closest Win32 equivalent of EIO.
+            mount_error_to_hresult(MountError::Store(objects::error::HeddleError::Io(
+                std::io::Error::from_raw_os_error(1117),
+            )))
+        }
+    }
+}
+
+fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
 }
 
 /// Read `data` field from a `PRJ_CALLBACK_DATA`, defensively.
@@ -427,6 +497,12 @@ unsafe fn callback_data<'a>(data: *const PRJ_CALLBACK_DATA) -> Option<&'a PRJ_CA
 unsafe extern "system" fn get_placeholder_info_trampoline(
     callback_data: *const PRJ_CALLBACK_DATA,
 ) -> HRESULT {
+    guarded_hresult("get_placeholder_info", || unsafe {
+        get_placeholder_info_impl(callback_data)
+    })
+}
+
+unsafe fn get_placeholder_info_impl(callback_data: *const PRJ_CALLBACK_DATA) -> HRESULT {
     let Some(data) = (unsafe { callback_data_or_log("get_placeholder_info", callback_data) })
     else {
         return mount_error_to_hresult(MountError::Stale("null callback_data".into()));
@@ -478,6 +554,16 @@ unsafe extern "system" fn get_placeholder_info_trampoline(
 }
 
 unsafe extern "system" fn get_file_data_trampoline(
+    callback_data: *const PRJ_CALLBACK_DATA,
+    byte_offset: u64,
+    length: u32,
+) -> HRESULT {
+    guarded_hresult("get_file_data", || unsafe {
+        get_file_data_impl(callback_data, byte_offset, length)
+    })
+}
+
+unsafe fn get_file_data_impl(
     callback_data: *const PRJ_CALLBACK_DATA,
     byte_offset: u64,
     length: u32,
@@ -546,6 +632,8 @@ unsafe extern "system" fn start_dir_enum_trampoline(
     // We compute the directory listing lazily on each `get_dir_enum`
     // call rather than caching it across the start/get/end trio.
     // ProjFS will recall `get` until we set `EntriesAvailable=false`.
+    // No panic guard: this body is unconditionally `S_OK` and can't
+    // unwind. Adding one would only obscure the contract.
     S_OK
 }
 
@@ -560,6 +648,15 @@ unsafe extern "system" fn get_dir_enum_trampoline(
     callback_data: *const PRJ_CALLBACK_DATA,
     _enumeration_id: *const GUID,
     _search_expression: PCWSTR,
+    dir_entry_buffer_handle: PRJ_DIR_ENTRY_BUFFER_HANDLE,
+) -> HRESULT {
+    guarded_hresult("get_dir_enum", || unsafe {
+        get_dir_enum_impl(callback_data, dir_entry_buffer_handle)
+    })
+}
+
+unsafe fn get_dir_enum_impl(
+    callback_data: *const PRJ_CALLBACK_DATA,
     dir_entry_buffer_handle: PRJ_DIR_ENTRY_BUFFER_HANDLE,
 ) -> HRESULT {
     let Some(data) = (unsafe { callback_data_or_log("get_dir_enum", callback_data) }) else {
@@ -622,12 +719,24 @@ unsafe extern "system" fn notification_trampoline(
     destination_file_name: PCWSTR,
     _operation_parameters: *mut windows::Win32::Storage::ProjectedFileSystem::PRJ_NOTIFICATION_PARAMETERS,
 ) -> HRESULT {
+    guarded_hresult("notification", || unsafe {
+        notification_impl(callback_data, notification, destination_file_name)
+    })
+}
+
+unsafe fn notification_impl(
+    callback_data: *const PRJ_CALLBACK_DATA,
+    notification: PRJ_NOTIFICATION,
+    destination_file_name: PCWSTR,
+) -> HRESULT {
     let Some(data) = (unsafe { callback_data_or_log("notification", callback_data) }) else {
         return S_OK;
     };
-    let Some(shell) = (unsafe { shell_from_context(data.InstanceContext) }) else {
+    let Some(instance) = (unsafe { instance_from_context(data.InstanceContext) }) else {
         return S_OK;
     };
+    let shell = &instance.shell;
+    let virt_root = instance.virtualization_root.as_path();
 
     let rel_path = unsafe { decode_wide(data.FilePathName) };
     let rel = Path::new(&rel_path);
@@ -643,9 +752,12 @@ unsafe extern "system" fn notification_trampoline(
     match notification {
         n if n == PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED => {
             // ProjFS does not deliver per-write callbacks. Read the
-            // hydrated file back from NTFS and synthesize a single
-            // write+flush so the existing CAS promotion path runs.
-            let full_path = data_root(data).join(rel);
+            // hydrated file back from NTFS — at the path we registered
+            // in `PrjStartVirtualizing`, not at `std::env::current_dir`
+            // which silently drops the write if the host process
+            // chdir'd elsewhere — and synthesize a single write+flush
+            // so the existing CAS promotion path runs.
+            let full_path = virt_root.join(rel);
             match std::fs::read(&full_path) {
                 Ok(contents) => {
                     if let Err(e) = shell.write(node, 0, &contents) {
@@ -690,18 +802,62 @@ unsafe extern "system" fn notification_trampoline(
             }
         }
         n if n == PRJ_NOTIFICATION_FILE_RENAMED => {
-            // Rename = delete-old + write-new. We surface both legs.
+            // Rename = delete-old + write-new. We surface both legs
+            // and propagate errors via HRESULT — previously the
+            // `let _ = shell.write/flush(...)` swallow lost writes
+            // silently the same way the data_root bug did.
             if let Err(e) = shell.release(node) {
-                warn!(error = ?e, "projfs: rename old-path release failed");
+                warn!(
+                    path = %rel.display(),
+                    error = ?e,
+                    "projfs: rename old-path release failed",
+                );
+                return mount_error_to_hresult(e);
             }
             let dest = unsafe { decode_wide(destination_file_name) };
             if !dest.is_empty() {
                 let dest_path = Path::new(&dest);
-                if let Ok(new_node) = resolve_path(shell, dest_path) {
-                    let full_path = data_root(data).join(dest_path);
-                    if let Ok(contents) = std::fs::read(&full_path) {
-                        let _ = shell.write(new_node, 0, &contents);
-                        let _ = shell.flush(new_node);
+                match resolve_path(shell, dest_path) {
+                    Ok(new_node) => {
+                        let full_path = virt_root.join(dest_path);
+                        match std::fs::read(&full_path) {
+                            Ok(contents) => {
+                                if let Err(e) = shell.write(new_node, 0, &contents) {
+                                    warn!(
+                                        path = %full_path.display(),
+                                        error = ?e,
+                                        "projfs: rename new-path write failed",
+                                    );
+                                    return mount_error_to_hresult(e);
+                                }
+                                if let Err(e) = shell.flush(new_node) {
+                                    warn!(
+                                        path = %full_path.display(),
+                                        error = ?e,
+                                        "projfs: rename new-path flush failed",
+                                    );
+                                    return mount_error_to_hresult(e);
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    path = %full_path.display(),
+                                    error = ?e,
+                                    "projfs: could not re-read hydrated file on rename",
+                                );
+                                return mount_error_to_hresult(MountError::Store(
+                                    objects::error::HeddleError::Io(e),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            dest = %dest_path.display(),
+                            error = ?e,
+                            "projfs: rename new-path resolve failed",
+                        );
+                        return mount_error_to_hresult(e);
                     }
                 }
             }
@@ -709,31 +865,6 @@ unsafe extern "system" fn notification_trampoline(
         _ => {}
     }
     S_OK
-}
-
-fn data_root(data: &PRJ_CALLBACK_DATA) -> PathBuf {
-    // SAFETY: `VersionInfo` is not what we want — the root path is
-    // not directly in callback_data on every API version. Instead we
-    // reconstruct from a side channel: the path the caller registered
-    // in `PrjStartVirtualizing` is also accessible via the
-    // notification's parent directory. ProjFS does not expose the
-    // root on every version, so as a best-effort we walk up from the
-    // file path. The existing API contract guarantees `FilePathName`
-    // is relative to the virtualization root.
-    //
-    // For the close-modified bridge, we can rely on the working
-    // directory being the virtualization root for the FS handle that
-    // produced the notification. The caller's `data.FilePathName` is
-    // already relative; the join in the trampoline against the
-    // ProjFsSession's stored root via `data_root` here returns the
-    // current dir, which on a typical ProjFS path is the root. If the
-    // host moves to a chdir-changed process, the close-modified
-    // fallback will fail loudly and we'll log a warning.
-    //
-    // A cleaner solution is to thread the virt-root into
-    // instance_context alongside the shell; see issue #TBD.
-    let _ = data;
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 /// Wrap [`callback_data`] with a single log site so we don't sprinkle

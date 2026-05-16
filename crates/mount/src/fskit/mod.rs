@@ -347,6 +347,60 @@ fn errno_from(err: MountError) -> c_int {
     err.to_errno()
 }
 
+/// Catch any panic inside an FSKit trampoline and convert it to
+/// `EIO` instead of letting the unwind cross the C ABI boundary.
+///
+/// Rust ≥1.81 converts unwind-across-`extern "C"` to abort, so a
+/// panic in a trampoline body would otherwise crash the entire
+/// System Extension process — and with it every materialised
+/// FSKit volume hosted by `heddled`. A single poisoned mutex or
+/// unwrap-deep-in-a-shell-call now produces an `EIO` for the one
+/// operation that hit the bad path; the kernel surfaces it to the
+/// userland reader as a normal I/O failure and the rest of the
+/// volume keeps serving. The panic gets logged in `tracing` first
+/// so the operator can see what actually broke.
+///
+/// `AssertUnwindSafe` is correct here: the trampolines own no
+/// state across the catch boundary, and any references they hold
+/// (the shell `Arc`, the FFI outparams) are written through raw
+/// pointers — outparams won't be torn by a panicking writer
+/// because we don't write them on the error path.
+#[inline]
+fn guarded_c_int<F: FnOnce() -> c_int>(label: &'static str, f: F) -> c_int {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(rc) => rc,
+        Err(payload) => {
+            let msg = panic_payload_str(&payload);
+            tracing::error!(trampoline = label, %msg, "FSKit trampoline panicked; returning EIO");
+            libc::EIO
+        }
+    }
+}
+
+/// `void`-returning variant for `trampoline_drop`. Returning `()`
+/// is the same shape as a successful errno-0 trampoline so the
+/// helper boils down to "log and swallow". Dropping the boxed
+/// shell shouldn't panic in practice — `Arc` drop is straight-line
+/// — but we hold the line anyway: a panic during deinit would
+/// otherwise abort `heddled` itself.
+#[inline]
+fn guarded_drop<F: FnOnce()>(label: &'static str, f: F) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        let msg = panic_payload_str(&payload);
+        tracing::error!(trampoline = label, %msg, "FSKit trampoline panicked during drop");
+    }
+}
+
+fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
 unsafe extern "C" fn trampoline_lookup(
     user_data: *mut c_void,
     parent_inode: u64,
@@ -355,29 +409,31 @@ unsafe extern "C" fn trampoline_lookup(
     out_unix_mode: *mut u32,
     out_size: *mut u64,
 ) -> c_int {
-    // SAFETY: every dereference below is delegated to a function
-    // with a documented contract; the FSKit caller upholds those.
-    unsafe {
-        let Some(shell) = shell_ref(user_data) else {
-            return libc::EINVAL;
-        };
-        if name_utf8.is_null() {
-            return libc::EINVAL;
-        }
-        let cstr = CStr::from_ptr(name_utf8);
-        let name: &OsStr = OsStr::from_bytes(cstr.to_bytes());
-
-        match shell.lookup(NodeId(parent_inode), name) {
-            Ok(Some(entry)) => {
-                write_out(out_child_inode, entry.node.0);
-                write_out(out_unix_mode, entry.unix_mode);
-                write_out(out_size, entry.size);
-                0
+    guarded_c_int("lookup", || {
+        // SAFETY: every dereference below is delegated to a function
+        // with a documented contract; the FSKit caller upholds those.
+        unsafe {
+            let Some(shell) = shell_ref(user_data) else {
+                return libc::EINVAL;
+            };
+            if name_utf8.is_null() {
+                return libc::EINVAL;
             }
-            Ok(None) => libc::ENOENT,
-            Err(err) => errno_from(err),
+            let cstr = CStr::from_ptr(name_utf8);
+            let name: &OsStr = OsStr::from_bytes(cstr.to_bytes());
+
+            match shell.lookup(NodeId(parent_inode), name) {
+                Ok(Some(entry)) => {
+                    write_out(out_child_inode, entry.node.0);
+                    write_out(out_unix_mode, entry.unix_mode);
+                    write_out(out_size, entry.size);
+                    0
+                }
+                Ok(None) => libc::ENOENT,
+                Err(err) => errno_from(err),
+            }
         }
-    }
+    })
 }
 
 unsafe extern "C" fn trampoline_getattr(
@@ -388,22 +444,24 @@ unsafe extern "C" fn trampoline_getattr(
     out_nlink: *mut u32,
     out_mtime_sec: *mut i64,
 ) -> c_int {
-    // SAFETY: see `trampoline_lookup`.
-    unsafe {
-        let Some(shell) = shell_ref(user_data) else {
-            return libc::EINVAL;
-        };
-        match shell.attrs(NodeId(inode)) {
-            Ok(attrs) => {
-                write_out(out_unix_mode, attrs.unix_mode);
-                write_out(out_size, attrs.size);
-                write_out(out_nlink, attrs.nlink);
-                write_out(out_mtime_sec, mtime_to_secs(attrs.mtime));
-                0
+    guarded_c_int("getattr", || {
+        // SAFETY: see `trampoline_lookup`.
+        unsafe {
+            let Some(shell) = shell_ref(user_data) else {
+                return libc::EINVAL;
+            };
+            match shell.attrs(NodeId(inode)) {
+                Ok(attrs) => {
+                    write_out(out_unix_mode, attrs.unix_mode);
+                    write_out(out_size, attrs.size);
+                    write_out(out_nlink, attrs.nlink);
+                    write_out(out_mtime_sec, mtime_to_secs(attrs.mtime));
+                    0
+                }
+                Err(err) => errno_from(err),
             }
-            Err(err) => errno_from(err),
         }
-    }
+    })
 }
 
 /// Convert a `SystemTime` to seconds-since-UNIX-epoch. Pre-epoch
@@ -422,25 +480,27 @@ unsafe extern "C" fn trampoline_read(
     buffer_capacity: u64,
     out_bytes_read: *mut u64,
 ) -> c_int {
-    // SAFETY: caller (FSKit reply path) provides a buffer of
-    // `buffer_capacity` bytes that lives until this call returns.
-    unsafe {
-        let Some(shell) = shell_ref(user_data) else {
-            return libc::EINVAL;
-        };
-        if buffer.is_null() {
-            return libc::EINVAL;
-        }
-        let cap = buffer_capacity as usize;
-        let buf = std::slice::from_raw_parts_mut(buffer, cap);
-        match shell.read(NodeId(inode), offset, buf) {
-            Ok(n) => {
-                write_out(out_bytes_read, n as u64);
-                0
+    guarded_c_int("read", || {
+        // SAFETY: caller (FSKit reply path) provides a buffer of
+        // `buffer_capacity` bytes that lives until this call returns.
+        unsafe {
+            let Some(shell) = shell_ref(user_data) else {
+                return libc::EINVAL;
+            };
+            if buffer.is_null() {
+                return libc::EINVAL;
             }
-            Err(err) => errno_from(err),
+            let cap = buffer_capacity as usize;
+            let buf = std::slice::from_raw_parts_mut(buffer, cap);
+            match shell.read(NodeId(inode), offset, buf) {
+                Ok(n) => {
+                    write_out(out_bytes_read, n as u64);
+                    0
+                }
+                Err(err) => errno_from(err),
+            }
         }
-    }
+    })
 }
 
 unsafe extern "C" fn trampoline_write(
@@ -451,28 +511,30 @@ unsafe extern "C" fn trampoline_write(
     data_len: u64,
     out_bytes_written: *mut u64,
 ) -> c_int {
-    // SAFETY: caller (FSKit write path) provides a `data_len`-byte
-    // buffer that lives until this call returns.
-    unsafe {
-        let Some(shell) = shell_ref(user_data) else {
-            return libc::EINVAL;
-        };
-        if data.is_null() && data_len > 0 {
-            return libc::EINVAL;
-        }
-        let slice = if data_len == 0 {
-            &[][..]
-        } else {
-            std::slice::from_raw_parts(data, data_len as usize)
-        };
-        match shell.write(NodeId(inode), offset, slice) {
-            Ok(n) => {
-                write_out(out_bytes_written, n as u64);
-                0
+    guarded_c_int("write", || {
+        // SAFETY: caller (FSKit write path) provides a `data_len`-byte
+        // buffer that lives until this call returns.
+        unsafe {
+            let Some(shell) = shell_ref(user_data) else {
+                return libc::EINVAL;
+            };
+            if data.is_null() && data_len > 0 {
+                return libc::EINVAL;
             }
-            Err(err) => errno_from(err),
+            let slice = if data_len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(data, data_len as usize)
+            };
+            match shell.write(NodeId(inode), offset, slice) {
+                Ok(n) => {
+                    write_out(out_bytes_written, n as u64);
+                    0
+                }
+                Err(err) => errno_from(err),
+            }
         }
-    }
+    })
 }
 
 unsafe extern "C" fn trampoline_enumerate(
@@ -481,71 +543,75 @@ unsafe extern "C" fn trampoline_enumerate(
     emit_user_data: *mut c_void,
     emit: HeddleEnumerateEmit,
 ) -> c_int {
-    // SAFETY: `shell_ref` and `emit` invocations both rely on the
-    // FSKit-side ownership contract documented at the top of this
-    // module.
-    unsafe {
-        let Some(shell) = shell_ref(user_data) else {
-            return libc::EINVAL;
-        };
-        let Some(emit) = emit else {
-            return libc::EINVAL;
-        };
-        let entries: Vec<Entry> = match shell.enumerate(NodeId(dir_inode)) {
-            Ok(e) => e,
-            Err(err) => return errno_from(err),
-        };
-        // Resolve the mount's mtime once per directory listing
-        // rather than per entry. `ContentAddressedMount` returns
-        // `mounted_at` for every node, so a single `attrs` call on
-        // the parent directory is representative; if it fails we
-        // fall back to epoch (same as the prior placeholder).
-        let dir_mtime_sec = shell
-            .attrs(NodeId(dir_inode))
-            .ok()
-            .map(|a| mtime_to_secs(a.mtime))
-            .unwrap_or(0);
-        for entry in entries {
-            // Convert the OS string to a NUL-terminated C string.
-            // `OsString` may contain a NUL on bizarre filesystems,
-            // but any path Heddle can serve was constructed from
-            // valid UTF-8 tree entries — fail loudly if that ever
-            // changes.
-            let bytes = entry.name.as_os_str().as_bytes();
-            let Ok(c_name) = CString::new(bytes) else {
-                warn!(?entry.name, "fskit enumerate: skipping entry with embedded NUL");
-                continue;
+    guarded_c_int("enumerate", || {
+        // SAFETY: `shell_ref` and `emit` invocations both rely on the
+        // FSKit-side ownership contract documented at the top of this
+        // module.
+        unsafe {
+            let Some(shell) = shell_ref(user_data) else {
+                return libc::EINVAL;
             };
-            let rc = emit(
-                emit_user_data,
-                entry.node.0,
-                c_name.as_ptr(),
-                entry.unix_mode,
-                entry.size,
-                dir_mtime_sec,
-            );
-            if rc != 0 {
-                // Swift signalled "stop" (typically because its
-                // reply buffer is full). Not an error; the kernel
-                // will call back to resume.
-                break;
+            let Some(emit) = emit else {
+                return libc::EINVAL;
+            };
+            let entries: Vec<Entry> = match shell.enumerate(NodeId(dir_inode)) {
+                Ok(e) => e,
+                Err(err) => return errno_from(err),
+            };
+            // Resolve the mount's mtime once per directory listing
+            // rather than per entry. `ContentAddressedMount` returns
+            // `mounted_at` for every node, so a single `attrs` call on
+            // the parent directory is representative; if it fails we
+            // fall back to epoch (same as the prior placeholder).
+            let dir_mtime_sec = shell
+                .attrs(NodeId(dir_inode))
+                .ok()
+                .map(|a| mtime_to_secs(a.mtime))
+                .unwrap_or(0);
+            for entry in entries {
+                // Convert the OS string to a NUL-terminated C string.
+                // `OsString` may contain a NUL on bizarre filesystems,
+                // but any path Heddle can serve was constructed from
+                // valid UTF-8 tree entries — fail loudly if that ever
+                // changes.
+                let bytes = entry.name.as_os_str().as_bytes();
+                let Ok(c_name) = CString::new(bytes) else {
+                    warn!(?entry.name, "fskit enumerate: skipping entry with embedded NUL");
+                    continue;
+                };
+                let rc = emit(
+                    emit_user_data,
+                    entry.node.0,
+                    c_name.as_ptr(),
+                    entry.unix_mode,
+                    entry.size,
+                    dir_mtime_sec,
+                );
+                if rc != 0 {
+                    // Swift signalled "stop" (typically because its
+                    // reply buffer is full). Not an error; the kernel
+                    // will call back to resume.
+                    break;
+                }
             }
+            0
         }
-        0
-    }
+    })
 }
 
 unsafe extern "C" fn trampoline_flush(user_data: *mut c_void, inode: u64) -> c_int {
-    // SAFETY: see `trampoline_lookup`.
-    unsafe {
-        let Some(shell) = shell_ref(user_data) else {
-            return libc::EINVAL;
-        };
-        match shell.flush(NodeId(inode)) {
-            Ok(()) => 0,
-            Err(err) => errno_from(err),
+    guarded_c_int("flush", || {
+        // SAFETY: see `trampoline_lookup`.
+        unsafe {
+            let Some(shell) = shell_ref(user_data) else {
+                return libc::EINVAL;
+            };
+            match shell.flush(NodeId(inode)) {
+                Ok(()) => 0,
+                Err(err) => errno_from(err),
+            }
         }
-    }
+    })
 }
 
 /// Reclaim the boxed shell. Called by the Swift session's deinit.
@@ -553,13 +619,15 @@ unsafe extern "C" fn trampoline_drop(user_data: *mut c_void) {
     if user_data.is_null() {
         return;
     }
-    // SAFETY: `user_data` was produced by `Box::into_raw` in
-    // `FSKitShell::from_shell` and is dropped exactly once here.
-    unsafe {
-        drop(Box::from_raw(
-            user_data as *mut Arc<dyn PlatformShell + Send + Sync>,
-        ));
-    }
+    guarded_drop("drop", || {
+        // SAFETY: `user_data` was produced by `Box::into_raw` in
+        // `FSKitShell::from_shell` and is dropped exactly once here.
+        unsafe {
+            drop(Box::from_raw(
+                user_data as *mut Arc<dyn PlatformShell + Send + Sync>,
+            ));
+        }
+    });
 }
 
 #[inline]

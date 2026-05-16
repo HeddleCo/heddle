@@ -47,8 +47,17 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
     // full picture: virtualised mounts (daemon-resident) + materialised
     // threads (daemon-independent). Best-effort — a malformed
     // manifest directory shouldn't break the status output.
-    let materialized = repo::thread_manifest::list_thread_manifests(&repo_root.join(".heddle"))
-        .unwrap_or_default();
+    //
+    // Use `repo.heddle_dir()` rather than `repo_root.join(".heddle")`
+    // because in a worktree those aren't the same path: the
+    // worktree's `.heddle/objectstore` pointer forwards to the main
+    // repo's heddle dir (set up by `Repository::open` via
+    // `with_local_head`), and the manifests live in the *main*
+    // repo's `threads/`. Pre-fix this misread always returned an
+    // empty inventory inside a worktree.
+    let heddle_dir = resolve_heddle_dir(cli).unwrap_or_else(|_| repo_root.join(".heddle"));
+    let materialized =
+        repo::thread_manifest::list_thread_manifests(&heddle_dir).unwrap_or_default();
     match response {
         Some(MountDaemonResponse::Health {
             version,
@@ -170,4 +179,18 @@ fn resolve_repo_root(cli: &Cli) -> Result<std::path::PathBuf> {
     }
     let repo = repo::Repository::open(&std::env::current_dir()?)?;
     Ok(repo.root().to_path_buf())
+}
+
+/// Resolve the heddle dir for the currently-open repo. Differs from
+/// `<repo_root>/.heddle` for worktrees: those have a `.heddle/`
+/// pointer file forwarding to the main repo's heddle dir, and
+/// thread manifests live in the main repo's `threads/`. Always
+/// opens the repo to read the canonical heddle_dir from there.
+fn resolve_heddle_dir(cli: &Cli) -> Result<std::path::PathBuf> {
+    let start = cli
+        .repo
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let repo = repo::Repository::open(&start)?;
+    Ok(repo.heddle_dir().to_path_buf())
 }

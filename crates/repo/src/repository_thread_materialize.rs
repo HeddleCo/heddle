@@ -14,7 +14,10 @@
 
 use std::{collections::BTreeMap, fs, os::unix::fs::MetadataExt, path::Path};
 
-use objects::object::{ChangeId, State, Tree};
+use objects::{
+    lock::RepositoryLockExt,
+    object::{ChangeId, State, Tree},
+};
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
@@ -161,6 +164,24 @@ impl Repository {
         thread: &str,
         root: &Path,
     ) -> Result<ThreadCaptureOutcome> {
+        // Repository-wide write lock — same shape as
+        // `snapshot_with_attribution_profiled`. Without it, two
+        // concurrent `thread switch` invocations from sibling
+        // worktrees can race the same source thread: both read
+        // `get_thread(thread)` returning the same parent, both
+        // `put_state` with that parent, both `set_thread` —
+        // result is two leaf states with the same parent, one of
+        // which is orphaned because the ref ends up pointing at
+        // whichever `set_thread` won the race. The manifest write
+        // at step 4 has the same lost-update problem on a smaller
+        // scale. Holding the write lock across the whole
+        // read-modify-write sequence makes the capture atomic with
+        // respect to other state-changing operations.
+        let _lock = self
+            .locker()
+            .write()
+            .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+
         let existing_manifest = read_manifest(self.heddle_dir(), thread).map_err(HeddleError::Io)?;
 
         // 0. Fast no-op via the stat-cache. If every file in the
@@ -720,6 +741,111 @@ mod tests {
         assert!(
             !stat_cache_no_op(&repo, &manifest, &dest).unwrap(),
             "deleted file must invalidate the fast path"
+        );
+    }
+
+    /// Two `capture_thread_from_disk` calls on the same thread from
+    /// different threads must serialize through the repository write
+    /// lock: the thread head's parent chain must include both
+    /// captures (no lost update where one capture's parent is the
+    /// pre-race head instead of the other capture's state).
+    ///
+    /// Reproduces the race Codex P1 #2 named: pre-fix, two sibling
+    /// worktrees doing `heddle thread switch` against the same
+    /// source thread both read the same parent in
+    /// `refs().get_thread()`, both `put_state` with that parent,
+    /// both `set_thread` — whichever `set_thread` won last orphaned
+    /// the other state on disk. With the lock both captures land in
+    /// series and the final head's parent chain links back through
+    /// both new states.
+    #[test]
+    fn concurrent_captures_serialize_via_repository_lock() {
+        use std::sync::Arc;
+
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Arc::new(Repository::init_default(repo_dir.path()).unwrap());
+        fs::write(repo_dir.path().join("shared.txt"), b"seed\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+        let initial_head = repo.refs().get_thread("main").unwrap().expect("seeded");
+
+        // Two sibling materialized worktrees of the same thread.
+        let dest_a_holder = TempDir::new().unwrap();
+        let dest_a = dest_a_holder.path().join("a");
+        repo.materialize_thread("main", &dest_a).unwrap();
+        let dest_b_holder = TempDir::new().unwrap();
+        let dest_b = dest_b_holder.path().join("b");
+        repo.materialize_thread("main", &dest_b).unwrap();
+
+        // Disjoint edits so each capture has real work to do (no
+        // stat-cache no-op short-circuit).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(dest_a.join("shared.txt"), b"edited-by-a\n").unwrap();
+        fs::write(dest_b.join("shared.txt"), b"edited-by-b\n").unwrap();
+
+        // Race the two captures.
+        let repo_a = Arc::clone(&repo);
+        let repo_b = Arc::clone(&repo);
+        let h_a = std::thread::spawn(move || {
+            repo_a
+                .capture_thread_from_disk("main", &dest_a)
+                .expect("capture A")
+        });
+        let h_b = std::thread::spawn(move || {
+            repo_b
+                .capture_thread_from_disk("main", &dest_b)
+                .expect("capture B")
+        });
+        let outcome_a = h_a.join().expect("thread A");
+        let outcome_b = h_b.join().expect("thread B");
+
+        // Both captures landed (neither was a NoOp because both
+        // edited the same file with different bytes).
+        let id_a = match outcome_a {
+            ThreadCaptureOutcome::Captured { state_id } => state_id,
+            ThreadCaptureOutcome::NoOp => panic!("A expected Captured"),
+        };
+        let id_b = match outcome_b {
+            ThreadCaptureOutcome::Captured { state_id } => state_id,
+            ThreadCaptureOutcome::NoOp => panic!("B expected Captured"),
+        };
+        assert_ne!(id_a, id_b, "the two captures must produce distinct states");
+
+        // The thread head is one of the two captures. Lock-naked,
+        // the loser's parent would be `initial_head`. With the
+        // lock, the loser's parent is the winner's id and the
+        // winner's parent is `initial_head`.
+        let final_head = repo.refs().get_thread("main").unwrap().expect("head");
+        let winner_id = final_head;
+        let loser_id = if final_head == id_a { id_b } else { id_a };
+
+        let winner_state = repo
+            .store()
+            .get_state(&winner_id)
+            .unwrap()
+            .expect("winner state on disk");
+        let loser_state = repo
+            .store()
+            .get_state(&loser_id)
+            .unwrap()
+            .expect("loser state on disk");
+
+        // The two captures must have linked through the lock:
+        // exactly one of (winner.parents, loser.parents) names the
+        // other; the remaining parent is the seed head. Pre-fix
+        // both states named the seed head and the loser was
+        // orphaned — assert that this isn't the case.
+        let chained =
+            winner_state.parents.contains(&loser_id) || loser_state.parents.contains(&winner_id);
+        assert!(
+            chained,
+            "concurrent captures must chain through the lock; got\n  \
+             winner {winner_id} parents={:?}\n  loser  {loser_id} parents={:?}",
+            winner_state.parents, loser_state.parents
+        );
+        assert!(
+            winner_state.parents.contains(&initial_head)
+                || loser_state.parents.contains(&initial_head),
+            "the bottom of the chain must still reach the seed head"
         );
     }
 }
