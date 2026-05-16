@@ -377,14 +377,17 @@ impl Repository {
             builder = builder.force_path_style(true);
         }
 
-        // S3StoreBuilder::build is async; block on it.
-        let rt = tokio::runtime::Handle::try_current().or_else(|_| {
-            tokio::runtime::Runtime::new()
-                .map(|rt| rt.handle().clone())
-                .map_err(|e| HeddleError::Config(format!("failed to create tokio runtime: {e}")))
-        })?;
-        let store = rt
-            .block_on(builder.build())
+        // `S3StoreBuilder::build` is async. The previous design here was
+        // `Handle::try_current().or_else(Runtime::new()).block_on(builder.build())`
+        // — that nested `block_on` panicked with "Cannot start a runtime
+        // from within a runtime" whenever `Repository::open` was called
+        // from inside a Tokio runtime (`#[tokio::main]`, `#[tokio::test]`,
+        // a daemon worker). `build_blocking` routes the async `build()`
+        // through a short-lived worker-thread runtime, so the caller's
+        // runtime is never re-entered — mirrors the heddle#60 fix for the
+        // `ObjectStore` impl on `S3Store`.
+        let store = builder
+            .build_blocking()
             .map_err(|e| HeddleError::Config(format!("S3 store initialization failed: {e}")))?;
         Ok(Box::new(store))
     }
