@@ -10,8 +10,6 @@ use refs::Head;
 use repo::Repository;
 
 #[cfg(feature = "client")]
-use heddle_client::grpc_hosted::PullMaterialization;
-#[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
     bridge::{
@@ -23,6 +21,8 @@ use crate::{
     client::LocalSync,
     remote::RemoteTarget,
 };
+#[cfg(feature = "client")]
+use heddle_client::grpc_hosted::PullMaterialization;
 
 /// Pull/materialization options shared by local and network clone paths.
 struct CloneOptions {
@@ -104,7 +104,7 @@ fn clone_git_overlay_url(
 ) -> Result<()> {
     reject_unsupported_for_git_overlay(options)?;
     fs::create_dir_all(local_path)?;
-    clone_url_to_bare(url, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
+    clone_url_to_bare(url, &local_path.join(".git"), None, None).map_err(anyhow::Error::msg)?;
     finish_git_overlay_clone(cli, local_path, options, url.to_string())
 }
 
@@ -121,27 +121,35 @@ fn clone_git_overlay_path(
     finish_git_overlay_clone(cli, local_path, options, remote_path.display().to_string())
 }
 
-/// Reject options the Git-overlay path doesn't support yet, BEFORE any
-/// filesystem or network work runs. Without this, the user pays the
-/// full clone cost (potentially seconds-to-minutes) and is left with a
-/// partially-initialized destination directory before seeing the error.
-/// Tracked separately for `--filter`, `--lazy`, and `--depth` so each
-/// rejection message stays scannable.
+/// Reject `--depth` / `--lazy` / `--filter` for Git-overlay clones before
+/// any filesystem or network work runs. The wire-level plumbing in
+/// `clone_url_to_bare` can already negotiate shallow + partial-clone
+/// capabilities, but the import step (`import_all` →
+/// `GitTreeImporter::import_blob` + ancestry walk) requires every blob
+/// and parent commit to be present locally. Until the importer learns
+/// to tolerate missing objects, accepting these flags would just trade
+/// an upfront rejection for a half-built clone that fails partway
+/// through import. Each flag has its own message so the error stays
+/// scannable.
 fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
     if let Some(filter) = options.filter.as_deref() {
         return Err(anyhow!(
-            "--filter {} is not available for Git-overlay clones yet; run a full clone",
+            "--filter {} is not yet supported for Git-overlay clones; \
+             the import step requires all blobs locally. Run a full clone for now.",
             filter
         ));
     }
     if options.lazy {
         return Err(anyhow!(
-            "lazy clone is not available for Git-overlay clones yet; run a full clone"
+            "--lazy is not yet supported for Git-overlay clones; \
+             the import step requires all blobs locally. Run a full clone for now."
         ));
     }
     if options.depth.is_some() {
         return Err(anyhow!(
-            "shallow Git-overlay clone is not available yet; run a full clone"
+            "--depth is not yet supported for Git-overlay clones; \
+             the import step walks ancestry past the shallow boundary. \
+             Run a full clone for now."
         ));
     }
     Ok(())
@@ -471,4 +479,59 @@ fn copy_entry(path: &Path, dest_path: &Path) -> Result<()> {
         fs::copy(path, dest_path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(depth: Option<u32>, lazy: bool, filter: Option<&str>) -> CloneOptions {
+        CloneOptions {
+            thread: None,
+            depth,
+            lazy,
+            filter: filter.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn reject_unsupported_passes_when_no_flags_set() {
+        assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
+    }
+
+    #[test]
+    fn reject_unsupported_rejects_filter() {
+        let err = reject_unsupported_for_git_overlay(&opts(None, false, Some("blob:none")))
+            .expect_err("filter must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("--filter"), "message must name --filter: {msg}");
+        assert!(
+            msg.contains("not yet supported"),
+            "message must say not yet supported: {msg}"
+        );
+    }
+
+    #[test]
+    fn reject_unsupported_rejects_lazy() {
+        let err = reject_unsupported_for_git_overlay(&opts(None, true, None))
+            .expect_err("lazy must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("--lazy"), "message must name --lazy: {msg}");
+        assert!(
+            msg.contains("not yet supported"),
+            "message must say not yet supported: {msg}"
+        );
+    }
+
+    #[test]
+    fn reject_unsupported_rejects_depth() {
+        let err = reject_unsupported_for_git_overlay(&opts(Some(1), false, None))
+            .expect_err("depth must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("--depth"), "message must name --depth: {msg}");
+        assert!(
+            msg.contains("not yet supported"),
+            "message must say not yet supported: {msg}"
+        );
+    }
 }

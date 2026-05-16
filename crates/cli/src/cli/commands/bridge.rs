@@ -145,7 +145,7 @@ fn resolve_source(repo: &Repository, source: GitSource) -> Result<ResolvedSource
             // repo it was for, not buried under the OS temp root.
             let tmp_root = repo.heddle_dir().join("tmp");
             let scratch = ScratchDir::new_in(&tmp_root, "import-")?;
-            clone_url_to_bare(&url, &scratch.path)?;
+            clone_url_to_bare(&url, &scratch.path, None, None)?;
             Ok(ResolvedSource {
                 path: scratch.path.clone(),
                 _temp: Some(scratch),

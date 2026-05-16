@@ -124,7 +124,77 @@ fn test_cli_clone_local_lazy_is_rejected() {
 }
 
 #[test]
+fn test_cli_clone_git_overlay_depth_is_rejected() {
+    // Issue 49 / 20b: `--depth` is wired through to gix at the wire
+    // layer (`clone_url_to_bare` honours it), but the import step
+    // (`import_all` ancestry walk) still requires every parent commit
+    // locally. Until the importer tolerates missing parents, the
+    // user-facing flag is rejected up-front so we never leave a
+    // half-built clone behind.
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    gix::init_bare(&origin).expect("init bare git origin");
+
+    let err = heddle(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            work.to_str().expect("work path utf8"),
+            "--depth",
+            "1",
+        ],
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("--depth") && err.contains("not yet supported"),
+        "depth must be rejected with 'not yet supported': {err}"
+    );
+    assert!(
+        !work.exists(),
+        "rejection must run before any filesystem work: {} should not exist",
+        work.display()
+    );
+}
+
+#[test]
+fn test_cli_clone_git_overlay_lazy_is_rejected() {
+    // Issue 49 / 20b: same shape as --depth — `--lazy` (the
+    // `--filter blob:none` synonym) gets rejected up-front because the
+    // import step requires all blobs locally.
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    gix::init_bare(&origin).expect("init bare git origin");
+
+    let err = heddle(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            work.to_str().expect("work path utf8"),
+            "--lazy",
+        ],
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("--lazy") && err.contains("not yet supported"),
+        "lazy must be rejected with 'not yet supported': {err}"
+    );
+    assert!(
+        !work.exists(),
+        "rejection must run before any filesystem work: {} should not exist",
+        work.display()
+    );
+}
+
+#[test]
 fn test_cli_clone_git_overlay_filter_is_rejected() {
+    // Issue 49 / 20b: same shape as --depth / --lazy — `--filter` is
+    // rejected up-front. The wire-layer plumbing in `clone_url_to_bare`
+    // is real prep for 20c; the user-facing flag flip waits on
+    // import-side support.
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
@@ -142,8 +212,49 @@ fn test_cli_clone_git_overlay_filter_is_rejected() {
     )
     .unwrap_err();
     assert!(
-        err.contains("--filter") && err.contains("Git-overlay"),
-        "Git-overlay clone with --filter should fail with a tailored message: {err}"
+        err.contains("--filter") && err.contains("not yet supported"),
+        "filter must be rejected with 'not yet supported': {err}"
+    );
+    assert!(
+        !work.exists(),
+        "rejection must run before any filesystem work: {} should not exist",
+        work.display()
+    );
+}
+
+#[test]
+fn test_cli_clone_git_overlay_file_url_rejects_unsupported_flags() {
+    // Issue 49 / 20b round-2 P1: previously the local-path rejection
+    // told users to "use a file:// URL instead" — but `file://` parses
+    // as `RemoteTarget::Local` and routes through the same
+    // `clone_git_overlay_path`, hitting the same rejection. Confirm
+    // the file:// scheme path is rejected with the same shape (no
+    // dead-end loop) and leaves no partial directory behind.
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    gix::init_bare(&origin).expect("init bare git origin");
+
+    let file_url = format!("file://{}", origin.display());
+    let err = heddle(
+        &[
+            "clone",
+            &file_url,
+            work.to_str().expect("work path utf8"),
+            "--filter",
+            "blob:none",
+        ],
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("--filter") && err.contains("not yet supported"),
+        "file:// + --filter must reject with the same 'not yet supported' shape: {err}"
+    );
+    assert!(
+        !work.exists(),
+        "rejection must run before any filesystem work: {} should not exist",
+        work.display()
     );
 }
 
