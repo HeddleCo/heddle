@@ -29,11 +29,43 @@ if [[ ! -f "$WF" ]]; then
   exit 1
 fi
 
-# Tag-push trigger.
-if grep -E "^\s*tags:" "$WF" >/dev/null && grep -E "['\"]?v\*['\"]?" "$WF" >/dev/null; then
-  ok "tag-push trigger on v*"
+# Tag-push trigger. The contract is strict semver only (vX.Y.Z); RC
+# tags route through workflow_dispatch so the publish step can mark
+# them prerelease+draft. See validate-tag job for the full rule.
+if grep -E "^\s*tags:" "$WF" >/dev/null \
+   && grep -E "v\[0-9\]\+\.\[0-9\]\+\.\[0-9\]\+" "$WF" >/dev/null; then
+  ok "tag-push trigger restricted to strict semver (vX.Y.Z)"
 else
-  err "missing tag-push trigger on v* in $WF"
+  err "missing strict-semver tag-push trigger ('v[0-9]+.[0-9]+.[0-9]+') in $WF"
+fi
+
+# Trust gate: a validate-tag job must run before build/release and
+# enforce (a) tag existence, (b) ancestry on origin/main, (c) pattern
+# classification. We assert the structural pieces here; the rule
+# content lives in the workflow itself.
+if grep -E "^\s*validate-tag:" "$WF" >/dev/null; then
+  ok "validate-tag job present"
+else
+  err "missing validate-tag job in $WF"
+fi
+if grep -E "git merge-base --is-ancestor" "$WF" >/dev/null; then
+  ok "validate-tag enforces ancestry on origin/main"
+else
+  err "validate-tag must reject tags not reachable from origin/main"
+fi
+if grep -E "needs:\s*validate-tag|needs:\s*\[validate-tag" "$WF" >/dev/null; then
+  ok "build/release jobs depend on validate-tag"
+else
+  err "build/release must declare 'needs: validate-tag' so signing is gated on it"
+fi
+
+# Publish step must read draft/prerelease from validate-tag.outputs.kind
+# so dispatch-triggered runs never auto-publish a normal release.
+if grep -E "draft:\s*\\\$\{\{\s*needs\.validate-tag\.outputs\.kind" "$WF" >/dev/null \
+   && grep -E "prerelease:\s*\\\$\{\{\s*needs\.validate-tag\.outputs\.kind" "$WF" >/dev/null; then
+  ok "publish step keys draft+prerelease off validate-tag.outputs.kind"
+else
+  err "publish step must set draft+prerelease from needs.validate-tag.outputs.kind"
 fi
 
 # All five target triples.

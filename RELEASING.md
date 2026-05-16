@@ -13,7 +13,9 @@ pipeline from the one described here.
 ## Cutting a release
 
 1. Land your change on `main` (CI green).
-2. Tag from `main`:
+2. Tag the commit you want to release from `main`. Tags **must** match
+   strict semver (`vX.Y.Z`); any other shape will not trigger the
+   release workflow on push:
 
    ```bash
    git tag -a v0.3.0 -m 'heddle v0.3.0'
@@ -21,15 +23,27 @@ pipeline from the one described here.
    ```
 
 3. The `Release binaries` workflow (`.github/workflows/release.yml`)
-   triggers on the `v*` tag push. It:
+   triggers on the stable-semver tag push. Before building anything it
+   runs a `validate-tag` gate that:
 
-   - builds the `heddle` binary natively on five GitHub-hosted runners
-   - packages each into a versioned archive (`.tar.gz` for unix,
+   - resolves the requested tag from the trigger (push or dispatch)
+   - rejects refs that aren't real tags (catches `main`, typos, deleted
+     tags fed to `workflow_dispatch`)
+   - rejects tags whose commit isn't reachable from `origin/main`
+     (catches tags accidentally — or maliciously — placed on a feature
+     branch)
+   - classifies the run as `stable` or `prerelease`
+
+   If `validate-tag` fails, no build, sign, or publish step runs. If it
+   passes, the matrix proceeds to:
+
+   - build the `heddle` binary natively on five GitHub-hosted runners
+   - package each into a versioned archive (`.tar.gz` for unix,
      `.zip` for windows)
-   - emits a `.sha256` next to each archive
-   - signs each archive with `cosign` keyless (Sigstore public-good
+   - emit a `.sha256` next to each archive
+   - sign each archive with `cosign` keyless (Sigstore public-good
      instance; trust is rooted in the GitHub OIDC token for this run)
-   - publishes a GitHub Release with auto-generated notes, all
+   - publish a GitHub Release with auto-generated notes, all
      artifacts, signatures, certificates, and an aggregated
      `SHA256SUMS`
 
@@ -40,10 +54,30 @@ pipeline from the one described here.
 
 ### Dry-runs
 
-The workflow also accepts `workflow_dispatch` with a `tag` input. Push
-a pre-release tag (e.g. `v0.3.0-rc1`), trigger the workflow from the
-Actions tab, and inspect the artifacts it produces against a draft or
-prerelease GitHub Release. Delete the rc tag and assets when done.
+Pre-release tags (`-rc`, `-beta`, `-alpha`) intentionally do **not**
+fire the push trigger — only `vX.Y.Z` does. To rehearse a release:
+
+1. Push an RC tag from `main`:
+
+   ```bash
+   git tag -a v0.3.0-rc.1 -m 'heddle v0.3.0-rc.1'
+   git push origin v0.3.0-rc.1
+   ```
+
+   (This push alone does not run the workflow.)
+
+2. From the Actions tab, run `Release binaries` via `workflow_dispatch`
+   with `tag: v0.3.0-rc.1`.
+
+3. The run goes through `validate-tag` exactly as a real release would.
+   On publish, the GitHub Release is created as **draft + prerelease**
+   — even if you hand-type a stable-looking tag, dispatch-triggered
+   runs never auto-publish a normal release. Inspect the draft release,
+   then delete the draft release and the RC tag/assets when done.
+
+Accepted tag patterns: `vX.Y.Z` (stable), or
+`vX.Y.Z-(rc|alpha|beta)[.N]` (prerelease). Anything else fails
+`validate-tag`.
 
 ## Artifact contract
 
@@ -128,7 +162,9 @@ similar projects).
 
 A lightweight `release-pipeline-check` job runs on every PR. It greps
 `.github/workflows/release.yml` for the five target triples, the
-tag-push trigger, packaging, checksum, signing, and upload steps, and
+strict-semver tag-push trigger, the `validate-tag` trust gate (with
+ancestry check + downstream `needs:` wiring + draft/prerelease keyed
+off its outputs), packaging, checksum, signing, and upload steps, and
 greps `RELEASING.md` for each target. The contract above is the
 contract it enforces. If you intentionally change the contract,
 update `scripts/check-release-pipeline.sh` in the same PR.

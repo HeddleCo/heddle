@@ -2,11 +2,20 @@ name: Release binaries
 
 # Pre-built binaries for the `heddle` CLI on tagged releases.
 #
-# Trigger: any `v*` tag push. The job tree:
+# Trigger: stable-semver tag push (vX.Y.Z) OR manual workflow_dispatch
+# with an existing tag (used for RC dry-runs). The job tree:
 #
-#   build (matrix, 5 targets) ──┐
-#                               ├─► sign + checksum (per artifact, in-matrix)
-#                               └─► release (aggregates, publishes, posts SHA256SUMS)
+#   validate-tag ──► build (matrix, 5 targets) ──┐
+#                                                ├─► sign + checksum (per artifact, in-matrix)
+#                                                └─► release (aggregates, publishes, posts SHA256SUMS)
+#
+# validate-tag is the single trust gate for the pipeline. It refuses to
+# proceed unless the requested tag (a) exists, (b) is reachable from
+# origin/main, and (c) matches the documented release-tag pattern. All
+# downstream jobs read the validated tag and the publish "kind"
+# (stable | prerelease) from its outputs — no other job should look at
+# the raw trigger ref. This keeps the answer to "is this a sanctioned
+# release?" in exactly one place.
 #
 # Strategy: native matrix builds (one runner per target) instead of
 # cross-compilation. Rationale lives in RELEASING.md — short version:
@@ -21,12 +30,15 @@ name: Release binaries
 
 on:
   push:
+    # Strict semver only. RC / beta / alpha tags do not auto-trigger; use
+    # workflow_dispatch for dry-runs so the publish step can mark them
+    # prerelease+draft. See validate-tag for the full rule.
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build (must already exist; for dry-runs use a pre-pushed v*-rc tag)'
+        description: 'Existing tag to build (vX.Y.Z or vX.Y.Z-(rc|alpha|beta)[.N]). Dispatch-triggered runs always publish as prerelease+draft.'
         required: true
 
 permissions:
@@ -43,8 +55,106 @@ env:
   CRATE_NAME: heddle-cli
 
 jobs:
+  validate-tag:
+    name: validate tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.classify.outputs.tag }}
+      kind: ${{ steps.classify.outputs.kind }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history is needed for both the tag→commit resolution and
+          # the ancestor check against origin/main.
+          fetch-depth: 0
+
+      - name: Resolve, verify, and classify tag
+        id: classify
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          PUSH_REF: ${{ github.ref }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # 1. Resolve the requested tag from the trigger.
+          case "$EVENT" in
+            push)
+              if [[ "$PUSH_REF" != refs/tags/* ]]; then
+                echo "::error::push trigger but ref is not a tag: $PUSH_REF"
+                exit 1
+              fi
+              tag="${PUSH_REF#refs/tags/}"
+              ;;
+            workflow_dispatch)
+              tag="$DISPATCH_TAG"
+              ;;
+            *)
+              echo "::error::unsupported event: $EVENT"
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "$tag" ]]; then
+            echo "::error::no tag resolved from trigger ($EVENT)"
+            exit 1
+          fi
+
+          # 2. Reject anything that is not a real tag in this repo. This
+          #    catches workflow_dispatch with 'main', a typo, or a
+          #    deleted tag — none of which should reach the build job.
+          if ! git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            echo "::error::'${tag}' is not a tag in this repository"
+            exit 1
+          fi
+
+          # 3. The pipeline only ships releases from main. A tag pointed
+          #    at a feature branch (deliberately or accidentally) must
+          #    not produce signed binaries with the heddle release OIDC
+          #    identity. The tag-push trigger does not enforce branch
+          #    ancestry on its own, so we do it here.
+          tag_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          if ! git merge-base --is-ancestor "$tag_sha" "refs/remotes/origin/main"; then
+            echo "::error::tag '${tag}' (commit ${tag_sha}) is not reachable from origin/main — refusing to release"
+            exit 1
+          fi
+
+          # 4. Classify. Tag pattern decides the *shape* of release;
+          #    event source decides whether it ships as a final release.
+          #    Dispatch runs are *always* prerelease+draft so an operator
+          #    dry-run cannot accidentally publish a public, non-draft
+          #    release — even if they hand-type a stable-looking tag.
+          # SemVer prerelease identifiers permit both `-rc.1` (dot-
+          # separated) and `-rc1` (concatenated) shapes; accept either.
+          stable_re='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          pre_re='^v[0-9]+\.[0-9]+\.[0-9]+-(rc|alpha|beta)(\.?[0-9]+)?$'
+
+          if ! [[ "$tag" =~ $stable_re || "$tag" =~ $pre_re ]]; then
+            echo "::error::tag '${tag}' does not match vX.Y.Z or vX.Y.Z-(rc|alpha|beta)[.N]"
+            exit 1
+          fi
+
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            kind=prerelease
+          elif [[ "$tag" =~ $stable_re ]]; then
+            kind=stable
+          else
+            # Push trigger but the tag is not strict semver. The push
+            # filter should have blocked this; if it slipped through,
+            # fail loudly rather than silently downgrading.
+            echo "::error::push trigger received non-stable tag '${tag}'; refusing"
+            exit 1
+          fi
+
+          echo "Resolved: tag=${tag} commit=${tag_sha} kind=${kind}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "kind=${kind}" >> "$GITHUB_OUTPUT"
+
   build:
     name: build ${{ matrix.target }}
+    needs: validate-tag
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -69,7 +179,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: refs/tags/${{ needs.validate-tag.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -83,12 +193,13 @@ jobs:
       - name: Compute version
         id: ver
         shell: bash
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
         run: |
-          ref="${{ inputs.tag || github.ref_name }}"
           # Strip leading "v" if present (v0.3.0 → 0.3.0).
-          version="${ref#v}"
+          version="${TAG#v}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Build release binary
         run: cargo build --release --locked -p ${{ env.CRATE_NAME }} --target ${{ matrix.target }}
@@ -150,19 +261,13 @@ jobs:
 
   release:
     name: publish release
-    needs: build
+    needs: [validate-tag, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - name: Resolve tag
-        id: ver
-        run: |
-          ref="${{ inputs.tag || github.ref_name }}"
-          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
+          ref: refs/tags/${{ needs.validate-tag.outputs.tag }}
 
       - name: Download all build outputs
         uses: actions/download-artifact@v4
@@ -182,8 +287,13 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: ${{ steps.ver.outputs.tag }}
+          tag_name: ${{ needs.validate-tag.outputs.tag }}
+          name: ${{ needs.validate-tag.outputs.tag }}
+          # Dispatch-triggered runs (and any future non-stable trigger
+          # path) publish as draft + prerelease. Push-triggered stable
+          # releases publish as a normal release.
+          draft: ${{ needs.validate-tag.outputs.kind != 'stable' }}
+          prerelease: ${{ needs.validate-tag.outputs.kind != 'stable' }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
