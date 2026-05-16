@@ -17,8 +17,12 @@
 //!   refs (packed-refs hashmap shines here; reftable pays log N seeks per
 //!   lookup).
 //! - `list_all`: enumerate every ref name (used by `heddle status`, sync, etc.).
-//! - `append_one_persist`: add one new ref and rewrite the whole file (the
-//!   current write strategy for both backends).
+//! - `append_one_persist`: add one new ref and rewrite the whole file —
+//!   including the actual filesystem write, `fsync`, and atomic rename via
+//!   `objects::fs_atomic::write_file_atomic` (the same call `PackedRefs::save`
+//!   uses in production). Both branches go through this path so the
+//!   comparison reflects real-world rewrite latency, not just in-memory
+//!   serialization cost.
 //!
 //! The bench also prints on-disk byte sizes for both formats at each scale,
 //! as a "Throughput::Bytes" entry on the `cold_load` group.
@@ -32,6 +36,7 @@ use std::{
 };
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use objects::fs_atomic::write_file_atomic;
 use objects::object::ChangeId;
 use refs::{PackedRefsModel, ReftableModel};
 use tempfile::TempDir;
@@ -219,7 +224,9 @@ fn bench_append_one_persist(c: &mut Criterion) {
                 },
                 |mut m| {
                     m.set_thread(&new_name, new_id);
-                    let _text = black_box(m.to_text());
+                    let text = m.to_text();
+                    write_file_atomic(&layout.packed_path, text.as_bytes()).unwrap();
+                    black_box(&layout.packed_path);
                 },
                 BatchSize::SmallInput,
             );
@@ -233,7 +240,9 @@ fn bench_append_one_persist(c: &mut Criterion) {
                 },
                 |mut m| {
                     m.set_thread(&new_name, new_id);
-                    let _bytes = black_box(m.to_bytes());
+                    let bytes = m.to_bytes();
+                    write_file_atomic(&layout.reftable_path, &bytes).unwrap();
+                    black_box(&layout.reftable_path);
                 },
                 BatchSize::SmallInput,
             );
