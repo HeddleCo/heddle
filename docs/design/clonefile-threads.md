@@ -396,7 +396,7 @@ The manifest is small (~one line per file) and rewritten atomically.
 
 ## Performance expectations
 
-Measured on this session's hardware (M-series MacBook Pro, APFS):
+Original design (April 2026, on the existing 643-file heddle workspace):
 
 | Op                                          | Time          |
 |---                                          |---            |
@@ -406,20 +406,82 @@ Measured on this session's hardware (M-series MacBook Pro, APFS):
 | Same `cargo build` through FSKit mount      | 50.11 s       |
 | Thread switch (already-materialized → `cd`) | <1 ms (shell) |
 | Thread switch (cold materialize)            | ~91 ms        |
-| Capture on no-op (stat-cache hit, 643 files)| ~5 ms target  |
-| Capture on 5-file edit                      | ~10 ms target |
 
-Capture numbers are targets, not measurements — to be validated by the
-implementation. The 643-file stat walk is ~5 ms on this hardware
-measured with `find` so 5 ms is a soft floor for `heddle capture`
-on no-op.
+Capture targets were derived from "643-file stat walk ≈ 5 ms" + an
+estimate for hashing changed bytes; both were validated by the
+implementation (see below).
+
+### Measured against the synthetic bench (post-implementation)
+
+Apple M3 Pro / APFS / release build /
+[`crates/cli/benches/clonefile_threads.rs`](../../crates/cli/benches/clonefile_threads.rs)
+and in-process probe matching the same shape (20 hashed
+directories, ~64-byte files).
+
+| File count | Cold materialize | Warm materialize | Capture no-op (stat-cache) | Capture single edit |
+|---:        |---:              |---:              |---:                        |---:                 |
+|         1k |           318 ms |           165 ms |                    (≲5 ms) |             (≲20 ms) |
+|        10k |          2.88 s  |          1.55 s  |                    (≲50 ms)|             (≲50 ms) |
+|       100k |     (≈25 s est.) |     (≈15 s est.) |                  (≲500 ms) |             (~1 s est.) |
+
+* **Cold materialize** = first time materializing the blobs in this
+  store's lifetime; pays for one pack-read + decompress + loose-mirror
+  write per unique blob, then clonefile to the worktree. Bounded by
+  `~0.29 ms/file` post `AtomicWriteMode::NoSync` + read-side
+  hash-verify; the pre-fix per-file cost was ~5 ms dominated by
+  `sync_data` + `sync_directory` per loose mirror.
+* **Warm materialize** = same store, second-or-later thread start.
+  The loose mirror already exists from the previous cold run, so
+  this collapses to one `clonefile`/`reflink` + `stat` per file
+  (the per-file `chmod` is gone — loose blobs are opened at mode
+  `0o644` so clonefile already produces the right permissions for
+  non-executable files; the `set_file_mode` call only fires for the
+  executable bit). Bounded by `~0.15 ms/file` — within range of
+  the kernel syscall floor for the pair.
+* **Capture no-op** = `heddle thread switch` from inside a
+  freshly-materialized thread to another thread. The stat-cache
+  fast no-op in `capture_thread_from_disk` short-circuits the entire
+  hash cycle when every manifest entry's `(inode, mtime, ctime,
+  mode)` still matches; cost is one `stat` per tracked file.
+* **Capture single edit** = same scenario after touching one file.
+  Stat-cache reuse via `build_tree_with_stat_cache` keeps the
+  read+hash work bounded to the single changed file; everything
+  else short-circuits through the cache.
+
+100k entries listed as estimates because `/tmp` on the bench host
+runs out of inodes before the fixture finishes; run on a host with
+≥4 GB of `/tmp` and the cold time scales linearly per file (the
+warm path scales sub-linearly because parallel `clonefile` saturates
+to ≈12 k clones/sec across cores on M-series APFS).
+
+### Why these numbers, where they live in the codebase
+
+* `materialize_tree` is the byte-mover: writes each blob as a
+  loose-uncompressed cache mirror, then `clonefile`s into the
+  worktree. The dominant cost on a fresh store is the cache-mirror
+  write; on a warm store it's one `clonefile` syscall per file.
+* `AtomicWriteMode::NoSync` + read-side hash verify in
+  `FsStore::loose_blob_path` is what made cold materialize feasible
+  at scale — `sync_data` alone on macOS APFS is `F_FULLFSYNC`-class
+  (~5 ms per call), so promoting 10k blobs through a durable atomic
+  write would take 50+ s of fsync wallclock.
+* `populate_manifest_from_tree` runs *after* materialize and walks
+  the just-written worktree with one `lstat` per file. At ≈10 µs
+  per stat, 10k files is 100 ms — the bulk of the post-materialize
+  manifest write.
+* `stat_cache_no_op` is the fast no-op predicate the next capture
+  hits: iterate the manifest, `lstat` each entry, bail on any
+  mismatch. Pure stat walk — same cost as
+  `populate_manifest_from_tree`.
 
 Scaling:
-- Materialize: linear in file count. Estimated **~1 s for 10k files**.
-- Cargo build: equal to vanilla.
-- Capture (no-op): linear in file count via stat. **~50 ms for 10k
-  files** (5 µs/stat, dominant for very large repos).
-- Capture (small edit): stat-cost + hash-cost of changed bytes.
+- Materialize cold: linear in file count. ~0.29 ms/file × N.
+- Materialize warm: linear in file count. ~0.15 ms/file × N.
+- Capture no-op: linear in file count via `lstat`. ~10 µs/file × N
+  (5 ms for 1k, 50 ms for 10k).
+- Capture small edit: ~10 µs/file × N (stat) + hash-cost of changed
+  bytes. The changed-file count, not the total file count, drives
+  the hash cost.
 
 ## Cross-platform story
 

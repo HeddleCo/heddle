@@ -83,10 +83,22 @@ pub(super) fn write_atomic(
     }
     let mut failing_op = Op::Write;
     let write_result: std::io::Result<()> = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
+        // Open with explicit mode 0o644 instead of relying on the
+        // process umask. This makes loose objects byte-and-mode
+        // deterministic: clonefile on macOS preserves source mode,
+        // so a worktree materialised from a loose blob inherits
+        // 0o644 *without* an extra chmod. `repository_materialization`
+        // skips `set_file_mode` on non-executable files because of
+        // this contract — see `materialize_blob`'s comment near the
+        // `set_file_mode(dest, true)` call.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o644);
+        }
+        let mut file = opts.open(&temp_path)?;
         use std::io::Write as _;
         file.write_all(data)?;
         match mode {
