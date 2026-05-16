@@ -93,6 +93,135 @@ mod tests {
         .expect("S3 compliance tests panicked");
     }
 
+    // ── Issue #60 regression: nested-runtime panic ──────────────────────────
+
+    /// Issue #60: `S3Store::*` methods must be callable directly from inside
+    /// a `#[tokio::main]` / `#[tokio::test]` async context without panicking.
+    ///
+    /// Pre-fix, every method went through `Handle::try_current().block_on(...)`,
+    /// which panics with "Cannot start a runtime from within a runtime" when
+    /// invoked from a task that's already on a Tokio runtime. This test
+    /// invokes a sync `ObjectStore` method directly from the runtime — with
+    /// the bug, the call panics; with the fix it returns `Ok(false)`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn s3_store_methods_do_not_panic_in_tokio_context() {
+        let (endpoint, bucket, _tmp) = start_local_s3().await;
+        let (_client, store) = build_test_store(&endpoint, &bucket).await;
+
+        let hash = ContentHash::compute(b"issue-60: never-stored blob");
+        // Direct sync call from within the runtime. No `spawn_blocking`.
+        let exists = store
+            .has_blob(&hash)
+            .expect("has_blob must surface a real Result, not panic");
+        assert!(!exists, "fresh bucket must not contain a blob we never put");
+    }
+
+    /// Issue #60: every sync surface of `S3Store` shares the same bridging
+    /// shape, so a regression in one path would shadow regressions in the
+    /// others. Hit blob, tree, state, and action paths sequentially from a
+    /// single async task. With the bug, the first call panics. With the fix,
+    /// each round-trips through the bridge.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn s3_store_multi_method_sequence_no_panic() {
+        use crate::object::{Blob, Operation, Tree};
+
+        let (endpoint, bucket, _tmp) = start_local_s3().await;
+        let (_client, store) = build_test_store(&endpoint, &bucket).await;
+
+        // Blob: put / has / get / list
+        let blob = Blob::new(b"issue-60: sequence".to_vec());
+        let blob_hash = store.put_blob(&blob).expect("put_blob must not panic");
+        assert!(
+            store.has_blob(&blob_hash).expect("has_blob must not panic"),
+            "blob must be present after put_blob"
+        );
+        let fetched = store
+            .get_blob(&blob_hash)
+            .expect("get_blob must not panic")
+            .expect("blob present");
+        assert_eq!(fetched.content(), blob.content());
+        assert!(
+            store
+                .list_blobs()
+                .expect("list_blobs must not panic")
+                .contains(&blob_hash),
+            "list_blobs must include the put hash"
+        );
+
+        // Tree: put / has / get / list
+        let tree = Tree::new();
+        let tree_hash = store.put_tree(&tree).expect("put_tree must not panic");
+        assert!(
+            store.has_tree(&tree_hash).expect("has_tree must not panic"),
+            "tree must be present after put_tree"
+        );
+        assert!(
+            store
+                .get_tree(&tree_hash)
+                .expect("get_tree must not panic")
+                .is_some(),
+            "get_tree must return Some after put_tree"
+        );
+        assert!(
+            store
+                .list_trees()
+                .expect("list_trees must not panic")
+                .contains(&tree_hash),
+            "list_trees must include the put hash"
+        );
+
+        // State: put / has / get / list
+        let attribution = Attribution::human(Principal::new("Issue 60", "issue-60@example.com"));
+        let state = State::new(tree_hash, vec![], attribution.clone());
+        let state_id = state.change_id;
+        store.put_state(&state).expect("put_state must not panic");
+        assert!(
+            store
+                .has_state(&state_id)
+                .expect("has_state must not panic"),
+            "state must be present after put_state"
+        );
+        assert!(
+            store
+                .get_state(&state_id)
+                .expect("get_state must not panic")
+                .is_some(),
+            "get_state must return Some after put_state"
+        );
+        assert!(
+            store
+                .list_states()
+                .expect("list_states must not panic")
+                .contains(&state_id),
+            "list_states must include the put state"
+        );
+
+        // Action: put / get / list
+        let mut action = Action::new(
+            None,
+            ChangeId::generate(),
+            Operation::Snapshot,
+            "issue-60 sequence",
+            attribution,
+        );
+        let action_id = store
+            .put_action(&mut action)
+            .expect("put_action must not panic");
+        assert!(
+            store
+                .get_action(&action_id)
+                .expect("get_action must not panic")
+                .is_some(),
+            "get_action must return Some after put_action"
+        );
+        // Issue #60 is about the nested-runtime panic, not the content
+        // round-trip; we only require `list_actions` to come back as a
+        // real `Ok(_)` without panicking. (The pre-existing
+        // `action_key`/`list_actions` short-vs-full-hash mismatch is
+        // tracked separately and intentionally not in scope here.)
+        let _ = store.list_actions().expect("list_actions must not panic");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_get_state_rejects_wrong_object_swap() {
         let (endpoint, bucket, _tmp) = start_local_s3().await;

@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //! ObjectStore trait implementation for S3 storage.
+//!
+//! Every method dispatches its async `aws_sdk_s3` work through
+//! [`S3Store::bridge`], the worker-thread bridge defined in `s3_store.rs`.
+//! Routing through the bridge means the sync `ObjectStore` surface is safe
+//! to call from inside a caller's Tokio runtime — the previous design
+//! (`Handle::try_current().block_on(...)`) panicked with "Cannot start a
+//! runtime from within a runtime" the moment any `#[tokio::main]`,
+//! `#[tokio::test]`, or daemon worker exercised this code (issue #60).
 
 mod helpers;
 #[cfg(test)]
 mod tests;
+
+use std::sync::Arc;
 
 use aws_sdk_s3::primitives::ByteStream;
 
@@ -22,19 +32,14 @@ impl ObjectStore for S3Store {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
         let key = self.blob_key(hash);
         let hash = *hash;
-        self.runtime()?.block_on(async {
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    match self
-                        .client
-                        .get_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                    {
+                    match client.get_object().bucket(&bucket).key(&key).send().await {
                         Ok(response) => {
                             let data = response.body.collect().await.map_err(|e| {
                                 StoreError::Io(std::io::Error::other(format!(
@@ -81,19 +86,14 @@ impl ObjectStore for S3Store {
         let hash = blob.hash();
         let key = self.blob_key(&hash);
         let content = blob.content().to_vec();
-        self.runtime()?.block_on(async {
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    match self
-                        .client
-                        .head_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                    {
+                    match client.head_object().bucket(&bucket).key(&key).send().await {
                         Ok(_) => return Ok(hash),
                         Err(e) => {
                             if !e
@@ -111,9 +111,9 @@ impl ObjectStore for S3Store {
                     let compression_config = crate::store::CompressionConfig::default();
                     let data = crate::store::compression::compress(&content, &compression_config)?
                         .unwrap_or(content.clone());
-                    self.client
+                    client
                         .put_object()
-                        .bucket(&self.bucket)
+                        .bucket(&bucket)
                         .key(&key)
                         .body(ByteStream::from(data))
                         .send()
@@ -133,19 +133,14 @@ impl ObjectStore for S3Store {
 
     fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
         let key = self.blob_key(hash);
-        self.runtime()?.block_on(async {
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    match self
-                        .client
-                        .head_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                    {
+                    match client.head_object().bucket(&bucket).key(&key).send().await {
                         Ok(_) => Ok(true),
                         Err(e) => {
                             if e.as_service_error()
@@ -168,9 +163,10 @@ impl ObjectStore for S3Store {
     }
 
     fn list_blobs(&self) -> Result<Vec<ContentHash>> {
-        let keys = self.runtime()?.block_on(async {
+        let store = self.clone();
+        let keys = self.bridge()?.block_on(async move {
             retry_with(RetryPolicy::S3_DEFAULT, should_retry_store_error, || {
-                self.list_with_prefix("blobs/")
+                store.list_with_prefix("blobs/")
             })
             .await
         })?;
@@ -192,19 +188,14 @@ impl ObjectStore for S3Store {
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         let key = self.tree_key(hash);
         let hash = *hash;
-        self.runtime()?.block_on(async {
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    match self
-                        .client
-                        .get_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                    {
+                    match client.get_object().bucket(&bucket).key(&key).send().await {
                         Ok(response) => {
                             let data = response.body.collect().await.map_err(|e| {
                                 StoreError::Io(std::io::Error::other(format!(
@@ -251,19 +242,14 @@ impl ObjectStore for S3Store {
         let hash = tree.hash();
         let key = self.tree_key(&hash);
         let serialized = rmp_serde::to_vec(tree)?;
-        self.runtime()?.block_on(async {
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    match self
-                        .client
-                        .head_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                    {
+                    match client.head_object().bucket(&bucket).key(&key).send().await {
                         Ok(_) => return Ok(hash),
                         Err(e) => {
                             if !e
@@ -282,9 +268,9 @@ impl ObjectStore for S3Store {
                     let data =
                         crate::store::compression::compress(&serialized, &compression_config)?
                             .unwrap_or(serialized.clone());
-                    self.client
+                    client
                         .put_object()
-                        .bucket(&self.bucket)
+                        .bucket(&bucket)
                         .key(&key)
                         .body(ByteStream::from(data))
                         .send()
@@ -304,19 +290,14 @@ impl ObjectStore for S3Store {
 
     fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
         let key = self.tree_key(hash);
-        self.runtime()?.block_on(async {
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    match self
-                        .client
-                        .head_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                    {
+                    match client.head_object().bucket(&bucket).key(&key).send().await {
                         Ok(_) => Ok(true),
                         Err(e) => {
                             if e.as_service_error()
@@ -339,9 +320,10 @@ impl ObjectStore for S3Store {
     }
 
     fn list_trees(&self) -> Result<Vec<ContentHash>> {
-        let keys = self.runtime()?.block_on(async {
+        let store = self.clone();
+        let keys = self.bridge()?.block_on(async move {
             retry_with(RetryPolicy::S3_DEFAULT, should_retry_store_error, || {
-                self.list_with_prefix("trees/")
+                store.list_with_prefix("trees/")
             })
             .await
         })?;
@@ -362,19 +344,15 @@ impl ObjectStore for S3Store {
 
     fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
         let key = self.state_key(id);
-        self.runtime()?.block_on(async {
+        let id = *id;
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    match self
-                        .client
-                        .get_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                    {
+                    match client.get_object().bucket(&bucket).key(&key).send().await {
                         Ok(response) => {
                             let data = response.body.collect().await.map_err(|e| {
                                 StoreError::Io(std::io::Error::other(format!(
@@ -389,7 +367,7 @@ impl ObjectStore for S3Store {
                                 bytes.to_vec()
                             };
                             let state =
-                                validate_loaded_state(id, rmp_serde::from_slice(&decoded)?)?;
+                                validate_loaded_state(&id, rmp_serde::from_slice(&decoded)?)?;
                             Ok(Some(state))
                         }
                         Err(e) => {
@@ -415,7 +393,9 @@ impl ObjectStore for S3Store {
     fn put_state(&self, state: &State) -> Result<()> {
         let key = self.state_key(&state.change_id);
         let serialized = rmp_serde::to_vec(state)?;
-        self.runtime()?.block_on(async {
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -424,9 +404,9 @@ impl ObjectStore for S3Store {
                     let data =
                         crate::store::compression::compress(&serialized, &compression_config)?
                             .unwrap_or(serialized.clone());
-                    self.client
+                    client
                         .put_object()
-                        .bucket(&self.bucket)
+                        .bucket(&bucket)
                         .key(&key)
                         .body(ByteStream::from(data))
                         .send()
@@ -446,19 +426,14 @@ impl ObjectStore for S3Store {
 
     fn has_state(&self, id: &ChangeId) -> Result<bool> {
         let key = self.state_key(id);
-        self.runtime()?.block_on(async {
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    match self
-                        .client
-                        .head_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                    {
+                    match client.head_object().bucket(&bucket).key(&key).send().await {
                         Ok(_) => Ok(true),
                         Err(e) => {
                             if e.as_service_error()
@@ -481,9 +456,10 @@ impl ObjectStore for S3Store {
     }
 
     fn list_states(&self) -> Result<Vec<ChangeId>> {
-        let keys = self.runtime()?.block_on(async {
+        let store = self.clone();
+        let keys = self.bridge()?.block_on(async move {
             retry_with(RetryPolicy::S3_DEFAULT, should_retry_store_error, || {
-                self.list_with_prefix("states/")
+                store.list_with_prefix("states/")
             })
             .await
         })?;
@@ -504,19 +480,15 @@ impl ObjectStore for S3Store {
 
     fn get_action(&self, id: &ActionId) -> Result<Option<Action>> {
         let key = self.action_key(id);
-        self.runtime()?.block_on(async {
+        let id = *id;
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
                 || async {
-                    match self
-                        .client
-                        .get_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await
-                    {
+                    match client.get_object().bucket(&bucket).key(&key).send().await {
                         Ok(response) => {
                             let data = response.body.collect().await.map_err(|e| {
                                 StoreError::Io(std::io::Error::other(format!(
@@ -531,7 +503,7 @@ impl ObjectStore for S3Store {
                                 bytes.to_vec()
                             };
                             let action =
-                                validate_loaded_action(id, rmp_serde::from_slice(&decoded)?)?;
+                                validate_loaded_action(&id, rmp_serde::from_slice(&decoded)?)?;
                             Ok(Some(action))
                         }
                         Err(e) => {
@@ -558,7 +530,9 @@ impl ObjectStore for S3Store {
         let id = action.id();
         let key = self.action_key(&id);
         let serialized = rmp_serde::to_vec(action)?;
-        self.runtime()?.block_on(async {
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.bridge()?.block_on(async move {
             retry_with(
                 RetryPolicy::S3_DEFAULT,
                 should_retry_store_error,
@@ -567,9 +541,9 @@ impl ObjectStore for S3Store {
                     let data =
                         crate::store::compression::compress(&serialized, &compression_config)?
                             .unwrap_or(serialized.clone());
-                    self.client
+                    client
                         .put_object()
-                        .bucket(&self.bucket)
+                        .bucket(&bucket)
                         .key(&key)
                         .body(ByteStream::from(data))
                         .send()
@@ -588,9 +562,10 @@ impl ObjectStore for S3Store {
     }
 
     fn list_actions(&self) -> Result<Vec<ActionId>> {
-        let keys = self.runtime()?.block_on(async {
+        let store = self.clone();
+        let keys = self.bridge()?.block_on(async move {
             retry_with(RetryPolicy::S3_DEFAULT, should_retry_store_error, || {
-                self.list_with_prefix("actions/")
+                store.list_with_prefix("actions/")
             })
             .await
         })?;
