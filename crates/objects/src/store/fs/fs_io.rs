@@ -44,6 +44,16 @@ impl FileBytes {
 pub(super) enum AtomicWriteMode {
     Durable,
     BatchDirectorySync,
+    /// No fsync at all. Caller asserts the file is a recoverable
+    /// cache mirror — the authoritative copy lives elsewhere
+    /// (typically a pack) and re-derivation on read is correct.
+    /// On macOS APFS, `sync_data` alone is ~5 ms per call
+    /// (`F_FULLFSYNC`-class cost); skipping it cuts cache-write
+    /// throughput from ~200 writes/s to ~5500 writes/s. The price
+    /// is that a torn write after a crash could leave the cached
+    /// file with garbage bytes — readers must guard with a hash
+    /// check before trusting the content.
+    NoSync,
 }
 
 pub(super) fn write_atomic(
@@ -97,6 +107,10 @@ pub(super) fn write_atomic(
             // but whose data blocks weren't flushed — exactly the
             // ACID violation we want to avoid for state/tree writes.
             AtomicWriteMode::BatchDirectorySync => file.sync_data()?,
+            // Cache-mirror writes: no fsync. Caller guards reads
+            // with a hash check, so torn-write corruption is
+            // recoverable (re-promote from the authoritative copy).
+            AtomicWriteMode::NoSync => {}
         }
         failing_op = Op::Rename;
         std::fs::rename(&temp_path, path)?;
@@ -111,6 +125,7 @@ pub(super) fn write_atomic(
                     dirs.insert(parent.to_path_buf());
                 }
             }
+            AtomicWriteMode::NoSync => {}
         }
         Ok(())
     })();

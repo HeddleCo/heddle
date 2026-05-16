@@ -3,15 +3,15 @@ use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
 
 use super::{
-    FsStore, LooseObjectWriteMode,
     fs_paths::{blobs_dir, hash_path},
+    FsStore, LooseObjectWriteMode,
 };
 use crate::{
     object::{
         Action, Attribution, Blob, ChangeId, ContentHash, Operation, Principal, State, Tree,
         TreeEntry,
     },
-    store::{HeddleError, ObjectStore, atomic::temp_path},
+    store::{atomic::temp_path, HeddleError, ObjectStore},
 };
 
 fn create_test_store() -> (TempDir, FsStore) {
@@ -461,4 +461,43 @@ fn test_get_tree_rejects_invalid_deserialized_entry_name() {
         .get_tree(&tree_hash)
         .expect_err("invalid tree should be rejected");
     assert!(matches!(error, HeddleError::InvalidTreeEntry(_)));
+}
+
+/// Belt-and-suspenders for the no-fsync cache-mirror promote path:
+/// when a loose blob's on-disk bytes don't hash to the expected
+/// content hash (the failure mode of a torn write after a crash),
+/// `loose_blob_path` must report `None` so the caller re-promotes
+/// from the authoritative pack instead of silently materializing
+/// garbage. This is what makes `AtomicWriteMode::NoSync` safe.
+#[test]
+fn loose_blob_path_rejects_torn_cache_mirror() {
+    let (_temp, store) = create_test_store();
+
+    // Put a blob via the normal path → ends up loose+uncompressed.
+    let blob = Blob::from("authoritative bytes");
+    let hash = store.put_blob(&blob).unwrap();
+
+    let path = hash_path(&blobs_dir(store.root()), &hash);
+    assert!(path.exists(), "blob should be loose on disk");
+
+    // Sanity: first call hashes the bytes, finds them valid, returns
+    // the path *and* records the hash in the verified set.
+    let probed = store.loose_blob_path(&hash);
+    assert_eq!(probed, Some(path.clone()));
+    assert!(
+        store.verified_loose_blobs.read().unwrap().contains(&hash),
+        "verified cache should pick up the hash after first probe"
+    );
+
+    // Drop the in-process verified cache and corrupt the file. This
+    // is the post-crash state we're guarding against: cache empty,
+    // file's bytes don't match the hash any more.
+    store.verified_loose_blobs.write().unwrap().clear();
+    std::fs::write(&path, b"torn-write garbage").unwrap();
+
+    let probed = store.loose_blob_path(&hash);
+    assert!(
+        probed.is_none(),
+        "corrupted loose blob must not be served as canonical bytes"
+    );
 }

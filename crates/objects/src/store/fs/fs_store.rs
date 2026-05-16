@@ -2,22 +2,22 @@
 //! Core FsStore structure.
 
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     hash::Hash,
     path::{Path, PathBuf},
     sync::{Mutex, RwLock},
 };
 
 use super::{
-    fs_io::{AtomicWriteMode, write_atomic},
+    fs_io::{write_atomic, AtomicWriteMode},
     fs_paths::{actions_dir, blobs_dir, packs_dir, states_dir, trees_dir},
 };
 use crate::{
     fs_atomic::sync_directory,
     object::{Blob, ChangeId, ContentHash, State, Tree},
     store::{
-        CompressionConfig, Result,
         pack::{PackManager, PackObjectId},
+        CompressionConfig, Result,
     },
 };
 
@@ -98,6 +98,19 @@ pub struct FsStore {
     loose_object_write_mode: LooseObjectWriteMode,
     snapshot_write_batch_depth: Mutex<usize>,
     pending_directory_syncs: Mutex<BTreeSet<PathBuf>>,
+    /// In-process trust cache for loose-blob cache mirrors. A hash
+    /// enters this set when this process either (a) wrote the blob
+    /// itself via `promote_to_loose_uncompressed` or (b) successfully
+    /// hash-verified it on first read. Bytes-on-disk for any entry
+    /// in this set can be trusted without a re-hash by subsequent
+    /// `loose_blob_path` calls within the same process — bounded by
+    /// the working set of accessed blobs, not the total store size.
+    ///
+    /// Pairs with `AtomicWriteMode::NoSync` on the write side: a
+    /// crashed promote leaves a torn cache-mirror file, but its
+    /// hash won't match on the next process's first-read verify,
+    /// so the reader falls through to a fresh promote off the pack.
+    pub(super) verified_loose_blobs: RwLock<HashSet<ContentHash>>,
 }
 
 impl FsStore {
@@ -119,6 +132,7 @@ impl FsStore {
             loose_object_write_mode: LooseObjectWriteMode::Durable,
             snapshot_write_batch_depth: Mutex::new(0),
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
+            verified_loose_blobs: RwLock::new(HashSet::new()),
         }
     }
 
@@ -138,6 +152,7 @@ impl FsStore {
             loose_object_write_mode: LooseObjectWriteMode::Durable,
             snapshot_write_batch_depth: Mutex::new(0),
             pending_directory_syncs: Mutex::new(BTreeSet::new()),
+            verified_loose_blobs: RwLock::new(HashSet::new()),
         }
     }
 
@@ -286,6 +301,30 @@ impl FsStore {
 
     pub(super) fn write_pack_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
         write_atomic(path, data, AtomicWriteMode::Durable, None)
+    }
+
+    /// Atomic write tuned for *cache-mirror* loose objects: no fsync
+    /// at any level. The authoritative copy lives in a pack; if a
+    /// crash leaves the cache mirror torn, the read-side hash check
+    /// catches it and `promote_to_loose_uncompressed` rebuilds it
+    /// from the pack on the next access.
+    ///
+    /// On macOS APFS, `sync_data` alone costs ~5 ms per call (it
+    /// behaves like `F_FULLFSYNC` for tiny writes), and the parent
+    /// directory fsync is ~3-10 ms on top. For 1k blobs, that's
+    /// 5-15 seconds of pure fsync wallclock — the dominant cost in
+    /// the cold materialize path. Dropping both pays back ~30× on
+    /// raw create+rename throughput (measured: 200/s with sync_data
+    /// vs 5500/s without).
+    ///
+    /// Safety contract: this is only valid for files whose authority
+    /// lives elsewhere. Used by `promote_to_loose_uncompressed`; the
+    /// matching `loose_blob_path` reader hash-verifies before
+    /// trusting the bytes. Do *not* use for `put_blob` / `put_tree`
+    /// / `put_state` — those are the authoritative copy and must
+    /// survive a crash.
+    pub(super) fn write_loose_object_cache(&self, path: &Path, data: &[u8]) -> Result<()> {
+        write_atomic(path, data, AtomicWriteMode::NoSync, None)
     }
 
     pub(super) fn begin_snapshot_write_batch_impl(&self) -> Result<()> {
