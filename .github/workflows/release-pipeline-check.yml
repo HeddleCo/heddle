@@ -1,0 +1,30 @@
+name: Release pipeline check
+
+# Static asserter for the binary-release contract (heddle#56). The release
+# workflow only runs on `v*` tag pushes, so this job is what gives normal
+# PRs a signal that the contract is intact. Keep it cheap.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-pipeline-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: release.yml contract
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert release pipeline contract
+        run: bash scripts/check-release-pipeline.sh
