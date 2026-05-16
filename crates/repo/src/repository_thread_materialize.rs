@@ -349,6 +349,59 @@ fn timespec_to_ns(secs: i64, nanos: i64) -> i64 {
 /// file in the manifest is missing, an untracked file showed up,
 /// or any single field mismatched. Callers fall through to the
 /// slow `build_tree` path, which is always correct.
+/// Walk the captured tree named by `manifest.tree_hash` and collect
+/// every subdirectory's relative path (forward-slash joined,
+/// relative to the tree root, no leading or trailing slashes).
+/// Source of truth for [`stat_cache_no_op`]'s directory leg —
+/// includes tree-only empty directories that a `manifest.files`
+/// ancestors-derived set would miss.
+fn collect_expected_dirs(
+    repo: &Repository,
+    manifest: &ThreadManifest,
+) -> Result<std::collections::HashSet<String>> {
+    use std::collections::HashSet;
+    let mut set: HashSet<String> = HashSet::new();
+    let Some(tree) = repo.store().get_tree(&manifest.tree_hash)? else {
+        // Tree missing from the store would be a serious anomaly —
+        // surface it so the caller bails to the slow path which will
+        // re-derive everything from the worktree.
+        return Err(HeddleError::Config(format!(
+            "tree {} referenced by manifest is missing",
+            manifest.tree_hash
+        )));
+    };
+    collect_subdirs_into(repo, &tree, "", &mut set)?;
+    Ok(set)
+}
+
+fn collect_subdirs_into(
+    repo: &Repository,
+    tree: &objects::object::Tree,
+    rel_prefix: &str,
+    out: &mut std::collections::HashSet<String>,
+) -> Result<()> {
+    use objects::object::EntryType;
+    for entry in tree.entries() {
+        if entry.entry_type != EntryType::Tree {
+            continue;
+        }
+        let rel = if rel_prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{rel_prefix}/{}", entry.name)
+        };
+        let subtree = repo.store().get_tree(&entry.hash)?.ok_or_else(|| {
+            HeddleError::Config(format!(
+                "subtree {} missing while collecting expected dirs at {rel}",
+                entry.hash
+            ))
+        })?;
+        out.insert(rel.clone());
+        collect_subdirs_into(repo, &subtree, &rel, out)?;
+    }
+    Ok(())
+}
+
 fn stat_cache_no_op(
     repo: &Repository,
     manifest: &ThreadManifest,
@@ -370,26 +423,32 @@ fn stat_cache_no_op(
     // side, but the on-disk tree no longer matches what `build_tree`
     // would produce.
     //
-    // Derive the set of directories implied by every manifest file's
-    // ancestors (the "expected dirs") so the directory leg of the
-    // walk has something to compare against. Empty-dir additions
-    // surface as a walk-side dir that isn't in `expected_dirs`;
-    // empty-dir removals surface as an expected dir that the walk
-    // never visited.
-    let expected_dirs: HashSet<String> = {
-        let mut set = HashSet::new();
-        for key in manifest.files.keys() {
-            let path = Path::new(key);
-            let mut cur = path.parent();
-            while let Some(p) = cur {
-                if p.as_os_str().is_empty() {
-                    break;
-                }
-                set.insert(p.to_string_lossy().into_owned());
-                cur = p.parent();
-            }
-        }
-        set
+    // Source of truth for the expected directory set is the captured
+    // tree itself (the one the manifest's `tree_hash` names), not
+    // the manifest's file ancestors. Two reasons:
+    //
+    //   1. *Tree-only empty directories.* A `Tree` entry with no
+    //      files beneath it is invisible from a `manifest.files`
+    //      ancestors-walk — the file set is empty, so every
+    //      ancestor it would contribute is missing. Removing a
+    //      legit empty leaf dir would still false-pass.
+    //   2. *Future schema drift.* Files in `manifest.files` may
+    //      use slash-normalised relative paths that don't exactly
+    //      match how `Tree::entries` names subdirs on every
+    //      platform; walking the tree directly avoids the
+    //      double-encoding hazard.
+    //
+    // Cost is ~one `get_tree` per subdir of the captured tree.
+    // For the typical thread (a few hundred dirs) that's a small
+    // number of memory-mapped object reads; on the predicate's
+    // hot path it's bounded by the tree's directory fan-out, not
+    // file count.
+    let expected_dirs: HashSet<String> = match collect_expected_dirs(repo, manifest) {
+        Ok(s) => s,
+        // Any error walking the tree → conservatively bail to the
+        // slow path. `Ok(false)` keeps correctness; the worst case
+        // is a wasted full rebuild.
+        Err(_) => return Ok(false),
     };
 
     // Walk the worktree. For every file we see, check it against the
@@ -813,6 +872,46 @@ mod tests {
             ThreadCaptureOutcome::Captured { .. } => {}
             ThreadCaptureOutcome::NoOp => panic!("expected Captured; got NoOp"),
         }
+    }
+
+    /// Codex pass-3 P2: a *tree-only* empty directory — one that
+    /// was a captured tree entry but never had any files beneath it
+    /// — was invisible to the pass-2 fix because `expected_dirs`
+    /// was derived from manifest file ancestors. Removing such a
+    /// directory left every set the same size and the predicate
+    /// false-passed, silently dropping the change. The pass-3 fix
+    /// derives `expected_dirs` from the captured tree directly so
+    /// empty leaf dirs are tracked.
+    #[test]
+    fn stat_cache_detects_removed_tree_only_empty_directory() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        // Seed with one file (so the thread isn't empty) plus an
+        // empty directory that becomes a tree entry on its own.
+        fs::write(repo_dir.path().join("anchor.txt"), b"anchor\n").unwrap();
+        fs::create_dir_all(repo_dir.path().join("empty-on-purpose")).unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        let manifest = repo.materialize_thread("main", &dest).unwrap();
+
+        // Sanity: the empty dir landed on disk after materialise.
+        assert!(
+            dest.join("empty-on-purpose").is_dir(),
+            "materialise must emit the empty dir on disk"
+        );
+
+        // Remove the empty dir. No files inside it changed
+        // because there never were any — pure tree-only delta.
+        fs::remove_dir(dest.join("empty-on-purpose")).unwrap();
+
+        assert!(
+            !stat_cache_no_op(&repo, &manifest, &dest).unwrap(),
+            "removing a tree-only empty directory must invalidate \
+             the fast path; pre-fix the predicate false-passed and \
+             auto-capture silently dropped the deletion"
+        );
     }
 
     /// Empty directory added by the user — manifests only record

@@ -181,6 +181,7 @@ impl NfsShell {
             runtime: Some(runtime),
             mountpoint,
             port,
+            unmounted: false,
         })
     }
 }
@@ -191,6 +192,13 @@ pub struct NfsSession {
     mountpoint: PathBuf,
     #[allow(dead_code)]
     port: u16,
+    /// `true` after a successful explicit `unmount()`. Tells `Drop`
+    /// to skip its fallback `invoke_unmount`; without this, an
+    /// explicit unmount is followed by Drop's silent retry, which
+    /// produces a spurious failure warning (the path is already
+    /// unmounted) and — in the worst case — racily unmounts a
+    /// freshly-reused mountpoint a sibling thread just claimed.
+    unmounted: bool,
 }
 
 impl NfsSession {
@@ -198,6 +206,7 @@ impl NfsSession {
         invoke_unmount(&self.mountpoint).map_err(|e| {
             MountError::Store(objects::error::HeddleError::Io(e))
         })?;
+        self.unmounted = true;
         // Shut the server down. `Runtime::shutdown_background`
         // releases the worker threads without blocking; the
         // accept loop's `tokio::spawn`-ed tasks die with the
@@ -215,11 +224,13 @@ impl NfsSession {
 
 impl Drop for NfsSession {
     fn drop(&mut self) {
-        if let Err(e) = invoke_unmount(&self.mountpoint) {
-            warn!(
-                mountpoint = %self.mountpoint.display(),
-                "nfs unmount on drop failed: {e}",
-            );
+        if !self.unmounted {
+            if let Err(e) = invoke_unmount(&self.mountpoint) {
+                warn!(
+                    mountpoint = %self.mountpoint.display(),
+                    "nfs unmount on drop failed: {e}",
+                );
+            }
         }
         if let Some(rt) = self.runtime.take() {
             rt.shutdown_background();
@@ -575,12 +586,40 @@ impl NFSFileSystem for HeddleNFS {
     }
 
     async fn readlink(&self, id: fileid3) -> std::result::Result<nfspath3, nfsstat3> {
-        // Symlink readback would need a `PlatformShell::readlink`
-        // hook the trait doesn't have yet. Surface as ENOSYS-ish
-        // (NFS3ERR_NOTSUPP) so a readdir hit returning a symlink
-        // is at least diagnosable.
-        let _ = id;
-        Err(nfsstat3::NFS3ERR_NOTSUPP)
+        // Heddle stores symlinks as blobs whose content is the
+        // link target path, and `ContentAddressedMount::read`
+        // already serves both regular files and symlinks out of the
+        // same blob-backed code path. So `readlink` is just
+        // `attrs → check kind → read whole blob → wrap as nfspath3`.
+        //
+        // Bound the buffer at the path-length cap most kernels
+        // accept (4 KiB, matching `PATH_MAX` on macOS/Linux). A
+        // captured symlink whose target exceeds that wouldn't be
+        // round-trippable through the kernel anyway; surface the
+        // overflow as `NFS3ERR_NAMETOOLONG`.
+        let attrs = self
+            .inner
+            .attrs(NodeId(id))
+            .map_err(|e| mount_err_to_nfs(&e))?;
+        if !matches!(attrs.kind, NodeKind::Symlink) {
+            return Err(nfsstat3::NFS3ERR_INVAL);
+        }
+        const MAX_SYMLINK_BYTES: u64 = 4096;
+        if attrs.size > MAX_SYMLINK_BYTES {
+            tracing::warn!(
+                node = id,
+                size = attrs.size,
+                "nfs: symlink target exceeds PATH_MAX-class bound"
+            );
+            return Err(nfsstat3::NFS3ERR_NAMETOOLONG);
+        }
+        let mut buf = vec![0u8; attrs.size as usize];
+        let n = self
+            .inner
+            .read(NodeId(id), 0, &mut buf)
+            .map_err(|e| mount_err_to_nfs(&e))?;
+        buf.truncate(n);
+        Ok(nfspath3 { 0: buf })
     }
 }
 
