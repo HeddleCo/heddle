@@ -160,19 +160,31 @@ fi
 # downstream job dropped the dep" regression.
 
 ensure_pyyaml() {
-  python3 -c 'import yaml' 2>/dev/null && return 0
-  # PyYAML is pre-installed on GitHub-hosted ubuntu-latest, but blacksmith
-  # / self-hosted runners may have a slimmer image. Fall back to pip.
-  python3 -m pip install --quiet --disable-pip-version-check pyyaml >/dev/null 2>&1 || true
-  python3 -c 'import yaml' 2>/dev/null
+  # Echoes the python interpreter to use (with PyYAML importable), or
+  # returns non-zero. Prefer the system python3 if PyYAML is already
+  # there; otherwise spin up an ephemeral venv and install PyYAML into
+  # it. We deliberately don't fall back to `python3 -m pip install` at
+  # system scope: on PEP 668-enforcing distros (Ubuntu 24.04+) that
+  # errors out with `externally-managed-environment`, which would turn
+  # this asserter into a CI breaker on slim runner images.
+  if python3 -c 'import yaml' 2>/dev/null; then
+    echo python3
+    return 0
+  fi
+  local venv
+  venv="$(mktemp -d)/venv"
+  python3 -m venv "$venv" >/dev/null 2>&1 || return 1
+  "$venv/bin/pip" install --quiet --disable-pip-version-check pyyaml >/dev/null 2>&1 || return 1
+  "$venv/bin/python" -c 'import yaml' 2>/dev/null || return 1
+  echo "$venv/bin/python"
 }
 
 if ! command -v python3 >/dev/null 2>&1; then
   err "python3 not available; strict structural checks skipped"
-elif ! ensure_pyyaml; then
-  err "PyYAML not available and could not be installed; strict structural checks skipped"
+elif ! PY=$(ensure_pyyaml); then
+  err "PyYAML not available and venv fallback failed; strict structural checks skipped"
 else
-  strict_report=$(python3 - "$WF" <<'PY'
+  strict_report=$("$PY" - "$WF" <<'PY'
 import sys
 import yaml
 

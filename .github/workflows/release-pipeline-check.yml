@@ -28,3 +28,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Assert release pipeline contract
         run: bash scripts/check-release-pipeline.sh
+      - name: Assert PyYAML venv fallback (PEP 668 path)
+        # Shadow `python3` with a fresh venv that has no PyYAML installed,
+        # so the asserter's `import yaml` fails and the venv fallback in
+        # ensure_pyyaml() is the only way the strict structural checks
+        # can succeed. Guards against regressions like the earlier
+        # `python3 -m pip install` fallback that broke under
+        # `externally-managed-environment` on Ubuntu 24.04.
+        run: |
+          set -euo pipefail
+          shadow="$(mktemp -d)/shadow"
+          python3 -m venv "$shadow"
+          "$shadow/bin/python" -c 'import yaml' && {
+            echo "shadow venv unexpectedly has PyYAML; test is not exercising the fallback" >&2
+            exit 1
+          } || true
+          PATH="$shadow/bin:$PATH" bash scripts/check-release-pipeline.sh
