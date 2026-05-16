@@ -30,7 +30,12 @@ use serde::{Deserialize, Serialize};
 /// Current schema version. Bumped only when the on-disk layout
 /// changes incompatibly; readers should refuse to interpret a
 /// manifest with a future version they don't recognise.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 adds [`ManifestFile::size`] — the prior schema had no size
+/// field, so a v1 manifest read as v2 would default `size` to 0 and
+/// silently mismatch every entry. Bumping the version forces a clean
+/// rematerialize for any thread carrying a pre-v2 manifest.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// On-disk per-thread materialization record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,15 +77,22 @@ impl ThreadManifest {
     }
 }
 
-/// Per-file record inside a [`ThreadManifest`]. All four time/identity
-/// fields are stored together so a `stat`-cache hit is a single
-/// comparison and the user can never accidentally bypass it by
-/// `touch`ing a file with a frozen clock.
+/// Per-file record inside a [`ThreadManifest`]. The stat fields are
+/// stored together so a `stat`-cache hit is a single comparison and
+/// the user can never accidentally bypass it by `touch`ing a file
+/// with a frozen clock.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ManifestFile {
     /// Content hash at materialize time. Reused as the file's blob
     /// hash on capture when the stat-cache matches.
     pub hash: ContentHash,
+    /// File size in bytes. Cheapest possible "content changed"
+    /// detector — independent of mtime granularity. CI runners
+    /// frequently mount filesystems (ext4 with various options,
+    /// overlayfs over tmpfs) where two back-to-back writes share an
+    /// mtime, so size is the safety net that catches "wrote
+    /// different-length bytes" even when the timestamps collapse.
+    pub size: u64,
     /// File inode. On reflink filesystems (APFS, btrfs, XFS-reflink),
     /// the inode is the per-clonefile identity — a re-clonefile of
     /// the same canonical blob gets a *different* inode, so this
@@ -101,7 +113,8 @@ impl ManifestFile {
     /// as `self`. Hot-path comparison for the capture stat-cache.
     #[inline]
     pub fn matches(&self, other: &ManifestFile) -> bool {
-        self.inode == other.inode
+        self.size == other.size
+            && self.inode == other.inode
             && self.mtime_ns == other.mtime_ns
             && self.ctime_ns == other.ctime_ns
             && self.mode == other.mode
@@ -366,6 +379,7 @@ mod tests {
             "Cargo.toml".to_string(),
             ManifestFile {
                 hash: h(2),
+                size: 128,
                 inode: 4242,
                 mtime_ns: 1_700_000_000_000_000_000,
                 ctime_ns: 1_700_000_000_000_000_000,
@@ -376,6 +390,7 @@ mod tests {
             "src/main.rs".to_string(),
             ManifestFile {
                 hash: h(3),
+                size: 512,
                 inode: 4243,
                 mtime_ns: 1_700_000_001_000_000_000,
                 ctime_ns: 1_700_000_001_000_000_000,
@@ -406,6 +421,7 @@ mod tests {
             "a.txt".to_string(),
             ManifestFile {
                 hash: h(9),
+                size: 7,
                 inode: 1,
                 mtime_ns: 0,
                 ctime_ns: 0,
@@ -436,6 +452,7 @@ mod tests {
     fn matches_compares_identity_fields() {
         let a = ManifestFile {
             hash: h(1),
+            size: 64,
             inode: 100,
             mtime_ns: 200,
             ctime_ns: 300,
@@ -449,6 +466,9 @@ mod tests {
         let mut d = a;
         d.mode = 0o100755;
         assert!(!a.matches(&d));
+        let mut e = a;
+        e.size = 65;
+        assert!(!a.matches(&e), "size change must invalidate the cache");
     }
 
     /// `remove_thread_manifest_dir` must reap empty parent directories

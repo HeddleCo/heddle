@@ -429,6 +429,7 @@ impl<'a> TreeBuildPolicy<'a> {
         let cached = cache.files.get(&rel_str)?;
         let stat = crate::thread_manifest::ManifestFile {
             hash: cached.hash,
+            size: std::os::unix::fs::MetadataExt::size(&entry.metadata),
             inode: std::os::unix::fs::MetadataExt::ino(&entry.metadata),
             mtime_ns: std::os::unix::fs::MetadataExt::mtime(&entry.metadata)
                 .saturating_mul(1_000_000_000)

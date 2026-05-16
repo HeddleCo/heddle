@@ -313,6 +313,7 @@ pub(crate) fn populate_manifest_from_tree(
                     rel_path,
                     ManifestFile {
                         hash: entry.hash,
+                        size: meta.size(),
                         inode: meta.ino(),
                         mtime_ns: timespec_to_ns(meta.mtime(), meta.mtime_nsec()),
                         ctime_ns: timespec_to_ns(meta.ctime(), meta.ctime_nsec()),
@@ -498,6 +499,7 @@ fn walk_for_no_op(
             };
             let stat = ManifestFile {
                 hash: manifest_entry.hash,
+                size: meta.size(),
                 inode: meta.ino(),
                 mtime_ns: timespec_to_ns(meta.mtime(), meta.mtime_nsec()),
                 ctime_ns: timespec_to_ns(meta.ctime(), meta.ctime_nsec()),
