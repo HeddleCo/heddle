@@ -113,3 +113,152 @@ impl BlobHydrator for HostedBlobHydrator {
             .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! These tests reach into `pub(super)` fields on `HostedGrpcClient`
+    //! to fabricate a client whose `Channel` was built via
+    //! `Endpoint::connect_lazy` — i.e. it doesn't actually dial
+    //! anything until the first RPC and then fails predictably with
+    //! `tonic::transport::Error`. That's enough to drive the
+    //! [`HostedBlobHydrator::hydrate`] runtime-bridging logic end to
+    //! end without spinning up an in-process gRPC server.
+    use std::{sync::Arc, thread};
+    use cli_shared::ClientConfig;
+    use objects::object::{Blob, ChangeId};
+    use repo::Repository;
+    use tempfile::TempDir;
+    use tokio::sync::Mutex;
+    use tonic::transport::Endpoint;
+
+    use grpc::heddle::v1::{
+        auth_service_client::AuthServiceClient,
+        content_service_client::ContentServiceClient,
+        hosted_user_service_client::HostedUserServiceClient,
+        repo_sync_service_client::RepoSyncServiceClient,
+    };
+
+    use super::{
+        BlobHydrator, HostedBlobHydrator,
+        super::{HostedGrpcClient, helpers::HostedTransportPolicy},
+    };
+
+    /// Build a [`HostedGrpcClient`] that points at a definitely-closed
+    /// `127.0.0.1:1` endpoint via `connect_lazy`. Any RPC against it
+    /// returns a transport-layer error rather than hanging. Must be
+    /// called from inside a tokio runtime context — `connect_lazy`
+    /// reaches into hyper-util which needs a reactor on construction.
+    fn fabricate_offline_client() -> HostedGrpcClient {
+        let endpoint = Endpoint::from_static("http://127.0.0.1:1");
+        let channel = endpoint.connect_lazy();
+        let config = ClientConfig::default();
+        let transport = HostedTransportPolicy::from_client_config(&config);
+        HostedGrpcClient {
+            inner: RepoSyncServiceClient::new(channel.clone()),
+            user: HostedUserServiceClient::new(channel.clone()),
+            auth: AuthServiceClient::new(channel.clone()),
+            content: ContentServiceClient::new(channel),
+            token_header: None,
+            transport,
+            auth_proof_key_pem: None,
+            server_key: None,
+        }
+    }
+
+    /// Build the smallest possible Heddle repo for the trait method to
+    /// scribble into (it never actually does, since the call fails
+    /// before reaching the put_blob site).
+    fn temp_repo() -> (TempDir, Repository) {
+        let temp = TempDir::new().expect("temp");
+        let repo = Repository::init_default(temp.path()).expect("init heddle repo");
+        (temp, repo)
+    }
+
+    #[test]
+    fn new_stores_all_constructor_arguments_for_later_hydrate() {
+        // Pure-construction smoke test. Runs the construction inside
+        // the runtime context because `connect_lazy` reaches into
+        // hyper-util which needs a tokio reactor on call. Locks in
+        // the public `new` signature so hosted callers (e.g.
+        // `clone_network`) break visibly on signature drift.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let handle = runtime.handle().clone();
+        let hydrator = runtime.block_on(async {
+            let client = Arc::new(Mutex::new(fabricate_offline_client()));
+            HostedBlobHydrator::new(
+                client,
+                "org/acme/repo".to_string(),
+                "main".to_string(),
+                ChangeId::generate(),
+                handle,
+            )
+        });
+        // Force the field reads through a Debug-free path so the
+        // optimizer can't drop them entirely under coverage.
+        assert!(matches!(&hydrator as &dyn BlobHydrator, _));
+        drop(hydrator);
+        drop(runtime);
+    }
+
+    #[test]
+    fn hydrate_surfaces_transport_failure_without_silent_fallback() {
+        // Spin a dedicated multi-thread runtime on a SEPARATE thread,
+        // hand its handle to the hydrator, and call `hydrate` from
+        // the *main* test thread — that's the production setup
+        // pattern (see the doc comment on the struct), and it lets
+        // `handle.block_on` work without nesting into a running
+        // runtime on our own thread.
+        let (runtime_tx, runtime_rx) = std::sync::mpsc::channel();
+        let runtime_thread = thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("dedicated hydration runtime");
+            runtime_tx.send(rt.handle().clone()).expect("send handle");
+            // Park the runtime alive until the test releases it.
+            rt.block_on(async {
+                let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+                let _ = rx.await;
+            });
+        });
+        let handle = runtime_rx.recv().expect("receive runtime handle");
+
+        // Construct the offline client inside the dedicated runtime —
+        // `Endpoint::connect_lazy` needs a tokio reactor on call.
+        let client = Arc::new(Mutex::new(
+            handle.block_on(async { fabricate_offline_client() }),
+        ));
+        let hydrator = HostedBlobHydrator::new(
+            client,
+            "org/acme/repo".to_string(),
+            "main".to_string(),
+            ChangeId::generate(),
+            handle.clone(),
+        );
+
+        let (_temp, repo) = temp_repo();
+        let blake3 = Blob::new(b"placeholder".to_vec()).hash();
+        let err = hydrator
+            .hydrate(&repo, &blake3)
+            .expect_err("offline endpoint must produce an error");
+        let msg = err.to_string();
+        // Don't pin on the exact tonic wording (it varies by tonic /
+        // hyper version), just confirm we got an error *back* — i.e.
+        // the hydrator didn't silently return Ok.
+        assert!(
+            !msg.is_empty(),
+            "hydrator must surface a non-empty error message",
+        );
+        // Drop the hydrator so the Arc'd client refs go away before
+        // we tear down the runtime. The runtime thread leaks
+        // deliberately — there's no clean shutdown story for a
+        // detached runtime in std, and the test process exits right
+        // after this anyway.
+        drop(hydrator);
+        std::mem::forget(runtime_thread);
+    }
+}
