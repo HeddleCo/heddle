@@ -1,0 +1,198 @@
+name: Release binaries
+
+# Pre-built binaries for the `heddle` CLI on tagged releases.
+#
+# Trigger: any `v*` tag push. The job tree:
+#
+#   build (matrix, 5 targets) ──┐
+#                               ├─► sign + checksum (per artifact, in-matrix)
+#                               └─► release (aggregates, publishes, posts SHA256SUMS)
+#
+# Strategy: native matrix builds (one runner per target) instead of
+# cross-compilation. Rationale lives in RELEASING.md — short version:
+# Apple-codesign + Windows packaging are simpler when the host triple
+# matches the target, and GitHub-hosted ARM runners (ubuntu-24.04-arm,
+# macos-14) make this free.
+#
+# Signing: cosign keyless via the Sigstore public-good instance. No
+# stored secrets — the GitHub OIDC token is the trust anchor. Verifying
+# parties run `cosign verify-blob --certificate-identity-regexp ...`;
+# see RELEASING.md for the exact recipe.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (must already exist; for dry-runs use a pre-pushed v*-rc tag)'
+        required: true
+
+permissions:
+  contents: write   # create release + upload assets
+  id-token: write   # cosign keyless OIDC
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: heddle
+  CRATE_NAME: heddle-cli
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Compute version
+        id: ver
+        shell: bash
+        run: |
+          ref="${{ inputs.tag || github.ref_name }}"
+          # Strip leading "v" if present (v0.3.0 → 0.3.0).
+          version="${ref#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary
+        run: cargo build --release --locked -p ${{ env.CRATE_NAME }} --target ${{ matrix.target }}
+
+      - name: Stage artifact (unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="heddle-${{ steps.ver.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p "dist/${stage}"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${stage}/"
+          cp README.md LICENSE NOTICE "dist/${stage}/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          ( cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256" )
+          echo "ASSET=dist/${stage}.tar.gz" >> "$GITHUB_ENV"
+          echo "SUM=dist/${stage}.tar.gz.sha256" >> "$GITHUB_ENV"
+
+      - name: Stage artifact (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $stage = "heddle-${{ steps.ver.outputs.tag }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${env:BIN_NAME}.exe" "dist/$stage/"
+          Copy-Item README.md, LICENSE, NOTICE "dist/$stage/"
+          Compress-Archive -Path "dist/$stage" -DestinationPath "dist/$stage.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$stage.zip").Hash.ToLower()
+          "$hash  $stage.zip" | Out-File -Encoding ascii "dist/$stage.zip.sha256"
+          "ASSET=dist/$stage.zip"        | Out-File -Encoding ascii -Append $env:GITHUB_ENV
+          "SUM=dist/$stage.zip.sha256"   | Out-File -Encoding ascii -Append $env:GITHUB_ENV
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign artifact (cosign keyless)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Keyless signing: identity is this workflow run's OIDC token,
+          # rooted in the Sigstore public-good Fulcio CA. The .sig and
+          # .pem land next to the artifact for offline verification.
+          cosign sign-blob --yes \
+            --output-signature "${ASSET}.sig" \
+            --output-certificate "${ASSET}.pem" \
+            "${ASSET}"
+
+      - name: Upload build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: heddle-${{ matrix.target }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.SUM }}
+            ${{ env.ASSET }}.sig
+            ${{ env.ASSET }}.pem
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve tag
+        id: ver
+        run: |
+          ref="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Download all build outputs
+        uses: actions/download-artifact@v4
+        with:
+          path: staging
+
+      - name: Flatten + aggregate SHA256SUMS
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find staging -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sig' -o -name '*.pem' -o -name '*.sha256' \) \
+            -exec cp -t dist {} +
+          ( cd dist && cat *.sha256 | sort > SHA256SUMS )
+          echo "--- artifacts ---"
+          ls -la dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/heddle-*.tar.gz
+            dist/heddle-*.tar.gz.sha256
+            dist/heddle-*.tar.gz.sig
+            dist/heddle-*.tar.gz.pem
+            dist/heddle-*.zip
+            dist/heddle-*.zip.sha256
+            dist/heddle-*.zip.sig
+            dist/heddle-*.zip.pem
+            dist/SHA256SUMS
