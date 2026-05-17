@@ -5,10 +5,7 @@ use super::*;
 /// directly. Used by undo tests that assert HEAD has moved to a specific state.
 fn head_short(root: &std::path::Path) -> String {
     let repo = Repository::open(root).unwrap();
-    repo.head()
-        .unwrap()
-        .expect("repo has HEAD")
-        .short()
+    repo.head().unwrap().expect("repo has HEAD").short()
 }
 
 #[test]
@@ -637,11 +634,21 @@ fn test_undo_refuses_when_prior_state_missing() {
     heddle_must_succeed(&["capture", "-m", "second"], temp.path());
 
     // Simulate the destructive-boundary case: the prior state object file is
-    // gone from the loose store. (Mirrors a `gc --prune` having reached past
-    // the live oplog, or an oplog backup restored without its objects.)
+    // gone from the loose store *and* any pack that might contain it.
+    // Mirrors a `gc --prune` having reached past the live oplog, or an oplog
+    // backup restored without its objects.
     let state_path = locate_state_loose_file(temp.path(), &first_state_short)
         .expect("prior state's loose file is present after capture");
     std::fs::remove_file(&state_path).unwrap();
+    // Drop every pack in the repo too; heddle writes packs eagerly and a
+    // surviving pack would still resolve the state, masking the test's
+    // destructive-boundary intent.
+    let packs_dir = temp.path().join(".heddle/packs");
+    if packs_dir.exists() {
+        for entry in std::fs::read_dir(&packs_dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+    }
 
     let err = heddle(&["undo"], Some(temp.path()))
         .expect_err("undo must refuse when the prior state is missing");
@@ -686,29 +693,19 @@ fn test_undo_help_lists_undoable_and_unsupported() {
     );
 }
 
-/// Locate a state's loose object file within `.heddle/objectstore/states/`.
-/// Returns the path if exactly one matching file is found. The state directory
-/// layout is `states/<aa>/<rest>` where `<aa><rest>` is the full content hash
-/// — we match by the short prefix to keep the helper independent of the full
-/// hash, which the test doesn't know.
+/// Locate a state's on-disk object file inside `.heddle/objects/states/` by
+/// the short change-id prefix. Heddle stores each captured state as
+/// `<full-change-id>.state` in that directory; the short id is the first
+/// component of the filename. Returns `None` when no matching file exists
+/// (e.g. the state lives only in a packfile).
 fn locate_state_loose_file(repo_root: &std::path::Path, short: &str) -> Option<std::path::PathBuf> {
-    let states_dir = repo_root.join(".heddle/objectstore/states");
-    if !states_dir.exists() {
-        return None;
-    }
-    for shard in std::fs::read_dir(&states_dir).ok()? {
-        let shard = shard.ok()?;
-        if !shard.file_type().ok()?.is_dir() {
-            continue;
-        }
-        for entry in std::fs::read_dir(shard.path()).ok()? {
-            let entry = entry.ok()?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            let combined = format!("{}{}", shard.file_name().to_string_lossy(), name_str);
-            if combined.starts_with(short) {
-                return Some(entry.path());
-            }
+    let states_dir = repo_root.join(".heddle/objects/states");
+    for entry in std::fs::read_dir(&states_dir).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(short) {
+            return Some(entry.path());
         }
     }
     None

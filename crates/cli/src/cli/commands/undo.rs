@@ -2,7 +2,8 @@
 //! Undo and redo commands.
 
 use anyhow::{Result, anyhow};
-use oplog::OpBatch;
+use objects::object::ChangeId;
+use oplog::{OpBatch, OpRecord};
 use repo::Repository;
 use serde::Serialize;
 
@@ -98,6 +99,12 @@ pub fn cmd_undo(cli: &Cli, steps: usize, list: bool, depth: usize, preview: bool
     }
 
     ensure_worktree_clean(&repo, "undo")?;
+    // Refuse before mutating anything when a state the batch needs to
+    // restore is missing from the object store — typically because `gc
+    // --prune` or a truncated oplog has reached past the live window.
+    // Letting `apply_undo_batch` discover this mid-apply would leave the
+    // repo half-undone (worktree partially rewritten, batch not marked).
+    ensure_undo_states_reachable(&repo, &batches)?;
 
     let mut updated_batches = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -256,4 +263,62 @@ fn print_head(repo: &Repository) -> Result<()> {
         println!("Now at: {}", id.short());
     }
     Ok(())
+}
+
+/// Walk every batch we're about to undo and verify that each state the
+/// inverse would restore is still present in the object store. If any state
+/// is missing we refuse before touching the worktree or marking batches
+/// undone — letting the apply path discover the gap mid-flight would leave
+/// the repository half-rewound (partial worktree apply, batch unmarked).
+///
+/// "Missing" here means a destructive boundary has been crossed: typically
+/// `gc --prune` reached past the live oplog window, or an oplog backup was
+/// restored without its underlying objects. The user gets a single clear
+/// message instead of a raw `state not found` from deep in `goto`.
+fn ensure_undo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
+    let mut missing: Vec<(u64, ChangeId)> = Vec::new();
+    for batch in batches {
+        for entry in &batch.entries {
+            for needed in states_required_for_undo(&entry.operation) {
+                if !repo.store().has_state(&needed)? {
+                    missing.push((entry.id, needed));
+                }
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let shorts: Vec<String> = missing
+        .iter()
+        .map(|(op_id, id)| format!("op {} -> {}", op_id, id.short()))
+        .collect();
+    Err(anyhow!(
+        "Refusing to undo: prior state(s) needed to restore have been garbage-collected or are otherwise missing from the object store ({}). \
+         A destructive boundary (likely `heddle gc --prune`) has been crossed past the live oplog window — \
+         undo cannot rewind here. Restore the missing states from a backup, or run `heddle undo --list` and pick an entry past the boundary.",
+        shorts.join(", "),
+    ))
+}
+
+/// Identify the state IDs that an inverse for `op` would need to load.
+/// Variants whose undo is a no-op (e.g. `Fork`, `Collapse`, `Redact`,
+/// `Purge`, `Checkpoint`) return an empty list — they don't reach into the
+/// object store, so a missing object can't trip them.
+fn states_required_for_undo(op: &OpRecord) -> Vec<ChangeId> {
+    match op {
+        OpRecord::Snapshot {
+            prev_head: Some(prev),
+            ..
+        } => vec![*prev],
+        OpRecord::Goto {
+            prev_head: Some(prev),
+            ..
+        } => vec![*prev],
+        OpRecord::ThreadDelete { state, .. } => vec![*state],
+        OpRecord::ThreadUpdate { old_state, .. } => vec![*old_state],
+        OpRecord::MarkerDelete { state, .. } => vec![*state],
+        _ => Vec::new(),
+    }
 }
