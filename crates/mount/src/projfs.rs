@@ -43,35 +43,38 @@
 //!   paths are always NTFS on a standard install.
 
 use std::{
+    collections::HashMap,
     ffi::{OsStr, OsString},
     os::windows::ffi::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use tracing::warn;
 use windows::{
-    core::{GUID, HRESULT, PCWSTR, PWSTR},
+    core::{GUID, HRESULT, PCWSTR},
     Win32::{
-        Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_MOD_NOT_FOUND, S_OK},
+        Foundation::{FreeLibrary, ERROR_INSUFFICIENT_BUFFER, S_OK},
         Storage::ProjectedFileSystem::{
             PrjAllocateAlignedBuffer, PrjFillDirEntryBuffer, PrjFreeAlignedBuffer,
             PrjMarkDirectoryAsPlaceholder, PrjStartVirtualizing, PrjStopVirtualizing,
             PrjWriteFileData, PrjWritePlaceholderInfo, PRJ_CALLBACKS, PRJ_CALLBACK_DATA,
-            PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO, PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT,
-            PRJ_NOTIFICATION, PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_DELETED,
+            PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN, PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO,
+            PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_NOTIFICATION,
+            PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_DELETED,
             PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED,
             PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_NO_MODIFICATION, PRJ_NOTIFICATION_FILE_RENAMED,
-            PRJ_NOTIFICATION_MAPPING, PRJ_PLACEHOLDER_INFO, PRJ_STARTVIRTUALIZING_OPTIONS,
+            PRJ_NOTIFICATION_MAPPING, PRJ_NOTIFY_TYPES, PRJ_PLACEHOLDER_INFO,
+            PRJ_STARTVIRTUALIZING_OPTIONS,
         },
-        System::LibraryLoader::{FreeLibrary, LoadLibraryW},
+        System::LibraryLoader::LoadLibraryW,
     },
 };
 
 use crate::{
     core::ContentAddressedMount,
     error::{MountError, Result},
-    shell::{NodeId, NodeKind, PlatformShell},
+    shell::{Entry, NodeId, NodeKind, PlatformShell},
 };
 
 // ----------------------------------------------------------------
@@ -145,10 +148,9 @@ impl ProjFsShell {
             PrjMarkDirectoryAsPlaceholder(
                 PCWSTR(root_wide.as_ptr()),
                 PCWSTR::null(),
-                std::ptr::null(),
+                None,
                 &instance_id,
             )
-            .ok()
             .map_err(|e| hresult_to_mount_error(e.code()))?;
         }
 
@@ -171,6 +173,7 @@ impl ProjFsShell {
         let context = Box::new(InstanceContext {
             shell: self.inner,
             virtualization_root: root.clone(),
+            enumerations: Mutex::new(HashMap::new()),
         });
         let instance_context = Box::into_raw(context) as *const std::ffi::c_void;
 
@@ -188,12 +191,30 @@ impl ProjFsShell {
         // The notification mapping subscribes us to close-modified,
         // close-deleted, and rename events. Reads (placeholder hydra-
         // tion) work without an explicit subscription.
-        let notification_bits = (PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED.0
-            | PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_DELETED.0
-            | PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_NO_MODIFICATION.0
-            | PRJ_NOTIFICATION_FILE_RENAMED.0) as i32;
+        //
+        // windows-rs 0.58 separates `PRJ_NOTIFICATION` (the enum
+        // delivered to the trampoline) from `PRJ_NOTIFY_TYPES` (the
+        // bitmask we ship into `PRJ_NOTIFICATION_MAPPING`); the two
+        // have identical underlying `i32` storage but the type system
+        // refuses the implicit conversion.
+        // windows-rs 0.58 splits the notification surface in two:
+        // the individual constants are typed `PRJ_NOTIFICATION`
+        // (inner `i32`, used for the value delivered to the
+        // notification trampoline) while the mask field on
+        // `PRJ_NOTIFICATION_MAPPING` is `PRJ_NOTIFY_TYPES` (inner
+        // `u32`). The constants' bit values are identical between
+        // the two; we OR them as `i32` and re-cast on the way into
+        // the mask. The transmute-via-cast is sound because both
+        // types are `#[repr(transparent)]` over the underlying
+        // 32-bit integer with the same bit-layout.
+        let notification_bits = PRJ_NOTIFY_TYPES(
+            (PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED.0
+                | PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_DELETED.0
+                | PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_NO_MODIFICATION.0
+                | PRJ_NOTIFICATION_FILE_RENAMED.0) as u32,
+        );
         let mut notification_mapping = PRJ_NOTIFICATION_MAPPING {
-            NotificationBitMask: PRJ_NOTIFICATION(notification_bits),
+            NotificationBitMask: notification_bits,
             NotificationRoot: PCWSTR::null(),
         };
 
@@ -209,25 +230,29 @@ impl ProjFsShell {
         // call. `instance_context` is the only thing that has to
         // outlive *the mount*, and it does — it's held by the kernel
         // and reclaimed in our Drop.
-        let mut handle = PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT::default();
-        let start_rc = unsafe {
+        //
+        // windows-rs 0.58 returns the handle from `PrjStartVirtualizing`
+        // rather than taking it as an out parameter (the older shape
+        // the scaffold targeted).
+        let handle = match unsafe {
             PrjStartVirtualizing(
                 PCWSTR(root_wide.as_ptr()),
                 &callbacks,
                 Some(instance_context),
                 Some(&options),
-                &mut handle,
             )
-        };
-        if let Err(e) = start_rc {
-            // Mount didn't start; reclaim the box so we don't leak.
-            // SAFETY: `instance_context` was produced by Box::into_raw
-            // above and the kernel never took ownership.
-            unsafe {
-                drop(Box::from_raw(instance_context as *mut InstanceContext));
+        } {
+            Ok(h) => h,
+            Err(e) => {
+                // Mount didn't start; reclaim the box so we don't leak.
+                // SAFETY: `instance_context` was produced by Box::into_raw
+                // above and the kernel never took ownership.
+                unsafe {
+                    drop(Box::from_raw(instance_context as *mut InstanceContext));
+                }
+                return Err(hresult_to_mount_error(e.code()));
             }
-            return Err(hresult_to_mount_error(e.code()));
-        }
+        };
 
         Ok(ProjFsSession {
             handle: Some(handle),
@@ -299,9 +324,69 @@ impl ProjFsSession {
 /// so the close-modified bridge can read the hydrated NTFS file at
 /// `virtualization_root.join(rel_path)` regardless of the host
 /// process's current working directory.
+///
+/// `enumerations` is the per-directory-enumeration cursor cache,
+/// keyed by the `enumeration_id` GUID the kernel hands us across the
+/// start/get/end trio. ProjFS does not cache the listing for us; if
+/// the user-side buffer is too small to fit every entry in one
+/// `get_dir_enum` call, the kernel will recall us and expect us to
+/// resume from where the previous call left off. Pre-fix the trampoline
+/// re-enumerated from index 0 on every recall, which (a) duplicated
+/// every entry in directories with > kernel-buffer worth of children
+/// (~32 entries on a typical 8KiB buffer), and (b) prevented the
+/// kernel from ever seeing `EntriesAvailable=false`, so listings of
+/// large directories looped forever. The cursor here is the entry
+/// index of the next-to-send file.
 struct InstanceContext {
     shell: Arc<dyn PlatformShell + Send + Sync>,
     virtualization_root: PathBuf,
+    enumerations: Mutex<HashMap<EnumKey, EnumState>>,
+}
+
+/// Hashable wrapper around `GUID` so we can key the per-enumeration
+/// cursor map by the raw `enumeration_id` ProjFS hands us. `GUID`
+/// itself is `Copy + Eq` but does not implement `Hash`, so we
+/// canonicalise to the little-endian byte form (matching the format
+/// the on-disk `.heddle_projfs_id` sidecar uses).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct EnumKey([u8; 16]);
+
+impl EnumKey {
+    fn from_guid(g: &GUID) -> Self {
+        let mut buf = [0u8; 16];
+        buf[0..4].copy_from_slice(&g.data1.to_le_bytes());
+        buf[4..6].copy_from_slice(&g.data2.to_le_bytes());
+        buf[6..8].copy_from_slice(&g.data3.to_le_bytes());
+        buf[8..16].copy_from_slice(&g.data4);
+        Self(buf)
+    }
+}
+
+/// One per active `enumeration_id`. `entries` is the lazily-populated
+/// snapshot from `PlatformShell::enumerate` (populated on the first
+/// `get_dir_enum` call after `start_dir_enum`, and again whenever the
+/// kernel sets `PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN`). `cursor` is the
+/// index of the next entry to emit.
+struct EnumState {
+    entries: Vec<Entry>,
+    cursor: usize,
+    populated: bool,
+}
+
+impl EnumState {
+    fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+            cursor: 0,
+            populated: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.entries.clear();
+        self.cursor = 0;
+        self.populated = false;
+    }
 }
 
 impl Drop for ProjFsSession {
@@ -363,22 +448,47 @@ fn resolve_path(shell: &Arc<dyn PlatformShell + Send + Sync>, relative: &Path) -
 }
 
 /// Persist a per-virtualization-root GUID so reopens reuse the same
-/// instance identity. Lives at `<root>/.heddle_projfs_id`.
+/// instance identity.
+///
+/// Stored at `<root>/../.<root_basename>.heddle-projfs-id` — i.e. a
+/// hidden sidecar in the *parent* directory of the virtualization
+/// root, not inside the root itself.
+///
+/// Pre-fix this lived at `<root>/.heddle_projfs_id`, which had two
+/// production-blocking problems:
+///
+/// 1. The file showed up in `dir`/`Get-ChildItem` listings of the
+///    mountpoint. ProjFS treats files that exist *before*
+///    `PrjMarkDirectoryAsPlaceholder` as "full files" and enumerates
+///    them alongside placeholders, so users saw a `.heddle_projfs_id`
+///    entry next to their projected source tree. Pure leakage of
+///    internal metadata into the user-visible namespace.
+/// 2. The kernel-side dir enumeration callback returned only the
+///    PlatformShell entries, so listing the mounted root once via
+///    NTFS (which sees the full file) and once via the projection
+///    callback (which doesn't) produced an inconsistent picture
+///    depending on which API the caller used to enumerate.
+///
+/// Parent-directory sidecar means the file is outside the projection
+/// envelope, invisible to users `ls`-ing the mountpoint, and survives
+/// remounts of the same path. Falls back to writing at `<root>` only
+/// when `<root>` has no parent (drive root); that's the unusual case
+/// and matches the pre-fix behaviour.
 fn load_or_create_instance_id(root: &Path) -> Result<GUID> {
-    let id_path = root.join(".heddle_projfs_id");
-    if let Ok(bytes) = std::fs::read(&id_path) {
-        if bytes.len() == 16 {
-            // SAFETY: bytes is exactly 16 bytes (GUID layout).
-            return Ok(GUID::from_values(
-                u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-                u16::from_le_bytes([bytes[4], bytes[5]]),
-                u16::from_le_bytes([bytes[6], bytes[7]]),
-                [
-                    bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
-                    bytes[15],
-                ],
-            ));
-        }
+    let id_path = instance_id_sidecar_path(root);
+    if let Ok(bytes) = std::fs::read(&id_path)
+        && bytes.len() == 16
+    {
+        // SAFETY: bytes is exactly 16 bytes (GUID layout).
+        return Ok(GUID::from_values(
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            u16::from_le_bytes([bytes[4], bytes[5]]),
+            u16::from_le_bytes([bytes[6], bytes[7]]),
+            [
+                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
+                bytes[15],
+            ],
+        ));
     }
     let guid = GUID::new().map_err(|e| hresult_to_mount_error(e.code()))?;
     let mut bytes = Vec::with_capacity(16);
@@ -386,9 +496,35 @@ fn load_or_create_instance_id(root: &Path) -> Result<GUID> {
     bytes.extend_from_slice(&guid.data2.to_le_bytes());
     bytes.extend_from_slice(&guid.data3.to_le_bytes());
     bytes.extend_from_slice(&guid.data4);
+    if let Some(parent) = id_path.parent() {
+        // Best-effort: parent already exists in the common case
+        // (the CLI creates `<repo_parent>/.<repo_name>-heddle-mounts/`
+        // before calling us). Ignore failure; the write below will
+        // surface a real I/O error.
+        let _ = std::fs::create_dir_all(parent);
+    }
     std::fs::write(&id_path, &bytes)
         .map_err(|e| MountError::Store(objects::error::HeddleError::Io(e)))?;
     Ok(guid)
+}
+
+/// Compute the sidecar path for `root`'s instance-ID GUID.
+///
+/// `<parent>/.<basename>.heddle-projfs-id` for the typical case;
+/// `<root>/.heddle-projfs-id` as a last-resort fallback when `root`
+/// has no parent (the user mounted a drive root, e.g. `C:\`) — in
+/// that pathological case the file shows up in the projection just
+/// like before, but the alternative is failing the mount, which
+/// is worse.
+fn instance_id_sidecar_path(root: &Path) -> PathBuf {
+    if let (Some(parent), Some(basename)) = (root.parent(), root.file_name()) {
+        let mut name = OsString::from(".");
+        name.push(basename);
+        name.push(".heddle-projfs-id");
+        parent.join(name)
+    } else {
+        root.join(".heddle-projfs-id")
+    }
 }
 
 fn hresult_to_mount_error(hr: HRESULT) -> MountError {
@@ -410,11 +546,17 @@ fn mount_error_to_hresult(err: MountError) -> HRESULT {
 /// Approximate POSIX errno → Win32 error code translation. Only the
 /// cases we actually surface from `MountError::to_errno` are mapped;
 /// everything else degrades to ERROR_GEN_FAILURE.
+///
+/// `ESTALE` is POSIX-only and the Windows `libc` crate doesn't
+/// export the constant. `MountError::to_errno` returns the POSIX
+/// numeric value (`116`) verbatim on the Windows path, so the match
+/// uses a literal here rather than `libc::ESTALE` for parity.
 fn errno_to_win32(errno: i32) -> u32 {
+    const ESTALE: i32 = 116; // POSIX ESTALE; libc on Windows doesn't define it.
     match errno {
         libc::ENOENT => 2,    // ERROR_FILE_NOT_FOUND
         libc::ENOTDIR => 267, // ERROR_DIRECTORY
-        libc::ESTALE => 1632, // ERROR_FILE_INVALID (close enough)
+        ESTALE => 1632,       // ERROR_FILE_INVALID (close enough)
         libc::EROFS => 19,    // ERROR_WRITE_PROTECT
         libc::EIO => 1117,    // ERROR_IO_DEVICE
         _ => 31,              // ERROR_GEN_FAILURE
@@ -522,19 +664,21 @@ unsafe fn get_placeholder_info_impl(callback_data: *const PRJ_CALLBACK_DATA) -> 
         Err(e) => return mount_error_to_hresult(e),
     };
 
-    let mut info = PRJ_PLACEHOLDER_INFO::default();
-    info.FileBasicInfo = PRJ_FILE_BASIC_INFO {
-        IsDirectory: matches!(attrs.kind, NodeKind::Directory).into(),
-        FileSize: attrs.size as i64,
-        CreationTime: Default::default(),
-        LastAccessTime: Default::default(),
-        LastWriteTime: Default::default(),
-        ChangeTime: Default::default(),
-        FileAttributes: if matches!(attrs.kind, NodeKind::Directory) {
-            0x10 // FILE_ATTRIBUTE_DIRECTORY
-        } else {
-            0x80 // FILE_ATTRIBUTE_NORMAL
+    let info = PRJ_PLACEHOLDER_INFO {
+        FileBasicInfo: PRJ_FILE_BASIC_INFO {
+            IsDirectory: matches!(attrs.kind, NodeKind::Directory).into(),
+            FileSize: attrs.size as i64,
+            CreationTime: Default::default(),
+            LastAccessTime: Default::default(),
+            LastWriteTime: Default::default(),
+            ChangeTime: Default::default(),
+            FileAttributes: if matches!(attrs.kind, NodeKind::Directory) {
+                0x10 // FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                0x80 // FILE_ATTRIBUTE_NORMAL
+            },
         },
+        ..PRJ_PLACEHOLDER_INFO::default()
     };
 
     // SAFETY: `info` is a stack value passed by reference; ProjFS
@@ -626,45 +770,88 @@ unsafe fn get_file_data_impl(
 }
 
 unsafe extern "system" fn start_dir_enum_trampoline(
-    _callback_data: *const PRJ_CALLBACK_DATA,
-    _enumeration_id: *const GUID,
+    callback_data: *const PRJ_CALLBACK_DATA,
+    enumeration_id: *const GUID,
 ) -> HRESULT {
-    // We compute the directory listing lazily on each `get_dir_enum`
-    // call rather than caching it across the start/get/end trio.
-    // ProjFS will recall `get` until we set `EntriesAvailable=false`.
-    // No panic guard: this body is unconditionally `S_OK` and can't
-    // unwind. Adding one would only obscure the contract.
+    guarded_hresult("start_dir_enum", || unsafe {
+        start_dir_enum_impl(callback_data, enumeration_id)
+    })
+}
+
+unsafe fn start_dir_enum_impl(
+    callback_data: *const PRJ_CALLBACK_DATA,
+    enumeration_id: *const GUID,
+) -> HRESULT {
+    let Some(data) = (unsafe { callback_data_or_log("start_dir_enum", callback_data) }) else {
+        return S_OK;
+    };
+    let Some(instance) = (unsafe { instance_from_context(data.InstanceContext) }) else {
+        return S_OK;
+    };
+    if enumeration_id.is_null() {
+        return S_OK;
+    }
+    let key = EnumKey::from_guid(unsafe { &*enumeration_id });
+    // Insert a fresh empty state; the first `get_dir_enum` lazily
+    // populates it from `shell.enumerate`. Doing the enumerate-walk
+    // here would needlessly call into the shell when ProjFS only
+    // wants to know whether to *allow* the open (which we always do).
+    let mut guard = instance.enumerations.lock().expect("enumerations lock");
+    guard.insert(key, EnumState::empty());
     S_OK
 }
 
 unsafe extern "system" fn end_dir_enum_trampoline(
-    _callback_data: *const PRJ_CALLBACK_DATA,
-    _enumeration_id: *const GUID,
+    callback_data: *const PRJ_CALLBACK_DATA,
+    enumeration_id: *const GUID,
 ) -> HRESULT {
+    guarded_hresult("end_dir_enum", || unsafe {
+        end_dir_enum_impl(callback_data, enumeration_id)
+    })
+}
+
+unsafe fn end_dir_enum_impl(
+    callback_data: *const PRJ_CALLBACK_DATA,
+    enumeration_id: *const GUID,
+) -> HRESULT {
+    let Some(data) = (unsafe { callback_data_or_log("end_dir_enum", callback_data) }) else {
+        return S_OK;
+    };
+    let Some(instance) = (unsafe { instance_from_context(data.InstanceContext) }) else {
+        return S_OK;
+    };
+    if enumeration_id.is_null() {
+        return S_OK;
+    }
+    let key = EnumKey::from_guid(unsafe { &*enumeration_id });
+    let mut guard = instance.enumerations.lock().expect("enumerations lock");
+    guard.remove(&key);
     S_OK
 }
 
 unsafe extern "system" fn get_dir_enum_trampoline(
     callback_data: *const PRJ_CALLBACK_DATA,
-    _enumeration_id: *const GUID,
+    enumeration_id: *const GUID,
     _search_expression: PCWSTR,
     dir_entry_buffer_handle: PRJ_DIR_ENTRY_BUFFER_HANDLE,
 ) -> HRESULT {
     guarded_hresult("get_dir_enum", || unsafe {
-        get_dir_enum_impl(callback_data, dir_entry_buffer_handle)
+        get_dir_enum_impl(callback_data, enumeration_id, dir_entry_buffer_handle)
     })
 }
 
 unsafe fn get_dir_enum_impl(
     callback_data: *const PRJ_CALLBACK_DATA,
+    enumeration_id: *const GUID,
     dir_entry_buffer_handle: PRJ_DIR_ENTRY_BUFFER_HANDLE,
 ) -> HRESULT {
     let Some(data) = (unsafe { callback_data_or_log("get_dir_enum", callback_data) }) else {
         return mount_error_to_hresult(MountError::Stale("null callback_data".into()));
     };
-    let Some(shell) = (unsafe { shell_from_context(data.InstanceContext) }) else {
+    let Some(instance) = (unsafe { instance_from_context(data.InstanceContext) }) else {
         return mount_error_to_hresult(MountError::Stale("null instance_context".into()));
     };
+    let shell = &instance.shell;
 
     let rel_path = unsafe { decode_wide(data.FilePathName) };
     let dir_node = match resolve_path(shell, Path::new(&rel_path)) {
@@ -672,13 +859,67 @@ unsafe fn get_dir_enum_impl(
         Err(e) => return mount_error_to_hresult(e),
     };
 
-    let entries = match shell.enumerate(dir_node) {
-        Ok(e) => e,
-        Err(e) => return mount_error_to_hresult(e),
-    };
+    if enumeration_id.is_null() {
+        // Shouldn't happen — ProjFS always pairs `get` with a valid
+        // `start`. Fail soft: emit one full pass and return. We can't
+        // track a cursor without a key, so accept the duplicate-risk
+        // on this pathological path rather than wedge the listing.
+        let entries = match shell.enumerate(dir_node) {
+            Ok(e) => e,
+            Err(e) => return mount_error_to_hresult(e),
+        };
+        return match emit_entry_slice(&entries, dir_entry_buffer_handle) {
+            Ok(_) => S_OK,
+            Err(hr) => hr,
+        };
+    }
 
-    for entry in entries {
-        let mut basic = PRJ_FILE_BASIC_INFO {
+    let key = EnumKey::from_guid(unsafe { &*enumeration_id });
+    let restart = (data.Flags.0 & PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN.0) != 0;
+
+    let mut guard = instance.enumerations.lock().expect("enumerations lock");
+    // Defensive: `get` without a prior `start` (unusual but observed
+    // in some ProjFS versions on the first call after mount) — insert
+    // an empty state so the populate path below runs.
+    let state = guard.entry(key).or_insert_with(EnumState::empty);
+    if restart {
+        state.reset();
+    }
+    if !state.populated {
+        match shell.enumerate(dir_node) {
+            Ok(entries) => {
+                state.entries = entries;
+                state.cursor = 0;
+                state.populated = true;
+            }
+            Err(e) => return mount_error_to_hresult(e),
+        }
+    }
+
+    // Drain entries from the cursor forward, advancing on each
+    // successfully-written entry. On `ERROR_INSUFFICIENT_BUFFER`,
+    // leave `cursor` pointing at the entry that didn't fit so the
+    // kernel's next call resumes there.
+    match emit_entry_slice(&state.entries[state.cursor..], dir_entry_buffer_handle) {
+        Ok(written) => {
+            state.cursor += written;
+            S_OK
+        }
+        Err(hr) => hr,
+    }
+}
+
+/// Emit entries from a pre-fetched slice into the ProjFS buffer.
+/// Returns the number of entries successfully written; when the
+/// kernel buffer fills (`ERROR_INSUFFICIENT_BUFFER`), returns the
+/// count *up to* the entry that overflowed so the caller can resume
+/// at the same index on the next call.
+fn emit_entry_slice(
+    entries: &[Entry],
+    buffer: PRJ_DIR_ENTRY_BUFFER_HANDLE,
+) -> std::result::Result<usize, HRESULT> {
+    for (i, entry) in entries.iter().enumerate() {
+        let basic = PRJ_FILE_BASIC_INFO {
             IsDirectory: matches!(entry.kind, NodeKind::Directory).into(),
             FileSize: entry.size as i64,
             CreationTime: Default::default(),
@@ -693,23 +934,23 @@ unsafe fn get_dir_enum_impl(
         };
         let mut name_wide = entry.name.encode_wide().collect::<Vec<u16>>();
         name_wide.push(0);
+        // windows-rs 0.58 takes the basic-info pointer as
+        // `Option<*const PRJ_FILE_BASIC_INFO>` (it was
+        // `&mut PRJ_FILE_BASIC_INFO` in older bindings). `&basic`
+        // produces a `&PRJ_FILE_BASIC_INFO` we coerce to a const
+        // pointer for the kernel — the struct is read, not modified.
+        let basic_ptr: *const PRJ_FILE_BASIC_INFO = &basic;
         let rc = unsafe {
-            PrjFillDirEntryBuffer(
-                PCWSTR(name_wide.as_ptr()),
-                &mut basic,
-                dir_entry_buffer_handle,
-            )
+            PrjFillDirEntryBuffer(PCWSTR(name_wide.as_ptr()), Some(basic_ptr), buffer)
         };
         if let Err(e) = rc {
-            // ERROR_INSUFFICIENT_BUFFER means the kernel's buffer is
-            // full and it will recall us. Not a hard failure.
             if e.code() == HRESULT::from(ERROR_INSUFFICIENT_BUFFER) {
-                break;
+                return Ok(i);
             }
-            return e.code();
+            return Err(e.code());
         }
     }
-    S_OK
+    Ok(entries.len())
 }
 
 unsafe extern "system" fn notification_trampoline(
@@ -918,5 +1159,58 @@ mod tests {
     #[ignore = "requires the projfs feature; opt-in via --features projfs"]
     fn is_runtime_available_does_not_panic() {
         let _ = ProjFsShell::is_runtime_available();
+    }
+
+    /// The instance-ID sidecar must land in the *parent* directory,
+    /// not inside the virtualization root. Pre-fix the file lived at
+    /// `<root>/.heddle_projfs_id` and leaked into `dir`/`ls`
+    /// listings; the regression test in `tests/projfs_smoke.rs`
+    /// covers the on-disk side, this unit test covers the pure
+    /// path-derivation function in isolation so a refactor that
+    /// silently moves the sidecar back inside the root trips here
+    /// before it reaches the smoke matrix.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the projfs feature; opt-in via --features projfs"]
+    fn instance_id_sidecar_lives_outside_the_virtualization_root() {
+        let root = Path::new("C:\\users\\test\\.heddle-mounts\\thread-x");
+        let sidecar = instance_id_sidecar_path(root);
+        assert!(
+            !sidecar.starts_with(root),
+            "sidecar must be outside virt root, got {}",
+            sidecar.display(),
+        );
+        // Sanity: the file name encodes the basename so multiple
+        // sibling mounts get distinct sidecars.
+        assert!(
+            sidecar.file_name().unwrap().to_string_lossy().contains("thread-x"),
+            "sidecar name must include the mount basename, got {}",
+            sidecar.display(),
+        );
+    }
+
+    /// `EnumKey` is the hash-able wrapper around `GUID` we use to
+    /// key the per-enumeration cursor map. Two `EnumKey`s built
+    /// from the same GUID must compare equal and hash to the same
+    /// bucket — otherwise the cursor cache would miss every
+    /// directory enumeration and we'd re-emit the head of the
+    /// listing on every kernel callback.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the projfs feature; opt-in via --features projfs"]
+    fn enum_key_round_trips_through_guid() {
+        let g = GUID::from_values(0x1234_5678, 0x9abc, 0xdef0, [1, 2, 3, 4, 5, 6, 7, 8]);
+        let a = EnumKey::from_guid(&g);
+        let b = EnumKey::from_guid(&g);
+        assert_eq!(a, b, "same GUID must produce equal EnumKey");
+
+        // Two distinct GUIDs must produce distinct keys (the only
+        // way that fails is a collision in the byte canonicalisation).
+        let g2 = GUID::from_values(0x1234_5678, 0x9abc, 0xdef0, [1, 2, 3, 4, 5, 6, 7, 9]);
+        assert_ne!(
+            a,
+            EnumKey::from_guid(&g2),
+            "different GUIDs must produce different EnumKeys",
+        );
     }
 }

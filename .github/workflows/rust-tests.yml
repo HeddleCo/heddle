@@ -132,6 +132,89 @@ jobs:
       - name: sccache stats
         run: sccache --show-stats
 
+  # Windows ProjFS mount smoke. Mirrors `fuse-smoke` above for the
+  # Windows daily-use path. The runner needs the "Projected File
+  # System" optional feature enabled before the test will mount;
+  # `windows-latest` (Server 2022) ships with the *capability* but
+  # not the feature itself, so the first step DISM-enables it.
+  #
+  # The integration test in `tests/projfs_smoke.rs` is `#[ignore]` and
+  # additionally guarded by `HEDDLE_PROJFS_AVAILABLE=1` so a generic
+  # contributor's `cargo test -p heddle-mount` on macOS or Linux
+  # doesn't try to mount through a missing kernel adapter. CI opts
+  # in explicitly via the env var below + `-- --ignored`.
+  #
+  # If the DISM step fails (newer Server SKUs sometimes rename the
+  # feature, and home-edition Windows 10 hosts may have it disabled
+  # at the SKU level), the test will report itself as skipped via
+  # the `ProjFsShell::is_runtime_available()` guard in the smoke
+  # source. The job exits 0 in that case; treat a hard `assertion
+  # failed` from the test as the real regression signal.
+  projfs-smoke:
+    name: ProjFS mount smoke (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Enable the ProjFS optional feature. `Client-ProjFS` is the
+      # canonical name on Windows 10/11 client SKUs; `Projected-FS`
+      # is the Server variant. Try Client first (matches the docs we
+      # ship to teammates), fall back to the Server name. Either
+      # exit-success leaves us with `ProjectedFSLib.dll` on PATH.
+      #
+      # `-NoRestart` keeps the step from rebooting the runner —
+      # ProjFS enables in-place and is usable immediately for new
+      # processes, which is exactly what the cargo step below is.
+      - name: Enable ProjFS optional feature
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $client = Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart -ErrorAction SilentlyContinue
+          if ($null -eq $client -or $client.RestartNeeded -eq $null) {
+            Write-Host "Client-ProjFS unavailable on this SKU; trying Projected-FS (Server variant)"
+            $server = Enable-WindowsOptionalFeature -Online -FeatureName Projected-FS -NoRestart -ErrorAction SilentlyContinue
+            if ($null -eq $server) {
+              Write-Host "::warning::Neither Client-ProjFS nor Projected-FS could be enabled; smoke test will self-skip"
+            }
+          }
+          # Verify the DLL the shell probes for is actually present.
+          $dll = Join-Path $env:SystemRoot 'System32\ProjectedFSLib.dll'
+          if (Test-Path $dll) {
+            Write-Host "ProjectedFSLib.dll present: $dll"
+          } else {
+            Write-Host "::warning::ProjectedFSLib.dll not present; smoke test will self-skip"
+          }
+
+      # Build + run the integration test. Single-threaded to keep a
+      # wedged virtualization root from cascading into sibling
+      # tempdir lifetimes (the OS would clean up eventually, but the
+      # next test would see a partially-torn-down placeholder dir).
+      # `--nocapture` so any panic-trampoline log surfaces in the
+      # job output for debug.
+      - name: ProjFS integration tests
+        shell: pwsh
+        env:
+          HEDDLE_PROJFS_AVAILABLE: "1"
+          RUST_BACKTRACE: "1"
+        run: |
+          cargo test --locked -p heddle-mount --features projfs --test projfs_smoke `
+            -- --ignored --test-threads=1 --nocapture
+
+      # Panic-recovery + unit-level tests for the ProjFS shell live
+      # alongside the source. They're `#[ignore]` (the `windows` dep
+      # only links on the `projfs` feature) so a regular workspace
+      # `cargo test` doesn't try to run them.
+      - name: ProjFS panic-recovery unit tests
+        shell: pwsh
+        env:
+          RUST_BACKTRACE: "1"
+        run: |
+          cargo test --locked -p heddle-mount --features projfs --lib projfs:: `
+            -- --ignored --test-threads=1
+
   # Coverage requires an instrumented build that can't share `target/`
   # with the regular profile, so it stays as its own job.
   coverage:

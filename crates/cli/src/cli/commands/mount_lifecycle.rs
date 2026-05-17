@@ -416,7 +416,9 @@ mod windows {
 
     /// Mount `thread_id` into `mountpoint`. Tries ProjFS first; on
     /// failure (typically "ProjFS optional feature not enabled"),
-    /// falls back to the NFS shell.
+    /// falls back to the NFS shell. The fallback warning includes
+    /// the install hint so an operator can opt back into ProjFS
+    /// without grepping the docs.
     pub fn spawn_mount_for_thread(
         repo: Repository,
         thread_id: &str,
@@ -429,23 +431,68 @@ mod windows {
         let mount = ContentAddressedMount::new(repo, thread_id)
             .map_err(|e| anyhow!("open content-addressed mount for {thread_id}: {e}"))?;
 
-        let session = match ProjFsShell::new(mount).mount_background(mountpoint) {
-            Ok(s) => BackingSession::ProjFs(s),
-            Err(native_err) => {
-                warn!(
-                    thread = thread_id,
-                    "ProjFS mount failed ({native_err}); falling back to NFS"
-                );
-                let reopened = Repository::open(&root)
-                    .map_err(|e| anyhow!("reopen repo for NFS fallback: {e}"))?;
-                let mount = ContentAddressedMount::new(reopened, thread_id)
-                    .map_err(|e| anyhow!("open mount for {thread_id} (NFS fallback): {e}"))?;
-                BackingSession::Nfs(NfsShell::new(mount).mount_background(mountpoint).map_err(
-                    |e| {
-                        anyhow!("ProjFS mount failed ({native_err}); NFS fallback also failed: {e}")
-                    },
-                )?)
+        // Probe up front: if `ProjectedFSLib.dll` isn't loadable, we
+        // can skip the (relatively expensive) attempt-mount-then-fail
+        // path and go straight to NFS with a clear, actionable
+        // install hint. The probe is cheap (single `LoadLibraryW` +
+        // `FreeLibrary`), the savings is one full
+        // `PrjMarkDirectoryAsPlaceholder` + `PrjStartVirtualizing`
+        // round-trip that the kernel rejects with `ERROR_MOD_NOT_FOUND`
+        // anyway.
+        let runtime_available = ProjFsShell::is_runtime_available();
+        if !runtime_available {
+            warn!(
+                thread = thread_id,
+                "ProjFS optional feature not enabled; using NFS fallback. \
+                 Run `Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS` \
+                 (Windows 10/11) or `... -FeatureName Projected-FS` (Windows Server) \
+                 from an admin PowerShell for a faster mount.",
+            );
+        }
+
+        let session = if runtime_available {
+            match ProjFsShell::new(mount).mount_background(mountpoint) {
+                Ok(s) => BackingSession::ProjFs(s),
+                Err(native_err) => {
+                    // DLL loaded but the mount itself failed —
+                    // could be a non-NTFS root, a stale
+                    // virtualization on the same path, or a
+                    // permission issue.
+                    warn!(
+                        thread = thread_id,
+                        "ProjFS mount failed ({native_err}); falling back to NFS",
+                    );
+                    let reopened = Repository::open(&root)
+                        .map_err(|e| anyhow!("reopen repo for NFS fallback: {e}"))?;
+                    let mount = ContentAddressedMount::new(reopened, thread_id).map_err(|e| {
+                        anyhow!("open mount for {thread_id} (NFS fallback): {e}")
+                    })?;
+                    BackingSession::Nfs(
+                        NfsShell::new(mount).mount_background(mountpoint).map_err(|e| {
+                            anyhow!(
+                                "ProjFS mount failed ({native_err}); NFS fallback also failed: {e}"
+                            )
+                        })?,
+                    )
+                }
             }
+        } else {
+            // No ProjFS runtime — go straight to NFS without
+            // burning a mount attempt. `mount` here is the
+            // already-constructed ContentAddressedMount; we don't
+            // need to reopen the repo.
+            BackingSession::Nfs(
+                NfsShell::new(mount)
+                    .mount_background(mountpoint)
+                    .map_err(|e| {
+                        anyhow!(
+                            "ProjFS unavailable and NFS fallback failed: {e}. \
+                             Install the 'Projected File System' Windows optional feature \
+                             (admin PowerShell: `Enable-WindowsOptionalFeature -Online \
+                             -FeatureName Client-ProjFS`) or ensure the NFS client is enabled."
+                        )
+                    })?,
+            )
         };
 
         let handle = std::sync::Arc::new(MountHandle {
