@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Semantic analysis and parser-heavy diff support.
+//!
+//! The native hunk-level text merge engine lives in the separate
+//! `heddle-merge` crate so it can be used by non-semantic CLI builds.
 
 pub mod analysis;
 pub mod cache;

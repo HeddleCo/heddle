@@ -315,113 +315,23 @@ fn try_auto_merge_textual_change(
     Ok(Some(hash))
 }
 
+/// Replay-time auto-merge of three line-level byte slices.
+///
+/// Returns `Some(bytes)` only when the merge resolves *cleanly* — any
+/// conflict (including binary, delete/modify, or overlapping hunks) returns
+/// `None`, leaving the rebase caller to either invoke `blob_contains_both`
+/// or stop with `ApplyResult::Conflict`. Routes through the native
+/// hunk-level merger added in heddle#79 — always available, no feature
+/// gate — so multi-hunk-per-side edits auto-resolve when disjoint even on
+/// `--no-default-features` builds, addressing the heddle#54 trip report's
+/// rebase failure mode.
 fn auto_merge_text_lines(base: &[u8], current: &[u8], incoming: &[u8]) -> Result<Option<Vec<u8>>> {
-    let base_text = match std::str::from_utf8(base) {
-        Ok(text) => text,
-        Err(_) => return Ok(None),
-    };
-    let current_text = match std::str::from_utf8(current) {
-        Ok(text) => text,
-        Err(_) => return Ok(None),
-    };
-    let incoming_text = match std::str::from_utf8(incoming) {
-        Ok(text) => text,
-        Err(_) => return Ok(None),
-    };
-
-    let base_lines = split_lines_preserving_endings(base_text);
-    let current_lines = split_lines_preserving_endings(current_text);
-    let incoming_lines = split_lines_preserving_endings(incoming_text);
-    let Some(current_hunk) = single_contiguous_hunk(&base_lines, &current_lines) else {
-        return Ok(None);
-    };
-    let Some(incoming_hunk) = single_contiguous_hunk(&base_lines, &incoming_lines) else {
-        return Ok(None);
-    };
-
-    if current_hunk == incoming_hunk {
-        return Ok(Some(current.to_vec()));
-    }
-    if ranges_overlap(
-        current_hunk.base_start,
-        current_hunk.base_end,
-        incoming_hunk.base_start,
-        incoming_hunk.base_end,
-    ) {
-        return Ok(None);
-    }
-
-    let mut merged = base_lines;
-    let mut hunks = vec![current_hunk, incoming_hunk];
-    hunks.sort_by_key(|hunk| std::cmp::Reverse(hunk.base_start));
-    for hunk in hunks {
-        merged.splice(hunk.base_start..hunk.base_end, hunk.replacement);
-    }
-    Ok(Some(merged.concat().into_bytes()))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TextHunk {
-    base_start: usize,
-    base_end: usize,
-    replacement: Vec<String>,
-}
-
-fn split_lines_preserving_endings(text: &str) -> Vec<String> {
-    if text.is_empty() {
-        Vec::new()
-    } else {
-        text.split_inclusive('\n').map(str::to_string).collect()
-    }
-}
-
-fn single_contiguous_hunk(base: &[String], changed: &[String]) -> Option<TextHunk> {
-    if base == changed {
-        return Some(TextHunk {
-            base_start: 0,
-            base_end: 0,
-            replacement: Vec::new(),
-        });
-    }
-
-    let mut prefix = 0usize;
-    while prefix < base.len() && prefix < changed.len() && base[prefix] == changed[prefix] {
-        prefix += 1;
-    }
-
-    let mut suffix = 0usize;
-    while suffix < base.len().saturating_sub(prefix)
-        && suffix < changed.len().saturating_sub(prefix)
-        && base[base.len() - 1 - suffix] == changed[changed.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-
-    let base_end = base.len() - suffix;
-    let changed_end = changed.len() - suffix;
-    Some(TextHunk {
-        base_start: prefix,
-        base_end,
-        replacement: changed[prefix..changed_end].to_vec(),
-    })
-}
-
-fn ranges_overlap(
-    left_start: usize,
-    left_end: usize,
-    right_start: usize,
-    right_end: usize,
-) -> bool {
-    let left_empty = left_start == left_end;
-    let right_empty = right_start == right_end;
-    if left_empty && right_empty {
-        left_start == right_start
-    } else if left_empty {
-        right_start < left_start && left_start < right_end
-    } else if right_empty {
-        left_start < right_start && right_start < left_end
-    } else {
-        left_start < right_end && right_start < left_end
+    use merge::{MergeOutcome, text_hunk_merge};
+    match text_hunk_merge(base, current, incoming) {
+        MergeOutcome::Clean(bytes) => Ok(Some(bytes)),
+        MergeOutcome::Conflicts { .. }
+        | MergeOutcome::Binary
+        | MergeOutcome::DeleteVsModify => Ok(None),
     }
 }
 

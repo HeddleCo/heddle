@@ -1,0 +1,17 @@
+[package]
+name = "heddle-merge"
+version = "0.2.4"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "merge"
+
+[dependencies]
+similar.workspace = true
