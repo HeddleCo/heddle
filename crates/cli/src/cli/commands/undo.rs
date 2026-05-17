@@ -346,6 +346,7 @@ fn states_required_for_undo(op: &OpRecord) -> Vec<ChangeId> {
         OpRecord::ThreadDelete { state, .. } => vec![*state],
         OpRecord::ThreadUpdate { old_state, .. } => vec![*old_state],
         OpRecord::MarkerDelete { state, .. } => vec![*state],
+        OpRecord::FastForward { pre_target_id, .. } => vec![*pre_target_id],
         _ => Vec::new(),
     }
 }
@@ -389,9 +390,7 @@ fn ensure_redaction_undo_safe(
     for batch in batches {
         for entry in &batch.entries {
             match &entry.operation {
-                OpRecord::Purge { redaction_id, .. } => {
-                    purge_ops.push((entry.id, *redaction_id))
-                }
+                OpRecord::Purge { redaction_id, .. } => purge_ops.push((entry.id, *redaction_id)),
                 OpRecord::Redact {
                     blob, state, path, ..
                 } => redact_ops.push(RedactSummary {
@@ -408,7 +407,9 @@ fn ensure_redaction_undo_safe(
     if !purge_ops.is_empty() {
         let shorts: Vec<String> = purge_ops
             .iter()
-            .map(|(op_id, redaction_id)| format!("op {} (redaction {})", op_id, redaction_id.short()))
+            .map(|(op_id, redaction_id)| {
+                format!("op {} (redaction {})", op_id, redaction_id.short())
+            })
             .collect();
         return Err(anyhow!(
             "Refusing to undo: `heddle purge` is irreversible by design — the blob bytes have been \

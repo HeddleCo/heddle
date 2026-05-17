@@ -88,6 +88,23 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         } => {
             repo.remove_redaction(blob, state, path, redaction_id)?;
         }
+        // Fast-forward merge inverse: restore both HEAD and the target
+        // thread ref to the pre-FF tip. The source thread never moved
+        // during the FF, so it's untouched. Closes heddle#99 — the bug
+        // where recording an FF as `OpRecord::Goto` left the target
+        // thread ref stranded at the FF target after undo.
+        OpRecord::FastForward {
+            target_thread,
+            pre_target_id,
+            ..
+        } => {
+            repo.goto_without_record(pre_target_id)?;
+            repo.refs().set_thread(target_thread, pre_target_id)?;
+            repo.refs().write_head(&Head::Attached {
+                thread: target_thread.clone(),
+            })?;
+            sync_thread_record_state(repo, target_thread, *pre_target_id)?;
+        }
         _ => {}
     }
 
@@ -127,6 +144,30 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         }
         OpRecord::MarkerDelete { name, .. } => {
             repo.refs().delete_marker(name)?;
+        }
+        // FF merge redo: re-advance both HEAD and the target thread ref
+        // to the source thread's current tip. We re-read the source
+        // thread rather than caching its tip in the OpRecord because the
+        // source thread is the authoritative pointer for "what FF means
+        // right now" — if it moved between undo and redo, we'd otherwise
+        // redo to a stale state.
+        OpRecord::FastForward {
+            source_thread,
+            target_thread,
+            ..
+        } => {
+            let source_tip = repo.refs().get_thread(source_thread)?.ok_or_else(|| {
+                anyhow!(
+                    "cannot redo fast-forward: source thread '{}' no longer exists",
+                    source_thread
+                )
+            })?;
+            repo.goto_without_record(&source_tip)?;
+            repo.refs().set_thread(target_thread, &source_tip)?;
+            repo.refs().write_head(&Head::Attached {
+                thread: target_thread.clone(),
+            })?;
+            sync_thread_record_state(repo, target_thread, source_tip)?;
         }
         _ => {}
     }

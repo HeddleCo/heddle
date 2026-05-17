@@ -34,8 +34,27 @@ impl Repository {
     /// pre-op state — this helper preserves attached-HEAD semantics so the
     /// thread's ref and metadata advance with the worktree.
     pub fn fast_forward_attached(&self, target: &ChangeId) -> Result<()> {
+        self.fast_forward_attached_internal(target, true)
+    }
+
+    /// Variant of [`Self::fast_forward_attached`] that performs the
+    /// fast-forward without recording an `OpRecord::Goto`. The merge
+    /// command uses this so it can record an `OpRecord::FastForward`
+    /// instead — the FF-specific variant carries the pre-FF thread tip,
+    /// so undo can restore both HEAD and the target thread ref. The
+    /// generic `Goto` inverse only rewinds HEAD, which stranded the
+    /// merged-into thread ref (heddle#99).
+    pub fn fast_forward_attached_without_record(&self, target: &ChangeId) -> Result<()> {
+        self.fast_forward_attached_internal(target, false)
+    }
+
+    fn fast_forward_attached_internal(&self, target: &ChangeId, record: bool) -> Result<()> {
         let head_before = self.refs.read_head()?;
-        self.goto(target)?;
+        if record {
+            self.goto(target)?;
+        } else {
+            self.goto_without_record(target)?;
+        }
         if let Head::Attached {
             thread: current_thread,
         } = &head_before

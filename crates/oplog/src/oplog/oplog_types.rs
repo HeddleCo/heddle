@@ -124,6 +124,26 @@ pub enum OpRecord {
         /// Blob hash whose bytes were physically removed.
         blob: ContentHash,
     },
+    /// Fast-forward merge: `target_thread` advanced from `pre_target_id`
+    /// to `source_thread`'s tip without writing a synthetic merge state.
+    /// `source_thread` is untouched.
+    ///
+    /// Distinct from `Goto` so undo can restore both HEAD *and* the
+    /// target thread ref. The `Goto` inverse only rewinds HEAD, which
+    /// stranded the merged-into thread ref at the FF target — the bug
+    /// closed by heddle#99 and previously pinned by
+    /// `test_undo_ff_merge_restores_head_but_strands_thread_ref`.
+    FastForward {
+        /// The thread that was merged in. Its ref never moves during
+        /// an FF merge — recorded only for forensic context.
+        source_thread: String,
+        /// The thread that fast-forwarded. Undo restores this ref to
+        /// `pre_target_id`.
+        target_thread: String,
+        /// `target_thread`'s tip before the FF. Undo restores both
+        /// HEAD and the target thread ref to this state.
+        pre_target_id: ChangeId,
+    },
 }
 
 impl OpRecord {
@@ -200,6 +220,18 @@ impl OpRecord {
                     "purge blob {} (redaction {})",
                     blob.short(),
                     redaction_id.short()
+                )
+            }
+            OpRecord::FastForward {
+                source_thread,
+                target_thread,
+                pre_target_id,
+            } => {
+                format!(
+                    "fast-forward {} into {} (was at {})",
+                    source_thread,
+                    target_thread,
+                    pre_target_id.short()
                 )
             }
         }

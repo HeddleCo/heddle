@@ -204,4 +204,27 @@ pub trait OpLogBackend: Send + Sync {
         )?;
         Ok(ids[0])
     }
+
+    /// Record a fast-forward merge. `pre_target_id` captures the target
+    /// thread's tip before the FF so undo can restore both HEAD and the
+    /// target thread ref. Recording an FF merge as a plain `Goto`
+    /// stranded the target thread ref at the FF target on undo — the
+    /// bug heddle#99 closes.
+    fn record_fast_forward(
+        &self,
+        source_thread: &str,
+        target_thread: &str,
+        pre_target_id: &ChangeId,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::FastForward {
+                source_thread: source_thread.to_string(),
+                target_thread: target_thread.to_string(),
+                pre_target_id: *pre_target_id,
+            }],
+            scope,
+        )?;
+        Ok(ids[0])
+    }
 }

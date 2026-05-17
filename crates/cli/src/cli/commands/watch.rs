@@ -86,6 +86,7 @@ const FILTER_KINDS: &[&str] = &[
     "marker_create",
     "marker_delete",
     "merge", // alias for thread_update on a merge target — see kind_for
+    "fast_forward",
 ];
 
 /// Top-level entry point. Threading-wise:
@@ -447,6 +448,7 @@ fn kind_for(op: &OpRecord) -> String {
         OpRecord::ConflictResolved { .. } => "conflict_resolved".into(),
         OpRecord::Redact { .. } => "redact".into(),
         OpRecord::Purge { .. } => "purge".into(),
+        OpRecord::FastForward { .. } => "fast_forward".into(),
     }
 }
 
@@ -463,6 +465,7 @@ fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
         OpRecord::MarkerDelete { name, .. } => Some(name.clone()),
         OpRecord::Checkpoint { thread, .. } => thread.clone(),
         OpRecord::EphemeralThreadCollapse { thread, .. } => Some(thread.clone()),
+        OpRecord::FastForward { target_thread, .. } => Some(target_thread.clone()),
         OpRecord::Goto { .. }
         | OpRecord::Fork { .. }
         | OpRecord::Collapse { .. }
@@ -494,7 +497,8 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
         OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
-        | OpRecord::Purge { .. } => None,
+        | OpRecord::Purge { .. }
+        | OpRecord::FastForward { .. } => None,
     }
 }
 

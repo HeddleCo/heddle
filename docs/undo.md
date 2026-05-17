@@ -13,7 +13,7 @@ follow-ups.
 |------------------|-------------------------------------------------------------------------|
 | `heddle capture` | Restores `HEAD` and the worktree to the immediate parent state.         |
 | `heddle merge` (non-FF) | Restores `HEAD` **and** both thread refs; drops the merge state.  |
-| `heddle merge` (FF)     | Restores `HEAD` to the pre-merge tip. **Caveat:** the merged-into thread ref is left at the FF target — see "Known caveats" below. |
+| `heddle merge` (FF)     | Restores `HEAD` **and** the merged-into thread ref to the pre-merge tip; the merged-in thread is untouched. |
 | `heddle goto`    | Restores `HEAD` to the pre-`goto` state.                                |
 | `heddle thread create`   | Deletes the thread (if no further work landed on it).           |
 | `heddle thread drop`     | Recreates the thread at its pre-drop tip.                       |
@@ -93,13 +93,6 @@ Run `heddle undo --help` for the curated list with examples and the explicit
 
 ## Known caveats (filed as follow-ups)
 
-- After a **fast-forward** merge undo, `HEAD` is restored to the pre-merge
-  state but the *thread ref* you merged into is left at the FF target. A
-  `heddle thread switch <name>` re-attaches; data is never lost. Fixing
-  this end-to-end needs a new `OpRecord::FastForward` variant carrying the
-  thread context — out of scope for the MVP. Tracked in
-  [heddle#99](https://github.com/HeddleCo/heddle/issues/99) and pinned by
-  `test_undo_ff_merge_restores_head_but_strands_thread_ref`.
 - `OpRecord::Checkpoint` is defined but no current code path emits it; the
   variant exists for the agent-frequent-saves work in flight. When it lands
   it will need its own inverse arm in `undo_apply.rs`.
