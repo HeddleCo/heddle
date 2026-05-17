@@ -43,6 +43,15 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     debug!(heddle_dir = %repo.heddle_dir().display(), "Repository initialized");
 
+    // Install the default `.heddleignore` if the repo doesn't ship
+    // one yet. Auto-install (no prompt) is the explicit UX call: the
+    // friction we're paying is `heddle merge` refusals on day-one
+    // `.DS_Store` / `xcuserdata/` noise, and a prompt would just
+    // delay that suppression to whenever the user noticed. The file
+    // is plain text the user can edit or delete afterwards, so the
+    // blast radius of "wrong choice" is small.
+    let installed_heddleignore = maybe_install_default_heddleignore(repo.root())?;
+
     if args.principal_name.is_some() || args.principal_email.is_some() {
         let name = args
             .principal_name
@@ -61,22 +70,47 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     super::maybe_prompt_init_install(cli, &repo, &args)?;
 
+    let mut message = if has_git {
+        format!(
+            "Initialized Heddle sidecar in {} for Git-overlay workflows",
+            repo.heddle_dir().display()
+        )
+    } else {
+        format!(
+            "Initialized Heddle repository in {}",
+            repo.heddle_dir().display()
+        )
+    };
+    if installed_heddleignore {
+        message.push_str("\nWrote default .heddleignore (edit to customize)");
+    }
+
     let output = InitOutput {
         path: repo.heddle_dir().to_path_buf(),
-        message: if has_git {
-            format!(
-                "Initialized Heddle sidecar in {} for Git-overlay workflows",
-                repo.heddle_dir().display()
-            )
-        } else {
-            format!(
-                "Initialized Heddle repository in {}",
-                repo.heddle_dir().display()
-            )
-        },
+        message,
     };
 
     render_init(&output, should_output_json(cli, Some(repo.config())))
+}
+
+/// Write the bundled default `.heddleignore` into the worktree root
+/// if (and only if) no `.heddleignore` already exists there. Returns
+/// whether a write actually happened so the caller can surface a
+/// single-line notice to the user.
+///
+/// Failure to write is non-fatal: a freshly-initialized repo without
+/// the default template is still a valid Heddle repo, and a noisy
+/// failure here would block init for paths the user can recreate by
+/// hand. We propagate I/O errors only for the genuinely unexpected
+/// cases (permission denied with the file *not* present, etc.).
+pub(crate) fn maybe_install_default_heddleignore(root: &std::path::Path) -> Result<bool> {
+    let path = root.join(".heddleignore");
+    if path.exists() {
+        return Ok(false);
+    }
+    std::fs::write(&path, super::heddleignore_defaults::DEFAULT_HEDDLEIGNORE)
+        .map_err(|e| anyhow::anyhow!("failed to write default .heddleignore: {}", e))?;
+    Ok(true)
 }
 
 fn render_init(output: &InitOutput, json: bool) -> Result<()> {

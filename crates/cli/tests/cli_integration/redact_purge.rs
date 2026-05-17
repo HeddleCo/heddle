@@ -727,16 +727,22 @@ fn redact_apply_json(temp: &TempDir, state: &str) -> Value {
 
 #[test]
 fn redact_apply_emits_ignore_hint_when_neither_file_covers_path() {
-    // Fresh repo, no `.heddleignore` and no `.gitignore`. The hint
-    // must surface and point at `.heddleignore` (heddle-native
-    // preference for fresh repos) with `already_exists: false`.
+    // Fresh repo: `heddle init` ships a default `.heddleignore` now
+    // (heddle#80), but the default template doesn't cover the leaked
+    // `config/secrets.toml` path. The hint must still surface,
+    // pointing at `.heddleignore` with `already_exists: true` (so
+    // the message renders as "add ... to .heddleignore", not
+    // "create ...").
     let (temp, state) = setup_repo_with_secret();
     let apply = redact_apply_json(&temp, &state);
     let hint = apply
         .get("ignore_hint")
         .expect("ignore_hint should be present when path is uncovered");
     assert_eq!(hint["ignore_file"].as_str().unwrap(), ".heddleignore");
-    assert!(!hint["already_exists"].as_bool().unwrap());
+    assert!(
+        hint["already_exists"].as_bool().unwrap(),
+        "init now installs a default .heddleignore"
+    );
     assert_eq!(
         hint["suggested_pattern"].as_str().unwrap(),
         "config/secrets.toml"
@@ -794,8 +800,8 @@ fn redact_apply_emits_hint_when_only_gitignore_covers_the_path() {
         ".gitignore is not consulted by heddle capture; hint must target .heddleignore"
     );
     assert!(
-        !hint["already_exists"].as_bool().unwrap(),
-        "should report .heddleignore as not-yet-present"
+        hint["already_exists"].as_bool().unwrap(),
+        "init installs a default .heddleignore (heddle#80)"
     );
 }
 
@@ -863,7 +869,10 @@ fn purge_apply_also_emits_ignore_hint() {
         .get("ignore_hint")
         .expect("purge output must include ignore_hint");
     assert_eq!(hint["ignore_file"].as_str().unwrap(), ".heddleignore");
-    assert!(!hint["already_exists"].as_bool().unwrap());
+    assert!(
+        hint["already_exists"].as_bool().unwrap(),
+        "init installs a default .heddleignore (heddle#80)"
+    );
 }
 
 #[test]
