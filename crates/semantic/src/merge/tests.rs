@@ -284,6 +284,75 @@ fn same_anchor_insertions_concat_rather_than_conflict() {
     }
 }
 
+/// Benchmark-style timing test for the no-conflict path on a heddle#54-shape
+/// large file. Prints elapsed time and asserts it under a generous budget so
+/// regressions show up loud. The previous `merge_single_line_ranges` walked
+/// prefix/suffix in O(n); the new layered path adds two LCS diffs (Histogram
+/// algorithm in `similar`) on top, so this guards against any
+/// pathological-input quadratic regression.
+#[test]
+fn bench_no_conflict_disjoint_hunks_large_file() {
+    // 1000-line base, ours edits 3 disjoint 5-line hunks, theirs edits 3
+    // different disjoint 5-line hunks. No overlap — Clean expected.
+    let base: String = (1..=1000).map(|i| format!("line {i}\n")).collect();
+    let mut ours = String::new();
+    for i in 1..=1000 {
+        let in_our_hunk = (100..=104).contains(&i)
+            || (400..=404).contains(&i)
+            || (700..=704).contains(&i);
+        ours.push_str(&if in_our_hunk {
+            format!("OUR-{i}\n")
+        } else {
+            format!("line {i}\n")
+        });
+    }
+    let mut theirs = String::new();
+    for i in 1..=1000 {
+        let in_their_hunk = (200..=204).contains(&i)
+            || (500..=504).contains(&i)
+            || (800..=804).contains(&i);
+        theirs.push_str(&if in_their_hunk {
+            format!("THEIR-{i}\n")
+        } else {
+            format!("line {i}\n")
+        });
+    }
+
+    // Warm up to avoid measuring first-call setup costs.
+    for _ in 0..3 {
+        let _ = text_hunk_merge(base.as_bytes(), ours.as_bytes(), theirs.as_bytes());
+    }
+
+    let start = std::time::Instant::now();
+    let iters = 50;
+    for _ in 0..iters {
+        let outcome = text_hunk_merge(base.as_bytes(), ours.as_bytes(), theirs.as_bytes());
+        let MergeOutcome::Clean(_) = outcome else {
+            panic!("expected Clean on disjoint multi-hunk fixture");
+        };
+    }
+    let total = start.elapsed();
+    let per = total / iters;
+    println!(
+        "merge::bench_no_conflict_disjoint_hunks_large_file: \
+         {iters}x 1000-line/3-hunk-per-side disjoint merge in {total:?} \
+         (~{per:?} per call)"
+    );
+    // Budget: 50 ms/call in release, 500 ms/call in debug. The bench guards
+    // against pathological regression, not absolute speed — debug mode adds
+    // ~15× overhead from the unoptimised LCS path. Real-user-facing builds
+    // are always release; this asserts both stay in a sane range.
+    let budget = if cfg!(debug_assertions) {
+        std::time::Duration::from_millis(500)
+    } else {
+        std::time::Duration::from_millis(50)
+    };
+    assert!(
+        per < budget,
+        "merge slower than {budget:?} per call on 1000-line disjoint input: {per:?}"
+    );
+}
+
 // Append-to-EOF on both sides with different content — same UX rule.
 #[test]
 fn same_anchor_eof_appends_concat() {
