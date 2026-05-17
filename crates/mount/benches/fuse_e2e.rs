@@ -84,7 +84,7 @@ use std::{
 };
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use mount::{BackgroundSession, ContentAddressedMount};
+use mount::{BackgroundSession, ContentAddressedMount, FuseShell};
 use repo::Repository;
 use tempfile::TempDir;
 
@@ -178,13 +178,17 @@ impl Drop for HeddleMount {
     }
 }
 
-/// RED-COMMIT STUB: builds the repo + opens a `ContentAddressedMount`
-/// but does **not** call `FuseShell::mount_background`. The
-/// mountpoint stays an empty tempdir, so every bench body's read
-/// fails with `ENOENT` and the criterion iteration panics — proving
-/// the bench harness *would* catch a totally-broken mount. The green
-/// commit swaps this body for a real `FuseShell::new(mount)
-/// .mount_background(mountpoint.path())` call + kernel-publish wait.
+/// Build a heddle repo, snapshot the given files, mount it via FUSE,
+/// and wait for the kernel to publish the FS before returning. Every
+/// bench body reads from `mountpoint.path()` via plain `std::fs` —
+/// the kernel round-trips that into FUSE callbacks on the worker
+/// thread.
+///
+/// The publish wait probes the first fixture file (`files[0].0`) for
+/// up to 5s; `FuseShell::mount_background` returns once the session
+/// is spawned, but the kernel may take a tick to attach the FS so a
+/// naked read can race. The mirror is the test-side `mount_fixture`
+/// in `crates/mount/tests/fuse_mount.rs`.
 fn build_heddle_mount(files: &[(String, Vec<u8>)]) -> HeddleMount {
     let repo_dir = TempDir::new().expect("tempdir for repo");
     let mountpoint = TempDir::new().expect("tempdir for mountpoint");
@@ -194,11 +198,29 @@ fn build_heddle_mount(files: &[(String, Vec<u8>)]) -> HeddleMount {
     }
     repo.snapshot(Some("fuse_e2e fixture".into()), None)
         .expect("snapshot fixture");
-    let _ = ContentAddressedMount::new(repo, "main").expect("open mount");
-    // INTENTIONAL STUB: no FUSE session. mountpoint is empty; every
-    // read below will fail.
+    let mount = ContentAddressedMount::new(repo, "main").expect("open mount");
+    let session = FuseShell::new(mount)
+        .mount_background(mountpoint.path())
+        .expect("mount_background");
+
+    // Wait for the kernel to publish. We probe the first fixture file
+    // because `repo.snapshot` guarantees it's reachable through the
+    // mount as soon as the FS is attached.
+    if let Some((first, _)) = files.first() {
+        let target = mountpoint.path().join(first);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !target.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            target.exists(),
+            "FUSE mount did not publish {} within 5s",
+            target.display()
+        );
+    }
+
     HeddleMount {
-        session: None,
+        session: Some(session),
         mountpoint,
         repo_dir,
     }
