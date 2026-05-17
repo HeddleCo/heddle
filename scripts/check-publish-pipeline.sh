@@ -427,6 +427,36 @@ def parse_ver_full(s):
     return (out[0], out[1], out[2], pre)
 
 
+def _cmp_prerelease(a, b):
+    """Compare two prerelease identifier strings per semver §11. Returns
+    -1/0/1. Empty string means "no prerelease" and sorts ABOVE any
+    prerelease (1.0.0 > 1.0.0-anything). Within prereleases: dot-separated
+    identifiers compared left-to-right; numeric identifiers compare
+    numerically, alphanumerics lexicographically, numerics rank below
+    alphanumerics, a shorter prefix loses to a longer one with the same
+    prefix (alpha < alpha.1)."""
+    if a == b:
+        return 0
+    if a == "":
+        return 1
+    if b == "":
+        return -1
+    ap, bp = a.split("."), b.split(".")
+    for x, y in zip(ap, bp):
+        xn, yn = x.isdigit(), y.isdigit()
+        if xn and yn:
+            xi, yi = int(x), int(y)
+            if xi != yi:
+                return -1 if xi < yi else 1
+        elif xn != yn:
+            return -1 if xn else 1
+        elif x != y:
+            return -1 if x < y else 1
+    if len(ap) != len(bp):
+        return -1 if len(ap) < len(bp) else 1
+    return 0
+
+
 def satisfies(req, ver):
     """Cargo caret semantics. Returns True / False, or None to signal an
     unsupported comparator shape (the caller treats None as a hard error).
@@ -443,10 +473,23 @@ def satisfies(req, ver):
     and must widen to <1.0.0, where the previous all-zero collapse to
     exact-patch was wrong (Codex r1 finding).
 
-    Prerelease rule: a source version carrying a prerelease tag (e.g.
-    0.3.0-alpha.1) MUST NOT satisfy a non-prerelease requirement; cargo
-    only admits prereleases when the requirement explicitly asks for one
-    (we model that as an exact `=X.Y.Z-pre` match).
+    Prerelease rules (cargo opts in only when the requirement asks for one):
+      - source has prerelease, req does not → reject.
+      - req has prerelease → restrict matches to the same (major,minor,patch)
+        tuple (cargo's documented behavior), and within that tuple require
+        source prerelease >= req prerelease using semver ordering. Catches
+        both "0.3.0-alpha.0 satisfying 0.3.0-alpha.1" (Codex r2 P2 finding)
+        and "1.0.1 leaking through a 1.0.0-alpha requirement" (Codex r2 P2).
+      - exact `=X.Y.Z-pre` still routes through the exact branch.
+
+    Exact `=` comparator:
+      - Build metadata (`+...`) is ignored on both sides — semver §10 says
+        build metadata MUST NOT factor into precedence (Codex r2 P3).
+      - Partial exact requirements widen to ranges per cargo:
+        `=4`   → >=4.0.0, <5.0.0-0
+        `=4.2` → >=4.2.0, <4.3.0-0
+        `=4.2.3` (or with prerelease tag) stays an exact normalized match.
+        (Codex r2 P3 finding.)
 
     Wildcards (`*` anywhere in the requirement) are rejected outright —
     `1.2.*` is a valid cargo comparator but the workspace convention is
@@ -460,10 +503,28 @@ def satisfies(req, ver):
     if "*" in req:
         return None
 
-    # Exact `=` comparator: full-string equality including prerelease.
-    # This is the ONLY way a prerelease source version can satisfy.
     if req.startswith("="):
-        return req[1:].strip() == ver.strip()
+        body = req[1:].strip()
+        body_no_meta = body.partition("+")[0]
+        has_pre = "-" in body_no_meta
+        base = body_no_meta.split("-", 1)[0]
+        base_parts_given = len([p for p in base.split(".") if p != ""])
+        # Partial `=` requirements are ranges (no prerelease in this form).
+        if not has_pre and base_parts_given < 3:
+            rmaj, rmin, rpat, _ = parse_ver_full(body)
+            vmaj, vmin, vpat, vpre = parse_ver_full(ver)
+            if vpre:
+                return False
+            if base_parts_given == 1:
+                return (vmaj, vmin, vpat) >= (rmaj, 0, 0) and vmaj == rmaj
+            # base_parts_given == 2
+            return (
+                (vmaj, vmin, vpat) >= (rmaj, rmin, 0)
+                and (vmaj, vmin) == (rmaj, rmin)
+            )
+        # Full exact (`=X.Y.Z` or `=X.Y.Z-pre`): ignore build metadata on
+        # BOTH sides per semver §10.
+        return body_no_meta == ver.strip().partition("+")[0]
 
     # Other comparators / multi-clause requirements: surface, don't guess.
     if req[:1] in (">", "<", "~") or "," in req:
@@ -479,15 +540,19 @@ def satisfies(req, ver):
     rmaj, rmin, rpat, rpre = parse_ver_full(req)
     vmaj, vmin, vpat, vpre = parse_ver_full(ver)
 
+    # Req has a prerelease tag: cargo restricts matches to the same
+    # (major,minor,patch) tuple AND requires source prerelease >= req
+    # prerelease (release counts as > any prerelease on the same tuple).
+    if rpre:
+        if (vmaj, vmin, vpat) != (rmaj, rmin, rpat):
+            return False
+        return _cmp_prerelease(vpre, rpre) >= 0
+
     # Prerelease in source but not in requirement → not satisfied.
-    # (Exact `=req-pre` matches were already handled above.)
-    if vpre and not rpre:
+    if vpre:
         return False
 
-    # Lower bound: source >= requirement (numeric tuple compare; pre-release
-    # ordering against same numeric is not material here — cargo treats a
-    # prerelease as "less than" the same release, but the prior branch
-    # already filtered the asymmetric case).
+    # Lower bound: source >= requirement (no prerelease on either side here).
     if (vmaj, vmin, vpat) < (rmaj, rmin, rpat):
         return False
 
@@ -543,6 +608,48 @@ _selftest(
     [
         (satisfies("1.2.*", "1.2.5"), None),
         (satisfies("*", "1.0.0"),     None),
+    ],
+)
+_selftest(
+    "caret prerelease lower-bound ordering (alpha.0 fails alpha.1; release sat. prerelease)",
+    [
+        (satisfies("0.3.0-alpha.1", "0.3.0-alpha.0"), False),
+        (satisfies("0.3.0-alpha.1", "0.3.0-alpha.1"), True),
+        (satisfies("0.3.0-alpha.1", "0.3.0-alpha.2"), True),
+        (satisfies("0.3.0-alpha.1", "0.3.0-beta"),    True),
+        (satisfies("0.3.0-alpha.1", "0.3.0"),         True),
+    ],
+)
+_selftest(
+    "prerelease requirements pin to same (M,m,p) tuple (cargo's documented rule)",
+    [
+        (satisfies("1.0.0-alpha", "1.0.0-alpha"),   True),
+        (satisfies("1.0.0-alpha", "1.0.0-alpha.1"), True),
+        (satisfies("1.0.0-alpha", "1.0.0"),         True),
+        (satisfies("1.0.0-alpha", "1.0.1-alpha"),   False),
+        (satisfies("1.0.0-alpha", "1.0.1"),         False),
+    ],
+)
+_selftest(
+    "exact `=` ignores build metadata on both sides (semver §10)",
+    [
+        (satisfies("=0.3.0-alpha.1", "0.3.0-alpha.1+build.5"), True),
+        (satisfies("=0.3.0+meta",    "0.3.0+other"),           True),
+        (satisfies("=0.3.0",         "0.3.0+build"),           True),
+        (satisfies("=0.3.0",         "0.3.1"),                 False),
+    ],
+)
+_selftest(
+    "partial `=` requirements widen to ranges (=4 → <5.0.0-0; =4.2 → <4.3.0-0)",
+    [
+        (satisfies("=4",   "4.0.0"),     True),
+        (satisfies("=4",   "4.999.999"), True),
+        (satisfies("=4",   "5.0.0"),     False),
+        (satisfies("=4",   "3.9.9"),     False),
+        (satisfies("=4.2", "4.2.0"),     True),
+        (satisfies("=4.2", "4.2.99"),    True),
+        (satisfies("=4.2", "4.3.0"),     False),
+        (satisfies("=4.2", "4.1.9"),     False),
     ],
 )
 
