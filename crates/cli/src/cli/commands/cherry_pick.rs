@@ -35,10 +35,7 @@ pub fn cmd_cherry_pick(
         .ok_or_else(|| anyhow!("Commit {} not found", commit))?;
 
     // Apply the tree from the cherry-picked commit
-    let tree = repo
-        .store()
-        .get_tree(&state.tree)?
-        .ok_or_else(|| anyhow!("Tree not found"))?;
+    let tree = repo.require_tree(&state.tree)?;
 
     // Apply the tree to the worktree
     apply_tree_to_worktree(&repo, &tree)?;
@@ -88,10 +85,10 @@ fn apply_tree_to_worktree(repo: &Repository, tree: &objects::object::Tree) -> Re
     use crate::cli::commands::merge::prepare_dir_for_file_replacement;
 
     // Remove entries that are not in the new tree.
-    let current_tree = repo
-        .current_state()?
-        .and_then(|s| repo.store().get_tree(&s.tree).ok().flatten())
-        .unwrap_or_default();
+    let current_tree = match repo.current_state()? {
+        Some(s) => repo.require_tree(&s.tree)?,
+        None => Tree::default(),
+    };
 
     let current_entries: HashMap<&str, &TreeEntry> = current_tree
         .entries()

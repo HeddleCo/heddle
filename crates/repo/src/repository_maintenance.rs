@@ -12,7 +12,7 @@ use refs::{Head, RefSummaryIndexInspection};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CommitGraphIndex, Repository, Result, Tree,
+    CommitGraphIndex, Repository, Result,
     commit_graph_persistence::{commit_graph_path, load_commit_graph},
 };
 use crate::{FsMonitorSettings, HeddleError, WorktreeIndex, WorktreeStatusOptions};
@@ -184,10 +184,7 @@ impl Repository {
         let pull_planner_maintenance = maintain_pull_planner_cache(self)?;
 
         if let Some(state) = self.current_state()? {
-            let tree = self
-                .store()
-                .get_tree(&state.tree)?
-                .unwrap_or_else(Tree::new);
+            let tree = self.require_tree(&state.tree)?;
             self.compare_worktree_cached_detailed_with_options(&tree, options)?;
             rebuilt_worktree_index = true;
             refreshed_change_monitor = true;

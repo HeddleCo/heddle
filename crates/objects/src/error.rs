@@ -37,7 +37,9 @@ pub enum HeddleError {
         expected: ContentHash,
         found: ContentHash,
     },
-    #[error("missing {object_type} object: {id}")]
+    #[error(
+        "missing {object_type} object: {id} (run `heddle fsck --full` to inspect store integrity)"
+    )]
     MissingObject { object_type: String, id: String },
     #[error("invalid tree entry: {0}")]
     InvalidTreeEntry(#[from] TreeError),

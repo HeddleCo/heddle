@@ -50,12 +50,10 @@ pub fn cmd_stash(cli: &Cli, command: StashCommands) -> Result<()> {
 
 fn cmd_stash_push(cli: &Cli, repo: &Repository, message: Option<String>) -> Result<()> {
     let current_state = repo.current_state()?;
-    let current_tree = current_state
-        .as_ref()
-        .map(|s| repo.store().get_tree(&s.tree))
-        .transpose()?
-        .flatten()
-        .unwrap_or_default();
+    let current_tree = match current_state.as_ref() {
+        Some(s) => repo.require_tree(&s.tree)?,
+        None => objects::object::Tree::new(),
+    };
 
     let status = repo.compare_worktree_cached_with_options(
         &current_tree,
@@ -224,14 +222,11 @@ fn cmd_stash_show(cli: &Cli, repo: &Repository) -> Result<()> {
 
     let parent_tree_hash = ContentHash::from_hex(&stash.parent_tree_hash)
         .map_err(|e| anyhow!("Invalid parent tree hash: {}", e))?;
-    let _parent_tree = repo
-        .store()
-        .get_tree(&parent_tree_hash)?
-        .unwrap_or_default();
+    let _parent_tree = repo.require_tree(&parent_tree_hash)?;
 
     let stash_tree_hash = ContentHash::from_hex(&stash.tree_hash)
         .map_err(|e| anyhow!("Invalid stash tree hash: {}", e))?;
-    let _stash_tree = repo.store().get_tree(&stash_tree_hash)?.unwrap_or_default();
+    let _stash_tree = repo.require_tree(&stash_tree_hash)?;
 
     let changes = repo.diff_trees(&parent_tree_hash, &stash_tree_hash)?;
 

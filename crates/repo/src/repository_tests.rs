@@ -1352,6 +1352,96 @@ mod blob_hydrator_callback {
     }
 }
 
+mod require_tree_callback {
+    //! Tree-side analog of [`super::blob_hydrator_callback`] for
+    //! `Repository::require_tree` (issue heddle#93).
+    //!
+    //! `require_tree` has no hydrator dance — partial-fetch only ever
+    //! lazy-fetches blobs, not trees — so the contract is the simpler
+    //! shape: present trees round-trip; absent trees surface
+    //! `MissingObject { object_type: "tree" }` with the `heddle fsck`
+    //! hint baked into the display.
+    //!
+    //! These tests pin the contract at the API boundary; the
+    //! end-to-end CLI guards in
+    //! `crates/cli/tests/state_management/missing_tree_integrity.rs`
+    //! cover the on-disk wiring.
+
+    use objects::object::{ContentHash, Tree};
+
+    use super::create_test_repo;
+    use crate::{HeddleError, Repository};
+
+    #[test]
+    fn require_tree_returns_tree_when_present_in_store() {
+        let (_temp, repo): (_, Repository) = create_test_repo();
+        let tree = Tree::new();
+        let hash = repo.store().put_tree(&tree).unwrap();
+        let loaded = repo
+            .require_tree(&hash)
+            .expect("require_tree must return a tree that was just put");
+        assert_eq!(loaded.hash(), hash);
+    }
+
+    #[test]
+    fn require_tree_returns_missing_object_when_absent() {
+        let (_temp, repo): (_, Repository) = create_test_repo();
+        // Use a hash that cannot collide with anything `init_default`
+        // seeded: `Tree::new().hash()` was the prior choice, but
+        // `init_default` seeds the empty tree, so `has_tree(hash)`
+        // returned true and an early-return short-circuited the test
+        // before `require_tree` was ever called (Codex r2 P3). A
+        // synthetic all-`0xab` digest has no preimage and is
+        // guaranteed absent from any freshly-initialised store.
+        let hash = ContentHash::from_bytes([0xab; 32]);
+        assert!(
+            !repo.store().has_tree(&hash).unwrap(),
+            "synthetic phantom hash must be absent from a fresh store",
+        );
+
+        let err = repo
+            .require_tree(&hash)
+            .expect_err("require_tree must error when the tree is absent from the store");
+        match err {
+            HeddleError::MissingObject { object_type, id } => {
+                assert_eq!(object_type, "tree", "object_type must distinguish tree from blob");
+                assert_eq!(
+                    id,
+                    hash.to_hex(),
+                    "missing-object error must carry the hash so the operator can correlate \
+                     with fsck output",
+                );
+            }
+            other => panic!("expected MissingObject, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_tree_display_includes_fsck_recovery_hint() {
+        // The hint travels with the variant's Display impl, so every
+        // call site that bubbles the error to the user (via anyhow
+        // `?`) gets the next-step pointer for free — no per-site
+        // wrapping required.
+        let err = HeddleError::MissingObject {
+            object_type: "tree".to_string(),
+            id: "deadbeef".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("heddle fsck"),
+            "missing-object display must include the fsck recovery hint; got: {msg}",
+        );
+        assert!(
+            msg.contains("tree"),
+            "display must carry the object_type so the operator knows what's missing; got: {msg}",
+        );
+        assert!(
+            msg.contains("deadbeef"),
+            "display must carry the id so the operator can correlate with fsck output; got: {msg}",
+        );
+    }
+}
+
 /// Issue #61: `Repository::open` must be callable from inside a Tokio
 /// runtime (`#[tokio::main]`, `#[tokio::test]`, a daemon worker) when
 /// the repo is configured with an `[storage.s3]` backend, without

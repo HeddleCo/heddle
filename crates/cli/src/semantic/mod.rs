@@ -53,7 +53,7 @@ pub fn semantic_diff_worktree(
     options: &SemanticDiffOptions,
     status_options: &WorktreeStatusOptions,
 ) -> Result<SemanticDiffResult, anyhow::Error> {
-    let from_tree = repo.store().get_tree(from_tree_hash)?.unwrap_or_default();
+    let from_tree = repo.require_tree(from_tree_hash)?;
     let status = repo.compare_worktree_cached_with_options(&from_tree, status_options)?;
 
     let status = WorktreeStatus {
@@ -79,7 +79,7 @@ pub fn semantic_check_only_worktree(
     options: &SemanticDiffOptions,
     status_options: &WorktreeStatusOptions,
 ) -> Result<SemanticCheckOnlyResult, anyhow::Error> {
-    let from_tree = repo.store().get_tree(from_tree_hash)?.unwrap_or_default();
+    let from_tree = repo.require_tree(from_tree_hash)?;
     let status = repo.compare_worktree_cached_with_options(&from_tree, status_options)?;
 
     let status = WorktreeStatus {
@@ -103,7 +103,7 @@ pub fn semantic_diff_summary_worktree(
     options: &SemanticDiffOptions,
     status_options: &WorktreeStatusOptions,
 ) -> Result<SemanticSummaryResult, anyhow::Error> {
-    let from_tree = repo.store().get_tree(from_tree_hash)?.unwrap_or_default();
+    let from_tree = repo.require_tree(from_tree_hash)?;
     let status = repo.compare_worktree_cached_with_options(&from_tree, status_options)?;
 
     let status = WorktreeStatus {

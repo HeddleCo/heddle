@@ -1564,6 +1564,41 @@ impl Repository {
         self.partial_fetch_metadata().is_missing_blob(hash)
     }
 
+    /// Load a tree by hash from the object store, surfacing a clear
+    /// error when the hash resolves to nothing.
+    ///
+    /// Use this whenever a hash recorded in a `State.tree` field or as
+    /// a subtree `TreeEntry` MUST resolve to an object: presentation
+    /// paths (`heddle status`, `heddle ready`, `heddle stash show`),
+    /// mutation paths (`heddle revert`, `heddle cherry-pick`,
+    /// `heddle goto`, `heddle resolve`), and inspection paths
+    /// (semantic diff, harness baseline) all qualify.
+    ///
+    /// Replaces the legacy `get_tree(...)?.unwrap_or_default()`
+    /// pattern. That pattern silently substituted `Tree::default()`
+    /// for a missing object, so presentation paths rendered "no
+    /// content" and mutation paths committed subtree-erasure merges
+    /// (see heddle#90 for the merge-path lock and heddle#93 for the
+    /// non-merge sweep that motivated this method).
+    ///
+    /// Returns [`HeddleError::MissingObject`] with `object_type =
+    /// "tree"` so callers and the top-level error printer can
+    /// recognize the bug class. The `Display` impl on `MissingObject`
+    /// includes the `heddle fsck --full` recovery hint, so call sites
+    /// don't need to wrap with anyhow context to give the operator a
+    /// next step.
+    ///
+    /// Pair with [`Repository::require_blob`] for the blob side of the
+    /// same contract.
+    pub fn require_tree(&self, hash: &ContentHash) -> Result<Tree> {
+        self.store
+            .get_tree(hash)?
+            .ok_or_else(|| HeddleError::MissingObject {
+                object_type: "tree".to_string(),
+                id: hash.to_hex(),
+            })
+    }
+
     pub fn require_blob(&self, hash: &ContentHash) -> Result<objects::object::Blob> {
         if let Some(blob) = self.store.get_blob(hash)? {
             if self.is_missing_blob(hash)? {

@@ -39,19 +39,16 @@ pub fn cmd_revert(
             .store()
             .get_state(parent_id)?
             .ok_or_else(|| anyhow!("Parent state not found"))?;
-        repo.store()
-            .get_tree(&parent_state.tree)?
-            .unwrap_or_default()
+        repo.require_tree(&parent_state.tree)?
     } else {
         Tree::new()
     };
 
-    if repo.store().get_tree(&target_state.tree)?.is_none() {
-        return Err(anyhow!(
-            "State {} references a missing tree object",
-            state_spec
-        ));
-    }
+    // Reject up-front if the target tree itself is missing — without
+    // this, the per-entry materialize path below would surface the
+    // same corruption later with a less helpful "missing blob"-shaped
+    // error. `require_tree` carries the fsck recovery hint.
+    repo.require_tree(&target_state.tree)?;
 
     let empty_tree = Tree::new();
     let parent_hash = if target_state.first_parent().is_some() {
@@ -67,12 +64,10 @@ pub fn cmd_revert(
     }
 
     let current_state = repo.current_state()?;
-    let current_tree = current_state
-        .as_ref()
-        .map(|s| repo.store().get_tree(&s.tree))
-        .transpose()?
-        .flatten()
-        .unwrap_or_default();
+    let current_tree = match current_state.as_ref() {
+        Some(s) => repo.require_tree(&s.tree)?,
+        None => Tree::new(),
+    };
 
     let status = repo.compare_worktree_cached_with_options(
         &current_tree,

@@ -27,12 +27,10 @@ pub fn cmd_clean(cli: &Cli, force: bool, dry_run: bool) -> Result<()> {
     }
 
     let current_state = repo.current_state()?;
-    let tree = current_state
-        .as_ref()
-        .map(|s| repo.store().get_tree(&s.tree))
-        .transpose()?
-        .flatten()
-        .unwrap_or_default();
+    let tree = match current_state.as_ref() {
+        Some(s) => repo.require_tree(&s.tree)?,
+        None => objects::object::Tree::new(),
+    };
 
     let detailed = repo.compare_worktree_cached_detailed_with_options(
         &tree,
