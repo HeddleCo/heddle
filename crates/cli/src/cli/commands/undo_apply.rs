@@ -65,6 +65,16 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         OpRecord::MarkerDelete { name, state } => {
             repo.refs().create_marker(name, state)?;
         }
+        // Redaction inverse: drop the specific redaction record so
+        // subsequent materialize calls restore the original blob
+        // bytes. The opt-in flag + purged-bytes check are enforced in
+        // `cmd_undo::ensure_redaction_undo_safe` before this point;
+        // `remove_redaction` re-checks `purged_at` defensively so a
+        // future caller that bypasses the CLI gate can't lose the
+        // audit trail of destroyed bytes.
+        OpRecord::Redact { redaction_id, .. } => {
+            repo.remove_redaction(redaction_id)?;
+        }
         _ => {}
     }
 

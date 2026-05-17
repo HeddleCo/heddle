@@ -69,7 +69,7 @@ pub use repository::{
     WorktreeCompareProfile, WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct,
     find_merge_base, is_major_rewrite, is_synthetic_root,
 };
-pub use repository_redaction::PurgeOutcome;
+pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{
     ABSENT_CONFIDENCE_DISPLAY, ThreadMetadataRefresh, classify_impact_categories,

@@ -319,6 +319,10 @@ Undoable operations:
   - heddle goto              (restores HEAD to the pre-goto state)
   - heddle thread create/drop/rename
   - heddle marker create/drop
+  - heddle redact apply               (with --allow-redact-undo; removes the
+                                       redaction record so future materializes
+                                       restore the original blob bytes. Refused
+                                       when a Purge has destroyed the bytes.)
 
 Not undoable (file a follow-up if you need one):
   - heddle push / heddle fetch        (remote-affecting; out of scope)
@@ -343,6 +347,16 @@ pub struct UndoArgs {
     /// alias kept for muscle memory from git/other VCS tooling.
     #[arg(long, visible_alias = "dry-run")]
     pub preview: bool,
+
+    /// Explicit opt-in for undoing a `heddle redact apply`. The inverse
+    /// removes the redaction record so subsequent materializes restore
+    /// the original blob bytes — i.e. previously-hidden content
+    /// becomes readable again. Without this flag, a `heddle undo`
+    /// chain that crosses a Redact refuses loudly rather than silently
+    /// re-exposing the content. Refused regardless of the flag when
+    /// a Purge has destroyed the bytes: Purge is irreversible.
+    #[arg(long)]
+    pub allow_redact_undo: bool,
 }
 
 /// User-facing `--workspace` flag values. Vocabulary is the same as

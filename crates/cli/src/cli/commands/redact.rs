@@ -114,8 +114,9 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
         primary.signature = Some(sign_redaction(signer.as_ref(), &primary)?);
     }
     let primary_id = repo.put_redaction(primary)?;
+    let scope = repo.op_scope();
     repo.oplog()
-        .record_redact(&primary_id, &blob, &state, &args.path)?;
+        .record_redact(&primary_id, &blob, &state, &args.path, Some(&scope))?;
 
     let mut states_redacted: u32 = 1;
     let mut extra_oplog_entries: u32 = 0;
@@ -157,8 +158,13 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
                     extra.signature = Some(sign_redaction(signer.as_ref(), &extra)?);
                 }
                 let extra_id = repo.put_redaction(extra)?;
-                repo.oplog()
-                    .record_redact(&extra_id, &blob, &other_state, &path)?;
+                repo.oplog().record_redact(
+                    &extra_id,
+                    &blob,
+                    &other_state,
+                    &path,
+                    Some(&scope),
+                )?;
                 extra_oplog_entries += 1;
             }
         }

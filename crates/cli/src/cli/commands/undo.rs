@@ -2,7 +2,7 @@
 //! Undo and redo commands.
 
 use anyhow::{Result, anyhow};
-use objects::object::ChangeId;
+use objects::object::{ChangeId, ContentHash};
 use oplog::{OpBatch, OpRecord};
 use repo::Repository;
 use serde::Serialize;
@@ -42,7 +42,14 @@ struct UndoRedoOutput {
     batches: Vec<OpBatchOutput>,
 }
 
-pub fn cmd_undo(cli: &Cli, steps: usize, list: bool, depth: usize, preview: bool) -> Result<()> {
+pub fn cmd_undo(
+    cli: &Cli,
+    steps: usize,
+    list: bool,
+    depth: usize,
+    preview: bool,
+    allow_redact_undo: bool,
+) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
 
     if list && preview {
@@ -105,6 +112,12 @@ pub fn cmd_undo(cli: &Cli, steps: usize, list: bool, depth: usize, preview: bool
     // Letting `apply_undo_batch` discover this mid-apply would leave the
     // repo half-undone (worktree partially rewritten, batch not marked).
     ensure_undo_states_reachable(&repo, &batches)?;
+    // Pre-flight the redaction-related ops in the batch chain so we
+    // refuse loudly before any state mutation. Purge is always
+    // irreversible; Redact is reversible but requires explicit opt-in
+    // (`--allow-redact-undo`) and refuses when the underlying bytes
+    // have since been purged.
+    ensure_redaction_undo_safe(&repo, &batches, allow_redact_undo)?;
 
     let mut updated_batches = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -165,6 +178,13 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     }
 
     ensure_worktree_clean(&repo, "redo")?;
+    // Redo of `Redact` / `Purge` is intentionally unsupported in this
+    // MVP: the OpRecord doesn't preserve the full `Redaction` record
+    // (reason, redactor, timestamp, signature) needed to faithfully
+    // re-apply, and `Purge` is irreversible by design. Refuse before
+    // mutating anything so a multi-batch chain that includes one of
+    // these isn't half-applied.
+    ensure_redaction_redo_supported(&batches)?;
 
     let mut updated_batches = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -303,9 +323,11 @@ fn ensure_undo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
 }
 
 /// Identify the state IDs that an inverse for `op` would need to load.
-/// Variants whose undo is a no-op (e.g. `Fork`, `Collapse`, `Redact`,
-/// `Purge`, `Checkpoint`) return an empty list — they don't reach into the
-/// object store, so a missing object can't trip them.
+/// Variants whose undo is a no-op (e.g. `Fork`, `Collapse`, `Checkpoint`)
+/// or which only mutate sidecars (`Redact`) return an empty list —
+/// they don't reach into the object store, so a missing state can't
+/// trip them. `Purge` is irreversible and handled by
+/// `ensure_redaction_undo_safe`; it returns nothing here too.
 fn states_required_for_undo(op: &OpRecord) -> Vec<ChangeId> {
     match op {
         OpRecord::Snapshot {
@@ -321,4 +343,137 @@ fn states_required_for_undo(op: &OpRecord) -> Vec<ChangeId> {
         OpRecord::MarkerDelete { state, .. } => vec![*state],
         _ => Vec::new(),
     }
+}
+
+/// Pre-flight check for redaction-related ops in the batch chain.
+///
+/// Three refusal cases, all surfaced before any state mutation:
+///
+/// 1. **Purge.** Purge is irreversible by design — the bytes are gone
+///    from local storage. The CLI rejects the whole undo so operators
+///    aren't surprised by a half-applied chain.
+///
+/// 2. **Redact without opt-in.** Undoing a `Redact` removes the
+///    redaction record so subsequent materializes substitute the
+///    original bytes again — i.e. previously-hidden content becomes
+///    readable. Pre-fix this was a silent no-op (heddle#98); the fix
+///    actually reverses the redaction. To prevent a casual
+///    `heddle undo -n N` from re-exposing redacted content, the
+///    inverse runs only when the user passes `--allow-redact-undo`.
+///
+/// 3. **Redact whose bytes have been purged.** The Redaction record is
+///    then the only audit trail for "these bytes were destroyed".
+///    Removing it would lie about local storage state and the
+///    materialize path would fail with a missing-blob error instead
+///    of restoring content. Refused regardless of the opt-in flag.
+fn ensure_redaction_undo_safe(
+    repo: &Repository,
+    batches: &[OpBatch],
+    allow_redact_undo: bool,
+) -> Result<()> {
+    let mut purge_ops: Vec<(u64, ContentHash)> = Vec::new();
+    let mut redact_ops: Vec<(u64, ContentHash)> = Vec::new();
+
+    for batch in batches {
+        for entry in &batch.entries {
+            match &entry.operation {
+                OpRecord::Purge {
+                    redaction_id, ..
+                } => purge_ops.push((entry.id, *redaction_id)),
+                OpRecord::Redact {
+                    redaction_id, ..
+                } => redact_ops.push((entry.id, *redaction_id)),
+                _ => {}
+            }
+        }
+    }
+
+    if !purge_ops.is_empty() {
+        let shorts: Vec<String> = purge_ops
+            .iter()
+            .map(|(op_id, redaction_id)| format!("op {} (redaction {})", op_id, redaction_id.short()))
+            .collect();
+        return Err(anyhow!(
+            "Refusing to undo: `heddle purge` is irreversible by design — the blob bytes have been \
+             physically removed from local storage and cannot be reconstructed. Affected op(s): {}. \
+             Restore the bytes from a backup if you need them, or run `heddle undo --list` and \
+             target an earlier op past the purge.",
+            shorts.join(", "),
+        ));
+    }
+
+    if redact_ops.is_empty() {
+        return Ok(());
+    }
+
+    // Refuse if any redaction in the chain has its bytes already
+    // purged — checked first so the precise "purged audit trail" error
+    // wins over the generic opt-in prompt.
+    let mut purged_redacts: Vec<(u64, ContentHash)> = Vec::new();
+    for (op_id, redaction_id) in &redact_ops {
+        if repo.redaction_is_purged(redaction_id)? {
+            purged_redacts.push((*op_id, *redaction_id));
+        }
+    }
+    if !purged_redacts.is_empty() {
+        let shorts: Vec<String> = purged_redacts
+            .iter()
+            .map(|(op_id, id)| format!("op {} (redaction {})", op_id, id.short()))
+            .collect();
+        return Err(anyhow!(
+            "Refusing to undo: at least one redaction in this chain has had its bytes purged ({}). \
+             The redaction record is now the only audit trail that those bytes were destroyed; \
+             removing it would lie about local storage and a subsequent materialize would fail \
+             with a missing-blob error rather than restore content. Purge is irreversible.",
+            shorts.join(", "),
+        ));
+    }
+
+    if !allow_redact_undo {
+        let shorts: Vec<String> = redact_ops
+            .iter()
+            .map(|(op_id, id)| format!("op {} (redaction {})", op_id, id.short()))
+            .collect();
+        return Err(anyhow!(
+            "Refusing to undo a `heddle redact apply`: the inverse removes the redaction record \
+             so subsequent materializes restore the original bytes, which would re-expose \
+             previously-hidden content. Pass `--allow-redact-undo` to confirm. Affected op(s): {}.",
+            shorts.join(", "),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Pre-flight for `heddle redo`: refuse when the batch chain contains a
+/// `Redact` or `Purge` op. Neither has a faithful re-apply path today —
+/// `OpRecord::Redact` doesn't carry the full `Redaction` (reason,
+/// redactor, signature, etc.), so a re-application would invent fields,
+/// and `Purge` is irreversible. Refusing pre-mutation keeps multi-batch
+/// chains from being half-redone.
+fn ensure_redaction_redo_supported(batches: &[OpBatch]) -> Result<()> {
+    let mut blocking: Vec<(u64, &'static str)> = Vec::new();
+    for batch in batches {
+        for entry in &batch.entries {
+            match &entry.operation {
+                OpRecord::Redact { .. } => blocking.push((entry.id, "Redact")),
+                OpRecord::Purge { .. } => blocking.push((entry.id, "Purge")),
+                _ => {}
+            }
+        }
+    }
+    if blocking.is_empty() {
+        return Ok(());
+    }
+    let shorts: Vec<String> = blocking
+        .iter()
+        .map(|(op_id, kind)| format!("op {} ({})", op_id, kind))
+        .collect();
+    Err(anyhow!(
+        "Refusing to redo: `Redact` and `Purge` ops do not have a re-apply path — the oplog \
+         entry doesn't preserve the full Redaction record (reason, redactor, signature) needed \
+         to recreate it, and Purge is irreversible by design. Re-run `heddle redact apply` \
+         (or `heddle purge apply`) to re-establish the operation. Affected op(s): {}.",
+        shorts.join(", "),
+    ))
 }

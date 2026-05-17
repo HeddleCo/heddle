@@ -414,9 +414,10 @@ async fn main() -> Result<()> {
             list,
             depth,
             preview,
+            allow_redact_undo,
         }) => {
             resolve_operation_id(&cli)?;
-            cmd_undo(&cli, *steps, *list, *depth, *preview)
+            cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo)
         }
 
         Commands::Redo { steps, preview } => {

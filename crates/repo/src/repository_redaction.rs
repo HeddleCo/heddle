@@ -73,6 +73,20 @@ pub struct WireAcceptOutcome {
     pub skipped_existing: usize,
 }
 
+/// Outcome of a [`Repository::remove_redaction`] call. Surfaces the
+/// blob the redaction targeted and whether the sidecar file is now
+/// empty so the undo path can announce the change without re-walking
+/// the store.
+#[derive(Debug, Clone)]
+pub struct RemoveRedactionOutcome {
+    /// Blob the removed redaction targeted.
+    pub blob: ContentHash,
+    /// `true` when the sidecar file held only this one redaction and
+    /// has been deleted from disk; `false` when other redactions
+    /// remain on the same blob and the file was rewritten in place.
+    pub sidecar_now_empty: bool,
+}
+
 /// Outcome of a `purge` call. Useful for surfaces that report what
 /// actually changed (the JSON output of `heddle purge`).
 #[derive(Debug, Clone)]
@@ -197,6 +211,99 @@ impl Repository {
             }
         }
         Ok(None)
+    }
+
+    /// Reverse a redaction declaration by removing the specific record
+    /// (identified by its content-addressed id) from the on-disk
+    /// sidecar. This is the inverse of `put_redaction` for the
+    /// undo path — see [`OpRecord::Redact`](oplog::OpRecord)'s undo
+    /// contract.
+    ///
+    /// Refuses if the redaction's bytes have already been purged
+    /// (`purged_at: Some(_)`): the Redaction record is then load-
+    /// bearing audit trail for "these bytes were physically destroyed",
+    /// and removing it would lie. Purge is documented irreversible.
+    ///
+    /// Returns the outcome — whether a record was removed and whether
+    /// the surrounding sidecar file is now empty (callers can use this
+    /// to clean up the empty `.bin` file if desired; the read path
+    /// already treats a missing file as `RedactionsBlob::empty`).
+    pub fn remove_redaction(
+        &self,
+        redaction_id: &ContentHash,
+    ) -> Result<RemoveRedactionOutcome> {
+        // Walk the per-blob sidecars to find the one carrying this id.
+        // Today the redactions store is small enough (operator-scale,
+        // not per-row) that an O(N) scan is fine; the same `get_redaction`
+        // helper above already pays this cost.
+        for (blob, mut redactions_blob) in self.list_all_redactions()? {
+            // Locate the entry by re-computing each contained
+            // redaction's canonical id. Cheaper than threading the id
+            // through the on-disk schema and keeps the storage format
+            // version-stable.
+            let mut found_index: Option<usize> = None;
+            for (index, redaction) in redactions_blob.redactions.iter().enumerate() {
+                let id = redaction_content_hash(redaction)?;
+                if &id == redaction_id {
+                    if redaction.is_purged() {
+                        anyhow::bail!(
+                            "redaction {} on blob {} cannot be undone: the underlying bytes were purged \
+                             (Purge is irreversible — the redaction record is load-bearing audit trail \
+                              for the destroyed bytes)",
+                            redaction_id.short(),
+                            blob.short(),
+                        );
+                    }
+                    found_index = Some(index);
+                    break;
+                }
+            }
+            let Some(index) = found_index else {
+                continue;
+            };
+            redactions_blob.redactions.remove(index);
+            let path = self.redaction_path_for_blob(&blob);
+            if redactions_blob.redactions.is_empty() {
+                // Empty sidecar — clean up the file so `list_all_redactions`
+                // doesn't carry around a hollow entry. Missing-file is
+                // already the "no redactions for this blob" signal.
+                if path.exists() {
+                    fs::remove_file(&path).with_context(|| {
+                        format!("remove empty redactions sidecar '{}'", path.display())
+                    })?;
+                }
+                return Ok(RemoveRedactionOutcome {
+                    blob,
+                    sidecar_now_empty: true,
+                });
+            }
+            let bytes = redactions_blob
+                .encode()
+                .with_context(|| "re-encode redactions blob after removal")?;
+            write_file_atomic(&path, &bytes)
+                .with_context(|| format!("write '{}'", path.display()))?;
+            return Ok(RemoveRedactionOutcome {
+                blob,
+                sidecar_now_empty: false,
+            });
+        }
+        anyhow::bail!(
+            "redaction {} not found in any sidecar — it may have already \
+             been removed",
+            redaction_id.short(),
+        )
+    }
+
+    /// Look up a redaction's current `purged_at` state by id. Used by
+    /// the undo pre-flight to refuse before any mutation if removing
+    /// the redaction record would lie about destroyed bytes.
+    pub fn redaction_is_purged(&self, redaction_id: &ContentHash) -> Result<bool> {
+        match self.get_redaction(redaction_id)? {
+            Some((_, redaction)) => Ok(redaction.is_purged()),
+            // A missing redaction is not "purged"; let the caller's
+            // own missing-record path surface the right error.
+            None => Ok(false),
+        }
     }
 
     /// Mark every redaction on `blob` as purged and physically remove the
