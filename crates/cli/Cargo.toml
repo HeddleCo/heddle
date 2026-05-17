@@ -45,6 +45,11 @@ libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.2", features = ["memory-backend"] }
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.2" }
 daemon = { path = "../daemon", package = "heddle-daemon", version = "0.2" }
+# `heddle-merge` is the native hunk-level text merge engine extracted from
+# `heddle-semantic` so non-semantic builds (`--no-default-features`) retain
+# text auto-merge. Always-on: the merge driver and rebase replay both call
+# into it unconditionally.
+merge = { path = "../merge", package = "heddle-merge", version = "0.2" }
 grpc = { path = "../grpc", package = "heddle-grpc", version = "0.3" }
 cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.2" }
 heddle-client = { path = "../client", version = "0.2", optional = true }

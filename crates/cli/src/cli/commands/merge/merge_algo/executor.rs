@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
     store::ObjectStore,
@@ -231,7 +231,6 @@ fn three_way_content_merge(
     text_hunk_merge_blobs(store, base_hash, our_hash, their_hash, path, conflicts, labels)
 }
 
-#[cfg(feature = "semantic")]
 fn text_hunk_merge_blobs(
     store: &dyn ObjectStore,
     base_hash: &ContentHash,
@@ -241,11 +240,11 @@ fn text_hunk_merge_blobs(
     conflicts: &mut Vec<String>,
     labels: ConflictLabels<'_>,
 ) -> Result<ContentHash> {
-    use semantic::merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
+    use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 
-    let base_content = load_blob_content(store, base_hash)?;
-    let our_content = load_blob_content(store, our_hash)?;
-    let their_content = load_blob_content(store, their_hash)?;
+    let base_content = load_blob_content(store, base_hash, path)?;
+    let our_content = load_blob_content(store, our_hash, path)?;
+    let their_content = load_blob_content(store, their_hash, path)?;
 
     let markers = ConflictMarkers {
         ours: labels.current,
@@ -275,28 +274,26 @@ fn text_hunk_merge_blobs(
     }
 }
 
-#[cfg(not(feature = "semantic"))]
-fn text_hunk_merge_blobs(
+/// Load a blob's bytes, surfacing an error if it's missing from the store.
+///
+/// A missing blob during a three-way merge means the object store cannot
+/// satisfy a hash the tree layer believes exists — corrupt store, dropped
+/// pack, broken ref. Coercing the missing input to empty (`unwrap_or_default`)
+/// causes the merger to silently produce a result where the other side
+/// "wins" with no markers, committing a merge that loses data. Bail loudly
+/// so the user sees the corruption instead of inheriting a silent rewrite.
+fn load_blob_content(
     store: &dyn ObjectStore,
-    _base_hash: &ContentHash,
-    our_hash: &ContentHash,
-    their_hash: &ContentHash,
+    hash: &ContentHash,
     path: &str,
-    conflicts: &mut Vec<String>,
-    labels: ConflictLabels<'_>,
-) -> Result<ContentHash> {
-    // No semantic feature → no native hunk-level merge engine. Fall back
-    // to whole-file conflict markers (preserves prior behavior for users
-    // who explicitly built with `--no-default-features` without
-    // re-enabling `semantic`).
-    content_conflict_merge(store, our_hash, their_hash, path, conflicts, labels)
-}
-
-fn load_blob_content(store: &dyn ObjectStore, hash: &ContentHash) -> Result<Vec<u8>> {
-    Ok(store
-        .get_blob(hash)?
-        .map(|blob| blob.content().to_vec())
-        .unwrap_or_default())
+) -> Result<Vec<u8>> {
+    let blob = store.get_blob(hash)?.ok_or_else(|| {
+        anyhow!(
+            "merge input blob {hash} for path {path:?} is missing from the object store; \
+             aborting to avoid silently merging against empty content"
+        )
+    })?;
+    Ok(blob.content().to_vec())
 }
 
 fn content_conflict_merge(
@@ -307,14 +304,8 @@ fn content_conflict_merge(
     conflicts: &mut Vec<String>,
     labels: ConflictLabels<'_>,
 ) -> Result<ContentHash> {
-    let our_content = store
-        .get_blob(our_hash)?
-        .map(|blob| blob.content().to_vec())
-        .unwrap_or_default();
-    let their_content = store
-        .get_blob(their_hash)?
-        .map(|blob| blob.content().to_vec())
-        .unwrap_or_default();
+    let our_content = load_blob_content(store, our_hash, path)?;
+    let their_content = load_blob_content(store, their_hash, path)?;
     let blob = Blob::new(format_conflict_content(
         &our_content,
         &their_content,
@@ -332,10 +323,7 @@ fn modify_delete_conflict_merge(
     conflicts: &mut Vec<String>,
     labels: ConflictLabels<'_>,
 ) -> Result<ContentHash> {
-    let kept_content = store
-        .get_blob(kept_hash)?
-        .map(|blob| blob.content().to_vec())
-        .unwrap_or_default();
+    let kept_content = load_blob_content(store, kept_hash, path)?;
     let blob = Blob::new(format_conflict_content(&kept_content, &[], labels));
     let hash = store.put_blob(&blob)?;
     conflicts.push(path.to_string());
@@ -699,5 +687,51 @@ fn conflict_entry_content(repo: &Repository, entry: &TreeEntry) -> Result<Vec<u8
         Ok(listing.into_bytes())
     } else {
         Ok(repo.require_blob(&entry.hash)?.content().to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objects::store::InMemoryStore;
+
+    /// A missing blob during the three-way text merge must surface as an
+    /// error, not be silently coerced to empty bytes. The pre-fix code
+    /// `unwrap_or_default()`-ed the load and would produce a "clean" merge
+    /// where the present side won and the missing side appeared as deletion
+    /// — committing data loss without conflict markers.
+    #[test]
+    fn missing_merge_blob_surfaces_as_error_not_silent_empty() {
+        let store = InMemoryStore::new();
+        let present = Blob::new(b"X\nY\n".to_vec());
+        let present_hash = store.put_blob(&present).unwrap();
+        // Hash not present in the store — simulates a corrupt object store
+        // or dropped pack.
+        let missing = Blob::new(b"zzz".to_vec());
+        let missing_hash = missing.hash();
+        assert_ne!(present_hash, missing_hash);
+
+        let err = load_blob_content(&store, &missing_hash, "src/foo.rs")
+            .expect_err("expected a hard error on missing merge input");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("missing from the object store"),
+            "error must surface the missing-blob diagnostic, got: {msg}"
+        );
+        assert!(
+            msg.contains("src/foo.rs"),
+            "error must mention the affected path so operators can locate \
+             the corrupt entry; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn present_merge_blob_loads_content() {
+        let store = InMemoryStore::new();
+        let blob = Blob::new(b"hello\nworld\n".to_vec());
+        let hash = store.put_blob(&blob).unwrap();
+        let content = load_blob_content(&store, &hash, "src/bar.rs")
+            .expect("blob present in store");
+        assert_eq!(content, b"hello\nworld\n");
     }
 }

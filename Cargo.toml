@@ -8,6 +8,7 @@ members = [
     "crates/devtools",
     "crates/grpc",
     "crates/ingest",
+    "crates/merge",
     "crates/mount",
     "crates/objects",
     "crates/oplog",

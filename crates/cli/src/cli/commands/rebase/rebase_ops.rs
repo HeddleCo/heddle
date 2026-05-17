@@ -320,31 +320,19 @@ fn try_auto_merge_textual_change(
 /// Returns `Some(bytes)` only when the merge resolves *cleanly* — any
 /// conflict (including binary, delete/modify, or overlapping hunks) returns
 /// `None`, leaving the rebase caller to either invoke `blob_contains_both`
-/// or stop with `ApplyResult::Conflict`. With the `semantic` feature on
-/// (the default), this routes through the native hunk-level merger added
-/// in heddle#79, so multi-hunk-per-side edits auto-resolve when disjoint —
-/// directly addressing the heddle#54 trip report's rebase failure mode.
-#[cfg(feature = "semantic")]
+/// or stop with `ApplyResult::Conflict`. Routes through the native
+/// hunk-level merger added in heddle#79 — always available, no feature
+/// gate — so multi-hunk-per-side edits auto-resolve when disjoint even on
+/// `--no-default-features` builds, addressing the heddle#54 trip report's
+/// rebase failure mode.
 fn auto_merge_text_lines(base: &[u8], current: &[u8], incoming: &[u8]) -> Result<Option<Vec<u8>>> {
-    use semantic::merge::{MergeOutcome, text_hunk_merge};
+    use merge::{MergeOutcome, text_hunk_merge};
     match text_hunk_merge(base, current, incoming) {
         MergeOutcome::Clean(bytes) => Ok(Some(bytes)),
         MergeOutcome::Conflicts { .. }
         | MergeOutcome::Binary
         | MergeOutcome::DeleteVsModify => Ok(None),
     }
-}
-
-#[cfg(not(feature = "semantic"))]
-fn auto_merge_text_lines(
-    _base: &[u8],
-    _current: &[u8],
-    _incoming: &[u8],
-) -> Result<Option<Vec<u8>>> {
-    // No semantic feature → no native hunk-level merge engine. Decline
-    // auto-merge; caller falls back to `blob_contains_both` or marks
-    // the file conflicted.
-    Ok(None)
 }
 
 fn blob_contains_both(

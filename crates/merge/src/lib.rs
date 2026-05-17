@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native hunk-level three-way text merge.
 //!
-//! This module provides [`text_hunk_merge`], heddle's own line-based three-way
+//! This crate provides [`text_hunk_merge`], heddle's own line-based three-way
 //! merge engine. It is the layer the semantic merger and other tooling fall
 //! through to when path- or symbol-level reconciliation declines. Unlike the
 //! prior single-range merger that bailed to whole-file conflict markers on any
 //! multi-hunk diff, this engine identifies disjoint hunks via diff3-style
 //! alignment and emits per-hunk markers — matching git's baseline competence.
+//!
+//! The engine is a primitive: it depends only on `similar` for LCS alignment
+//! and is intentionally split out of `heddle-semantic` so non-semantic CLI
+//! builds (e.g. `--no-default-features`) retain text-level auto-merge. Higher
+//! layers (semantic resolver, rebase replay, merge driver) call into this
+//! crate unconditionally.
 //!
 //! ## Pipeline position
 //!
@@ -28,7 +34,9 @@
 //!   conflict; the side that introduced/retained content wins.
 //! - When both sides modify the same hunk but the only difference is trailing
 //!   whitespace on otherwise-equal lines, the merge prefers the version with
-//!   no extra trailing whitespace to avoid spurious conflicts.
+//!   no extra trailing whitespace to avoid spurious conflicts. CRLF vs LF is
+//!   NOT treated as "whitespace-equivalent": line endings are load-bearing on
+//!   cross-platform repos and divergence there must surface as a conflict.
 //!
 //! ## Binary files
 //!

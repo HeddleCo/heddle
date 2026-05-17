@@ -284,6 +284,148 @@ fn same_anchor_insertions_concat_rather_than_conflict() {
     }
 }
 
+// =====================================================================
+// Codex r1 — P1: split insertion+edit hunks before declaring conflicts.
+//
+// One side ONLY inserts at an anchor; the other side ONLY edits an
+// adjacent base line. The patches don't overlap and git's merge-file
+// resolves them cleanly; before the fix, our hunk classifier reported
+// a conflict because the four-way classification only handles exact
+// `ours == base` / `theirs == base` / `ours == theirs` equalities.
+// =====================================================================
+#[test]
+fn insertion_plus_adjacent_edit_resolves_cleanly() {
+    let base = b"X\nY\n";
+    let ours = b"X\nNEW\nY\n"; // inserts NEW between X and Y
+    let theirs = b"X\nY'\n"; // edits Y → Y'
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => {
+            assert_eq!(out, b"X\nNEW\nY'\n", "expected X NEW Y' composition");
+        }
+        other => panic!("expected Clean from insertion+edit compose, got {other:?}"),
+    }
+}
+
+#[test]
+fn insertion_plus_adjacent_edit_symmetric() {
+    // Swap which side inserts and which edits — same expected result.
+    let base = b"X\nY\n";
+    let ours = b"X\nY'\n"; // edits Y → Y'
+    let theirs = b"X\nNEW\nY\n"; // inserts NEW
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => {
+            assert_eq!(out, b"X\nNEW\nY'\n", "expected X NEW Y' composition");
+        }
+        other => panic!("expected Clean from insertion+edit compose, got {other:?}"),
+    }
+}
+
+#[test]
+fn insertion_plus_adjacent_delete_resolves_cleanly() {
+    // Composer also covers insertion + delete: ours inserts NEW, theirs
+    // deletes Y. Output: X NEW (Y is gone).
+    let base = b"X\nY\n";
+    let ours = b"X\nNEW\nY\n";
+    let theirs = b"X\n"; // Y deleted
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => {
+            assert_eq!(out, b"X\nNEW\n", "expected X NEW (Y deleted)");
+        }
+        other => panic!("expected Clean from insertion+delete compose, got {other:?}"),
+    }
+}
+
+#[test]
+fn insertion_at_eof_plus_edit_resolves_cleanly() {
+    // Ours appends NEW after base; theirs replaces last base line.
+    // Composer must place the trailing insertion correctly.
+    let base = b"X\nY\n";
+    let ours = b"X\nY\nNEW\n"; // appends NEW at EOF
+    let theirs = b"X\nY'\n"; // edits Y
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => {
+            assert_eq!(out, b"X\nY'\nNEW\n", "trailing insertion must follow edit");
+        }
+        other => panic!("expected Clean from insertion+edit (EOF) compose, got {other:?}"),
+    }
+}
+
+#[test]
+fn insertion_at_bof_plus_edit_resolves_cleanly() {
+    // Ours prepends NEW at start; theirs edits last base line.
+    let base = b"X\nY\n";
+    let ours = b"NEW\nX\nY\n";
+    let theirs = b"X\nY'\n";
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => {
+            assert_eq!(out, b"NEW\nX\nY'\n", "leading insertion must precede edits");
+        }
+        other => panic!("expected Clean from insertion+edit (BOF) compose, got {other:?}"),
+    }
+}
+
+#[test]
+fn both_sides_modify_same_line_still_conflicts() {
+    // Sanity: composer must NOT auto-resolve when both sides modify the
+    // same base line. This is the canonical conflict.
+    let base = b"X\nY\n";
+    let ours = b"X\nY'\n";
+    let theirs = b"X\nY''\n";
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Conflicts { conflict_count, .. } => {
+            assert_eq!(conflict_count, 1, "expected exactly one conflict");
+        }
+        other => panic!("expected Conflicts on both-sides-modify-Y, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// Codex r1 — P2: respect line-ending differences in trailing-ws compare.
+//
+// `trailing_ws_equal` previously stripped line endings before comparing,
+// so a CRLF-only side and an LF-only side editing the same line were
+// folded into "whitespace-equivalent" and auto-resolved via prefer_clean.
+// That hides genuine cross-platform divergence; line endings are
+// load-bearing.
+// =====================================================================
+#[test]
+fn crlf_vs_lf_on_same_line_conflicts() {
+    // base has LF endings. ours keeps LF but edits Y. theirs uses CRLF
+    // for the same edit. The "edit" content is identical mod line endings;
+    // the previous buggy `trailing_ws_equal` would mark these equivalent.
+    let base = b"X\nY\n";
+    let ours = b"X\nY-edit\n";
+    let theirs = b"X\r\nY-edit\r\n";
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Conflicts { conflict_count, .. } => {
+            assert!(
+                conflict_count >= 1,
+                "CRLF vs LF must conflict, got {conflict_count}"
+            );
+        }
+        // Allow Clean ONLY if both ends actually agree byte-for-byte (they
+        // don't, in this fixture). Anything that silently picks one is a
+        // regression of the documented line-ending policy.
+        other => panic!("expected Conflicts on CRLF vs LF divergence, got {other:?}"),
+    }
+}
+
+#[test]
+fn trailing_space_only_difference_still_auto_resolves_with_same_endings() {
+    // Sanity: the trailing-whitespace folding still works when line
+    // endings agree on both sides. ours has trailing space, theirs has
+    // none — prefer_clean picks the cleaner one.
+    let base = b"X\nY\n";
+    let ours = b"X\nY-edit  \n"; // two trailing spaces
+    let theirs = b"X\nY-edit\n";
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => {
+            assert_eq!(out, b"X\nY-edit\n", "prefer_clean must pick no-trailing-space");
+        }
+        other => panic!("expected Clean (prefer_clean), got {other:?}"),
+    }
+}
+
 /// Benchmark-style timing test for the no-conflict path on a heddle#54-shape
 /// large file. Prints elapsed time and asserts it under a generous budget so
 /// regressions show up loud. The previous `merge_single_line_ranges` walked
