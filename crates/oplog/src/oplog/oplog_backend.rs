@@ -67,16 +67,30 @@ pub trait OpLogBackend: Send + Sync {
         Ok(ids[0])
     }
 
+    /// Record a thread creation.
+    ///
+    /// `manager_snapshot` is opaque rmp-serde bytes of the matching
+    /// `Thread` record body (see `repo::ThreadManager::snapshot_thread_record`)
+    /// so redo can recreate the record after undo destroyed it. Pass
+    /// `None` for callsites that don't write a `ThreadManager` record
+    /// alongside the create (rename batch's new-name arm, ingest,
+    /// harness/agent stubs that write the record later or not at all).
+    ///
+    /// Always emits `OpRecord::ThreadCreateV2`. V1
+    /// (`OpRecord::ThreadCreate`) is retained as read-back-only for
+    /// legacy oplog entries written before heddle#23 r2.
     fn record_thread_create(
         &self,
         name: &str,
         state: &ChangeId,
+        manager_snapshot: Option<Vec<u8>>,
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
-            vec![OpRecord::ThreadCreate {
+            vec![OpRecord::ThreadCreateV2 {
                 name: name.to_string(),
                 state: *state,
+                manager_snapshot,
             }],
             scope,
         )?;
@@ -99,6 +113,16 @@ pub trait OpLogBackend: Send + Sync {
         Ok(ids[0])
     }
 
+    /// Record a thread rename as a batch.
+    ///
+    /// Emits the new-name arm as `ThreadCreateV2 { manager_snapshot: None }`
+    /// — `cmd_thread_rename`'s forward path does not re-key the
+    /// ThreadManager record under the new name (a pre-existing
+    /// forward-path bug filed as a follow-up in
+    /// docs/design/cross-thread-undo.md), so there is no record to
+    /// snapshot. The undo gate (`ensure_thread_worktree_undo_safe`)
+    /// matches both V1 and V2 ThreadCreate arms, so the rename undo
+    /// still refuses on a materialized worktree under either name.
     fn record_thread_rename(
         &self,
         old_name: &str,
@@ -108,9 +132,10 @@ pub trait OpLogBackend: Send + Sync {
     ) -> Result<Vec<u64>> {
         self.record_batch_scoped(
             vec![
-                OpRecord::ThreadCreate {
+                OpRecord::ThreadCreateV2 {
                     name: new_name.to_string(),
                     state: *state,
+                    manager_snapshot: None,
                 },
                 OpRecord::ThreadDelete {
                     name: old_name.to_string(),

@@ -1181,8 +1181,18 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     } else {
         repo.refs()
             .set_thread_cas(&args.name, RefExpectation::Missing, &base_state)?;
+        // `cmd_start` writes the ThreadManager record only after
+        // materializing the worktree below — there's no record yet to
+        // snapshot, so pass `None`. The `ensure_thread_worktree_undo_safe`
+        // gate (undo.rs) refuses undo whenever this create has a live
+        // materialized worktree on disk, so the only path where redo
+        // would actually run for a `start` op is one where the user has
+        // manually torn the worktree down. Redo then restores the ref
+        // only (no record body to put back); a subsequent `heddle
+        // thread start` re-establishes the record if the user wants
+        // one. heddle#23 r2.
         repo.oplog()
-            .record_thread_create(&args.name, &base_state, Some(&repo.op_scope()))?;
+            .record_thread_create(&args.name, &base_state, None, Some(&repo.op_scope()))?;
     }
 
     let thread_mode = resolve_thread_mode(repo, &args);
@@ -1562,8 +1572,6 @@ pub(crate) fn cmd_thread_create(
 
     repo.refs()
         .set_thread_cas(&name, RefExpectation::Missing, &current)?;
-    repo.oplog()
-        .record_thread_create(&name, &current, Some(&repo.op_scope()))?;
 
     // Persist a Thread record so subsequent commands that go through
     // `ThreadManager::load` (delegate, ship, integration policy,
@@ -1634,6 +1642,24 @@ pub(crate) fn cmd_thread_create(
         shared_target_dir: None,
     };
     thread_manager.save(&thread_state)?;
+
+    // Snapshot the just-saved record into the OpRecord so `heddle redo`
+    // can recreate it after `heddle undo` destroys it. Without this,
+    // redo restores only the ref and record-backed commands (`thread
+    // cd`, delegate, integration policy) silently degrade. heddle#23 r2
+    // Codex P1 (mirrors the heddle#99 r2 FastForwardV2 pattern — record
+    // what redo needs).
+    //
+    // Snapshot failure is fatal here: we just wrote the record, so a
+    // round-trip-encode that can't read its own write is a serde
+    // contract bug, not a runtime condition.
+    let manager_snapshot = thread_manager.snapshot_thread_record(&name)?;
+    repo.oplog().record_thread_create(
+        &name,
+        &current,
+        manager_snapshot,
+        Some(&repo.op_scope()),
+    )?;
 
     let output = ThreadOpOutput {
         name: name.clone(),

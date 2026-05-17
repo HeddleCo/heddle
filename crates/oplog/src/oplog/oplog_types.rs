@@ -179,6 +179,44 @@ pub enum OpRecord {
         /// later.
         post_target_id: ChangeId,
     },
+    /// Thread creation — V2 with a ThreadManager record snapshot so redo
+    /// can recreate the record body after undo destroyed it.
+    ///
+    /// V1 (`ThreadCreate`) carried only `(name, state)`. The undo inverse
+    /// added under heddle#23 r1 also deletes the matching ThreadManager
+    /// record so refs and record-store state stay in lockstep (contract
+    /// rule 4). That left redo broken: `apply_redo_entry` could only
+    /// restore the ref via `set_thread` — the record body (mode,
+    /// execution_path, materialized_path, base_state, base_root, …) was
+    /// gone and not reconstructible from V1's `(name, state)`. Record-
+    /// backed commands (`thread cd`, delegate, integration policy) then
+    /// silently degraded after an undo→redo round-trip. heddle#23 r2
+    /// Codex P1 (PR #112, thread 3254698975).
+    ///
+    /// Same hazard shape as heddle#99 r2 (FastForward → FastForwardV2
+    /// with `post_target_id`): undo destroys state that redo cannot
+    /// reconstruct from the OpRecord alone. The fix is the same — record
+    /// what redo needs.
+    ///
+    /// `manager_snapshot` is opaque rmp-serde bytes of the `Thread`
+    /// record body. Opaque to keep the `oplog` crate independent of
+    /// `repo`-level types; the `repo` crate owns the encoding via
+    /// `ThreadManager::snapshot_thread_record` /
+    /// `ThreadManager::restore_thread_record_from_snapshot`. `None` for
+    /// callsites that don't write a ThreadManager record alongside the
+    /// op (rename batch's new-name arm, ingest, harness/agent stubs).
+    ///
+    /// V1 records remain readable: `apply_undo_entry` keeps its V1 arm,
+    /// and `apply_redo_entry` falls back to ref-only restore with a
+    /// stderr warning so legacy oplog entries don't error — they
+    /// degrade gracefully as the live window slides forward.
+    ThreadCreateV2 {
+        name: String,
+        state: ChangeId,
+        /// rmp-serde-encoded `Thread` record body, or `None` when no
+        /// record was written by the forward path.
+        manager_snapshot: Option<Vec<u8>>,
+    },
 }
 
 impl OpRecord {
@@ -282,6 +320,9 @@ impl OpRecord {
                     pre_target_id.short(),
                     post_target_id.short()
                 )
+            }
+            OpRecord::ThreadCreateV2 { name, .. } => {
+                format!("create thread {}", name)
             }
         }
     }

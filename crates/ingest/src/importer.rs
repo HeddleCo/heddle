@@ -690,6 +690,7 @@ mod tests {
         for entry in &recent {
             match &entry.operation {
                 OpRecord::ThreadCreate { .. }
+                | OpRecord::ThreadCreateV2 { .. }
                 | OpRecord::ThreadUpdate { .. }
                 | OpRecord::ThreadDelete { .. }
                 | OpRecord::MarkerCreate { .. }

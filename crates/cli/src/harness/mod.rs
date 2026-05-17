@@ -916,9 +916,14 @@ impl HarnessBridgeRuntime {
             self.repo
                 .refs()
                 .set_thread_cas(name, refs::RefExpectation::Missing, &base_state)?;
+            // Harness writes the ThreadManager record later in this
+            // function (after materializing); no record exists to
+            // snapshot at recording time. `None` matches the pattern
+            // used by `cmd_start` / agent reservation. heddle#23 r2.
             self.repo.oplog().record_thread_create(
                 name,
                 &base_state,
+                None,
                 Some(&self.repo.op_scope()),
             )?;
         }

@@ -434,7 +434,7 @@ fn kind_for(op: &OpRecord) -> String {
     match op {
         OpRecord::Snapshot { .. } => "snapshot".into(),
         OpRecord::Goto { .. } => "goto".into(),
-        OpRecord::ThreadCreate { .. } => "thread_create".into(),
+        OpRecord::ThreadCreate { .. } | OpRecord::ThreadCreateV2 { .. } => "thread_create".into(),
         OpRecord::ThreadDelete { .. } => "thread_delete".into(),
         OpRecord::ThreadUpdate { .. } => "thread_update".into(),
         OpRecord::Fork { .. } => "fork".into(),
@@ -458,7 +458,9 @@ fn kind_for(op: &OpRecord) -> String {
 fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
     match op {
         OpRecord::Snapshot { thread, .. } => thread.clone(),
-        OpRecord::ThreadCreate { name, .. } => Some(name.clone()),
+        OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
+            Some(name.clone())
+        }
         OpRecord::ThreadDelete { name, .. } => Some(name.clone()),
         OpRecord::ThreadUpdate { name, .. } => Some(name.clone()),
         OpRecord::MarkerCreate { name, .. } => Some(name.clone()),
@@ -485,7 +487,9 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
     match op {
         OpRecord::Snapshot { new_state, .. } => Some(*new_state),
         OpRecord::Goto { target, .. } => Some(*target),
-        OpRecord::ThreadCreate { state, .. } => Some(*state),
+        OpRecord::ThreadCreate { state, .. } | OpRecord::ThreadCreateV2 { state, .. } => {
+            Some(*state)
+        }
         OpRecord::ThreadDelete { state, .. } => Some(*state),
         OpRecord::ThreadUpdate { new_state, .. } => Some(*new_state),
         OpRecord::Fork { new_state, .. } => Some(*new_state),

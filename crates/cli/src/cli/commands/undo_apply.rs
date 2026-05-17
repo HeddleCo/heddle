@@ -49,7 +49,7 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         | OpRecord::Goto {
             prev_head: None, ..
         } => {}
-        OpRecord::ThreadCreate { name, .. } => {
+        OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
             delete_thread_safely(repo, name)?;
             // Cross-thread contract rule 4 (docs/design/cross-thread-undo.md):
             // the inverse of `ThreadCreate` must also remove the matching
@@ -62,6 +62,11 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             // safe. Missing record is fine: not every `ThreadCreate` path
             // writes one (legacy oplog entries may predate the record
             // store).
+            //
+            // Both V1 and V2 use the same undo: V2's `manager_snapshot`
+            // is recorded for redo, so undo can still destroy the live
+            // record without losing the data needed to put it back.
+            // Matches the FastForward/V2 shared-undo shape.
             remove_thread_manager_record(repo, name)?;
         }
         OpRecord::ThreadDelete { name, state } => {
@@ -152,8 +157,57 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         OpRecord::Goto { target, .. } => {
             repo.goto_without_record(target)?;
         }
+        // V1 ThreadCreate redo: ref-only, with a stderr note that the
+        // ThreadManager record is not being restored. V1 records were
+        // written by code pre-heddle#23 r2 that didn't carry a record
+        // snapshot in the OpRecord; redo can't reconstruct the body
+        // (mode, base_state, base_root, …) from `(name, state)` alone.
+        // Record-backed commands (`thread cd`, delegate, integration
+        // policy) will silently degrade on this thread — pointed out
+        // on stderr so the operator can rerun `heddle thread start
+        // <name>` if they want the record back. V1 ages out as the
+        // live oplog window slides forward.
         OpRecord::ThreadCreate { name, state } => {
             repo.refs().set_thread(name, state)?;
+            eprintln!(
+                "warning: redo of legacy V1 `ThreadCreate` for '{}' restores the ref only — \
+                 the matching ThreadManager record body was not snapshotted by this oplog entry. \
+                 Run `heddle thread start {}` to re-establish the record if record-backed \
+                 commands (`thread cd`, delegate, integration policy) misbehave.",
+                name, name
+            );
+        }
+        // V2 ThreadCreate redo (heddle#23 r2): restore both the thread
+        // ref and the ThreadManager record body from the snapshot
+        // captured at recording time. Mirrors the FastForwardV2 redo
+        // pattern (record what redo needs).
+        //
+        // `manager_snapshot = None` means the forward path didn't have
+        // a record to snapshot (cmd_start before materialization, the
+        // rename batch's new-name arm, ingest, harness/agent stubs).
+        // Restore the ref only in that case — no record to put back.
+        OpRecord::ThreadCreateV2 {
+            name,
+            state,
+            manager_snapshot,
+        } => {
+            repo.refs().set_thread(name, state)?;
+            if let Some(bytes) = manager_snapshot {
+                let manager = ThreadManager::new(repo.heddle_dir());
+                match manager.restore_thread_record_from_snapshot(bytes) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!(
+                            "warning: redo of `ThreadCreate` for '{}' restored the ref but \
+                             failed to decode the ThreadManager record snapshot ({}). \
+                             Record-backed commands (`thread cd`, delegate) may degrade \
+                             on this thread — run `heddle thread start {}` to recreate \
+                             the record.",
+                            name, e, name
+                        );
+                    }
+                }
+            }
         }
         OpRecord::ThreadDelete { name, .. } => {
             delete_thread_safely(repo, name)?;

@@ -43,7 +43,8 @@ than HEAD's? Does today's inverse correctly restore it?
 |---|---|---|---|
 | `Snapshot` | No — snapshot is on HEAD's thread by construction | ✅ | Single-thread by definition |
 | `Goto` | No — only moves HEAD | ✅ | Single-thread by definition |
-| `ThreadCreate` | **Yes** — creates a ref for a thread the user is not (necessarily) on; also writes a ThreadManager record | ❌ before this doc — inverse deletes ref but leaves ThreadManager record (and any attached worktree) orphaned | See "In scope" below |
+| `ThreadCreate` (V1, legacy read-only) | **Yes** — creates a ref for a thread the user is not (necessarily) on; also writes a ThreadManager record | Undo: delete ref + delete record. Redo: ref-only + stderr warning (V1 doesn't carry a snapshot for redo to read back). | V1 records age out as the live oplog window slides forward |
+| `ThreadCreateV2` | **Yes** — same as V1; carries `manager_snapshot` for symmetric undo/redo | ✅ — undo deletes ref + record; redo restores both from `manager_snapshot` | heddle#23 r2 Codex P1 fix; same shape as `FastForwardV2` |
 | `ThreadDelete` | **Yes** when emitted — but the user-facing `heddle thread drop --delete-thread` path does *not* record this variant (drop tears the worktree down through `drop_thread_silent` in thread_cmd.rs:562 without touching the oplog); it is emitted only by the `rename` batch and a legacy `cmd_thread_delete` helper no longer wired to the CLI verb | Ref-only restore via `set_thread`. Sufficient for the rename round-trip path; no record-cleanup work is reachable here because `cmd_thread_rename` doesn't write a record under the new name | See "Out of scope" |
 | `ThreadUpdate` | Defined but never emitted today | n/a | Inverse code path exists; unused |
 | `Fork`, `Collapse` | n/a — never emitted today | n/a | Reserved for future thread-graph ops |
@@ -225,21 +226,33 @@ The change is concentrated in `crates/cli/src/cli/commands/undo_apply.rs` and
   `materialized_path = Some(path)` where `path` still exists on disk.
   Called from `cmd_undo` before the worktree-clean check and before the
   `--preview` short-circuit so preview output stays honest.
-- `apply_undo_entry`'s `ThreadCreate` arm gains a ThreadManager record
-  deletion after `delete_thread_safely`. The deletion is best-effort: a
-  missing record is not an error (some ThreadCreate paths might predate
-  the record-writing change, or have had their record removed by a
-  preceding `drop` op).
-- `apply_redo_entry`'s `ThreadCreate` arm intentionally does **not**
-  re-create the ThreadManager record on redo. The forward op carried only
-  `(name, state)`; the record body (`execution_path`, `materialized_path`,
-  workflow metadata, …) isn't reconstructible from the OpRecord. Redo
-  restores the ref so subsequent operations behave correctly; a follow-up
-  forward `heddle thread start <name>` or equivalent can re-establish the
-  record if the user wants one.
+- `apply_undo_entry`'s `ThreadCreate`/`ThreadCreateV2` arms share a
+  single body: delete the ref via `delete_thread_safely`, then delete
+  the matching ThreadManager record (best-effort — a missing record is
+  not an error). V2 is fine to destroy alongside the live record because
+  the OpRecord retains `manager_snapshot` for redo (see below).
+- `apply_redo_entry`'s `ThreadCreateV2` arm restores **both** the ref
+  and the ThreadManager record from `manager_snapshot`. Without the
+  record body restored, record-backed commands (`thread cd`, delegate,
+  integration policy) silently degrade after an undo→redo round-trip —
+  the Codex P1 finding closed under heddle#23 r2 (PR #112, thread
+  3254698975). Same hazard class as heddle#99 r2 (FF redo
+  non-determinism); same fix shape (record what redo needs).
+- `apply_redo_entry`'s legacy V1 `ThreadCreate` arm restores the ref
+  only and prints a stderr warning pointing the operator at
+  `heddle thread start <name>` to re-establish the record. V1 records
+  age out as the live oplog window slides forward.
 
-No new `OpRecord` variant. No new public Repository API beyond what
-ThreadManager already exposes.
+**New `OpRecord` variant**: `ThreadCreateV2 { name, state,
+manager_snapshot: Option<Vec<u8>> }`. The snapshot is opaque rmp-serde
+bytes of the `Thread` record body — kept opaque so the `oplog` crate
+stays independent of `repo`-level types. The `repo` crate owns the
+encoding via two new helpers on `ThreadManager`:
+`snapshot_thread_record(thread_name) -> Option<Vec<u8>>` and
+`restore_thread_record_from_snapshot(bytes) -> Thread`. `manager_snapshot`
+is `None` for callsites that don't write a `ThreadManager` record
+alongside the op (rename batch's new-name arm, ingest, harness/agent
+stubs).
 
 ## Test plan
 
@@ -262,6 +275,43 @@ red-commit-first.
    `heddle undo --preview` against a worktree-attached ThreadCreate must
    surface the refusal instead of advertising "Would undo …", matching
    the preview-honesty pattern at undo.rs:88. **Red today.**
+
+## Rule-7 sweep — undo/redo symmetry across all `OpRecord` arms
+
+After heddle#23 r2 closed the second instance of "undo destroys state
+that redo can't reconstruct from the OpRecord alone" (the first was
+heddle#99 r2's FastForward → FastForwardV2 fix), we walked every
+`OpRecord` arm in `apply_undo_entry` / `apply_redo_entry` and asked: does
+undo destroy state that redo re-derives by *name* (which can change), or
+which isn't reconstructible from the OpRecord fields?
+
+| Variant | Undo destroys | Redo source | Hazard? | Disposition |
+|---|---|---|---|---|
+| `Snapshot { prev_head: Some, … }` | HEAD position, thread ref | `new_state` field | No | OK |
+| `Goto { prev_head: Some, … }` | HEAD position | `target` field | No | OK |
+| `ThreadCreate` (V1) | ref + record body | ref-only + warning | **Latent** | V1 read-back-only; ages out. New ops emit V2. |
+| `ThreadCreateV2` | ref + record body | `manager_snapshot` bytes | No | **Fixed this PR** |
+| `ThreadDelete` | ref | `state` field (ref restored); record body **not** restored | **Latent** | No forward callsite exercises the hazard today: the user-facing delete (`thread drop --delete-thread`) records no oplog entry, and the rename batch's `ThreadDelete` half deletes the old name under which no record exists anyway (the forward rename doesn't re-key the record). Becomes load-bearing if a future forward path records `ThreadDelete` against a thread with a live record. Tracked alongside `cmd_thread_rename`'s pre-existing forward-path bug. |
+| `ThreadUpdate` | thread ref | `new_state`/`old_state` | No | Not emitted today; symmetric on paper. |
+| `MarkerCreate` / `MarkerDelete` | marker ref | recorded `state` | No | OK — markers have no record-store sidecar. |
+| `Redact` | redaction sidecar entry | redo refuses (no `Redaction` snapshot in OpRecord — reason, redactor, signature missing) | **Yes — loud refusal** | Documented under heddle#98. A future `RedactV2` carrying the full `Redaction` snapshot would close it; today the loud refusal is the contract. |
+| `Purge` | blob bytes | irreversible by design | n/a | Intentional; `cmd_undo` refuses pre-mutation. |
+| `FastForward` (V1) | HEAD + target ref | re-resolves `source_thread → tip` (non-deterministic) | **Latent** | V1 read-back-only; FastForwardV2 fixes. heddle#99 r2. |
+| `FastForwardV2` | HEAD + target ref | `post_target_id` field | No | OK. |
+| `Fork` / `Collapse` / `Checkpoint` / `TransactionAbort` / `TransactionCommit` / `EphemeralThreadCollapse` / `ConflictResolved` | (no inverse arm) | n/a | n/a | Forensic-only or not yet wired. |
+
+Net: two fixed instances of the hazard class (`FastForwardV2`,
+`ThreadCreateV2`), one loud-refusal'd (`Redact`), and one dormant-by-
+construction (`ThreadDelete`). No silent corruption paths remain across
+the implemented inverses. If a future forward path lights up the
+`ThreadDelete` hazard, the same V2-snapshot pattern applies — file a
+`ThreadDeleteV2` with the record snapshot.
+
+The pattern is now well-established enough that any new ref-mutating
+`OpRecord` variant should be reviewed against this matrix at design
+time: "what does undo destroy, and what does redo read to put it back?"
+If the answer to the second question is "a name we'll re-resolve" or
+"defaults", the variant needs a snapshot field.
 
 ## Open questions deferred to follow-ups
 

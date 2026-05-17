@@ -401,6 +401,7 @@ fn states_required_for_redo(op: &OpRecord) -> Vec<ChangeId> {
         OpRecord::Snapshot { new_state, .. } => vec![*new_state],
         OpRecord::Goto { target, .. } => vec![*target],
         OpRecord::ThreadCreate { state, .. } => vec![*state],
+        OpRecord::ThreadCreateV2 { state, .. } => vec![*state],
         OpRecord::ThreadUpdate { new_state, .. } => vec![*new_state],
         OpRecord::MarkerCreate { state, .. } => vec![*state],
         OpRecord::FastForwardV2 { post_target_id, .. } => vec![*post_target_id],
@@ -577,8 +578,13 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
 
     for batch in batches {
         for entry in &batch.entries {
-            let OpRecord::ThreadCreate { name, .. } = &entry.operation else {
-                continue;
+            // Match V1 and V2 — the rename batch's new-name arm and all
+            // post-heddle#23-r2 creates record as V2. Both have the
+            // same worktree-orphan hazard on undo.
+            let name = match &entry.operation {
+                OpRecord::ThreadCreate { name, .. }
+                | OpRecord::ThreadCreateV2 { name, .. } => name,
+                _ => continue,
             };
             let Some(record) = manager.find_by_thread(name)? else {
                 continue;

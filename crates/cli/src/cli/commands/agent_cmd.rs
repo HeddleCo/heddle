@@ -270,8 +270,19 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
         } else {
             repo.refs()
                 .set_thread_cas(&thread_name, RefExpectation::Missing, &anchor)?;
-            repo.oplog()
-                .record_thread_create(&thread_name, &anchor, Some(&repo.op_scope()))?;
+            // Agent-reservation flow writes the ThreadManager record via
+            // `ensure_thread_record` below, after this op is recorded —
+            // so there's no record to snapshot at recording time. Pass
+            // `None`; the op records as `ThreadCreateV2` with no
+            // manager snapshot. Reservations are an agent-internal API
+            // that aren't expected to participate in human undo/redo
+            // flows in 0.3. heddle#23 r2.
+            repo.oplog().record_thread_create(
+                &thread_name,
+                &anchor,
+                None,
+                Some(&repo.op_scope()),
+            )?;
         }
 
         // Ensure a Thread record exists so downstream commands
