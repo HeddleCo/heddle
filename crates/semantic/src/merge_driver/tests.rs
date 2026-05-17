@@ -1425,6 +1425,40 @@ func (b B) String() string { return \"B-THEIRS\" }
 }
 
 // =====================================================================
+// Codex r1 P1 #4: container children must remain as merge units.
+//
+// items.rs:99 — when a container (impl, trait, class, module) is
+// recorded as an item AND its body is traversed for sub-items, the
+// de-overlap pass drops every sub-item whose start falls inside the
+// container's byte range. The whole container then merges as one unit
+// via text_hunk_merge, defeating the function-level semantic
+// granularity that's the whole point of this driver.
+// =====================================================================
+#[test]
+fn impl_block_single_line_disjoint_method_edits_merge_cleanly() {
+    // Methods packed on a single line so text_hunk_merge can't compose
+    // the disjoint edits (the whole impl is one line; ours and theirs
+    // both rewrite that line differently). Per-method semantic merge
+    // routes each method through its own resolution.
+    let base = "impl A { fn x() { 0 } fn y() { 0 } }\n";
+    let ours = "impl A { fn x() { 11 } fn y() { 0 } }\n";
+    let theirs = "impl A { fn x() { 0 } fn y() { 22 } }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(
+        merged.contains("fn x() { 11 }"),
+        "ours edit lost: {merged}"
+    );
+    assert!(
+        merged.contains("fn y() { 22 }"),
+        "theirs edit lost: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "expected clean merge, got markers: {merged}"
+    );
+}
+
+// =====================================================================
 // Codex r1 P1 #2: reconstruct inter-item segments at original positions.
 //
 // reconstruct.rs:116 — the v1 reconstruction concatenates each side's
