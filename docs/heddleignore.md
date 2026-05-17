@@ -79,17 +79,14 @@ like `Icons`, `Icon1`, or an `Icons/` directory full of real
 assets, which would silently hide project content from `status` and
 `capture`.
 
-If your team uses macOS custom folder icons heavily and the
-metadata files become noise, add the literal-`\r` form as a
-project-specific pattern. Most editors won't insert a bare `\r`
-cleanly; the reliable recipe is to append it from a shell:
-
-```
-printf 'Icon\r\n' >> .heddleignore
-```
-
-Verify with `xxd .heddleignore | tail` that the line ends `49 63
-6f 6e 0d 0a` (`Icon\r\n`) rather than `49 63 6f 6e 0a`.
+**Note:** heddle's `.heddleignore` parser normalizes whitespace
+including trailing `\r`, so the `Icon\r` filename cannot be
+expressed as a `.heddleignore` pattern — any line written as
+`Icon\r` is read back as plain `Icon` and would suppress
+legitimate files or directories named `Icon`. If these metadata
+files are noise in your workflow, suppress them at the macOS
+level instead: delete the custom folder icon, or set Finder's
+"Hide" attribute on the file.
 
 ## Local-tool state (`.claude/`, etc.)
 
