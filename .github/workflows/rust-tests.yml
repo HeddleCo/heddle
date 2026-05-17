@@ -65,6 +65,73 @@ jobs:
       - name: sccache stats
         run: sccache --show-stats
 
+  # Linux FUSE mount smoke. Pinned to a GitHub-hosted `ubuntu-latest`
+  # runner so we get `/dev/fuse`, `fusermount3`, and the system-wide
+  # FUSE policy without having to special-case the Blacksmith image.
+  # The blacksmith ARM runner above doesn't ship `fuse3 libfuse3-dev`
+  # by default, and asking it to install them post-boot adds image
+  # drift we'd rather not chase.
+  #
+  # This job is the load-bearing check that Linux teammates can mount
+  # a heddle thread, read it, write through the mount, and unmount
+  # cleanly — i.e. the "use heddle over git in repo development"
+  # daily-use path. If it breaks, the daily-use story breaks.
+  #
+  # The `fuse_mount.rs` integration tests are `#[ignore]` so they
+  # don't run by default (a `cargo test -p heddle-mount` from a
+  # contributor's laptop doesn't need FUSE installed). This job opts
+  # in explicitly with `-- --ignored`.
+  fuse-smoke:
+    name: FUSE mount smoke (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuse-smoke-${{ runner.os }}
+          cache-on-failure: true
+
+      # `fuse3` ships `fusermount3`, the SUID helper the FUSE shell
+      # uses to publish the mount to the kernel; `libfuse3-dev` is
+      # what `fuser`'s build links against.
+      - name: Install FUSE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3 libfuse3-dev
+          fusermount3 --version
+          ls -l /dev/fuse
+
+      # Single-threaded so a kernel-side hang on one mount can't
+      # cascade into the others' tempdir lifetimes. `--nocapture` so
+      # the CI log shows the FUSE write/release path if a test
+      # regresses.
+      - name: FUSE integration tests
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        run: |
+          cargo test --locked -p heddle-mount --features fuse --test fuse_mount \
+            -- --ignored --test-threads=1 --nocapture
+
+      # Panic-recovery unit tests live alongside the FUSE shell; run
+      # them on the same job so a regression in the `guard_call`
+      # contract trips a single, well-scoped CI failure.
+      - name: FUSE panic-recovery unit tests
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        run: |
+          cargo test --locked -p heddle-mount --features fuse --lib fuse::
+
+      - name: sccache stats
+        run: sccache --show-stats
+
   # Coverage requires an instrumented build that can't share `target/`
   # with the regular profile, so it stays as its own job.
   coverage:

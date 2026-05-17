@@ -59,8 +59,8 @@ use std::{
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
         Arc, Mutex, RwLock, Weak,
+        atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     },
     thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
@@ -609,8 +609,7 @@ fn prewarm_run(weak: Weak<MountInner>, cancel: Arc<AtomicBool>) -> PrewarmStats 
     let mut hashes: Vec<ContentHash> = Vec::new();
     let root_tree = inner.state.read().expect("mount state lock").tree;
     let mut queue: VecDeque<ContentHash> = VecDeque::from([root_tree]);
-    let mut seen_trees: std::collections::HashSet<ContentHash> =
-        std::collections::HashSet::new();
+    let mut seen_trees: std::collections::HashSet<ContentHash> = std::collections::HashSet::new();
     while let Some(tree_hash) = queue.pop_front() {
         if cancel.load(Ordering::Relaxed) {
             return stats;
@@ -1205,7 +1204,6 @@ impl ContentAddressedMount {
         }
         out.into_iter().collect()
     }
-
 }
 
 /// Copy `[offset, offset+buf.len())` from `src` into `buf`, returning
@@ -1222,6 +1220,24 @@ fn copy_into(src: &[u8], offset: u64, buf: &mut [u8]) -> usize {
     let take = std::cmp::min(buf.len(), src.len() - offset);
     buf[..take].copy_from_slice(&src[offset..offset + take]);
     take
+}
+
+/// Pending-tier overlay for a captured-tree path. Consumed by `read`
+/// to decide whether to serve the captured blob (`None` returned by
+/// the lookup) or the pending overlay's bytes.
+enum Overlay {
+    /// In-flight hot buffer keyed at a sibling NodeId for the same
+    /// path — typically a coalesced write through a different inode
+    /// number than the captured `File` record.
+    Hot(Vec<u8>),
+    /// Promoted warm-tier blob. Same path now points at this blob in
+    /// the pending tier; the captured `File` record's blob is
+    /// effectively stale until capture folds the warm tier in.
+    Warm(ContentHash),
+    /// Tombstoned through the mount. The kernel will get a stale
+    /// inode reply; subsequent dentry refresh resolves the entry as
+    /// gone.
+    Gone,
 }
 
 /// What `pending_lookup` found at a given path.
@@ -1501,7 +1517,49 @@ impl PlatformShell for ContentAddressedMount {
                     ))),
                 }
             }
-            NodeRecord::File { blob, .. } | NodeRecord::Symlink { blob } => {
+            NodeRecord::File { blob, path, .. } => {
+                // A captured-tree file whose path now has a pending
+                // overlay (hot buffer on a sibling NodeId, warm-tier
+                // promotion, or tombstone) must serve the overlay,
+                // not the captured blob. Without this, a FUSE
+                // `write → flush → read` round-trip through the
+                // *same* kernel-cached NodeId silently returns the
+                // pre-write bytes (the kernel reuses its dentry for
+                // the duration of the entry TTL and never re-issues
+                // `lookup`, so the inode record is never refreshed
+                // from `File` to `PendingFile`).
+                //
+                // Priority: hot @ another NodeId → warm → tombstone
+                // (ENOENT-shaped Stale) → captured blob.
+                let overlay = {
+                    let pending = self.inner.pending.lock().expect("pending lock");
+                    if pending.tombstones.contains(path) {
+                        Some(Overlay::Gone)
+                    } else if let Some(other_id) = pending.hot_by_path.get(path).copied()
+                        && let Some(hot) = pending.hot.get(&other_id)
+                    {
+                        Some(Overlay::Hot(hot.bytes.clone()))
+                    } else {
+                        pending.warm.get(path).map(|warm| Overlay::Warm(warm.blob))
+                    }
+                };
+                match overlay {
+                    Some(Overlay::Gone) => Err(MountError::Stale(format!(
+                        "file {} was unlinked through the mount",
+                        path.display()
+                    ))),
+                    Some(Overlay::Hot(bytes)) => Ok(copy_into(&bytes, offset, buf)),
+                    Some(Overlay::Warm(blob)) => {
+                        let bytes = self.load_blob_bytes(&blob)?;
+                        Ok(copy_into(&bytes, offset, buf))
+                    }
+                    None => {
+                        let bytes = self.load_blob_bytes(blob)?;
+                        Ok(copy_into(&bytes, offset, buf))
+                    }
+                }
+            }
+            NodeRecord::Symlink { blob } => {
                 let bytes = self.load_blob_bytes(blob)?;
                 Ok(copy_into(&bytes, offset, buf))
             }
@@ -1763,17 +1821,44 @@ impl PlatformShell for ContentAddressedMount {
                 // pending tier. Size = direct-child count.
                 (self.pending_children_at(path).len() as u64, 2)
             }
-            NodeRecord::File { blob, .. } | NodeRecord::Symlink { blob } => {
-                // Hot buffer overrides the captured size if the agent
-                // is currently editing this file via this NodeId.
-                let pending = self.inner.pending.lock().expect("pending lock");
-                if let Some(buf) = pending.hot.get(&node.0) {
-                    (buf.bytes.len() as u64, 1)
-                } else {
-                    drop(pending);
-                    (self.blob_size(blob)?, 1)
+            NodeRecord::File { blob, path, .. } => {
+                // Same overlay priority as `read`: hot @ this NodeId
+                // → hot @ another NodeId for the same path → warm-tier
+                // promotion → tombstone (stale) → captured blob.
+                // Keeping `attrs` and `read` symmetric is mandatory:
+                // `read` consults the warm tier for captured files
+                // (so `WORLD` shadows `world`), and a stale `attrs`
+                // that still reports the captured size would clip the
+                // returned bytes in the kernel's read buffer.
+                let overlay_size = {
+                    let pending = self.inner.pending.lock().expect("pending lock");
+                    if let Some(buf) = pending.hot.get(&node.0) {
+                        Some(Some(buf.bytes.len() as u64))
+                    } else if pending.tombstones.contains(path) {
+                        // Tombstoned via the mount: treat as
+                        // not-yet-collected. The path is gone but the
+                        // inode is still registered.
+                        Some(None)
+                    } else if let Some(other_id) = pending.hot_by_path.get(path).copied()
+                        && let Some(hot) = pending.hot.get(&other_id)
+                    {
+                        Some(Some(hot.bytes.len() as u64))
+                    } else {
+                        pending.warm.get(path).map(|warm| Some(warm.size))
+                    }
+                };
+                match overlay_size {
+                    Some(Some(size)) => (size, 1),
+                    Some(None) => {
+                        return Err(MountError::Stale(format!(
+                            "file {} was unlinked through the mount",
+                            path.display()
+                        )));
+                    }
+                    None => (self.blob_size(blob)?, 1),
                 }
             }
+            NodeRecord::Symlink { blob } => (self.blob_size(blob)?, 1),
             NodeRecord::PendingFile { path, .. } => {
                 let hit = self
                     .pending_lookup(path)

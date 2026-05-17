@@ -11,8 +11,8 @@ use std::{
     ffi::OsStr,
     fs,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -31,13 +31,15 @@ use crate::{
 };
 
 /// Shared test mocks. Lives under `tests::mocks` so the per-platform
-/// adapter unit tests (FSKit on macOS, ProjFS on Windows) can reuse
-/// the same in-memory shell without duplicating it inline.
+/// adapter unit tests (FUSE on Linux, FSKit on macOS, ProjFS on
+/// Windows) can reuse the same in-memory shell without duplicating
+/// it inline.
 ///
 /// Gated on the features that actually consume the mocks so OSS-only
-/// Linux builds (no `fskit` / `projfs`) don't trip clippy's
+/// builds (no `fuse` / `fskit` / `projfs`) don't trip clippy's
 /// `-D warnings` on dead test code.
 #[cfg(any(
+    all(target_os = "linux", feature = "fuse"),
     all(target_os = "macos", feature = "fskit"),
     all(target_os = "windows", feature = "projfs"),
 ))]
@@ -45,15 +47,15 @@ pub(crate) mod mocks {
     use std::{
         ffi::OsStr,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::UNIX_EPOCH,
     };
 
     use crate::{
         error::{MountError, Result},
-        shell::{Attrs, Entry, NodeId, NodeKind, PlatformShell, DIR_UNIX_MODE},
+        shell::{Attrs, DIR_UNIX_MODE, Entry, NodeId, NodeKind, PlatformShell},
     };
 
     /// Trivial in-memory shell that lets adapter unit tests validate
@@ -63,10 +65,17 @@ pub(crate) mod mocks {
     /// Increments `drops` exactly once when the shell is finally
     /// dropped, so a test that boxes the shell into a C ABI handle can
     /// assert the box was reclaimed.
+    ///
+    /// `dead_code` is silenced because this is only consumed by the
+    /// FSKit / ProjFS unit tests — the FUSE shell tests use
+    /// [`PanicShell`] but never [`CountingShell`], and clippy's
+    /// `-D warnings` would otherwise fail the Linux+fuse build.
+    #[allow(dead_code)]
     pub struct CountingShell {
         pub drops: Arc<AtomicUsize>,
     }
 
+    #[allow(dead_code)]
     impl CountingShell {
         pub fn new() -> (Self, Arc<AtomicUsize>) {
             let drops = Arc::new(AtomicUsize::new(0));
@@ -650,6 +659,49 @@ fn flush_promotes_buffer_to_warm_tier() {
     let warm = mount.warm_keys();
     assert_eq!(warm.len(), 1);
     assert_eq!(warm[0], std::path::PathBuf::from("out.txt"));
+}
+
+#[test]
+fn captured_file_read_after_flush_through_same_node_id_serves_overlay() {
+    // Regression: the FUSE shell reuses the NodeId the kernel cached
+    // for a captured-tree file across the open → write → close →
+    // reopen → read cycle (FUSE's dentry TTL keeps the dentry alive
+    // for the cache window, so the kernel never re-issues `lookup`).
+    // The core's `read` must therefore consult the pending overlay
+    // for a `NodeRecord::File`'s path before falling back to the
+    // captured blob — otherwise post-flush reads through the same
+    // NodeId silently return the *pre*-write bytes and "write through
+    // the mount" looks broken from userspace.
+    //
+    // The companion `lookup_after_write_serves_new_content` test
+    // doesn't trip this because it re-resolves via `lookup_path`
+    // after the flush, which refreshes the inode record. Real FUSE
+    // dispatchers don't do that re-resolution — the kernel does.
+    let (_temp, mount) = open_mount();
+    let node = mount.lookup_path("hello.txt").unwrap();
+
+    // Sanity: pre-write content from the captured tree.
+    let mut buf = vec![0u8; 64];
+    let n = mount.read(node, 0, &mut buf).unwrap();
+    assert_eq!(&buf[..n], b"world");
+
+    // Write through the *captured* file's NodeId, flush to warm.
+    mount.write(node, 0, b"WORLD").unwrap();
+    mount.flush(node).unwrap();
+
+    // Re-read via the same NodeId — no fresh `lookup_path` call.
+    let mut buf = vec![0u8; 64];
+    let n = mount.read(node, 0, &mut buf).unwrap();
+    assert_eq!(
+        &buf[..n],
+        b"WORLD",
+        "captured-file read after flush must serve warm tier, not captured blob"
+    );
+    let attrs = mount.attrs(node).unwrap();
+    assert_eq!(
+        attrs.size, 5,
+        "captured-file attrs after flush must reflect warm-tier size"
+    );
 }
 
 #[test]
