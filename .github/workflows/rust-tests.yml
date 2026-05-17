@@ -54,6 +54,14 @@ jobs:
       - name: Tests
         run: cargo test --locked --workspace
 
+      # 3a. Unit tests for `scripts/fuse-bench-compare.py`. The perf gate
+      #     is only as honest as the compare script; these tests pin the
+      #     "missing or corrupt estimates fail closed" contract (Codex r1
+      #     P1 on heddle#89). Plain `unittest`, no third-party deps.
+      - name: Bench-compare script unit tests
+        shell: bash
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
       # 4. Verify the OSS build flavors compile. `cargo check` is fast on
       #    a warm cache; the feature-delta from defaults is small.
       - name: Check git-overlay-only
