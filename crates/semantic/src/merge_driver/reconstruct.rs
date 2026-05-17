@@ -148,9 +148,9 @@ fn resolve_item(
     theirs_item: Option<&Item>,
     markers: ConflictMarkers<'_>,
 ) -> (Option<Vec<u8>>, usize) {
-    let base_bytes = base_item.map(|i| base[i.start_byte..i.end_byte].as_bytes());
-    let ours_bytes = ours_item.map(|i| ours[i.start_byte..i.end_byte].as_bytes());
-    let theirs_bytes = theirs_item.map(|i| theirs[i.start_byte..i.end_byte].as_bytes());
+    let base_bytes = base_item.map(|i| &base.as_bytes()[i.start_byte..i.end_byte]);
+    let ours_bytes = ours_item.map(|i| &ours.as_bytes()[i.start_byte..i.end_byte]);
+    let theirs_bytes = theirs_item.map(|i| &theirs.as_bytes()[i.start_byte..i.end_byte]);
 
     match (base_bytes, ours_bytes, theirs_bytes) {
         (None, None, None) => (None, 0),
@@ -196,9 +196,7 @@ fn resolve_item(
         (Some(b), Some(o), Some(t)) => {
             if o == b {
                 (Some(t.to_vec()), 0)
-            } else if t == b {
-                (Some(o.to_vec()), 0)
-            } else if o == t {
+            } else if t == b || o == t {
                 (Some(o.to_vec()), 0)
             } else {
                 let outcome = text_hunk_merge_with_markers(b, o, t, markers);
