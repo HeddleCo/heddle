@@ -289,12 +289,21 @@ jobs:
             exit 0
           fi
           # Mount-relevant paths include the bench's own crate + every
-          # read-path dependency, the compare script, the workflow,
-          # AND shared workspace inputs (Cargo.lock, root Cargo.toml)
-          # that can move codegen / dependency versions under the
-          # bench without touching the per-crate sources.
+          # transitive read-path dependency, the compare script, the
+          # workflow, AND shared workspace inputs (Cargo.lock, root
+          # Cargo.toml) that can move codegen / dependency versions
+          # under the bench without touching the per-crate sources.
+          #
+          # Transitive set (mount → repo → {crypto, oplog, proto,
+          # objects, refs} → optional runtime-bridge). Keep this in
+          # sync with `crates/mount/Cargo.toml` + the transitive
+          # closure under it; Codex r3 P2 flagged that the original
+          # list (mount|objects|repo|refs) skipped the perf gate when
+          # a PR touched only `crypto`, `oplog`, or `proto` — all of
+          # which compile into the bench binary via `Repository`'s
+          # use sites in `build_heddle_mount`.
           if printf '%s\n' "$diff_output" | grep -E \
-              '^(crates/(mount|objects|repo|refs)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
+              '^(crates/(mount|objects|repo|refs|oplog|crypto|proto|runtime-bridge)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
               > /dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
