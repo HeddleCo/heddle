@@ -117,8 +117,23 @@ pub(crate) fn maybe_install_default_heddleignore(root: &std::path::Path) -> Resu
         .open(&path)
     {
         Ok(mut f) => {
-            f.write_all(super::heddleignore_defaults::DEFAULT_HEDDLEIGNORE.as_bytes())
-                .map_err(|e| anyhow::anyhow!("failed to write default .heddleignore: {}", e))?;
+            // If `write_all` fails after `create_new` already
+            // landed an empty file (ENOSPC, EIO, ...), a naïve
+            // bail-out would leave the zero-byte file on disk —
+            // and a retried `heddle init` would then hit the
+            // `AlreadyExists` arm and silently report success
+            // without ever installing the template. Remove the
+            // partial file so the retry path can recreate it.
+            if let Err(e) =
+                f.write_all(super::heddleignore_defaults::DEFAULT_HEDDLEIGNORE.as_bytes())
+            {
+                drop(f);
+                let _ = std::fs::remove_file(&path);
+                return Err(anyhow::anyhow!(
+                    "failed to write default .heddleignore: {}",
+                    e
+                ));
+            }
             Ok(true)
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),

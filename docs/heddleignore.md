@@ -13,8 +13,8 @@ overwhelmingly-common cross-platform noise — macOS Finder metadata
 `.vscode/`, `.fleet/`, `*.iml`), Vim/Emacs swap and backup files
 (`*.swp`, `*.swo`, `*~`), Windows shell metadata (`Thumbs.db`,
 `desktop.ini`), LibreOffice locks (`.~lock.*`), and the two
-shell-redirect typo artifacts that periodically show up (`/-r`,
-`/-rv`).
+shell-redirect typo artifacts that periodically show up (`-r`,
+`-rv` — unanchored, so a `src/-r` typo is suppressed too).
 
 The template is intentionally conservative: only patterns the entire
 team is overwhelmingly likely to want suppressed. Project-specific

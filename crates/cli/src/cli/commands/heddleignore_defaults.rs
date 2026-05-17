@@ -33,7 +33,12 @@ pub const DEFAULT_HEDDLEIGNORE: &str = "\
 .DS_Store
 .AppleDouble
 .LSOverride
-Icon
+# Custom-folder icon metadata: the on-disk basename is literally
+# `Icon\r` (four chars + a trailing carriage return). Plain `Icon`
+# would only catch a normal file named `Icon` (false positive on
+# real assets like an `Icon` source file) and miss the actual
+# metadata. The single-char glob `?` matches the `\r` byte.
+Icon?
 ._*
 
 # Xcode / iOS dev artifacts
@@ -174,11 +179,22 @@ pub fn noise_hint_for(path: &Path) -> Option<NoiseHint> {
                 suggested_pattern: ".DS_Store",
             });
         }
-        ".AppleDouble" | ".LSOverride" | "Icon" => {
+        ".AppleDouble" | ".LSOverride" => {
             return Some(NoiseHint {
                 category: NoiseCategory::MacOsFinder,
                 label: "macOS Finder metadata",
                 suggested_pattern: name_to_static(name),
+            });
+        }
+        // macOS custom-folder icon: the real on-disk name is
+        // `Icon\r`. Suggest the `Icon?` glob (matches the trailing
+        // `\r`) rather than a literal control-char line that's
+        // awkward to copy-paste.
+        "Icon\r" => {
+            return Some(NoiseHint {
+                category: NoiseCategory::MacOsFinder,
+                label: "macOS Finder metadata",
+                suggested_pattern: "Icon?",
             });
         }
         "Thumbs.db" => {
@@ -290,7 +306,6 @@ fn name_to_static(name: &str) -> &'static str {
     match name {
         ".AppleDouble" => ".AppleDouble",
         ".LSOverride" => ".LSOverride",
-        "Icon" => "Icon",
         _ => "",
     }
 }
@@ -398,9 +413,50 @@ mod tests {
         assert!(noise_hint_for(&PathBuf::from("src/main.rs")).is_none());
         assert!(noise_hint_for(&PathBuf::from("docs/README.md")).is_none());
         assert!(noise_hint_for(&PathBuf::from("Cargo.toml")).is_none());
-        // `Icon-512.png` shares a prefix with the macOS `Icon`
+        // `Icon-512.png` shares a prefix with the macOS `Icon\r`
         // metadata sentinel but is a real app asset; exact-basename
         // match prevents the false positive.
         assert!(noise_hint_for(&PathBuf::from("assets/Icon-512.png")).is_none());
+        // A plain file literally named `Icon` (e.g. a Rust source
+        // module someone created) is NOT the macOS metadata file
+        // and must not be flagged. The metadata's real basename
+        // ends in `\r`; see `macos_icon_metadata_hint`.
+        assert!(noise_hint_for(&PathBuf::from("src/Icon")).is_none());
+    }
+
+    #[test]
+    fn macos_icon_metadata_hint() {
+        // The real on-disk filename ends in a carriage return —
+        // that's what `Finder` writes for a custom folder icon.
+        // The plain `Icon` arm used to (incorrectly) match a bare
+        // `Icon` file *and* miss this one. Now `Icon\r` matches
+        // and the suggestion is the `Icon?` glob.
+        let hint = noise_hint_for(&PathBuf::from("Icon\r")).unwrap();
+        assert_eq!(hint.category, NoiseCategory::MacOsFinder);
+        assert_eq!(hint.suggested_pattern, "Icon?");
+    }
+
+    #[test]
+    fn icon_glob_in_template_matches_real_metadata_filename() {
+        // Belt-and-braces: confirm the `Icon?` line in the bundled
+        // template actually suppresses the `Icon\r` basename when
+        // fed through the gitignore matcher, and that a plain
+        // `Icon` source file is NOT suppressed.
+        use objects::worktree::worktree_ignore::should_ignore;
+        let patterns = vec!["Icon?".to_string()];
+        assert!(should_ignore(&PathBuf::from("Icon\r"), &patterns));
+        assert!(should_ignore(
+            &PathBuf::from("subdir/Icon\r"),
+            &patterns
+        ));
+        // `Icon?` is a single-char glob, so a bare `Icon` (only
+        // 4 chars) is NOT matched — the prior `Icon` literal would
+        // have suppressed it as a false positive. The narrower
+        // pattern is the win.
+        assert!(!should_ignore(&PathBuf::from("Icon"), &patterns));
+        assert!(!should_ignore(
+            &PathBuf::from("Icon-512.png"),
+            &patterns
+        ));
     }
 }
