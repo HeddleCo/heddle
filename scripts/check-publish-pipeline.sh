@@ -356,15 +356,32 @@ fi
 # is publishable). That way a brand-new publishable crate added to the
 # workspace gets caught by this asserter without anyone remembering to
 # update the check.
+# TOML parser detection: tomllib lands in stdlib at Python 3.11. On 3.10
+# and earlier we fall back to the third-party `tomli` (the same code,
+# pre-stdlib). If neither is importable we emit a genuine `skip:` line
+# and do NOT set fail — "I couldn't run this check" is not the same as
+# "this check failed" (Codex r1 finding).
+toml_module=""
+if command -v python3 >/dev/null 2>&1; then
+  if python3 -c 'import tomllib' 2>/dev/null; then
+    toml_module="tomllib"
+  elif python3 -c 'import tomli' 2>/dev/null; then
+    toml_module="tomli"
+  fi
+fi
+
 if ! command -v python3 >/dev/null 2>&1; then
-  err "python3 not available; consumer-version check skipped"
-elif ! python3 -c 'import tomllib' 2>/dev/null; then
-  err "python3 tomllib unavailable (needs 3.11+); consumer-version check skipped"
+  echo "skip: python3 unavailable; consumer-version check skipped"
+elif [[ -z "$toml_module" ]]; then
+  echo "skip: tomllib (Python 3.11+) and tomli both unavailable; consumer-version check skipped"
 else
-  consumer_report=$(python3 - <<'PY'
+  ok "toml parser available ($toml_module)"
+  consumer_report=$(TOML_MODULE="$toml_module" python3 - <<'PY'
 import glob
+import importlib
+import os
 import re
-import tomllib
+tomllib = importlib.import_module(os.environ["TOML_MODULE"])
 
 crates = []
 for cm in sorted(glob.glob("crates/*/Cargo.toml")):
@@ -391,40 +408,143 @@ for cm, toml in crates:
         publishable.add(name)
 
 
-def parse_ver(s):
-    s = re.split(r"[-+]", s, maxsplit=1)[0]
-    parts = (s.split(".") + ["0", "0", "0"])[:3]
+def parse_ver_full(s):
+    """Returns (major, minor, patch, prerelease) where prerelease is the
+    raw pre-release identifier (everything after the first `-`, with build
+    metadata stripped) or "" if absent."""
+    s = s.strip()
+    base, dash, rest = s.partition("-")
+    # Strip +build metadata from whichever side it appears.
+    base = base.partition("+")[0]
+    pre = rest.partition("+")[0] if dash else ""
+    parts = (base.split(".") + ["0", "0", "0"])[:3]
     out = []
     for p in parts:
         try:
             out.append(int(p))
         except ValueError:
             out.append(0)
-    return tuple(out)
+    return (out[0], out[1], out[2], pre)
 
 
 def satisfies(req, ver):
-    # Cargo's default operator is caret. `cargo metadata` normalizes
-    # "0.2" → "^0.2", but Cargo.toml may carry the bare form, so we
-    # treat unprefixed as caret too. We deliberately don't try to
-    # parse `>=`, `~`, or comma-joined comparators — the workspace
-    # convention is caret, and a foreign comparator should be loudly
-    # surfaced rather than silently passed.
+    """Cargo caret semantics. Returns True / False, or None to signal an
+    unsupported comparator shape (the caller treats None as a hard error).
+
+    Cargo's caret rules (https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html):
+      ^1.2.3 → >=1.2.3, <2.0.0   (uppermost nonzero major)
+      ^0.2.3 → >=0.2.3, <0.3.0   (uppermost nonzero minor when major == 0)
+      ^0.0.3 → >=0.0.3, <0.0.4   (uppermost nonzero patch when major+minor == 0)
+      ^0.0   → >=0.0.0, <0.1.0
+      ^0     → >=0.0.0, <1.0.0
+    Bare requirements (no leading operator) follow caret by default; the
+    width is determined by how many components the requirement specifies,
+    not the parsed integer tuple — `"0"` is a 1-component all-zero req
+    and must widen to <1.0.0, where the previous all-zero collapse to
+    exact-patch was wrong (Codex r1 finding).
+
+    Prerelease rule: a source version carrying a prerelease tag (e.g.
+    0.3.0-alpha.1) MUST NOT satisfy a non-prerelease requirement; cargo
+    only admits prereleases when the requirement explicitly asks for one
+    (we model that as an exact `=X.Y.Z-pre` match).
+
+    Wildcards (`*` anywhere in the requirement) are rejected outright —
+    `1.2.*` is a valid cargo comparator but the workspace convention is
+    caret, and the previous loose guard let `1.2.*` fall through to
+    numeric parsing where `*` coerced to 0 and the check effectively
+    became major-only (Codex r1 finding).
+    """
     req = req.strip()
+
+    # Wildcards anywhere are rejected (not just leading). Catches "1.2.*".
+    if "*" in req:
+        return None
+
+    # Exact `=` comparator: full-string equality including prerelease.
+    # This is the ONLY way a prerelease source version can satisfy.
+    if req.startswith("="):
+        return req[1:].strip() == ver.strip()
+
+    # Other comparators / multi-clause requirements: surface, don't guess.
+    if req[:1] in (">", "<", "~") or "," in req:
+        return None
+
     if req.startswith("^"):
         req = req[1:]
-    elif req[:1] in ("=", ">", "<", "~", "*") or "," in req:
-        # Unsupported comparator shape. Flag conservatively.
-        return None
-    r = parse_ver(req)
-    v = parse_ver(ver)
-    if v < r:
+
+    # How many components did the requirement actually specify?
+    # ("0" vs "0.0" vs "0.0.0" differ in caret width when all zero.)
+    req_parts_given = len([p for p in req.split(".") if p != ""])
+
+    rmaj, rmin, rpat, rpre = parse_ver_full(req)
+    vmaj, vmin, vpat, vpre = parse_ver_full(ver)
+
+    # Prerelease in source but not in requirement → not satisfied.
+    # (Exact `=req-pre` matches were already handled above.)
+    if vpre and not rpre:
         return False
-    if r[0] > 0:
-        return v[0] == r[0]
-    if r[1] > 0:
-        return v[0] == 0 and v[1] == r[1]
-    return v[0] == 0 and v[1] == 0 and v[2] == r[2]
+
+    # Lower bound: source >= requirement (numeric tuple compare; pre-release
+    # ordering against same numeric is not material here — cargo treats a
+    # prerelease as "less than" the same release, but the prior branch
+    # already filtered the asymmetric case).
+    if (vmaj, vmin, vpat) < (rmaj, rmin, rpat):
+        return False
+
+    # Upper bound: caret widens at the leftmost-nonzero component.
+    if rmaj > 0:
+        return vmaj == rmaj
+    if rmin > 0:
+        return vmaj == 0 and vmin == rmin
+    if rpat > 0:
+        return vmaj == 0 and vmin == 0 and vpat == rpat
+
+    # All-zero requirement: width depends on how many components were given.
+    if req_parts_given <= 1:
+        # "0" → <1.0.0
+        return vmaj == 0
+    if req_parts_given == 2:
+        # "0.0" → <0.1.0
+        return vmaj == 0 and vmin == 0
+    # "0.0.0" → <0.0.1 (exact)
+    return (vmaj, vmin, vpat) == (0, 0, 0)
+
+
+# --- Self-test the caret-semver parser ------------------------------------
+# One assertion bundle per Codex r1 P2 finding. Each bundle that passes
+# emits a single `ok:` line; failures become `err:` so a future edit
+# that reintroduces one of the four bugs fails the asserter immediately.
+def _selftest(label, cases):
+    for got, want in cases:
+        if got != want:
+            errors.append(f"satisfies() self-test failed: {label} (got {got!r}, want {want!r})")
+            return
+    oks.append(f"satisfies() self-test: {label}")
+
+_selftest(
+    "caret semantics for bare 0 and 0.0 (cargo default widens to <1.0.0 / <0.1.0)",
+    [
+        (satisfies("0", "0.5.2"),    True),
+        (satisfies("0", "1.0.0"),    False),
+        (satisfies("0.0", "0.0.7"),  True),
+        (satisfies("0.0", "0.1.0"),  False),
+    ],
+)
+_selftest(
+    "prerelease versions excluded from non-prerelease requirements (= opts in)",
+    [
+        (satisfies("0.3", "0.3.0-alpha.1"),            False),
+        (satisfies("=0.3.0-alpha.1", "0.3.0-alpha.1"), True),
+        (satisfies("=0.3.0-alpha.1", "0.3.0"),         False),
+    ],
+)
+_selftest(
+    "wildcard requirements rejected (1.2.* surfaces as unsupported)",
+    [
+        (satisfies("1.2.*", "1.2.5"), None),
+        (satisfies("*", "1.0.0"),     None),
+    ],
+)
 
 
 DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
