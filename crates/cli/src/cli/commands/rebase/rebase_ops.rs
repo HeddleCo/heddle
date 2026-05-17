@@ -7,8 +7,20 @@ use anyhow::{Result, anyhow};
 use objects::object::{Blob, ChangeId, ContentHash, EntryType, State};
 use repo::Repository;
 
-use super::rebase_state::{load_rebase_state, save_rebase_state};
+use super::{
+    super::ff_record::record_ff_advance,
+    rebase_state::{load_rebase_state, save_rebase_state},
+};
 use crate::cli::{Cli, should_output_json};
+
+/// Synthetic `source_thread` for `OpRecord::FastForwardV2` entries
+/// emitted during a rebase replay. Each replayed commit becomes its
+/// own FF op (advancing the attached thread's tip), so listing them
+/// under `<rebase>` keeps `heddle watch` / `heddle log` honest about
+/// the operation's provenance without requiring the rebase target
+/// thread name be threaded through the replay loop. Forensic-only —
+/// neither undo nor redo reads it.
+const REBASE_REPLAY_SOURCE: &str = "<rebase>";
 
 pub(super) fn replay_commits(
     repo: &Repository,
@@ -281,7 +293,7 @@ fn apply_commit(
 
     let new_state_id = new_state.change_id;
     repo.store().put_state(&new_state)?;
-    repo.fast_forward_attached(&new_state_id)?;
+    record_ff_advance(repo, REBASE_REPLAY_SOURCE, &new_state_id)?;
 
     Ok(ApplyResult::Success(new_state_id))
 }
@@ -329,9 +341,9 @@ fn auto_merge_text_lines(base: &[u8], current: &[u8], incoming: &[u8]) -> Result
     use merge::{MergeOutcome, text_hunk_merge};
     match text_hunk_merge(base, current, incoming) {
         MergeOutcome::Clean(bytes) => Ok(Some(bytes)),
-        MergeOutcome::Conflicts { .. }
-        | MergeOutcome::Binary
-        | MergeOutcome::DeleteVsModify => Ok(None),
+        MergeOutcome::Conflicts { .. } | MergeOutcome::Binary | MergeOutcome::DeleteVsModify => {
+            Ok(None)
+        }
     }
 }
 
@@ -388,7 +400,7 @@ fn apply_tree_to_worktree(
 
     let new_state_id = new_state.change_id;
     repo.store().put_state(&new_state)?;
-    repo.fast_forward_attached(&new_state_id)?;
+    record_ff_advance(repo, REBASE_REPLAY_SOURCE, &new_state_id)?;
 
     Ok(ApplyResult::Success(new_state_id))
 }

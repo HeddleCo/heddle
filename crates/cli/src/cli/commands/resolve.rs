@@ -84,7 +84,18 @@ pub(crate) fn abort_merge_state(
     let merge_state = merge_manager
         .load()?
         .ok_or_else(|| anyhow!("No merge in progress"))?;
-    repo.fast_forward_attached(&merge_state.ours)?;
+    // The 3-way merge that preceded this abort wrote a partial tree
+    // (conflict markers) but did not move HEAD or the target thread
+    // ref — both stay at `ours` throughout the conflicted-merge
+    // window. The FF here is therefore a worktree reset to `ours`,
+    // not a thread advance, so the recorded `FastForwardV2`'s
+    // `pre_target_id` and `post_target_id` are equal. Migrated as
+    // part of the heddle#110 Rule-7 sweep for uniformity with the
+    // other `fast_forward_attached` callers: a future merge variant
+    // that *does* move HEAD before aborting (e.g. a partial-apply
+    // shape) would then get correct undo semantics for free without
+    // a second migration.
+    super::ff_record::record_ff_advance(repo, "<abort>", &merge_state.ours)?;
     merge_manager.abort()?;
     Ok(())
 }
