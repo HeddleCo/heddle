@@ -23,6 +23,7 @@ mod session_storage;
 pub mod snapshot_metadata;
 pub mod staleness;
 mod stash;
+mod stat_signature;
 /// Re-export of the symbol resolver. The implementation lives in
 /// `crates/semantic/src/symbol_resolver.rs` so anchor-travel code in
 /// `objects`-adjacent modules can use it without depending on `repo`.

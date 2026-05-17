@@ -421,7 +421,7 @@ impl WorktreeIndex {
                 }
                 #[cfg(not(unix))]
                 {
-                    entry.executable == false
+                    !entry.executable
                 }
             }
             IndexEntryKind::Symlink => !entry.executable,

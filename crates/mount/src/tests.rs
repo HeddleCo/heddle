@@ -130,6 +130,15 @@ pub(crate) mod mocks {
     /// of letting the unwind cross the C ABI boundary (which Rust
     /// ≥1.81 turns into an abort that would crash the host process
     /// and every projected/materialised volume with it).
+    ///
+    /// `dead_code` is silenced because not every feature flag pulls
+    /// in a consumer: the Linux+fuse build uses it via
+    /// `fuse::tests::guard_call_translates_panic_to_eio`, but a
+    /// Windows+projfs-only build wires `guarded_hresult` through its
+    /// closure tests (no PanicShell required), so the type sits
+    /// dormant on that feature set. clippy's `-D warnings` would
+    /// otherwise break the Windows ProjFS clippy gate.
+    #[allow(dead_code)]
     pub struct PanicShell;
 
     impl PlatformShell for PanicShell {

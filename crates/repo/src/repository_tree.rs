@@ -427,17 +427,15 @@ impl<'a> TreeBuildPolicy<'a> {
             rel_str.push_str(s.to_str()?);
         }
         let cached = cache.files.get(&rel_str)?;
+        let (size, inode, mtime_ns, ctime_ns, mode) =
+            crate::stat_signature::stat_signature(entry.path, &entry.metadata);
         let stat = crate::thread_manifest::ManifestFile {
             hash: cached.hash,
-            size: std::os::unix::fs::MetadataExt::size(&entry.metadata),
-            inode: std::os::unix::fs::MetadataExt::ino(&entry.metadata),
-            mtime_ns: std::os::unix::fs::MetadataExt::mtime(&entry.metadata)
-                .saturating_mul(1_000_000_000)
-                .saturating_add(std::os::unix::fs::MetadataExt::mtime_nsec(&entry.metadata)),
-            ctime_ns: std::os::unix::fs::MetadataExt::ctime(&entry.metadata)
-                .saturating_mul(1_000_000_000)
-                .saturating_add(std::os::unix::fs::MetadataExt::ctime_nsec(&entry.metadata)),
-            mode: std::os::unix::fs::MetadataExt::mode(&entry.metadata),
+            size,
+            inode,
+            mtime_ns,
+            ctime_ns,
+            mode,
         };
         if stat.matches(cached) {
             Some(cached.hash)

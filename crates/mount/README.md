@@ -19,12 +19,14 @@ adapter is its own `cfg`-gated module.
 
 ## Cargo features
 
-| Feature | Platform | Effect |
-|---------|----------|--------|
-| `fuse`  | Linux    | Compiles `fuser` and the `FuseShell` adapter. |
-| `fskit` | macOS    | Compiles the Swift adapter and the `FSKitShell`. |
+| Feature  | Platform | Effect |
+|----------|----------|--------|
+| `fuse`   | Linux    | Compiles `fuser` and the `FuseShell` adapter. |
+| `fskit`  | macOS    | Compiles the Swift adapter and the `FSKitShell`. |
+| `projfs` | Windows  | Compiles the `windows` ProjFS bindings and the `ProjFsShell` adapter. |
+| `nfs`    | any      | Compiles the in-process NFSv3 fallback (`NfsShell`). |
 
-Both are off by default. The default build of the workspace runs
+All are off by default. The default build of the workspace runs
 on every OS and produces a crate with the trait + core only — no
 mountable shell.
 
@@ -34,6 +36,9 @@ cargo build -p mount --features fuse
 
 # macOS dev box
 cargo build -p mount --features fskit
+
+# Windows dev box
+cargo build -p mount --features projfs
 ```
 
 ## Linux runtime requirements (FUSE)
@@ -206,6 +211,95 @@ HEDDLE_FSKIT_AVAILABLE=1 \
 The integration test will skip itself unless `HEDDLE_FSKIT_AVAILABLE=1`
 is set, so a generic CI runner won't fail on it accidentally.
 
+## Windows runtime requirements (ProjFS)
+
+The ProjFS shell is the daily-use path on Windows. To mount, the
+host needs:
+
+1. **Windows 10 1809+, Windows 11, or Windows Server 2019+.**
+   `ProjectedFSLib.dll` was added in 1809; earlier builds will
+   fail at `LoadLibraryW`. [`ProjFsShell::is_runtime_available`]
+   probes for the DLL and reports failure when missing.
+
+2. **The "Projected File System" Windows optional feature
+   installed.** This is NOT enabled by default on most SKUs. One-time
+   enable from an admin PowerShell:
+
+   ```powershell
+   # Windows 10 / 11 client SKUs
+   Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS
+
+   # Windows Server SKUs (the feature is named differently)
+   Enable-WindowsOptionalFeature -Online -FeatureName Projected-FS
+   ```
+
+   The enable is in-place and doesn't require a reboot for new
+   processes. Heddle's CLI will fall back to the NFS shell if the
+   feature is missing, but the user-visible performance is much
+   better with ProjFS — installing it once is the recommended
+   workflow.
+
+3. **The virtualization root on NTFS.** Paths under
+   `%USERPROFILE%`, `%LOCALAPPDATA%`, or any normal NTFS drive
+   work. ReFS, FAT32, and exFAT volumes don't support reparse
+   points and will fail at `PrjMarkDirectoryAsPlaceholder` with
+   `ERROR_NOT_SUPPORTED`.
+
+4. **The `projfs` cargo feature**, propagated through
+   `heddle-cli`'s `mount` feature.
+
+5. **No admin rights at mount time.** Once the optional feature is
+   installed (one-time admin step), routine mount/unmount is
+   unprivileged — the kernel-side adapter handles the privilege
+   transition.
+
+### Cleaning up a stale ProjFS mount
+
+The clean-shutdown path is `ProjFsSession::drop`, which calls
+`PrjStopVirtualizing`. If the daemon is force-killed, the
+virtualization root stays *marked* (the directory keeps its
+reparse metadata) but no provider answers callbacks. Reading
+already-hydrated files works (they're regular NTFS files at that
+point); reading a placeholder hangs the kernel until it times
+out.
+
+To clear: re-mount the same path with a fresh `ProjFsShell`
+session — the sidecar GUID file in the parent directory pins the
+instance identity so the kernel re-attaches without an error.
+Alternatively, delete the entire virtualization root tree from
+PowerShell:
+
+```powershell
+Remove-Item -Recurse -Force <root>
+```
+
+Deleting the root strips both the reparse metadata and any
+hydrated placeholders. The sidecar GUID file has two possible
+locations depending on parent-directory writability at mount
+time — `<parent>\.<basename>.heddle-projfs-id` is the default,
+`<root>\.heddle-projfs-id` is the fallback when the parent ACL
+refuses writes — both should be removed to fully reset the
+instance identity.
+
+### Running the ProjFS tests locally
+
+The unit tests in `src/projfs.rs::tests` and the smoke tests in
+`tests/projfs_smoke.rs` are all `#[ignore]` by default. To run:
+
+```powershell
+# Smoke tests (require the optional feature)
+$env:HEDDLE_PROJFS_AVAILABLE = "1"
+cargo test -p mount --features projfs --test projfs_smoke -- --ignored
+
+# Unit lifecycle tests (no real mount; just constructor + drop +
+# is_runtime_available probe)
+cargo test -p mount --features projfs --lib projfs:: -- --ignored
+```
+
+The smoke tests will skip themselves unless
+`HEDDLE_PROJFS_AVAILABLE=1` is set, so a Windows host without the
+optional feature won't fail them accidentally.
+
 ## Status
 
 - Linux FUSE shell: production. Used by the heddle CLI when
@@ -221,7 +315,17 @@ is set, so a generic CI runner won't fail on it accidentally.
   the kernel is **stubbed** — the Swift `mount(at:)` returns
   `ENOSYS` today. Finishing this needs a `.fsmodule` bundle and
   the FSKit entitlement, which are release-engineering tasks.
-- Windows ProjFS / CfAPI shell: not started.
+- Windows ProjFS shell: production-ready (heddle#75). The CLI
+  routes Windows daily-use traffic through `ProjFsShell` with an
+  NFS fallback when the optional feature is missing. Production
+  hardening (panic recovery in every trampoline, dir-enumeration
+  cursor across multi-call `get_dir_enum`, instance-ID sidecar
+  outside the projection envelope, close-modified bridge for the
+  write path) is locked in by the `projfs-smoke` CI matrix entry;
+  see `.github/workflows/rust-tests.yml` and
+  `tests/projfs_smoke.rs`. CfAPI (the cloud-files variant) is
+  still unimplemented and a follow-up only if a remote-fetch
+  product surface lands.
 
 ## CLI integration
 
