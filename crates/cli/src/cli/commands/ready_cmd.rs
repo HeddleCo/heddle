@@ -157,7 +157,7 @@ pub(crate) fn worktree_dirty(
         return Ok(!status.is_clean());
     }
     let tree = match repo.current_state()? {
-        Some(state) => repo.store().get_tree(&state.tree)?.unwrap_or_default(),
+        Some(state) => repo.require_tree(&state.tree)?,
         None => Tree::new(),
     };
     let status = repo.compare_worktree_cached_with_options(&tree, options)?;
