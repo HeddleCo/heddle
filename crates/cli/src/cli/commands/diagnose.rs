@@ -137,10 +137,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     let status_start = Instant::now();
     let status_options = worktree_status_options(Some(repo.config()));
     let status = if let Some(state) = current_state.as_ref() {
-        let tree = repo
-            .store()
-            .get_tree(&state.tree)?
-            .unwrap_or_else(Tree::new);
+        let tree = repo.require_tree(&state.tree)?;
         repo.compare_worktree_cached_with_options(&tree, &status_options)?
     } else if let Some(status) = repo.git_overlay_worktree_status()? {
         status

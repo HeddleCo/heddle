@@ -40,39 +40,49 @@ ok()  { echo "ok: $*"; }
 # the *_tests.rs files inside src/ are also exempt because they
 # pin the migration's intended behavior. Comments inside
 # executor.rs document the heddle#90 regression — also exempt.
-SEARCH_DIRS=(crates)
+#
+# Both SEARCH_DIRS and ALLOWLIST honour env overrides so the
+# companion test script (scripts/test-check-no-silent-default-tree-load.sh)
+# can point the asserter at synthetic fixtures without touching
+# production code.
+if [[ -n "${HEDDLE_ASSERTER_SEARCH_DIRS:-}" ]]; then
+  IFS=':' read -r -a SEARCH_DIRS <<< "$HEDDLE_ASSERTER_SEARCH_DIRS"
+else
+  SEARCH_DIRS=(crates)
+fi
 
-# Patterns that ARE the bug. Each entry: pattern => description.
-declare -a BUG_PATTERNS=(
-  "get_tree\([^)]*\)\??\s*\.unwrap_or_default\(\)|.get_tree(...).unwrap_or_default()"
-  "get_tree\([^)]*\)\??\s*\.unwrap_or_else\(\s*\|\|\s*Tree::(new|default)\(\)\s*\)|.get_tree(...).unwrap_or_else(|| Tree::...())"
-  "get_tree\([^)]*\)\??\s*\.unwrap_or_else\(\s*Tree::(new|default)\s*\)|.get_tree(...).unwrap_or_else(Tree::...)"
-)
-
-# Multi-line Option-chain shape:
-#   .map(|s| repo.store().get_tree(&s.tree))
-#   .transpose()?
-#   .flatten()
-#   .unwrap_or_default()
-# Detected with ripgrep multiline mode.
-
-# Allowlist (file:line) — explicit exemptions. Anything matched
-# here is reported as "exempt: <why>" instead of failing. Keep this
-# list short; prefer migrating the site over allowlisting it.
-declare -a ALLOWLIST=(
-  # heddle#90 comments quoting the pre-fix pattern as part of the
-  # documentation for the require_subtree helper.
-  "crates/cli/src/cli/commands/merge/merge_algo/executor.rs:303"
-  "crates/cli/src/cli/commands/merge/merge_algo/executor.rs:776"
-  # heddle#93 doc-comment on Repository::require_tree quoting the
-  # pre-fix pattern for context.
-  "crates/repo/src/repository.rs"
-)
+# Allowlist entries MUST be exact `path:line` pairs. A bare path was
+# accepted in r1, but `is_allowed` used prefix-matching, so any future
+# `get_tree(...).unwrap_or_default()` anywhere in the same file was
+# silently exempted — defeating the whole point of the asserter
+# (Codex r2 P2). Exact `path:line` means: when the line below moves,
+# the asserter fails CI and forces a re-justification.
+if [[ -n "${HEDDLE_ASSERTER_ALLOWLIST+set}" ]]; then
+  # Semicolon-separated list of `path:line` entries. Empty string
+  # means "no allowlist" — used by the asserter's own tests.
+  if [[ -z "$HEDDLE_ASSERTER_ALLOWLIST" ]]; then
+    ALLOWLIST=()
+  else
+    IFS=';' read -r -a ALLOWLIST <<< "$HEDDLE_ASSERTER_ALLOWLIST"
+  fi
+else
+  declare -a ALLOWLIST=(
+    # heddle#90 doc-comments quoting the pre-fix pattern.
+    "crates/cli/src/cli/commands/merge/merge_algo/executor.rs:303"
+    "crates/cli/src/cli/commands/merge/merge_algo/executor.rs:776"
+    # heddle#93 doc-comment on Repository::require_tree quoting the
+    # pre-fix pattern for context. The `///` doc-comment filter
+    # below already strips this on the current line; the explicit
+    # entry pins the location so a refactor that moves the prose
+    # into runtime code surfaces here instead of silently passing.
+    "crates/repo/src/repository.rs:1577"
+  )
+fi
 
 is_allowed() {
   local fileline="$1"
   for entry in "${ALLOWLIST[@]}"; do
-    if [[ "$fileline" == "$entry"* ]]; then
+    if [[ "$fileline" == "$entry" ]]; then
       return 0
     fi
   done
@@ -83,9 +93,14 @@ run_rg() {
   local pattern="$1"
   local label="$2"
   local hits
-  # --multiline so multi-line .transpose()?.flatten() chains are
-  # caught. --type rust restricts to .rs.
-  hits=$(rg --line-number --no-heading --type rust \
+  # --multiline + --multiline-dotall so patterns with `\s*` between
+  # `?` and `.unwrap_or_default()` catch the method-chain shape that
+  # spans lines (Codex r2 P2). Without these flags, the asserter
+  # claimed to catch multi-line chains but `rg` was actually doing
+  # single-line matching — `get_tree(x)?\n    .unwrap_or_default()`
+  # was invisible. --type rust restricts to .rs.
+  hits=$(rg --multiline --multiline-dotall \
+            --line-number --no-heading --type rust \
             "$pattern" "${SEARCH_DIRS[@]}" 2>/dev/null || true)
   if [[ -z "$hits" ]]; then
     ok "no occurrences: $label"
@@ -112,14 +127,16 @@ run_rg() {
   done <<< "$hits"
 }
 
-# Single-line shapes — straightforward ripgrep.
-run_rg 'get_tree\([^)]*\)\?\.unwrap_or_default\(\)' \
+# Bug shapes. `\s*` between `?` and the unwrap call catches both
+# single-line and multi-line chains because run_rg passes
+# --multiline --multiline-dotall (so `\s` matches newlines).
+run_rg 'get_tree\([^)]*\)\?\s*\.unwrap_or_default\(\)' \
        'silent-default tree load (heddle#90/#93 bug class)'
 run_rg 'get_tree\([^)]*\)\?\s*\.unwrap_or_else\(\|\|\s*Tree::(new|default)\(\)\s*\)' \
        'silent-default tree load via unwrap_or_else(closure)'
 run_rg 'get_tree\([^)]*\)\?\s*\.unwrap_or_else\(\s*Tree::(new|default)\s*\)' \
        'silent-default tree load via unwrap_or_else(fn-pointer)'
-run_rg 'get_tree\([^)]*\)\.ok\(\)\.flatten\(\)\.unwrap_or_default\(\)' \
+run_rg 'get_tree\([^)]*\)\.ok\(\)\s*\.flatten\(\)\s*\.unwrap_or_default\(\)' \
        'silent-default tree load via .ok().flatten().unwrap_or_default()'
 
 # Multi-line Option-chain — must enable rg's multiline mode.
