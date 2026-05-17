@@ -43,17 +43,25 @@ impl OpLog {
         )
     }
 
-    /// Record a thread creation.
+    /// Record a thread creation. See `OpLogBackend::record_thread_create`
+    /// for the contract — `manager_snapshot` carries the rmp-serde bytes
+    /// of the matching `Thread` record body so redo can recreate the
+    /// record after undo destroyed it (heddle#23 r2). Pass `None` for
+    /// callsites that don't write a record alongside the op.
+    ///
+    /// Always emits `OpRecord::ThreadCreateV2`.
     pub fn record_thread_create(
         &self,
         name: &str,
         state: &ChangeId,
+        manager_snapshot: Option<Vec<u8>>,
         scope: Option<&str>,
     ) -> Result<u64> {
         self.record_single_scoped(
-            OpRecord::ThreadCreate {
+            OpRecord::ThreadCreateV2 {
                 name: name.to_string(),
                 state: *state,
+                manager_snapshot,
             },
             scope,
         )
@@ -75,7 +83,9 @@ impl OpLog {
         )
     }
 
-    /// Record a thread rename as a batch of operations.
+    /// Record a thread rename as a batch of operations. See
+    /// `OpLogBackend::record_thread_rename` for why the new-name arm
+    /// carries `manager_snapshot: None`.
     pub fn record_thread_rename(
         &self,
         old_name: &str,
@@ -85,9 +95,10 @@ impl OpLog {
     ) -> Result<Vec<u64>> {
         self.record_batch_scoped(
             vec![
-                OpRecord::ThreadCreate {
+                OpRecord::ThreadCreateV2 {
                     name: new_name.to_string(),
                     state: *state,
+                    manager_snapshot: None,
                 },
                 OpRecord::ThreadDelete {
                     name: old_name.to_string(),

@@ -170,8 +170,13 @@ impl<'a> OplogEmitter<'a> {
                     stats.skipped_unmapped += 1;
                     return Ok(());
                 };
+                // Git-history ingest does not write a ThreadManager
+                // record — those exist for native heddle threads. Pass
+                // `None` for the snapshot; the recorded
+                // `ThreadCreateV2` carries no record body to restore
+                // on redo. heddle#23 r2.
                 self.oplog
-                    .record_thread_create(short_name, &cid, scope)
+                    .record_thread_create(short_name, &cid, None, scope)
                     .map_err(IngestError::from)?;
                 stats.thread_creates += 1;
             }
@@ -377,7 +382,7 @@ mod tests {
         let ops = all_ops(&log);
         assert_eq!(ops.len(), 3);
         assert!(
-            matches!(ops[0], OpRecord::ThreadCreate { ref name, state } if name == "main" && state == cid_a)
+            matches!(ops[0], OpRecord::ThreadCreateV2 { ref name, state, manager_snapshot: None } if name == "main" && state == cid_a)
         );
         assert!(matches!(
             &ops[1],
@@ -408,7 +413,7 @@ mod tests {
         let ops = all_ops(&log);
         assert!(matches!(
             &ops[0],
-            OpRecord::ThreadCreate { name, .. } if name == "feature/ingest"
+            OpRecord::ThreadCreateV2 { name, .. } if name == "feature/ingest"
         ));
     }
 

@@ -4,7 +4,7 @@
 use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ContentHash};
 use oplog::{OpBatch, OpRecord};
-use repo::Repository;
+use repo::{Repository, ThreadManager};
 use serde::Serialize;
 
 use super::{
@@ -94,6 +94,13 @@ pub fn cmd_undo(
     // post-preview: dirty worktree and gc-pruned states are conditions
     // operators expect `--preview` to ignore.
     ensure_redaction_undo_safe(&repo, &batches, allow_redact_undo)?;
+    // Cross-thread safety: refuse to undo a `ThreadCreate` whose
+    // ThreadManager record still has a materialized worktree on disk.
+    // The inverse only deletes the ref, so silently proceeding would
+    // leave the worktree directory orphaned with a broken `.heddle/HEAD`
+    // and a phantom ThreadManager record. Pre-preview for the same
+    // honesty reason as the redaction gate.
+    ensure_thread_worktree_undo_safe(&repo, &batches)?;
 
     if preview {
         let output = UndoRedoOutput {
@@ -394,6 +401,7 @@ fn states_required_for_redo(op: &OpRecord) -> Vec<ChangeId> {
         OpRecord::Snapshot { new_state, .. } => vec![*new_state],
         OpRecord::Goto { target, .. } => vec![*target],
         OpRecord::ThreadCreate { state, .. } => vec![*state],
+        OpRecord::ThreadCreateV2 { state, .. } => vec![*state],
         OpRecord::ThreadUpdate { new_state, .. } => vec![*new_state],
         OpRecord::MarkerCreate { state, .. } => vec![*state],
         OpRecord::FastForwardV2 { post_target_id, .. } => vec![*post_target_id],
@@ -544,6 +552,73 @@ fn ensure_redaction_redo_supported(batches: &[OpBatch]) -> Result<()> {
          entry doesn't preserve the full Redaction record (reason, redactor, signature) needed \
          to recreate it, and Purge is irreversible by design. Re-run `heddle redact apply` \
          (or `heddle purge apply`) to re-establish the operation. Affected op(s): {}.",
+        shorts.join(", "),
+    ))
+}
+
+/// Cross-thread undo safety: refuse to undo any `ThreadCreate` whose
+/// ThreadManager record carries a materialized worktree path that still
+/// exists on disk. The undo inverse only deletes the thread ref — without
+/// the matching worktree teardown the directory at `materialized_path` is
+/// left orphaned with a broken `.heddle/HEAD` and a phantom record. The
+/// canonical teardown verb is `heddle thread drop <name> --delete-thread`,
+/// which goes through `drop_thread_silent` (thread_cmd.rs:562) to unmount
+/// virtualized threads, rm the execution path, mark the record Abandoned,
+/// strip agent registry entries, and finally remove the ref. Once that
+/// has run the path no longer exists and a subsequent `heddle undo` of
+/// the original create proceeds.
+///
+/// A stale record whose `materialized_path` points at a non-existent
+/// directory is *not* a refusal — the user has already torn the worktree
+/// down by hand and the undo's record-cleanup pass will sweep the orphan
+/// up. See docs/design/cross-thread-undo.md "Contract" rule 5.
+fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let mut blocking: Vec<(u64, String, std::path::PathBuf)> = Vec::new();
+
+    for batch in batches {
+        for entry in &batch.entries {
+            // Match V1 and V2 — the rename batch's new-name arm and all
+            // post-heddle#23-r2 creates record as V2. Both have the
+            // same worktree-orphan hazard on undo.
+            let name = match &entry.operation {
+                OpRecord::ThreadCreate { name, .. }
+                | OpRecord::ThreadCreateV2 { name, .. } => name,
+                _ => continue,
+            };
+            let Some(record) = manager.find_by_thread(name)? else {
+                continue;
+            };
+            let Some(path) = record.materialized_path.as_ref() else {
+                continue;
+            };
+            if path.exists() {
+                blocking.push((entry.id, name.clone(), path.clone()));
+            }
+        }
+    }
+
+    if blocking.is_empty() {
+        return Ok(());
+    }
+
+    let shorts: Vec<String> = blocking
+        .iter()
+        .map(|(op_id, name, path)| {
+            format!(
+                "op {} (thread '{}', worktree {})",
+                op_id,
+                name,
+                path.display()
+            )
+        })
+        .collect();
+    Err(anyhow!(
+        "Refusing to undo: at least one `thread create` in this chain has an attached \
+         materialized worktree that would be orphaned by the inverse ({}). The undo only \
+         removes the thread ref; the worktree directory and its `.heddle/HEAD` would be left \
+         pointing at a thread that no longer exists. Tear the worktree down first with \
+         `heddle thread drop <name> --delete-thread`, then re-run `heddle undo`.",
         shorts.join(", "),
     ))
 }

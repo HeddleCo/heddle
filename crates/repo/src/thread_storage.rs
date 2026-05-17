@@ -360,6 +360,50 @@ impl ThreadManager {
         let _lock = self.write_lock()?;
         self.record_store.delete_value(record_id)
     }
+
+    /// Encode the `Thread` record matching `thread_name` to opaque
+    /// rmp-serde bytes for inclusion in `OpRecord::ThreadCreateV2`'s
+    /// `manager_snapshot` field. Returns `Ok(None)` when no record
+    /// exists for that thread (the caller doesn't have a record to
+    /// snapshot — e.g. `cmd_start --path` writes the record only after
+    /// materialization, and the rename batch's new-name arm never has
+    /// one). heddle#23 r2.
+    ///
+    /// The encoding is opaque to the `oplog` crate: it stores the bytes
+    /// without interpreting them. The shape is `Thread`'s serde form,
+    /// which has `#[serde(default)]` on every optional field, so
+    /// records written by future versions of heddle remain decodable
+    /// by older readers and vice versa.
+    pub fn snapshot_thread_record(&self, thread_name: &str) -> Result<Option<Vec<u8>>> {
+        let Some(thread) = self.find_by_thread(thread_name)? else {
+            return Ok(None);
+        };
+        let bytes = rmp_serde::to_vec_named(&thread).map_err(|e| {
+            HeddleError::Serialization(format!(
+                "encode thread record snapshot for '{}': {}",
+                thread_name, e
+            ))
+        })?;
+        Ok(Some(bytes))
+    }
+
+    /// Decode and persist a `Thread` record from rmp-serde bytes
+    /// produced by `snapshot_thread_record`. Used by `heddle redo` of a
+    /// `ThreadCreateV2` to restore the record body that undo destroyed
+    /// (heddle#23 r2 Codex P1, mirroring the FastForwardV2 pattern from
+    /// heddle#99 r2 — record what redo needs).
+    ///
+    /// Returns the restored `Thread` for callers that want to inspect
+    /// it (e.g. for stderr summaries). An empty/invalid snapshot
+    /// surfaces as `HeddleError::Other` — the redo arm logs and falls
+    /// back to ref-only restore rather than failing the whole batch.
+    pub fn restore_thread_record_from_snapshot(&self, bytes: &[u8]) -> Result<Thread> {
+        let thread: Thread = rmp_serde::from_slice(bytes).map_err(|e| {
+            HeddleError::Serialization(format!("decode thread record snapshot: {}", e))
+        })?;
+        self.save(&thread)?;
+        Ok(thread)
+    }
 }
 
 impl ThreadRecordStore for ThreadManager {
