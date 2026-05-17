@@ -2,7 +2,10 @@
 #[cfg(windows)]
 use std::{
     ffi::OsString,
-    os::windows::{ffi::OsStringExt, fs::MetadataExt},
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::MetadataExt,
+    },
     path::PathBuf,
 };
 #[cfg(unix)]

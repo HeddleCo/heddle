@@ -43,10 +43,16 @@ impl MountError {
     /// Translate this error into a libc errno suitable for handing
     /// back to FUSE. Only the platform shell uses this — keeping it
     /// here means platform code stays one-liners.
+    ///
+    /// `ESTALE` is POSIX-only; on Windows `libc` doesn't define it,
+    /// so the Windows build uses the POSIX value (`116`) verbatim.
+    /// The ProjFS shell translates this back into a Win32
+    /// `ERROR_FILE_INVALID` further downstream — no caller looks at
+    /// the raw integer except as a `match` discriminant.
     pub fn to_errno(&self) -> i32 {
         match self {
             MountError::NotFound(_) | MountError::UnknownThread(_) => libc::ENOENT,
-            MountError::Stale(_) => libc::ESTALE,
+            MountError::Stale(_) => stale_errno(),
             MountError::NotADirectory(_) => libc::ENOTDIR,
             MountError::ReadOnly => libc::EROFS,
             MountError::Store(HeddleError::NotFound(_))
@@ -56,4 +62,20 @@ impl MountError {
             MountError::Store(_) => libc::EIO,
         }
     }
+}
+
+#[cfg(unix)]
+#[inline]
+fn stale_errno() -> i32 {
+    libc::ESTALE
+}
+
+/// POSIX `ESTALE = 116` on Linux. Reuse the value verbatim on
+/// Windows where the libc crate doesn't expose the constant. The
+/// ProjFS errno→Win32 table in `projfs.rs` maps this back to
+/// `ERROR_FILE_INVALID (1632)`.
+#[cfg(windows)]
+#[inline]
+fn stale_errno() -> i32 {
+    116
 }

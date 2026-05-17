@@ -17,7 +17,11 @@ use objects::{
 };
 use tracing::{debug, instrument};
 
-use super::{HeddleError, Repository, Result, repository_worktree_apply::is_directory_not_empty};
+use super::{HeddleError, Repository, Result};
+// Only consumed by the `#[cfg(unix)]` `remove_materialized_leaf`
+// helper; gate the import so Windows builds don't warn it unused.
+#[cfg(unix)]
+use super::repository_worktree_apply::is_directory_not_empty;
 use crate::{
     worktree_index::IndexEntry,
     worktree_walk::{build_cached_entry, cache_key},
@@ -504,8 +508,16 @@ impl Repository {
                     remove_materialized_leaf(path)?;
                     std::os::unix::fs::symlink(target, path)?;
                 }
+                // Windows symlink materialization is unimplemented;
+                // the projection layer (ProjFS) handles symlinks
+                // through reparse points instead of native symlinks,
+                // and `heddle materialize` on Windows isn't part of
+                // the daily-use mount story. Suppress the unused
+                // bindings rather than ship a half-implementation.
                 #[cfg(not(unix))]
-                let _ = blob;
+                {
+                    let _ = (blob, path);
+                }
             }
         }
 
@@ -720,6 +732,12 @@ fn prepare_parent_directories(writes: &[WorktreeWriteOp]) -> Result<()> {
 /// tolerance, a `goto` over a real-world worktree that mutates a
 /// tracked directory into a symlink aborts mid-apply with `os error
 /// 66`, leaving HEAD stuck and disk diverged from state.
+///
+/// Only called from the `#[cfg(unix)]` symlink-write branch above;
+/// the `#[cfg(not(unix))]` build skips the call (no Windows symlink
+/// materialization), which would warn "function never used" without
+/// the matching gate here.
+#[cfg(unix)]
 fn remove_materialized_leaf(path: &Path) -> Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {

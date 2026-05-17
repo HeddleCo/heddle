@@ -15,7 +15,6 @@
 use std::{
     collections::BTreeMap,
     fs,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
@@ -320,26 +319,23 @@ pub(crate) fn populate_manifest_from_tree(
                     }
                     Err(e) => return Err(HeddleError::Io(e)),
                 };
+                let (size, inode, mtime_ns, ctime_ns, mode) =
+                    crate::stat_signature::stat_signature(&meta);
                 out.insert(
                     rel_path,
                     ManifestFile {
                         hash: entry.hash,
-                        size: meta.size(),
-                        inode: meta.ino(),
-                        mtime_ns: timespec_to_ns(meta.mtime(), meta.mtime_nsec()),
-                        ctime_ns: timespec_to_ns(meta.ctime(), meta.ctime_nsec()),
-                        mode: meta.mode(),
+                        size,
+                        inode,
+                        mtime_ns,
+                        ctime_ns,
+                        mode,
                     },
                 );
             }
         }
     }
     Ok(())
-}
-
-#[inline]
-fn timespec_to_ns(secs: i64, nanos: i64) -> i64 {
-    secs.saturating_mul(1_000_000_000).saturating_add(nanos)
 }
 
 /// Record the manifest's worktree-path field as an *absolute*,
@@ -523,13 +519,15 @@ fn walk_for_no_op(
                 Ok(m) => m,
                 Err(_) => return Ok(false),
             };
+            let (size, inode, mtime_ns, ctime_ns, mode) =
+                crate::stat_signature::stat_signature(&meta);
             let stat = ManifestFile {
                 hash: manifest_entry.hash,
-                size: meta.size(),
-                inode: meta.ino(),
-                mtime_ns: timespec_to_ns(meta.mtime(), meta.mtime_nsec()),
-                ctime_ns: timespec_to_ns(meta.ctime(), meta.ctime_nsec()),
-                mode: meta.mode(),
+                size,
+                inode,
+                mtime_ns,
+                ctime_ns,
+                mode,
             };
             if !stat.matches(manifest_entry) {
                 return Ok(false);
