@@ -31,6 +31,13 @@
 //!   to `ContentAddressedMount` is safe under realistic read
 //!   parallelism (a build of any non-trivial project will issue tens
 //!   of these per second).
+//! * [`fuse_mount_serves_mmap_readers`] — `mmap(MAP_SHARED, ...)` on a
+//!   mounted file. Locks in the [`InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP`]
+//!   opt-in: without it, every `open` reply carrying
+//!   `FOPEN_DIRECT_IO` forces `mmap(MAP_SHARED, ...)` to fail with
+//!   `ENODEV`, which breaks rust-analyzer, cargo, IDEs, and
+//!   `grep --mmap` on heddle-mounted trees. Requires Linux 5.16+;
+//!   skips itself on older kernels (the cap is silently dropped).
 //! * [`fuse_mount_unmounts_cleanly_on_session_drop`] — drop semantics.
 //!   After the session is dropped the mountpoint must no longer
 //!   serve the captured file; reading should fail with `NotFound` and
@@ -180,6 +187,79 @@ fn fuse_mount_serves_concurrent_readers() {
     }
 
     drop(session);
+}
+
+/// `mmap(MAP_SHARED, ...)` against a mounted file must succeed and
+/// must return the captured bytes when the mapping is read.
+///
+/// This locks in `FUSE_DIRECT_IO_ALLOW_MMAP`: the shell unconditionally
+/// returns `FOPEN_DIRECT_IO` from `open` so kernel page-cache reads
+/// don't shadow hot-tier writes, and under default kernel semantics
+/// that disables shared `mmap` on every fd (the page cache is the
+/// mapping substrate; bypass it and the kernel refuses to map the
+/// file, returning `ENODEV` from the `mmap` syscall). The shell opts
+/// out of that restriction via `InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP`
+/// in its `init` callback — without that opt-in, this test fails
+/// with `Errno::NODEV` at the `Mmap::map(&file)` call, which is the
+/// exact failure mode rust-analyzer, cargo, and IDEs hit on
+/// heddle-mounted repos.
+///
+/// The cap requires Linux 5.16+ (when the kernel-side flag was
+/// added). Older kernels silently drop the request — fuser logs it at
+/// debug — and this test will fail there. We probe the kernel version
+/// up front and skip rather than fail on older kernels so the
+/// `fuse-smoke` CI matrix stays portable.
+#[test]
+#[ignore = "requires FUSE on host (Linux 5.16+); opt-in via --ignored"]
+fn fuse_mount_serves_mmap_readers() {
+    if !kernel_at_least(5, 16) {
+        eprintln!(
+            "skipping fuse_mount_serves_mmap_readers: \
+             FUSE_DIRECT_IO_ALLOW_MMAP requires Linux 5.16+"
+        );
+        return;
+    }
+
+    let (_repo_dir, repo) = build_fixture();
+    let (session, mountpoint) = mount_fixture(repo);
+
+    let target = mountpoint.path().join("hello.txt");
+    let file = fs::File::open(&target).expect("open mounted file");
+
+    // SAFETY: `Mmap::map` is unsafe because the kernel may revoke the
+    // mapping out from under us if another process truncates the
+    // backing file. In this test we hold the only handle to the
+    // mounted file for the lifetime of `mapping`, and the FUSE shell
+    // doesn't expose `setattr(size)` (so truncation is impossible
+    // through the mount). Soundness is on us; we accept the contract.
+    let mapping = unsafe { memmap2::Mmap::map(&file) }
+        .expect("mmap(MAP_SHARED) on mounted file (FUSE_DIRECT_IO_ALLOW_MMAP must be enabled)");
+
+    assert_eq!(
+        &mapping[..],
+        b"world",
+        "mmap'd bytes must match captured content"
+    );
+
+    drop(mapping);
+    drop(file);
+    drop(session);
+}
+
+/// Parse `/proc/sys/kernel/osrelease` to skip the mmap test on
+/// kernels older than `(major, minor)`. The cap was added in 5.16; a
+/// `mount.fuse.kernel-old.smoke` CI runner on an older kernel should
+/// skip rather than fail.
+fn kernel_at_least(major: u32, minor: u32) -> bool {
+    let raw = match fs::read_to_string("/proc/sys/kernel/osrelease") {
+        Ok(s) => s,
+        Err(_) => return true, // not Linux-shaped — let the test attempt and report
+    };
+    let version_str = raw.trim().split('-').next().unwrap_or("");
+    let mut parts = version_str.split('.').filter_map(|s| s.parse::<u32>().ok());
+    let host_major = parts.next().unwrap_or(0);
+    let host_minor = parts.next().unwrap_or(0);
+    (host_major, host_minor) >= (major, minor)
 }
 
 #[test]

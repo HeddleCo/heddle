@@ -71,6 +71,20 @@ needs:
 4. **The `fuse` cargo feature**, propagated through
    `heddle-cli`'s `mount` feature.
 
+5. **Linux 5.16+ for shared `mmap` on mounted files.** The shell
+   hands back `FOPEN_DIRECT_IO` on every `open` so kernel page-cache
+   reads don't shadow hot-tier writes (see
+   [`crate::fuse::FuseShell::open`]). Under default kernel semantics
+   that disables `mmap(MAP_SHARED, ...)` on every fd — calls return
+   `ENODEV`. The shell opts out of that restriction by requesting
+   the `FUSE_DIRECT_IO_ALLOW_MMAP` capability in `init`; the kernel
+   bit was added in 5.16. On older kernels the cap is silently
+   dropped and shared mmap fails with `ENODEV` — rust-analyzer,
+   cargo (when reading dep-info files via `mmap`), IDEs, and
+   `grep --mmap` will misbehave on heddle-mounted trees. The mount
+   itself still works; only the mmap path is affected. Upgrade the
+   kernel or use clients that fall back to `read(2)`.
+
 ### Cleaning up a stale FUSE mount
 
 The clean-shutdown path is a `BackgroundSession::drop` (the CLI's
@@ -130,6 +144,7 @@ backend exposes to userspace:
 | `mkdir` / `create`     | not wired (ENOSYS)   | not wired            | not wired            |
 | `setattr(size)` (O_TRUNC) | not wired (ENOSYS)   | not wired            | n/a                  |
 | Symlink readback       | works (read-only)    | works (read-only)    | works (read-only)    |
+| Shared `mmap` on mounted files | yes (kernel 5.16+; falls back to ENODEV on older kernels) | yes (UBC-backed) | yes (projected files are physical on the volume) |
 | ACLs / chmod through mount | not honored      | not honored          | n/a                  |
 | Auto-unmount on daemon death | off by default | n/a                  | n/a                  |
 | Panic-recovery in callbacks | yes (`guard_call`) | yes (`guarded_c_int`) | yes (`guarded_hresult`) |

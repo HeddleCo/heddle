@@ -45,10 +45,11 @@ use std::{
 
 use fuser::{
     BackgroundSession, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
-    Generation, INodeNo, LockOwner, MountOption, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
-    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, Session, WriteFlags,
+    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags, ReplyAttr,
+    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, Session,
+    WriteFlags,
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{
     core::ContentAddressedMount,
@@ -255,6 +256,32 @@ fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 impl Filesystem for FuseShell {
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
+        // Opt into `FUSE_DIRECT_IO_ALLOW_MMAP`. We hand back
+        // `FOPEN_DIRECT_IO` from `open` (see the comment there), and
+        // under default kernel semantics that disables shared `mmap`
+        // on every fd — calls to `mmap(MAP_SHARED, ...)` return
+        // `ENODEV`. The kernel cap added in 5.16 keeps direct-IO
+        // bypass for `read(2)`/`write(2)` but re-enables shared mmap,
+        // which is the daily-use path for rust-analyzer, cargo, IDEs,
+        // and `grep --mmap` on heddle-mounted trees.
+        //
+        // `add_capabilities` errors when the kernel is < 5.16 (the
+        // bit wasn't defined). That's not fatal — older kernels just
+        // get the pre-cap behaviour (no shared mmap), which is the
+        // same shape r1 of this fix shipped with. Log it once at
+        // mount time so operators on old kernels can correlate
+        // `ENODEV` from a mapping syscall with the missing cap.
+        if let Err(unsupported) = config.add_capabilities(InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP) {
+            debug!(
+                ?unsupported,
+                "kernel does not support FUSE_DIRECT_IO_ALLOW_MMAP (requires 5.16+); \
+                 shared mmap on mounted files will fail with ENODEV"
+            );
+        }
+        Ok(())
+    }
+
     fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         // Open every file in `direct_io` mode so the kernel never
         // serves bytes from its page cache. The content-addressed
@@ -275,6 +302,15 @@ impl Filesystem for FuseShell {
         // every kernel `read(2)` becomes a FUSE `read` callback,
         // which we serve from the hot-tier-then-warm-tier-then-
         // captured-blob priority chain.
+        //
+        // The kernel's default rule for direct-IO files is "no shared
+        // mmap" (the page cache is the mapping substrate; bypass it
+        // and `mmap(MAP_SHARED, ...)` returns `ENODEV`). We opt out
+        // of that rule by requesting `FUSE_DIRECT_IO_ALLOW_MMAP` in
+        // [`Self::init`] — on Linux 5.16+ the kernel keeps the
+        // direct-IO bypass for `read`/`write` but lets shared mmap
+        // through, which is the daily-use path for rust-analyzer,
+        // cargo, IDEs, and `grep --mmap` on heddle-mounted trees.
         //
         // FH=0 mirrors the fuser default (we don't track per-handle
         // state — open files identify by inode in [`PlatformShell`]).
