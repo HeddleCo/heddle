@@ -2,84 +2,84 @@
   "_meta": {
     "captured_on": "2026-05-17 \u2014 Linux 6.8 kernel, ubuntu-shaped 4 vCPU host (orchestrator runner)",
     "regenerate_with": "cargo bench --features fuse -p heddle-mount --bench fuse_e2e",
-    "note": "ns_per_iter is criterion's mean point estimate. Update intentionally; the compare script flags any workload at > baseline * 1.20."
+    "note": "ns_per_iter is criterion's mean point estimate. Recalibrated after the cold-blob-cache fix (Codex r1 / PR #91): per-iter `clear_blob_cache()` re-hydrates from the object store every sample, so mmap_read / stat_storm / write_throughput / random_read shifted significantly upward. The compare script flags any workload at > baseline * 1.20."
   },
   "seq_read": {
     "heddle": {
-      "ns_per_iter": 87081193.4,
-      "throughput_mib_s": 22.43
+      "ns_per_iter": 96460839.1,
+      "throughput_mib_s": 20.25
     },
     "vanilla": {
-      "ns_per_iter": 3609560.4,
-      "throughput_mib_s": 541.1
+      "ns_per_iter": 3796810.8,
+      "throughput_mib_s": 514.41
     }
   },
   "mmap_read": {
     "heddle": {
-      "ns_per_iter": 59936036.6,
-      "throughput_mib_s": 1067.81
+      "ns_per_iter": 214736054.8,
+      "throughput_mib_s": 298.04
     },
     "vanilla": {
-      "ns_per_iter": 14023004.8,
-      "throughput_mib_s": 4563.93
+      "ns_per_iter": 13424499.0,
+      "throughput_mib_s": 4767.4
     }
   },
   "concurrent_read": {
     "heddle/4": {
-      "ns_per_iter": 18545356.2,
-      "throughput_mib_s": 105.32
+      "ns_per_iter": 18766236.5,
+      "throughput_mib_s": 104.08
     },
     "heddle/16": {
-      "ns_per_iter": 16823066.2,
-      "throughput_mib_s": 116.1
+      "ns_per_iter": 17567486.1,
+      "throughput_mib_s": 111.18
     },
     "vanilla/4": {
-      "ns_per_iter": 1585907.4,
-      "throughput_mib_s": 1231.55
+      "ns_per_iter": 1534453.9,
+      "throughput_mib_s": 1272.85
     },
     "vanilla/16": {
-      "ns_per_iter": 1537570.7,
-      "throughput_mib_s": 1270.27
+      "ns_per_iter": 1534263.8,
+      "throughput_mib_s": 1273.0
     }
   },
   "random_read": {
     "heddle": {
-      "ns_per_iter": 35712606.8,
-      "throughput_mib_s": 109.38
+      "ns_per_iter": 61992220.7,
+      "throughput_mib_s": 63.01
     },
     "vanilla": {
-      "ns_per_iter": 1673614.9,
-      "throughput_mib_s": 2334.02
+      "ns_per_iter": 1489113.4,
+      "throughput_mib_s": 2623.21
     }
   },
   "stat_storm": {
     "heddle": {
-      "ns_per_iter": 101381335.1,
-      "throughput_elem_s": 19727.5
+      "ns_per_iter": 328921520.1,
+      "throughput_elem_s": 6080.48
     },
     "vanilla": {
-      "ns_per_iter": 6488897.1,
-      "throughput_elem_s": 308218.79
+      "ns_per_iter": 6243690.4,
+      "throughput_elem_s": 320323.38
     }
   },
   "write_throughput": {
     "heddle": {
-      "ns_per_iter": 13904397.4,
-      "throughput_mib_s": 287.68
+      "ns_per_iter": 24638424.8,
+      "throughput_mib_s": 162.35
     },
     "vanilla": {
-      "ns_per_iter": 1532698.9,
-      "throughput_mib_s": 2609.78
+      "ns_per_iter": 1551198.0,
+      "throughput_mib_s": 2578.65
     }
   },
   "lifecycle": {
     "heddle_mount_unmount": {
-      "ns_per_iter": 107728807.8,
-      "throughput_elem_s": 9.28
+      "ns_per_iter": 123242969.8,
+      "throughput_elem_s": 8.11
     },
     "vanilla_mkdir_unlink": {
-      "ns_per_iter": 229911.6,
-      "throughput_elem_s": 4349.5
+      "ns_per_iter": 309917.1,
+      "throughput_elem_s": 3226.67
     }
   }
 }

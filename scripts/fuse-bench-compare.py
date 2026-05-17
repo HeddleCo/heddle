@@ -98,18 +98,34 @@ def load_estimate(criterion_dir: Path, group: str, variant: str) -> float:
         raise EstimateError(f"could not parse {estimates_path}: {exc}") from exc
 
 
-def discover_actual_ids(criterion_dir: Path) -> set[tuple[str, str]]:
+def discover_actual_ids(
+    criterion_dir: Path, baseline_groups: set[str]
+) -> set[tuple[str, str]]:
     """Walk criterion's output tree and return every `(group, variant)`
-    pair that has an `estimates.json`.
+    pair that has an `estimates.json` AND whose group is owned by the
+    baseline.
 
-    Used to detect benchmark IDs that exist on disk but not in the
-    baseline — additions or renames that escaped a baseline update.
-    Such IDs are unmeasured by the gate today and so represent a
-    silent coverage hole.
+    Scoping to `baseline_groups` is deliberate. In CI the bench step
+    runs only `--bench fuse_e2e`, so `target/criterion/` is single-
+    suite and the scoping is a no-op. Locally, a dev's target dir
+    typically holds estimates from sibling benches in the same crate
+    (`mount_read_paths`, etc.) — those have their own perf budgets
+    and aren't in `fuse_e2e_baseline.json`. Flagging them as
+    "unexpected" here would be a false positive every time. By only
+    treating IDs *inside the baseline's groups* as in-scope, we still
+    catch the codex-flagged case (a `seq_read/heddle_v2` variant
+    added or renamed without baseline coverage) without complaining
+    about benches that legitimately live elsewhere.
+
+    Wholly-new top-level groups (e.g. a `bench_streaming_read` added
+    without a baseline entry) won't be caught by this check; they
+    need a baseline stub. The bench file's `criterion_group!` macro
+    is the right code-review anchor for that — a new group can't
+    ship without an explicit edit there.
 
     Criterion's layout is `<group>/<variant>/new/estimates.json`, with
     one extra wrinkle: `<variant>` may itself be a nested path for
-    `BenchmarkId::new("name", value)` ids (`new/value` segments). We
+    `BenchmarkId::new("name", value)` ids (`name/value` segments). We
     walk for `new/estimates.json` files and reconstruct group/variant
     from the relative path.
     """
@@ -125,6 +141,8 @@ def discover_actual_ids(criterion_dir: Path) -> set[tuple[str, str]]:
         if len(rel) < 4 or rel[-2] != "new" or rel[-1] != "estimates.json":
             continue
         group = rel[0]
+        if group not in baseline_groups:
+            continue
         # Criterion also writes per-group aggregate dirs (no variant);
         # those have rel == (group, "new", "estimates.json") which fails
         # the len < 4 check above. Anything we keep has variant parts.
@@ -205,11 +223,13 @@ def main() -> int:
             ok.append(line)
 
     # Coverage check: any `(group, variant)` in criterion that the
-    # baseline doesn't know about. A rename produces both a missing
-    # entry (above) and an unexpected entry (here); a clean addition
-    # produces only the unexpected entry. Both are gate failures
-    # because the new measurement isn't budgeted.
-    actual = discover_actual_ids(args.criterion_dir)
+    # baseline doesn't know about, scoped to groups the baseline
+    # owns. A rename produces both a missing entry (above) and an
+    # unexpected entry (here); a variant addition produces only the
+    # unexpected entry. Both are gate failures because the new
+    # measurement isn't budgeted.
+    baseline_groups = {group for group, _ in expected}
+    actual = discover_actual_ids(args.criterion_dir, baseline_groups)
     unexpected = sorted(actual - expected)
 
     print("# fuse_e2e baseline comparison")
