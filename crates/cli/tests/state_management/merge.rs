@@ -1708,3 +1708,113 @@ fn test_merge_git_commit_without_git_overlay_blocks_with_clear_error() {
         "blockers must flag the missing git repo: {parsed}"
     );
 }
+
+// ----- Conflict-marker column-0 well-formedness (heddle#78) ---------
+//
+// Conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) must each start at
+// column 0. The pre-fix `format_conflict_content` concatenated the
+// "our" / "their" bodies directly against the separator marker, so a
+// side whose content lacked a trailing newline produced output like
+// `pub type Config = RepoConfig;=======` — invalid to git diff, IDEs,
+// and the upcoming hunk-level merge engine.
+
+/// Iterate the marker lines on a conflicted file and assert each one
+/// is anchored at column 0 (i.e. appears as its own line).
+fn assert_markers_at_column_zero(content: &str, ctx: &str) {
+    for marker in ["<<<<<<<", "=======", ">>>>>>>"] {
+        let appears = content.contains(marker);
+        assert!(
+            appears,
+            "expected marker `{marker}` in conflict output ({ctx}): {content}"
+        );
+        // Every occurrence must be at start-of-line. Walk lines and
+        // confirm at least one starts with the marker; also confirm no
+        // line contains the marker anywhere but at column 0.
+        let mut found_at_col_0 = false;
+        for line in content.split('\n') {
+            if line.starts_with(marker) {
+                found_at_col_0 = true;
+            } else if line.contains(marker) {
+                panic!(
+                    "marker `{marker}` is not at column 0 in line ({ctx}): {line:?}\nfull: {content}"
+                );
+            }
+        }
+        assert!(
+            found_at_col_0,
+            "marker `{marker}` never appears at column 0 ({ctx}): {content}"
+        );
+    }
+}
+
+/// Red-commit for heddle#78: when a side's content lacks a trailing
+/// newline, the `=======` separator used to be appended directly after
+/// the last content line. Reproduces the exact `pub type Config = ...`
+/// shape from the heddle#54 trip report.
+#[test]
+fn test_merge_conflict_markers_anchored_at_column_zero_no_trailing_newline() {
+    let temp = TempDir::new().unwrap();
+    let file = temp.path().join("config.rs");
+
+    heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(&file, "pub type Config = BaseConfig;").unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    // No trailing newline on the feature side — the exact shape from
+    // the trip report.
+    fs::write(&file, "pub type Config = RepoConfig;").unwrap();
+    heddle(&["capture", "-m", "Feature edit"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    // No trailing newline on the main side either.
+    fs::write(&file, "pub type Config = MainConfig;").unwrap();
+    heddle(&["capture", "-m", "Main edit"], Some(temp.path())).unwrap();
+
+    heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+    let content = fs::read_to_string(&file).unwrap();
+    assert_markers_at_column_zero(&content, "no-trailing-newline both sides");
+
+    // Belt-and-braces: the specific trip-report shape (content glued to
+    // the separator) must not reappear.
+    assert!(
+        !content.contains("RepoConfig;=======") && !content.contains("MainConfig;======="),
+        "content must not be glued to the `=======` separator: {content}"
+    );
+}
+
+/// Red-commit: a marker-validator sweep across multiple fixture
+/// shapes — one side missing newline, the other side missing newline,
+/// both missing, both ending in newline. All four must produce
+/// well-formed markers.
+#[test]
+fn test_merge_conflict_markers_well_formed_across_newline_shapes() {
+    let cases: &[(&str, &str, &str)] = &[
+        ("ours-only-newline", "ours\n", "theirs"),
+        ("theirs-only-newline", "ours", "theirs\n"),
+        ("neither-newline", "ours", "theirs"),
+        ("both-newline", "ours\n", "theirs\n"),
+    ];
+    for (label, ours, theirs) in cases {
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("f.txt");
+
+        heddle(&["init"], Some(temp.path())).unwrap();
+        fs::write(&file, "base\n").unwrap();
+        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+        fs::write(&file, theirs).unwrap();
+        heddle(&["capture", "-m", "feature edit"], Some(temp.path())).unwrap();
+
+        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+        fs::write(&file, ours).unwrap();
+        heddle(&["capture", "-m", "main edit"], Some(temp.path())).unwrap();
+
+        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+        let content = fs::read_to_string(&file).unwrap();
+        assert_markers_at_column_zero(&content, label);
+    }
+}
