@@ -50,7 +50,7 @@ pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
 
     // Check for uncommitted changes
     if !force && let Some(current) = repo.current_state()? {
-        let tree = repo.store().get_tree(&current.tree)?.unwrap_or_default();
+        let tree = repo.require_tree(&current.tree)?;
         let status = repo.compare_worktree_cached_with_options(
             &tree,
             &worktree_status_options(Some(repo.config())),
