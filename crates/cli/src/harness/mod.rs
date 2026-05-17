@@ -2428,7 +2428,7 @@ fn capture_worktree_change_snapshot(repo: &Repository) -> Result<Vec<WorktreeCha
 fn collect_worktree_changes(repo: &Repository) -> Result<BTreeMap<String, DiffKind>> {
     let status_options = worktree_status_options(Some(repo.config()));
     let worktree_tree = match repo.current_state()? {
-        Some(state) => repo.store().get_tree(&state.tree)?.unwrap_or_default(),
+        Some(state) => repo.require_tree(&state.tree)?,
         None => Tree::new(),
     };
     let status = repo.compare_worktree_cached_with_options(&worktree_tree, &status_options)?;
