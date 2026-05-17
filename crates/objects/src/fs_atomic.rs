@@ -147,6 +147,35 @@ pub fn temp_path(path: &Path) -> PathBuf {
     parent.join(format!(".{file_name}.tmp-{pid}-{unique}-{counter}"))
 }
 
+/// fsync the directory inode so a preceding `rename` is durable across
+/// crashes. POSIX-only — on Windows this is a no-op.
+///
+/// On Linux/macOS, after an `fsync(file)` + `rename(tmp, dest)` the
+/// rename itself still needs to be made durable, which requires
+/// `fsync(parent_dir)` (open parent for read, `sync_all`). Without it
+/// a crash between the rename and the next directory writeback can
+/// leave the destination dirent missing even though the file's data is
+/// on disk.
+///
+/// Windows directories don't support this pattern. `CreateFileW` with
+/// `GENERIC_READ` against a directory returns `ERROR_ACCESS_DENIED`
+/// unless the caller passes `FILE_FLAG_BACKUP_SEMANTICS`, and even
+/// then `FlushFileBuffers` on a directory handle is undefined — NTFS
+/// reports access-denied. Directory metadata durability on Windows is
+/// handled by the NTFS log; there is no userspace knob equivalent to
+/// `fsync(dirfd)`, and standard ecosystem crates (`tempfile`,
+/// `atomicwrites`) treat the directory sync as a Unix-only concern.
+///
+/// Returning `Ok(())` on Windows matches that consensus and fixes
+/// heddle#105 (`Repository::init_default` panicking with
+/// `PermissionDenied` on every `write_file_atomic` of an oplog or
+/// state file under a Windows tempdir).
+#[cfg(windows)]
+pub fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 pub fn sync_directory(path: &Path) -> io::Result<()> {
     let dir = OpenOptions::new().read(true).open(path)?;
     dir.sync_all()
@@ -574,5 +603,38 @@ mod tests {
         let target = dir.path().join("nested/under/here/file.bin");
         write_file_atomic(&target, b"hello").unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"hello");
+    }
+
+    /// Regression for heddle#105: `sync_directory` must succeed on any
+    /// writable directory. The original implementation called
+    /// `OpenOptions::new().read(true).open(dir)` + `sync_all()`, which
+    /// fails on Windows with `ERROR_ACCESS_DENIED` (5) because Windows
+    /// directory handles require `FILE_FLAG_BACKUP_SEMANTICS` and
+    /// `FlushFileBuffers` on a directory handle is not a supported
+    /// operation. The failure cascaded through `write_file_atomic` into
+    /// `Repository::init_default`, breaking `heddle init` on Windows.
+    #[test]
+    fn sync_directory_succeeds_on_writable_tempdir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        sync_directory(dir.path()).expect("sync_directory on writable tempdir");
+    }
+
+    /// Regression for heddle#105: full `write_file_atomic` round-trip
+    /// against a freshly-created nested directory must not surface
+    /// `PermissionDenied`. The previous failure mode was the
+    /// `sync_directory(parent)` call at the end of `write_file_atomic`.
+    #[test]
+    fn write_file_atomic_does_not_permission_deny_on_parent_sync() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("oplog/oplog.bin");
+        let result = write_file_atomic(&target, b"hello");
+        if let Err(e) = &result {
+            assert!(
+                !is_permission_denied(e),
+                "write_file_atomic surfaced PermissionDenied on a writable \
+                 tempdir (heddle#105): {e}"
+            );
+        }
+        result.expect("write_file_atomic");
     }
 }
