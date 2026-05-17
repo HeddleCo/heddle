@@ -52,7 +52,7 @@ impl Repository {
         let blob_hash = self.store.put_blob(&Blob::new(bytes))?;
 
         let current_tree = match context_root {
-            Some(root) => self.store.get_tree(root)?.unwrap_or_default(),
+            Some(root) => self.require_tree(root)?,
             None => Tree::new(),
         };
 
