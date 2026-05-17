@@ -307,6 +307,36 @@ the implemented inverses. If a future forward path lights up the
 `ThreadDelete` hazard, the same V2-snapshot pattern applies — file a
 `ThreadDeleteV2` with the record snapshot.
 
+### `FastForwardV2` emission sites (heddle#110)
+
+heddle#99 originally migrated *only* `cmd_merge`'s FF path to record
+`FastForwardV2`. The Rule-7 sweep filed under heddle#110 extended the
+same migration to the remaining `Repository::fast_forward_attached`
+callers — each of which previously recorded the implicit
+`OpRecord::Goto` (whose inverse only rewinds HEAD) and so silently
+stranded the attached thread ref at the post-FF target on undo.
+
+Today's call sites that emit `FastForwardV2` (via the shared
+`commands::ff_record::record_ff_advance` helper, which falls back to
+`Goto` on detached HEAD):
+
+| Site | Command | `source_thread` value | Notes |
+|---|---|---|---|
+| `commands/merge/mod.rs` | `heddle merge` (FF path) | merge `track_name` | heddle#99 |
+| `commands/rebase/mod.rs` (is_ancestor) | `heddle rebase` (pure FF) | rebase target thread | heddle#110 |
+| `commands/rebase/mod.rs` (empty-replay) | `heddle rebase` (no commits to replay) | rebase target thread | heddle#110 |
+| `commands/rebase/rebase_ops.rs:apply_commit` | `heddle rebase` (replay step) | `"<rebase>"` synthetic | heddle#110; one op per replayed commit |
+| `commands/rebase/rebase_ops.rs:apply_tree_to_worktree` | `heddle rebase` (parentless replay) | `"<rebase>"` synthetic | heddle#110; rare parentless-commit replay |
+| `commands/workflow.rs:adopt_manual_resolution` | `heddle ship` (manual-resolution adopt) | shipped thread name | heddle#110 |
+| `commands/remote/remote_ops.rs:pull_local` | `heddle pull` (local sync, repeat pull) | remote thread name | heddle#110; first-time pull falls back to `Goto` because there's no pre-target tip to restore |
+| `commands/resolve.rs:abort_merge_state` | `heddle resolve --abort` | `"<abort>"` synthetic | heddle#110; today this is a pre-target = post-target no-op record (HEAD doesn't move during a 3-way conflict merge), kept on the same code path so a future merge variant that does move HEAD before abort gets correct undo semantics for free |
+
+Any new caller of `fast_forward_attached` should go through
+`record_ff_advance` (or `record_ff_advance_explicit` when the caller
+pre-mutates the thread ref, à la `pull_local`). Calling
+`fast_forward_attached` directly is reserved for tests and for the
+detached-HEAD bootstrap path inside the helper itself.
+
 The pattern is now well-established enough that any new ref-mutating
 `OpRecord` variant should be reviewed against this matrix at design
 time: "what does undo destroy, and what does redo read to put it back?"
