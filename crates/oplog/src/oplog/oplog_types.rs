@@ -124,6 +124,61 @@ pub enum OpRecord {
         /// Blob hash whose bytes were physically removed.
         blob: ContentHash,
     },
+    /// Fast-forward merge — **legacy V1, read-only.** Predates the
+    /// heddle#99 r2 redo-determinism fix and is no longer emitted; new
+    /// recordings use [`FastForwardV2`].
+    ///
+    /// Lacks `post_target_id`, so a redo of this variant has to
+    /// re-resolve `source_thread → tip` at apply time — non-deterministic
+    /// if the source thread advanced or was deleted between undo and
+    /// redo. The undo direction is fine (uses `pre_target_id` directly).
+    /// Records of this shape age out as the live oplog window slides
+    /// forward.
+    FastForward {
+        /// The thread that was merged in. Its ref never moves during
+        /// an FF merge — recorded only for forensic context.
+        source_thread: String,
+        /// The thread that fast-forwarded. Undo restores this ref to
+        /// `pre_target_id`.
+        target_thread: String,
+        /// `target_thread`'s tip before the FF. Undo restores both
+        /// HEAD and the target thread ref to this state.
+        pre_target_id: ChangeId,
+    },
+    /// Fast-forward merge: `target_thread` advanced from `pre_target_id`
+    /// to `post_target_id` (the source's tip at the time of the FF)
+    /// without writing a synthetic merge state. `source_thread` is
+    /// untouched throughout.
+    ///
+    /// Distinct from `Goto` so undo can restore both HEAD *and* the
+    /// target thread ref. The `Goto` inverse only rewinds HEAD, which
+    /// stranded the merged-into thread ref at the FF target — the bug
+    /// closed by heddle#99 r1.
+    ///
+    /// V2 (heddle#99 r2) adds `post_target_id` so redo replays the
+    /// recorded operation byte-for-byte instead of re-resolving
+    /// `source_thread → tip` at apply time. The r1 redo was
+    /// non-deterministic: if the source thread had advanced after
+    /// undo, redo silently pulled in commits that were never part of
+    /// the original merge; if the source thread had been deleted,
+    /// redo errored even though the merged state is recoverable from
+    /// the recorded SHA. `source_thread` is kept for forensic context
+    /// only — neither inverse reads it.
+    FastForwardV2 {
+        /// The thread that was merged in. Forensic-only — neither
+        /// undo nor redo reads it.
+        source_thread: String,
+        /// The thread that fast-forwarded. Undo restores this ref to
+        /// `pre_target_id`; redo advances it to `post_target_id`.
+        target_thread: String,
+        /// `target_thread`'s tip before the FF. Undo target.
+        pre_target_id: ChangeId,
+        /// `target_thread`'s tip after the FF (the source's tip at
+        /// recording time). Redo target — recorded so replay is
+        /// deterministic regardless of what `source_thread` does
+        /// later.
+        post_target_id: ChangeId,
+    },
 }
 
 impl OpRecord {
@@ -200,6 +255,32 @@ impl OpRecord {
                     "purge blob {} (redaction {})",
                     blob.short(),
                     redaction_id.short()
+                )
+            }
+            OpRecord::FastForward {
+                source_thread,
+                target_thread,
+                pre_target_id,
+            } => {
+                format!(
+                    "fast-forward {} into {} (was at {})",
+                    source_thread,
+                    target_thread,
+                    pre_target_id.short()
+                )
+            }
+            OpRecord::FastForwardV2 {
+                source_thread,
+                target_thread,
+                pre_target_id,
+                post_target_id,
+            } => {
+                format!(
+                    "fast-forward {} into {} ({} -> {})",
+                    source_thread,
+                    target_thread,
+                    pre_target_id.short(),
+                    post_target_id.short()
                 )
             }
         }

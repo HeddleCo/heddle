@@ -169,4 +169,34 @@ impl OpLog {
             scope,
         )
     }
+
+    /// Record a fast-forward merge. `pre_target_id` is the target
+    /// thread's tip before the FF (undo target); `post_target_id` is
+    /// the target thread's tip after the FF (redo target). Use this
+    /// *instead* of `record_goto` when an FF merge moves an attached
+    /// thread ref forward — recording the FF as a plain `Goto` strands
+    /// the thread ref on undo (heddle#99 r1) and recording the redo
+    /// target via name-resolution is non-deterministic (heddle#99 r2).
+    ///
+    /// Always emits the V2 variant; V1 (`OpRecord::FastForward`) is
+    /// retained for read-back compatibility with records written by
+    /// the heddle#99 r1 implementation but is no longer recorded.
+    pub fn record_fast_forward(
+        &self,
+        source_thread: &str,
+        target_thread: &str,
+        pre_target_id: &ChangeId,
+        post_target_id: &ChangeId,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        self.record_single_scoped(
+            OpRecord::FastForwardV2 {
+                source_thread: source_thread.to_string(),
+                target_thread: target_thread.to_string(),
+                pre_target_id: *pre_target_id,
+                post_target_id: *post_target_id,
+            },
+            scope,
+        )
+    }
 }

@@ -204,4 +204,33 @@ pub trait OpLogBackend: Send + Sync {
         )?;
         Ok(ids[0])
     }
+
+    /// Record a fast-forward merge. `pre_target_id` is the target's tip
+    /// before the FF (undo target); `post_target_id` is the target's tip
+    /// after the FF (redo target). Both ends of the FF are recorded so
+    /// neither inverse has to re-resolve `source_thread → tip` at apply
+    /// time — closes heddle#99 r1 (stranded ref on undo) and r2 (redo
+    /// non-determinism).
+    ///
+    /// Always emits the V2 variant. V1 (`OpRecord::FastForward`) is
+    /// retained as read-back-only.
+    fn record_fast_forward(
+        &self,
+        source_thread: &str,
+        target_thread: &str,
+        pre_target_id: &ChangeId,
+        post_target_id: &ChangeId,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::FastForwardV2 {
+                source_thread: source_thread.to_string(),
+                target_thread: target_thread.to_string(),
+                pre_target_id: *pre_target_id,
+                post_target_id: *post_target_id,
+            }],
+            scope,
+        )?;
+        Ok(ids[0])
+    }
 }

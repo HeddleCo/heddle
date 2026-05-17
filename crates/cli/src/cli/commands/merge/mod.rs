@@ -396,7 +396,39 @@ pub(crate) fn merge_thread_into_current(
             // the integrated state. See `Repository::fast_forward_attached`
             // and the regression test
             // `merge_fast_forward_advances_current_thread`.
-            repo.fast_forward_attached(&merge_target_id)?;
+            //
+            // We perform the FF *without recording* an `OpRecord::Goto`
+            // and then explicitly record `OpRecord::FastForwardV2` so
+            // both ends of the FF are captured. r1 (heddle#99) added the
+            // variant to fix stranded-ref-on-undo. r2 added
+            // `post_target_id` so redo replays the recorded SHA instead
+            // of re-resolving `source_thread → tip` at apply time —
+            // closes Codex's non-determinism finding on PR #109.
+            let head_before_ff = repo.head_ref()?;
+            repo.fast_forward_attached_without_record(&merge_target_id)?;
+            match &head_before_ff {
+                Head::Attached {
+                    thread: target_thread,
+                } => {
+                    repo.oplog().record_fast_forward(
+                        track_name,
+                        target_thread,
+                        &current_state.change_id,
+                        &merge_target_id,
+                        Some(&repo.op_scope()),
+                    )?;
+                }
+                Head::Detached { state } => {
+                    // No attached thread to restore on undo. The generic
+                    // `Goto` inverse is sufficient — preserve historic
+                    // behavior for detached HEAD.
+                    repo.oplog().record_goto(
+                        &merge_target_id,
+                        Some(state),
+                        Some(&repo.op_scope()),
+                    )?;
+                }
+            }
             if let Some(entry) = &thread_entry {
                 registry.update_status(&entry.session_id, AgentStatus::Merged)?;
             }

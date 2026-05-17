@@ -161,12 +161,12 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         return Err(anyhow!("Nothing to redo"));
     }
 
-    // Same preview-honesty rule as `cmd_undo`: run the
-    // Redact/Purge-not-supported pre-flight before the `--preview`
-    // short-circuit so preview surfaces the refusal instead of
-    // advertising "Would redo …" for a chain the real command will
-    // reject.
+    // Same preview-honesty rule as `cmd_undo`: run pre-flight refusals
+    // before the `--preview` short-circuit so preview surfaces the
+    // refusal instead of advertising "Would redo …" for a chain the
+    // real command will reject.
     ensure_redaction_redo_supported(&batches)?;
+    ensure_redo_states_reachable(&repo, &batches)?;
 
     if preview {
         let output = UndoRedoOutput {
@@ -346,6 +346,57 @@ fn states_required_for_undo(op: &OpRecord) -> Vec<ChangeId> {
         OpRecord::ThreadDelete { state, .. } => vec![*state],
         OpRecord::ThreadUpdate { old_state, .. } => vec![*old_state],
         OpRecord::MarkerDelete { state, .. } => vec![*state],
+        OpRecord::FastForward { pre_target_id, .. } => vec![*pre_target_id],
+        OpRecord::FastForwardV2 { pre_target_id, .. } => vec![*pre_target_id],
+        _ => Vec::new(),
+    }
+}
+
+/// Symmetric to `ensure_undo_states_reachable`: walk every batch we'd
+/// redo and verify the post-state it would advance to is still in the
+/// object store. Without this check, a `gc --prune` that reached past
+/// the FF redo target would surface as a raw `state not found` from
+/// inside `goto`, identical in shape to the undo destructive-boundary
+/// case. The redo arms that touch the object store at apply time are
+/// `Snapshot`, `Goto`, `ThreadCreate`, `ThreadUpdate`, `MarkerCreate`,
+/// and `FastForwardV2`; all carry the post-state SHA directly. The
+/// legacy V1 `FastForward` redo re-resolves `source_thread → tip` and
+/// has its own error path, so we skip it here.
+fn ensure_redo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
+    let mut missing: Vec<(u64, ChangeId)> = Vec::new();
+    for batch in batches {
+        for entry in &batch.entries {
+            for needed in states_required_for_redo(&entry.operation) {
+                if !repo.store().has_state(&needed)? {
+                    missing.push((entry.id, needed));
+                }
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let shorts: Vec<String> = missing
+        .iter()
+        .map(|(op_id, id)| format!("op {} -> {}", op_id, id.short()))
+        .collect();
+    Err(anyhow!(
+        "Refusing to redo: post-state(s) needed to replay have been garbage-collected or are otherwise missing from the object store ({}). \
+         A destructive boundary (likely `heddle gc --prune`) has been crossed past the live oplog window — \
+         redo cannot replay here. Restore the missing states from a backup, or re-run the original operation manually.",
+        shorts.join(", "),
+    ))
+}
+
+fn states_required_for_redo(op: &OpRecord) -> Vec<ChangeId> {
+    match op {
+        OpRecord::Snapshot { new_state, .. } => vec![*new_state],
+        OpRecord::Goto { target, .. } => vec![*target],
+        OpRecord::ThreadCreate { state, .. } => vec![*state],
+        OpRecord::ThreadUpdate { new_state, .. } => vec![*new_state],
+        OpRecord::MarkerCreate { state, .. } => vec![*state],
+        OpRecord::FastForwardV2 { post_target_id, .. } => vec![*post_target_id],
         _ => Vec::new(),
     }
 }
@@ -389,9 +440,7 @@ fn ensure_redaction_undo_safe(
     for batch in batches {
         for entry in &batch.entries {
             match &entry.operation {
-                OpRecord::Purge { redaction_id, .. } => {
-                    purge_ops.push((entry.id, *redaction_id))
-                }
+                OpRecord::Purge { redaction_id, .. } => purge_ops.push((entry.id, *redaction_id)),
                 OpRecord::Redact {
                     blob, state, path, ..
                 } => redact_ops.push(RedactSummary {
@@ -408,7 +457,9 @@ fn ensure_redaction_undo_safe(
     if !purge_ops.is_empty() {
         let shorts: Vec<String> = purge_ops
             .iter()
-            .map(|(op_id, redaction_id)| format!("op {} (redaction {})", op_id, redaction_id.short()))
+            .map(|(op_id, redaction_id)| {
+                format!("op {} (redaction {})", op_id, redaction_id.short())
+            })
             .collect();
         return Err(anyhow!(
             "Refusing to undo: `heddle purge` is irreversible by design — the blob bytes have been \

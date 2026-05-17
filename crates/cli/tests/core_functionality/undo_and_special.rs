@@ -469,19 +469,19 @@ fn test_undo_capture_restores_head_to_parent() {
     );
 }
 
-/// Fast-forward merge undo, current behavior: HEAD is restored to the
-/// pre-merge tip, but the *merged-into* thread ref is **stranded** at the FF
-/// target. This is a documented gap (`docs/undo.md` "Known caveats") tracked
-/// by heddle#99 — add an `OpRecord::FastForward` variant that records the
-/// pre-merge thread state so undo can reset the ref too.
+/// Fast-forward merge undo, full restoration: HEAD *and* the merged-into
+/// thread ref both rewind to the pre-merge tip. This pins the heddle#99 fix —
+/// before it landed, the FF merge recorded an `OpRecord::Goto` whose inverse
+/// only rewinds HEAD, stranding the target thread ref at the FF target. The
+/// new `OpRecord::FastForward` variant carries the pre-FF tip so undo restores
+/// both refs together.
 ///
-/// Why pin the bug instead of skipping the test: the day the FF undo is fixed
-/// this test will start failing on the stranded-ref assertion, which is
-/// exactly the signal we want — "the gap is closed, update the docs + this
-/// test." See also `test_undo_non_ff_merge_restores_both_threads` below for
-/// the non-FF path that already works end-to-end.
+/// This test was previously named
+/// `test_undo_ff_merge_restores_head_but_strands_thread_ref` and asserted the
+/// stranded-ref behavior as a pinned bug. Renamed and the strand assertion
+/// flipped when heddle#99 closed.
 #[test]
-fn test_undo_ff_merge_restores_head_but_strands_thread_ref() {
+fn test_undo_ff_merge_restores_head_and_thread_ref() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -527,10 +527,113 @@ fn test_undo_ff_merge_restores_head_but_strands_thread_ref() {
         "feature thread tip must be unchanged across merge + undo"
     );
 
-    // The documented gap: the `main` thread ref is left at the FF target.
-    // Today's `OpRecord::Goto` inverse only rewinds HEAD; it carries no
-    // thread context to reset the ref. When the follow-up adds a
-    // `FastForward` op variant, flip this assertion to `main_tip_before`.
+    // The heddle#99 fix: undoing an FF merge restores BOTH HEAD and the
+    // target thread ref to the pre-merge state. Recording the FF as
+    // `OpRecord::FastForward` (instead of `OpRecord::Goto`) gives the
+    // inverse the thread context it needs.
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, main_tip_before,
+        "undo of FF merge must restore the `main` thread ref to its pre-merge tip \
+         (heddle#99 — was stranded at the FF target before the fix)"
+    );
+
+    // HEAD must remain attached to `main` so subsequent ops record on the
+    // expected lane. Pre-fix the strand also left HEAD detached, which
+    // silently broke scope filtering on the next undo.
+    match repo.head_ref().unwrap() {
+        refs::Head::Attached { thread } => assert_eq!(
+            thread, "main",
+            "HEAD must stay attached to `main` after FF undo"
+        ),
+        refs::Head::Detached { state } => panic!(
+            "HEAD must stay attached to `main`; got detached at {}",
+            state.short()
+        ),
+    }
+}
+
+/// Destructive-boundary protection covers `OpRecord::FastForward` too: if
+/// the pre-FF state is gone from the object store (gc --prune past the live
+/// oplog window, or oplog backup restored without its objects), undo must
+/// refuse loudly with a clear message instead of half-rewinding the worktree
+/// or panicking deep inside `goto`. Mirrors the `Goto`/`Snapshot` coverage
+/// in `test_undo_refuses_when_prior_state_missing` but exercises the new
+/// FF arm specifically.
+#[test]
+fn test_undo_ff_merge_refuses_when_pre_target_state_missing() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+
+    // Simulate gc reaching past the pre-FF tip. Same shape as the
+    // Goto/Snapshot coverage above: drop the loose state file and any
+    // pack that could resolve it.
+    let state_path = locate_state_loose_file(temp.path(), &main_tip_before)
+        .expect("pre-FF state's loose file is present after merge");
+    std::fs::remove_file(&state_path).unwrap();
+    let packs_dir = temp.path().join(".heddle/packs");
+    if packs_dir.exists() {
+        for entry in std::fs::read_dir(&packs_dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+    }
+
+    let err = heddle(&["undo"], Some(temp.path()))
+        .expect_err("undo must refuse when the pre-FF state is missing");
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("missing") || lower.contains("gone") || lower.contains("garbage"),
+        "error must explain that prior state is missing: {err}"
+    );
+}
+
+/// FF merge undo + redo round-trip: redo re-applies the FF, advancing both
+/// HEAD and the target thread ref back to the source's tip. The source
+/// thread is untouched throughout.
+#[test]
+fn test_redo_ff_merge_restores_head_and_thread_ref() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    let feature_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(head_short(temp.path()), main_tip_before);
+
+    heddle_must_succeed(&["redo"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        feature_tip_before,
+        "redo of FF merge must re-advance HEAD to feature's tip"
+    );
+
+    let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
         .get_thread("main")
@@ -539,8 +642,196 @@ fn test_undo_ff_merge_restores_head_but_strands_thread_ref() {
         .short();
     assert_eq!(
         main_tip, feature_tip_before,
-        "current behavior: `main` thread ref is stranded at the FF target \
-         after undo (see docs/undo.md 'Known caveats' + follow-up issue)"
+        "redo of FF merge must re-advance `main` thread ref to feature's tip"
+    );
+    let feature_tip = repo
+        .refs()
+        .get_thread("feature")
+        .unwrap()
+        .expect("feature thread still exists")
+        .short();
+    assert_eq!(
+        feature_tip, feature_tip_before,
+        "feature thread tip stays put across the full merge/undo/redo round-trip"
+    );
+}
+
+/// Redo of an FF merge must replay the *recorded* operation, not re-derive
+/// it from the source thread's current tip. heddle#99 r1 resolved
+/// `source_thread → tip` at redo time; if the source thread had advanced
+/// between undo and redo, redo silently pulled in commits that were never
+/// part of the original merge. The fix records `post_target_id` (the FF
+/// result SHA) at recording time and uses it directly on redo, so the
+/// replay is deterministic.
+///
+/// Pinned the bug pre-fix: this test was red before `FastForwardV2` landed.
+#[test]
+fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    let feature_tip_at_ff = head_short(temp.path());
+
+    // FF main → feature, then undo back to main_tip_before.
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(head_short(temp.path()), main_tip_before);
+
+    // Advance the source thread after undo: a second capture on feature
+    // gives it a new tip distinct from the FF target. Pre-fix, redo would
+    // pick up *this* tip instead of the recorded FF target.
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work + more").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature again"], temp.path());
+    let feature_tip_advanced = head_short(temp.path());
+    assert_ne!(
+        feature_tip_at_ff, feature_tip_advanced,
+        "post-undo capture on feature must produce a new tip distinct from the FF target"
+    );
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["redo"], temp.path());
+
+    // The recorded FF target — not feature's current tip — is what redo must
+    // restore. HEAD and the `main` thread ref both end at the original FF SHA.
+    assert_eq!(
+        head_short(temp.path()),
+        feature_tip_at_ff,
+        "redo of FF merge must replay to the recorded FF target, not source's current tip"
+    );
+    let repo = Repository::open(temp.path()).unwrap();
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, feature_tip_at_ff,
+        "redo of FF merge must set `main` ref to the recorded FF target, not source's current tip"
+    );
+    let feature_tip = repo
+        .refs()
+        .get_thread("feature")
+        .unwrap()
+        .expect("feature thread still exists")
+        .short();
+    assert_eq!(
+        feature_tip, feature_tip_advanced,
+        "feature thread's own ref is independent of redo — it stays at its new tip"
+    );
+}
+
+/// Redo of an FF merge must succeed even when the source thread has been
+/// deleted after undo. The original merged state is fully recoverable from
+/// the recorded `post_target_id`; refusing redo here would punish the user
+/// for housekeeping a now-merged feature branch.
+///
+/// Pinned the bug pre-fix: heddle#99 r1's redo resolved `source_thread → tip`
+/// live and errored with "source thread no longer exists" when the user
+/// dropped the thread between undo and redo.
+#[test]
+fn test_redo_ff_merge_succeeds_when_source_deleted() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    let feature_tip_at_ff = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(head_short(temp.path()), main_tip_before);
+
+    // Delete the source thread between undo and redo. The legacy CLI
+    // shape `thread delete <name>` is translated to
+    // `thread drop <name> --delete-thread` by `translate_legacy_args`.
+    heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
+
+    heddle_must_succeed(&["redo"], temp.path());
+
+    assert_eq!(
+        head_short(temp.path()),
+        feature_tip_at_ff,
+        "redo must replay to the recorded FF target even when source thread is gone"
+    );
+    let repo = Repository::open(temp.path()).unwrap();
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, feature_tip_at_ff,
+        "main ref must reach the recorded FF target after redo, source-thread-deletion notwithstanding"
+    );
+}
+
+/// Symmetric to `test_undo_ff_merge_refuses_when_pre_target_state_missing`:
+/// redo also has a destructive-boundary case. The state we'd advance to
+/// (`post_target_id`) must still be in the object store; if it has been
+/// pruned, redo must refuse with a clear message rather than partially
+/// rewinding HEAD past the boundary or panicking deep in `goto`.
+#[test]
+fn test_redo_ff_merge_refuses_when_post_target_state_missing() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    let feature_tip_at_ff = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+    // Undo first: HEAD is now back at main_tip_before, so the FF target SHA
+    // is no longer pinned by HEAD and can be removed to simulate a gc that
+    // pruned past the redo's reach.
+    heddle_must_succeed(&["undo"], temp.path());
+
+    let state_path = locate_state_loose_file(temp.path(), &feature_tip_at_ff)
+        .expect("FF target state's loose file is present after undo");
+    std::fs::remove_file(&state_path).unwrap();
+    let packs_dir = temp.path().join(".heddle/packs");
+    if packs_dir.exists() {
+        for entry in std::fs::read_dir(&packs_dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+    }
+    // Also drop the source thread ref so a live-resolve path can't smuggle
+    // the SHA back in by reading `feature → tip`. (Belt-and-braces: the new
+    // redo arm doesn't read the source thread at all, but locking this down
+    // ensures the test fails in the right way if a regression re-introduces
+    // a live-resolve fallback.)
+    heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
+
+    let err = heddle(&["redo"], Some(temp.path()))
+        .expect_err("redo must refuse when the FF target state is missing");
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("missing") || lower.contains("gone") || lower.contains("garbage"),
+        "error must explain that the redo target state is missing: {err}"
     );
 }
 
@@ -797,10 +1088,8 @@ fn test_undo_redact_with_allow_flag_restores_original_content() {
     // Sanity: redact list shows the new redaction, and the underlying
     // materialize gate (the same function `materialize_blob` calls)
     // reports an active stub.
-    let blob_hash = objects::object::Blob::from_slice(
-        b"api_token = \"super-secret-leaked-value\"\n",
-    )
-    .hash();
+    let blob_hash =
+        objects::object::Blob::from_slice(b"api_token = \"super-secret-leaked-value\"\n").hash();
     {
         let repo = Repository::open(temp.path()).unwrap();
         let stub = repo
@@ -994,8 +1283,8 @@ fn test_redo_of_undone_redact_refuses() {
 
     // Redo refuses with a message that names Redact + points the user
     // at re-running `heddle redact apply`.
-    let err = heddle(&["redo"], Some(temp.path()))
-        .expect_err("redo of an undone Redact must refuse");
+    let err =
+        heddle(&["redo"], Some(temp.path())).expect_err("redo of an undone Redact must refuse");
     let lower = err.to_lowercase();
     assert!(
         lower.contains("redact"),
