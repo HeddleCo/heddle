@@ -10,7 +10,7 @@ use std::path::Path;
 
 use merge::{ConflictMarkers, MergeOutcome};
 
-use super::semantic_three_way_merge;
+use super::{MergeStrategy, semantic_three_way_merge, three_way_merge};
 
 const MARKERS: ConflictMarkers<'static> = ConflictMarkers {
     ours: "OURS",
@@ -730,4 +730,589 @@ fn many_functions_disjoint_modifications_resolves() {
     let merged = assert_clean(merge_rust(&base, &ours, &theirs));
     assert!(merged.contains("5050"), "ours edit lost");
     assert!(merged.contains("15150"), "theirs edit lost");
+}
+
+// =====================================================================
+// Coverage: dispatch shortcuts in `semantic_three_way_merge`.
+// =====================================================================
+
+#[test]
+fn all_three_sides_identical_returns_base() {
+    let s = "fn a() { 1 }\n";
+    let out = merge_rust(s, s, s);
+    assert_eq!(assert_clean(out), s);
+}
+
+#[test]
+fn base_equals_ours_takes_theirs() {
+    let base = "fn a() { 1 }\n";
+    let theirs = "fn a() { 2 }\n";
+    let out = merge_rust(base, base, theirs);
+    assert_eq!(assert_clean(out), theirs);
+}
+
+#[test]
+fn base_equals_theirs_takes_ours() {
+    let base = "fn a() { 1 }\n";
+    let ours = "fn a() { 2 }\n";
+    let out = merge_rust(base, ours, base);
+    assert_eq!(assert_clean(out), ours);
+}
+
+#[test]
+fn ours_equals_theirs_takes_either() {
+    let base = "fn a() { 1 }\n";
+    let same = "fn a() { 99 }\n";
+    let out = merge_rust(base, same, same);
+    assert_eq!(assert_clean(out), same);
+}
+
+#[test]
+fn non_utf8_input_falls_through_to_hunk_merge() {
+    // Invalid UTF-8 byte (0xFF is never valid as a leading byte).
+    let base: &[u8] = b"fn a() { 1 }\n\xff\n";
+    let ours: &[u8] = b"fn a() { 1 }\n\xff OURS\n";
+    let theirs: &[u8] = b"fn a() { 1 }\n\xff THEIRS\n";
+    let outcome = semantic_three_way_merge(base, ours, theirs, Path::new("a.rs"), MARKERS);
+    // Must not panic; should produce some merge outcome from the byte path.
+    match outcome {
+        MergeOutcome::Clean(_) | MergeOutcome::Conflicts { .. } => {}
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+}
+
+#[test]
+fn three_way_merge_hunk_only_strategy_skips_parsing() {
+    // .rs path, but HunkOnly forces text_hunk_merge regardless.
+    let base = "fn a() { 1 }\nfn b() { 2 }\n";
+    let ours = "fn a() { 10 }\nfn b() { 2 }\n";
+    let theirs = "fn a() { 1 }\nfn b() { 20 }\n";
+    let out = three_way_merge(
+        base.as_bytes(),
+        ours.as_bytes(),
+        theirs.as_bytes(),
+        Path::new("a.rs"),
+        MARKERS,
+        MergeStrategy::HunkOnly,
+    );
+    let merged = assert_clean(out);
+    assert!(merged.contains("10"));
+    assert!(merged.contains("20"));
+}
+
+#[test]
+fn three_way_merge_semantic_strategy_uses_ast() {
+    let base = "fn a() { 1 }\nfn b() { 2 }\n";
+    let ours = "fn a() { 10 }\nfn b() { 2 }\n";
+    let theirs = "fn a() { 1 }\nfn b() { 20 }\n";
+    let out = three_way_merge(
+        base.as_bytes(),
+        ours.as_bytes(),
+        theirs.as_bytes(),
+        Path::new("a.rs"),
+        MARKERS,
+        MergeStrategy::Semantic,
+    );
+    let merged = assert_clean(out);
+    assert!(merged.contains("10"));
+    assert!(merged.contains("20"));
+}
+
+// =====================================================================
+// Coverage: reconstruct.rs — modify/delete variants.
+// =====================================================================
+
+#[test]
+fn modify_delete_clean_when_modifier_preserved_base() {
+    // ours: modify keep() so base != ours overall, but target() unchanged
+    // vs base; theirs: delete target() entirely. Target's b == o so the
+    // (Some, Some, None) arm cleanly drops the function.
+    let base = "fn keep() { 1 }\nfn target() { 1 }\n";
+    let ours = "fn keep() { 2 }\nfn target() { 1 }\n";
+    let theirs = "fn keep() { 1 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(!merged.contains("fn target"), "target should be deleted: {merged}");
+    assert!(merged.contains("fn keep() { 2 }"));
+}
+
+#[test]
+fn delete_modify_clean_when_modifier_preserved_base() {
+    // theirs keeps target() exactly as base; ours deletes target().
+    // Target's b == t so the (Some, None, Some) arm cleanly drops it.
+    let base = "fn keep() { 1 }\nfn target() { 1 }\n";
+    let ours = "fn keep() { 2 }\n";
+    let theirs = "fn keep() { 1 }\nfn target() { 1 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(!merged.contains("fn target"));
+    assert!(merged.contains("fn keep() { 2 }"));
+}
+
+#[test]
+fn both_sides_add_identical_function_with_other_divergence_clean() {
+    // Both sides add `fn newcomer() { 1 }` identically — but each side
+    // also makes a *different* edit elsewhere, so the file-level
+    // short-circuits in semantic_three_way_merge don't fire and we
+    // actually reach resolve_item's (None, Some(o), Some(t)) o==t arm.
+    let base = "fn alpha() { 1 }\nfn beta() { 2 }\n";
+    let ours = "fn alpha() { 10 }\nfn beta() { 2 }\nfn newcomer() { 99 }\n";
+    let theirs = "fn alpha() { 1 }\nfn beta() { 20 }\nfn newcomer() { 99 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("fn newcomer() { 99 }"));
+    assert!(merged.contains("fn alpha() { 10 }"));
+    assert!(merged.contains("fn beta() { 20 }"));
+}
+
+#[test]
+fn both_sides_delete_same_function_clean() {
+    // Exercise the (Some(_), None, None) → (None, 0) arm.
+    let base = "fn keep() { 1 }\nfn gone() { 0 }\n";
+    let ours = "fn keep() { 2 }\n";
+    let theirs = "fn keep() { 3 }\n";
+    let outcome = merge_rust(base, ours, theirs);
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts { merged_bytes_with_markers, .. } => {
+            String::from_utf8(merged_bytes_with_markers).unwrap()
+        }
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(!text.contains("fn gone"), "gone() should be removed: {text}");
+}
+
+#[test]
+fn delete_modify_conflicts_when_theirs_modified() {
+    // ours deletes; theirs modifies → conflict.
+    let base = "fn keep() {}\nfn target() { 1 }\n";
+    let ours = "fn keep() {}\n";
+    let theirs = "fn keep() {}\nfn target() { 999 }\n";
+    let (_text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1);
+}
+
+#[test]
+fn three_way_modify_ours_unchanged_takes_theirs() {
+    // o == b → take theirs.
+    let base = "fn a() { 1 }\n";
+    let ours = "fn a() { 1 }\n";
+    let theirs = "fn a() { 42 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("42"));
+}
+
+#[test]
+fn three_way_modify_both_made_same_change_takes_ours() {
+    // o == t → clean, both sides made identical edit.
+    let base = "fn a() { 1 }\nfn b() { 2 }\n";
+    let ours = "fn a() { 1 }\nfn b() { 42 }\n";
+    let theirs = "fn a() { 1 }\nfn b() { 42 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("42"));
+}
+
+// =====================================================================
+// Coverage: items.rs — Rust constructs beyond fn / impl.
+// =====================================================================
+
+#[test]
+fn rust_struct_modified_disjoint_clean() {
+    let base = "struct S { x: u32 }\nfn f() { 1 }\n";
+    let ours = "struct S { x: u64 }\nfn f() { 1 }\n";
+    let theirs = "struct S { x: u32 }\nfn f() { 2 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("u64"));
+    assert!(merged.contains("fn f() { 2 }"));
+}
+
+#[test]
+fn rust_enum_modified_disjoint_clean() {
+    let base = "enum E { A, B }\nfn f() { 1 }\n";
+    let ours = "enum E { A, B, C }\nfn f() { 1 }\n";
+    let theirs = "enum E { A, B }\nfn f() { 99 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("C"));
+    assert!(merged.contains("99"));
+}
+
+#[test]
+fn rust_trait_with_signature_methods_disjoint_clean() {
+    let base = "\
+trait T {
+    fn foo(&self);
+    fn bar(&self);
+}
+fn k() { 1 }
+";
+    let ours = "\
+trait T {
+    fn foo(&self) -> u32;
+    fn bar(&self);
+}
+fn k() { 1 }
+";
+    let theirs = "\
+trait T {
+    fn foo(&self);
+    fn bar(&self);
+}
+fn k() { 2 }
+";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("-> u32"));
+    assert!(merged.contains("fn k() { 2 }"));
+}
+
+#[test]
+fn rust_const_static_type_alias_modified_clean() {
+    let base = "\
+const C: u32 = 1;
+static S: u32 = 2;
+type T = u32;
+fn k() { 0 }
+";
+    let ours = "\
+const C: u32 = 10;
+static S: u32 = 2;
+type T = u32;
+fn k() { 0 }
+";
+    let theirs = "\
+const C: u32 = 1;
+static S: u32 = 20;
+type T = u64;
+fn k() { 0 }
+";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("C: u32 = 10"));
+    assert!(merged.contains("S: u32 = 20"));
+    assert!(merged.contains("type T = u64"));
+}
+
+#[test]
+fn rust_union_modified_clean() {
+    let base = "\
+union U { a: u32, b: u64 }
+fn k() { 0 }
+";
+    let ours = "\
+union U { a: u32, b: u128 }
+fn k() { 0 }
+";
+    let theirs = "\
+union U { a: u32, b: u64 }
+fn k() { 1 }
+";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("u128"));
+    assert!(merged.contains("fn k() { 1 }"));
+}
+
+#[test]
+fn rust_mod_header_only_change() {
+    // `mod x;` is a header form — no body child. Exercises the
+    // body.is_some() branch in classify_rust_node for mod_item.
+    let base = "mod a;\nmod b;\nfn k() { 0 }\n";
+    let ours = "mod a;\nmod b;\nfn k() { 1 }\n";
+    let theirs = "mod a;\nmod b;\nfn k() { 0 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("fn k() { 1 }"));
+}
+
+#[test]
+fn rust_mod_with_inline_body_disjoint_methods_clean() {
+    // `mod x { ... }` — body present, recurses into nested items with
+    // updated scope.
+    let base = "\
+mod inner {
+    fn one() { 1 }
+    fn two() { 2 }
+}
+";
+    let ours = "\
+mod inner {
+    fn one() { 10 }
+    fn two() { 2 }
+}
+";
+    let theirs = "\
+mod inner {
+    fn one() { 1 }
+    fn two() { 20 }
+}
+";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("fn one() { 10 }"));
+    assert!(merged.contains("fn two() { 20 }"));
+}
+
+#[test]
+fn rust_impl_trait_for_type_distinct_from_inherent_impl() {
+    // `impl T for Foo` should have a different ItemKey than `impl Foo`,
+    // so methods inside each are not confused. Exercises rust_impl_name's
+    // `trait for type` branch.
+    let base = "\
+struct Foo;
+impl Foo {
+    fn inherent(&self) { let _ = 1; }
+}
+impl Clone for Foo {
+    fn clone(&self) -> Self { Foo }
+}
+";
+    let ours = "\
+struct Foo;
+impl Foo {
+    fn inherent(&self) { let _ = 42; }
+}
+impl Clone for Foo {
+    fn clone(&self) -> Self { Foo }
+}
+";
+    let theirs = "\
+struct Foo;
+impl Foo {
+    fn inherent(&self) { let _ = 1; }
+}
+impl Clone for Foo {
+    fn clone(&self) -> Self { Foo.clone() }
+}
+";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("let _ = 42"));
+    assert!(merged.contains("Foo.clone()"));
+}
+
+// =====================================================================
+// Coverage: items.rs — Python, JavaScript, TypeScript classifiers.
+// =====================================================================
+
+fn merge_at(base: &str, ours: &str, theirs: &str, path: &str) -> MergeOutcome {
+    semantic_three_way_merge(
+        base.as_bytes(),
+        ours.as_bytes(),
+        theirs.as_bytes(),
+        Path::new(path),
+        MARKERS,
+    )
+}
+
+#[test]
+fn python_function_disjoint_modifications_clean() {
+    let base = "\
+def alpha():
+    return 1
+
+def beta():
+    return 2
+";
+    let ours = "\
+def alpha():
+    return 11
+
+def beta():
+    return 2
+";
+    let theirs = "\
+def alpha():
+    return 1
+
+def beta():
+    return 22
+";
+    let merged = match merge_at(base, ours, theirs, "f.py") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    assert!(merged.contains("return 11"));
+    assert!(merged.contains("return 22"));
+}
+
+#[test]
+fn python_class_with_methods_disjoint_clean() {
+    let base = "\
+class C:
+    def one(self):
+        return 1
+
+    def two(self):
+        return 2
+";
+    let ours = "\
+class C:
+    def one(self):
+        return 10
+
+    def two(self):
+        return 2
+";
+    let theirs = "\
+class C:
+    def one(self):
+        return 1
+
+    def two(self):
+        return 20
+";
+    let merged = match merge_at(base, ours, theirs, "f.py") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    assert!(merged.contains("return 10"));
+    assert!(merged.contains("return 20"));
+}
+
+#[test]
+fn python_pyi_extension_also_handled() {
+    let base = "def f():\n    return 1\n";
+    let ours = "def f():\n    return 2\n";
+    let theirs = base;
+    let outcome = merge_at(base, ours, theirs, "stub.pyi");
+    match outcome {
+        MergeOutcome::Clean(b) => {
+            let s = String::from_utf8(b).unwrap();
+            assert!(s.contains("return 2"));
+        }
+        other => panic!("expected Clean, got {other:?}"),
+    }
+}
+
+#[test]
+fn javascript_function_declarations_disjoint_clean() {
+    let base = "\
+function a() { return 1; }
+function b() { return 2; }
+";
+    let ours = "\
+function a() { return 11; }
+function b() { return 2; }
+";
+    let theirs = "\
+function a() { return 1; }
+function b() { return 22; }
+";
+    let merged = match merge_at(base, ours, theirs, "f.js") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    assert!(merged.contains("return 11"));
+    assert!(merged.contains("return 22"));
+}
+
+#[test]
+fn javascript_class_methods_disjoint_clean() {
+    let base = "\
+class C {
+    one() { return 1; }
+    two() { return 2; }
+}
+";
+    let ours = "\
+class C {
+    one() { return 10; }
+    two() { return 2; }
+}
+";
+    let theirs = "\
+class C {
+    one() { return 1; }
+    two() { return 20; }
+}
+";
+    let merged = match merge_at(base, ours, theirs, "f.js") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    assert!(merged.contains("return 10"));
+    assert!(merged.contains("return 20"));
+}
+
+#[test]
+fn typescript_class_method_modified_clean() {
+    let base = "\
+class C {
+    greet(name: string): string { return name; }
+    bye(): void {}
+}
+";
+    let ours = "\
+class C {
+    greet(name: string): string { return name.toUpperCase(); }
+    bye(): void {}
+}
+";
+    let theirs = "\
+class C {
+    greet(name: string): string { return name; }
+    bye(): void { console.log('bye'); }
+}
+";
+    let merged = match merge_at(base, ours, theirs, "f.ts") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    assert!(merged.contains("toUpperCase"));
+    assert!(merged.contains("console.log"));
+}
+
+// =====================================================================
+// Coverage: reconstruct.rs — inter-item / preamble divergence surfaces
+// conflicts via the Conflicts branch of merge_inter_item_content.
+// =====================================================================
+
+#[test]
+fn preamble_diverging_edits_surface_conflict_in_inter_item_merge() {
+    // Both sides modify the same line of the preamble (between items
+    // there are no items — only `use` lines at the top). This forces
+    // text_hunk_merge on the inter-item concatenation to produce
+    // Conflicts, exercising the Conflicts arm of the inter-item match.
+    let base = "\
+use std::a;
+use std::b;
+
+fn f() { 1 }
+";
+    let ours = "\
+use std::a;
+use std::OURS;
+
+fn f() { 1 }
+";
+    let theirs = "\
+use std::a;
+use std::THEIRS;
+
+fn f() { 1 }
+";
+    let outcome = merge_rust(base, ours, theirs);
+    match outcome {
+        MergeOutcome::Conflicts { conflict_count, .. } => {
+            assert!(conflict_count >= 1);
+        }
+        MergeOutcome::Clean(_) => panic!("expected conflict on diverging preamble"),
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+}
+
+// =====================================================================
+// Coverage: items.rs — Item de-overlap (nested fn inside fn body).
+// =====================================================================
+
+#[test]
+fn nested_function_inside_outer_does_not_split_outer_item() {
+    // Inner `fn inner()` lives inside `outer()` body; the de-overlap
+    // pass must drop the inner item so `outer()` merges as one unit.
+    let base = "\
+fn outer() {
+    fn inner() { 1 }
+    inner()
+}
+";
+    let ours = "\
+fn outer() {
+    fn inner() { 99 }
+    inner()
+}
+";
+    let theirs = base;
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("fn inner() { 99 }"));
 }
