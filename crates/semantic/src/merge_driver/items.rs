@@ -138,11 +138,14 @@ fn collect_items(
                 name,
                 container_body,
                 signature_hash,
+                extra_scope,
             } = classified;
+            let mut item_scope = scope.to_vec();
+            item_scope.extend(extra_scope);
             let item_key = ItemKey {
                 kind,
                 name: name.clone(),
-                scope: scope.to_vec(),
+                scope: item_scope,
                 signature_hash,
             };
             out.push(Item {
@@ -173,6 +176,11 @@ struct Classified<'a> {
     name: String,
     container_body: Option<Node<'a>>,
     signature_hash: u64,
+    /// Extra scope components appended to the inherited scope before
+    /// constructing the ItemKey. Used for Go method receivers — without
+    /// the receiver type in scope, two methods named `String` on
+    /// different receiver types collide.
+    extra_scope: Vec<String>,
 }
 
 /// Classify a node as an item the merger recognises, or return `None`.
@@ -207,6 +215,7 @@ fn classify_rust_node<'a>(
                 name,
                 container_body: None,
                 signature_hash,
+                extra_scope: Vec::new(),
             })
         }
         "function_signature_item" => {
@@ -218,6 +227,7 @@ fn classify_rust_node<'a>(
                 name,
                 container_body: None,
                 signature_hash,
+                extra_scope: Vec::new(),
             })
         }
         "impl_item" => {
@@ -230,6 +240,7 @@ fn classify_rust_node<'a>(
                 name,
                 container_body,
                 signature_hash: 0,
+                extra_scope: Vec::new(),
             })
         }
         "mod_item" => {
@@ -241,6 +252,7 @@ fn classify_rust_node<'a>(
                 name,
                 container_body,
                 signature_hash: 0,
+                extra_scope: Vec::new(),
             })
         }
         "struct_item" => simple_item(source, node, "name", ItemKind::Struct),
@@ -253,6 +265,7 @@ fn classify_rust_node<'a>(
                 name,
                 container_body,
                 signature_hash: 0,
+                extra_scope: Vec::new(),
             })
         }
         "union_item" => simple_item(source, node, "name", ItemKind::Struct),
@@ -277,6 +290,7 @@ fn classify_python_node<'a>(
                 name,
                 container_body: None,
                 signature_hash,
+                extra_scope: Vec::new(),
             })
         }
         "class_definition" => {
@@ -287,6 +301,7 @@ fn classify_python_node<'a>(
                 name,
                 container_body,
                 signature_hash: 0,
+                extra_scope: Vec::new(),
             })
         }
         _ => None,
@@ -307,6 +322,7 @@ fn classify_js_node<'a>(
                 name,
                 container_body: None,
                 signature_hash,
+                extra_scope: Vec::new(),
             })
         }
         "class_declaration" => {
@@ -317,6 +333,7 @@ fn classify_js_node<'a>(
                 name,
                 container_body,
                 signature_hash: 0,
+                extra_scope: Vec::new(),
             })
         }
         "method_definition" => {
@@ -327,6 +344,7 @@ fn classify_js_node<'a>(
                 name,
                 container_body: None,
                 signature_hash,
+                extra_scope: Vec::new(),
             })
         }
         _ => None,
@@ -347,20 +365,50 @@ fn classify_go_node<'a>(
                 name,
                 container_body: None,
                 signature_hash,
+                extra_scope: Vec::new(),
             })
         }
         "method_declaration" => {
             let name = name_from_field(source, node, "name")?;
             let signature_hash = signature_hash_from_field(source, node, "parameters");
+            // Receiver type disambiguates two methods with the same name
+            // on different receivers — `func (a A) String()` vs
+            // `func (b B) String()`. Without it the BTreeMap collapses
+            // them and one method is dropped from the merge.
+            let extra_scope = go_receiver_type(source, node)
+                .map(|t| vec![t])
+                .unwrap_or_default();
             Some(Classified {
                 kind: ItemKind::Method,
                 name,
                 container_body: None,
                 signature_hash,
+                extra_scope,
             })
         }
         _ => None,
     }
+}
+
+/// Extract the receiver type from a Go `method_declaration` as a
+/// whitespace-normalized string (e.g. `"A"`, `"*A"`, `"Foo[T]"`). Returns
+/// `None` for non-methods or malformed receivers.
+fn go_receiver_type(source: &str, node: Node<'_>) -> Option<String> {
+    let receiver = node.child_by_field_name("receiver")?;
+    let mut cursor = receiver.walk();
+    for child in receiver.children(&mut cursor) {
+        if child.kind() == "parameter_declaration"
+            && let Some(ty) = child.child_by_field_name("type")
+        {
+            return Some(
+                source[ty.byte_range()]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+    }
+    None
 }
 
 fn classify_c_node<'a>(
@@ -381,6 +429,7 @@ fn classify_c_node<'a>(
             name,
             container_body: None,
             signature_hash,
+            extra_scope: Vec::new(),
         });
     }
     None
@@ -400,6 +449,7 @@ fn classify_java_node<'a>(
                 name,
                 container_body: None,
                 signature_hash,
+                extra_scope: Vec::new(),
             })
         }
         "class_declaration" | "interface_declaration" => {
@@ -410,6 +460,7 @@ fn classify_java_node<'a>(
                 name,
                 container_body,
                 signature_hash: 0,
+                extra_scope: Vec::new(),
             })
         }
         _ => None,
@@ -428,6 +479,7 @@ fn simple_item<'a>(
         name,
         container_body: None,
         signature_hash: 0,
+        extra_scope: Vec::new(),
     })
 }
 
