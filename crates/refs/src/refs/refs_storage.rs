@@ -151,13 +151,14 @@ impl RefManager {
             }
 
             match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(mut file) => {
+                Ok(file) => {
                     let now = Utc::now().timestamp();
                     let content = format!("{} {}", current_pid, now);
-                    if let Err(err) = write_lock_body_or_cleanup(&mut file, content.as_bytes(), &path) {
-                        return Err(err);
-                    }
+                    let file = write_lock_body_or_cleanup(file, content.as_bytes(), &path)?;
                     if let Err(err) = file.sync_all() {
+                        // Drop-before-remove is load-bearing on Windows.
+                        // See `write_lock_body_or_cleanup` doc-comment.
+                        drop(file);
                         let _ = fs::remove_file(&path);
                         return Err(err.into());
                     }
@@ -234,24 +235,30 @@ impl RefManager {
     }
 }
 
-/// Write `body` to `writer`; on failure, remove the orphan at
-/// `cleanup_path` and surface the write error.
+/// Write `body` to `writer`; on failure drop the writer (closing any
+/// underlying OS handle) and remove the orphan at `cleanup_path`,
+/// returning the original write error. On success, return the writer
+/// so the caller can continue using it (e.g. for `sync_all`).
 ///
-/// **NOTE (red commit):** this version takes `&mut W` and leaves the
-/// caller's writer alive across the cleanup call. On Windows,
-/// `DeleteFile` against a still-open handle (without
-/// `FILE_SHARE_DELETE`) fails with `ERROR_SHARING_VIOLATION`, so the
-/// `remove_file` silently no-ops and the orphan stays. The fix commit
-/// switches this to ownership-transfer (`mut writer: W` + explicit
-/// `drop(writer)` before `remove_file`) per heddle#86 r2.
+/// Generic over `Write` so tests can inject a failing writer to
+/// exercise the cleanup branch — the production caller passes the
+/// freshly-`create_new`'d lock file by value.
+///
+/// **Drop-before-remove is load-bearing on Windows.** Without
+/// `FILE_SHARE_DELETE`, `DeleteFile` against a still-open handle fails
+/// with `ERROR_SHARING_VIOLATION`. Taking the writer by value makes
+/// ownership obvious at the call site and forces the close to happen
+/// before `remove_file`. Lifted from the heddle#86 r2 helper in
+/// `shared_target.rs`.
 fn write_lock_body_or_cleanup<W: Write>(
-    writer: &mut W,
+    mut writer: W,
     body: &[u8],
     cleanup_path: &Path,
-) -> Result<()> {
+) -> Result<W> {
     match writer.write_all(body) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(writer),
         Err(err) => {
+            drop(writer);
             let _ = fs::remove_file(cleanup_path);
             Err(err.into())
         }
@@ -352,8 +359,8 @@ mod tests {
         fs::write(&orphan, b"").unwrap();
 
         let dropped = std::cell::Cell::new(false);
-        let mut writer = DropTrackingFailingWriter { dropped: &dropped };
-        let result = write_lock_body_or_cleanup(&mut writer, b"would-be body", &orphan);
+        let writer = DropTrackingFailingWriter { dropped: &dropped };
+        let result = write_lock_body_or_cleanup(writer, b"would-be body", &orphan);
 
         assert!(result.is_err());
         assert!(
