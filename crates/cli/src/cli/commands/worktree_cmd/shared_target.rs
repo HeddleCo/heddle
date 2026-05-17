@@ -169,11 +169,24 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
             return Err(err).with_context(|| format!("create '{}'", config_path.display()));
         }
     };
-    file.write_all(body.as_bytes())
-        .with_context(|| format!("write '{}'", config_path.display()))?;
+    write_body_or_cleanup(&mut file, body.as_bytes(), &config_path)?;
     file.sync_all()
         .with_context(|| format!("sync '{}'", config_path.display()))?;
     Ok(true)
+}
+
+/// Write `body` to `writer`; on failure remove the orphan at
+/// `cleanup_path` and return the error. Generic over `Write` so tests
+/// can inject a failing writer to exercise the cleanup branch — the
+/// production caller passes the freshly-`create_new`'d file.
+fn write_body_or_cleanup<W: Write>(
+    writer: &mut W,
+    body: &[u8],
+    cleanup_path: &Path,
+) -> Result<()> {
+    writer
+        .write_all(body)
+        .with_context(|| format!("write '{}'", cleanup_path.display()))
 }
 
 /// Count active materialized threads on the repo. "Active" means
@@ -277,6 +290,46 @@ mod tests {
         assert_eq!(
             after, user,
             "shared-target writer must not overwrite user-managed config",
+        );
+    }
+
+    /// `Write` impl whose `write` always errors. Used to drive the
+    /// partial-write cleanup branch in `write_body_or_cleanup` without
+    /// needing to actually exhaust disk space.
+    struct FailingWriter;
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("simulated write failure"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_body_or_cleanup_removes_orphan_on_write_failure() {
+        // Regression for heddle#86 (follow-up to heddle#80 r3). If
+        // `write_all` fails after `create_new` already landed the
+        // file, the partial file must be removed so a retry can
+        // re-enter `create_new` instead of hitting `AlreadyExists`
+        // and silently reporting no-op success.
+        let temp = TempDir::new().unwrap();
+        let orphan = temp.path().join(".cargo").join("config.toml");
+        std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        // Stand in for what `create_new(true)` would have just produced.
+        std::fs::write(&orphan, b"").unwrap();
+        assert!(orphan.exists(), "test precondition: orphan staged");
+
+        let mut writer = FailingWriter;
+        let result = write_body_or_cleanup(&mut writer, b"would-be body", &orphan);
+
+        assert!(
+            result.is_err(),
+            "writer failure must surface to caller, not be swallowed"
+        );
+        assert!(
+            !orphan.exists(),
+            "orphan file must be removed so a retry can re-create it cleanly"
         );
     }
 
