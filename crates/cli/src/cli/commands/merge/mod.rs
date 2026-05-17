@@ -398,10 +398,12 @@ pub(crate) fn merge_thread_into_current(
             // `merge_fast_forward_advances_current_thread`.
             //
             // We perform the FF *without recording* an `OpRecord::Goto`
-            // and then explicitly record `OpRecord::FastForward` so undo
-            // can restore both HEAD and the target thread ref. Recording
-            // as a plain `Goto` stranded the target thread ref on undo —
-            // the bug heddle#99 closes.
+            // and then explicitly record `OpRecord::FastForwardV2` so
+            // both ends of the FF are captured. r1 (heddle#99) added the
+            // variant to fix stranded-ref-on-undo. r2 added
+            // `post_target_id` so redo replays the recorded SHA instead
+            // of re-resolving `source_thread → tip` at apply time —
+            // closes Codex's non-determinism finding on PR #109.
             let head_before_ff = repo.head_ref()?;
             repo.fast_forward_attached_without_record(&merge_target_id)?;
             match &head_before_ff {
@@ -412,6 +414,7 @@ pub(crate) fn merge_thread_into_current(
                         track_name,
                         target_thread,
                         &current_state.change_id,
+                        &merge_target_id,
                         Some(&repo.op_scope()),
                     )?;
                 }

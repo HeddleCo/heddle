@@ -39,11 +39,12 @@ impl Repository {
 
     /// Variant of [`Self::fast_forward_attached`] that performs the
     /// fast-forward without recording an `OpRecord::Goto`. The merge
-    /// command uses this so it can record an `OpRecord::FastForward`
-    /// instead — the FF-specific variant carries the pre-FF thread tip,
-    /// so undo can restore both HEAD and the target thread ref. The
+    /// command uses this so it can record an `OpRecord::FastForwardV2`
+    /// instead — the FF-specific variant carries both `pre_target_id`
+    /// (for undo) and `post_target_id` (for deterministic redo). The
     /// generic `Goto` inverse only rewinds HEAD, which stranded the
-    /// merged-into thread ref (heddle#99).
+    /// merged-into thread ref (heddle#99 r1); a name-resolved redo was
+    /// also non-deterministic if the source thread moved (heddle#99 r2).
     pub fn fast_forward_attached_without_record(&self, target: &ChangeId) -> Result<()> {
         self.fast_forward_attached_internal(target, false)
     }

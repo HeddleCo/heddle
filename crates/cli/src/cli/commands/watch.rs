@@ -448,7 +448,7 @@ fn kind_for(op: &OpRecord) -> String {
         OpRecord::ConflictResolved { .. } => "conflict_resolved".into(),
         OpRecord::Redact { .. } => "redact".into(),
         OpRecord::Purge { .. } => "purge".into(),
-        OpRecord::FastForward { .. } => "fast_forward".into(),
+        OpRecord::FastForward { .. } | OpRecord::FastForwardV2 { .. } => "fast_forward".into(),
     }
 }
 
@@ -465,7 +465,8 @@ fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
         OpRecord::MarkerDelete { name, .. } => Some(name.clone()),
         OpRecord::Checkpoint { thread, .. } => thread.clone(),
         OpRecord::EphemeralThreadCollapse { thread, .. } => Some(thread.clone()),
-        OpRecord::FastForward { target_thread, .. } => Some(target_thread.clone()),
+        OpRecord::FastForward { target_thread, .. }
+        | OpRecord::FastForwardV2 { target_thread, .. } => Some(target_thread.clone()),
         OpRecord::Goto { .. }
         | OpRecord::Fork { .. }
         | OpRecord::Collapse { .. }
@@ -498,7 +499,8 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
         | OpRecord::Purge { .. }
-        | OpRecord::FastForward { .. } => None,
+        | OpRecord::FastForward { .. }
+        | OpRecord::FastForwardV2 { .. } => None,
     }
 }
 
