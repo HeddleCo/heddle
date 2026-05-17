@@ -25,6 +25,7 @@ mod discuss;
 mod doctor_docs;
 mod doctor_schemas;
 mod fetch;
+mod ff_record;
 mod fork;
 mod fsck;
 mod fsck_checks;

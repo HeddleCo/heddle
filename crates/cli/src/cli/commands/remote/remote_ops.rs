@@ -13,8 +13,6 @@ use repo::{Repository, RepositoryCapability};
 
 #[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
-#[cfg(feature = "client")]
-use heddle_client::grpc_hosted::PullMaterialization;
 use crate::{
     bridge::GitBridge,
     cli::{Cli, RemoteCommands, should_output_json, style},
@@ -22,6 +20,8 @@ use crate::{
     config::UserConfig,
     remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key},
 };
+#[cfg(feature = "client")]
+use heddle_client::grpc_hosted::PullMaterialization;
 
 /// Execute pull command.
 pub async fn cmd_pull(
@@ -145,6 +145,15 @@ async fn pull_local(
     let objects_copied = source.fetch_state(repo, &state_id)?;
 
     let track_to_update = local_thread.unwrap_or(remote_thread);
+
+    // Capture the local thread's pre-pull tip *before* mutating it
+    // (heddle#110). The materializing branch records an
+    // `OpRecord::FastForwardV2` whose `pre_target_id` must be the
+    // pre-pull state so undo restores both HEAD and the local thread
+    // ref. Reading the ref after `set_thread` would return the
+    // post-pull state and silently strand the thread on undo —
+    // exactly the bug we're closing.
+    let pre_target = repo.refs().get_thread(track_to_update)?;
     repo.refs().set_thread(track_to_update, &state_id)?;
 
     // Preserve attached-HEAD semantics only when the pull target is the
@@ -155,7 +164,25 @@ async fn pull_local(
         Head::Detached { .. } => local_thread.is_none(),
     };
     if should_materialize {
-        repo.fast_forward_attached(&state_id)?;
+        // First-time pull of this thread has no pre_target_id; the
+        // `set_thread` above effectively created the ref. Fall back to
+        // recording the generic `Goto` inverse — there's no pre-FF tip
+        // to restore on undo, only HEAD to rewind. Repeat pulls flow
+        // through the `FastForwardV2` arm so undo restores the local
+        // thread ref alongside HEAD.
+        match pre_target {
+            Some(pre) => {
+                super::super::ff_record::record_ff_advance_explicit(
+                    repo,
+                    remote_thread,
+                    &pre,
+                    &state_id,
+                )?;
+            }
+            None => {
+                repo.fast_forward_attached(&state_id)?;
+            }
+        }
     }
 
     if should_output_json(cli, Some(repo.config())) {

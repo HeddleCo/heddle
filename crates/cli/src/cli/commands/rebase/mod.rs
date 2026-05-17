@@ -7,7 +7,10 @@ use anyhow::{Result, anyhow};
 use refs::Head;
 use repo::Repository;
 
-use super::{snapshot::ensure_current_state, worktree_safety::ensure_worktree_clean};
+use super::{
+    ff_record::record_ff_advance, snapshot::ensure_current_state,
+    worktree_safety::ensure_worktree_clean,
+};
 use crate::{
     cli::{Cli, should_output_json},
     config::UserConfig,
@@ -174,7 +177,7 @@ fn run_rebase(
     let is_ancestor = is_ancestor_of(repo, &current_state.change_id, &target_change_id)?;
 
     if is_ancestor {
-        repo.fast_forward_attached(&target_change_id)?;
+        record_ff_advance(repo, target_thread, &target_change_id)?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -203,7 +206,7 @@ fn run_rebase(
         collect_commits_to_rebase(repo, &current_state.change_id, &target_change_id)?;
 
     if commits_to_replay.is_empty() {
-        repo.fast_forward_attached(&target_change_id)?;
+        record_ff_advance(repo, target_thread, &target_change_id)?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))

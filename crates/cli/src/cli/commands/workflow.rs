@@ -670,7 +670,7 @@ fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String>
             thread.thread
         )
     })?;
-    repo.fast_forward_attached(&target)?;
+    super::ff_record::record_ff_advance(repo, &thread.thread, &target)?;
     thread.state = repo::ThreadState::Merged;
     thread.merged_state = Some(target.short());
     thread.current_state = Some(target.short());
