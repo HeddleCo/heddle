@@ -11,7 +11,15 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
-## 0.2.5 - 2026-05-17
+## 0.3.0 - 2026-05-17
+
+### Breaking
+
+- **RPC rename `AuthService.FinishWebAuthnRegistration` →
+  `RegisterPublicKey`.** Consumers pinned to `^0.2` must update
+  generated client/server stubs before upgrading. Bumped to `0.3.0`
+  (not `0.2.5`) so pre-1.0 Cargo callers don't auto-resolve into the
+  breaking change.
 
 ### Changed
 
