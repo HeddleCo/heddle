@@ -381,11 +381,10 @@ fn resolve_required_state(
 }
 
 fn collect_worktree_split_paths(repo: &Repository, prefixes: &[String]) -> Result<Vec<String>> {
-    let baseline = repo
-        .current_state()?
-        .and_then(|state| repo.store().get_tree(&state.tree).transpose())
-        .transpose()?
-        .unwrap_or_default();
+    let baseline = match repo.current_state()? {
+        Some(state) => repo.require_tree(&state.tree)?,
+        None => objects::object::Tree::new(),
+    };
     let status = repo.compare_worktree_cached_with_options(
         &baseline,
         &worktree_status_options(Some(repo.config())),
@@ -457,10 +456,7 @@ fn apply_selected_state_paths(
         .store()
         .get_state(state_id)?
         .ok_or_else(|| anyhow!("State '{}' not found", state_id.short()))?;
-    let tree = source_repo
-        .store()
-        .get_tree(&state.tree)?
-        .unwrap_or_default();
+    let tree = source_repo.require_tree(&state.tree)?;
     for path in paths {
         restore_one_path(target_repo, Some(&tree), path)?;
     }
@@ -477,7 +473,7 @@ fn restore_paths_from_state(
             .store()
             .get_state(&state_id)?
             .ok_or_else(|| anyhow!("Baseline state '{}' not found", state_id.short()))?;
-        Some(repo.store().get_tree(&state.tree)?.unwrap_or_default())
+        Some(repo.require_tree(&state.tree)?)
     } else {
         None
     };
