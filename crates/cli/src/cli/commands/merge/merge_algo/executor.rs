@@ -296,6 +296,28 @@ fn load_blob_content(
     Ok(blob.content().to_vec())
 }
 
+/// Load a tree, surfacing an error if it's missing from the store.
+///
+/// Same hazard shape as [`load_blob_content`]: a hash that the tree layer
+/// records as an entry MUST resolve to an object in the store. The
+/// pre-#90 code used `get_tree(...)?.unwrap_or_default()` which silently
+/// substituted an empty `Tree`, so the recursive merger treated the
+/// subtree as "deleted on both sides" and the user committed a merge
+/// that erased every file under that path with no conflict markers.
+///
+/// `label` is folded into the error message so the operator can locate
+/// the corrupt entry — typically the recursive-merge path or the
+/// merge-side entry name.
+fn require_subtree(store: &dyn ObjectStore, hash: &ContentHash, label: &str) -> Result<Tree> {
+    store.get_tree(hash)?.ok_or_else(|| {
+        anyhow!(
+            "merge input subtree {hash} for {label} is missing from the object store; \
+             aborting to avoid silently merging against an empty subtree. \
+             Run `heddle fsck --full` to inspect store integrity."
+        )
+    })
+}
+
 fn content_conflict_merge(
     store: &dyn ObjectStore,
     our_hash: &ContentHash,
@@ -557,7 +579,11 @@ fn merge_changed_entries(
         merged_entries.push(entry);
     } else if our_entry.is_tree() && their_entry.is_tree() {
         let base_subtree = if base_entry.is_tree() {
-            repo.store().get_tree(&base_entry.hash)?.unwrap_or_default()
+            require_subtree(
+                repo.store(),
+                &base_entry.hash,
+                &format!("base subtree at {conflict_path:?}"),
+            )?
         } else {
             Tree::new()
         };
@@ -635,11 +661,16 @@ fn merge_subtrees(
     prefix: &str,
     labels: ConflictLabels<'_>,
 ) -> Result<(TreeEntry, Vec<String>)> {
-    let our_subtree = repo.store().get_tree(&our_entry.hash)?.unwrap_or_default();
-    let their_subtree = repo
-        .store()
-        .get_tree(&their_entry.hash)?
-        .unwrap_or_default();
+    let our_subtree = require_subtree(
+        repo.store(),
+        &our_entry.hash,
+        &format!("our subtree at {prefix:?}/{}", our_entry.name),
+    )?;
+    let their_subtree = require_subtree(
+        repo.store(),
+        &their_entry.hash,
+        &format!("their subtree at {prefix:?}/{}", their_entry.name),
+    )?;
     let (merged_subtree, conflicts) = three_way_merge_recursive(
         repo,
         base_subtree,
@@ -672,7 +703,11 @@ fn generate_conflict_content(
 
 fn conflict_entry_content(repo: &Repository, entry: &TreeEntry) -> Result<Vec<u8>> {
     if entry.is_tree() {
-        let tree = repo.store().get_tree(&entry.hash)?.unwrap_or_default();
+        let tree = require_subtree(
+            repo.store(),
+            &entry.hash,
+            &format!("conflict-entry subtree {:?}", entry.name),
+        )?;
         let mut names: Vec<&str> = tree
             .entries()
             .iter()
@@ -733,5 +768,70 @@ mod tests {
         let content = load_blob_content(&store, &hash, "src/bar.rs")
             .expect("blob present in store");
         assert_eq!(content, b"hello\nworld\n");
+    }
+
+    /// Symmetric guard for [`load_blob_content`]: a missing subtree
+    /// during recursive three-way merge must surface as a hard error
+    /// rather than coercing to `Tree::default()`. The pre-#90 code did
+    /// `get_tree(...)?.unwrap_or_default()`, which made the recursive
+    /// merger see an "empty" subtree on one side and silently delete
+    /// every file under that path in the merged result — no conflict,
+    /// no diff, just data loss.
+    #[test]
+    fn missing_merge_subtree_surfaces_as_error_not_silent_empty() {
+        // Build a non-empty subtree's hash without ever inserting it
+        // into the store. Using a non-empty tree avoids any concern
+        // about empty-tree canonical-hash collisions. The hash is
+        // structurally valid; it just doesn't resolve to any object —
+        // exactly what a dropped pack / corrupt store / missing
+        // partial-fetch blob looks like to a downstream caller.
+        let blob_hash = Blob::new(b"placeholder\n".to_vec()).hash();
+        let phantom_subtree = Tree::from_entries(vec![
+            TreeEntry::file("inner.rs".to_string(), blob_hash, false).unwrap(),
+        ]);
+        let phantom_hash = phantom_subtree.hash();
+
+        let store = InMemoryStore::new();
+        assert!(
+            store.get_tree(&phantom_hash).unwrap().is_none(),
+            "test setup: phantom subtree must not be present in the store",
+        );
+
+        let err = require_subtree(&store, &phantom_hash, "src/sub")
+            .expect_err("expected a hard error on missing merge subtree");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("missing from the object store"),
+            "error must surface the missing-subtree diagnostic, got: {msg}"
+        );
+        assert!(
+            msg.contains("src/sub"),
+            "error must mention the affected merge-side label so operators \
+             can locate the corrupt entry; got: {msg}"
+        );
+        assert!(
+            msg.contains("heddle fsck"),
+            "error must point at the recovery command so operators have a \
+             next step instead of just a stack trace; got: {msg}"
+        );
+    }
+
+    /// Happy path: when the subtree is present, the helper returns it
+    /// rather than erroring. Belt-and-suspenders against a regression
+    /// where someone tightens the require_subtree contract too far
+    /// (e.g. always erroring because of a stray `Err(...)` branch).
+    #[test]
+    fn present_merge_subtree_loads_tree() {
+        let store = InMemoryStore::new();
+        let blob_hash = store.put_blob(&Blob::new(b"x".to_vec())).unwrap();
+        let subtree = Tree::from_entries(vec![
+            TreeEntry::file("inner.rs".to_string(), blob_hash, false).unwrap(),
+        ]);
+        let hash = store.put_tree(&subtree).unwrap();
+
+        let loaded = require_subtree(&store, &hash, "src/sub")
+            .expect("subtree present in store");
+        assert_eq!(loaded.entries().len(), 1);
+        assert_eq!(loaded.entries()[0].name, "inner.rs");
     }
 }

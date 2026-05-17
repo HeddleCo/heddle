@@ -124,5 +124,18 @@ fn load_tree(repo: &Repository, change_id: &ChangeId) -> Result<objects::object:
         .store()
         .get_state(change_id)?
         .ok_or_else(|| anyhow!("State '{}' not found", change_id.short()))?;
-    Ok(repo.store().get_tree(&state.tree)?.unwrap_or_default())
+    // `state.tree` is recorded by the state object — the tree MUST be
+    // present in the store for that state to be meaningful. Coercing
+    // `Ok(None)` to `Tree::default()` here meant a corrupt store
+    // produced a clean merge against an empty side, silently erasing
+    // every tracked file. Surface the corruption instead.
+    repo.store().get_tree(&state.tree)?.ok_or_else(|| {
+        anyhow!(
+            "state {} references tree {} but the object store has no such tree; \
+             aborting merge to avoid silently merging against an empty tree. \
+             Run `heddle fsck --full` to inspect store integrity.",
+            change_id.short(),
+            state.tree
+        )
+    })
 }
