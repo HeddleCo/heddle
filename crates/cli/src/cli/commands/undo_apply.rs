@@ -72,8 +72,15 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         // `remove_redaction` re-checks `purged_at` defensively so a
         // future caller that bypasses the CLI gate can't lose the
         // audit trail of destroyed bytes.
-        OpRecord::Redact { redaction_id, .. } => {
-            repo.remove_redaction(redaction_id)?;
+        //
+        // Match by `(blob, state, path)` rather than the oplog's
+        // `redaction_id`: `redaction_content_hash` includes
+        // `purged_at`, so a later Purge shifts the on-disk id away
+        // from the recorded one. The triple is stable.
+        OpRecord::Redact {
+            blob, state, path, ..
+        } => {
+            repo.remove_redaction(blob, state, path)?;
         }
         _ => {}
     }

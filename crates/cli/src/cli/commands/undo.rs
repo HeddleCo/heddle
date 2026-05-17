@@ -371,18 +371,30 @@ fn ensure_redaction_undo_safe(
     batches: &[OpBatch],
     allow_redact_undo: bool,
 ) -> Result<()> {
+    struct RedactSummary {
+        op_id: u64,
+        blob: ContentHash,
+        state: ChangeId,
+        path: String,
+    }
+
     let mut purge_ops: Vec<(u64, ContentHash)> = Vec::new();
-    let mut redact_ops: Vec<(u64, ContentHash)> = Vec::new();
+    let mut redact_ops: Vec<RedactSummary> = Vec::new();
 
     for batch in batches {
         for entry in &batch.entries {
             match &entry.operation {
-                OpRecord::Purge {
-                    redaction_id, ..
-                } => purge_ops.push((entry.id, *redaction_id)),
+                OpRecord::Purge { redaction_id, .. } => {
+                    purge_ops.push((entry.id, *redaction_id))
+                }
                 OpRecord::Redact {
-                    redaction_id, ..
-                } => redact_ops.push((entry.id, *redaction_id)),
+                    blob, state, path, ..
+                } => redact_ops.push(RedactSummary {
+                    op_id: entry.id,
+                    blob: *blob,
+                    state: *state,
+                    path: path.clone(),
+                }),
                 _ => {}
             }
         }
@@ -408,17 +420,19 @@ fn ensure_redaction_undo_safe(
 
     // Refuse if any redaction in the chain has its bytes already
     // purged — checked first so the precise "purged audit trail" error
-    // wins over the generic opt-in prompt.
-    let mut purged_redacts: Vec<(u64, ContentHash)> = Vec::new();
-    for (op_id, redaction_id) in &redact_ops {
-        if repo.redaction_is_purged(redaction_id)? {
-            purged_redacts.push((*op_id, *redaction_id));
+    // wins over the generic opt-in prompt. We match by (blob, state,
+    // path) rather than by the oplog-stored `redaction_id` because
+    // setting `purged_at` shifts the on-disk record's content hash.
+    let mut purged_redacts: Vec<&RedactSummary> = Vec::new();
+    for r in &redact_ops {
+        if repo.redaction_is_purged(&r.blob, &r.state, &r.path)? {
+            purged_redacts.push(r);
         }
     }
     if !purged_redacts.is_empty() {
         let shorts: Vec<String> = purged_redacts
             .iter()
-            .map(|(op_id, id)| format!("op {} (redaction {})", op_id, id.short()))
+            .map(|r| format!("op {} (blob {} at {})", r.op_id, r.blob.short(), r.path))
             .collect();
         return Err(anyhow!(
             "Refusing to undo: at least one redaction in this chain has had its bytes purged ({}). \
@@ -432,7 +446,7 @@ fn ensure_redaction_undo_safe(
     if !allow_redact_undo {
         let shorts: Vec<String> = redact_ops
             .iter()
-            .map(|(op_id, id)| format!("op {} (redaction {})", op_id, id.short()))
+            .map(|r| format!("op {} (blob {} at {})", r.op_id, r.blob.short(), r.path))
             .collect();
         return Err(anyhow!(
             "Refusing to undo a `heddle redact apply`: the inverse removes the redaction record \

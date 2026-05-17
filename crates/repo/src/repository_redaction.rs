@@ -213,97 +213,104 @@ impl Repository {
         Ok(None)
     }
 
-    /// Reverse a redaction declaration by removing the specific record
-    /// (identified by its content-addressed id) from the on-disk
-    /// sidecar. This is the inverse of `put_redaction` for the
-    /// undo path — see [`OpRecord::Redact`](oplog::OpRecord)'s undo
-    /// contract.
+    /// Reverse a redaction declaration by removing the matching record
+    /// from the per-blob sidecar. The undo-path inverse of
+    /// [`Repository::put_redaction`] — see [`OpRecord::Redact`](oplog::OpRecord)'s
+    /// undo contract.
     ///
-    /// Refuses if the redaction's bytes have already been purged
-    /// (`purged_at: Some(_)`): the Redaction record is then load-
-    /// bearing audit trail for "these bytes were physically destroyed",
-    /// and removing it would lie. Purge is documented irreversible.
+    /// We match by `(blob, state, path)` rather than by the redaction's
+    /// content-addressed id because `redaction_content_hash` includes
+    /// every field in the canonical encoding, including `purged_at`.
+    /// A `Purge` between the original `redact apply` and this call
+    /// mutates `purged_at`, which shifts the on-disk id away from the
+    /// pre-purge id carried in `OpRecord::Redact.redaction_id`. The
+    /// `(blob, state, path)` triple is the redaction's user-visible
+    /// identity (one per spot) and is stable across purge.
     ///
-    /// Returns the outcome — whether a record was removed and whether
-    /// the surrounding sidecar file is now empty (callers can use this
-    /// to clean up the empty `.bin` file if desired; the read path
-    /// already treats a missing file as `RedactionsBlob::empty`).
+    /// Refuses if the matched redaction is purged: the record is then
+    /// load-bearing audit trail for "these bytes were physically
+    /// destroyed", and removing it would lie. Purge is irreversible.
+    ///
+    /// Returns the outcome — whether the surrounding sidecar file is
+    /// now empty (single-redaction case) or rewritten in place.
     pub fn remove_redaction(
         &self,
-        redaction_id: &ContentHash,
+        blob: &ContentHash,
+        state: &ChangeId,
+        path: &str,
     ) -> Result<RemoveRedactionOutcome> {
-        // Walk the per-blob sidecars to find the one carrying this id.
-        // Today the redactions store is small enough (operator-scale,
-        // not per-row) that an O(N) scan is fine; the same `get_redaction`
-        // helper above already pays this cost.
-        for (blob, mut redactions_blob) in self.list_all_redactions()? {
-            // Locate the entry by re-computing each contained
-            // redaction's canonical id. Cheaper than threading the id
-            // through the on-disk schema and keeps the storage format
-            // version-stable.
-            let mut found_index: Option<usize> = None;
-            for (index, redaction) in redactions_blob.redactions.iter().enumerate() {
-                let id = redaction_content_hash(redaction)?;
-                if &id == redaction_id {
-                    if redaction.is_purged() {
-                        anyhow::bail!(
-                            "redaction {} on blob {} cannot be undone: the underlying bytes were purged \
-                             (Purge is irreversible — the redaction record is load-bearing audit trail \
-                              for the destroyed bytes)",
-                            redaction_id.short(),
-                            blob.short(),
-                        );
-                    }
-                    found_index = Some(index);
-                    break;
-                }
+        let mut redactions_blob = self.get_redactions_for_blob(blob)?;
+        let found_index = redactions_blob
+            .redactions
+            .iter()
+            .position(|r| r.state == *state && r.path == path);
+        let Some(index) = found_index else {
+            anyhow::bail!(
+                "redaction for blob {} at {} in {} not found — it may \
+                 have already been removed",
+                blob.short(),
+                path,
+                state.short(),
+            );
+        };
+        if redactions_blob.redactions[index].is_purged() {
+            anyhow::bail!(
+                "redaction for blob {} at {} in {} cannot be undone: the underlying bytes were purged \
+                 (Purge is irreversible — the redaction record is load-bearing audit trail \
+                 for the destroyed bytes)",
+                blob.short(),
+                path,
+                state.short(),
+            );
+        }
+        redactions_blob.redactions.remove(index);
+        let sidecar_path = self.redaction_path_for_blob(blob);
+        if redactions_blob.redactions.is_empty() {
+            // Empty sidecar — clean up the file so `list_all_redactions`
+            // doesn't carry around a hollow entry. Missing-file is
+            // already the "no redactions for this blob" signal.
+            if sidecar_path.exists() {
+                fs::remove_file(&sidecar_path).with_context(|| {
+                    format!("remove empty redactions sidecar '{}'", sidecar_path.display())
+                })?;
             }
-            let Some(index) = found_index else {
-                continue;
-            };
-            redactions_blob.redactions.remove(index);
-            let path = self.redaction_path_for_blob(&blob);
-            if redactions_blob.redactions.is_empty() {
-                // Empty sidecar — clean up the file so `list_all_redactions`
-                // doesn't carry around a hollow entry. Missing-file is
-                // already the "no redactions for this blob" signal.
-                if path.exists() {
-                    fs::remove_file(&path).with_context(|| {
-                        format!("remove empty redactions sidecar '{}'", path.display())
-                    })?;
-                }
-                return Ok(RemoveRedactionOutcome {
-                    blob,
-                    sidecar_now_empty: true,
-                });
-            }
-            let bytes = redactions_blob
-                .encode()
-                .with_context(|| "re-encode redactions blob after removal")?;
-            write_file_atomic(&path, &bytes)
-                .with_context(|| format!("write '{}'", path.display()))?;
             return Ok(RemoveRedactionOutcome {
-                blob,
-                sidecar_now_empty: false,
+                blob: *blob,
+                sidecar_now_empty: true,
             });
         }
-        anyhow::bail!(
-            "redaction {} not found in any sidecar — it may have already \
-             been removed",
-            redaction_id.short(),
-        )
+        let bytes = redactions_blob
+            .encode()
+            .with_context(|| "re-encode redactions blob after removal")?;
+        write_file_atomic(&sidecar_path, &bytes)
+            .with_context(|| format!("write '{}'", sidecar_path.display()))?;
+        Ok(RemoveRedactionOutcome {
+            blob: *blob,
+            sidecar_now_empty: false,
+        })
     }
 
-    /// Look up a redaction's current `purged_at` state by id. Used by
-    /// the undo pre-flight to refuse before any mutation if removing
-    /// the redaction record would lie about destroyed bytes.
-    pub fn redaction_is_purged(&self, redaction_id: &ContentHash) -> Result<bool> {
-        match self.get_redaction(redaction_id)? {
-            Some((_, redaction)) => Ok(redaction.is_purged()),
-            // A missing redaction is not "purged"; let the caller's
-            // own missing-record path surface the right error.
-            None => Ok(false),
-        }
+    /// Look up the redaction matching `(blob, state, path)` and report
+    /// whether its underlying bytes have been purged. Used by the undo
+    /// pre-flight to refuse before any mutation when removing the
+    /// redaction record would lie about destroyed bytes.
+    ///
+    /// Returns `false` when no matching record exists — the caller's
+    /// own missing-record path surfaces that condition with the right
+    /// error.
+    pub fn redaction_is_purged(
+        &self,
+        blob: &ContentHash,
+        state: &ChangeId,
+        path: &str,
+    ) -> Result<bool> {
+        let redactions_blob = self.get_redactions_for_blob(blob)?;
+        Ok(redactions_blob
+            .redactions
+            .iter()
+            .find(|r| r.state == *state && r.path == path)
+            .map(|r| r.is_purged())
+            .unwrap_or(false))
     }
 
     /// Mark every redaction on `blob` as purged and physically remove the
@@ -831,6 +838,162 @@ mod tests {
         assert!(
             missing.is_none(),
             "lookup of unknown id must return None, not error"
+        );
+    }
+
+    #[test]
+    fn remove_redaction_drops_record_and_deletes_empty_sidecar() {
+        let (_dir, repo) = fresh_repo();
+        let r = sample_redaction();
+        let blob = r.redacted_blob;
+        let state = r.state;
+        let path = r.path.clone();
+        repo.put_redaction(r).unwrap();
+        let outcome = repo
+            .remove_redaction(&blob, &state, &path)
+            .expect("remove existing redaction");
+        assert_eq!(outcome.blob, blob);
+        assert!(
+            outcome.sidecar_now_empty,
+            "single-redaction sidecar must be deleted, not left as empty .bin",
+        );
+
+        // Subsequent lookup returns empty — the sidecar file is gone.
+        let stored = repo
+            .get_redactions_for_blob(&blob)
+            .expect("read post-remove");
+        assert!(
+            stored.redactions.is_empty(),
+            "remove must clear the redaction from the per-blob sidecar"
+        );
+
+        // Materialize gate now restores original bytes (no active stub).
+        let stub = repo
+            .redaction_stub_for_blob(&blob)
+            .expect("stub lookup");
+        assert!(
+            stub.is_none(),
+            "with no active redaction, materialize must not substitute the stub"
+        );
+    }
+
+    #[test]
+    fn remove_redaction_keeps_siblings_when_multiple_target_same_blob() {
+        // Two redactions on the same blob with different (state, path)
+        // tuples. Removing one rewrites the sidecar in place; the
+        // other survives.
+        let (_dir, repo) = fresh_repo();
+        let first = sample_redaction();
+        let first_state = first.state;
+        let first_path = first.path.clone();
+        let blob = first.redacted_blob;
+        repo.put_redaction(first).unwrap();
+        let second = Redaction {
+            state: ChangeId::from_bytes([2u8; 16]),
+            path: "config/other.toml".into(),
+            reason: "follow-up reason".into(),
+            ..sample_redaction()
+        };
+        repo.put_redaction(second).unwrap();
+
+        let outcome = repo
+            .remove_redaction(&blob, &first_state, &first_path)
+            .expect("remove first redaction");
+        assert!(
+            !outcome.sidecar_now_empty,
+            "sibling redaction must keep the sidecar alive"
+        );
+
+        let stored = repo
+            .get_redactions_for_blob(&blob)
+            .expect("read post-remove");
+        assert_eq!(stored.redactions.len(), 1);
+        // The surviving record is the second one — identified by its
+        // (different) `path` field.
+        assert_eq!(stored.redactions[0].path, "config/other.toml");
+    }
+
+    #[test]
+    fn remove_redaction_refuses_when_already_purged() {
+        // Defensive: even if the CLI pre-flight is bypassed (e.g. a
+        // future caller goes straight to `remove_redaction`), the
+        // helper itself refuses to drop the audit trail of destroyed
+        // bytes. The error message must explain the cause.
+        let (_dir, repo) = fresh_repo();
+        let r = sample_redaction();
+        let blob = r.redacted_blob;
+        let state = r.state;
+        let path = r.path.clone();
+        repo.put_redaction(r).unwrap();
+        repo.purge_blob(&blob, &sample_principal())
+            .expect("purge after redact");
+
+        let err = repo
+            .remove_redaction(&blob, &state, &path)
+            .expect_err("remove must refuse on a purged redaction");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("purged") || msg.contains("Purge is irreversible"),
+            "refusal must name the purged/irreversibility cause: {msg}"
+        );
+
+        // Record must still be there, marked purged.
+        let stored = repo
+            .get_redactions_for_blob(&blob)
+            .expect("read after refusal");
+        assert_eq!(stored.redactions.len(), 1);
+        assert!(stored.redactions[0].is_purged());
+    }
+
+    #[test]
+    fn remove_redaction_errors_when_record_not_found() {
+        // Unknown (blob, state, path) surfaces a clear error instead
+        // of silently succeeding. This is the "already removed / never
+        // existed" safety net.
+        let (_dir, repo) = fresh_repo();
+        let unknown_blob = ContentHash::from_bytes([0u8; 32]);
+        let unknown_state = ChangeId::from_bytes([0u8; 16]);
+        let err = repo
+            .remove_redaction(&unknown_blob, &unknown_state, "config/nope.toml")
+            .expect_err("unknown record must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not found"),
+            "refusal must explain the missing-record cause: {msg}"
+        );
+    }
+
+    #[test]
+    fn redaction_is_purged_reflects_current_state() {
+        let (_dir, repo) = fresh_repo();
+        let r = sample_redaction();
+        let blob = r.redacted_blob;
+        let state = r.state;
+        let path = r.path.clone();
+        repo.put_redaction(r).unwrap();
+        assert!(
+            !repo
+                .redaction_is_purged(&blob, &state, &path)
+                .expect("pre-purge lookup"),
+            "fresh redaction must not report purged"
+        );
+        repo.purge_blob(&blob, &sample_principal())
+            .expect("purge");
+        assert!(
+            repo.redaction_is_purged(&blob, &state, &path)
+                .expect("post-purge lookup"),
+            "after purge_blob, redaction_is_purged must return true"
+        );
+
+        // Unknown (blob, state, path) → false. Lets the caller's own
+        // missing-record path surface the cause.
+        let unknown_blob = ContentHash::from_bytes([0u8; 32]);
+        let unknown_state = ChangeId::from_bytes([0u8; 16]);
+        assert!(
+            !repo
+                .redaction_is_purged(&unknown_blob, &unknown_state, "missing")
+                .expect("unknown lookup"),
+            "unknown record is not 'purged'; surfaces as false"
         );
     }
 

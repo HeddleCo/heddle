@@ -964,3 +964,132 @@ fn test_undo_redact_refuses_when_blob_already_purged() {
         "the redaction must still be marked purged after refusal: {list:?}",
     );
 }
+
+#[test]
+fn test_redo_of_undone_redact_refuses() {
+    // Counterpart to the undo test: once a `Redact` batch has been
+    // undone with `--allow-redact-undo`, `heddle redo` refuses to
+    // re-apply it. The OpRecord doesn't preserve the full `Redaction`
+    // (reason, redactor, signature) needed for a faithful re-apply,
+    // so we surface a clear error instead of silently no-op'ing.
+    let (temp, state) = setup_repo_with_secret();
+
+    heddle_must_succeed(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+        ],
+        temp.path(),
+    );
+
+    // Undo with the opt-in. The Redact batch is now marked undone and
+    // sits as the next redoable batch.
+    heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
+        .expect("undo of Redact must succeed with --allow-redact-undo");
+
+    // Redo refuses with a message that names Redact + points the user
+    // at re-running `heddle redact apply`.
+    let err = heddle(&["redo"], Some(temp.path()))
+        .expect_err("redo of an undone Redact must refuse");
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("redact"),
+        "redo refusal must mention Redact: {err}"
+    );
+    assert!(
+        lower.contains("redact apply") || lower.contains("re-apply"),
+        "redo refusal should redirect to `heddle redact apply`: {err}"
+    );
+
+    // Refusal is atomic — no state mutated. Redact list still 0 (the
+    // record was removed by the undo and the refused redo did not
+    // re-create it).
+    let list: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "redact", "list"],
+        temp.path(),
+    ))
+    .unwrap();
+    assert_eq!(
+        list["count"].as_u64().unwrap(),
+        0,
+        "redo refusal must not re-create the redaction: {list:?}",
+    );
+}
+
+#[test]
+fn test_undo_redact_preserves_sibling_redactions_on_same_blob() {
+    // When two redactions target the same blob (e.g. `--all-states`
+    // propagation, or a redact + a later refinement on a different
+    // path), undoing one must leave the other intact: the per-blob
+    // sidecar is rewritten in place rather than deleted wholesale.
+    let (temp, state_a) = setup_repo_with_secret();
+    // A second capture so we have two states referencing the same
+    // blob (the secrets file content is unchanged between captures,
+    // so the blob hash is identical — that's the trigger for the
+    // shared-sidecar code path).
+    std::fs::write(temp.path().join("trailing.txt"), "trailing").unwrap();
+    heddle_must_succeed(&["capture", "-m", "trailing"], temp.path());
+    let state_b = head_short(temp.path());
+
+    heddle_must_succeed(
+        &[
+            "redact",
+            "apply",
+            &state_a,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential (state_a)",
+        ],
+        temp.path(),
+    );
+    heddle_must_succeed(
+        &[
+            "redact",
+            "apply",
+            &state_b,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential (state_b)",
+        ],
+        temp.path(),
+    );
+
+    let list_before: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "redact", "list"],
+        temp.path(),
+    ))
+    .unwrap();
+    assert_eq!(
+        list_before["count"].as_u64().unwrap(),
+        2,
+        "two redactions on the same blob expected: {list_before:?}",
+    );
+
+    // Undo the most-recent Redact (state_b) — the state_a redaction
+    // must survive untouched.
+    heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
+        .expect("undo of single Redact succeeds");
+
+    let list_after: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "redact", "list"],
+        temp.path(),
+    ))
+    .unwrap();
+    assert_eq!(
+        list_after["count"].as_u64().unwrap(),
+        1,
+        "exactly one redaction should remain after one undo: {list_after:?}",
+    );
+    let surviving_reason = list_after["redactions"][0]["reason"].as_str().unwrap();
+    assert_eq!(
+        surviving_reason, "leaked credential (state_a)",
+        "the state_a redaction must survive when state_b's is undone"
+    );
+}
