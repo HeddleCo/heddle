@@ -1093,3 +1093,154 @@ fn test_undo_redact_preserves_sibling_redactions_on_same_blob() {
         "the state_a redaction must survive when state_b's is undone"
     );
 }
+
+#[test]
+fn test_undo_redact_removes_exact_record_when_multiple_target_same_triple() {
+    // Two `redact apply` invocations on the same (state, path) — a
+    // refinement pass where the operator updates `--reason` (or adds
+    // `--sign-with`) without first undoing the prior declaration.
+    // Each invocation writes a distinct `Redaction` (different reason →
+    // different content hash) into the per-blob sidecar.
+    //
+    // `heddle undo --allow-redact-undo -n 1` must remove the SECOND
+    // (most-recent) record because that's the one the most-recent op
+    // batch references. A naive `(state, path)` match would pick the
+    // first record in the sidecar and silently undo the wrong one,
+    // leaving the recently-refined reason behind.
+    let (temp, state) = setup_repo_with_secret();
+
+    heddle_must_succeed(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "initial: leaked credential",
+        ],
+        temp.path(),
+    );
+    heddle_must_succeed(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "refined: leaked api token v2",
+        ],
+        temp.path(),
+    );
+
+    let list_before: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "redact", "list"],
+        temp.path(),
+    ))
+    .unwrap();
+    assert_eq!(
+        list_before["count"].as_u64().unwrap(),
+        2,
+        "two redactions on same (blob,state,path) expected: {list_before:?}",
+    );
+
+    // Undo the most-recent batch (the refined-reason redact). The
+    // initial-reason redaction must survive intact.
+    heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
+        .expect("undo of refined Redact succeeds");
+
+    let list_after: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "redact", "list"],
+        temp.path(),
+    ))
+    .unwrap();
+    assert_eq!(
+        list_after["count"].as_u64().unwrap(),
+        1,
+        "exactly one redaction must remain after one undo: {list_after:?}",
+    );
+    let surviving_reason = list_after["redactions"][0]["reason"].as_str().unwrap();
+    assert_eq!(
+        surviving_reason, "initial: leaked credential",
+        "the initial (older) redaction must survive — undoing the refined batch must remove the refined record, not the initial one"
+    );
+}
+
+#[test]
+fn test_undo_preview_refuses_redact_without_allow_flag() {
+    // `heddle undo --preview` must mirror the real command's refusals
+    // rather than optimistically saying "Would undo ..." Pre-fix it
+    // short-circuited before the redaction safety check and lied about
+    // the outcome.
+    let (temp, state) = setup_repo_with_secret();
+
+    heddle_must_succeed(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+        ],
+        temp.path(),
+    );
+
+    let err = heddle(&["undo", "--preview"], Some(temp.path())).expect_err(
+        "undo --preview against a Redact batch must refuse without --allow-redact-undo",
+    );
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("redact"),
+        "preview refusal must name the redaction cause: {err}"
+    );
+    assert!(
+        lower.contains("--allow-redact-undo") || lower.contains("allow-redact-undo"),
+        "preview refusal must point at the opt-in flag: {err}"
+    );
+}
+
+#[test]
+fn test_undo_preview_refuses_redact_when_blob_already_purged() {
+    // Parallel to the non-preview case: undoing across a purged
+    // redaction must refuse with the irreversibility/audit-trail
+    // message, and `--preview` must surface that refusal honestly.
+    let (temp, state) = setup_repo_with_secret();
+
+    heddle_must_succeed(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+        ],
+        temp.path(),
+    );
+    heddle_must_succeed(
+        &[
+            "purge",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--force",
+        ],
+        temp.path(),
+    );
+
+    let err = heddle(
+        &["undo", "-n", "2", "--preview", "--allow-redact-undo"],
+        Some(temp.path()),
+    )
+    .expect_err("undo --preview across a purged redaction must refuse");
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("purge") || lower.contains("irreversible"),
+        "preview refusal must name purge/irreversibility: {err}"
+    );
+}
