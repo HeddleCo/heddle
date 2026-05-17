@@ -66,7 +66,9 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
     let outcome = repo.purge_blob(&blob, &principal)?;
 
     if let Some(redaction_id) = &outcome.redaction_id {
-        repo.oplog().record_purge(redaction_id, &blob)?;
+        let scope = repo.op_scope();
+        repo.oplog()
+            .record_purge(redaction_id, &blob, Some(&scope))?;
     }
 
     let mut message = format!(

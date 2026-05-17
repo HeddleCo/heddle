@@ -85,9 +85,25 @@ pub enum OpRecord {
     },
     /// A redaction was declared on a blob in a specific state. The blob
     /// bytes are still on disk; readers see the stub from the
-    /// `Redaction` object instead. Reversible via `heddle undo` (the
-    /// reversal stops materialize from substituting the stub but doesn't
-    /// touch any later Purge — Purge is irreversible).
+    /// `Redaction` object instead.
+    ///
+    /// Reversible via `heddle undo --allow-redact-undo`. The inverse
+    /// removes the specific `Redaction` record from the per-blob
+    /// sidecar so subsequent materializes restore the original bytes.
+    /// The opt-in flag exists because the inverse re-exposes
+    /// previously-hidden content; a casual `heddle undo` chain refuses
+    /// rather than silently unwind the stub-substitution.
+    ///
+    /// Refused regardless of the flag when the underlying bytes have
+    /// since been purged: the `Redaction` record is then load-bearing
+    /// audit trail for "these bytes were physically destroyed", and
+    /// removing it would lie about local storage. `Purge` itself is
+    /// irreversible.
+    ///
+    /// **Redo is not supported.** The OpRecord doesn't preserve the
+    /// full `Redaction` (reason, redactor, signature, …), so `heddle
+    /// redo` of an undone Redact refuses with a clear message rather
+    /// than silently no-op. Re-run `heddle redact apply` to recreate.
     Redact {
         /// Content hash of the encoded `Redaction` object.
         redaction_id: ContentHash,

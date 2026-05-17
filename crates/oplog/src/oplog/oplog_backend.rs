@@ -155,30 +155,53 @@ pub trait OpLogBackend: Send + Sync {
 
     /// Record a redaction declaration. The blob bytes stay on disk —
     /// `Purge` is the separate, irreversible step that removes them.
+    ///
+    /// `scope` carries the repo's `op_scope()` so the CLI's scoped
+    /// undo can reach this batch. Without it the entry is recorded
+    /// with `scope: None` and `undo_batches_scoped` (the only path
+    /// `heddle undo` consults) silently filters it out — the silent
+    /// no-op fixed under heddle#98.
     fn record_redact(
         &self,
         redaction_id: &ContentHash,
         blob: &ContentHash,
         state: &ChangeId,
         path: &str,
+        scope: Option<&str>,
     ) -> Result<u64> {
-        let ids = self.record_batch(vec![OpRecord::Redact {
-            redaction_id: *redaction_id,
-            blob: *blob,
-            state: *state,
-            path: path.to_string(),
-        }])?;
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::Redact {
+                redaction_id: *redaction_id,
+                blob: *blob,
+                state: *state,
+                path: path.to_string(),
+            }],
+            scope,
+        )?;
         Ok(ids[0])
     }
 
     /// Record a purge — the underlying blob bytes were physically
     /// removed from local storage. The associated `Redaction` record
     /// stays in place.
-    fn record_purge(&self, redaction_id: &ContentHash, blob: &ContentHash) -> Result<u64> {
-        let ids = self.record_batch(vec![OpRecord::Purge {
-            redaction_id: *redaction_id,
-            blob: *blob,
-        }])?;
+    ///
+    /// Scoped for the same reason as `record_redact`: the CLI's
+    /// `heddle undo` only sees scoped batches, and the Purge inverse
+    /// (refusal) needs to see the entry to surface the irreversibility
+    /// message instead of silently skipping it.
+    fn record_purge(
+        &self,
+        redaction_id: &ContentHash,
+        blob: &ContentHash,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::Purge {
+                redaction_id: *redaction_id,
+                blob: *blob,
+            }],
+            scope,
+        )?;
         Ok(ids[0])
     }
 }

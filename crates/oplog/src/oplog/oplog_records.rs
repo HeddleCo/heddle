@@ -130,29 +130,43 @@ impl OpLog {
         })
     }
 
-    /// Record a redaction declaration.
+    /// Record a redaction declaration. See the trait-level doc on
+    /// `OpLogBackend::record_redact` for why `scope` is required —
+    /// without it the entry slips past the CLI's scoped undo filter.
     pub fn record_redact(
         &self,
         redaction_id: &ContentHash,
         blob: &ContentHash,
         state: &ChangeId,
         path: &str,
+        scope: Option<&str>,
     ) -> Result<u64> {
-        self.record_single(OpRecord::Redact {
-            redaction_id: *redaction_id,
-            blob: *blob,
-            state: *state,
-            path: path.to_string(),
-        })
+        self.record_single_scoped(
+            OpRecord::Redact {
+                redaction_id: *redaction_id,
+                blob: *blob,
+                state: *state,
+                path: path.to_string(),
+            },
+            scope,
+        )
     }
 
     /// Record a purge — the underlying blob bytes were physically removed.
     /// The associated `Redaction` record stays in place; only the bytes
     /// are gone.
-    pub fn record_purge(&self, redaction_id: &ContentHash, blob: &ContentHash) -> Result<u64> {
-        self.record_single(OpRecord::Purge {
-            redaction_id: *redaction_id,
-            blob: *blob,
-        })
+    pub fn record_purge(
+        &self,
+        redaction_id: &ContentHash,
+        blob: &ContentHash,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        self.record_single_scoped(
+            OpRecord::Purge {
+                redaction_id: *redaction_id,
+                blob: *blob,
+            },
+            scope,
+        )
     }
 }

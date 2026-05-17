@@ -20,6 +20,7 @@ follow-ups.
 | `heddle thread rename`   | Renames back.                                                   |
 | `heddle marker create`   | Deletes the marker.                                             |
 | `heddle marker drop`     | Recreates the marker at its prior state.                        |
+| `heddle redact apply`    | Removes the redaction record so the next materialize restores the original bytes. Requires `--allow-redact-undo` (see "Safety contracts"). Refused when the blob has since been purged. |
 
 The list above is the **shipped** surface for v0.2. The inverses live in
 `crates/cli/src/cli/commands/undo_apply.rs`; the oplog records that drive them
@@ -32,9 +33,12 @@ own, are destructive by design, or need a substrate change we haven't shipped:
 
 - **`heddle push` / `heddle fetch`** — remote-affecting. Reverting them would
   require coordinating with the other side. File a follow-up if you need this.
-- **`heddle purge`** — physically removes blob bytes. Documented irreversible
-  in `OpRecord::Purge` (the `Redact` declaration that preceded it can still
-  be undone separately when that path lands).
+- **`heddle purge`** — physically removes blob bytes; refused by `heddle undo`
+  with a single clear message naming the affected op. Documented irreversible
+  in `OpRecord::Purge`. Even with `--allow-redact-undo`, an undo chain that
+  reaches across a purged redaction is refused: the `Redaction` record is
+  the only on-disk audit trail that the bytes were destroyed, and removing
+  it would lie about local storage.
 - **Cross-thread undo** — today's undo only rewinds operations recorded on the
   current checkout's HEAD path. Undoing an op that mutated a different thread
   is the design problem heddle#23's title points at; the MVP ships the
@@ -47,6 +51,15 @@ own, are destructive by design, or need a substrate change we haven't shipped:
 The CLI is designed to **fail loud** instead of silently corrupting state. The
 contracts below are enforced by integration tests in
 `crates/cli/tests/core_functionality/undo_and_special.rs`.
+
+- **Redact-undo opt-in.** `heddle undo` refuses to roll back a `heddle redact
+  apply` unless you pass `--allow-redact-undo`. The inverse removes the
+  redaction record, so the next materialize restores the original blob bytes
+  — i.e. previously-hidden content becomes readable. The opt-in turns the
+  re-exposure into an explicit decision instead of a side effect of a casual
+  multi-step undo. Refused regardless of the flag when a `Purge` has
+  destroyed the underlying bytes (the redaction's audit-trail role is then
+  load-bearing).
 
 - **Dirty worktree refusal.** If you have uncommitted changes (modified
   tracked files, untracked files), `heddle undo` refuses and surfaces the
@@ -72,6 +85,7 @@ contracts below are enforced by integration tests in
 | `--list`                   | Print the recent batches without undoing.                   |
 | `--depth <N>`              | How many batches `--list` shows (default 20).               |
 | `--preview` / `--dry-run`  | Print what would change without applying.                   |
+| `--allow-redact-undo`      | Explicit opt-in to undo a `heddle redact apply` (see "Safety contracts"). |
 | `--output {auto,json,text}`| Force output format. JSON is the structured contract.        |
 
 Run `heddle undo --help` for the curated list with examples and the explicit
@@ -89,6 +103,10 @@ Run `heddle undo --help` for the curated list with examples and the explicit
 - `OpRecord::Checkpoint` is defined but no current code path emits it; the
   variant exists for the agent-frequent-saves work in flight. When it lands
   it will need its own inverse arm in `undo_apply.rs`.
-- `OpRecord::Redact` is documented as reversible but currently no-ops on
-  undo (`undo_apply.rs` falls through to the default arm). A follow-up
-  will reverse the materialize-substitution side effect.
+- **Redact redo is unsupported.** `heddle redo` of a previously-undone
+  `Redact` refuses with a clear error: the `OpRecord::Redact` entry doesn't
+  preserve the full `Redaction` record (reason, redactor, signature) needed
+  to faithfully re-apply, so any "redo" path would invent the missing
+  fields. Re-run `heddle redact apply` to recreate. A follow-up could stash
+  the removed `Redaction` on undo and restore it on redo if the round-trip
+  becomes load-bearing for daily use.
