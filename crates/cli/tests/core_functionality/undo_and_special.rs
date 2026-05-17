@@ -656,6 +656,185 @@ fn test_redo_ff_merge_restores_head_and_thread_ref() {
     );
 }
 
+/// Redo of an FF merge must replay the *recorded* operation, not re-derive
+/// it from the source thread's current tip. heddle#99 r1 resolved
+/// `source_thread → tip` at redo time; if the source thread had advanced
+/// between undo and redo, redo silently pulled in commits that were never
+/// part of the original merge. The fix records `post_target_id` (the FF
+/// result SHA) at recording time and uses it directly on redo, so the
+/// replay is deterministic.
+///
+/// Pinned the bug pre-fix: this test was red before `FastForwardV2` landed.
+#[test]
+fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    let feature_tip_at_ff = head_short(temp.path());
+
+    // FF main → feature, then undo back to main_tip_before.
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(head_short(temp.path()), main_tip_before);
+
+    // Advance the source thread after undo: a second capture on feature
+    // gives it a new tip distinct from the FF target. Pre-fix, redo would
+    // pick up *this* tip instead of the recorded FF target.
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work + more").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature again"], temp.path());
+    let feature_tip_advanced = head_short(temp.path());
+    assert_ne!(
+        feature_tip_at_ff, feature_tip_advanced,
+        "post-undo capture on feature must produce a new tip distinct from the FF target"
+    );
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["redo"], temp.path());
+
+    // The recorded FF target — not feature's current tip — is what redo must
+    // restore. HEAD and the `main` thread ref both end at the original FF SHA.
+    assert_eq!(
+        head_short(temp.path()),
+        feature_tip_at_ff,
+        "redo of FF merge must replay to the recorded FF target, not source's current tip"
+    );
+    let repo = Repository::open(temp.path()).unwrap();
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, feature_tip_at_ff,
+        "redo of FF merge must set `main` ref to the recorded FF target, not source's current tip"
+    );
+    let feature_tip = repo
+        .refs()
+        .get_thread("feature")
+        .unwrap()
+        .expect("feature thread still exists")
+        .short();
+    assert_eq!(
+        feature_tip, feature_tip_advanced,
+        "feature thread's own ref is independent of redo — it stays at its new tip"
+    );
+}
+
+/// Redo of an FF merge must succeed even when the source thread has been
+/// deleted after undo. The original merged state is fully recoverable from
+/// the recorded `post_target_id`; refusing redo here would punish the user
+/// for housekeeping a now-merged feature branch.
+///
+/// Pinned the bug pre-fix: heddle#99 r1's redo resolved `source_thread → tip`
+/// live and errored with "source thread no longer exists" when the user
+/// dropped the thread between undo and redo.
+#[test]
+fn test_redo_ff_merge_succeeds_when_source_deleted() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    let feature_tip_at_ff = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(head_short(temp.path()), main_tip_before);
+
+    // Delete the source thread between undo and redo. The legacy CLI
+    // shape `thread delete <name>` is translated to
+    // `thread drop <name> --delete-thread` by `translate_legacy_args`.
+    heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
+
+    heddle_must_succeed(&["redo"], temp.path());
+
+    assert_eq!(
+        head_short(temp.path()),
+        feature_tip_at_ff,
+        "redo must replay to the recorded FF target even when source thread is gone"
+    );
+    let repo = Repository::open(temp.path()).unwrap();
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, feature_tip_at_ff,
+        "main ref must reach the recorded FF target after redo, source-thread-deletion notwithstanding"
+    );
+}
+
+/// Symmetric to `test_undo_ff_merge_refuses_when_pre_target_state_missing`:
+/// redo also has a destructive-boundary case. The state we'd advance to
+/// (`post_target_id`) must still be in the object store; if it has been
+/// pruned, redo must refuse with a clear message rather than partially
+/// rewinding HEAD past the boundary or panicking deep in `goto`.
+#[test]
+fn test_redo_ff_merge_refuses_when_post_target_state_missing() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    let feature_tip_at_ff = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+    // Undo first: HEAD is now back at main_tip_before, so the FF target SHA
+    // is no longer pinned by HEAD and can be removed to simulate a gc that
+    // pruned past the redo's reach.
+    heddle_must_succeed(&["undo"], temp.path());
+
+    let state_path = locate_state_loose_file(temp.path(), &feature_tip_at_ff)
+        .expect("FF target state's loose file is present after undo");
+    std::fs::remove_file(&state_path).unwrap();
+    let packs_dir = temp.path().join(".heddle/packs");
+    if packs_dir.exists() {
+        for entry in std::fs::read_dir(&packs_dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+    }
+    // Also drop the source thread ref so a live-resolve path can't smuggle
+    // the SHA back in by reading `feature → tip`. (Belt-and-braces: the new
+    // redo arm doesn't read the source thread at all, but locking this down
+    // ensures the test fails in the right way if a regression re-introduces
+    // a live-resolve fallback.)
+    heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
+
+    let err = heddle(&["redo"], Some(temp.path()))
+        .expect_err("redo must refuse when the FF target state is missing");
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("missing") || lower.contains("gone") || lower.contains("garbage"),
+        "error must explain that the redo target state is missing: {err}"
+    );
+}
+
 /// Non-fast-forward merge undo: both threads have divergent work since the
 /// common ancestor. The merge synthesizes a new merge state with two parents.
 /// Undo must restore main to its pre-merge tip; feature's tip never moved.
