@@ -2936,6 +2936,7 @@ dependencies = [
  "heddle-repo",
  "libc",
  "lru",
+ "memmap2",
  "nfsserve",
  "proptest",
  "tempfile",
