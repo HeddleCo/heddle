@@ -213,10 +213,7 @@ impl ProjFsShell {
                 | PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_NO_MODIFICATION.0
                 | PRJ_NOTIFICATION_FILE_RENAMED.0) as u32,
         );
-        let mut notification_mapping = PRJ_NOTIFICATION_MAPPING {
-            NotificationBitMask: notification_bits,
-            NotificationRoot: PCWSTR::null(),
-        };
+        let mut notification_mapping = entire_root_notification_mapping(notification_bits);
 
         let options = PRJ_STARTVIRTUALIZING_OPTIONS {
             Flags: Default::default(),
@@ -585,6 +582,29 @@ fn encode_guid(guid: &GUID) -> Vec<u8> {
     bytes.extend_from_slice(&guid.data3.to_le_bytes());
     bytes.extend_from_slice(&guid.data4);
     bytes
+}
+
+/// Build the single `PRJ_NOTIFICATION_MAPPING` we register with
+/// `PrjStartVirtualizing`, covering the entire virtualization root.
+///
+/// The `NotificationRoot` field is required to be a non-null,
+/// NUL-terminated wide string: an empty string (`L""`) means "the
+/// whole virtualization root". `PrjStartVirtualizing` dereferences
+/// this pointer synchronously to copy the relative path of the
+/// directory the mapping applies to; passing a NULL `PCWSTR` here
+/// crashed the host process with `STATUS_ACCESS_VIOLATION`
+/// (heddle#108) before any callback could fire.
+///
+/// The empty string lives in `'static` storage so the pointer is
+/// trivially valid for the duration of the `PrjStartVirtualizing`
+/// call (and well beyond — the kernel copies the contents).
+fn entire_root_notification_mapping(bits: PRJ_NOTIFY_TYPES) -> PRJ_NOTIFICATION_MAPPING {
+    // A single NUL terminator — the wide-string form of `""`.
+    static EMPTY_NOTIFICATION_ROOT: [u16; 1] = [0u16];
+    PRJ_NOTIFICATION_MAPPING {
+        NotificationBitMask: bits,
+        NotificationRoot: PCWSTR(EMPTY_NOTIFICATION_ROOT.as_ptr()),
+    }
 }
 
 fn hresult_to_mount_error(hr: HRESULT) -> MountError {
@@ -1295,6 +1315,43 @@ mod tests {
             sidecar.display(),
         );
         assert_eq!(sidecar.file_name().unwrap(), ".heddle-projfs-id");
+    }
+
+    /// Regression test for heddle#108: STATUS_ACCESS_VIOLATION in
+    /// `PrjStartVirtualizing`.
+    ///
+    /// Pre-fix, `mount_background` built its single
+    /// `PRJ_NOTIFICATION_MAPPING` with `NotificationRoot:
+    /// PCWSTR::null()`. The ProjFS kernel dereferences that pointer
+    /// to copy the relative path of the directory the mapping
+    /// applies to (an empty string means "the whole virtualization
+    /// root"), so a null caused the host process to crash with
+    /// STATUS_ACCESS_VIOLATION before any callback fired — every
+    /// projfs-smoke test failed at the `mount_background` step.
+    ///
+    /// The fix points `NotificationRoot` at a NUL-terminated empty
+    /// wide string. This test pins the contract: the mapping
+    /// `mount_background` ships into the kernel must (a) have a
+    /// non-null `NotificationRoot` and (b) that pointer must point
+    /// at a NUL terminator (= empty string).
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the projfs feature; opt-in via --features projfs"]
+    fn notification_mapping_root_is_non_null_empty_wide_string_heddle108() {
+        let mapping = entire_root_notification_mapping(PRJ_NOTIFY_TYPES(0));
+        assert!(
+            !mapping.NotificationRoot.0.is_null(),
+            "NotificationRoot must not be null — PrjStartVirtualizing \
+             STATUS_ACCESS_VIOLATIONs on null (heddle#108)",
+        );
+        // SAFETY: the fix points NotificationRoot at a 'static
+        // [u16; 1] = [0]; dereferencing one u16 is in-bounds.
+        let first = unsafe { *mapping.NotificationRoot.0 };
+        assert_eq!(
+            first, 0u16,
+            "NotificationRoot must point at a NUL terminator (= empty \
+             string, meaning 'the whole virtualization root')",
+        );
     }
 
     /// `EnumKey` is the hash-able wrapper around `GUID` we use to
