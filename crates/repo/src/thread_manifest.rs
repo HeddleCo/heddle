@@ -33,9 +33,19 @@ use serde::{Deserialize, Serialize};
 ///
 /// v2 adds [`ManifestFile::size`] — the prior schema had no size
 /// field, so a v1 manifest read as v2 would default `size` to 0 and
-/// silently mismatch every entry. Bumping the version forces a clean
-/// rematerialize for any thread carrying a pre-v2 manifest.
-pub const SCHEMA_VERSION: u32 = 2;
+/// silently mismatch every entry.
+///
+/// v3 adds [`ThreadManifest::worktree_path`] — the absolute path the
+/// manifest's stats describe. Without it, `Repository::snapshot`
+/// can't tell whether it's running inside the materialized worktree
+/// (use the stat-cache + refresh the manifest after) or some other
+/// directory the same thread is checked out at (do neither — the
+/// stats won't match anyway, and a refresh would corrupt the
+/// manifest by writing the wrong directory's stats into it).
+///
+/// Bumping the version forces a clean rematerialize for any thread
+/// carrying a pre-current manifest.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// On-disk per-thread materialization record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,11 +61,18 @@ pub struct ThreadManifest {
     /// UNIX-epoch seconds at materialize time. Diagnostic only;
     /// nothing in the capture path consults this.
     pub materialized_at: u64,
+    /// Absolute path to the worktree directory the per-file stat
+    /// records describe. Used by `Repository::snapshot` to decide
+    /// whether the running capture is happening inside this
+    /// materialized worktree (refresh + use cache) or somewhere
+    /// else (skip both). Canonicalized at write time so symlink /
+    /// `./` traversal differences don't cause a false miss.
+    pub worktree_path: PathBuf,
     /// Per-file stat-cache. Key is the worktree-relative path with
     /// forward-slash separators (so a manifest moves between macOS
     /// and Linux without rewriting). Value is the snapshot of
-    /// `(hash, inode, mtime_ns, ctime_ns, mode)` we recorded when
-    /// the file landed in the worktree.
+    /// `(hash, size, inode, mtime_ns, ctime_ns, mode)` we recorded
+    /// when the file landed in the worktree.
     #[serde(default)]
     pub files: BTreeMap<String, ManifestFile>,
 }
@@ -63,7 +80,12 @@ pub struct ThreadManifest {
 impl ThreadManifest {
     /// Construct an empty manifest pointing at `state_id`. Caller is
     /// expected to populate `files` before persisting.
-    pub fn new(state_id: ChangeId, tree_hash: ContentHash) -> Self {
+    ///
+    /// `worktree_path` should be the path the manifest's stat records
+    /// will describe. Production callers canonicalize the path
+    /// (`std::fs::canonicalize`) so a later `snapshot` from inside
+    /// the worktree matches regardless of symlink / `./` indirection.
+    pub fn new(state_id: ChangeId, tree_hash: ContentHash, worktree_path: PathBuf) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             state_id,
@@ -72,6 +94,7 @@ impl ThreadManifest {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            worktree_path,
             files: BTreeMap::new(),
         }
     }
@@ -363,7 +386,7 @@ mod tests {
     #[test]
     fn round_trip_empty() {
         let dir = TempDir::new().unwrap();
-        let manifest = ThreadManifest::new(cid(), h(1));
+        let manifest = ThreadManifest::new(cid(), h(1), PathBuf::from("/tmp/test-worktree"));
         write_manifest(dir.path(), "main", &manifest).unwrap();
         let loaded = read_manifest(dir.path(), "main").unwrap().expect("present");
         assert_eq!(loaded.schema_version, SCHEMA_VERSION);
@@ -374,7 +397,7 @@ mod tests {
     #[test]
     fn round_trip_with_files() {
         let dir = TempDir::new().unwrap();
-        let mut manifest = ThreadManifest::new(cid(), h(7));
+        let mut manifest = ThreadManifest::new(cid(), h(7), PathBuf::from("/tmp/test-worktree"));
         manifest.files.insert(
             "Cargo.toml".to_string(),
             ManifestFile {
@@ -415,8 +438,8 @@ mod tests {
     #[test]
     fn list_returns_sorted_summaries_for_present_manifests() {
         let dir = TempDir::new().unwrap();
-        let m1 = ThreadManifest::new(cid(), h(1));
-        let mut m2 = ThreadManifest::new(cid(), h(2));
+        let m1 = ThreadManifest::new(cid(), h(1), PathBuf::from("/tmp/test-worktree"));
+        let mut m2 = ThreadManifest::new(cid(), h(2), PathBuf::from("/tmp/test-worktree"));
         m2.files.insert(
             "a.txt".to_string(),
             ManifestFile {
@@ -481,7 +504,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // Two threads under the same `feature/` parent. Drop one;
         // `feature/` must survive because the other is still there.
-        let m = ThreadManifest::new(cid(), h(1));
+        let m = ThreadManifest::new(cid(), h(1), PathBuf::from("/tmp/test-worktree"));
         write_manifest(dir.path(), "feature/keeper", &m).unwrap();
         write_manifest(dir.path(), "feature/dropme", &m).unwrap();
 
@@ -518,7 +541,7 @@ mod tests {
     #[test]
     fn remove_thread_manifest_dir_handles_flat_names() {
         let dir = TempDir::new().unwrap();
-        let m = ThreadManifest::new(cid(), h(1));
+        let m = ThreadManifest::new(cid(), h(1), PathBuf::from("/tmp/test-worktree"));
         write_manifest(dir.path(), "main", &m).unwrap();
         assert!(remove_thread_manifest_dir(dir.path(), "main").unwrap());
         assert!(!dir.path().join("threads").join("main").exists());

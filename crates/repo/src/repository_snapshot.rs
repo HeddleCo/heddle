@@ -98,7 +98,8 @@ impl Repository {
         }
 
         // Materialized-thread context detection: when HEAD is attached
-        // to a thread and that thread has a manifest on disk, the agent
+        // to a thread and that thread has a manifest on disk *whose
+        // recorded worktree_path matches our `self.root`*, the agent
         // is capturing inside a clonefile-backed materialized worktree
         // (the day-one shape for `--workspace light`). Two opportunities:
         //   1. Reuse the manifest's per-file stat-cache during the tree
@@ -111,6 +112,16 @@ impl Repository {
         //      fast path (stat fields drift forward; the cache shouldn't
         //      get stale just because we ran `capture`).
         //
+        // The `worktree_path` check is load-bearing: if the user
+        // materialized thread X at `/mat/` and then runs `heddle
+        // capture` from the *main* repo at `/repo/`, the manifest's
+        // stat records describe `/mat/`. Using it as a stat-cache
+        // against `/repo/`'s files always misses (wasted I/O); worse,
+        // refreshing the manifest with `/repo/`'s stats corrupts the
+        // sidecar so `heddle status` falsely reports `/mat/` as
+        // fresh when its on-disk content is actually stale. The
+        // guard restricts both legs to the case the comment promises.
+        //
         // Best-effort and read-only on the detection side: a missing or
         // malformed manifest collapses to the plain `build_tree_profiled`
         // path. The slow path is always correct; the fast path is the
@@ -120,7 +131,14 @@ impl Repository {
             match head_for_manifest.as_ref() {
                 Some(Head::Attached { thread }) => {
                     match crate::thread_manifest::read_manifest(self.heddle_dir(), thread) {
-                        Ok(Some(m)) => Some((thread.clone(), m)),
+                        Ok(Some(m)) => {
+                            let self_root_canonical = super::repository_thread_materialize::canonical_worktree_path(&self.root);
+                            if m.worktree_path == self_root_canonical {
+                                Some((thread.clone(), m))
+                            } else {
+                                None
+                            }
+                        }
                         _ => None,
                     }
                 }
@@ -243,9 +261,16 @@ impl Repository {
             // ref are already durable, and the next `capture` will
             // fall through to the full read+hash path on a stale
             // manifest and self-heal.
-            if let Some((thread_name, _)) = manifest_context.as_ref() {
-                let mut refreshed =
-                    crate::thread_manifest::ThreadManifest::new(state.change_id, tree_hash);
+            if let Some((thread_name, original)) = manifest_context.as_ref() {
+                // Preserve the worktree_path from the manifest we
+                // matched against — by construction it equals
+                // `self.root` canonicalized, which is the worktree
+                // we just captured from.
+                let mut refreshed = crate::thread_manifest::ThreadManifest::new(
+                    state.change_id,
+                    tree_hash,
+                    original.worktree_path.clone(),
+                );
                 if let Err(err) = super::repository_thread_materialize::populate_manifest_from_tree(
                     self,
                     &tree,

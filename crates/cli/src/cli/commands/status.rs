@@ -1312,33 +1312,35 @@ mod tests {
     }
 
     #[test]
-    fn assess_flags_thread_as_stale_when_manifest_records_a_different_state() {
-        // We can't trigger this state via `repo.snapshot()` from the
-        // main repo dir, because the snapshot code path auto-refreshes
-        // any attached-thread manifest when HEAD is attached (see
-        // repository_snapshot.rs::snapshot_with_attribution_profiled,
-        // "Refresh the thread manifest when capturing inside a
-        // materialized-thread worktree"). So we synthesize the stale
-        // state directly: write a manifest naming a `state_id` that
-        // doesn't match the current thread head.
-        let dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
-        fs::write(dir.path().join("hello.txt"), b"hello\n").unwrap();
+    fn assess_flags_thread_as_stale_when_head_advances_past_manifest() {
+        // Setup: materialize "main" at a path *separate from*
+        // `repo.root()`. After the post-bugfix snapshot path-gate
+        // landed (manifest is only refreshed when `self.root` matches
+        // the manifest's recorded worktree_path), running
+        // `repo.snapshot()` from the main repo dir advances the
+        // thread head WITHOUT auto-healing the manifest. The
+        // staleness check should then surface the materialized
+        // worktree as stale, which is the user-facing signal
+        // `heddle status` exists to deliver.
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
-        let stale_state = objects::object::ChangeId::generate();
-        let stale_tree =
-            objects::object::ContentHash::from_bytes([0xAB; 32]);
-        let stale_manifest =
-            repo::thread_manifest::ThreadManifest::new(stale_state, stale_tree);
-        repo::thread_manifest::write_manifest(repo.heddle_dir(), "main", &stale_manifest)
-            .unwrap();
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        let mat = repo.materialize_thread("main", &dest).unwrap();
+
+        // Advance main from the main repo dir (not from dest).
+        fs::write(repo_dir.path().join("hello.txt"), b"hello world\n").unwrap();
+        let snap = repo.snapshot(Some("advance".into()), None).unwrap();
+        assert_ne!(snap.change_id, mat.state_id);
 
         let infos = assess_materialized_threads(&repo);
         assert_eq!(infos.len(), 1);
         assert!(
             infos[0].stale,
-            "manifest's recorded state_id differs from main's head → stale"
+            "manifest still names mat.state_id but main head is at snap.change_id → stale"
         );
     }
 

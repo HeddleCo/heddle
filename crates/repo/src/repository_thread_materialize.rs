@@ -12,7 +12,12 @@
 //! userspace FS callbacks in the hot path. Disk usage is the
 //! ~zero-cost clonefile share until the agent diverges blocks.
 
-use std::{collections::BTreeMap, fs, os::unix::fs::MetadataExt, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 
 use objects::{
     lock::RepositoryLockExt,
@@ -71,7 +76,8 @@ impl Repository {
 
         self.materialize_tree(&tree, dest)?;
 
-        let mut manifest = ThreadManifest::new(change_id, state.tree);
+        let mut manifest =
+            ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
         populate_manifest_from_tree(self, &tree, dest, "", &mut manifest.files)?;
 
         write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
@@ -116,7 +122,8 @@ impl Repository {
             .store()
             .get_tree(&state.tree)?
             .ok_or_else(|| HeddleError::Config(format!("tree for state {state_id} missing")))?;
-        let mut manifest = ThreadManifest::new(*state_id, state.tree);
+        let mut manifest =
+            ThreadManifest::new(*state_id, state.tree, canonical_worktree_path(dest));
         populate_manifest_from_tree(self, &tree, dest, "", &mut manifest.files)?;
         crate::thread_manifest::write_manifest(self.heddle_dir(), thread, &manifest)
             .map_err(HeddleError::Io)?;
@@ -241,8 +248,12 @@ impl Repository {
         self.store().put_state(&state)?;
         self.refs().set_thread(thread, &state.change_id)?;
 
-        // 4. Rewrite the manifest to reflect the new state.
-        let mut manifest = ThreadManifest::new(state.change_id, new_tree_hash);
+        // 4. Rewrite the manifest to reflect the new state. `root` is
+        //    the worktree being captured from — record its canonical
+        //    path so the next snapshot can tell whether it's running
+        //    inside this same worktree.
+        let mut manifest =
+            ThreadManifest::new(state.change_id, new_tree_hash, canonical_worktree_path(root));
         populate_manifest_from_tree(self, &new_tree, root, "", &mut manifest.files)?;
         write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
 
@@ -329,6 +340,21 @@ pub(crate) fn populate_manifest_from_tree(
 #[inline]
 fn timespec_to_ns(secs: i64, nanos: i64) -> i64 {
     secs.saturating_mul(1_000_000_000).saturating_add(nanos)
+}
+
+/// Record the manifest's worktree-path field as an *absolute*,
+/// symlink-resolved path. `Repository::snapshot` compares its
+/// `self.root` (also canonicalized) to this value to decide whether
+/// it's running inside the materialized worktree; without
+/// canonicalization a `/tmp/foo` materialize + `/private/tmp/foo`
+/// snapshot would miss the match on macOS.
+///
+/// Falls back to the input path on canonicalize failure — the
+/// comparison may produce a false miss in pathological cases, which
+/// degrades the cache to "always rebuild" instead of corrupting the
+/// manifest. Strictly worse perf, never worse correctness.
+pub(crate) fn canonical_worktree_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Stat-cache fast no-op check. Returns `true` when the on-disk
@@ -948,8 +974,11 @@ mod tests {
             .get_tree(&initial.tree)
             .unwrap()
             .expect("seed tree");
-        let mut manifest =
-            crate::thread_manifest::ThreadManifest::new(initial.change_id, initial.tree);
+        let mut manifest = crate::thread_manifest::ThreadManifest::new(
+            initial.change_id,
+            initial.tree,
+            canonical_worktree_path(repo_dir.path()),
+        );
         populate_manifest_from_tree(
             &repo,
             &initial_tree,
@@ -979,6 +1008,79 @@ mod tests {
         // still appear in the refreshed manifest.
         assert!(refreshed.files.contains_key("alpha.txt"));
         assert!(refreshed.files.contains_key("beta.txt"));
+    }
+
+    /// Regression: snapshot from a directory that is NOT the
+    /// manifest's recorded worktree path must NOT refresh the
+    /// manifest. Pre-fix, the snapshot code detected the
+    /// "materialized-thread context" purely by `HEAD attached + a
+    /// manifest exists for the attached thread", so a snapshot from
+    /// the main repo dir (or any sibling worktree) would corrupt the
+    /// manifest by writing the wrong directory's stat fields into it
+    /// — and `heddle status` would then falsely report the
+    /// materialized worktree as fresh because the manifest's
+    /// `state_id` had auto-rolled forward.
+    #[test]
+    fn snapshot_outside_materialized_worktree_does_not_refresh_manifest() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("alpha.txt"), b"v1\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        // Materialize "main" at a totally separate path. Manifest
+        // records `dest_holder/out` as the worktree.
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        let materialize_manifest = repo.materialize_thread("main", &dest).unwrap();
+        let materialize_state_id = materialize_manifest.state_id;
+        let materialize_tree_hash = materialize_manifest.tree_hash;
+        let materialized_path = materialize_manifest.worktree_path.clone();
+        assert_eq!(
+            materialized_path,
+            canonical_worktree_path(&dest),
+            "manifest must record the canonical materialize destination"
+        );
+
+        // Now run snapshot from the MAIN repo dir (`repo.root()`) —
+        // a path that is NOT the materialized worktree. The pre-fix
+        // bug fired here.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(repo_dir.path().join("alpha.txt"), b"v2-from-main-repo\n").unwrap();
+        let snap = repo
+            .snapshot(Some("from main repo, not the mat worktree".into()), None)
+            .unwrap();
+        assert_ne!(
+            snap.change_id, materialize_state_id,
+            "snapshot must advance main's head"
+        );
+
+        // The manifest must NOT have been refreshed: state_id and
+        // tree_hash still point at the materialize state, worktree
+        // path still points at `dest`.
+        let after = crate::thread_manifest::read_manifest(repo.heddle_dir(), "main")
+            .unwrap()
+            .expect("manifest still present");
+        assert_eq!(
+            after.state_id, materialize_state_id,
+            "manifest state_id must NOT advance when snapshot is taken outside the materialized worktree"
+        );
+        assert_eq!(
+            after.tree_hash, materialize_tree_hash,
+            "manifest tree_hash must NOT advance"
+        );
+        assert_eq!(
+            after.worktree_path, materialized_path,
+            "manifest worktree_path must be unchanged"
+        );
+
+        // And `heddle status`'s staleness check should now correctly
+        // report the materialized worktree as stale (head moved,
+        // manifest didn't).
+        let head_now = repo.refs().get_thread("main").unwrap().expect("head");
+        assert_ne!(
+            head_now, after.state_id,
+            "post-fix invariant: main head advanced past manifest's recorded state → stale"
+        );
     }
 
     /// Capture from a *dedicated* thread worktree (one whose path
