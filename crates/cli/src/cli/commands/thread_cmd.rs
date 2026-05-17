@@ -386,7 +386,9 @@ fn try_three_way_merge_refresh(
 ) -> Result<ThreeWayMergeRefresh> {
     use objects::object::Attribution;
 
-    use super::merge::{ConflictLabels, ThreeWayMergeOutcome, try_three_way_merge_between_tips};
+    use super::merge::{
+        ConflictLabels, MergeStrategy, ThreeWayMergeOutcome, try_three_way_merge_between_tips,
+    };
 
     let target_tip = parent_repo
         .refs()
@@ -406,6 +408,7 @@ fn try_three_way_merge_refresh(
         ConflictLabels {
             current: &current_label,
             incoming: &incoming_label,
+            strategy: MergeStrategy::HunkOnly,
         },
     )?;
 

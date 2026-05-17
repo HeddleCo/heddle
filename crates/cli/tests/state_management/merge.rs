@@ -1818,3 +1818,78 @@ fn test_merge_conflict_markers_well_formed_across_newline_shapes() {
         assert_markers_at_column_zero(&content, label);
     }
 }
+
+#[test]
+fn test_merge_semantic_resolves_disjoint_function_edits_clean() {
+    // heddle#68: with `--semantic`, two branches editing DIFFERENT functions
+    // in the same file should merge cleanly with zero conflict markers.
+    // Without `--semantic` the default text engine surfaces a hunk conflict
+    // around the rewritten regions because both sides modified the same
+    // file. The two outcomes encode the contract the trip report
+    // (heddle#54) asked for.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let src = temp.path().join("lib.rs");
+    fs::write(
+        &src,
+        "fn alpha() -> u32 { 1 }\n\nfn beta() -> u32 { 2 }\n\nfn gamma() -> u32 { 3 }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "create", "edit_alpha"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "edit_alpha"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "fn alpha() -> u32 { 11 }\n\nfn beta() -> u32 { 2 }\n\nfn gamma() -> u32 { 3 }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "alpha edit"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "fn alpha() -> u32 { 1 }\n\nfn beta() -> u32 { 2 }\n\nfn gamma() -> u32 { 333 }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "gamma edit"], Some(temp.path())).unwrap();
+
+    let result = heddle(&["merge", "edit_alpha", "--semantic"], Some(temp.path()));
+    assert!(result.is_ok(), "semantic merge should succeed");
+
+    let merged = fs::read_to_string(&src).unwrap();
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "disjoint function edits must not leave conflict markers under --semantic: {merged}"
+    );
+    assert!(merged.contains("fn alpha() -> u32 { 11 }"), "alpha edit lost: {merged}");
+    assert!(merged.contains("fn gamma() -> u32 { 333 }"), "gamma edit lost: {merged}");
+}
+
+#[test]
+fn test_merge_semantic_falls_through_on_text_file() {
+    // Files without a recognised language extension (a `.txt` file here)
+    // bypass the AST driver and use the existing hunk-level engine. The
+    // existing conflict-marker shape must be preserved.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let f = temp.path().join("notes.txt");
+    fs::write(&f, "base line\n").unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    fs::write(&f, "feature line\n").unwrap();
+    heddle(&["capture", "-m", "f"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    fs::write(&f, "main line\n").unwrap();
+    heddle(&["capture", "-m", "m"], Some(temp.path())).unwrap();
+
+    heddle(&["merge", "feature", "--semantic"], Some(temp.path())).unwrap();
+    let merged = fs::read_to_string(&f).unwrap();
+    assert!(
+        merged.contains("<<<<<<< CURRENT (main)"),
+        "same-line conflict on a non-language file must still produce markers under --semantic: {merged}"
+    );
+}

@@ -242,6 +242,8 @@ fn text_hunk_merge_blobs(
 ) -> Result<ContentHash> {
     use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 
+    use crate::cli::commands::merge::merge_algo::MergeStrategy;
+
     let base_content = load_blob_content(store, base_hash, path)?;
     let our_content = load_blob_content(store, our_hash, path)?;
     let their_content = load_blob_content(store, their_hash, path)?;
@@ -250,7 +252,32 @@ fn text_hunk_merge_blobs(
         ours: labels.current,
         theirs: labels.incoming,
     };
-    match text_hunk_merge_with_markers(&base_content, &our_content, &their_content, markers) {
+    // Route based on the caller's chosen merge strategy. `Semantic` invokes
+    // the AST-aware driver in `heddle-semantic::merge_driver`, which itself
+    // falls back to `text_hunk_merge` on unparseable / unknown-language
+    // files. `HunkOnly` preserves the historical path verbatim.
+    let outcome = match labels.strategy {
+        #[cfg(feature = "semantic")]
+        MergeStrategy::Semantic => semantic::merge_driver::semantic_three_way_merge(
+            &base_content,
+            &our_content,
+            &their_content,
+            std::path::Path::new(path),
+            markers,
+        ),
+        // When the semantic feature is compiled out, the Semantic variant
+        // collapses to the same code path as HunkOnly. The CLI flag is
+        // accepted but has no functional effect — matching the historical
+        // behaviour before this PR.
+        #[cfg(not(feature = "semantic"))]
+        MergeStrategy::Semantic => {
+            text_hunk_merge_with_markers(&base_content, &our_content, &their_content, markers)
+        }
+        MergeStrategy::HunkOnly => {
+            text_hunk_merge_with_markers(&base_content, &our_content, &their_content, markers)
+        }
+    };
+    match outcome {
         MergeOutcome::Clean(bytes) => {
             let blob = Blob::new(bytes);
             Ok(store.put_blob(&blob)?)

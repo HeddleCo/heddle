@@ -21,12 +21,25 @@ pub(crate) struct MergeResult {
 pub(crate) struct ConflictLabels<'a> {
     pub current: &'a str,
     pub incoming: &'a str,
+    /// Content-merge strategy. `HunkOnly` keeps the historical behaviour —
+    /// every blob goes through `heddle-merge::text_hunk_merge`. `Semantic`
+    /// routes parseable source through the AST-aware driver in
+    /// `heddle-semantic::merge_driver`, falling back to `text_hunk_merge`
+    /// on unknown / unparseable files.
+    pub strategy: MergeStrategy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MergeStrategy {
+    HunkOnly,
+    Semantic,
 }
 
 impl ConflictLabels<'_> {
     pub(crate) const DEFAULT: ConflictLabels<'static> = ConflictLabels {
         current: "CURRENT",
         incoming: "INCOMING",
+        strategy: MergeStrategy::HunkOnly,
     };
 }
 

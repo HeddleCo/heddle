@@ -34,7 +34,7 @@ mod merge_renames;
 mod rename_matcher;
 
 use git_commit::{GitCommitInfo, GitCommitPreview};
-pub(crate) use merge_algo::ConflictLabels;
+pub(crate) use merge_algo::{ConflictLabels, MergeStrategy};
 use merge_algo::{apply_merged_tree, three_way_merge};
 use merge_plan::MergePlan;
 use merge_relation::MergeRelationKind;
@@ -291,6 +291,11 @@ pub(crate) fn merge_thread_into_current(
         ConflictLabels {
             current: &current_label,
             incoming: &incoming_label,
+            strategy: if semantic {
+                merge_algo::MergeStrategy::Semantic
+            } else {
+                merge_algo::MergeStrategy::HunkOnly
+            },
         },
     )?;
 
@@ -1186,6 +1191,7 @@ fn build_thread_preview_report_with_graph(
             ConflictLabels {
                 current: &current_label,
                 incoming: &incoming_label,
+                strategy: merge_algo::MergeStrategy::HunkOnly,
             },
         )?;
         if let Some(merge_result) = merge_plan.merge_result() {
