@@ -575,4 +575,37 @@ mod tests {
         write_file_atomic(&target, b"hello").unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"hello");
     }
+
+    /// Regression for heddle#105: `sync_directory` must succeed on any
+    /// writable directory. The original implementation called
+    /// `OpenOptions::new().read(true).open(dir)` + `sync_all()`, which
+    /// fails on Windows with `ERROR_ACCESS_DENIED` (5) because Windows
+    /// directory handles require `FILE_FLAG_BACKUP_SEMANTICS` and
+    /// `FlushFileBuffers` on a directory handle is not a supported
+    /// operation. The failure cascaded through `write_file_atomic` into
+    /// `Repository::init_default`, breaking `heddle init` on Windows.
+    #[test]
+    fn sync_directory_succeeds_on_writable_tempdir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        sync_directory(dir.path()).expect("sync_directory on writable tempdir");
+    }
+
+    /// Regression for heddle#105: full `write_file_atomic` round-trip
+    /// against a freshly-created nested directory must not surface
+    /// `PermissionDenied`. The previous failure mode was the
+    /// `sync_directory(parent)` call at the end of `write_file_atomic`.
+    #[test]
+    fn write_file_atomic_does_not_permission_deny_on_parent_sync() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("oplog/oplog.bin");
+        let result = write_file_atomic(&target, b"hello");
+        if let Err(e) = &result {
+            assert!(
+                !is_permission_denied(e),
+                "write_file_atomic surfaced PermissionDenied on a writable \
+                 tempdir (heddle#105): {e}"
+            );
+        }
+        result.expect("write_file_atomic");
+    }
 }

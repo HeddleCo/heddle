@@ -276,6 +276,42 @@ fn projfs_mount_unmounts_cleanly_on_session_drop() {
     let _ = fs::read_dir(&mp); // doesn't panic
 }
 
+/// Windows regression test for heddle#105. `Repository::init_default`
+/// used to fail with `PermissionDenied` on any Windows tempdir because
+/// `objects::fs_atomic::write_file_atomic` called `sync_directory` on
+/// `.heddle/oplog`, and `sync_directory` opened the directory with
+/// `OpenOptions::new().read(true)` + `sync_all()` — neither operation
+/// is meaningful on Windows (directory handles require
+/// `FILE_FLAG_BACKUP_SEMANTICS` to open, and `FlushFileBuffers` on a
+/// directory handle returns `ERROR_ACCESS_DENIED`).
+///
+/// The bug was invisible until heddle#102 fixed the silent-red Windows
+/// CI job and the ProjFS smoke tests in this file started actually
+/// running — at which point every fixture builder hit it on the
+/// `init_default` call in [`build_fixture`].
+///
+/// This test exercises only the init path (no ProjFS mount) so the
+/// regression stays caught even if a later refactor makes the broader
+/// smoke tests skip earlier. Kept here (rather than in `heddle-repo`'s
+/// own test suite) because `projfs-smoke` is the workflow's only
+/// Windows job — moving it would re-hide the regression on Linux-only
+/// runs.
+#[test]
+#[ignore = "Windows regression for heddle#105; opt-in alongside projfs-smoke"]
+fn init_default_on_windows_tempdir_does_not_permission_deny() {
+    let dir = TempDir::new().expect("tempdir for repo");
+    let result = Repository::init_default(dir.path());
+    if let Err(e) = &result {
+        let msg = e.to_string().to_lowercase();
+        assert!(
+            !msg.contains("permission denied"),
+            "init_default regressed to PermissionDenied on a writable Windows \
+             tempdir (heddle#105): {e}"
+        );
+    }
+    result.expect("init_default on Windows tempdir");
+}
+
 #[test]
 #[ignore = "requires Windows + ProjFS; opt-in via HEDDLE_PROJFS_AVAILABLE=1"]
 fn projfs_mount_hides_instance_id_sidecar_from_listing() {
