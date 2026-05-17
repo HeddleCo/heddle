@@ -335,6 +335,173 @@ PY
   done <<< "$strict_report"
 fi
 
+# --- Internal-consumer / publishable-version compat ----------------------
+#
+# Why this check exists: heddle#63 r2 bumped the heddle-grpc source crate
+# to 0.3.0 but left three internal workspace consumers (cli, daemon,
+# client) pinned at `version = "0.2"`. Local `cargo build` was happy
+# (path deps override version reqs in-workspace), but the push-to-main
+# publish workflow tried `cargo publish` — which strips path deps and
+# resolves consumers against crates.io — and failed loud with
+# "candidate versions found which didn't match: 0.3.0".
+#
+# The structural rule: every internal workspace consumer of a
+# publishable crate must declare a version requirement that the
+# publishable crate's CURRENT version satisfies. If it doesn't, the
+# next push-to-main publish will fail.
+#
+# Trust-aspect: we DON'T trust the PUBLISHABLE_CRATES env var from the
+# workflow as the source of truth here. We re-derive the publishable
+# set from each Cargo.toml's [package].publish field (default-publish
+# is publishable). That way a brand-new publishable crate added to the
+# workspace gets caught by this asserter without anyone remembering to
+# update the check.
+if ! command -v python3 >/dev/null 2>&1; then
+  err "python3 not available; consumer-version check skipped"
+elif ! python3 -c 'import tomllib' 2>/dev/null; then
+  err "python3 tomllib unavailable (needs 3.11+); consumer-version check skipped"
+else
+  consumer_report=$(python3 - <<'PY'
+import glob
+import re
+import tomllib
+
+crates = []
+for cm in sorted(glob.glob("crates/*/Cargo.toml")):
+    with open(cm, "rb") as f:
+        crates.append((cm, tomllib.load(f)))
+
+errors = []
+oks = []
+
+by_name = {}      # crate name → current version string
+publishable = set()
+for cm, toml in crates:
+    pkg = toml.get("package", {})
+    name = pkg.get("name")
+    version = pkg.get("version")
+    if not name or not isinstance(version, str):
+        continue
+    by_name[name] = version
+    # `publish` unset defaults to true (publishable). A non-empty list
+    # restricts the registries but is still publishable. `false` /
+    # empty list / explicit False means not publishable.
+    pub = pkg.get("publish")
+    if pub is None or pub is True or (isinstance(pub, list) and len(pub) > 0):
+        publishable.add(name)
+
+
+def parse_ver(s):
+    s = re.split(r"[-+]", s, maxsplit=1)[0]
+    parts = (s.split(".") + ["0", "0", "0"])[:3]
+    out = []
+    for p in parts:
+        try:
+            out.append(int(p))
+        except ValueError:
+            out.append(0)
+    return tuple(out)
+
+
+def satisfies(req, ver):
+    # Cargo's default operator is caret. `cargo metadata` normalizes
+    # "0.2" → "^0.2", but Cargo.toml may carry the bare form, so we
+    # treat unprefixed as caret too. We deliberately don't try to
+    # parse `>=`, `~`, or comma-joined comparators — the workspace
+    # convention is caret, and a foreign comparator should be loudly
+    # surfaced rather than silently passed.
+    req = req.strip()
+    if req.startswith("^"):
+        req = req[1:]
+    elif req[:1] in ("=", ">", "<", "~", "*") or "," in req:
+        # Unsupported comparator shape. Flag conservatively.
+        return None
+    r = parse_ver(req)
+    v = parse_ver(ver)
+    if v < r:
+        return False
+    if r[0] > 0:
+        return v[0] == r[0]
+    if r[1] > 0:
+        return v[0] == 0 and v[1] == r[1]
+    return v[0] == 0 and v[1] == 0 and v[2] == r[2]
+
+
+DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
+checked = 0
+for cm, toml in crates:
+    consumer_name = toml.get("package", {}).get("name", cm)
+    tables = []
+    for k in DEP_TABLES:
+        if isinstance(toml.get(k), dict):
+            tables.append(toml[k])
+    for _tk, tv in (toml.get("target", {}) or {}).items():
+        if not isinstance(tv, dict):
+            continue
+        for k in DEP_TABLES:
+            if isinstance(tv.get(k), dict):
+                tables.append(tv[k])
+
+    for deps in tables:
+        for dep_key, dep_val in deps.items():
+            if not isinstance(dep_val, dict):
+                continue
+            pkg_name = dep_val.get("package") or dep_key
+            if pkg_name not in publishable:
+                continue
+            req = dep_val.get("version")
+            if not isinstance(req, str):
+                continue
+            src_ver = by_name.get(pkg_name)
+            if src_ver is None:
+                continue
+            checked += 1
+            result = satisfies(req, src_ver)
+            if result is None:
+                errors.append(
+                    f"{consumer_name} declares {pkg_name} = \"{req}\" "
+                    f"(unsupported comparator shape; workspace convention is caret)"
+                )
+            elif not result:
+                errors.append(
+                    f"{consumer_name} requires {pkg_name} = \"{req}\", "
+                    f"but {pkg_name} current version is {src_ver} (incompatible)"
+                )
+
+if not by_name:
+    errors.append("could not parse any crates/*/Cargo.toml")
+elif not errors:
+    oks.append(
+        f"internal workspace consumers satisfy publishable crate versions "
+        f"({checked} req/version pairs, {len(publishable)} publishable crates)"
+    )
+
+print("OKS:")
+for o in oks:
+    print(o)
+print("ERRORS:")
+for e in errors:
+    print(e)
+PY
+)
+
+  in_oks=0
+  in_errors=0
+  while IFS= read -r line; do
+    case "$line" in
+      "OKS:")     in_oks=1; in_errors=0; continue ;;
+      "ERRORS:")  in_oks=0; in_errors=1; continue ;;
+    esac
+    [[ -z "$line" ]] && continue
+    if (( in_oks )); then
+      ok "$line"
+    elif (( in_errors )); then
+      err "$line"
+    fi
+  done <<< "$consumer_report"
+fi
+
 if (( fail )); then
   echo "publish-pipeline check FAILED" >&2
   exit 1
