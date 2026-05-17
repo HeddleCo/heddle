@@ -195,7 +195,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
 
     // Get worktree status
     let changes = if let Some(ref state) = current_state {
-        let tree = repo.store().get_tree(&state.tree)?.unwrap_or_default();
+        let tree = repo.require_tree(&state.tree)?;
         let status = repo.compare_worktree_cached_with_options(&tree, &status_options)?;
         ChangesInfo {
             modified: status
