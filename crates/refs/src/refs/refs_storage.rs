@@ -154,9 +154,8 @@ impl RefManager {
                 Ok(mut file) => {
                     let now = Utc::now().timestamp();
                     let content = format!("{} {}", current_pid, now);
-                    if let Err(err) = file.write_all(content.as_bytes()) {
-                        let _ = fs::remove_file(&path);
-                        return Err(err.into());
+                    if let Err(err) = write_lock_body_or_cleanup(&mut file, content.as_bytes(), &path) {
+                        return Err(err);
                     }
                     if let Err(err) = file.sync_all() {
                         let _ = fs::remove_file(&path);
@@ -235,6 +234,30 @@ impl RefManager {
     }
 }
 
+/// Write `body` to `writer`; on failure, remove the orphan at
+/// `cleanup_path` and surface the write error.
+///
+/// **NOTE (red commit):** this version takes `&mut W` and leaves the
+/// caller's writer alive across the cleanup call. On Windows,
+/// `DeleteFile` against a still-open handle (without
+/// `FILE_SHARE_DELETE`) fails with `ERROR_SHARING_VIOLATION`, so the
+/// `remove_file` silently no-ops and the orphan stays. The fix commit
+/// switches this to ownership-transfer (`mut writer: W` + explicit
+/// `drop(writer)` before `remove_file`) per heddle#86 r2.
+fn write_lock_body_or_cleanup<W: Write>(
+    writer: &mut W,
+    body: &[u8],
+    cleanup_path: &Path,
+) -> Result<()> {
+    match writer.write_all(body) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = fs::remove_file(cleanup_path);
+            Err(err.into())
+        }
+    }
+}
+
 fn encode_flat_thread_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len() * 2 + FLAT_THREAD_SUFFIX.len());
     for byte in name.as_bytes() {
@@ -286,6 +309,59 @@ mod tests {
         assert!(repo.lock_path().exists());
         drop(lock);
         assert!(!repo.lock_path().exists());
+    }
+
+    /// `Write` wrapper that flips a flag from its `Drop` impl. The
+    /// regression test below uses this to assert the writer is closed
+    /// before the helper's `remove_file` call — load-bearing on Windows,
+    /// where `DeleteFile` against a still-open handle fails with
+    /// `ERROR_SHARING_VIOLATION` and the orphan would otherwise survive.
+    /// Mirrors `DropTrackingFailingWriter` from
+    /// `shared_target.rs` (heddle#86 r2).
+    struct DropTrackingFailingWriter<'a> {
+        dropped: &'a std::cell::Cell<bool>,
+    }
+    impl Write for DropTrackingFailingWriter<'_> {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("simulated write failure"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Drop for DropTrackingFailingWriter<'_> {
+        fn drop(&mut self) {
+            self.dropped.set(true);
+        }
+    }
+
+    #[test]
+    fn write_lock_body_or_cleanup_drops_writer_before_returning_on_failure() {
+        // Regression for heddle#95 (sweep follow-up to heddle#86 r2). On
+        // Windows, `remove_file` against a still-open handle fails with
+        // `ERROR_SHARING_VIOLATION`; the lock file stays, and the next
+        // operation waits the full 5-minute stale-lock timeout. The
+        // helper must take the writer by value and drop it before
+        // `remove_file`. POSIX would let the unlink succeed against an
+        // open handle, so this test asserts the ownership-transfer
+        // guarantee directly: by the time the helper returns on the
+        // failure path, the writer has been dropped (i.e. on a real
+        // `File`, the OS handle is closed).
+        let temp = TempDir::new().unwrap();
+        let orphan = temp.path().join("LOCK");
+        fs::write(&orphan, b"").unwrap();
+
+        let dropped = std::cell::Cell::new(false);
+        let mut writer = DropTrackingFailingWriter { dropped: &dropped };
+        let result = write_lock_body_or_cleanup(&mut writer, b"would-be body", &orphan);
+
+        assert!(result.is_err());
+        assert!(
+            dropped.get(),
+            "writer must be dropped before the helper returns on failure — \
+             on Windows, the file handle must be closed before remove_file"
+        );
+        assert!(!orphan.exists());
     }
 
     #[test]
