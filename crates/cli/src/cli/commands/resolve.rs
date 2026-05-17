@@ -210,7 +210,7 @@ fn resolve_file_with_version(
             .store()
             .get_state(&merge_state.ours)?
             .ok_or_else(|| anyhow!("Our state not found"))?;
-        let our_tree = repo.store().get_tree(&our_state.tree)?.unwrap_or_default();
+        let our_tree = repo.require_tree(&our_state.tree)?;
 
         if let Some(entry) = our_tree.get(path) {
             let blob = repo.require_blob(&entry.hash)?;
@@ -221,10 +221,7 @@ fn resolve_file_with_version(
             .store()
             .get_state(&merge_state.theirs)?
             .ok_or_else(|| anyhow!("Their state not found"))?;
-        let their_tree = repo
-            .store()
-            .get_tree(&their_state.tree)?
-            .unwrap_or_default();
+        let their_tree = repo.require_tree(&their_state.tree)?;
 
         if let Some(entry) = their_tree.get(path) {
             let blob = repo.require_blob(&entry.hash)?;
