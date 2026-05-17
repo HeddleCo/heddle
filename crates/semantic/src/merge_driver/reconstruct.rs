@@ -263,21 +263,9 @@ fn compute_item_emit_order(
     all_keys: &BTreeSet<&ItemKey>,
 ) -> Vec<ItemKey> {
     let base_keys: Vec<ItemKey> = base_segments.items.iter().map(|i| i.key.clone()).collect();
-    let base_key_set: BTreeSet<&ItemKey> = base_segments.items.iter().map(|i| &i.key).collect();
 
     let mut order: Vec<ItemKey> = base_keys.clone();
     let mut placed: BTreeSet<ItemKey> = base_keys.iter().cloned().collect();
-
-    // Helper: find a base anchor to splice an added key after, by walking
-    // left through `side_keys` until we hit a base key.
-    let find_anchor = |side_keys: &[ItemKey], idx: usize| -> Option<ItemKey> {
-        for i in (0..idx).rev() {
-            if base_key_set.contains(&side_keys[i]) {
-                return Some(side_keys[i].clone());
-            }
-        }
-        None
-    };
 
     let splice_added = |order: &mut Vec<ItemKey>,
                         placed: &mut BTreeSet<ItemKey>,
@@ -288,15 +276,19 @@ fn compute_item_emit_order(
             if placed.contains(key) {
                 continue;
             }
-            let anchor = find_anchor(&side_keys, idx);
-            let insert_at = match anchor {
-                Some(anchor_key) => order
-                    .iter()
-                    .position(|k| *k == anchor_key)
-                    .map(|p| p + 1)
-                    .unwrap_or(order.len()),
-                None => 0,
-            };
+            // Anchor is the nearest key to the left in this side's source
+            // order that's already placed in `order`. That includes both
+            // base keys AND earlier-spliced additions from this side —
+            // so a run of N adjacent new items splices as a contiguous
+            // block preserving source order, rather than each one
+            // jumping ahead of its predecessor at the same base anchor.
+            let mut insert_at = 0usize;
+            for i in (0..idx).rev() {
+                if let Some(pos) = order.iter().position(|k| *k == side_keys[i]) {
+                    insert_at = pos + 1;
+                    break;
+                }
+            }
             order.insert(insert_at, key.clone());
             placed.insert(key.clone());
         }
