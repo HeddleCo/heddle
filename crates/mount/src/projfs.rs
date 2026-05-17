@@ -594,10 +594,16 @@ fn encode_guid(guid: &GUID) -> Vec<u8> {
 /// directory the mapping applies to; passing a NULL `PCWSTR` here
 /// crashed the host process with `STATUS_ACCESS_VIOLATION`
 /// (heddle#108) before any callback could fire.
+///
+/// The empty string lives in `'static` storage so the pointer is
+/// trivially valid for the duration of the `PrjStartVirtualizing`
+/// call (and well beyond — the kernel copies the contents).
 fn entire_root_notification_mapping(bits: PRJ_NOTIFY_TYPES) -> PRJ_NOTIFICATION_MAPPING {
+    // A single NUL terminator — the wide-string form of `""`.
+    static EMPTY_NOTIFICATION_ROOT: [u16; 1] = [0u16];
     PRJ_NOTIFICATION_MAPPING {
         NotificationBitMask: bits,
-        NotificationRoot: PCWSTR::null(),
+        NotificationRoot: PCWSTR(EMPTY_NOTIFICATION_ROOT.as_ptr()),
     }
 }
 
