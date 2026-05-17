@@ -1,14 +1,24 @@
 # Releasing Heddle
 
-This document covers the binary-release pipeline that produces pre-built
-`heddle` CLI artifacts on tagged releases. It is the upstream contract
-that the HomeBrew (heddle#29b), Scoop, and apt (heddle#29c) packaging
-channels consume.
+Heddle has two release pipelines, both static-asserted on every PR:
 
-For the crates.io publishing flow (`heddle-cli` and the workspace crates
-managed by `release-plz`), see the existing `release-plz.toml` and the
-manual `publish-*.sh` scripts at the repo root. That is a separate
-pipeline from the one described here.
+| Pipeline | Trigger | Workflow | Asserter |
+|---|---|---|---|
+| **Binary release** — `heddle` CLI artifacts for HomeBrew / Scoop / apt | `vX.Y.Z` tag push (or `workflow_dispatch` for RC dry-runs) | `.github/workflows/release.yml` | `scripts/check-release-pipeline.sh` |
+| **crates.io publish** — workspace crates managed by `release-plz` | push to `main` (typically a release-plz merge) | `.github/workflows/publish-crates.yml` | `scripts/check-publish-pipeline.sh` |
+
+The two are independent — a binary release doesn't bump crate versions
+and a crates.io publish doesn't produce binaries — but they follow the
+same trust pattern: a `validate-*` job runs first and exposes a SHA
+output; every downstream credentialed step pins `actions/checkout` to
+that SHA rather than the mutable ref it was triggered on. See the
+"Pipeline-contract check" sections below for what the asserters enforce.
+
+The manual `publish-*.sh` scripts at the repo root are kept as the
+fallback path for bootstrap publishes (and for the 0.2.0 cutover that
+predated the workflow). For routine version bumps, prefer the
+release-plz → push-to-main flow documented in
+[Automated crates.io publishing](#automated-cratesio-publishing) below.
 
 ## Cutting a release
 
@@ -199,3 +209,114 @@ passes:
 The contract above is the contract it enforces. If you intentionally
 change the contract, update `scripts/check-release-pipeline.sh` in
 the same PR.
+
+## Automated crates.io publishing
+
+`heddle-grpc` and the rest of the OSS workspace crates publish to
+crates.io automatically on every push to `main` via
+`.github/workflows/publish-crates.yml`. The normal flow is:
+
+1. `release-plz` (configured in `release-plz.toml`) opens a PR that
+   bumps Cargo.toml versions and updates `CHANGELOG.md`.
+2. A maintainer reviews and merges the PR.
+3. On the resulting push to `main`, `publish-crates.yml` runs:
+   - `validate-publish` confirms the push is on `main`, captures the
+     merged commit SHA as `commit_sha`, and probes crates.io for
+     each declared-publishable crate. For each it emits one of:
+     **publish** (Cargo.toml version isn't on crates.io yet),
+     **skip** (already published — idempotent re-run), or **fail**
+     (Cargo.toml downgrade — refuses).
+   - `publish` runs only when `has_publishes == 'true'`, checks out
+     the validated `commit_sha` (not `refs/heads/main` — see the
+     TOCTOU note in `release.yml`), asserts the `CARGO_REGISTRY_TOKEN`
+     env var is non-empty (sourced from `secrets.CRATES_IO_API_KEY` —
+     see [Token wiring](#token-wiring) below), and runs
+     `cargo publish -p <crate>` for each entry in the publish set.
+     "already exists" errors are treated as success (race / re-run);
+     5xx errors retry with exponential backoff (1s → 4s → 16s);
+     anything else fails loud.
+   - A workflow run summary lists each published `<crate>@<version>`
+     with a crates.io link.
+
+### Trigger choice
+
+The workflow fires only on `on.push.branches: ['main']`. There is no
+`workflow_dispatch` path — automation must never be triggerable from
+outside `main`'s history. If a maintainer needs to force-publish (a
+bootstrap, a recovery), they run `cargo publish` locally with their
+own creds; that's a deliberate ops action, not workflow surface.
+
+### Publishable crate list
+
+Maintained as an explicit `PUBLISHABLE_CRATES` env var in
+`publish-crates.yml`, in topological order (deps first). Adding a new
+publishable crate is a one-line workflow edit, reviewed in PR. The
+list mirrors `release-plz.toml`'s `[[package]]` blocks.
+
+Auto-discovery (`cargo metadata --workspace`) is deliberately avoided:
+an implicit `publish = true` (or absence of `publish = false`) in a
+new Cargo.toml is invisible at PR review time, and accidentally
+flipping it would silently expand the public surface. Currently
+**all 17 workspace crates are publishable** (none declare
+`publish = false`); the explicit list keeps that scope visible in
+diff.
+
+### Token wiring
+
+The workflow's publish job exposes the credential to cargo via:
+
+```yaml
+env:
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_KEY }}
+```
+
+The two names are deliberately distinct halves of the mapping:
+
+- `CARGO_REGISTRY_TOKEN` is the env-var name `cargo publish` reads at
+  runtime (cargo's documented name). Renaming this side would mean
+  cargo can't find the token at all.
+- `CRATES_IO_API_KEY` is the GitHub Actions secret name as configured
+  under repo Settings → Secrets and variables → Actions. Renaming this
+  side would resolve to an empty string and break authentication on
+  the first publish.
+
+The asserter (see below) checks both halves separately so a regression
+on either side surfaces with its own error line.
+
+To rotate the token: update the `CRATES_IO_API_KEY` secret in repo
+settings. No workflow change is needed.
+
+### Pipeline-contract check
+
+`scripts/check-publish-pipeline.sh` runs alongside the binary
+release check on every PR (via `release-pipeline-check.yml`). Same
+two-pass shape as `check-release-pipeline.sh`:
+
+- **Smoke (grep).** push-to-main trigger present, `workflow_dispatch`
+  absent, `validate-publish` + `publish` jobs both present, publish
+  job declares `needs: validate-publish`, `secrets.CRATES_IO_API_KEY`
+  and the `CARGO_REGISTRY_TOKEN` env var both referenced, explicit
+  `PUBLISHABLE_CRATES` list present, this section exists in
+  `RELEASING.md`.
+- **Strict (parsed YAML).** `validate-publish` exports `commit_sha`,
+  `to_publish`, `has_publishes`; `publish` declares
+  `needs: validate-publish` and gates `if:` on `has_publishes`;
+  publish's `actions/checkout` pins `ref` to
+  `${{ needs.validate-publish.outputs.commit_sha }}` (not
+  `refs/heads/main` — TOCTOU); the env-var key is exactly
+  `CARGO_REGISTRY_TOKEN` (cargo's documented name); that env var is
+  wired from `secrets.CRATES_IO_API_KEY` (the repo-settings secret
+  name).
+
+### Verifying a publish
+
+```bash
+# After a release-plz PR merges, watch the workflow:
+gh run watch --repo HeddleCo/heddle --workflow publish-crates.yml
+
+# Once green, confirm the crate is queryable:
+curl -s https://crates.io/api/v1/crates/heddle-grpc | jq '.crate.max_stable_version'
+```
+
+The workflow's "Published to crates.io" summary table is the
+canonical receipt of what shipped on a given run.

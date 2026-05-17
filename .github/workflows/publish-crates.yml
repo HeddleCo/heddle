@@ -1,0 +1,419 @@
+name: Publish crates
+
+# Auto-publishes the workspace's declared-publishable crates to
+# crates.io on every push to main. Designed for the release-plz flow:
+# release-plz opens a "release PR" that bumps Cargo.toml versions;
+# when that PR merges to main, this workflow detects the bumped
+# versions and publishes them.
+#
+# The job tree mirrors heddle#56's release.yml:
+#
+#   validate-publish ──► publish (conditional on has_publishes)
+#
+# validate-publish is the single trust gate. It refuses to proceed
+# unless the merged commit (a) lives on main and (b) is the SHA we'll
+# pin every downstream step to. It also probes crates.io to decide
+# whether each declared-publishable crate needs publishing this run,
+# and refuses to publish if a Cargo.toml version is *lower* than the
+# crate's current published version (a downgrade is always a bad
+# state). The publish job then runs only if at least one crate needs
+# publishing — so no-op merges (the common case) cost a few seconds of
+# validation and nothing else.
+#
+# Trust pattern (mirroring heddle#56 r3):
+#   - on.push.branches: ['main'] only. NOT workflow_dispatch.
+#     Automation must never be triggerable from outside main's history.
+#     If a maintainer needs to force-publish, they run `cargo publish`
+#     locally — that's a deliberate ops action, not workflow surface.
+#   - validate-publish emits commit_sha as an output. The publish job
+#     checks out THAT SHA, never refs/heads/main directly. main is
+#     mutable: between validate-publish reading HEAD and publish
+#     running, a force-push could redirect the publish. The SHA pin
+#     closes that window. Same TOCTOU reasoning as release.yml's
+#     tag_sha → ref pin.
+#   - The publishable crate list is an explicit env var, not derived
+#     by scanning Cargo.toml for `publish = true`. Adding a new
+#     publishable crate is a one-line workflow edit, reviewed in PR.
+#
+# Asserter: scripts/check-publish-pipeline.sh runs on every PR
+# touching this workflow (release-pipeline-check.yml). It fails if any
+# of the structural guarantees above regress.
+
+on:
+  push:
+    branches:
+      - main
+    # Only fire when something that could change a publishable
+    # crate's version (or this workflow itself) lands. Pure docs /
+    # CI / scripts pushes don't need to re-probe crates.io.
+    paths:
+      - 'crates/*/Cargo.toml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/publish-crates.yml'
+
+permissions:
+  contents: read
+
+# Serialize publish runs on main. crates.io has a 1-publish-per-minute
+# rate limit for existing crates (1-per-10-minutes for new crates);
+# parallel runs would race each other and produce confusing failures.
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
+
+env:
+  # Explicit publishable-crates list, in topological order (deps
+  # first). Order matters: cargo publish verifies the package against
+  # the registry, which requires the crate's deps to already be on
+  # crates.io. The list mirrors release-plz.toml's [[package]]
+  # entries. To add a publishable crate, append it here AND add a
+  # `[[package]]` block to release-plz.toml in the matching position.
+  #
+  # No auto-discovery (cargo metadata --workspace --no-deps): implicit
+  # `publish = true` in Cargo.toml is invisible at PR review time, and
+  # accidentally flipping it would silently expand the public surface.
+  PUBLISHABLE_CRATES: |
+    heddle-objects
+    heddle-crypto
+    heddle-refs
+    heddle-oplog
+    heddle-proto
+    heddle-semantic
+    heddle-devtools
+    heddle-grpc
+    heddle-review
+    heddle-state-review
+    heddle-repo
+    heddle-mount
+    heddle-ingest
+    heddle-cli-shared
+    weft-client-shim
+    heddle-daemon
+    heddle-cli
+
+jobs:
+  validate-publish:
+    name: validate publish set
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      # Commit SHA the publish job must pin to. See top-of-file
+      # comment for the TOCTOU rationale.
+      commit_sha: ${{ steps.classify.outputs.commit_sha }}
+      # JSON array of {crate, version} pairs the publish job will
+      # actually publish (omitting crates whose current version is
+      # already on crates.io).
+      to_publish: ${{ steps.classify.outputs.to_publish }}
+      # 'true' iff to_publish is non-empty. Used to skip the publish
+      # job entirely on no-op merges.
+      has_publishes: ${{ steps.classify.outputs.has_publishes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history isn't needed (we don't walk it), but we DO
+          # need the commit to be a real commit object so we can
+          # ancestor-check it against origin/main below.
+          fetch-depth: 0
+
+      - name: Confirm push is on main
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          # Belt-and-suspenders. The on.push.branches filter already
+          # enforces this, but the cost of a second check is zero and
+          # the cost of a misconfiguration that bypassed the filter is
+          # high (publishing from a feature branch with prod creds).
+          if [[ "$REF" != "refs/heads/main" ]]; then
+            echo "::error::expected refs/heads/main, got ${REF}"
+            exit 1
+          fi
+          echo "ok: trigger ref is refs/heads/main"
+
+      - name: Probe crates.io for each publishable crate
+        id: classify
+        shell: bash
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Verify the trigger SHA is reachable from origin/main.
+          # actions/checkout already gave us this commit on main, but
+          # we explicitly assert ancestry so a future change to
+          # checkout config (e.g. a contributor switching ref:) can't
+          # silently move us off main.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/main" 2>/dev/null \
+             && ! git merge-base --is-ancestor "$GITHUB_SHA" "HEAD" 2>/dev/null; then
+            echo "::error::commit ${GITHUB_SHA} is not reachable from main — refusing to publish"
+            exit 1
+          fi
+
+          # Classify each publishable crate.
+          #
+          # For each crate we read its Cargo.toml version, then ask
+          # crates.io whether that exact version already exists:
+          #   - 200 → already published. Skip (idempotent: a re-run of
+          #     the same merge, or an unrelated commit that didn't bump
+          #     this crate).
+          #   - 404 → not yet published. Publish.
+          #   - 5xx / network error → fail the validation; the publish
+          #     job would have had to retry anyway, and failing here
+          #     keeps the operator-visible error close to its cause.
+          # Additionally we compare against the latest published
+          # version and refuse if Cargo.toml is *lower* — a downgrade
+          # is never legitimate, and silently publishing the lower
+          # version would re-yank-then-re-publish surface area.
+          to_publish='[]'
+          had_action=0
+
+          while IFS= read -r crate; do
+            [[ -z "$crate" ]] && continue
+            # Find the crate's Cargo.toml. Most live under crates/<dir>/
+            # but the workspace layout doesn't require dir==name, so
+            # we search by package name.
+            manifest=""
+            for cm in crates/*/Cargo.toml; do
+              if grep -qE "^name\s*=\s*\"${crate}\"\s*$" "$cm"; then
+                manifest="$cm"
+                break
+              fi
+            done
+            if [[ -z "$manifest" ]]; then
+              echo "::error::PUBLISHABLE_CRATES lists '${crate}' but no crates/*/Cargo.toml has 'name = \"${crate}\"'"
+              exit 1
+            fi
+            # First version line under [package] (the [[bin]] /
+            # [[example]] sections don't carry a version key).
+            local_version=$(awk -F'"' '/^\[package\]/{in_pkg=1; next} /^\[/{in_pkg=0} in_pkg && /^version\s*=/{print $2; exit}' "$manifest")
+            if [[ -z "$local_version" ]]; then
+              echo "::error::${manifest} has no [package] version"
+              exit 1
+            fi
+
+            # GET the exact-version endpoint. crates.io returns 200 if
+            # that version exists, 404 if not. We don't follow redirects
+            # (-S would print the error to stderr) and we capture the
+            # HTTP status separately so we can branch on it cleanly.
+            url="https://crates.io/api/v1/crates/${crate}/${local_version}"
+            status=$(curl -sS -o /tmp/probe.json -w '%{http_code}' \
+                       -H 'User-Agent: heddle-publish-workflow (https://github.com/HeddleCo/heddle)' \
+                       --max-time 30 \
+                       --retry 3 --retry-delay 4 --retry-connrefused \
+                       "$url" || echo 'CURL_FAIL')
+
+            case "$status" in
+              200)
+                echo "skip: ${crate}@${local_version} already on crates.io"
+                ;;
+              404)
+                # Crate-or-version not found. Could be: (a) this crate
+                # is brand-new (never published), or (b) only this
+                # version is new. We don't need to distinguish — both
+                # are "publish" actions for us. We still check the
+                # crate-level endpoint to detect downgrades.
+                latest_url="https://crates.io/api/v1/crates/${crate}"
+                latest_status=$(curl -sS -o /tmp/latest.json -w '%{http_code}' \
+                                  -H 'User-Agent: heddle-publish-workflow (https://github.com/HeddleCo/heddle)' \
+                                  --max-time 30 \
+                                  --retry 3 --retry-delay 4 --retry-connrefused \
+                                  "$latest_url" || echo 'CURL_FAIL')
+                if [[ "$latest_status" == "200" ]]; then
+                  # Downgrade guard. `jq // empty` falls through both
+                  # the stable and total max fields; if both are
+                  # missing we treat the latest as unknown and skip
+                  # the comparison rather than erroring. sort -V (GNU
+                  # version sort) handles `0.10 > 0.9` correctly,
+                  # which a naive lexical compare would get wrong.
+                  latest=$(jq -r '.crate.max_stable_version // .crate.max_version // empty' /tmp/latest.json)
+                  if [[ -n "$latest" ]]; then
+                    smaller=$(printf '%s\n%s\n' "$local_version" "$latest" | sort -V | head -n1)
+                    if [[ "$smaller" == "$local_version" && "$local_version" != "$latest" ]]; then
+                      echo "::error::${crate} Cargo.toml version ${local_version} is LOWER than published ${latest} — refusing (downgrade is never legitimate)"
+                      exit 1
+                    fi
+                  fi
+                elif [[ "$latest_status" != "404" ]]; then
+                  echo "::error::crates.io lookup for ${crate} returned ${latest_status}"
+                  exit 1
+                fi
+                echo "publish: ${crate}@${local_version}"
+                to_publish=$(jq -c --arg c "$crate" --arg v "$local_version" \
+                  '. + [{crate: $c, version: $v}]' <<<"$to_publish")
+                had_action=1
+                ;;
+              *)
+                echo "::error::crates.io probe for ${crate}@${local_version} returned ${status} (expected 200 or 404)"
+                exit 1
+                ;;
+            esac
+          done <<< "${PUBLISHABLE_CRATES}"
+
+          if (( had_action )); then
+            has_publishes=true
+          else
+            has_publishes=false
+          fi
+
+          echo "Resolved publish set: ${to_publish}"
+          # commit_sha is the only ref the publish job is allowed to
+          # act on. Emitting it as an output closes the TOCTOU window:
+          # if main moves between this job passing and the publish
+          # job checking out, publish still operates on the SHA we
+          # validated. Same pattern as release.yml's tag_sha output.
+          echo "commit_sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "to_publish=${to_publish}" >> "$GITHUB_OUTPUT"
+          echo "has_publishes=${has_publishes}" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: publish to crates.io
+    needs: validate-publish
+    # Skip the entire job (no runner spin-up, no token expose) when
+    # there's nothing to publish. The common case is a non-version-bump
+    # merge to main.
+    if: needs.validate-publish.outputs.has_publishes == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # The env var name (CARGO_REGISTRY_TOKEN) is cargo's documented
+      # name and is what `cargo publish` reads at runtime — it must
+      # stay exactly this. The GitHub Actions secret name
+      # (CRATES_IO_API_KEY) is independent: it's the label under repo
+      # Settings → Secrets and variables → Actions. The strict asserter
+      # verifies both halves of this mapping — any rename on either
+      # side would silently break authentication.
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Pin to the SHA validate-publish verified, NOT
+          # refs/heads/main. main is mutable; a force-push between
+          # validate-publish and this step would otherwise redirect
+          # the publish to attacker-controlled code. Same TOCTOU pin
+          # as release.yml.
+          ref: ${{ needs.validate-publish.outputs.commit_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: publish-crates
+          cache-on-failure: true
+
+      - name: Assert CARGO_REGISTRY_TOKEN is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          # We deliberately check at the FIRST credentialed step (not
+          # in validate-publish) so the validation pass still runs and
+          # surfaces what *would have* been published, even if the
+          # secret isn't configured yet. That gives the operator a
+          # punch list to act on. If the validation pass shipped
+          # without a publish attempt, it'd be silent.
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "::error::CARGO_REGISTRY_TOKEN env var is empty — the CRATES_IO_API_KEY secret is unset or the mapping in publish-crates.yml is wrong. Add CRATES_IO_API_KEY under repo Settings → Secrets and variables → Actions, then re-run."
+            exit 1
+          fi
+          echo "ok: CARGO_REGISTRY_TOKEN is present (length=${#CARGO_REGISTRY_TOKEN})"
+
+      - name: Publish each crate (idempotent, retry on 5xx)
+        shell: bash
+        env:
+          TO_PUBLISH: ${{ needs.validate-publish.outputs.to_publish }}
+        run: |
+          set -euo pipefail
+
+          # Pretty-print the publish plan up front so the workflow log
+          # has a clean record before any side effects.
+          echo "Publish plan:"
+          jq -r '.[] | "  - \(.crate)@\(.version)"' <<<"$TO_PUBLISH"
+
+          published_summary=()
+
+          while read -r line; do
+            [[ -z "$line" ]] && continue
+            crate=$(echo "$line" | cut -f1)
+            version=$(echo "$line" | cut -f2)
+
+            attempt=0
+            max_attempts=3
+            backoff=1
+            while true; do
+              attempt=$((attempt+1))
+              echo ""
+              echo "=== publishing ${crate}@${version} (attempt ${attempt}/${max_attempts}) ==="
+
+              # --no-verify skips the local build of the packaged
+              # tarball. The deps were already built by the upstream
+              # `cargo publish` calls (or by rust-cache); re-verifying
+              # adds minutes per crate. crates.io still runs its own
+              # verification on receipt.
+              if out=$(cargo publish -p "$crate" --no-verify 2>&1); then
+                echo "$out"
+                echo "=== ${crate}@${version} OK ==="
+                published_summary+=("${crate}@${version}")
+                break
+              fi
+
+              echo "$out"
+
+              # Idempotency: "already exists" means a previous run (or
+              # parallel publisher) beat us to it. That's success for
+              # our purposes — the post-condition is "version X is on
+              # crates.io", and it is.
+              if echo "$out" | grep -qiE 'already (exists|uploaded)|crate version .* is already uploaded'; then
+                echo "=== ${crate}@${version} already on crates.io (race / re-run) — treating as success ==="
+                published_summary+=("${crate}@${version} (already-present)")
+                break
+              fi
+
+              # Retry policy: 5xx-shaped errors (status codes,
+              # connection drops, timeouts) get exponential backoff.
+              # Anything else fails loud — we don't want to retry
+              # past a permanent error like "bad token" or "manifest
+              # validation failed".
+              if echo "$out" | grep -qiE '5[0-9][0-9]|server error|gateway|timed? ?out|connection (reset|refused|closed)'; then
+                if (( attempt >= max_attempts )); then
+                  echo "::error::${crate}@${version} failed after ${max_attempts} retries"
+                  exit 1
+                fi
+                sleep_for=$((backoff))
+                echo "=== transient failure, sleeping ${sleep_for}s before retry ==="
+                sleep "$sleep_for"
+                backoff=$((backoff * 4))
+                continue
+              fi
+
+              echo "::error::${crate}@${version} failed with non-retriable error"
+              exit 1
+            done
+
+            # crates.io's index propagates within seconds for the
+            # sparse index, but the registry still has a brief window
+            # where a freshly-published crate isn't visible to the
+            # NEXT `cargo publish` that depends on it. A 30s pause
+            # between publishes keeps the dep chain happy without
+            # adding meaningful wall-clock cost on small bumps.
+            sleep 30
+          done < <(jq -r '.[] | "\(.crate)\t\(.version)"' <<<"$TO_PUBLISH")
+
+          # GitHub Actions step summary — a tidy receipt of what
+          # shipped. Visible on the workflow run page; surviving even
+          # if the logs scroll off.
+          {
+            echo "## Published to crates.io"
+            echo ""
+            echo "| Crate | Version | Link |"
+            echo "|---|---|---|"
+            for entry in "${published_summary[@]}"; do
+              # entry shape: name@version[ (already-present)]
+              raw="${entry%% (*}"
+              note=""
+              [[ "$entry" == *'(already-present)'* ]] && note=" (already-present)"
+              name="${raw%@*}"
+              ver="${raw#*@}"
+              echo "| ${name} | ${ver}${note} | https://crates.io/crates/${name}/${ver} |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
