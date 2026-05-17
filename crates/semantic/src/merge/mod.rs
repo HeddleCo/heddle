@@ -38,12 +38,15 @@
 //! shape).
 
 mod diff3;
+mod lines;
+mod markers;
 mod preflight;
+mod whitespace;
 
 #[cfg(test)]
 mod tests;
 
-pub use diff3::ConflictMarkers;
+pub use markers::ConflictMarkers;
 
 /// Outcome of a three-way line-based merge.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -45,10 +45,7 @@ fn disjoint_multi_hunks_auto_resolve() {
             assert!(text.contains("OUR-1\n"), "missing ours hunk 1: {text}");
             assert!(text.contains("OUR-7\n"), "missing ours hunk 2: {text}");
             assert!(text.contains("THEIR-4\n"), "missing theirs hunk: {text}");
-            assert!(
-                !text.contains("<<<<<<<"),
-                "should have no markers: {text}"
-            );
+            assert!(!text.contains("<<<<<<<"), "should have no markers: {text}");
         }
         other => panic!("expected Clean, got {other:?}"),
     }
@@ -85,9 +82,15 @@ fn overlapping_hunks_produce_hunk_markers() {
             // The unchanged outer lines must still appear verbatim — this is
             // the heart of "hunk-level not whole-file".
             assert!(text.starts_with("line 1\nline 2\n"), "prefix lost: {text}");
-            assert!(text.ends_with("line 4\nline 5\nline 6\nline 7\nline 8\n"), "suffix lost: {text}");
+            assert!(
+                text.ends_with("line 4\nline 5\nline 6\nline 7\nline 8\n"),
+                "suffix lost: {text}"
+            );
             assert!(text.contains("OUR-3"), "missing ours conflict body: {text}");
-            assert!(text.contains("THEIR-3"), "missing theirs conflict body: {text}");
+            assert!(
+                text.contains("THEIR-3"),
+                "missing theirs conflict body: {text}"
+            );
         }
         other => panic!("expected Conflicts, got {other:?}"),
     }
@@ -186,7 +189,10 @@ fn binary_inputs_short_circuit() {
     let base = b"a\nb\nc\n";
     let ours = b"a\nb\n\0\n";
     let theirs = b"a\nb\nC\n";
-    assert!(matches!(text_hunk_merge(base, ours, theirs), MergeOutcome::Binary));
+    assert!(matches!(
+        text_hunk_merge(base, ours, theirs),
+        MergeOutcome::Binary
+    ));
 }
 
 #[test]
@@ -225,7 +231,9 @@ fn trailing_newline_divergence_does_not_conflict() {
             assert!(text.contains("OUR-a"));
             assert!(text.contains("THEIR-c"));
         }
-        other => panic!("expected Clean on disjoint hunks even with trailing-newline divergence, got {other:?}"),
+        other => panic!(
+            "expected Clean on disjoint hunks even with trailing-newline divergence, got {other:?}"
+        ),
     }
 }
 
