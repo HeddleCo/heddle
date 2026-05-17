@@ -8,10 +8,12 @@
 //!    bytes, falling through to `heddle-merge::text_hunk_merge` when both
 //!    sides modify the same item.
 //! 2. Stitching the resolved items back together in *base order*, with
-//!    one-side-only added items appended at their natural position relative
+//!    one-side-only added items spliced in at their natural position relative
 //!    to neighbours.
-//! 3. Running `heddle-merge::text_hunk_merge` on the *concatenated inter-item
-//!    content* to resolve preamble / between / postamble edits.
+//! 3. Weaving the inter-item segments back between the items at their
+//!    original positions. Each output gap is the per-segment 3-way merge of
+//!    the corresponding source segments on the sides that have the trailing
+//!    item; added items bring their adding-side segment with them.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,55 +65,6 @@ pub(crate) fn reconstruct_merged_file(
         resolved.insert((*key).clone(), resolution);
     }
 
-    // Build the merged file. Strategy:
-    //
-    //   1. Emit the merged *inter-item content* by concatenating each side's
-    //      inter-item slices and running text_hunk_merge once. The result is
-    //      a single byte string of "non-item" content.
-    //   2. Emit each resolved item in base order. Items that don't exist in
-    //      base (added on ours or theirs) get appended in their respective
-    //      side's relative position to the nearest matched neighbour.
-    //
-    // For the inter-item merge we use the simple concatenation trick because
-    // segment boundaries can shift when items are reordered; aligning per-
-    // segment would require a separate matching pass.
-    let inter_outcome = merge_inter_item_content(
-        base,
-        ours,
-        theirs,
-        base_segments,
-        ours_segments,
-        theirs_segments,
-        markers,
-    );
-    let (inter_bytes, inter_conflicts) = match inter_outcome {
-        MergeOutcome::Clean(bytes) => (bytes, 0),
-        MergeOutcome::Conflicts {
-            merged_bytes_with_markers,
-            conflict_count,
-        } => (merged_bytes_with_markers, conflict_count),
-        // Inter-item content is never binary on its own — it's a subset of
-        // text we already know parses. But carry the contract for safety.
-        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => (
-            inter_content_concat(base, base_segments).into_bytes(),
-            0,
-        ),
-    };
-    total_conflicts += inter_conflicts;
-
-    // For v1: emit the inter-item bytes first, then all the resolved items
-    // separated by a single newline. This loses fidelity on inter-item
-    // placement between specific items, but it produces a coherent, valid
-    // file. The trade-off is documented in `docs/design/semantic-merge-function-level.md`.
-    //
-    // A more sophisticated reconstruction would weave inter-item bytes
-    // between items in source order — that's the right v2.
-    //
-    // For *most* real codebases the inter-item content is "use statements
-    // and a doc comment at the top of the file", which concatenates cleanly.
-    let mut output = inter_bytes;
-    ensure_trailing_newline(&mut output);
-
     let item_emit_order = compute_item_emit_order(
         base_segments,
         ours_segments,
@@ -119,12 +72,87 @@ pub(crate) fn reconstruct_merged_file(
         &all_keys,
     );
 
-    for key in item_emit_order {
-        if let Some((Some(bytes), _)) = resolved.get(&key) {
-            output.extend_from_slice(bytes);
-            ensure_trailing_newline(&mut output);
+    // For each side, record each item's index so we can look up the
+    // inter-item segment that preceded it in source.
+    let base_idx = item_index(base_segments);
+    let ours_idx = item_index(ours_segments);
+    let theirs_idx = item_index(theirs_segments);
+
+    let base_ranges = base_segments.inter_item_ranges();
+    let ours_ranges = ours_segments.inter_item_ranges();
+    let theirs_ranges = theirs_segments.inter_item_ranges();
+
+    // Walk emit_order. For each item, emit:
+    //   1. The inter-item segment that PRECEDED it in the side(s) that
+    //      have it. When the item is in base, 3-way merge the preceding
+    //      segments from base/ours/theirs; when added on one side, take
+    //      that side's preceding segment. This keeps top-level
+    //      executable statements (Python `x.init()`, Rust attributes)
+    //      at their original source position.
+    //   2. The merged item bytes.
+    // After the last item, emit the postamble (the trailing inter-item
+    // segment on each side that has the last item).
+    let mut output: Vec<u8> = Vec::new();
+
+    for (emit_idx, key) in item_emit_order.iter().enumerate() {
+        let preceding = (
+            base_idx
+                .get(key)
+                .map(|i| inter_slice(base, &base_ranges, *i)),
+            ours_idx
+                .get(key)
+                .map(|i| inter_slice(ours, &ours_ranges, *i)),
+            theirs_idx
+                .get(key)
+                .map(|i| inter_slice(theirs, &theirs_ranges, *i)),
+        );
+        // First item: any side that has it contributes its preamble. If
+        // none of the sides have this item (shouldn't happen — all_keys
+        // is keyed on at least one side), fall through to base preamble.
+        let segment = if emit_idx == 0 {
+            select_preamble(
+                preceding.0,
+                preceding.1,
+                preceding.2,
+                &base_ranges,
+                &ours_ranges,
+                &theirs_ranges,
+                base,
+                ours,
+                theirs,
+            )
+        } else {
+            preceding
+        };
+        let (seg_bytes, seg_conflicts) =
+            merge_segment(segment.0, segment.1, segment.2, markers);
+        output.extend_from_slice(&seg_bytes);
+        total_conflicts += seg_conflicts;
+
+        if let Some((Some(item_bytes), _)) = resolved.get(key) {
+            output.extend_from_slice(item_bytes);
         }
     }
+
+    // Postamble: the LAST inter-item segment on each side. We pick the
+    // postambles unconditionally rather than tying them to the final
+    // emitted item — even sides that don't contribute the final item
+    // may have a meaningful trailing newline / comment.
+    let post = (
+        last_segment(base, &base_ranges),
+        last_segment(ours, &ours_ranges),
+        last_segment(theirs, &theirs_ranges),
+    );
+    let (post_bytes, post_conflicts) =
+        merge_segment(post.0, post.1, post.2, markers);
+    // Only emit the postamble if it adds bytes — otherwise we risk
+    // duplicating the trailing newline already in the last item's bytes.
+    if !post_bytes.is_empty() {
+        output.extend_from_slice(&post_bytes);
+    }
+    total_conflicts += post_conflicts;
+
+    ensure_trailing_newline(&mut output);
 
     if total_conflicts == 0 {
         MergeOutcome::Clean(output)
@@ -132,6 +160,103 @@ pub(crate) fn reconstruct_merged_file(
         MergeOutcome::Conflicts {
             merged_bytes_with_markers: output,
             conflict_count: total_conflicts,
+        }
+    }
+}
+
+fn item_index(segments: &FileSegments) -> BTreeMap<ItemKey, usize> {
+    segments
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| (it.key.clone(), i))
+        .collect()
+}
+
+fn inter_slice<'a>(source: &'a str, ranges: &[(usize, usize)], idx: usize) -> &'a str {
+    let (start, end) = ranges[idx];
+    &source[start..end]
+}
+
+fn last_segment<'a>(source: &'a str, ranges: &[(usize, usize)]) -> Option<&'a str> {
+    ranges.last().map(|(s, e)| &source[*s..*e])
+}
+
+/// First-item preceding-segment selection. When an item is missing on a
+/// side, fall back to that side's actual preamble so the 3-way merge can
+/// compare like with like (otherwise preamble edits on a side that
+/// dropped the first item get silently dropped).
+#[allow(clippy::too_many_arguments)]
+fn select_preamble<'a>(
+    base_pre: Option<&'a str>,
+    ours_pre: Option<&'a str>,
+    theirs_pre: Option<&'a str>,
+    base_ranges: &[(usize, usize)],
+    ours_ranges: &[(usize, usize)],
+    theirs_ranges: &[(usize, usize)],
+    base: &'a str,
+    ours: &'a str,
+    theirs: &'a str,
+) -> (Option<&'a str>, Option<&'a str>, Option<&'a str>) {
+    (
+        base_pre.or_else(|| base_ranges.first().map(|(s, e)| &base[*s..*e])),
+        ours_pre.or_else(|| ours_ranges.first().map(|(s, e)| &ours[*s..*e])),
+        theirs_pre.or_else(|| theirs_ranges.first().map(|(s, e)| &theirs[*s..*e])),
+    )
+}
+
+/// 3-way merge a single inter-item segment. Handles "side doesn't have
+/// this segment" by promoting the present side(s).
+fn merge_segment(
+    base: Option<&str>,
+    ours: Option<&str>,
+    theirs: Option<&str>,
+    markers: ConflictMarkers<'_>,
+) -> (Vec<u8>, usize) {
+    match (base, ours, theirs) {
+        (None, None, None) => (Vec::new(), 0),
+        (Some(b), Some(o), Some(t)) => materialize_segment(
+            text_hunk_merge_with_markers(b.as_bytes(), o.as_bytes(), t.as_bytes(), markers),
+            b,
+        ),
+        // Base has it; one side doesn't carry this segment (item missing
+        // there). Treat the missing side as "no change" against base.
+        (Some(b), Some(o), None) => materialize_segment(
+            text_hunk_merge_with_markers(b.as_bytes(), o.as_bytes(), b.as_bytes(), markers),
+            b,
+        ),
+        (Some(b), None, Some(t)) => materialize_segment(
+            text_hunk_merge_with_markers(b.as_bytes(), b.as_bytes(), t.as_bytes(), markers),
+            b,
+        ),
+        (Some(b), None, None) => (b.as_bytes().to_vec(), 0),
+        // Added item — only the adding side(s) contribute a segment.
+        (None, Some(o), Some(t)) => {
+            if o == t {
+                (o.as_bytes().to_vec(), 0)
+            } else {
+                materialize_segment(
+                    text_hunk_merge_with_markers(&[], o.as_bytes(), t.as_bytes(), markers),
+                    "",
+                )
+            }
+        }
+        (None, Some(o), None) => (o.as_bytes().to_vec(), 0),
+        (None, None, Some(t)) => (t.as_bytes().to_vec(), 0),
+    }
+}
+
+fn materialize_segment(outcome: MergeOutcome, fallback: &str) -> (Vec<u8>, usize) {
+    match outcome {
+        MergeOutcome::Clean(bytes) => (bytes, 0),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            conflict_count,
+        } => (merged_bytes_with_markers, conflict_count),
+        // Binary / DeleteVsModify shouldn't fire on a text subset, but
+        // carry through with base bytes rather than nothing.
+        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => {
+            (fallback.as_bytes().to_vec(), 0)
         }
     }
 }
@@ -217,34 +342,6 @@ fn materialize_outcome(outcome: MergeOutcome) -> (Option<Vec<u8>>, usize) {
         // parsed, but carry through safely.
         MergeOutcome::Binary | MergeOutcome::DeleteVsModify => (None, 1),
     }
-}
-
-fn merge_inter_item_content(
-    base: &str,
-    ours: &str,
-    theirs: &str,
-    base_segments: &FileSegments,
-    ours_segments: &FileSegments,
-    theirs_segments: &FileSegments,
-    markers: ConflictMarkers<'_>,
-) -> MergeOutcome {
-    let base_concat = inter_content_concat(base, base_segments);
-    let ours_concat = inter_content_concat(ours, ours_segments);
-    let theirs_concat = inter_content_concat(theirs, theirs_segments);
-    text_hunk_merge_with_markers(
-        base_concat.as_bytes(),
-        ours_concat.as_bytes(),
-        theirs_concat.as_bytes(),
-        markers,
-    )
-}
-
-fn inter_content_concat(source: &str, segments: &FileSegments) -> String {
-    let mut out = String::new();
-    for (start, end) in segments.inter_item_ranges() {
-        out.push_str(&source[start..end]);
-    }
-    out
 }
 
 /// Determine the order items should appear in the output. Strategy:
