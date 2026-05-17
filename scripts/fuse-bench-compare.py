@@ -41,6 +41,24 @@ Criterion's `estimates.json` lives at
 `mean.point_estimate` in nanoseconds per iteration. We use the mean
 (not the median) because that's what `cargo bench` reports as the
 canonical figure and what existing heddle perf notes cite.
+
+## Failure modes the gate enforces
+
+The gate is the only thing standing between a silent perf regression
+and main. A measurement that *can't be checked* is treated as a
+regression — silently passing on missing/corrupt input is the failure
+mode Codex r1 flagged on PR #91 (P1). Hard failures:
+
+  * Expected `(group, variant)` has no `estimates.json` (e.g. the
+    bench was renamed, removed, or its build broke).
+  * `estimates.json` exists but is unreadable (truncated, schema
+    drift, JSON syntax error).
+  * Criterion emits a `(group, variant)` that has no baseline entry
+    (e.g. a new bench shipped without updating the baseline, or an
+    existing bench was renamed and the old name is now stale).
+
+The last case prevents a PR from adding a bench without committing
+its baseline — the regression budget would silently exclude it.
 """
 
 from __future__ import annotations
@@ -51,23 +69,70 @@ import sys
 from pathlib import Path
 
 
-def load_estimate(criterion_dir: Path, group: str, variant: str) -> float | None:
-    """Return mean ns-per-iter for `<group>/<variant>` or None if missing.
+class EstimateError(Exception):
+    """Raised when an expected estimate can't be loaded.
 
-    Criterion writes estimates to `.../new/estimates.json` after each
-    completed run. The structure carries the bootstrap distribution;
-    we want the point estimate of the mean for direct comparison
-    against the baseline.
+    Distinguished from a numeric over-budget regression: this is a
+    *coverage* failure (the gate has no measurement to check against
+    the baseline), not a *budget* failure. Both still result in exit
+    code 1, but the script's output groups them separately so the
+    reviewer can tell at a glance whether the bench actually got
+    slower or whether the gate broke.
+    """
+
+
+def load_estimate(criterion_dir: Path, group: str, variant: str) -> float:
+    """Return mean ns-per-iter for `<group>/<variant>`.
+
+    Raises `EstimateError` if the file is missing or unreadable —
+    a missing measurement is a coverage failure that the gate MUST
+    treat as a regression (see module docstring).
     """
     estimates_path = criterion_dir / group / variant / "new" / "estimates.json"
     if not estimates_path.exists():
-        return None
+        raise EstimateError(f"estimate file not found: {estimates_path}")
     try:
         data = json.loads(estimates_path.read_text())
         return float(data["mean"]["point_estimate"])
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        print(f"warn: could not parse {estimates_path}: {exc}", file=sys.stderr)
-        return None
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise EstimateError(f"could not parse {estimates_path}: {exc}") from exc
+
+
+def discover_actual_ids(criterion_dir: Path) -> set[tuple[str, str]]:
+    """Walk criterion's output tree and return every `(group, variant)`
+    pair that has an `estimates.json`.
+
+    Used to detect benchmark IDs that exist on disk but not in the
+    baseline — additions or renames that escaped a baseline update.
+    Such IDs are unmeasured by the gate today and so represent a
+    silent coverage hole.
+
+    Criterion's layout is `<group>/<variant>/new/estimates.json`, with
+    one extra wrinkle: `<variant>` may itself be a nested path for
+    `BenchmarkId::new("name", value)` ids (`new/value` segments). We
+    walk for `new/estimates.json` files and reconstruct group/variant
+    from the relative path.
+    """
+    found: set[tuple[str, str]] = set()
+    if not criterion_dir.exists():
+        return found
+    for estimates_path in criterion_dir.rglob("new/estimates.json"):
+        # `<criterion-dir>/<group>/<variant...>/new/estimates.json`.
+        # `parts[-2]` is "new"; everything before that minus the
+        # criterion_dir prefix gives us (group, *variant_parts).
+        rel = estimates_path.relative_to(criterion_dir).parts
+        # rel looks like (group, *variant, "new", "estimates.json").
+        if len(rel) < 4 or rel[-2] != "new" or rel[-1] != "estimates.json":
+            continue
+        group = rel[0]
+        # Criterion also writes per-group aggregate dirs (no variant);
+        # those have rel == (group, "new", "estimates.json") which fails
+        # the len < 4 check above. Anything we keep has variant parts.
+        variant = "/".join(rel[1:-2])
+        if not variant:
+            continue
+        found.add((group, variant))
+    return found
 
 
 def main() -> int:
@@ -105,31 +170,47 @@ def main() -> int:
 
     baseline = json.loads(args.baseline.read_text())
 
-    failures: list[str] = []
-    skipped: list[str] = []
-    ok: list[str] = []
-
+    # Build the expected (group, variant) set from the baseline so we
+    # can both (a) iterate it for budget checks, and (b) diff it
+    # against what's actually on disk to detect untracked IDs.
+    expected: set[tuple[str, str]] = set()
     for group, variants in baseline.items():
         if group.startswith("_"):
             continue
-        for variant, expected in variants.items():
-            baseline_ns = float(expected["ns_per_iter"])
+        for variant in variants:
+            expected.add((group, variant))
+
+    failures: list[str] = []
+    missing: list[str] = []
+    ok: list[str] = []
+
+    for group, variant in sorted(expected):
+        baseline_ns = float(baseline[group][variant]["ns_per_iter"])
+        try:
             actual_ns = load_estimate(args.criterion_dir, group, variant)
-            if actual_ns is None:
-                skipped.append(f"{group}/{variant} (no estimate file)")
-                continue
-            ratio = actual_ns / baseline_ns
-            delta_pct = (ratio - 1.0) * 100.0
-            line = (
-                f"{group:>20s}/{variant:<25s}  "
-                f"baseline={baseline_ns / 1e6:>10.3f} ms  "
-                f"actual={actual_ns / 1e6:>10.3f} ms  "
-                f"delta={delta_pct:+6.1f}%"
-            )
-            if ratio > (1.0 + args.threshold):
-                failures.append(line)
-            else:
-                ok.append(line)
+        except EstimateError as exc:
+            missing.append(f"{group}/{variant} ({exc})")
+            continue
+        ratio = actual_ns / baseline_ns
+        delta_pct = (ratio - 1.0) * 100.0
+        line = (
+            f"{group:>20s}/{variant:<25s}  "
+            f"baseline={baseline_ns / 1e6:>10.3f} ms  "
+            f"actual={actual_ns / 1e6:>10.3f} ms  "
+            f"delta={delta_pct:+6.1f}%"
+        )
+        if ratio > (1.0 + args.threshold):
+            failures.append(line)
+        else:
+            ok.append(line)
+
+    # Coverage check: any `(group, variant)` in criterion that the
+    # baseline doesn't know about. A rename produces both a missing
+    # entry (above) and an unexpected entry (here); a clean addition
+    # produces only the unexpected entry. Both are gate failures
+    # because the new measurement isn't budgeted.
+    actual = discover_actual_ids(args.criterion_dir)
+    unexpected = sorted(actual - expected)
 
     print("# fuse_e2e baseline comparison")
     print(f"# threshold: +{args.threshold * 100:.0f}% regression\n")
@@ -138,17 +219,32 @@ def main() -> int:
         for line in ok:
             print(line)
         print()
-    if skipped:
-        print("## skipped")
-        for line in skipped:
+    if missing:
+        print("## MISSING (coverage failure — bench did not report)")
+        for line in missing:
             print(line)
+        print()
+    if unexpected:
+        print("## UNEXPECTED (coverage failure — bench ID has no baseline)")
+        for group, variant in unexpected:
+            print(f"{group:>20s}/{variant:<25s}  (commit a baseline entry or revert the rename)")
         print()
     if failures:
         print("## REGRESSIONS")
         for line in failures:
             print(line)
         print()
-        print(f"fuse_e2e: {len(failures)} regression(s) over the +{args.threshold * 100:.0f}% threshold")
+
+    coverage_errors = len(missing) + len(unexpected)
+    if failures or coverage_errors:
+        parts = []
+        if failures:
+            parts.append(f"{len(failures)} regression(s) over +{args.threshold * 100:.0f}%")
+        if missing:
+            parts.append(f"{len(missing)} missing measurement(s)")
+        if unexpected:
+            parts.append(f"{len(unexpected)} unexpected ID(s)")
+        print(f"fuse_e2e: FAIL — {'; '.join(parts)}")
         return 1
 
     print(f"fuse_e2e: {len(ok)} measurement(s) within budget")
