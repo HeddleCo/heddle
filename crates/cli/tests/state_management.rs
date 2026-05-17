@@ -12,6 +12,8 @@ mod clean;
 mod merge;
 #[path = "state_management/merge_store_integrity.rs"]
 mod merge_store_integrity;
+#[path = "state_management/missing_tree_integrity.rs"]
+mod missing_tree_integrity;
 #[path = "state_management/revert.rs"]
 mod revert;
 #[path = "state_management/stash.rs"]
