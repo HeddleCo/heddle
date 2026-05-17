@@ -1425,6 +1425,71 @@ func (b B) String() string { return \"B-THEIRS\" }
 }
 
 // =====================================================================
+// Codex r1 P1 #2: reconstruct inter-item segments at original positions.
+//
+// reconstruct.rs:116 — the v1 reconstruction concatenates each side's
+// inter-item content and emits the merged blob at the top, then
+// appends all merged items below. Top-level executable statements
+// (Python imports, JavaScript expression statements, Rust attributes)
+// get hoisted to the file start — changing runtime semantics.
+// =====================================================================
+#[test]
+fn python_top_level_executable_statement_stays_between_functions() {
+    // base has an `import`, then `foo`, then a top-level `x.init()`
+    // call (which must run AFTER foo is defined and BEFORE bar is
+    // defined), then `bar`.
+    let base = "\
+import x
+
+def foo():
+    return 1
+
+x.init()
+
+def bar():
+    return 2
+";
+    // ours edits foo; theirs edits bar. Both per-item edits land.
+    // The bug is in the WEAVING of the `x.init()` line.
+    let ours = "\
+import x
+
+def foo():
+    return 11
+
+x.init()
+
+def bar():
+    return 2
+";
+    let theirs = "\
+import x
+
+def foo():
+    return 1
+
+x.init()
+
+def bar():
+    return 22
+";
+    let merged = match merge_at(base, ours, theirs, "f.py") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    let p_foo = merged.find("def foo()").expect("foo present");
+    let p_init = merged.find("x.init()").expect("x.init() present");
+    let p_bar = merged.find("def bar()").expect("bar present");
+    assert!(
+        p_foo < p_init && p_init < p_bar,
+        "expected foo < x.init() < bar in:\n{merged}"
+    );
+    // Per-item edits land.
+    assert!(merged.contains("return 11"), "ours edit lost: {merged}");
+    assert!(merged.contains("return 22"), "theirs edit lost: {merged}");
+}
+
+// =====================================================================
 // Codex r1 P2 #2: collect_items must not stack-overflow on deep trees.
 //
 // items.rs:155 recurses for every unclassified or container child.
