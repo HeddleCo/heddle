@@ -10,6 +10,8 @@
 //! `impl` blocks for Rust. Nested closures and inner functions are NOT
 //! independently extracted: they participate in their enclosing item's merge.
 
+use std::hash::{Hash, Hasher};
+
 use tree_sitter::Node;
 
 use crate::parser::{Language, ParsedFile};
@@ -41,6 +43,11 @@ pub(crate) struct ItemKey {
     /// Used to disambiguate methods of the same name in different `impl`
     /// blocks.
     pub scope: Vec<String>,
+    /// Hash of the parameter-list spelling for function-like items. Zero
+    /// for items without parameters (structs, consts, type aliases, etc.).
+    /// Disambiguates overloads — same name, different arity/types — that
+    /// would otherwise collide on (kind, name, scope) alone.
+    pub signature_hash: u64,
 }
 
 /// A single extracted item with its byte range in the source.
@@ -125,26 +132,27 @@ fn collect_items(
     // edits are resolved by its bytes-level merge.
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if let Some((kind, name, is_container, container_body)) =
-            classify_node(language, source, child)
-        {
+        if let Some(classified) = classify_node(language, source, child) {
+            let Classified {
+                kind,
+                name,
+                container_body,
+                signature_hash,
+            } = classified;
             let item_key = ItemKey {
                 kind,
                 name: name.clone(),
                 scope: scope.to_vec(),
+                signature_hash,
             };
             out.push(Item {
                 key: item_key,
                 start_byte: child.start_byte(),
                 end_byte: child.end_byte(),
             });
-            // For impl / mod / trait, recurse into the body so we catch
-            // methods with their scope set to the container's name. The body
-            // is a separate child node (`declaration_list` for impl, `body`
-            // field for mod / trait).
-            if is_container
-                && let Some(body) = container_body
-            {
+            // For impl / mod / trait / class, recurse into the body so we
+            // catch methods with their scope set to the container's name.
+            if let Some(body) = container_body {
                 let mut next_scope = scope.to_vec();
                 next_scope.push(name);
                 collect_items(language, source, body, &next_scope, out);
@@ -157,15 +165,22 @@ fn collect_items(
     }
 }
 
-/// Returns `(kind, name, is_container, container_body)` if `node` is an item
-/// the merger recognises. `is_container` is true for nodes whose body should
-/// be traversed for sub-items (impl, mod, trait); `container_body` is the
-/// body node to recurse into.
+/// Classifier output: what kind of item, its name, an optional body to
+/// recurse into (for container items), and a parameter-signature hash for
+/// overload disambiguation (zero for non-function items).
+struct Classified<'a> {
+    kind: ItemKind,
+    name: String,
+    container_body: Option<Node<'a>>,
+    signature_hash: u64,
+}
+
+/// Classify a node as an item the merger recognises, or return `None`.
 fn classify_node<'a>(
     language: Language,
     source: &'a str,
     node: Node<'a>,
-) -> Option<(ItemKind, String, bool, Option<Node<'a>>)> {
+) -> Option<Classified<'a>> {
     let kind = node.kind();
     match language {
         Language::Rust => classify_rust_node(source, node, kind),
@@ -182,59 +197,68 @@ fn classify_rust_node<'a>(
     source: &'a str,
     node: Node<'a>,
     kind: &str,
-) -> Option<(ItemKind, String, bool, Option<Node<'a>>)> {
+) -> Option<Classified<'a>> {
     match kind {
         "function_item" => {
             let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Function, name, false, None))
+            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            Some(Classified {
+                kind: ItemKind::Function,
+                name,
+                container_body: None,
+                signature_hash,
+            })
         }
         "function_signature_item" => {
             // Trait method signature without body.
             let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Method, name, false, None))
+            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            Some(Classified {
+                kind: ItemKind::Method,
+                name,
+                container_body: None,
+                signature_hash,
+            })
         }
         "impl_item" => {
             // Name an impl by `<type>` or `<trait> for <type>` so two impls
             // for the same type but different traits get distinct keys.
             let name = rust_impl_name(source, node)?;
-            let body = node.child_by_field_name("body");
-            Some((ItemKind::Impl, name, true, body))
+            let container_body = node.child_by_field_name("body");
+            Some(Classified {
+                kind: ItemKind::Impl,
+                name,
+                container_body,
+                signature_hash: 0,
+            })
         }
         "mod_item" => {
             let name = name_from_field(source, node, "name")?;
             // mod may be a header (no body, `mod foo;`) or have a body.
-            let body = node.child_by_field_name("body");
-            Some((ItemKind::Module, name, body.is_some(), body))
+            let container_body = node.child_by_field_name("body");
+            Some(Classified {
+                kind: ItemKind::Module,
+                name,
+                container_body,
+                signature_hash: 0,
+            })
         }
-        "struct_item" => {
-            let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Struct, name, false, None))
-        }
-        "enum_item" => {
-            let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Enum, name, false, None))
-        }
+        "struct_item" => simple_item(source, node, "name", ItemKind::Struct),
+        "enum_item" => simple_item(source, node, "name", ItemKind::Enum),
         "trait_item" => {
             let name = name_from_field(source, node, "name")?;
-            let body = node.child_by_field_name("body");
-            Some((ItemKind::Trait, name, true, body))
+            let container_body = node.child_by_field_name("body");
+            Some(Classified {
+                kind: ItemKind::Trait,
+                name,
+                container_body,
+                signature_hash: 0,
+            })
         }
-        "union_item" => {
-            let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Struct, name, false, None))
-        }
-        "type_item" => {
-            let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::TypeAlias, name, false, None))
-        }
-        "const_item" => {
-            let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Const, name, false, None))
-        }
-        "static_item" => {
-            let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Static, name, false, None))
-        }
+        "union_item" => simple_item(source, node, "name", ItemKind::Struct),
+        "type_item" => simple_item(source, node, "name", ItemKind::TypeAlias),
+        "const_item" => simple_item(source, node, "name", ItemKind::Const),
+        "static_item" => simple_item(source, node, "name", ItemKind::Static),
         _ => None,
     }
 }
@@ -243,16 +267,27 @@ fn classify_python_node<'a>(
     source: &'a str,
     node: Node<'a>,
     kind: &str,
-) -> Option<(ItemKind, String, bool, Option<Node<'a>>)> {
+) -> Option<Classified<'a>> {
     match kind {
         "function_definition" => {
             let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Function, name, false, None))
+            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            Some(Classified {
+                kind: ItemKind::Function,
+                name,
+                container_body: None,
+                signature_hash,
+            })
         }
         "class_definition" => {
             let name = name_from_field(source, node, "name")?;
-            let body = node.child_by_field_name("body");
-            Some((ItemKind::Module, name, true, body))
+            let container_body = node.child_by_field_name("body");
+            Some(Classified {
+                kind: ItemKind::Module,
+                name,
+                container_body,
+                signature_hash: 0,
+            })
         }
         _ => None,
     }
@@ -262,20 +297,37 @@ fn classify_js_node<'a>(
     source: &'a str,
     node: Node<'a>,
     kind: &str,
-) -> Option<(ItemKind, String, bool, Option<Node<'a>>)> {
+) -> Option<Classified<'a>> {
     match kind {
         "function_declaration" | "generator_function_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Function, name, false, None))
+            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            Some(Classified {
+                kind: ItemKind::Function,
+                name,
+                container_body: None,
+                signature_hash,
+            })
         }
         "class_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            let body = node.child_by_field_name("body");
-            Some((ItemKind::Module, name, true, body))
+            let container_body = node.child_by_field_name("body");
+            Some(Classified {
+                kind: ItemKind::Module,
+                name,
+                container_body,
+                signature_hash: 0,
+            })
         }
         "method_definition" => {
             let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Method, name, false, None))
+            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            Some(Classified {
+                kind: ItemKind::Method,
+                name,
+                container_body: None,
+                signature_hash,
+            })
         }
         _ => None,
     }
@@ -285,15 +337,27 @@ fn classify_go_node<'a>(
     source: &'a str,
     node: Node<'a>,
     kind: &str,
-) -> Option<(ItemKind, String, bool, Option<Node<'a>>)> {
+) -> Option<Classified<'a>> {
     match kind {
         "function_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Function, name, false, None))
+            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            Some(Classified {
+                kind: ItemKind::Function,
+                name,
+                container_body: None,
+                signature_hash,
+            })
         }
         "method_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Method, name, false, None))
+            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            Some(Classified {
+                kind: ItemKind::Method,
+                name,
+                container_body: None,
+                signature_hash,
+            })
         }
         _ => None,
     }
@@ -303,11 +367,21 @@ fn classify_c_node<'a>(
     source: &'a str,
     node: Node<'a>,
     kind: &str,
-) -> Option<(ItemKind, String, bool, Option<Node<'a>>)> {
+) -> Option<Classified<'a>> {
     if kind == "function_definition" {
         let declarator = node.child_by_field_name("declarator")?;
         let name = identifier_in_subtree(source, declarator)?;
-        return Some((ItemKind::Function, name, false, None));
+        // C/C++ parameter list lives inside the declarator subtree as a
+        // `parameter_list` node — find it for overload disambiguation.
+        let signature_hash = find_descendant(declarator, &["parameter_list"])
+            .map(|n| hash_normalized(&source[n.byte_range()]))
+            .unwrap_or(0);
+        return Some(Classified {
+            kind: ItemKind::Function,
+            name,
+            container_body: None,
+            signature_hash,
+        });
     }
     None
 }
@@ -316,19 +390,78 @@ fn classify_java_node<'a>(
     source: &'a str,
     node: Node<'a>,
     kind: &str,
-) -> Option<(ItemKind, String, bool, Option<Node<'a>>)> {
+) -> Option<Classified<'a>> {
     match kind {
         "method_declaration" | "constructor_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            Some((ItemKind::Method, name, false, None))
+            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            Some(Classified {
+                kind: ItemKind::Method,
+                name,
+                container_body: None,
+                signature_hash,
+            })
         }
         "class_declaration" | "interface_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            let body = node.child_by_field_name("body");
-            Some((ItemKind::Module, name, true, body))
+            let container_body = node.child_by_field_name("body");
+            Some(Classified {
+                kind: ItemKind::Module,
+                name,
+                container_body,
+                signature_hash: 0,
+            })
         }
         _ => None,
     }
+}
+
+fn simple_item<'a>(
+    source: &'a str,
+    node: Node<'a>,
+    name_field: &str,
+    kind: ItemKind,
+) -> Option<Classified<'a>> {
+    let name = name_from_field(source, node, name_field)?;
+    Some(Classified {
+        kind,
+        name,
+        container_body: None,
+        signature_hash: 0,
+    })
+}
+
+/// Hash the spelling of the parameter-list child named `field`, with
+/// whitespace normalized so cosmetic reformatting doesn't fragment matches.
+/// Returns 0 when the field is absent (e.g. parameterless declarations).
+fn signature_hash_from_field(source: &str, node: Node<'_>, field: &str) -> u64 {
+    let Some(params) = node.child_by_field_name(field) else {
+        return 0;
+    };
+    hash_normalized(&source[params.byte_range()])
+}
+
+fn hash_normalized(s: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for token in s.split_whitespace() {
+        token.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn find_descendant<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if kinds.contains(&current.kind()) {
+            return Some(current);
+        }
+        for i in (0..current.child_count()).rev() {
+            if let Some(child) = current.child(i as u32) {
+                stack.push(child);
+            }
+        }
+    }
+    None
 }
 
 fn name_from_field(source: &str, node: Node<'_>, field: &str) -> Option<String> {
