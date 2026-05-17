@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Initialize command.
 
-use std::path::PathBuf;
+use std::{fs::OpenOptions, io::Write, path::PathBuf};
 
 use anyhow::Result;
 use repo::Repository;
@@ -105,12 +105,28 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 /// cases (permission denied with the file *not* present, etc.).
 pub(crate) fn maybe_install_default_heddleignore(root: &std::path::Path) -> Result<bool> {
     let path = root.join(".heddleignore");
-    if path.exists() {
-        return Ok(false);
+    // Atomic create-or-fail: the prior `path.exists()` + `fs::write`
+    // shape was a TOCTOU window where a concurrent `heddle init` (or
+    // a user dropping their own `.heddleignore` between the two
+    // syscalls) could see "absent" and then have its file silently
+    // overwritten. `O_CREAT | O_EXCL` collapses the check and the
+    // write into one kernel-enforced step.
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            f.write_all(super::heddleignore_defaults::DEFAULT_HEDDLEIGNORE.as_bytes())
+                .map_err(|e| anyhow::anyhow!("failed to write default .heddleignore: {}", e))?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(anyhow::anyhow!(
+            "failed to create default .heddleignore: {}",
+            e
+        )),
     }
-    std::fs::write(&path, super::heddleignore_defaults::DEFAULT_HEDDLEIGNORE)
-        .map_err(|e| anyhow::anyhow!("failed to write default .heddleignore: {}", e))?;
-    Ok(true)
 }
 
 fn render_init(output: &InitOutput, json: bool) -> Result<()> {
@@ -120,4 +136,35 @@ fn render_init(output: &InitOutput, json: bool) -> Result<()> {
         println!("{}", output.message);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_writes_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrote = maybe_install_default_heddleignore(dir.path()).unwrap();
+        assert!(wrote);
+        let body = std::fs::read_to_string(dir.path().join(".heddleignore")).unwrap();
+        assert_eq!(body, super::super::heddleignore_defaults::DEFAULT_HEDDLEIGNORE);
+    }
+
+    #[test]
+    fn install_preserves_existing_via_create_new() {
+        // The atomic `O_CREAT | O_EXCL` path must NOT overwrite a
+        // curated `.heddleignore`. Pre-create one with custom content,
+        // then confirm `maybe_install_default_heddleignore` returns
+        // `false` and leaves the body untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".heddleignore");
+        let curated = "# curated\nsecrets/\n";
+        std::fs::write(&path, curated).unwrap();
+
+        let wrote = maybe_install_default_heddleignore(dir.path()).unwrap();
+        assert!(!wrote);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body, curated);
+    }
 }

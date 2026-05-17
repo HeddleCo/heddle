@@ -61,9 +61,11 @@ desktop.ini
 # OS / shell temporary debris
 *.tmp
 
-# Shell-redirect typos (`> -r foo` lands a literal file named `-r`)
-/-r
-/-rv
+# Shell-redirect typos (`> -r foo` lands a literal file named `-r`).
+# Unanchored so a typo created from a subdirectory (`src/-r`) is also
+# suppressed — leading `/` would only catch the repo-root variant.
+-r
+-rv
 
 # Local tool state — uncomment if your team uses these and the
 # state files leak in. Left commented by default so teams that DO
@@ -197,7 +199,7 @@ pub fn noise_hint_for(path: &Path) -> Option<NoiseHint> {
             return Some(NoiseHint {
                 category: NoiseCategory::ShellTypo,
                 label: "shell-redirect typo artifact",
-                suggested_pattern: if name == "-r" { "/-r" } else { "/-rv" },
+                suggested_pattern: if name == "-r" { "-r" } else { "-rv" },
             });
         }
         _ => {}
@@ -310,7 +312,14 @@ mod tests {
         assert!(tpl.contains("*~"));
         assert!(tpl.contains("Thumbs.db"));
         assert!(tpl.contains("*.tmp"));
-        assert!(tpl.contains("/-r"));
+        // Unanchored so the typo is suppressed wherever it lands —
+        // `/-r` would only catch the repo-root variant.
+        assert!(tpl.contains("\n-r\n"));
+        assert!(tpl.contains("\n-rv\n"));
+        // Old root-anchored shape must not reappear as an actual
+        // pattern line — the comment may legitimately reference it.
+        assert!(!tpl.contains("\n/-r\n"));
+        assert!(!tpl.contains("\n/-rv\n"));
     }
 
     #[test]
@@ -358,7 +367,21 @@ mod tests {
     fn shell_redirect_typo() {
         let hint = noise_hint_for(&PathBuf::from("-r")).unwrap();
         assert_eq!(hint.category, NoiseCategory::ShellTypo);
-        assert_eq!(hint.suggested_pattern, "/-r");
+        // Unanchored — leading `/` would limit suppression to the
+        // repo root, but the same typo can land anywhere.
+        assert_eq!(hint.suggested_pattern, "-r");
+    }
+
+    #[test]
+    fn shell_redirect_typo_pattern_matches_subdir() {
+        // Belt-and-braces: confirm the suggested pattern actually
+        // suppresses the typo when it lands in a nested directory,
+        // which the old root-anchored `/-r` would have missed.
+        use objects::worktree::worktree_ignore::should_ignore;
+        let patterns = vec!["-r".to_string(), "-rv".to_string()];
+        assert!(should_ignore(&PathBuf::from("-r"), &patterns));
+        assert!(should_ignore(&PathBuf::from("src/-r"), &patterns));
+        assert!(should_ignore(&PathBuf::from("a/b/-rv"), &patterns));
     }
 
     #[test]
