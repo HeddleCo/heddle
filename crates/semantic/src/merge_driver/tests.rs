@@ -1368,6 +1368,62 @@ function foo(x: string): string { return \"AAA\"; }
     assert!(merged.contains("return \"AAA\""), "theirs edit lost: {merged}");
 }
 
+// =====================================================================
+// Codex r1 P1 #3: key Go methods by receiver type.
+//
+// In Go, `func (a A) String() string` and `func (b B) String() string`
+// share the method_declaration name "String"; without the receiver in
+// the key both methods collapse and one is dropped from the merge.
+// =====================================================================
+#[test]
+fn go_methods_on_different_receivers_not_collapsed() {
+    let base = "\
+package main
+
+type A struct{}
+func (a A) String() string { return \"a\" }
+
+type B struct{}
+func (b B) String() string { return \"b\" }
+";
+    // ours edits A.String; theirs edits B.String. Pre-fix both methods
+    // collide on (Method, \"String\", []) — one is dropped before any
+    // merge can happen.
+    let ours = "\
+package main
+
+type A struct{}
+func (a A) String() string { return \"A-OURS\" }
+
+type B struct{}
+func (b B) String() string { return \"b\" }
+";
+    let theirs = "\
+package main
+
+type A struct{}
+func (a A) String() string { return \"a\" }
+
+type B struct{}
+func (b B) String() string { return \"B-THEIRS\" }
+";
+    let merged = match merge_at(base, ours, theirs, "f.go") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    // Both methods must survive with their respective edits.
+    assert!(
+        merged.contains("(a A) String()"),
+        "A.String lost: {merged}"
+    );
+    assert!(
+        merged.contains("(b B) String()"),
+        "B.String lost: {merged}"
+    );
+    assert!(merged.contains("A-OURS"), "ours edit lost: {merged}");
+    assert!(merged.contains("B-THEIRS"), "theirs edit lost: {merged}");
+}
+
 #[test]
 fn javascript_top_level_same_name_functions_distinguishable_by_arity() {
     // Plain JavaScript allows two top-level `function foo` declarations
