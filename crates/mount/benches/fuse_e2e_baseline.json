@@ -1,0 +1,85 @@
+{
+  "_meta": {
+    "captured_on": "2026-05-17 \u2014 Linux 6.8 kernel, ubuntu-shaped 4 vCPU host (orchestrator runner)",
+    "regenerate_with": "cargo bench --features fuse -p heddle-mount --bench fuse_e2e",
+    "note": "ns_per_iter is criterion's mean point estimate. Update intentionally; the compare script flags any workload at > baseline * 1.20."
+  },
+  "seq_read": {
+    "heddle": {
+      "ns_per_iter": 87081193.4,
+      "throughput_mib_s": 22.43
+    },
+    "vanilla": {
+      "ns_per_iter": 3609560.4,
+      "throughput_mib_s": 541.1
+    }
+  },
+  "mmap_read": {
+    "heddle": {
+      "ns_per_iter": 59936036.6,
+      "throughput_mib_s": 1067.81
+    },
+    "vanilla": {
+      "ns_per_iter": 14023004.8,
+      "throughput_mib_s": 4563.93
+    }
+  },
+  "concurrent_read": {
+    "heddle/4": {
+      "ns_per_iter": 18545356.2,
+      "throughput_mib_s": 105.32
+    },
+    "heddle/16": {
+      "ns_per_iter": 16823066.2,
+      "throughput_mib_s": 116.1
+    },
+    "vanilla/4": {
+      "ns_per_iter": 1585907.4,
+      "throughput_mib_s": 1231.55
+    },
+    "vanilla/16": {
+      "ns_per_iter": 1537570.7,
+      "throughput_mib_s": 1270.27
+    }
+  },
+  "random_read": {
+    "heddle": {
+      "ns_per_iter": 35712606.8,
+      "throughput_mib_s": 109.38
+    },
+    "vanilla": {
+      "ns_per_iter": 1673614.9,
+      "throughput_mib_s": 2334.02
+    }
+  },
+  "stat_storm": {
+    "heddle": {
+      "ns_per_iter": 101381335.1,
+      "throughput_elem_s": 19727.5
+    },
+    "vanilla": {
+      "ns_per_iter": 6488897.1,
+      "throughput_elem_s": 308218.79
+    }
+  },
+  "write_throughput": {
+    "heddle": {
+      "ns_per_iter": 13904397.4,
+      "throughput_mib_s": 287.68
+    },
+    "vanilla": {
+      "ns_per_iter": 1532698.9,
+      "throughput_mib_s": 2609.78
+    }
+  },
+  "lifecycle": {
+    "heddle_mount_unmount": {
+      "ns_per_iter": 107728807.8,
+      "throughput_elem_s": 9.28
+    },
+    "vanilla_mkdir_unlink": {
+      "ns_per_iter": 229911.6,
+      "throughput_elem_s": 4349.5
+    }
+  }
+}

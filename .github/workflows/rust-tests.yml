@@ -221,6 +221,109 @@ jobs:
         shell: pwsh
         run: sccache --show-stats
 
+  # FUSE end-to-end bench gate. Decides whether the (expensive)
+  # `fuse-bench` job needs to run for this PR. Skipping the bench on
+  # docs-only / unrelated-crate PRs keeps the CI bill manageable, but
+  # any change that could plausibly move FUSE perf numbers — the
+  # mount adapter itself, or one of its read-path dependencies
+  # (objects, repo, refs) — has to be measured. On `push` to main the
+  # bench always runs so the cache + baseline stay current.
+  fuse-bench-gate:
+    name: FUSE bench gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Two commits is enough for a PR diff; pushes set run=true
+          # unconditionally so depth doesn't matter there.
+          fetch-depth: 2
+      - id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # PR: diff against base. Bench runs if any mount-relevant
+          # path is touched.
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          if git diff --name-only "origin/${{ github.base_ref }}"...HEAD | \
+             grep -E '^(crates/(mount|objects|repo|refs)/|scripts/fuse-bench-compare\.py|\.github/workflows/rust-tests\.yml)' \
+             > /dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # FUSE end-to-end bench. Drives the `fuse_e2e` criterion suite
+  # through a real `FuseShell::mount_background` session, then
+  # `scripts/fuse-bench-compare.py` flags any workload that
+  # regressed > 20% vs the committed baseline at
+  # `crates/mount/benches/fuse_e2e_baseline.json`. Sibling of
+  # `fuse-smoke`: same runner shape (ubuntu-latest for
+  # `/dev/fuse` + `fusermount3`), same FUSE install step, just
+  # with `cargo bench` in place of `cargo test --ignored`.
+  fuse-bench:
+    name: FUSE bench (Linux)
+    runs-on: ubuntu-latest
+    needs: fuse-bench-gate
+    if: needs.fuse-bench-gate.outputs.run == 'true'
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuse-bench-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Install FUSE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3 libfuse3-dev
+          fusermount3 --version
+          ls -l /dev/fuse
+
+      # Run the bench. Criterion writes per-workload `estimates.json`
+      # under `target/criterion/<group>/<variant>/new/` which the
+      # compare script picks up. We capture the full stdout to an
+      # artifact so PR reviewers can see the raw numbers without
+      # re-running.
+      - name: cargo bench
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        run: |
+          cargo bench --locked --features fuse -p heddle-mount --bench fuse_e2e \
+            2>&1 | tee fuse_e2e_bench.log
+
+      - name: Compare to baseline (flag >20% regressions)
+        run: |
+          python3 scripts/fuse-bench-compare.py \
+            --criterion-dir target/criterion \
+            --baseline crates/mount/benches/fuse_e2e_baseline.json \
+            --threshold 0.20 \
+            | tee fuse_e2e_compare.txt
+
+      - name: Upload bench artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuse-e2e-bench
+          path: |
+            fuse_e2e_bench.log
+            fuse_e2e_compare.txt
+            target/criterion/
+
+      - name: sccache stats
+        run: sccache --show-stats
+
   # Coverage requires an instrumented build that can't share `target/`
   # with the regular profile, so it stays as its own job.
   coverage:
