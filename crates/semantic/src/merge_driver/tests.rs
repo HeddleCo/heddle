@@ -1424,6 +1424,47 @@ func (b B) String() string { return \"B-THEIRS\" }
     assert!(merged.contains("B-THEIRS"), "theirs edit lost: {merged}");
 }
 
+// =====================================================================
+// Codex r1 P2 #1: preserve order of multiple adjacent additions at the
+// same anchor.
+//
+// reconstruct.rs:296 — when N new items on one side all share the same
+// "left neighbour" in base, each gets inserted at anchor+1 in turn, so
+// the run ends up reversed in the merged output. Side-effect-tied
+// definitions (decorators, init order) break.
+// =====================================================================
+#[test]
+fn three_adjacent_added_items_preserve_source_order() {
+    let base = "\
+fn a() { 1 }
+fn z() { 9 }
+";
+    // ours adds b, c, d in order between a and z.
+    let ours = "\
+fn a() { 1 }
+fn b() { 2 }
+fn c() { 3 }
+fn d() { 4 }
+fn z() { 9 }
+";
+    // theirs modifies z so the file-level base==theirs shortcut doesn't
+    // fire — the splice path is actually exercised.
+    let theirs = "\
+fn a() { 1 }
+fn z() { 99 }
+";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    let pa = merged.find("fn a(").expect("a present");
+    let pb = merged.find("fn b(").expect("b present");
+    let pc = merged.find("fn c(").expect("c present");
+    let pd = merged.find("fn d(").expect("d present");
+    let pz = merged.find("fn z(").expect("z present");
+    assert!(
+        pa < pb && pb < pc && pc < pd && pd < pz,
+        "expected a < b < c < d < z order in:\n{merged}"
+    );
+}
+
 #[test]
 fn javascript_top_level_same_name_functions_distinguishable_by_arity() {
     // Plain JavaScript allows two top-level `function foo` declarations
