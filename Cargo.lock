@@ -3106,6 +3106,7 @@ name = "heddle-semantic"
 version = "0.2.4"
 dependencies = [
  "anyhow",
+ "heddle-merge",
  "heddle-objects",
  "similar",
  "thiserror 2.0.18",

@@ -28,6 +28,7 @@ lang-java = ["dep:tree-sitter-java"]
 
 [dependencies]
 anyhow.workspace = true
+merge = { path = "../merge", package = "heddle-merge", version = "0.2" }
 objects = { path = "../objects", package = "heddle-objects", version = "0.2", features = ["memory-backend"] }
 similar.workspace = true
 thiserror.workspace = true
