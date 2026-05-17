@@ -1569,3 +1569,229 @@ fn test_redo_preview_refuses_redact_chain() {
         "redo preview refusal should redirect to `heddle redact apply`: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cross-thread undo coverage (heddle#23 r2)
+//
+// These tests pin the contract laid out in docs/design/cross-thread-undo.md:
+// undo of `ThreadCreate` must keep ref state and ThreadManager metadata in
+// lockstep, and must refuse rather than orphan a materialized sibling
+// worktree.
+// ---------------------------------------------------------------------------
+
+/// Bootstrap a repo with an initial snapshot so `ensure_current_state` is
+/// happy when we go on to `heddle thread create`. Returns the temp dir so
+/// the caller keeps it alive for the rest of the test.
+fn bootstrap_repo_with_initial_state() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    temp
+}
+
+/// After undoing a plain `heddle thread create`, the ref must be gone *and*
+/// the ThreadManager record that `cmd_thread_create` wrote alongside the
+/// ref must be removed. Pre-fix the inverse only deleted the ref; the
+/// record lingered and surfaced as a phantom entry in `heddle thread show`
+/// (which reads from the record store, not the ref store). Cross-thread
+/// contract rule 4 (refs and ThreadManager metadata must mirror each
+/// other) — see docs/design/cross-thread-undo.md.
+#[test]
+fn test_undo_thread_create_removes_record_when_no_worktree() {
+    use repo::ThreadManager;
+
+    let temp = bootstrap_repo_with_initial_state();
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+
+    // Sanity: the record was written by `cmd_thread_create` (thread.rs:1636).
+    {
+        let repo = Repository::open(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let record = manager
+            .find_by_thread("feature")
+            .unwrap()
+            .expect("`thread create` writes a ThreadManager record");
+        assert!(
+            record.materialized_path.is_none(),
+            "plain `thread create` must not materialize a worktree"
+        );
+    }
+
+    heddle_must_succeed(&["undo"], temp.path());
+
+    let repo = Repository::open(temp.path()).unwrap();
+
+    // The ref is gone — that part already worked pre-fix.
+    assert!(
+        repo.refs().get_thread("feature").unwrap().is_none(),
+        "undo of `thread create` must delete the thread ref"
+    );
+
+    // The fix: the ThreadManager record must also be gone so subsequent
+    // `heddle thread show` / `thread list` don't surface a phantom entry.
+    let manager = ThreadManager::new(repo.heddle_dir());
+    assert!(
+        manager.find_by_thread("feature").unwrap().is_none(),
+        "undo of `thread create` must remove the matching ThreadManager record \
+         (heddle#23 r2 — cross-thread undo contract rule 4)"
+    );
+}
+
+/// Undoing `heddle start <name> --path <wt>` would orphan the materialized
+/// worktree directory at `<wt>` — the inverse deletes the thread ref but
+/// has no way to atomically tear the worktree down (it lives in another
+/// directory and may have uncommitted work in flight). Per the cross-thread
+/// contract rule 5, undo refuses with a clear message pointing the user at
+/// the manual teardown path (`heddle thread drop --delete-thread`).
+#[test]
+fn test_undo_thread_create_refuses_with_materialized_worktree() {
+    let temp = bootstrap_repo_with_initial_state();
+
+    let wt_path = temp.path().join("feature-wt");
+    heddle_must_succeed(
+        &[
+            "start",
+            "feature",
+            "--path",
+            wt_path.to_str().unwrap(),
+            "--workspace",
+            "solid",
+        ],
+        temp.path(),
+    );
+
+    // Sanity: the worktree was materialized.
+    assert!(
+        wt_path.exists(),
+        "`heddle start --path` must materialize the requested worktree"
+    );
+    {
+        let repo = Repository::open(temp.path()).unwrap();
+        assert!(
+            repo.refs().get_thread("feature").unwrap().is_some(),
+            "feature thread ref must exist after `start --path`"
+        );
+    }
+
+    let err = heddle(&["undo"], Some(temp.path()))
+        .expect_err("undo of `start --path` must refuse so the worktree isn't orphaned");
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("worktree") || lower.contains("materialized"),
+        "refusal must name the worktree concern: {err}"
+    );
+    assert!(
+        err.contains("feature-wt") || err.contains("feature"),
+        "refusal must surface the affected thread or worktree path: {err}"
+    );
+    assert!(
+        lower.contains("thread drop") || lower.contains("--delete-thread"),
+        "refusal must point at the teardown command: {err}"
+    );
+
+    // Refusal must be pre-flight: nothing was mutated.
+    let repo = Repository::open(temp.path()).unwrap();
+    assert!(
+        repo.refs().get_thread("feature").unwrap().is_some(),
+        "thread ref must survive a refused undo (pre-flight refusal — \
+         consistent with the redaction/dirty-worktree gates)"
+    );
+    assert!(
+        wt_path.exists(),
+        "worktree directory must survive a refused undo"
+    );
+}
+
+/// `heddle thread rename` is a batch `[ThreadCreate(new), ThreadDelete(old)]`
+/// (see oplog_records.rs::record_thread_rename). The cross-thread inverse
+/// must round-trip both halves: the new name's ref deleted, the old name's
+/// ref restored, no orphan ThreadManager record under the new name.
+///
+/// Regression guard: passes today because `cmd_thread_rename` never writes
+/// a record under the new name in the first place, so the inverse vacuously
+/// satisfies the "no orphan under new name" assertion. Catches a future
+/// regression that introduced a forward-path record write without a
+/// matching inverse cleanup.
+#[test]
+fn test_undo_thread_rename_round_trips_refs_and_record() {
+    use repo::ThreadManager;
+
+    let temp = bootstrap_repo_with_initial_state();
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "rename", "feature", "feature-v2"], temp.path());
+
+    {
+        let repo = Repository::open(temp.path()).unwrap();
+        assert!(
+            repo.refs().get_thread("feature-v2").unwrap().is_some(),
+            "rename forward path must create `feature-v2`"
+        );
+        assert!(
+            repo.refs().get_thread("feature").unwrap().is_none(),
+            "rename forward path must remove `feature`"
+        );
+    }
+
+    heddle_must_succeed(&["undo"], temp.path());
+
+    let repo = Repository::open(temp.path()).unwrap();
+
+    // Refs: rename rolled back.
+    assert!(
+        repo.refs().get_thread("feature").unwrap().is_some(),
+        "undo of rename must restore the old name's ref"
+    );
+    assert!(
+        repo.refs().get_thread("feature-v2").unwrap().is_none(),
+        "undo of rename must delete the new name's ref"
+    );
+
+    // ThreadManager: no orphan under the new name. (The record under the
+    // old name is a separate pre-existing concern: `cmd_thread_rename`
+    // doesn't update the record forward, so the record is still keyed at
+    // `feature` throughout. The contract here is just "the inverse mustn't
+    // *introduce* a divergence" — we don't try to heal forward-path bugs.)
+    let manager = ThreadManager::new(repo.heddle_dir());
+    assert!(
+        manager.find_by_thread("feature-v2").unwrap().is_none(),
+        "undo of rename must not leave a ThreadManager record under the new name \
+         (heddle#23 r2 — cross-thread undo contract rule 4)"
+    );
+}
+
+/// `heddle undo --preview` (alias `--dry-run`) must surface the
+/// worktree-attached refusal pre-mutation, matching the same
+/// preview-honesty rule used by the redaction gate at undo.rs:88.
+/// Pre-fix `--preview` would happily print "Would undo …" for a chain
+/// the real `undo` would reject, then the user runs the real command
+/// and is surprised by the refusal.
+#[test]
+fn test_undo_preview_surfaces_worktree_refusal() {
+    let temp = bootstrap_repo_with_initial_state();
+
+    let wt_path = temp.path().join("feature-wt");
+    heddle_must_succeed(
+        &[
+            "start",
+            "feature",
+            "--path",
+            wt_path.to_str().unwrap(),
+            "--workspace",
+            "solid",
+        ],
+        temp.path(),
+    );
+
+    let err = heddle(&["undo", "--preview"], Some(temp.path())).expect_err(
+        "`undo --preview` must refuse a worktree-attached ThreadCreate \
+                     instead of advertising 'Would undo …'",
+    );
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("worktree") || lower.contains("materialized"),
+        "preview refusal must name the worktree concern: {err}"
+    );
+}
