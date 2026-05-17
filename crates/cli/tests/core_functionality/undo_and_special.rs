@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 
+/// Convenience: read the current state's short change-id by opening the repo
+/// directly. Used by undo tests that assert HEAD has moved to a specific state.
+fn head_short(root: &std::path::Path) -> String {
+    let repo = Repository::open(root).unwrap();
+    repo.head().unwrap().expect("repo has HEAD").short()
+}
+
 #[test]
 fn test_undo_at_beginning() {
     let temp = TempDir::new().unwrap();
@@ -418,4 +425,324 @@ fn test_undo_with_dotgit_directory_present() {
             .is_clean(),
         "worktree must match HEAD after undo"
     );
+}
+
+// ---------------------------------------------------------------------------
+// MVP undo coverage for the three operations daily users will reach for:
+// `heddle capture`, `heddle merge` (FF and non-FF), plus the safety contracts
+// the MVP must satisfy (--dry-run alias, refusal across destructive boundaries,
+// discoverable --help surface).
+// ---------------------------------------------------------------------------
+
+/// `heddle capture` followed by `heddle undo` must restore HEAD to the
+/// pre-capture parent state — not "some earlier state", not "the empty state",
+/// the exact parent. This is the load-bearing invariant for daily use: after a
+/// botched capture, the user expects to be exactly where they were one
+/// operation ago.
+#[test]
+fn test_undo_capture_restores_head_to_parent() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("a.txt"), "v1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "first"], temp.path());
+    let parent = head_short(temp.path());
+
+    std::fs::write(temp.path().join("a.txt"), "v2").unwrap();
+    heddle_must_succeed(&["capture", "-m", "second"], temp.path());
+    let after_second = head_short(temp.path());
+    assert_ne!(
+        parent, after_second,
+        "second capture must produce a fresh state"
+    );
+
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        parent,
+        "undo of capture must restore HEAD to the immediate parent state"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
+        "v1",
+        "worktree must reflect the parent state's tree after undo"
+    );
+}
+
+/// Fast-forward merge undo, current behavior: HEAD is restored to the
+/// pre-merge tip, but the *merged-into* thread ref is **stranded** at the FF
+/// target. This is a documented gap (`docs/undo.md` "Known caveats") tracked
+/// by heddle#99 — add an `OpRecord::FastForward` variant that records the
+/// pre-merge thread state so undo can reset the ref too.
+///
+/// Why pin the bug instead of skipping the test: the day the FF undo is fixed
+/// this test will start failing on the stranded-ref assertion, which is
+/// exactly the signal we want — "the gap is closed, update the docs + this
+/// test." See also `test_undo_non_ff_merge_restores_both_threads` below for
+/// the non-FF path that already works end-to-end.
+#[test]
+fn test_undo_ff_merge_restores_head_but_strands_thread_ref() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    let feature_tip_before = head_short(temp.path());
+    assert_ne!(main_tip_before, feature_tip_before);
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    assert_eq!(head_short(temp.path()), main_tip_before);
+
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        feature_tip_before,
+        "FF merge must advance main to feature's tip"
+    );
+
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        main_tip_before,
+        "undo of FF merge must restore HEAD to main's pre-merge tip"
+    );
+
+    let repo = Repository::open(temp.path()).unwrap();
+
+    // Feature thread never moved during FF merge, so its tip is unchanged.
+    let feature_tip = repo
+        .refs()
+        .get_thread("feature")
+        .unwrap()
+        .expect("feature thread still exists")
+        .short();
+    assert_eq!(
+        feature_tip, feature_tip_before,
+        "feature thread tip must be unchanged across merge + undo"
+    );
+
+    // The documented gap: the `main` thread ref is left at the FF target.
+    // Today's `OpRecord::Goto` inverse only rewinds HEAD; it carries no
+    // thread context to reset the ref. When the follow-up adds a
+    // `FastForward` op variant, flip this assertion to `main_tip_before`.
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, feature_tip_before,
+        "current behavior: `main` thread ref is stranded at the FF target \
+         after undo (see docs/undo.md 'Known caveats' + follow-up issue)"
+    );
+}
+
+/// Non-fast-forward merge undo: both threads have divergent work since the
+/// common ancestor. The merge synthesizes a new merge state with two parents.
+/// Undo must restore main to its pre-merge tip; feature's tip never moved.
+/// Unlike the FF path, this case exercises the `Snapshot` inverse (the merge
+/// records a new state with `thread = Some("main")`), so the thread ref *is*
+/// reset alongside HEAD.
+#[test]
+fn test_undo_non_ff_merge_restores_both_threads() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    // Diverge feature.
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    let feature_tip_before = head_short(temp.path());
+
+    // Diverge main (independent file so the merge is conflict-free but non-FF).
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("main.txt"), "main work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "main work"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["merge", "feature"], temp.path());
+    let merge_state = head_short(temp.path());
+    assert_ne!(
+        merge_state, main_tip_before,
+        "non-FF merge must produce a fresh merge state"
+    );
+    assert_ne!(
+        merge_state, feature_tip_before,
+        "non-FF merge must not collapse to feature's tip"
+    );
+
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        main_tip_before,
+        "undo of non-FF merge must restore HEAD to main's pre-merge tip"
+    );
+
+    let repo = Repository::open(temp.path()).unwrap();
+
+    // The `main` thread ref must be reset too (not just HEAD): the `Snapshot`
+    // inverse for a merge carries the thread name so the ref rewinds with it.
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, main_tip_before,
+        "non-FF undo must reset the `main` thread ref to its pre-merge tip"
+    );
+
+    // Feature is untouched throughout — its tip stays put.
+    let feature_tip = repo
+        .refs()
+        .get_thread("feature")
+        .unwrap()
+        .expect("feature thread still exists")
+        .short();
+    assert_eq!(feature_tip, feature_tip_before);
+}
+
+/// `--dry-run` is the discoverable spelling of `--preview` documented in
+/// `heddle undo --help`. It must not mutate state.
+#[test]
+fn test_undo_dry_run_alias_does_not_apply() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("a.txt"), "v1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "first"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "v2").unwrap();
+    heddle_must_succeed(&["capture", "-m", "second"], temp.path());
+    let before = head_short(temp.path());
+
+    let out = heddle_must_succeed(&["undo", "--dry-run"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        before,
+        "--dry-run must not move HEAD"
+    );
+    assert!(
+        out.to_lowercase().contains("would undo"),
+        "--dry-run output must announce the dry-run shape: {out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
+        "v2",
+        "--dry-run must not touch the worktree"
+    );
+
+    // The same operation under the original `--preview` spelling still works
+    // (we kept the existing flag rather than renaming it).
+    let out_preview = heddle_must_succeed(&["undo", "--preview"], temp.path());
+    assert!(
+        out_preview.to_lowercase().contains("would undo"),
+        "--preview must keep working: {out_preview}"
+    );
+    assert_eq!(head_short(temp.path()), before);
+}
+
+/// When the state that undo would restore to has been removed from the object
+/// store (gc, oplog truncation, etc.), undo must refuse with a clear,
+/// actionable error rather than partially applying or surfacing a raw
+/// `StateNotFound` panic. The user must be told why we refused.
+#[test]
+fn test_undo_refuses_when_prior_state_missing() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("a.txt"), "v1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "first"], temp.path());
+    let first_state_short = head_short(temp.path());
+
+    std::fs::write(temp.path().join("a.txt"), "v2").unwrap();
+    heddle_must_succeed(&["capture", "-m", "second"], temp.path());
+
+    // Simulate the destructive-boundary case: the prior state object file is
+    // gone from the loose store *and* any pack that might contain it.
+    // Mirrors a `gc --prune` having reached past the live oplog, or an oplog
+    // backup restored without its objects.
+    let state_path = locate_state_loose_file(temp.path(), &first_state_short)
+        .expect("prior state's loose file is present after capture");
+    std::fs::remove_file(&state_path).unwrap();
+    // Drop every pack in the repo too; heddle writes packs eagerly and a
+    // surviving pack would still resolve the state, masking the test's
+    // destructive-boundary intent.
+    let packs_dir = temp.path().join(".heddle/packs");
+    if packs_dir.exists() {
+        for entry in std::fs::read_dir(&packs_dir).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+    }
+
+    let err = heddle(&["undo"], Some(temp.path()))
+        .expect_err("undo must refuse when the prior state is missing");
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("missing") || lower.contains("gone") || lower.contains("garbage"),
+        "error must explain that prior state is missing: {err}"
+    );
+    // Worktree and HEAD must not have moved.
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
+        "v2",
+        "refusal must not touch the worktree"
+    );
+}
+
+/// `heddle undo --help` must surface the MVP scope: what's undoable today and
+/// what is NOT (cross-thread, push/fetch, redo, purge). Without this, users
+/// have to read the source to know when undo will help.
+#[test]
+fn test_undo_help_lists_undoable_and_unsupported() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    let help = heddle_must_succeed(&["undo", "--help"], temp.path());
+    let lower = help.to_lowercase();
+    assert!(
+        lower.contains("undoable") || lower.contains("undo "),
+        "--help should describe what undo does: {help}"
+    );
+    assert!(
+        lower.contains("capture"),
+        "--help should list capture as undoable: {help}"
+    );
+    assert!(
+        lower.contains("merge"),
+        "--help should list merge as undoable: {help}"
+    );
+    assert!(
+        lower.contains("push") || lower.contains("fetch") || lower.contains("cross-thread"),
+        "--help should call out what is NOT undoable: {help}"
+    );
+}
+
+/// Locate a state's on-disk object file inside `.heddle/objects/states/` by
+/// the short change-id prefix. Heddle stores each captured state as
+/// `<full-change-id>.state` in that directory; the short id is the first
+/// component of the filename. Returns `None` when no matching file exists
+/// (e.g. the state lives only in a packfile).
+fn locate_state_loose_file(repo_root: &std::path::Path, short: &str) -> Option<std::path::PathBuf> {
+    let states_dir = repo_root.join(".heddle/objects/states");
+    for entry in std::fs::read_dir(&states_dir).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with(short) {
+            return Some(entry.path());
+        }
+    }
+    None
 }

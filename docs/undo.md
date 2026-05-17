@@ -1,0 +1,94 @@
+# `heddle undo`
+
+A safety net for the operations a daily user is most likely to want to roll back.
+
+This document describes the MVP scope shipped under
+[HeddleCo/heddle#23](https://github.com/HeddleCo/heddle/issues/23). Cross-thread
+undo, remote-affecting undo, and persistent cross-invocation redo are tracked as
+follow-ups.
+
+## Undoable operations
+
+| Operation        | What undo does                                                          |
+|------------------|-------------------------------------------------------------------------|
+| `heddle capture` | Restores `HEAD` and the worktree to the immediate parent state.         |
+| `heddle merge` (non-FF) | Restores `HEAD` **and** both thread refs; drops the merge state.  |
+| `heddle merge` (FF)     | Restores `HEAD` to the pre-merge tip. **Caveat:** the merged-into thread ref is left at the FF target — see "Known caveats" below. |
+| `heddle goto`    | Restores `HEAD` to the pre-`goto` state.                                |
+| `heddle thread create`   | Deletes the thread (if no further work landed on it).           |
+| `heddle thread drop`     | Recreates the thread at its pre-drop tip.                       |
+| `heddle thread rename`   | Renames back.                                                   |
+| `heddle marker create`   | Deletes the marker.                                             |
+| `heddle marker drop`     | Recreates the marker at its prior state.                        |
+
+The list above is the **shipped** surface for v0.2. The inverses live in
+`crates/cli/src/cli/commands/undo_apply.rs`; the oplog records that drive them
+live in `crates/oplog/src/oplog/oplog_types.rs::OpRecord`.
+
+## Not undoable (today)
+
+These intentionally fall outside the MVP — they either touch state we don't
+own, are destructive by design, or need a substrate change we haven't shipped:
+
+- **`heddle push` / `heddle fetch`** — remote-affecting. Reverting them would
+  require coordinating with the other side. File a follow-up if you need this.
+- **`heddle purge`** — physically removes blob bytes. Documented irreversible
+  in `OpRecord::Purge` (the `Redact` declaration that preceded it can still
+  be undone separately when that path lands).
+- **Cross-thread undo** — today's undo only rewinds operations recorded on the
+  current checkout's HEAD path. Undoing an op that mutated a different thread
+  is the design problem heddle#23's title points at; the MVP ships the
+  single-thread safety net first.
+- **Redo across CLI invocations** — `heddle redo` works within the same shell
+  session but is not yet persisted across processes.
+
+## Safety contracts
+
+The CLI is designed to **fail loud** instead of silently corrupting state. The
+contracts below are enforced by integration tests in
+`crates/cli/tests/core_functionality/undo_and_special.rs`.
+
+- **Dirty worktree refusal.** If you have uncommitted changes (modified
+  tracked files, untracked files), `heddle undo` refuses and surfaces the
+  dirty paths. Capture the changes with `heddle capture -m "..."` (or remove
+  them) and retry. The check is shared with `cherry-pick` and `rebase`.
+- **Destructive-boundary refusal.** If the state the inverse would restore
+  has been removed from the object store — typically by `heddle gc --prune`
+  reaching past the live oplog window — `heddle undo` refuses with a single
+  clear message naming the missing op id. Restore from a backup or list past
+  the boundary with `heddle undo --list`.
+- **Idempotent re-run.** Once a batch is marked undone, the next `heddle
+  undo` picks the next still-active batch (or refuses if none remain). Re-
+  running `heddle undo` is never destructive.
+- **`--dry-run` is non-mutating.** `heddle undo --dry-run` (alias of
+  `--preview`) prints the batches it would undo without touching the
+  worktree, ref refs, or oplog state.
+
+## Flags
+
+| Flag                       | Purpose                                                     |
+|----------------------------|-------------------------------------------------------------|
+| `-n, --steps <N>`          | Roll back the last `N` batches (default 1).                 |
+| `--list`                   | Print the recent batches without undoing.                   |
+| `--depth <N>`              | How many batches `--list` shows (default 20).               |
+| `--preview` / `--dry-run`  | Print what would change without applying.                   |
+| `--output {auto,json,text}`| Force output format. JSON is the structured contract.        |
+
+Run `heddle undo --help` for the curated list with examples and the explicit
+"NOT undoable" reminder.
+
+## Known caveats (filed as follow-ups)
+
+- After a **fast-forward** merge undo, `HEAD` is restored to the pre-merge
+  state but the *thread ref* you merged into is left at the FF target. A
+  `heddle thread switch <name>` re-attaches; data is never lost. Fixing
+  this end-to-end needs a new `OpRecord::FastForward` variant carrying the
+  thread context — out of scope for the MVP. Tracked in
+  [heddle#99](https://github.com/HeddleCo/heddle/issues/99) and pinned by
+  `test_undo_ff_merge_restores_head_but_strands_thread_ref`.
+- `OpRecord::Checkpoint` is defined but no current code path emits it; the
+  variant exists for the agent-frequent-saves work in flight. When it lands
+  it will need its own inverse arm in `undo_apply.rs`.
+- `OpRecord::Redact` is documented as reversible but currently no-ops on
+  undo (`undo_apply.rs` falls through to the default arm). A follow-up
+  will reverse the materialize-substitution side effect.

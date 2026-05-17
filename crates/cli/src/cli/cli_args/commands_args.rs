@@ -308,7 +308,23 @@ Examples:
   heddle undo                # roll back the most recent operation
   heddle undo -n 3           # roll back the last three operations
   heddle undo --list         # preview undoable operations on this thread
-  heddle undo --preview      # show what would change without applying
+  heddle undo --dry-run      # show what would change without applying
+
+Undoable operations:
+  - heddle capture           (restores HEAD to the pre-capture parent)
+  - heddle merge (non-FF)    (restores HEAD + both thread refs)
+  - heddle merge (FF)        (restores HEAD only; the merged-into thread ref
+                              stays at the FF target — run `heddle thread
+                              switch <name>` to re-attach. Data is never lost.)
+  - heddle goto              (restores HEAD to the pre-goto state)
+  - heddle thread create/drop/rename
+  - heddle marker create/drop
+
+Not undoable (file a follow-up if you need one):
+  - heddle push / heddle fetch        (remote-affecting; out of scope)
+  - heddle purge                      (destructive by design; irreversible)
+  - cross-thread undo                 (single-thread scope today)
+  - redo across CLI invocations       (use `heddle redo` in the same shell)
 ")]
 pub struct UndoArgs {
     /// Undo N operations.
@@ -323,8 +339,9 @@ pub struct UndoArgs {
     #[arg(long, default_value = "20")]
     pub depth: usize,
 
-    /// Preview operations without undoing.
-    #[arg(long)]
+    /// Preview operations without undoing. `--dry-run` is an accepted
+    /// alias kept for muscle memory from git/other VCS tooling.
+    #[arg(long, visible_alias = "dry-run")]
     pub preview: bool,
 }
 
