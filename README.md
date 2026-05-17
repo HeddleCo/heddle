@@ -270,7 +270,7 @@ heddle push
 
 Important current behavior:
 
-- `heddle start` is the public entrypoint for starting work; `--workspace heavy` creates a real checkout, `--workspace light` uses the virtualized filesystem path, and `--path` places a heavy checkout somewhere explicit
+- `heddle start` is the public entrypoint for starting work; `--workspace materialized` creates a real checkout, `--workspace virtualized` uses the virtualized filesystem path, and `--path` places a heavy checkout somewhere explicit
 - in a plain Git repository, `heddle status` bootstraps Heddle sidecar storage under `.heddle/`, adopts the active Git branch as the current Heddle thread, and reports dirty files immediately
 - `heddle init` in a Git-backed repository uses the same sidecar model explicitly if you want to opt in ahead of first status/diagnose usage
 - `heddle capture` records a fine-grained recoverable step for undo, provenance, and review; this is the thing agents should do after a turn, before the work is ready to become public history

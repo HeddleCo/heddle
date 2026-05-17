@@ -361,7 +361,7 @@ fn test_cli_push_defaults_to_current_attached_thread() {
                 "start",
                 "feature/push-default",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(source.path()),
         )

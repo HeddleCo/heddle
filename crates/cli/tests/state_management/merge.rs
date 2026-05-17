@@ -158,12 +158,10 @@ fn test_continue_after_manual_marker_removal_says_mark_file_resolved() {
         blocked_continue["recommended_action"],
         "heddle resolve file.txt"
     );
-    assert!(
-        blocked_continue["message"]
-            .as_str()
-            .unwrap()
-            .contains("mark each file resolved with `heddle resolve <path>`")
-    );
+    assert!(blocked_continue["message"]
+        .as_str()
+        .unwrap()
+        .contains("mark each file resolved with `heddle resolve <path>`"));
 
     heddle(&["resolve", "file.txt"], Some(temp.path())).unwrap();
     let continued = heddle(&["--json", "continue"], Some(temp.path())).unwrap();
@@ -331,7 +329,7 @@ fn test_merge_from_main_worktree_targets_active_thread_lightweight_worktree() {
     // Start a private (lightweight) thread — its worktree lives at
     // a metadata-recorded path *outside* of `temp.path()`.
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -405,7 +403,7 @@ fn test_goto_from_main_worktree_targets_active_thread_lightweight_worktree() {
 
     heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -450,7 +448,7 @@ fn test_rebase_from_main_worktree_targets_active_thread_lightweight_worktree() {
     // Roll back so the lightweight thread starts behind `main`.
     heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -607,7 +605,7 @@ fn test_thread_switch_does_not_modify_cwd_worktree() {
 
     // Build a feature thread with content distinct from main.
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -701,7 +699,7 @@ fn test_thread_switch_only_updates_head() {
     heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
 
     heddle(
-        &["start", "feature", "--workspace", "private"],
+        &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -762,7 +760,7 @@ fn test_thread_switch_works_from_inside_thread_worktree() {
     // Two lightweight agent threads. CWD-of-the-test is main's root,
     // each agent has its own dedicated worktree.
     heddle(
-        &["start", "alpha", "--workspace", "private"],
+        &["start", "alpha", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -782,11 +780,7 @@ fn test_thread_switch_works_from_inside_thread_worktree() {
     )
     .unwrap();
 
-    heddle(
-        &["start", "beta", "--workspace", "private"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    heddle(&["start", "beta", "--workspace", "auto"], Some(temp.path())).unwrap();
     let beta_show = heddle(&["thread", "show", "beta", "--json"], Some(temp.path())).unwrap();
     let beta_path = serde_json::from_str::<Value>(&beta_show).unwrap()["execution_path"]
         .as_str()
@@ -812,17 +806,30 @@ fn test_thread_switch_works_from_inside_thread_worktree() {
     )
     .unwrap();
 
-    // HEAD updates *in the worktree we ran from*. Each isolated
-    // checkout has its own .heddle/HEAD (sharing only the object
-    // store with the main repo), so a switch from alpha_path
-    // attaches alpha's HEAD to beta — exactly what the operator
-    // running `thread switch` from that terminal expects. The main
-    // repo's HEAD (at temp.path()) is independently untouched.
-    let status = status_json(std::path::Path::new(&alpha_path));
+    // Worktree-HEAD safety (cmd_thread_switch in thread.rs):
+    // `thread switch beta` from inside alpha's dedicated worktree
+    // routes the HEAD update to the *main repo*, not alpha's
+    // worktree-local HEAD. Two reasons:
+    //   1. Alpha's worktree keeps its identity — running `heddle
+    //      status` from alpha_path afterwards still says "alpha", so
+    //      the next auto-capture-on-switch sees source=alpha and runs
+    //      (instead of seeing source==target and skipping).
+    //   2. The user's intent in invoking `thread switch beta` from
+    //      anywhere is "set the active thread to beta"; the main
+    //      repo's HEAD is the canonical answer to that question.
+    // So: main repo HEAD advances to beta, alpha worktree HEAD stays
+    // at alpha.
+    let main_status = status_json(temp.path());
     assert_eq!(
-        status["thread"].as_str().unwrap(),
+        main_status["thread"].as_str().unwrap(),
         "beta",
-        "HEAD in the worktree we ran switch from must point at beta"
+        "main repo HEAD must advance to beta after thread switch beta"
+    );
+    let alpha_status = status_json(std::path::Path::new(&alpha_path));
+    assert_eq!(
+        alpha_status["thread"].as_str().unwrap(),
+        "alpha",
+        "alpha's worktree HEAD must keep its identity (so future auto-capture works)"
     );
 
     // Alpha's worktree must be untouched — switching to beta from
@@ -867,7 +874,7 @@ fn test_thread_switch_to_thread_with_missing_worktree_handles_gracefully() {
     heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
 
     heddle(
-        &["start", "ghost", "--workspace", "private"],
+        &["start", "ghost", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();
@@ -1149,7 +1156,7 @@ fn test_thread_refresh_with_disjoint_sibling_changes_succeeds() {
             "start",
             "alpha",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             alpha_path.to_str().unwrap(),
         ],
@@ -1164,7 +1171,7 @@ fn test_thread_refresh_with_disjoint_sibling_changes_succeeds() {
             "start",
             "beta",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             beta_path.to_str().unwrap(),
         ],
@@ -1227,7 +1234,7 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
             "start",
             "alpha",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             alpha_path.to_str().unwrap(),
         ],
@@ -1240,7 +1247,7 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
             "start",
             "beta",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             beta_path.to_str().unwrap(),
         ],

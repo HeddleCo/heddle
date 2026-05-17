@@ -112,7 +112,7 @@ fn test_thread_create_then_show_via_record() {
 
     assert_eq!(summary["name"], name);
     assert_eq!(
-        summary["thread_mode"], "lightweight",
+        summary["thread_mode"], "materialized",
         "no-worktree create records the closest existing variant; \
          got: {summary}"
     );

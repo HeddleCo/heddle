@@ -31,6 +31,7 @@ mod stash;
 #[cfg(feature = "tree-sitter-symbols")]
 pub use semantic::symbol_resolver;
 mod thread_advice;
+pub mod thread_manifest;
 mod thread_model;
 mod thread_record_store;
 mod thread_storage;
@@ -63,7 +64,8 @@ pub use repository::{
     RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability,
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,
     RepositoryPerformanceInspectionReport, SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile,
-    TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats,
+    ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree,
+    WarmCanonicalStoreStats,
     WorktreeCompareProfile, WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct,
     find_merge_base, is_major_rewrite, is_synthetic_root,
 };

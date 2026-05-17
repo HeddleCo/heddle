@@ -11,8 +11,8 @@ use std::{
     ffi::OsStr,
     fs,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     },
 };
 
@@ -29,6 +29,121 @@ use crate::{
     error::MountError,
     shell::{NodeId, NodeKind, PlatformShell},
 };
+
+/// Shared test mocks. Lives under `tests::mocks` so the per-platform
+/// adapter unit tests (FSKit on macOS, ProjFS on Windows) can reuse
+/// the same in-memory shell without duplicating it inline.
+///
+/// Gated on the features that actually consume the mocks so OSS-only
+/// Linux builds (no `fskit` / `projfs`) don't trip clippy's
+/// `-D warnings` on dead test code.
+#[cfg(any(
+    all(target_os = "macos", feature = "fskit"),
+    all(target_os = "windows", feature = "projfs"),
+))]
+pub(crate) mod mocks {
+    use std::{
+        ffi::OsStr,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::UNIX_EPOCH,
+    };
+
+    use crate::{
+        error::{MountError, Result},
+        shell::{Attrs, Entry, NodeId, NodeKind, PlatformShell, DIR_UNIX_MODE},
+    };
+
+    /// Trivial in-memory shell that lets adapter unit tests validate
+    /// the session construct-and-drop lifecycle without needing a real
+    /// `ContentAddressedMount` (which requires a `Repository`).
+    ///
+    /// Increments `drops` exactly once when the shell is finally
+    /// dropped, so a test that boxes the shell into a C ABI handle can
+    /// assert the box was reclaimed.
+    pub struct CountingShell {
+        pub drops: Arc<AtomicUsize>,
+    }
+
+    impl CountingShell {
+        pub fn new() -> (Self, Arc<AtomicUsize>) {
+            let drops = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    drops: Arc::clone(&drops),
+                },
+                drops,
+            )
+        }
+    }
+
+    impl Drop for CountingShell {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl PlatformShell for CountingShell {
+        fn lookup(&self, _parent: NodeId, _name: &OsStr) -> Result<Option<Entry>> {
+            Ok(None)
+        }
+        fn read(&self, _node: NodeId, _offset: u64, _buf: &mut [u8]) -> Result<usize> {
+            Ok(0)
+        }
+        fn write(&self, _node: NodeId, _offset: u64, _data: &[u8]) -> Result<usize> {
+            Err(MountError::ReadOnly)
+        }
+        fn enumerate(&self, _dir: NodeId) -> Result<Vec<Entry>> {
+            Ok(vec![])
+        }
+        fn attrs(&self, node: NodeId) -> Result<Attrs> {
+            Ok(Attrs {
+                node,
+                kind: NodeKind::Directory,
+                size: 0,
+                unix_mode: DIR_UNIX_MODE,
+                nlink: 2,
+                mtime: UNIX_EPOCH,
+            })
+        }
+        fn invalidate(&self, _node: NodeId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Shell that panics on every PlatformShell call. Used by the
+    /// FFI panic-resilience tests to drive an unwind into a
+    /// trampoline body — the `catch_unwind` wrappers in
+    /// `fskit::guarded_c_int` and `projfs::guarded_hresult` must
+    /// translate the panic into `EIO` / a Win32 I/O HRESULT instead
+    /// of letting the unwind cross the C ABI boundary (which Rust
+    /// ≥1.81 turns into an abort that would crash the host process
+    /// and every projected/materialised volume with it).
+    pub struct PanicShell;
+
+    impl PlatformShell for PanicShell {
+        fn lookup(&self, _parent: NodeId, _name: &OsStr) -> Result<Option<Entry>> {
+            panic!("panic-shell: lookup intentionally panics")
+        }
+        fn read(&self, _node: NodeId, _offset: u64, _buf: &mut [u8]) -> Result<usize> {
+            panic!("panic-shell: read intentionally panics")
+        }
+        fn write(&self, _node: NodeId, _offset: u64, _data: &[u8]) -> Result<usize> {
+            panic!("panic-shell: write intentionally panics")
+        }
+        fn enumerate(&self, _dir: NodeId) -> Result<Vec<Entry>> {
+            panic!("panic-shell: enumerate intentionally panics")
+        }
+        fn attrs(&self, _node: NodeId) -> Result<Attrs> {
+            panic!("panic-shell: attrs intentionally panics")
+        }
+        fn invalidate(&self, _node: NodeId) -> Result<()> {
+            panic!("panic-shell: invalidate intentionally panics")
+        }
+    }
+}
 
 /// Build a repository with a small, deterministic tree:
 ///

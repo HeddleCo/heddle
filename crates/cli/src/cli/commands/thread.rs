@@ -7,7 +7,7 @@ use std::{
     process,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use objects::{
     object::{ChangeId, State},
@@ -16,9 +16,10 @@ use objects::{
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
-    RepositoryOperationStatus, Thread, ThreadConfidenceSummary, ThreadFreshness,
-    ThreadImpactCategory, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadRuntimeOverlay,
-    ThreadState, ThreadVerificationSummary, ThreadView, describe_thread_advice,
+    RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
+    ThreadFreshness, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadManager, ThreadMode,
+    ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
+    describe_thread_advice,
 };
 use serde::Serialize;
 
@@ -464,7 +465,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
             mode: summary
                 .thread_mode
                 .clone()
-                .unwrap_or(ThreadMode::Lightweight),
+                .unwrap_or(ThreadMode::Materialized),
             state: summary.thread_state.clone().unwrap_or(ThreadState::Active),
             base_state: summary.base_state.clone().unwrap_or_default(),
             base_root: summary.base_root.clone().unwrap_or_default(),
@@ -685,7 +686,7 @@ fn build_thread_view(
                 thread: name.clone(),
                 target_thread: None,
                 parent_thread: None,
-                mode: ThreadMode::Lightweight,
+                mode: ThreadMode::Materialized,
                 state: ThreadState::Active,
                 base_state: base_state.unwrap_or_default(),
                 base_root: base_root.unwrap_or_default(),
@@ -792,7 +793,7 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
         mode: summary
             .thread_mode
             .clone()
-            .unwrap_or(ThreadMode::Lightweight),
+            .unwrap_or(ThreadMode::Materialized),
         state: summary.thread_state.clone().unwrap_or(ThreadState::Active),
         base_state: summary.base_state.clone().unwrap_or_default(),
         base_root: summary.base_root.clone().unwrap_or_default(),
@@ -848,8 +849,41 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
 
 pub(crate) fn visibility_label(mode: &ThreadMode) -> &'static str {
     match mode {
-        ThreadMode::Materialized | ThreadMode::Lightweight => "heavy",
-        ThreadMode::Virtualized => "light",
+        ThreadMode::Materialized => "materialized",
+        ThreadMode::Virtualized => "virtualized",
+        ThreadMode::Solid => "solid",
+    }
+}
+
+/// Compact glyph appended to a thread-list row to indicate whether
+/// the thread's worktree is live on disk *right now*. Three states:
+///
+/// * `" ●"` (accent-coloured) — a path is recorded and exists. The
+///   common case for a thread the user is actively working in.
+/// * `" ✗"` (warn-coloured)   — a path is recorded but the directory
+///   is gone (user did `rm -rf` or the disk was reset). Surfacing
+///   this is the whole point of the glyph — silent "ghost" threads
+///   are the friction we're trying to remove.
+/// * `""` (empty)             — no path recorded (pure-ref thread,
+///   never started; or `thread create` without `thread start`).
+///   Glyphless because there's nothing meaningful to indicate.
+///
+/// Virtualised threads with a recorded mount point go through the
+/// same `Path::exists()` check — if the FUSE/FSKit/ProjFS daemon is
+/// dead the mount directory is still a real (empty) dir, so this
+/// is honest. A `(stale)` advisory would be misleading.
+fn thread_liveness_glyph(entry: &ThreadSummary) -> String {
+    let path = entry
+        .path
+        .as_deref()
+        .or(entry.execution_path.as_deref());
+    let Some(path) = path else {
+        return String::new();
+    };
+    if std::path::Path::new(path).exists() {
+        format!(" {}", style::accent("●"))
+    } else {
+        format!(" {}", style::warn("✗"))
     }
 }
 
@@ -980,13 +1014,20 @@ fn render_thread_entry(entry: &ThreadSummary) {
         style::dim("-")
     };
     let state = entry.current_state.as_deref().unwrap_or("(no state)");
+    // Worktree-liveness glyph after the mode label. Lets the user
+    // tell at a glance which threads have an actual on-disk worktree
+    // they can `cd` to vs. which are pure refs (or virtual mounts
+    // whose daemon may or may not be up). One stat per row — cheap
+    // for any sane thread count, no I/O at all on ref-only threads.
+    let liveness = thread_liveness_glyph(entry);
     println!(
-        "{} {} {} {} {}",
+        "{} {} {} {} {}{}",
         prefix,
         style::bold(&entry.name),
         style::dim(state),
         style::thread_state(&entry.coordination_status.to_string()),
-        style::dim(&entry.visibility)
+        style::dim(&entry.visibility),
+        liveness,
     );
     if let Some(path) = &entry.path {
         println!("    path: {}", path);
@@ -1145,12 +1186,44 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     }
 
     let thread_mode = resolve_thread_mode(repo, &args);
+    // Honesty pass for explicit `--workspace materialized` on a
+    // filesystem that doesn't support reflinks. `resolve_thread_mode`
+    // already downgrades Auto silently to `solid` in this case (the
+    // mode label should match disk truth), but an explicit user
+    // choice we respect — and then we owe the user a stderr note so
+    // they know why their disk usage will be higher than the design-
+    // doc promises. Fires once per `thread start` invocation, goes
+    // to stderr so JSON consumers on stdout are unaffected.
+    if args.workspace == WorkspaceModeArg::Materialized
+        && !objects::fs_clone::filesystem_supports_reflink(repo.root())
+    {
+        eprintln!(
+            "{}: this filesystem doesn't support reflinks/clonefile, so \
+             `--workspace materialized` will fall back to per-file copies — \
+             disk usage will match `--workspace solid`. \
+             Use `--workspace solid` to make this explicit, or `--workspace auto` \
+             to let heddle pick the right mode for this host.",
+            style::warn("note"),
+        );
+    }
     let path = match thread_mode {
+        // Bytes-on-disk modes honour an explicit `--path`. Clonefile
+        // (`Materialized`) doesn't care where the destination lives;
+        // full-copy (`Solid`) doesn't either. Default to a managed
+        // path when `--path` is absent — heddle-internal layout for
+        // Materialized so we can sweep it cleanly; the top-level
+        // `default_thread_path` for Solid because users typically
+        // want a navigable sibling directory.
         ThreadMode::Materialized => args
             .path
             .clone()
+            .unwrap_or_else(|| default_lightweight_thread_path(repo, &args.name)),
+        ThreadMode::Solid => args
+            .path
+            .clone()
             .unwrap_or_else(|| default_thread_path(repo, &args.name)),
-        ThreadMode::Lightweight => default_lightweight_thread_path(repo, &args.name),
+        // Virtualised mounts must live at a Heddle-managed path so a
+        // user-named directory never gets shadowed by a kernel mount.
         ThreadMode::Virtualized => default_virtualized_thread_path(repo, &args.name),
     };
     let abs_path = prepare_worktree_target(repo, &path)?;
@@ -1174,7 +1247,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let shared_target_dir_path: Option<PathBuf> = if args.shared_target
         && matches!(
             thread_mode,
-            ThreadMode::Materialized | ThreadMode::Lightweight
+            ThreadMode::Solid | ThreadMode::Materialized
         ) {
         if shared_target::workspace_root_is_rust(repo) {
             Some(shared_target::shared_target_dir(repo)?)
@@ -1195,7 +1268,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     if !args.shared_target
         && matches!(
             thread_mode,
-            ThreadMode::Materialized | ThreadMode::Lightweight
+            ThreadMode::Solid | ThreadMode::Materialized
         )
         && shared_target::should_advise_shared_target(repo)
     {
@@ -1209,8 +1282,17 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // would otherwise lie about a redirect that isn't in effect.
     let mut shared_target_dir_path = shared_target_dir_path;
     match thread_mode {
-        ThreadMode::Materialized | ThreadMode::Lightweight => {
+        ThreadMode::Solid | ThreadMode::Materialized => {
             write_isolated_checkout(repo, &abs_path, &base_state, Some(&args.name))?;
+            // Materialized threads ship with a manifest sidecar that
+            // ties the on-disk worktree to the captured state via a
+            // per-file stat-cache. Solid threads are full file copies
+            // with no shared extents and stat-cache reuse wouldn't be
+            // semantically right (the bytes can drift without us
+            // noticing the way clonefile shares would expose).
+            if matches!(thread_mode, ThreadMode::Materialized) {
+                repo.record_thread_manifest(&args.name, &base_state, &abs_path)?;
+            }
             if let Some(dir) = shared_target_dir_path.as_ref() {
                 let applied = shared_target::write_cargo_config(&abs_path, dir)?;
                 if !applied {
@@ -1282,7 +1364,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         task: task.clone(),
         execution_path: abs_path.clone(),
         materialized_path: match thread_mode {
-            ThreadMode::Materialized | ThreadMode::Lightweight => Some(abs_path.clone()),
+            ThreadMode::Solid | ThreadMode::Materialized => Some(abs_path.clone()),
             // Virtualized records the mount point as the materialized
             // path so `heddle thread show` reports it; it's not a
             // checkout, but it is the path the user `cd`s into.
@@ -1325,7 +1407,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             anchor_root: Some(base_root.clone()),
             reservation_token: Some(objects::store::generate_agent_id()),
             path: match thread_mode {
-                ThreadMode::Materialized | ThreadMode::Lightweight | ThreadMode::Virtualized => {
+                ThreadMode::Solid | ThreadMode::Materialized | ThreadMode::Virtualized => {
                     Some(path_for_entry.clone())
                 }
             },
@@ -1354,7 +1436,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 
     let summary = find_thread_summary(repo, &args.name)?;
     let message = match thread_mode {
-        ThreadMode::Lightweight | ThreadMode::Materialized => {
+        ThreadMode::Materialized | ThreadMode::Solid => {
             format!(
                 "Started heavy thread '{}' at '{}'",
                 args.name,
@@ -1386,21 +1468,55 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 }
 
 fn resolve_thread_mode(repo: &Repository, args: &ThreadStartArgs) -> ThreadMode {
-    if args.path.is_some() {
-        // An explicit `--path` means "put the heavy checkout here".
-        // Light workspaces stay Heddle-managed so a mount never shadows
-        // a user-named directory.
-        return ThreadMode::Materialized;
-    }
-
+    // Explicit `--workspace` wins. `--path` only changes *where* the
+    // worktree lives; the mode dispatch decides *how* the bytes get
+    // there (clonefile vs mount vs full copy). We respect explicit
+    // modes even on filesystems that won't deliver their full
+    // performance promise (e.g. `--workspace materialized` on ext4
+    // silently falls through to per-blob `fs::copy` inside the
+    // materializer); the auto path probes the FS instead so the
+    // mode label in `heddle status` stays accurate.
     match args.workspace {
-        WorkspaceModeArg::Heavy => ThreadMode::Lightweight,
-        WorkspaceModeArg::Light => ThreadMode::Virtualized,
-        WorkspaceModeArg::Auto => match resolve_auto_workspace_default(repo, args) {
-            UserThreadWorkspaceMode::Heavy => ThreadMode::Lightweight,
-            UserThreadWorkspaceMode::Light => ThreadMode::Virtualized,
-            UserThreadWorkspaceMode::Auto => ThreadMode::Lightweight,
-        },
+        WorkspaceModeArg::Materialized => ThreadMode::Materialized,
+        WorkspaceModeArg::Virtualized => ThreadMode::Virtualized,
+        WorkspaceModeArg::Solid => ThreadMode::Solid,
+        WorkspaceModeArg::Auto => {
+            // Explicit `--path` with no explicit mode reads as "I want
+            // a checkout I can navigate to" — point Auto away from
+            // `virtualized` (which is always managed) toward the
+            // bytes-on-disk modes.
+            let candidate = if args.path.is_some() {
+                ThreadMode::Materialized
+            } else {
+                match resolve_auto_workspace_default(repo, args) {
+                    UserThreadWorkspaceMode::Materialized => ThreadMode::Materialized,
+                    UserThreadWorkspaceMode::Virtualized => ThreadMode::Virtualized,
+                    UserThreadWorkspaceMode::Solid => ThreadMode::Solid,
+                    UserThreadWorkspaceMode::Auto => ThreadMode::Materialized,
+                }
+            };
+            // Auto-only reflink-capability probe. `materialized`
+            // implies "clonefile/reflink the captured tree into a
+            // thread dir"; on ext4 / HFS+ / NTFS the clonefile call
+            // returns `EOPNOTSUPP` and `materialize_blob` falls back
+            // to per-blob `fs::copy`. That works but uses N× the disk
+            // a CoW share would, and a user-facing `Workspace:
+            // materialized` line would be misleading. Downgrade to
+            // `solid` so the mode label matches what's actually on
+            // disk. One-shot syscall pair (write + clonefile on a
+            // tiny probe file under repo root), measured at <1 ms.
+            if candidate == ThreadMode::Materialized
+                && !objects::fs_clone::filesystem_supports_reflink(repo.root())
+            {
+                tracing::debug!(
+                    root = %repo.root().display(),
+                    "Auto workspace: filesystem does not support reflinks; \
+                     falling back to `solid` so the mode label reflects disk truth"
+                );
+                return ThreadMode::Solid;
+            }
+            candidate
+        }
     }
 }
 
@@ -1414,7 +1530,7 @@ fn resolve_auto_workspace_default(
             .worktree
             .thread_workspace
             .delegated_default
-            .unwrap_or(UserThreadWorkspaceMode::Heavy)
+            .unwrap_or(UserThreadWorkspaceMode::Materialized)
     } else {
         user_config.worktree.thread_workspace.top_level_default
     }
@@ -1485,7 +1601,7 @@ pub(crate) fn cmd_thread_create(
         thread: name.clone(),
         target_thread,
         parent_thread: None,
-        mode: ThreadMode::Lightweight,
+        mode: ThreadMode::Materialized,
         state: ThreadState::Active,
         base_state: base_short.clone(),
         base_root,
@@ -1530,11 +1646,135 @@ pub(crate) fn cmd_thread_create(
     render_thread_op(cli, output)
 }
 
-pub(crate) fn cmd_thread_switch(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
+/// If `repo` was opened against a dedicated thread worktree, open
+/// and return a fresh `Repository` handle rooted at the **main**
+/// repo. Returns `Ok(None)` when `repo` IS the main repo.
+///
+/// Detection signal: in `Repository::open`, when a worktree pointer
+/// (`.heddle/objectstore`) is followed, the resulting Repository
+/// has `root = <worktree_root>` but `heddle_dir = <shared_main_heddle>`.
+/// For the main repo, `heddle_dir == root.join(".heddle")`. So a
+/// mismatch between `repo.root().join(".heddle")` and
+/// `repo.heddle_dir()` is the worktree fingerprint.
+///
+/// Used by `cmd_thread_switch` to route HEAD writes at the main
+/// repo when the user runs the command from inside a worktree —
+/// otherwise `repo.refs().write_head()` lands on the worktree's
+/// local HEAD file (see `RefManager::with_local_head` in
+/// `crates/repo/src/repository.rs::open`) and clobbers the
+/// source worktree's identity.
+fn open_main_repo_from_worktree_if_needed(repo: &Repository) -> Result<Option<Repository>> {
+    let expected_for_main = repo.root().join(".heddle");
+    if expected_for_main == repo.heddle_dir() {
+        return Ok(None);
+    }
+    let main_root = repo.heddle_dir().parent().ok_or_else(|| {
+        anyhow!(
+            "heddle dir {} has no parent (the main repo root); cannot route HEAD write",
+            repo.heddle_dir().display()
+        )
+    })?;
+    Ok(Some(Repository::open(main_root)?))
+}
+
+/// Look up the on-disk path for `name` and print it on stdout. Read-only;
+/// no auto-capture, no state change. Powers the shell hook's
+/// `heddle thread cd` (the function `cd`s into the printed path).
+pub(crate) fn cmd_thread_cd(repo: &Repository, name: String) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let thread = manager
+        .find_by_thread(&name)?
+        .ok_or_else(|| anyhow!("Thread not found: {}", name))?;
+    let path = thread.execution_path;
+    if path.as_os_str().is_empty() {
+        return Err(anyhow!(
+            "thread '{name}' has no on-disk worktree (was it started with `--workspace virtualized`?)"
+        ));
+    }
+    if !path.exists() {
+        return Err(anyhow!(
+            "thread '{name}' was registered at '{}' but that path no longer exists; \
+             re-run `heddle start --workspace materialized {name}` to re-materialize",
+            path.display()
+        ));
+    }
+    println!("{}", path.display());
+    Ok(())
+}
+
+pub(crate) fn cmd_thread_switch(
+    cli: &Cli,
+    repo: &Repository,
+    name: String,
+    print_cd_path: bool,
+) -> Result<()> {
+    // Resolve the *target* before touching the source. A typo'd
+    // thread name otherwise produces (1) a new state on the source
+    // thread, (2) the source's head advancing, then (3) a
+    // `Thread not found` error — the bad side-effects already
+    // landed by the time the user sees the failure. Resolve first;
+    // bail before mutating anything if the target doesn't exist.
     let state = repo
         .refs()
         .get_thread(&name)?
         .ok_or_else(|| anyhow!("Thread not found: {}", name))?;
+
+    // Auto-capture-on-switch (jj-style): before flipping HEAD,
+    // capture any uncommitted edits in the *source* thread so the
+    // user never has the "you have uncommitted changes" experience
+    // git inflicts. Errors here surface loudly — silently losing
+    // the agent's work is the failure mode we are most allergic to.
+    //
+    // Fires when ALL of the following hold:
+    //   * HEAD is currently attached to a thread (so there's a
+    //     source thread to capture).
+    //   * Target differs from source (no-op self-switch).
+    //   * The source thread is `Materialized` or `Solid`. We
+    //     deliberately skip `Virtualized`: a dead FUSE/FSKit/ProjFS
+    //     mount leaves an empty real directory at the mount point,
+    //     `path.exists()` is true, `capture_thread_from_disk` walks
+    //     the empty dir, and the slow-path captures an *empty tree*
+    //     as the thread's new state — silent destruction of the
+    //     work the agent did inside the mount. Virtualised threads
+    //     are kept in sync by the daemon's write notifications; the
+    //     CLI doesn't second-guess that on switch.
+    //   * The source thread has a non-empty recorded execution
+    //     path that exists on disk. We capture there regardless of
+    //     whether it equals `repo.root()` — when the user runs
+    //     `heddle thread switch` from inside the source's own
+    //     worktree, `repo.root()` IS the execution path, and that's
+    //     exactly when we MOST want to capture (the user has been
+    //     editing here). Found during dogfood.
+    let auto_capture_outcome = match repo.head_ref()? {
+        Head::Attached {
+            thread: source_thread,
+        } if source_thread != name => {
+            let manager = ThreadManager::new(repo.heddle_dir());
+            let source_record = manager.find_by_thread(&source_thread)?;
+            let source_mode = source_record.as_ref().map(|t| t.mode.clone());
+            let source_path = source_record
+                .map(|t| t.execution_path)
+                .filter(|p| !p.as_os_str().is_empty());
+            let mode_safe_to_capture = matches!(
+                source_mode,
+                Some(ThreadMode::Materialized) | Some(ThreadMode::Solid)
+            );
+            match (mode_safe_to_capture, source_path) {
+                (true, Some(path)) if path.exists() => {
+                    let outcome = repo
+                        .capture_thread_from_disk(&source_thread, &path)
+                        .with_context(|| {
+                            format!(
+                                "auto-capture of '{source_thread}' before switch to '{name}'"
+                            )
+                        })?;
+                    Some((source_thread, outcome))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
 
     // "Invisible thread directories" rule: switching to a thread that has
     // its *own* dedicated worktree (the one `heddle start --workspace
@@ -1574,9 +1814,41 @@ pub(crate) fn cmd_thread_switch(cli: &Cli, repo: &Repository, name: String) -> R
         // we only need to flip HEAD. Importantly: this does NOT touch
         // CWD. Intentional raw `write_head` (not `fast_forward_attached`):
         // we're attaching to a *new* thread.
-        repo.refs().write_head(&Head::Attached {
+        //
+        // The HEAD we want to update is the *main repo's*. When the
+        // user is `cd`'d into a thread's dedicated worktree, `repo`
+        // refers to that worktree (which has its own `.heddle/HEAD`
+        // pointing at the source thread). Writing through `repo.refs()`
+        // would clobber the source worktree's HEAD with the target
+        // thread name — which (a) loses the source-worktree's
+        // identity, and (b) makes the next auto-capture-on-switch
+        // think source == target and skip itself. Found in dogfood.
+        // Fix: route the HEAD write to the main repo when we're
+        // inside a worktree.
+        let head_target_repo = open_main_repo_from_worktree_if_needed(repo)?;
+        let head_repo = head_target_repo.as_ref().unwrap_or(repo);
+        head_repo.refs().write_head(&Head::Attached {
             thread: name.clone(),
         })?;
+    } else if open_main_repo_from_worktree_if_needed(repo)?.is_some() {
+        // Switching to a target thread that has *no* dedicated
+        // worktree, from *inside* another thread's dedicated worktree.
+        // The legacy `goto` path would materialize the target's tree
+        // at the current worktree's root — overwriting the source
+        // worktree's files with the target's content. The bytes
+        // aren't lost (the auto-capture above wrote them to the
+        // source thread's history) but the disk state suddenly
+        // shows a different thread's content, which is jarring and
+        // makes it look like edits vanished.
+        //
+        // Refuse with a clear next step. The user either runs
+        // `heddle start --workspace materialized <target>` to give the
+        // target its own worktree, or cd's to the main repo root
+        // first.
+        anyhow::bail!(
+            "thread '{name}' has no dedicated worktree, and switching to it from inside another thread's worktree would overwrite this directory's files. \
+             Run `heddle start --workspace materialized {name}` to give it a dedicated worktree, or cd to the main repo root and try again."
+        );
     } else {
         // Legacy shared-worktree path: materialize the target tree at
         // CWD and reattach HEAD to the thread. Intentional raw `goto`:
@@ -1589,11 +1861,35 @@ pub(crate) fn cmd_thread_switch(cli: &Cli, repo: &Repository, name: String) -> R
     }
 
     let summary = find_thread_summary(repo, &name)?;
+
+    // Shell-hook mode: print only the target's on-disk path so the
+    // wrapper function can `cd` into it. Auto-capture still ran
+    // above; only the rich JSON/text output is suppressed.
+    if print_cd_path {
+        let path = summary
+            .as_ref()
+            .and_then(|t| t.execution_path.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "thread '{name}' has no on-disk worktree; `--print-cd-path` only works for materialized threads"
+                )
+            })?;
+        println!("{path}");
+        return Ok(());
+    }
+
     let mut message = format!("Switched to thread '{}'", name);
     if let Some(thread) = &summary
         && thread.coordination_status != CoordinationStatus::Clean
     {
         message.push_str(&format!(" [{}]", thread.coordination_status));
+    }
+    if let Some((source_thread, ThreadCaptureOutcome::Captured { state_id })) = auto_capture_outcome
+    {
+        message.push_str(&format!(
+            " (auto-captured '{source_thread}' → {})",
+            state_id.short()
+        ));
     }
 
     render_thread_op(

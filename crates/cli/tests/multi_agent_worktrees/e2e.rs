@@ -12,7 +12,7 @@ fn thread_start_rejects_second_active_writer_for_same_thread() {
             "start",
             "feature/reserved",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             first.path().to_str().unwrap(),
         ],
@@ -25,7 +25,7 @@ fn thread_start_rejects_second_active_writer_for_same_thread() {
             "start",
             "feature/reserved",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             second.path().to_str().unwrap(),
         ],
@@ -447,7 +447,7 @@ fn thread_captures_lists_granular_history_for_thread() {
             "start",
             "feature/captures",
             "--workspace",
-            "heavy",
+            "materialized",
             "--path",
             work.path().to_str().unwrap(),
         ],
@@ -522,7 +522,7 @@ fn capture_inherits_agent_from_thread() {
             "start",
             "modulo",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             work.path().to_str().unwrap(),
             "--agent-provider",
@@ -579,7 +579,7 @@ fn parallel_agents_visible_from_main_repo() {
             "start",
             "feature/auth",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             dir_a.path().to_str().unwrap(),
             "--agent-provider",
@@ -595,7 +595,7 @@ fn parallel_agents_visible_from_main_repo() {
             "start",
             "feature/search",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             dir_b.path().to_str().unwrap(),
             "--agent-provider",
@@ -635,16 +635,12 @@ fn parallel_agents_visible_from_main_repo() {
         serde_json::from_str(&heddle(&["--json", "thread", "list"], Some(main.path())).unwrap())
             .unwrap();
     let threads = thread_list["threads"].as_array().unwrap();
-    assert!(
-        threads
-            .iter()
-            .any(|thread| thread["name"] == "feature/auth")
-    );
-    assert!(
-        threads
-            .iter()
-            .any(|thread| thread["name"] == "feature/search")
-    );
+    assert!(threads
+        .iter()
+        .any(|thread| thread["name"] == "feature/auth"));
+    assert!(threads
+        .iter()
+        .any(|thread| thread["name"] == "feature/search"));
 
     assert_eq!(head_track(main.path()), "main");
 }
@@ -659,7 +655,7 @@ fn merge_agent_track_into_main() {
             "start",
             "feature/to-merge",
             "--workspace",
-            "visible",
+            "materialized",
             "--path",
             agent_tmp.path().to_str().unwrap(),
         ],
@@ -693,7 +689,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
             "start",
             "feature/native-cli",
             "--workspace",
-            "private",
+            "auto",
             "--agent-provider",
             "anthropic",
             "--agent-model",
@@ -705,8 +701,16 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     let started: Value = serde_json::from_str(&start_json).unwrap();
     let thread_path = started["execution_path"].as_str().unwrap();
     let thread = std::path::PathBuf::from(thread_path);
-    assert_eq!(started["thread"]["thread_mode"], "lightweight");
-    // Lightweight threads materialize at a Heddle-managed path, surfaced
+    // Auto-mode resolves to materialized on reflink-capable filesystems
+    // (APFS, btrfs, xfs+reflink) and downgrades to solid on ext4 / HFS+ /
+    // NTFS so the mode label reflects on-disk truth.
+    let expected_mode = if objects::fs_clone::filesystem_supports_reflink(main.path()) {
+        "materialized"
+    } else {
+        "solid"
+    };
+    assert_eq!(started["thread"]["thread_mode"], expected_mode);
+    // Auto-mode threads materialize at a Heddle-managed path, surfaced
     // both as the user-visible `path` and the work-site `execution_path`.
     assert_eq!(started["path"], started["execution_path"]);
 
@@ -735,7 +739,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(thread_info["path"], thread_path);
     assert_eq!(thread_info["execution_path"], thread_path);
     assert_eq!(thread_info["actor"]["provider"], "anthropic");
-    assert_eq!(thread_info["thread_mode"], "lightweight");
+    assert_eq!(thread_info["thread_mode"], expected_mode);
 
     std::fs::write(thread.join("native.txt"), "heddle-native").unwrap();
     let capture_json = heddle(
@@ -763,7 +767,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     .unwrap();
     let thread_show: Value = serde_json::from_str(&thread_show_json).unwrap();
     assert_eq!(thread_show["name"], "feature/native-cli");
-    assert_eq!(thread_show["thread_mode"], "lightweight");
+    assert_eq!(thread_show["thread_mode"], expected_mode);
     assert_eq!(thread_show["thread_state"], "active");
 
     let status_json = heddle(&["--json", "status"], Some(&thread)).unwrap();
@@ -808,7 +812,7 @@ fn ready_blocks_stale_or_heavy_impact_threads_and_status_reports_next_step() {
             "start",
             "feature/dep",
             "--workspace",
-            "private",
+            "auto",
             "--task",
             "update dependencies",
         ],
@@ -862,13 +866,7 @@ fn sync_refreshes_stale_thread_when_replay_is_clean() {
     let main = setup_repo("base.txt", "base");
     let started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/sync-me",
-                "--workspace",
-                "private",
-            ],
+            &["--json", "start", "feature/sync-me", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -911,13 +909,7 @@ fn ship_auto_captures_and_merges_clean_thread() {
     let main = setup_repo("base.txt", "base");
     let started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/ship-it",
-                "--workspace",
-                "private",
-            ],
+            &["--json", "start", "feature/ship-it", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -963,7 +955,7 @@ fn delegate_assigns_per_task_agents_when_spec_includes_them() {
     let main = setup_repo("base.txt", "base");
     let parent_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/race", "--workspace", "private"],
+            &["--json", "start", "feature/race", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -979,7 +971,7 @@ fn delegate_assigns_per_task_agents_when_spec_includes_them() {
             "--parent",
             "feature/race",
             "--workspace",
-            "visible",
+            "materialized",
             "--path-prefix",
             workspace_root.path().to_str().unwrap(),
             "approach:anthropic:claude-sonnet-4-5",
@@ -1055,7 +1047,7 @@ fn delegate_creates_child_threads_with_parent_relationship() {
                 "start",
                 "feature/orchestrator",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(main.path()),
         )
@@ -1080,16 +1072,12 @@ fn delegate_creates_child_threads_with_parent_relationship() {
     let delegated: Value = serde_json::from_str(&delegate_json).unwrap();
     let children = delegated["delegated"].as_array().unwrap();
     assert_eq!(children.len(), 2);
-    assert!(
-        children
-            .iter()
-            .any(|child| child["name"] == "feature/orchestrator/parser")
-    );
-    assert!(
-        children
-            .iter()
-            .any(|child| child["name"] == "feature/orchestrator/tests")
-    );
+    assert!(children
+        .iter()
+        .any(|child| child["name"] == "feature/orchestrator/parser"));
+    assert!(children
+        .iter()
+        .any(|child| child["name"] == "feature/orchestrator/tests"));
 
     let parser_thread: Value = serde_json::from_str(
         &heddle(
@@ -1109,7 +1097,7 @@ fn undo_is_scoped_to_the_current_thread() {
 
     let auth_thread: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/auth", "--workspace", "private"],
+            &["--json", "start", "feature/auth", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1117,13 +1105,7 @@ fn undo_is_scoped_to_the_current_thread() {
     .unwrap();
     let search_thread: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/search",
-                "--workspace",
-                "private",
-            ],
+            &["--json", "start", "feature/search", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1191,7 +1173,7 @@ fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() 
             "start",
             "feature/deps",
             "--workspace",
-            "private",
+            "auto",
             "--task",
             "update dependencies",
         ],
@@ -1213,13 +1195,11 @@ fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() 
     .unwrap();
     let captured: Value = serde_json::from_str(&capture_json).unwrap();
     assert_eq!(captured["promotion_suggested"], true);
-    assert!(
-        captured["heavy_impact_paths"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value.as_str() == Some("Cargo.toml"))
-    );
+    assert!(captured["heavy_impact_paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value.as_str() == Some("Cargo.toml")));
 
     let preview_json = heddle(
         &["--json", "merge", "feature/deps", "--preview"],
@@ -1242,7 +1222,7 @@ fn thread_promote_materializes_visible_checkout_without_changing_thread_identity
             "start",
             "feature/promote",
             "--workspace",
-            "private",
+            "auto",
             "--task",
             "prepare visible thread",
         ],
@@ -1266,7 +1246,7 @@ fn thread_promote_materializes_visible_checkout_without_changing_thread_identity
     .unwrap();
     let promoted: Value = serde_json::from_str(&promote_json).unwrap();
     assert_eq!(promoted["thread"]["id"], "feature/promote");
-    assert_eq!(promoted["thread"]["mode"], "materialized");
+    assert_eq!(promoted["thread"]["mode"], "solid");
     assert_eq!(
         promoted["thread"]["materialized_path"],
         visible.path().display().to_string()
@@ -1330,7 +1310,7 @@ fn status_watch_bounded_runs_are_transcript_friendly() {
 fn thread_show_watch_emits_initial_snapshot_for_local_repos() {
     let main = setup_repo("base.txt", "base");
     heddle(
-        &["start", "feature/watch-thread", "--workspace", "private"],
+        &["start", "feature/watch-thread", "--workspace", "auto"],
         Some(main.path()),
     )
     .unwrap();
@@ -1364,7 +1344,7 @@ fn workspace_show_groups_current_stacked_and_parallel_threads() {
                 "start",
                 "feature/orchestrator",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(main.path()),
         )
@@ -1384,7 +1364,7 @@ fn workspace_show_groups_current_stacked_and_parallel_threads() {
     )
     .unwrap();
     heddle(
-        &["start", "feature/search", "--workspace", "private"],
+        &["start", "feature/search", "--workspace", "auto"],
         Some(main.path()),
     )
     .unwrap();
@@ -1416,13 +1396,7 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
     let main = setup_repo("base.txt", "base");
     let source_started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/source",
-                "--workspace",
-                "private",
-            ],
+            &["--json", "start", "feature/source", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1430,13 +1404,7 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
     .unwrap();
     let target_started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/target",
-                "--workspace",
-                "private",
-            ],
+            &["--json", "start", "feature/target", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1477,13 +1445,7 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
     let main = setup_repo("base.txt", "base");
     let source_started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/source",
-                "--workspace",
-                "private",
-            ],
+            &["--json", "start", "feature/source", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1491,13 +1453,7 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
     .unwrap();
     let target_started: Value = serde_json::from_str(
         &heddle(
-            &[
-                "--json",
-                "start",
-                "feature/target",
-                "--workspace",
-                "private",
-            ],
+            &["--json", "start", "feature/target", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1541,7 +1497,7 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
                 "start",
                 "feature/orchestrator",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(main.path()),
         )
@@ -1595,7 +1551,7 @@ fn thread_resolve_refreshes_clean_stale_threads() {
     let main = setup_repo("base.txt", "base");
     let started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/stale", "--workspace", "private"],
+            &["--json", "start", "feature/stale", "--workspace", "auto"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1674,7 +1630,7 @@ fn log_never_surfaces_unknown_principal_after_init() {
     .unwrap();
 
     heddle(
-        &["start", "feature/parent", "--workspace", "private"],
+        &["start", "feature/parent", "--workspace", "auto"],
         Some(temp.path()),
     )
     .unwrap();

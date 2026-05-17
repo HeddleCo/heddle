@@ -11,7 +11,7 @@ fn start_registers_thread_with_agent_metadata() {
             "start",
             "feature/spawned",
             "--workspace",
-            "private",
+            "auto",
             "--agent-provider",
             "anthropic",
             "--agent-model",
@@ -41,12 +41,12 @@ fn thread_list_returns_all_started_threads() {
     let main = setup_repo("base.txt", "base");
 
     heddle(
-        &["start", "feature/list-a", "--workspace", "private"],
+        &["start", "feature/list-a", "--workspace", "auto"],
         Some(main.path()),
     )
     .unwrap();
     heddle(
-        &["start", "feature/list-b", "--workspace", "private"],
+        &["start", "feature/list-b", "--workspace", "auto"],
         Some(main.path()),
     )
     .unwrap();
@@ -55,16 +55,12 @@ fn thread_list_returns_all_started_threads() {
     let v: Value = serde_json::from_str(&out).unwrap();
     let threads = v["threads"].as_array().unwrap();
 
-    assert!(
-        threads
-            .iter()
-            .any(|thread| thread["name"] == "feature/list-a")
-    );
-    assert!(
-        threads
-            .iter()
-            .any(|thread| thread["name"] == "feature/list-b")
-    );
+    assert!(threads
+        .iter()
+        .any(|thread| thread["name"] == "feature/list-a"));
+    assert!(threads
+        .iter()
+        .any(|thread| thread["name"] == "feature/list-b"));
 }
 
 #[test]
@@ -76,7 +72,7 @@ fn inspect_reflects_thread_provider_and_model() {
             "start",
             "feature/attributed",
             "--workspace",
-            "private",
+            "auto",
             "--agent-provider",
             "anthropic",
             "--agent-model",
@@ -111,7 +107,7 @@ fn actor_show_defaults_to_current_thread_actor() {
             "start",
             "feature/current-actor",
             "--workspace",
-            "private",
+            "auto",
             "--agent-provider",
             "anthropic",
             "--agent-model",
@@ -140,7 +136,7 @@ fn actor_explain_reports_attach_reason_for_current_actor() {
             "start",
             "feature/explain-actor",
             "--workspace",
-            "private",
+            "auto",
             "--agent-provider",
             "anthropic",
             "--agent-model",
@@ -155,12 +151,10 @@ fn actor_explain_reports_attach_reason_for_current_actor() {
             .unwrap();
 
     assert_eq!(explained["thread"].as_str(), Some("feature/explain-actor"));
-    assert!(
-        explained["attach_reason"]
-            .as_str()
-            .unwrap_or("")
-            .contains("thread")
-    );
+    assert!(explained["attach_reason"]
+        .as_str()
+        .unwrap_or("")
+        .contains("thread"));
 }
 
 #[test]

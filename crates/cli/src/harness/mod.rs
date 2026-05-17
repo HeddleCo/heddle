@@ -928,15 +928,16 @@ impl HarnessBridgeRuntime {
             .harness
             .threading
             .workspace_default
-            .unwrap_or(UserThreadWorkspaceMode::Heavy);
+            .unwrap_or(UserThreadWorkspaceMode::Materialized);
         let thread_mode = match workspace_mode {
-            UserThreadWorkspaceMode::Heavy | UserThreadWorkspaceMode::Auto => {
-                ThreadMode::Lightweight
+            UserThreadWorkspaceMode::Materialized | UserThreadWorkspaceMode::Auto => {
+                ThreadMode::Materialized
             }
-            UserThreadWorkspaceMode::Light => ThreadMode::Virtualized,
+            UserThreadWorkspaceMode::Virtualized => ThreadMode::Virtualized,
+            UserThreadWorkspaceMode::Solid => ThreadMode::Solid,
         };
         let path = match thread_mode {
-            ThreadMode::Materialized | ThreadMode::Lightweight => {
+            ThreadMode::Solid | ThreadMode::Materialized => {
                 default_private_thread_path(&self.repo, name)
             }
             // Harness-managed light workspaces still need mount lifecycle
@@ -965,11 +966,11 @@ impl HarnessBridgeRuntime {
             task,
             execution_path: abs_path.clone(),
             materialized_path: match thread_mode {
-                ThreadMode::Materialized => Some(abs_path),
+                ThreadMode::Solid => Some(abs_path),
                 // See note above: harness can't currently produce
                 // Virtualized, so defaulting to None matches the
                 // Lightweight branch.
-                ThreadMode::Lightweight | ThreadMode::Virtualized => None,
+                ThreadMode::Materialized | ThreadMode::Virtualized => None,
             },
             changed_paths: vec![],
             impact_categories: vec![],

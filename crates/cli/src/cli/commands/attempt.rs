@@ -194,7 +194,7 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
     };
 
     let workspace = match args.workspace {
-        WorkspaceModeArg::Auto => WorkspaceModeArg::Heavy,
+        WorkspaceModeArg::Auto => WorkspaceModeArg::Materialized,
         other => other,
     };
 
@@ -809,7 +809,7 @@ mod tests {
 
         let make_args = || AttemptArgs {
             n: 3,
-            workspace: WorkspaceModeArg::Heavy,
+            workspace: WorkspaceModeArg::Materialized,
             shared_target: false,
             no_shared_target: true, // force off so we don't depend on workspace detection
             name_prefix: Some("attempt-fixed".into()),
@@ -866,7 +866,7 @@ mod tests {
 
         let make_args = || AttemptArgs {
             n: 3,
-            workspace: WorkspaceModeArg::Heavy,
+            workspace: WorkspaceModeArg::Materialized,
             shared_target: false,
             no_shared_target: true,
             name_prefix: Some("attempt-mid".into()),

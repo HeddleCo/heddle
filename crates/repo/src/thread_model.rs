@@ -36,33 +36,42 @@ impl From<&str> for ThreadId {
     }
 }
 
+/// How a thread's worktree is realised on disk. Three flavours:
+///
+/// * [`ThreadMode::Materialized`] — clonefile-or-reflink the captured
+///   tree into a thread directory. Real `read(2)`-able bytes, ~zero
+///   disk cost via shared extents (APFS / btrfs / XFS w/ reflinks).
+///   Day-one default on reflink-capable filesystems and the path the
+///   stat-cache fast no-op + manifest sidecar were built for. See
+///   `docs/design/clonefile-threads.md`.
+/// * [`ThreadMode::Virtualized`] — project the captured tree through
+///   a content-addressed FUSE/FSKit/ProjFS mount. Nothing on disk
+///   until the kernel asks. Useful for repos too large to materialize
+///   or when the CAS is remote-backed.
+/// * [`ThreadMode::Solid`] — full file copies with no shared extents.
+///   Strong isolation; the only choice on ext4 / NTFS hosts that have
+///   neither reflinks nor a usable mount API.
+///
+/// The discriminant names match the user-facing `--workspace` flag
+/// values so a single vocabulary spans the CLI, the JSON contract,
+/// and the thread record on disk. Pre-rename data using the older
+/// `"lightweight"` (clonefile) / `"materialized"` (full-copy) names
+/// will fail to deserialize and require a re-export — intentional;
+/// silently degrading isolation modes is the wrong default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadMode {
-    Lightweight,
     Materialized,
-    /// Backed by a content-addressed FUSE mount instead of a checkout
-    /// on disk. The thread directory is lazily projected from the
-    /// object store; nothing is materialized until the kernel asks.
-    ///
-    /// On-disk persistence note: older thread records predate this
-    /// variant, so existing repos will continue to deserialize as
-    /// `Lightweight`/`Materialized`. Forward-compat is fine because
-    /// serde uses the snake_case discriminant `"virtualized"` —
-    /// older binaries that try to read a virtualized record will
-    /// fail with an "unknown variant" deserialization error and
-    /// must be upgraded before they can re-open that thread. We
-    /// intentionally do not write a migration; degrading a virtual
-    /// mount to a checkout silently would be the wrong default.
     Virtualized,
+    Solid,
 }
 
 impl std::fmt::Display for ThreadMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ThreadMode::Lightweight => write!(f, "lightweight"),
             ThreadMode::Materialized => write!(f, "materialized"),
             ThreadMode::Virtualized => write!(f, "virtualized"),
+            ThreadMode::Solid => write!(f, "solid"),
         }
     }
 }

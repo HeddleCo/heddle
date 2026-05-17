@@ -66,6 +66,12 @@ impl ObjectStore for SharedStore {
     fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
         self.0.promote_to_loose_uncompressed(hash)
     }
+    fn clear_recent_caches(&self) {
+        self.0.clear_recent_caches()
+    }
+    fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
+        self.0.get_blob_bytes(hash)
+    }
     fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
         self.0.get_tree(hash)
     }
@@ -149,6 +155,22 @@ pub trait ObjectStore: Send + Sync {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;
     fn put_blob(&self, blob: &Blob) -> Result<ContentHash>;
 
+    /// Zero-copy variant of `get_blob`. Returns a [`bytes::Bytes`]
+    /// view of the blob's content, which for `FsStore` reads is a
+    /// slice into the pack file's mmap when the entry is non-delta
+    /// and uncompressed — no allocation, no memcpy.
+    ///
+    /// Default impl wraps `get_blob`'s `Vec<u8>` in a `Bytes` (one
+    /// Arc allocation, no body copy) so backends without a native
+    /// fast path still satisfy the contract. The mount's hot read
+    /// path goes through this method instead of `get_blob` so the
+    /// pack-mmap fast path lights up automatically.
+    fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
+        Ok(self
+            .get_blob(hash)?
+            .map(|blob| bytes::Bytes::from(blob.into_content())))
+    }
+
     /// Return the *uncompressed* byte length of the blob identified by
     /// `hash`, or `Ok(None)` when the blob is not in the store.
     ///
@@ -221,6 +243,16 @@ pub trait ObjectStore: Send + Sync {
     fn promote_to_loose_uncompressed(&self, _hash: &ContentHash) -> Result<bool> {
         Ok(false)
     }
+
+    /// Drop any in-memory caches of decompressed blobs / trees /
+    /// states. The next access to any object pays full I/O +
+    /// decompression cost. No-op for stores that don't cache
+    /// (`InMemoryStore` is already the source of truth).
+    ///
+    /// Exposed primarily for benchmarks that want to measure the
+    /// true cold-cache path without rebuilding the store from
+    /// scratch. Production callers don't need to invoke this.
+    fn clear_recent_caches(&self) {}
 
     fn put_blob_with_hash(&self, blob: &Blob, hash: ContentHash) -> Result<ContentHash> {
         if blob.hash() != hash {

@@ -16,9 +16,9 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use repo::daemon::{
-    MountDaemonRequest, MountDaemonResponse, load_endpoint, mount_daemon_endpoint_path, pid_alive,
+    load_endpoint, mount_daemon_endpoint_path, pid_alive, MountDaemonRequest, MountDaemonResponse,
 };
 
 use super::client::{rpc, sweep_stale_mounts};
@@ -41,6 +41,23 @@ pub fn cmd_daemon_serve(_cli: &Cli) -> Result<()> {
 pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
     let repo_root = resolve_repo_root(cli)?;
     let response = rpc(&repo_root, &MountDaemonRequest::Health {}, false)?;
+    // Materialized threads are persistent on disk (clonefile-backed),
+    // not held in the daemon's live mount registry. Enumerate them
+    // from the on-disk manifests so `daemon status` surfaces the
+    // full picture: virtualised mounts (daemon-resident) + materialised
+    // threads (daemon-independent). Best-effort — a malformed
+    // manifest directory shouldn't break the status output.
+    //
+    // Use `repo.heddle_dir()` rather than `repo_root.join(".heddle")`
+    // because in a worktree those aren't the same path: the
+    // worktree's `.heddle/objectstore` pointer forwards to the main
+    // repo's heddle dir (set up by `Repository::open` via
+    // `with_local_head`), and the manifests live in the *main*
+    // repo's `threads/`. Pre-fix this misread always returned an
+    // empty inventory inside a worktree.
+    let heddle_dir = resolve_heddle_dir(cli).unwrap_or_else(|_| repo_root.join(".heddle"));
+    let materialized =
+        repo::thread_manifest::list_thread_manifests(&heddle_dir).unwrap_or_default();
     match response {
         Some(MountDaemonResponse::Health {
             version,
@@ -49,22 +66,35 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
             mount_count,
         }) => {
             println!(
-                "daemon: ok={ok} version={version} uptime_s={uptime_s} mount_count={mount_count}"
+                "daemon: ok={ok} version={version} uptime_s={uptime_s} mount_count={mount_count} materialized_count={}",
+                materialized.len()
             );
-            Ok(())
         }
         Some(MountDaemonResponse::Error { code, message, .. }) => {
-            Err(anyhow!("daemon health failed: [{code}] {message}"))
+            return Err(anyhow!("daemon health failed: [{code}] {message}"));
         }
-        Some(other) => Err(anyhow!("unexpected daemon response: {other:?}")),
+        Some(other) => return Err(anyhow!("unexpected daemon response: {other:?}")),
         None => {
             println!(
-                "daemon: not running (no live endpoint at {})",
-                mount_daemon_endpoint_path(&repo_root).display()
+                "daemon: not running (no live endpoint at {}) materialized_count={}",
+                mount_daemon_endpoint_path(&repo_root).display(),
+                materialized.len()
             );
-            Ok(())
         }
     }
+    if !materialized.is_empty() {
+        println!("materialized threads:");
+        for s in &materialized {
+            println!(
+                "  {} (state={}, files={}, tree={})",
+                s.thread,
+                s.state_id,
+                s.file_count,
+                &s.tree_hash.to_string()[..12]
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Post-condition contract for `cmd_daemon_stop`: when this returns
@@ -149,4 +179,18 @@ fn resolve_repo_root(cli: &Cli) -> Result<std::path::PathBuf> {
     }
     let repo = repo::Repository::open(&std::env::current_dir()?)?;
     Ok(repo.root().to_path_buf())
+}
+
+/// Resolve the heddle dir for the currently-open repo. Differs from
+/// `<repo_root>/.heddle` for worktrees: those have a `.heddle/`
+/// pointer file forwarding to the main repo's heddle dir, and
+/// thread manifests live in the main repo's `threads/`. Always
+/// opens the repo to read the canonical heddle_dir from there.
+fn resolve_heddle_dir(cli: &Cli) -> Result<std::path::PathBuf> {
+    let start = cli
+        .repo
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let repo = repo::Repository::open(&start)?;
+    Ok(repo.heddle_dir().to_path_buf())
 }

@@ -646,7 +646,7 @@ fn test_cli_merge_preview_rejects_dirty_plain_git_repo_after_bootstrap() {
                 "start",
                 "feature/preview-thread",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(temp.path()),
         )
@@ -1449,7 +1449,7 @@ fn test_cli_start_bootstraps_current_state_in_plain_git_repo() {
                 "start",
                 "feature/overlay-thread",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(temp.path()),
         )
@@ -1532,7 +1532,7 @@ fn test_cli_ship_in_git_overlay_auto_checkpoints() {
                 "start",
                 "feature/ship-it",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(temp.path()),
         )
@@ -1571,7 +1571,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
 
     let auth_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/auth", "--workspace", "private"],
+            &["--json", "start", "feature/auth", "--workspace", "auto"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1584,7 +1584,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
                 "start",
                 "feature/search",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(temp.path()),
         )
@@ -1743,7 +1743,7 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
 
     let auth_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/auth", "--workspace", "private"],
+            &["--json", "start", "feature/auth", "--workspace", "auto"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1773,7 +1773,7 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
                 "start",
                 "feature/search",
                 "--workspace",
-                "private",
+                "auto",
             ],
             Some(temp.path()),
         )

@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Lifecycle helpers for `--workspace light` threads.
+//! Lifecycle helpers for `--workspace virtualized` threads.
 //!
 //! Virtualized threads project the thread's content-addressed tree
-//! through a FUSE mount instead of materializing a checkout. The
-//! mount itself lives in [`crates/mount`]; this module is the thin
-//! CLI-side adapter that:
+//! through a kernel-side mount instead of materializing a checkout.
+//! The mount itself lives in [`crates/mount`]; this module is the
+//! thin CLI-side adapter that:
 //!
 //! * builds the conventional mount-point path
 //!   (`.{repo_name}-heddle-mounts/{name}/`),
-//! * spawns a background FUSE session when the thread starts,
+//! * spawns a background mount session when the thread starts,
 //! * unmounts cleanly when the thread is dropped.
 //!
-//! The OS-specific implementation lives in the `linux` submodule
-//! and only compiles with `--features mount` on Linux. Every other
-//! build gets the [`virtualized_unsupported_error`] runtime check
-//! so the rest of the CLI keeps building everywhere.
+//! The OS-specific implementation lives in the `linux` / `macos` /
+//! `windows` submodules and only compiles with `--features mount`
+//! on the corresponding target. Every other build gets the
+//! [`virtualized_unsupported_error`] runtime check so the rest of
+//! the CLI keeps building everywhere.
 
 use std::path::{Path, PathBuf};
 
@@ -39,18 +40,16 @@ pub(crate) fn default_virtualized_mount_path(
         .join(sanitized_thread)
 }
 
-/// Anchored error for any non-Linux / unfeatured build path. Keeps
-/// the runtime message identical regardless of which gate failed,
-/// because either way the user has the same fix: rebuild on Linux
-/// with `--features mount`. Both call sites (`cmd_daemon_serve`
-/// fallback and the `fallback` module's `spawn_mount_for_thread`)
-/// are gated `#[cfg(not(all(target_os = "linux", feature = "mount")))]`,
-/// so on Linux + `--features mount` this function is genuinely
-/// unused — `#[allow(dead_code)]` keeps it visible across configs
-/// without tripping `-D dead-code`.
+/// Anchored error for any build that has no native mount adapter
+/// active. Surfaced when none of (linux+fuse, macos+fskit,
+/// windows+projfs) is in play. Keeps the runtime message identical
+/// regardless of which gate failed: the user has the same fix —
+/// rebuild on a supported host with `--features mount`.
 #[allow(dead_code)]
 pub(crate) fn virtualized_unsupported_error() -> anyhow::Error {
-    anyhow!("Virtualized workspace requires Linux + heddle built with --features mount")
+    anyhow!(
+        "Virtualized workspace requires Linux/macOS/Windows + heddle built with --features mount"
+    )
 }
 
 #[cfg(all(target_os = "linux", feature = "mount"))]
@@ -60,46 +59,52 @@ mod linux {
         sync::Mutex,
     };
 
-    use anyhow::{Context, Result, anyhow};
-    use mount::{ContentAddressedMount, FuseShell};
+    use anyhow::{anyhow, Context, Result};
+    use mount::{ContentAddressedMount, FuseShell, NfsSession, NfsShell};
     use repo::Repository;
     use tracing::warn;
 
     use crate::util::OnceMap;
 
-    /// The opaque handle a CLI caller stashes alongside the thread to
-    /// keep the mount alive. Dropping it triggers the `BackgroundSession`
-    /// drop, which unmounts the FS.
+    /// Which backend is actually live behind a [`MountHandle`].
     ///
-    /// We don't actually persist this handle anywhere across CLI
-    /// invocations — the FUSE mount lives only as long as the
-    /// `heddle thread start` process. That's an intentional v1
-    /// simplification: when the user kills heddle, the kernel
-    /// receives the unmount via `BackgroundSession::drop` and the
-    /// mount goes away. A reviewer can argue that
-    /// long-lived virtualized threads need a dedicated background
-    /// mount daemon — see the TODO at the bottom of
-    /// `spawn_mount_for_thread`.
+    /// The CLI prefers FUSE (unprivileged, zero install on a host
+    /// with `CONFIG_FUSE_FS` + `fusermount`). It falls back to NFS
+    /// when FUSE isn't available — typically a container or
+    /// minimal-userland Linux without `fusermount` on PATH.
+    enum BackingSession {
+        Fuse(mount::BackgroundSession),
+        Nfs(NfsSession),
+    }
+
+    impl BackingSession {
+        fn unmount(self) -> Result<()> {
+            match self {
+                // `BackgroundSession`'s Drop sends the unmount to
+                // the kernel; an explicit `drop` runs it now.
+                Self::Fuse(s) => {
+                    drop(s);
+                    Ok(())
+                }
+                Self::Nfs(s) => s.unmount().map_err(|e| anyhow!("nfs unmount: {e}")),
+            }
+        }
+    }
+
+    /// The opaque handle a CLI caller stashes alongside the thread
+    /// to keep the mount alive. Dropping it triggers the backing
+    /// session's drop, which unmounts the FS.
     pub struct MountHandle {
-        // `BackgroundSession` lives as long as the heddle process; it's
-        // the dtor that triggers the unmount. We store it in an Option
-        // so an explicit `drop` becomes safe.
-        session: Mutex<Option<mount::BackgroundSession>>,
+        session: Mutex<Option<BackingSession>>,
         mountpoint: PathBuf,
     }
 
     impl MountHandle {
-        /// Force the mount to unmount immediately. Returns an error
-        /// only if the unmount actually fails (the session drop is
-        /// infallible, but a stale-mount cleanup may still surface
-        /// a libc error).
         pub fn unmount(&self) -> Result<()> {
-            // Drop the BackgroundSession. fuser's session destructor
-            // sends an unmount to the kernel; if that races with a
-            // stale mount we'll see it as an error from `fusermount`
-            // on the next mount attempt — so this is best-effort.
             let mut guard = self.session.lock().expect("mount session lock");
-            *guard = None;
+            if let Some(s) = guard.take() {
+                s.unmount()?;
+            }
             Ok(())
         }
 
@@ -108,16 +113,11 @@ mod linux {
         }
     }
 
-    /// Process-global registry of live mount handles, keyed by
-    /// thread name. Storing the handles here is what keeps the
-    /// `BackgroundSession` alive past the `cmd_start` return — if
-    /// the handle dropped at function exit, the mount would
-    /// unmount immediately.
     static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();
 
-    /// Mount `thread_id` into `mountpoint` in a background FUSE
-    /// session. Creates the mount directory (`mkdir -p` semantics)
-    /// before mounting. Returns the live mount handle.
+    /// Mount `thread_id` into `mountpoint`. Tries FUSE first; on
+    /// failure, falls back to the NFS shell so the feature still
+    /// works on hosts that don't ship FUSE.
     pub fn spawn_mount_for_thread(
         repo: Repository,
         thread_id: &str,
@@ -126,38 +126,336 @@ mod linux {
         std::fs::create_dir_all(mountpoint)
             .with_context(|| format!("create mount point {}", mountpoint.display()))?;
 
+        let root = repo.root().to_path_buf();
         let mount = ContentAddressedMount::new(repo, thread_id)
             .map_err(|e| anyhow!("open content-addressed mount for {thread_id}: {e}"))?;
-        let shell = FuseShell::new(mount);
-        let session = shell.mount_background(mountpoint).map_err(|e| {
-            anyhow!(
-                "spawn FUSE background session at {}: {e}",
-                mountpoint.display()
-            )
-        })?;
+
+        let session = match FuseShell::new(mount).mount_background(mountpoint) {
+            Ok(s) => BackingSession::Fuse(s),
+            Err(native_err) => {
+                warn!(
+                    thread = thread_id,
+                    "FUSE mount failed ({native_err}); falling back to NFS"
+                );
+                let reopened = Repository::open(&root)
+                    .map_err(|e| anyhow!("reopen repo for NFS fallback: {e}"))?;
+                let mount = ContentAddressedMount::new(reopened, thread_id)
+                    .map_err(|e| anyhow!("open mount for {thread_id} (NFS fallback): {e}"))?;
+                BackingSession::Nfs(NfsShell::new(mount).mount_background(mountpoint).map_err(
+                    |e| anyhow!("FUSE mount failed ({native_err}); NFS fallback also failed: {e}"),
+                )?)
+            }
+        };
 
         let handle = std::sync::Arc::new(MountHandle {
             session: Mutex::new(Some(session)),
             mountpoint: mountpoint.to_path_buf(),
         });
         REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
-
-        // The mount lifetime here is pinned to the heddle process
-        // that started it: when the CLI exits, the
-        // BackgroundSession drops and the kernel unmounts. The
-        // long-lived alternative — the `heddled` daemon — owns the
-        // FUSE session across CLI invocations. As of 2026-05-02 the
-        // daemon is the *default* for `--workspace light`;
-        // this in-process path runs when the user passes
-        // `--no-daemon`, or as the silent fallback when the daemon
-        // is unavailable on the host. See `docs/design/mount-daemon.md`
-        // and `crates/cli/src/cli/commands/daemon/`.
         Ok(handle)
     }
 
-    /// Pop the registry entry for `thread_id` (if any) and unmount
-    /// it. Logs and swallows unmount errors so a thread drop can't
-    /// be blocked by a wedged mount.
+    pub fn unmount_thread_if_mounted(thread_id: &str) -> bool {
+        let Some(handle) = REGISTRY.remove(&thread_id.to_string()) else {
+            return false;
+        };
+        if let Err(err) = handle.unmount() {
+            warn!(
+                thread = thread_id,
+                mountpoint = %handle.mountpoint().display(),
+                "unmount failed: {err}"
+            );
+        }
+        true
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "mount"))]
+mod macos {
+    use std::{
+        path::{Path, PathBuf},
+        process::Command,
+        sync::Mutex,
+    };
+
+    use anyhow::{anyhow, Context, Result};
+    use mount::{
+        fskit::readiness::{self, Readiness},
+        ContentAddressedMount, NfsSession, NfsShell,
+    };
+    use repo::Repository;
+    use tracing::{info, warn};
+
+    use crate::util::OnceMap;
+
+    /// Which backend is actually live behind a [`MountHandle`] on
+    /// macOS.
+    ///
+    /// FSKit is the preferred adapter: when the System Extension
+    /// is installed and enabled, the CLI shells out to
+    /// `mount -t heddle` and the kernel routes through `fskitd`
+    /// → our extension → the Rust core. NFS is the universal
+    /// fallback for hosts where the extension is missing or the
+    /// user hasn't approved it yet.
+    enum BackingSession {
+        FsKit(FsKitMount),
+        Nfs(NfsSession),
+    }
+
+    impl BackingSession {
+        fn unmount(self) -> Result<()> {
+            match self {
+                Self::FsKit(m) => m.unmount(),
+                Self::Nfs(s) => s.unmount().map_err(|e| anyhow!("nfs unmount: {e}")),
+            }
+        }
+    }
+
+    /// RAII wrapper around an `/sbin/mount -t heddle` invocation.
+    /// Dropping (or calling `unmount`) runs `umount` against the
+    /// stashed mountpoint.
+    struct FsKitMount {
+        mountpoint: PathBuf,
+    }
+
+    impl FsKitMount {
+        fn mount(repo_path: &Path, thread_id: &str, mountpoint: &Path) -> Result<Self> {
+            let status = Command::new("/sbin/mount")
+                .arg("-t")
+                .arg("heddle")
+                .arg("-o")
+                .arg(format!("t={thread_id}"))
+                .arg(repo_path)
+                .arg(mountpoint)
+                .status()
+                .context("invoke /sbin/mount -t heddle")?;
+            if !status.success() {
+                return Err(anyhow!(
+                    "/sbin/mount -t heddle returned {status} \
+                     (extension installed but rejected the mount; \
+                     check `log show --predicate 'subsystem == \"sh.heddle.HeddleFSModule\"'`)"
+                ));
+            }
+            Ok(Self {
+                mountpoint: mountpoint.to_path_buf(),
+            })
+        }
+
+        fn unmount(self) -> Result<()> {
+            let status = Command::new("umount").arg(&self.mountpoint).status();
+            match status {
+                Ok(s) if s.success() => Ok(()),
+                Ok(s) => Err(anyhow!("umount returned {s}")),
+                Err(e) => Err(anyhow!("invoke umount: {e}")),
+            }
+        }
+    }
+
+    pub struct MountHandle {
+        session: Mutex<Option<BackingSession>>,
+        mountpoint: PathBuf,
+    }
+
+    impl MountHandle {
+        pub fn unmount(&self) -> Result<()> {
+            let mut guard = self.session.lock().expect("mount session lock");
+            if let Some(s) = guard.take() {
+                s.unmount()?;
+            }
+            Ok(())
+        }
+
+        pub fn mountpoint(&self) -> &Path {
+            &self.mountpoint
+        }
+    }
+
+    static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();
+
+    /// Mount `thread_id` into `mountpoint`. Probes FSKit
+    /// readiness first; if the extension is enabled, mounts via
+    /// `mount -t heddle`. Otherwise falls back to the NFS shell
+    /// — and on the `NeedsApproval` path, opens System Settings
+    /// + prints a one-line hint so the user can enable the
+    /// extension for next time.
+    pub fn spawn_mount_for_thread(
+        repo: Repository,
+        thread_id: &str,
+        mountpoint: &Path,
+    ) -> Result<std::sync::Arc<MountHandle>> {
+        std::fs::create_dir_all(mountpoint)
+            .with_context(|| format!("create mount point {}", mountpoint.display()))?;
+
+        let root = repo.root().to_path_buf();
+        let session = match readiness::probe() {
+            Readiness::Ready => {
+                info!(
+                    thread = thread_id,
+                    "FSKit extension ready; using `mount -t heddle`"
+                );
+                // Don't construct an in-process ContentAddressedMount
+                // — the extension owns the mount lifetime.
+                BackingSession::FsKit(
+                    FsKitMount::mount(&root, thread_id, mountpoint)
+                        .context("FSKit mount via /sbin/mount")?,
+                )
+            }
+            Readiness::NeedsApproval => {
+                // One-shot nudge: open Settings so the user can
+                // toggle the extension on for next time. Falling
+                // through to NFS keeps THIS mount working.
+                eprintln!("{}", readiness::setup_hint());
+                readiness::open_settings();
+                mount_via_nfs(&root, thread_id, mountpoint)?
+            }
+            Readiness::NotInstalled | Readiness::Unknown => {
+                // Host app isn't installed (or older macOS); NFS
+                // is the only path. No nudge — silent fallback.
+                mount_via_nfs(&root, thread_id, mountpoint)?
+            }
+        };
+
+        let handle = std::sync::Arc::new(MountHandle {
+            session: Mutex::new(Some(session)),
+            mountpoint: mountpoint.to_path_buf(),
+        });
+        REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
+        Ok(handle)
+    }
+
+    fn mount_via_nfs(
+        repo_root: &Path,
+        thread_id: &str,
+        mountpoint: &Path,
+    ) -> Result<BackingSession> {
+        let repo = Repository::open(repo_root)
+            .with_context(|| format!("reopen repo for NFS mount at {}", repo_root.display()))?;
+        let mount = ContentAddressedMount::new(repo, thread_id)
+            .map_err(|e| anyhow!("open content-addressed mount for {thread_id}: {e}"))?;
+        let session = NfsShell::new(mount)
+            .mount_background(mountpoint)
+            .map_err(|e| {
+                anyhow!(
+                "NFS fallback failed: {e} (run `sudo` and ensure host has the NFS client enabled)"
+            )
+            })?;
+        warn!(
+            thread = thread_id,
+            "using NFS fallback (install + enable the Heddle FSKit extension for a faster path)"
+        );
+        Ok(BackingSession::Nfs(session))
+    }
+
+    pub fn unmount_thread_if_mounted(thread_id: &str) -> bool {
+        let Some(handle) = REGISTRY.remove(&thread_id.to_string()) else {
+            return false;
+        };
+        if let Err(err) = handle.unmount() {
+            warn!(
+                thread = thread_id,
+                mountpoint = %handle.mountpoint().display(),
+                "unmount failed: {err}"
+            );
+        }
+        true
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "mount"))]
+mod windows {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+
+    use anyhow::{anyhow, Context, Result};
+    use mount::{ContentAddressedMount, NfsSession, NfsShell, ProjFsSession, ProjFsShell};
+    use repo::Repository;
+    use tracing::warn;
+
+    use crate::util::OnceMap;
+
+    /// Which backend is actually live behind a [`MountHandle`] on
+    /// Windows. ProjFS is the preferred adapter; the CLI falls
+    /// back to the NFS shell on hosts that don't have the
+    /// "Projected File System" optional feature enabled.
+    enum BackingSession {
+        ProjFs(ProjFsSession),
+        Nfs(NfsSession),
+    }
+
+    impl BackingSession {
+        fn unmount(self) -> Result<()> {
+            match self {
+                Self::ProjFs(s) => s.unmount().map_err(|e| anyhow!("projfs unmount: {e}")),
+                Self::Nfs(s) => s.unmount().map_err(|e| anyhow!("nfs unmount: {e}")),
+            }
+        }
+    }
+
+    pub struct MountHandle {
+        session: Mutex<Option<BackingSession>>,
+        mountpoint: PathBuf,
+    }
+
+    impl MountHandle {
+        pub fn unmount(&self) -> Result<()> {
+            let mut guard = self.session.lock().expect("mount session lock");
+            if let Some(s) = guard.take() {
+                s.unmount()?;
+            }
+            Ok(())
+        }
+
+        pub fn mountpoint(&self) -> &Path {
+            &self.mountpoint
+        }
+    }
+
+    static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();
+
+    /// Mount `thread_id` into `mountpoint`. Tries ProjFS first; on
+    /// failure (typically "ProjFS optional feature not enabled"),
+    /// falls back to the NFS shell.
+    pub fn spawn_mount_for_thread(
+        repo: Repository,
+        thread_id: &str,
+        mountpoint: &Path,
+    ) -> Result<std::sync::Arc<MountHandle>> {
+        std::fs::create_dir_all(mountpoint)
+            .with_context(|| format!("create mount point {}", mountpoint.display()))?;
+
+        let root = repo.root().to_path_buf();
+        let mount = ContentAddressedMount::new(repo, thread_id)
+            .map_err(|e| anyhow!("open content-addressed mount for {thread_id}: {e}"))?;
+
+        let session = match ProjFsShell::new(mount).mount_background(mountpoint) {
+            Ok(s) => BackingSession::ProjFs(s),
+            Err(native_err) => {
+                warn!(
+                    thread = thread_id,
+                    "ProjFS mount failed ({native_err}); falling back to NFS"
+                );
+                let reopened = Repository::open(&root)
+                    .map_err(|e| anyhow!("reopen repo for NFS fallback: {e}"))?;
+                let mount = ContentAddressedMount::new(reopened, thread_id)
+                    .map_err(|e| anyhow!("open mount for {thread_id} (NFS fallback): {e}"))?;
+                BackingSession::Nfs(NfsShell::new(mount).mount_background(mountpoint).map_err(
+                    |e| {
+                        anyhow!("ProjFS mount failed ({native_err}); NFS fallback also failed: {e}")
+                    },
+                )?)
+            }
+        };
+
+        let handle = std::sync::Arc::new(MountHandle {
+            session: Mutex::new(Some(session)),
+            mountpoint: mountpoint.to_path_buf(),
+        });
+        REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
+        Ok(handle)
+    }
+
     pub fn unmount_thread_if_mounted(thread_id: &str) -> bool {
         let Some(handle) = REGISTRY.remove(&thread_id.to_string()) else {
             return false;
@@ -179,15 +477,31 @@ pub(crate) use linux::MountHandle;
 #[cfg(all(target_os = "linux", feature = "mount"))]
 pub(crate) use linux::{spawn_mount_for_thread, unmount_thread_if_mounted};
 
-#[cfg(not(all(target_os = "linux", feature = "mount")))]
+#[cfg(all(target_os = "macos", feature = "mount"))]
+#[allow(unused_imports)] // Re-exported for downstream callers / tests.
+pub(crate) use macos::MountHandle;
+#[cfg(all(target_os = "macos", feature = "mount"))]
+pub(crate) use macos::{spawn_mount_for_thread, unmount_thread_if_mounted};
+
+#[cfg(all(target_os = "windows", feature = "mount"))]
+#[allow(unused_imports)] // Re-exported for downstream callers / tests.
+pub(crate) use windows::MountHandle;
+#[cfg(all(target_os = "windows", feature = "mount"))]
+pub(crate) use windows::{spawn_mount_for_thread, unmount_thread_if_mounted};
+
+#[cfg(not(any(
+    all(target_os = "linux", feature = "mount"),
+    all(target_os = "macos", feature = "mount"),
+    all(target_os = "windows", feature = "mount"),
+)))]
 mod stub {
     use std::path::Path;
 
     use anyhow::Result;
 
     /// Placeholder type so call sites compile on every platform.
-    /// Constructing one is impossible because the constructors
-    /// are gated to Linux+feature.
+    /// Constructing one is impossible because the real
+    /// constructors are gated to a supported target + feature.
     pub struct MountHandle(std::convert::Infallible);
 
     pub fn spawn_mount_for_thread(
@@ -203,10 +517,18 @@ mod stub {
     }
 }
 
-#[cfg(not(all(target_os = "linux", feature = "mount")))]
+#[cfg(not(any(
+    all(target_os = "linux", feature = "mount"),
+    all(target_os = "macos", feature = "mount"),
+    all(target_os = "windows", feature = "mount"),
+)))]
 #[allow(unused_imports)] // Re-exported for downstream callers / tests.
 pub(crate) use stub::MountHandle;
-#[cfg(not(all(target_os = "linux", feature = "mount")))]
+#[cfg(not(any(
+    all(target_os = "linux", feature = "mount"),
+    all(target_os = "macos", feature = "mount"),
+    all(target_os = "windows", feature = "mount"),
+)))]
 pub(crate) use stub::{spawn_mount_for_thread, unmount_thread_if_mounted};
 
 /// What kind of mount the caller wants for this `--workspace
@@ -242,7 +564,7 @@ impl MountOwnership {
     }
 }
 
-/// Establish the FUSE mount for a `--workspace light` thread,
+/// Establish the FUSE mount for a `--workspace virtualized` thread,
 /// honoring the user's daemon preference. This is the dispatch
 /// point that flipped on 2026-05-02:
 ///

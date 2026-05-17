@@ -554,7 +554,7 @@ fn git_overlay_matrix_stale_conflict_ship_blocks_with_guidance() {
             "start",
             "feature/conflict",
             "--workspace",
-            "heavy",
+            "materialized",
         ],
     );
     let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
@@ -768,7 +768,7 @@ fn git_overlay_matrix_stale_thread_can_recover_via_sync_then_ship() {
 
     let started = json(
         temp.path(),
-        &["--json", "start", "feature/recover", "--workspace", "heavy"],
+        &["--json", "start", "feature/recover", "--workspace", "materialized"],
     );
     let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
 
@@ -1113,7 +1113,7 @@ fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
             "start",
             "feature/manual-recover",
             "--workspace",
-            "heavy",
+            "materialized",
         ],
     );
     let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());

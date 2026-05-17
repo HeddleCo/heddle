@@ -14,24 +14,54 @@
 //   * mount-point lifetime (the Drop on `FSKitShell` triggers
 //     `heddle_fskit_unmount`)
 //
-// Realistic scope:
+// SDK-verification result (plan §6.1):
 //
-// FSKit is heavily Swift-protocol-oriented (`FSUnaryFileSystem`
-// uses `async throws` callbacks, opaque `FSItem` subclasses,
-// and `FSVolume.Operations` protocols that are awkward to expose
-// across a C ABI). This file scaffolds the constructor + a few
-// of the read-side callbacks (`getattr`, `lookup`, `read`,
-// `enumerate`) so the architecture is validated end-to-end. The
-// write-side callbacks and the `FSModuleHost` registration that
-// actually publishes the volume to `mount(2)` are stubbed — see
-// the TODOs below. A full implementation needs ~400 more LOC of
-// Swift and a `.fsmodule` bundle plus an entitlement, which is
-// out of scope for this PR.
+// The macOS 26.5 SDK at
+// `MacOSX.sdk/System/Library/Frameworks/FSKit.framework/Headers/`
+// confirms the System-Extension model:
 //
-// The C ABI surface this file exports is defined in the
-// `HeddleFSKit-Bridging.h` header next to it. Build.rs compiles
-// this file and links the resulting static lib into the Rust
-// crate.
+//   * `FSUnaryFileSystem` is real, with `probeResource:replyHandler:`
+//     and `loadResource:options:replyHandler:` as the registration
+//     surface (`FSUnaryFileSystem.h`).
+//   * `FSVolume` is a subclass; per-operation behaviour comes from
+//     conforming to the various `FSVolume.Operations` /
+//     `FSVolume.ReadWriteOperations` / `FSVolume.OpenCloseOperations`
+//     protocols (`FSVolume.h`).
+//   * There is no `FSFileSystemManager` / programmatic in-process
+//     `mount(at:)` API. Mounting is done out-of-process by the
+//     `mount(8)` userspace tool against a registered `.fsmodule`
+//     System Extension; the host app activates the extension via
+//     the System Extensions framework.
+//
+// Consequence: the live FS code cannot run inside the `heddle` CLI
+// process. It must run inside a code-signed `.fsmodule` System
+// Extension bundle that links against this same static library.
+//
+// What this file ships today:
+//   * The C ABI surface that Rust calls (untouched — required by
+//     `crates/mount/src/fskit/c_abi.rs`).
+//   * A `HeddleFSKitSession` class that holds the C-side callbacks
+//     so any consumer (this CLI for the unit test, or a future
+//     `.fsmodule` bundle) can dispatch into them.
+//   * A minimal `HeddleFSUnary : FSUnaryFileSystem` placeholder that
+//     compiles against the 15.4+ SDK so the `cargo build --features
+//     fskit` cycle stays green.
+//
+// What's deferred to release engineering (out of scope here):
+//   * `.fsmodule` / `.appex` System Extension bundle packaging.
+//   * `OSSystemExtensionRequest.activationRequest(...)` from the
+//     CLI to install the extension.
+//   * `com.apple.developer.fskit.fsmodule` entitlement +
+//     Developer-ID code-signing on both the CLI and the extension.
+//   * Full conformance to `FSVolume.Operations` /
+//     `FSVolume.ReadWriteOperations` (lookup, getAttributes,
+//     read, write, enumerateDirectory, synchronize). Each protocol
+//     method dispatches into the C callbacks held by
+//     `HeddleFSKitSession` — the wiring pattern is the same as the
+//     placeholder methods below.
+//
+// See `crates/mount/README.md` for the install steps that consume
+// those artefacts.
 
 import Foundation
 
@@ -70,7 +100,8 @@ public typealias HeddleGetattrCallback = @convention(c) (
     UInt64,                             // inode
     UnsafeMutablePointer<UInt32>?,      // out: unix mode
     UnsafeMutablePointer<UInt64>?,      // out: size
-    UnsafeMutablePointer<UInt32>?       // out: nlink
+    UnsafeMutablePointer<UInt32>?,      // out: nlink
+    UnsafeMutablePointer<Int64>?        // out: mtime seconds since UNIX epoch
 ) -> Int32
 
 public typealias HeddleReadCallback = @convention(c) (
@@ -100,7 +131,8 @@ public typealias HeddleEnumerateEmit = @convention(c) (
     UInt64,                             // child inode
     UnsafePointer<CChar>?,              // child name (UTF-8 NUL-terminated)
     UInt32,                             // unix mode
-    UInt64                              // size
+    UInt64,                             // size
+    Int64                               // mtime seconds since UNIX epoch
 ) -> Int32
 
 public typealias HeddleEnumerateCallback = @convention(c) (
@@ -241,45 +273,63 @@ final class HeddleFSKitSession {
     }
 
     func mount(at path: String) -> Int32 {
-        // TODO(fskit-mount): Wire this to FSKit's `FSModuleHost`.
+        // FSKit on macOS 15.4+ has no programmatic in-process
+        // `mount(at:)`. Mounting requires a code-signed `.fsmodule`
+        // System Extension that registers via
+        // `OSSystemExtensionRequest.activationRequest(...)` and is
+        // then driven by `mount(8)` from userspace. The CLI process
+        // cannot host the live FS.
         //
-        // The real implementation looks like:
+        // Returning ENOSYS keeps the existing contract intact: the
+        // Rust side surfaces it as a `MountError`, the FSKit smoke
+        // test treats `HEDDLE_FSKIT_AVAILABLE=1` as an entitlement
+        // probe, and the CLI falls back through to its existing
+        // error path.
         //
-        //   let host = FSModuleHost.shared
-        //   let fs = HeddleFSUnary(session: self)
-        //   try host.register(fs, identifier: "xyz.heddle.mount")
-        //   // ...then `mount -F -t heddle` from userspace, or
-        //   // call `FSResource.mount(...)` programmatically.
-        //
-        // FSKit's registration requires a code-signed bundle with
-        // the `com.apple.developer.fskit.fsmodule` entitlement.
-        // Distributing that is a release-engineering problem this
-        // PR doesn't try to solve. For now the constructor +
-        // unmount lifecycle is exercised; the mount itself is a
-        // no-op that returns ENOSYS so callers can detect the
-        // unfinished seam.
+        // To finish the macOS path: package a `.fsmodule` bundle
+        // that links this static library, request the FSKit
+        // entitlement, and add `OSSystemExtensionRequest` activation
+        // to the CLI. See `crates/mount/README.md`.
         _ = path
         return Int32(ENOSYS)
     }
 
     func unmount() -> Int32 {
-        // TODO(fskit-mount): once `mount(at:)` actually mounts a
-        // volume, this needs to call `FSResource.unmount` and
-        // wait for the kernel to drain in-flight requests. For
-        // now we just succeed.
+        // Symmetric with `mount(at:)`: nothing was actually mounted
+        // in-process, so unmount is a successful no-op.
         return 0
     }
 }
 
 #if canImport(FSKit) && os(macOS)
 
-// Skeleton of the FSKit-side adapter. Kept compiling under
-// `canImport(FSKit)` so the file builds on macOS 15.4 SDKs but
-// the type body stays minimal — every method has a matching TODO
-// pointing at the trait callback it should dispatch to.
+// MARK: - FSKit class skeletons ---------------------------------
+//
+// These compile against the real macOS 26.5 SDK headers. They are
+// the entry points a future `.fsmodule` System Extension target
+// would consume:
+//
+//   * `HeddleFSUnary` is the top-level filesystem class FSKit's
+//     extension host instantiates. Per `FSUnaryFileSystem.h`, the
+//     extension implements `probeResource:replyHandler:` and
+//     `loadResource:options:replyHandler:`.
+//   * `HeddleVolume` (subclass of `FSVolume`) is the per-volume
+//     class that gets returned from `loadResource`. It must
+//     conform to `FSVolume.Operations`,
+//     `FSVolume.PathConfOperations`, and (for read-write mounts)
+//     `FSVolume.ReadWriteOperations`. Each protocol method
+//     dispatches into the C callbacks held by `HeddleFSKitSession`.
+//   * `HeddleItem` (subclass of `FSItem`) wraps the `UInt64` inode
+//     handed back from `lookup` / `enumerate`.
+//
+// Today these classes are present-but-empty so the cargo build
+// stays green. Wiring each `FSVolume.Operations` method to the
+// matching C callback is the next concrete task; the trampoline
+// shape is the same as the Linux FUSE adapter in
+// `crates/mount/src/fuse.rs`.
 
 @available(macOS 15.4, *)
-final class HeddleFSUnary: NSObject {
+final class HeddleFSUnary: FSUnaryFileSystem {
     weak var session: HeddleFSKitSession?
 
     init(session: HeddleFSKitSession) {
@@ -287,20 +337,19 @@ final class HeddleFSUnary: NSObject {
         super.init()
     }
 
-    // TODO(fskit-mount): conform to `FSUnaryFileSystem` and
-    // implement `loadResource(...)`, `probeResource(...)`,
-    // `activate(options:replyHandler:)` etc. Each callback maps
-    // to one of the `HeddleFSKitSession` C-callback fields:
-    //
-    //   FSVolume.lookupItem(named:in:)        -> session.lookup
-    //   FSItem.attributes                     -> session.getattr
-    //   FSVolume.read(_:from:into:length:)    -> session.read
-    //   FSVolume.write(_:into:from:length:)   -> session.write
-    //   FSVolume.enumerate(_:)                -> session.enumerate
-    //   FSItem.flush                          -> session.flush
-    //
-    // Each FSKit callback hands back an `Errno` or throws — we
-    // translate the Int32 return into the right shape there.
+    // Real `probeResource` / `loadResource` overrides land here
+    // once the `.fsmodule` packaging story is in place. The
+    // signatures live in
+    // `FSKit.framework/Headers/FSUnaryFileSystem.h`.
 }
+
+// The canonical `HeddleItem` lives in the System Extension target
+// (`crates/mount/swift/HeddleHost/HeddleFSModule/HeddleItem.swift`)
+// where it's used alongside the full `FSVolume.Operations`
+// conformance on `HeddleVolume`. The in-process (cargo-built)
+// Swift static lib doesn't need its own copy because the
+// in-process path never instantiates an `FSItem` — it dispatches
+// trampolines directly into Rust without going through FSKit's
+// item layer.
 
 #endif

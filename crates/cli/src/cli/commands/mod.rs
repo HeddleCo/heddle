@@ -61,6 +61,7 @@ mod semantic_change_output;
 #[cfg(feature = "semantic")]
 mod semantic_cmd;
 mod session;
+mod shell;
 mod show;
 pub(crate) mod snapshot;
 mod stash;
@@ -171,6 +172,7 @@ pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
 pub use stash::cmd_stash;
 pub use status::cmd_status;
 pub use store_cmd::cmd_store;
+pub use shell::cmd_shell;
 pub use thread::{cmd_start, cmd_thread_show};
 pub use thread_cmd::cmd_thread;
 pub use thread_shaping::{

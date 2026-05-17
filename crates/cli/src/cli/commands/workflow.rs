@@ -541,7 +541,7 @@ pub fn cmd_delegate(cli: &Cli, args: DelegateArgs) -> Result<()> {
                     // effect of `heddle delegate` would surprise the
                     // caller (delegate is mostly used with materialized /
                     // lightweight workspaces anyway). If a future caller
-                    // passes `--workspace light` through delegate
+                    // passes `--workspace virtualized` through delegate
                     // and wants daemon ownership, they can spawn the
                     // daemon explicitly first.
                     daemon: false,

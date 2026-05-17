@@ -3,7 +3,7 @@
 
 use tempfile::TempDir;
 
-use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
+use super::{pack_index::PackIndex, ObjectType, PackBuilder, PackObjectId, PackReader};
 use crate::{
     delta::MAX_DELTA_OUTPUT_SIZE,
     object::{ChangeId, ContentHash},
@@ -285,6 +285,77 @@ fn test_pack_reader_missing_object_returns_none() {
     // Query for a hash that doesn't exist
     let result = reader.get_hashed_object(&create_test_hash(99)).unwrap();
     assert!(result.is_none(), "non-existent hash should return None");
+}
+
+/// Stale `.idx` regression: when the index routes a lookup for hash
+/// `A` to the on-disk offset of a different record (hash `B`'s
+/// position), `get_hashed_object` must reject the result rather than
+/// silently returning B's bytes under A's name. The tagged id at
+/// each record's start is the cheap authenticator that catches the
+/// mismatch — see `PackReader::verify_record_id_matches`.
+///
+/// Repro: build a pack with two distinct blobs, then synthesize a
+/// new index that swaps the two offsets, write it back over the
+/// real index, reopen the reader, and assert the lookup errors out
+/// with the expected diagnostic phrase.
+#[test]
+fn stale_index_swapped_offsets_surfaces_as_invalid_object() {
+    use crate::store::{pack::pack_index::PackIndex, StoreError};
+
+    let blob_a = b"alpha-payload alpha-payload alpha-payload alpha".to_vec();
+    let blob_b = b"bravo-payload bravo-payload bravo-payload bravo".to_vec();
+    let hash_a = ContentHash::compute(&blob_a);
+    let hash_b = ContentHash::compute(&blob_b);
+
+    let temp_dir = TempDir::new().unwrap();
+    let pack_path = temp_dir.path().join("test.pack");
+    let index_path = temp_dir.path().join("test.idx");
+
+    let mut builder = PackBuilder::new(CompressionConfig::default());
+    builder.add_with_path(hash_a, ObjectType::Blob, blob_a.clone(), None);
+    builder.add_with_path(hash_b, ObjectType::Blob, blob_b.clone(), None);
+    let (pack_data, index_data, _) = builder.build().unwrap();
+    std::fs::write(&pack_path, &pack_data).unwrap();
+    std::fs::write(&index_path, &index_data).unwrap();
+
+    // Sanity: untouched index reads cleanly.
+    {
+        let reader = PackReader::open(&pack_path, &index_path).unwrap();
+        let (_, got_a) = reader.get_hashed_object(&hash_a).unwrap().expect("A");
+        assert_eq!(got_a, blob_a);
+        let (_, got_b) = reader.get_hashed_object(&hash_b).unwrap().expect("B");
+        assert_eq!(got_b, blob_b);
+    }
+
+    // Synthesize a stale index that swaps the two offsets.
+    let original_index = PackIndex::from_bytes(&index_data).unwrap();
+    let offset_a = original_index
+        .find(&PackObjectId::Hash(hash_a))
+        .expect("index has A");
+    let offset_b = original_index
+        .find(&PackObjectId::Hash(hash_b))
+        .expect("index has B");
+    assert_ne!(offset_a, offset_b);
+    let mut stale = PackIndex::new();
+    stale.add(PackObjectId::Hash(hash_a), offset_b); // A → B's offset
+    stale.add(PackObjectId::Hash(hash_b), offset_a); // B → A's offset
+    stale.sort();
+    std::fs::write(&index_path, stale.to_bytes()).unwrap();
+
+    let reader = PackReader::open(&pack_path, &index_path).unwrap();
+    let err = reader
+        .get_hashed_object(&hash_a)
+        .expect_err("stale index must surface as an error, not silent wrong bytes");
+    assert!(
+        matches!(&err, StoreError::InvalidObject(msg) if msg.contains("stale or corrupt")),
+        "expected InvalidObject('… stale or corrupt …'), got: {err:?}",
+    );
+    // The zero-copy path takes a different fork inside
+    // `get_object_bytes`; verify it independently.
+    let err_bytes = reader
+        .get_hashed_object_bytes(&hash_a)
+        .expect_err("zero-copy path must reject too");
+    assert!(matches!(err_bytes, StoreError::InvalidObject(_)));
 }
 
 /// Helper to write a pack+index to disk and open a reader.

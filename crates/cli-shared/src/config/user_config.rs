@@ -79,13 +79,18 @@ pub struct UserFsMonitorConfig {
     pub mode: Option<FsMonitorMode>,
 }
 
+/// User-config default for thread workspace mode. Same vocabulary
+/// as [`crate::config::repo::ThreadMode`] and the `--workspace` flag,
+/// so a user setting `top_level_default = "materialized"` reads
+/// uniformly across the CLI surface and the thread record on disk.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum UserThreadWorkspaceMode {
     #[default]
     Auto,
-    Heavy,
-    Light,
+    Materialized,
+    Virtualized,
+    Solid,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

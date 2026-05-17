@@ -145,7 +145,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     // execute commands inside, and a real checkout is what the cmd
     // expects.
     let workspace = match args.workspace {
-        WorkspaceModeArg::Auto => WorkspaceModeArg::Heavy,
+        WorkspaceModeArg::Auto => WorkspaceModeArg::Materialized,
         other => other,
     };
     let start_args = ThreadStartArgs {
@@ -544,7 +544,7 @@ mod tests {
 
         let make_args = || TryArgs {
             name: Some("legacy-ref-thread".into()),
-            workspace: WorkspaceModeArg::Heavy,
+            workspace: WorkspaceModeArg::Materialized,
             auto_merge: false,
             keep_on_success: false,
             command: vec!["true".into()],

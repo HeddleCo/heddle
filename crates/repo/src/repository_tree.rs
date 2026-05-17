@@ -10,18 +10,18 @@ use objects::{
 use tracing::{debug, instrument, trace, warn};
 
 use super::{
+    repository_worktree_status::{compare_worktree_with_index_detailed, WorktreeStatusDetailed},
     HeddleError, Repository, Result,
-    repository_worktree_status::{WorktreeStatusDetailed, compare_worktree_with_index_detailed},
 };
 use crate::{
-    FsMonitorSettings, WorktreeIndex, WorktreeStatusOptions,
     fsmonitor::ChangeMonitorSession,
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_index::{WorktreeIndexLoadStats, WorktreeIndexSaveStats},
     worktree_walk::{
-        WalkDirectory, WalkEntry, WorktreeWalkPolicy, read_blob_with_hash, validate_symlink_target,
-        walk_worktree,
+        read_blob_with_hash, validate_symlink_target, walk_worktree, WalkDirectory, WalkEntry,
+        WorktreeWalkPolicy,
     },
+    FsMonitorSettings, WorktreeIndex, WorktreeStatusOptions,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -69,13 +69,60 @@ impl Repository {
         self.build_tree_profiled(dir).map(|(tree, _)| tree)
     }
 
+    /// Build a tree from a directory, reusing per-file hashes from a
+    /// thread manifest when the on-disk `(inode, mtime, ctime, mode)`
+    /// still matches the recorded snapshot.
+    ///
+    /// Same output as [`Self::build_tree`] — a complete `Tree` object —
+    /// but files whose stat fields match the cache skip the
+    /// `read + hash + put_blob` cycle entirely. Net effect on
+    /// `capture_thread_from_disk` for a single-file edit on a 643-file
+    /// fixture: blob work drops from ~30 MB of reads to ~one file's
+    /// worth. Wall-clock follows.
+    ///
+    /// Safe-by-default: any uncertainty (entry missing from cache,
+    /// stat mismatch) falls back to the full read path for that
+    /// specific file. Other files in the same tree still benefit.
+    pub fn build_tree_with_stat_cache(
+        &self,
+        dir: &Path,
+        manifest: &crate::thread_manifest::ThreadManifest,
+    ) -> Result<Tree> {
+        self.build_tree_profiled_inner(dir, Some(manifest))
+            .map(|(tree, _)| tree)
+    }
+
     #[instrument(skip(self), fields(dir = %dir.display()))]
     pub fn build_tree_profiled(&self, dir: &Path) -> Result<(Tree, TreeBuildProfile)> {
+        self.build_tree_profiled_inner(dir, None)
+    }
+
+    /// Profiled tree-build that reuses a manifest's stat-cache. Same
+    /// contract as [`Self::build_tree_profiled`] — returns the full
+    /// `(Tree, TreeBuildProfile)` for downstream timing — but skips
+    /// the `read + hash + put_blob` cycle for files whose stat fields
+    /// match the cache. The fall-through path for changed/new files
+    /// is identical, so the resulting tree is byte-identical to what
+    /// the un-cached build would produce.
+    #[instrument(skip(self, manifest), fields(dir = %dir.display()))]
+    pub fn build_tree_profiled_with_stat_cache(
+        &self,
+        dir: &Path,
+        manifest: &crate::thread_manifest::ThreadManifest,
+    ) -> Result<(Tree, TreeBuildProfile)> {
+        self.build_tree_profiled_inner(dir, Some(manifest))
+    }
+
+    fn build_tree_profiled_inner(
+        &self,
+        dir: &Path,
+        stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
+    ) -> Result<(Tree, TreeBuildProfile)> {
         let patterns = self.ignore_patterns()?;
         debug!(pattern_count = patterns.len(), "Starting tree build");
         let start = Instant::now();
         let nested_exclusions = self.nested_thread_worktree_exclusions(dir)?;
-        let tree = self.build_tree_walk(dir, &patterns, nested_exclusions);
+        let tree = self.build_tree_walk(dir, &patterns, nested_exclusions, stat_cache);
         let elapsed = start.elapsed().as_millis();
         debug!(duration_ms = elapsed, "Tree build complete");
         tree.map(|output| {
@@ -85,16 +132,17 @@ impl Repository {
         })
     }
 
-    #[instrument(skip(self, patterns, nested_exclusions), fields(dir = %dir.display()))]
+    #[instrument(skip(self, patterns, nested_exclusions, stat_cache), fields(dir = %dir.display()))]
     fn build_tree_walk(
         &self,
         dir: &Path,
         patterns: &[String],
         nested_exclusions: Vec<std::path::PathBuf>,
+        stat_cache: Option<&crate::thread_manifest::ThreadManifest>,
     ) -> Result<TreeBuildOutput> {
         let ignore_matcher =
             WorktreeIgnoreMatcher::new(patterns).with_nested_worktree_exclusions(nested_exclusions);
-        let mut policy = TreeBuildPolicy::new(self);
+        let mut policy = TreeBuildPolicy::new(self, dir, stat_cache);
         let mut output = walk_worktree(self, dir, &ignore_matcher, None, &mut policy)?;
 
         // Flush every newly-seen blob as a single packfile. Stores
@@ -323,6 +371,15 @@ struct TreeBuildState {
 
 struct TreeBuildPolicy<'a> {
     repo: &'a Repository,
+    /// Walk root, used to compute paths relative to it so they line
+    /// up with manifest keys (`src/foo.rs`, not absolute paths).
+    walk_root: &'a Path,
+    /// Optional stat-cache. When present, files whose disk stat
+    /// `(inode, mtime, ctime, mode)` matches the recorded entry get
+    /// their hash reused — no `read + hash + put_blob` cycle. Tracked
+    /// in `stat_cache_hits` for diagnostics.
+    stat_cache: Option<&'a crate::thread_manifest::ThreadManifest>,
+    stat_cache_hits: u64,
     /// Blobs encountered during the walk that aren't already in the
     /// store. Drained once at the end of the walk into a single
     /// packfile via `ObjectStore::put_blobs_packed` — turns N×fsync
@@ -334,11 +391,58 @@ struct TreeBuildPolicy<'a> {
 }
 
 impl<'a> TreeBuildPolicy<'a> {
-    fn new(repo: &'a Repository) -> Self {
+    fn new(
+        repo: &'a Repository,
+        walk_root: &'a Path,
+        stat_cache: Option<&'a crate::thread_manifest::ThreadManifest>,
+    ) -> Self {
         Self {
             repo,
+            walk_root,
+            stat_cache,
+            stat_cache_hits: 0,
             pending_blobs: Vec::new(),
             seen: HashSet::new(),
+        }
+    }
+
+    /// Look up `entry`'s manifest record by relative path and, if
+    /// found, compare the on-disk `(inode, mtime, ctime, mode)` to
+    /// the recorded snapshot. Returns the cached hash when the
+    /// match is exact; `None` otherwise. The caller falls back to
+    /// the read-and-hash path.
+    fn lookup_stat_cache_hash(&self, entry: &WalkEntry<'_>) -> Option<ContentHash> {
+        let cache = self.stat_cache?;
+        let rel = entry.path.strip_prefix(self.walk_root).ok()?;
+        // Manifest keys use forward-slash separators (cross-platform
+        // by construction; see `populate_manifest_from_tree`).
+        let mut rel_str = String::with_capacity(rel.as_os_str().len());
+        for (i, component) in rel.components().enumerate() {
+            let std::path::Component::Normal(s) = component else {
+                return None;
+            };
+            if i > 0 {
+                rel_str.push('/');
+            }
+            rel_str.push_str(s.to_str()?);
+        }
+        let cached = cache.files.get(&rel_str)?;
+        let stat = crate::thread_manifest::ManifestFile {
+            hash: cached.hash,
+            size: std::os::unix::fs::MetadataExt::size(&entry.metadata),
+            inode: std::os::unix::fs::MetadataExt::ino(&entry.metadata),
+            mtime_ns: std::os::unix::fs::MetadataExt::mtime(&entry.metadata)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(std::os::unix::fs::MetadataExt::mtime_nsec(&entry.metadata)),
+            ctime_ns: std::os::unix::fs::MetadataExt::ctime(&entry.metadata)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(std::os::unix::fs::MetadataExt::ctime_nsec(&entry.metadata)),
+            mode: std::os::unix::fs::MetadataExt::mode(&entry.metadata),
+        };
+        if stat.matches(cached) {
+            Some(cached.hash)
+        } else {
+            None
         }
     }
 
@@ -379,6 +483,24 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
         trace!(file = %entry.path.display(), size = entry.metadata.len(), "Processing file");
+
+        // Stat-cache fast path: when this build is on behalf of a
+        // capture against a previously-materialised thread, reuse the
+        // recorded hash if the file's stat fields haven't shifted
+        // since materialise time. Skips the read+hash entirely for
+        // unchanged files — the dominant cost on a "one file edited
+        // in a big repo" capture.
+        if let Some(hash) = self.lookup_stat_cache_hash(&entry) {
+            self.stat_cache_hits += 1;
+            state.profile.file_count += 1;
+            state.entries.push(TreeEntry::file(
+                entry.name.to_string(),
+                hash,
+                entry.executable,
+            )?);
+            return Ok(());
+        }
+
         let read_start = Instant::now();
         let (blob, hash) = read_blob_with_hash(entry.path, entry.metadata.len())?;
         let read_elapsed = read_start.elapsed().as_millis();
@@ -410,8 +532,19 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
         state: &mut Self::DirectoryState,
     ) -> Result<()> {
         let target = fs::read_link(entry.path)?;
-        let symlink_dir = entry.path.parent().unwrap_or(self.repo.root());
-        if !validate_symlink_target(self.repo.root(), symlink_dir, &target) {
+        // Validate symlink escape against the *walk root*, not
+        // `repo.root()`. When `capture_thread_from_disk` builds a
+        // tree from a dedicated thread worktree, the walk root is
+        // the thread's checkout path (not the main repo) and
+        // symlinks should be allowed to point inside it. Pre-fix
+        // every symlink in such a worktree was rejected the moment
+        // the slow path ran, breaking `thread switch` auto-capture
+        // for any thread containing a symlink. For the common case
+        // where `build_tree(self.root)` runs against the main repo
+        // root, `walk_root == self.repo.root()` and behaviour is
+        // unchanged.
+        let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
+        if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
             return Err(HeddleError::InvalidSymlinkTarget(target));
         }
 

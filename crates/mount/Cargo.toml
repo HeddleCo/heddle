@@ -12,11 +12,26 @@ categories.workspace = true
 [dependencies]
 bytes.workspace = true
 libc.workspace = true
+# Bounded LRU cache for materialised blob bytes. Read benchmarks
+# showed chunked / mmap-style reads were dominated by re-hydrating
+# the same blob from the object store on every kernel `read` call.
+# This cache short-circuits that into an `Arc<[u8]>` clone.
+lru = { workspace = true }
 objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
 refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.2" }
 thiserror.workspace = true
 tracing.workspace = true
+
+# NFS fallback adapter — only built when the `nfs` feature is on.
+# Unlike `fuse`/`fskit`/`projfs` (which target one OS each), the
+# NFS shell is platform-agnostic: it stands up an in-process
+# NFSv3 server bound to localhost and asks the host's built-in
+# NFS client to mount it. Works wherever the kernel ships an NFS
+# client (Linux, macOS, Windows w/ NFS client feature).
+async-trait = { workspace = true, optional = true }
+nfsserve = { version = "0.10", optional = true }
+tokio = { workspace = true, optional = true }
 
 # `fuser` provides the FUSE bindings on Linux. Gated behind the
 # `fuse` feature so the crate still builds (without a mountable
@@ -26,11 +41,34 @@ tracing.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.17", optional = true }
 
+# `windows` provides the ProjFS bindings on Windows. Gated behind
+# the `projfs` feature mirroring `fuse`/`fskit`. The `Foundation`
+# and `Win32_System_Com` features are pulled in transitively by the
+# ProjFS API surface (GUIDs, HRESULTs, IIDs). Target-gated to
+# Windows so non-Windows builds with `projfs` accidentally enabled
+# get a no-op rather than a download.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_ProjectedFileSystem",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+], optional = true }
+
 [dev-dependencies]
 chrono.workspace = true
+criterion = "0.8"
 oplog = { path = "../oplog", package = "heddle-oplog" }
 proptest.workspace = true
 tempfile.workspace = true
+
+# Cross-platform PlatformShell microbench. Walks `lookup`, `read`,
+# `enumerate`, `attrs` against both `ContentAddressedMount` and a
+# `std::fs` baseline so we can see how far each operation sits from
+# vanilla-FS time.
+[[bench]]
+name = "mount_read_paths"
+harness = false
 
 [features]
 default = []
@@ -45,6 +83,23 @@ fuse = ["dep:fuser"]
 # `cbindgen` regenerates the Swift bridging header from it at
 # build time.
 fskit = ["dep:cbindgen"]
+# Enable the ProjFS shell. Windows-only; on other platforms the
+# `ProjFsShell` type and its module simply don't compile in. The
+# `windows` dep is target-gated to Windows so a non-Windows build
+# with `--all-features` doesn't try to pull in the win32 bindings.
+# Requires the Windows "Projected File System" optional feature to
+# actually mount at runtime — see `ProjFsShell::is_runtime_available`.
+projfs = ["dep:windows"]
+# Enable the NFS fallback shell. Platform-agnostic: spawns an
+# in-process NFSv3 server on 127.0.0.1:<ephemeral> and shells out
+# to the host's `mount` (or `mount.exe` on Windows) to attach it.
+# Used by the CLI's mount lifecycle as the safety net when the
+# host's native adapter (FUSE/FSKit/ProjFS) is unavailable —
+# missing kernel modules, missing System Extension, missing
+# optional features, etc. Sudo/admin is required to mount NFS on
+# every supported OS; if that's unacceptable the caller should
+# fix the native adapter rather than rely on this.
+nfs = ["dep:nfsserve", "dep:tokio", "dep:async-trait"]
 
 [build-dependencies]
 # `cbindgen` regenerates the FSKit Swift bridging header from the
@@ -59,3 +114,10 @@ cbindgen = { version = "0.29", default-features = false, optional = true }
 [lib]
 path = "src/lib.rs"
 name = "mount"
+# `rlib` for the rest of the Rust workspace; `staticlib` for the
+# macOS System Extension (`crates/mount/swift/HeddleHost/HeddleFSModule`)
+# which links the resulting `libmount.a` directly. The staticlib
+# variant is only meaningful with `--features fskit`; on other
+# feature sets it's an empty extra artefact that costs a few MB of
+# `target/` and nothing else.
+crate-type = ["rlib", "staticlib"]

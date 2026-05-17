@@ -31,6 +31,24 @@ pub enum ThreadCommands {
     Switch {
         /// Thread identifier.
         name: String,
+        /// Print only the target thread's checkout path on stdout and
+        /// exit. Used by the shell hook (`heddle shell init`) to auto-cd
+        /// into the new thread:
+        ///   dir=$(heddle thread switch X --print-cd-path) && cd "$dir"
+        /// Auto-capture still runs; rich output is suppressed.
+        #[arg(long, hide_short_help = true)]
+        print_cd_path: bool,
+    },
+
+    /// Print the on-disk path for a thread. Read-only — no state change,
+    /// no auto-capture. Pair with the shell hook (`heddle shell init`)
+    /// to land in the right directory:
+    ///   eval "$(heddle thread cd X)"
+    /// Or use the shell function directly: `heddle thread cd X` becomes
+    /// `cd <path>` when the hook is installed.
+    Cd {
+        /// Thread identifier.
+        name: String,
     },
 
     /// List threads.

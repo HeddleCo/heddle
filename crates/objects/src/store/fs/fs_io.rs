@@ -9,10 +9,12 @@ use std::{
     sync::Mutex,
 };
 
+use bytes::Bytes;
+
 use crate::{
     error::HeddleError,
     fs_atomic::{enrich_fs_error, enrich_rename_error, sync_directory},
-    store::{Result, atomic::temp_path},
+    store::{atomic::temp_path, Result},
 };
 
 const MMAP_THRESHOLD_BYTES: u64 = 256 * 1024;
@@ -42,6 +44,16 @@ impl FileBytes {
 pub(super) enum AtomicWriteMode {
     Durable,
     BatchDirectorySync,
+    /// No fsync at all. Caller asserts the file is a recoverable
+    /// cache mirror — the authoritative copy lives elsewhere
+    /// (typically a pack) and re-derivation on read is correct.
+    /// On macOS APFS, `sync_data` alone is ~5 ms per call
+    /// (`F_FULLFSYNC`-class cost); skipping it cuts cache-write
+    /// throughput from ~200 writes/s to ~5500 writes/s. The price
+    /// is that a torn write after a crash could leave the cached
+    /// file with garbage bytes — readers must guard with a hash
+    /// check before trusting the content.
+    NoSync,
 }
 
 pub(super) fn write_atomic(
@@ -71,10 +83,22 @@ pub(super) fn write_atomic(
     }
     let mut failing_op = Op::Write;
     let write_result: std::io::Result<()> = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
+        // Open with explicit mode 0o644 instead of relying on the
+        // process umask. This makes loose objects byte-and-mode
+        // deterministic: clonefile on macOS preserves source mode,
+        // so a worktree materialised from a loose blob inherits
+        // 0o644 *without* an extra chmod. `repository_materialization`
+        // skips `set_file_mode` on non-executable files because of
+        // this contract — see `materialize_blob`'s comment near the
+        // `set_file_mode(dest, true)` call.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o644);
+        }
+        let mut file = opts.open(&temp_path)?;
         use std::io::Write as _;
         file.write_all(data)?;
         match mode {
@@ -95,6 +119,10 @@ pub(super) fn write_atomic(
             // but whose data blocks weren't flushed — exactly the
             // ACID violation we want to avoid for state/tree writes.
             AtomicWriteMode::BatchDirectorySync => file.sync_data()?,
+            // Cache-mirror writes: no fsync. Caller guards reads
+            // with a hash check, so torn-write corruption is
+            // recoverable (re-promote from the authoritative copy).
+            AtomicWriteMode::NoSync => {}
         }
         failing_op = Op::Rename;
         std::fs::rename(&temp_path, path)?;
@@ -109,6 +137,7 @@ pub(super) fn write_atomic(
                     dirs.insert(parent.to_path_buf());
                 }
             }
+            AtomicWriteMode::NoSync => {}
         }
         Ok(())
     })();
@@ -150,6 +179,33 @@ pub(super) fn read_file_header(path: &Path, header_len: usize) -> Result<Option<
         file.read_exact(&mut header)?;
     }
     Ok(Some((header, len)))
+}
+
+/// Read a pack file as zero-copy [`Bytes`]. For packs that clear the
+/// mmap threshold, the underlying memory is the mmap'd region —
+/// every `Bytes::slice` into it is a zero-copy view. Smaller packs
+/// fall back to a heap read wrapped in `Bytes`. Public because the
+/// pack reader lives in a sibling module and needs to bypass the
+/// `pub(super)` gate on `read_file_bytes`.
+pub fn read_file_bytes_for_pack(path: &Path) -> Result<Bytes> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(Bytes::new());
+    }
+    if len >= MMAP_THRESHOLD_BYTES {
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        if mmap.len() != len as usize {
+            return Err(HeddleError::InvalidObject(
+                "pack file size changed during memory mapping".to_string(),
+            ));
+        }
+        return Ok(Bytes::from_owner(mmap));
+    }
+    let mut data = Vec::with_capacity(len as usize);
+    let mut reader = file;
+    reader.read_to_end(&mut data)?;
+    Ok(Bytes::from(data))
 }
 
 pub(super) fn read_file_bytes(path: &Path) -> Result<Option<FileBytes>> {

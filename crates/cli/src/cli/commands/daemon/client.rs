@@ -34,7 +34,7 @@ use tracing::{debug, warn};
 /// the caller must surface".
 ///
 /// The split exists because, post-default-flip, every
-/// `--workspace light` start tries the daemon first and
+/// `--workspace virtualized` start tries the daemon first and
 /// silently falls back when the daemon is unavailable on this
 /// host (e.g. no `fusermount`, exec failed, daemon endpoint never
 /// appeared). A `Fatal` error means the daemon *did* respond but
@@ -293,7 +293,7 @@ fn refine_rpc_error(
 /// failure modes into "daemon unavailable, fall back" (`Unavailable`)
 /// and "daemon said no for a real reason, surface it" (`Fatal`).
 ///
-/// Used by the default-flipped `--workspace light` path where
+/// Used by the default-flipped `--workspace virtualized` path where
 /// we silently fall back to the in-process mount when the host can't
 /// run the daemon. Splits the RPC into endpoint-discovery + send so
 /// each phase can pick its own classification.

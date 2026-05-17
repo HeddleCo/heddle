@@ -19,8 +19,8 @@ use super::{
     operator_core::OperatorCommandOutput,
     operator_loop::primary_next_action,
     thread::{
-        cmd_thread_create, cmd_thread_delete, cmd_thread_list, cmd_thread_rename, cmd_thread_show,
-        cmd_thread_switch, find_thread_summary, show_thread_summary,
+        cmd_thread_cd, cmd_thread_create, cmd_thread_delete, cmd_thread_list, cmd_thread_rename,
+        cmd_thread_show, cmd_thread_switch, find_thread_summary, show_thread_summary,
     },
     thread_shaping::{cmd_thread_absorb, cmd_thread_move, cmd_thread_resolve},
     worktree_cmd::helpers::{prepare_worktree_target, write_isolated_checkout},
@@ -99,7 +99,7 @@ pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
         thread,
         target_thread: None,
         parent_thread: None,
-        mode: ThreadMode::Lightweight,
+        mode: ThreadMode::Materialized,
         state: ThreadState::Active,
         base_state: current_state.clone().unwrap_or_default(),
         base_root,
@@ -144,7 +144,11 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
             ephemeral,
             ttl_secs,
         } => cmd_thread_create(cli, &repo, name, ephemeral, ttl_secs),
-        ThreadCommands::Switch { name } => cmd_thread_switch(cli, &repo, name),
+        ThreadCommands::Switch {
+            name,
+            print_cd_path,
+        } => cmd_thread_switch(cli, &repo, name, print_cd_path),
+        ThreadCommands::Cd { name } => cmd_thread_cd(&repo, name),
         ThreadCommands::List(args) => cmd_thread_list(cli, &repo, args),
         ThreadCommands::Cleanup(args) => cmd_thread_cleanup(cli, &repo, args),
         ThreadCommands::Show(args) => {
@@ -502,7 +506,7 @@ fn cmd_thread_promote(
     let abs_path = prepare_worktree_target(repo, &path)?;
     write_isolated_checkout(repo, &abs_path, &state_id, Some(&thread.thread))?;
 
-    thread.mode = ThreadMode::Materialized;
+    thread.mode = ThreadMode::Solid;
     thread.state = ThreadState::Promoted;
     thread.materialized_path = Some(abs_path.clone());
     thread.updated_at = Utc::now();
@@ -598,6 +602,13 @@ pub(crate) fn drop_thread_silent(
         // will also fail and the user gets a clear error.
         remove_path_recursively(&thread.execution_path)?;
     }
+    // Drop the manifest sidecar last — it has no on-disk dependencies
+    // and a leftover would surface as a phantom entry in
+    // `heddle status` and `heddle daemon status`. Best-effort: a
+    // missing dir reports `false` rather than erroring, an inaccessible
+    // dir bubbles up the io error so the drop reports the actual
+    // problem instead of silently leaving inventory inconsistent.
+    repo::thread_manifest::remove_thread_manifest_dir(repo.heddle_dir(), &thread.thread)?;
     thread.state = ThreadState::Abandoned;
     thread.updated_at = Utc::now();
     manager.save(&thread)?;

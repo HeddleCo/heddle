@@ -84,6 +84,32 @@ pub(crate) struct StatusOutput {
     state: Option<StateInfo>,
     git_checkpoint: Option<GitCheckpointInfo>,
     changes: ChangesInfo,
+    /// Inventory of clonefile-backed thread worktrees discovered on
+    /// disk. Read-only diagnostic. Included in JSON always (as `[]`
+    /// when no threads are materialized — the JSON contract is "the
+    /// field is always an array", which lets consumers index into
+    /// it without a null-guard) and in verbose text; the default
+    /// short text only prints a one-line advisory when at least one
+    /// thread is stale (manifest's recorded state lags the thread's
+    /// actual head), because that's the case where the user may
+    /// want to act (re-materialize or re-capture). Healthy
+    /// materialized threads stay invisible.
+    #[serde(default)]
+    materialized_threads: Vec<MaterializedThreadInfo>,
+}
+
+#[derive(Serialize, Default)]
+struct MaterializedThreadInfo {
+    name: String,
+    state_id: String,
+    tree_hash_short: String,
+    file_count: usize,
+    /// `true` when the thread ref has advanced beyond what the
+    /// manifest recorded. The on-disk worktree may not reflect the
+    /// thread's latest content; users may want `heddle thread
+    /// switch <name>` to re-materialize or `heddle capture` to
+    /// fast-forward the manifest.
+    stale: bool,
 }
 
 #[derive(Serialize)]
@@ -274,6 +300,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             state: None,
             git_checkpoint: None,
             changes,
+            materialized_threads: assess_materialized_threads(&repo),
         });
     }
 
@@ -455,6 +482,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         state: state_info,
         git_checkpoint,
         changes,
+        materialized_threads: assess_materialized_threads(&repo),
     };
     let has_changes = !output.changes.modified.is_empty()
         || !output.changes.added.is_empty()
@@ -470,7 +498,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         mode: output
             .thread_mode
             .clone()
-            .unwrap_or(ThreadMode::Lightweight),
+            .unwrap_or(ThreadMode::Materialized),
         state: output.thread_state.clone().unwrap_or(ThreadState::Active),
         base_state: output.base_state.clone().unwrap_or_default(),
         base_root: output.base_root.clone().unwrap_or_default(),
@@ -631,6 +659,30 @@ fn render_short_changes(changes: &ChangesInfo) {
 
 fn render_short_status(output: &StatusOutput) {
     render_short_changes(&output.changes);
+    render_materialized_advisory(output);
+}
+
+/// Default short-text advisory for materialized threads. Stays silent
+/// unless at least one thread is stale — the user's bar for this
+/// surface is "say something only when I might need to act". When
+/// stale threads exist, emit a single dim line naming them so the
+/// user can `thread switch` (re-materialize) or `capture` (move the
+/// manifest's recorded state forward) at their leisure.
+fn render_materialized_advisory(output: &StatusOutput) {
+    let stale: Vec<&str> = output
+        .materialized_threads
+        .iter()
+        .filter(|t| t.stale)
+        .map(|t| t.name.as_str())
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    println!(
+        "{} materialized thread(s) lag their head: {}",
+        style::dim("·"),
+        stale.join(", ")
+    );
 }
 
 fn render_long_status(output: &StatusOutput, verbose: bool) {
@@ -641,6 +693,56 @@ fn render_long_status(output: &StatusOutput, verbose: bool) {
     render_status_advice(output);
     render_status_changes(output);
     render_status_parallel(output);
+    render_status_materialized(&output.materialized_threads, verbose);
+}
+
+/// Long-form inventory of clonefile-backed materialized threads. The
+/// default long output keeps it tight — one line per stale thread,
+/// silent when everything's in sync — so it has the same "no news is
+/// good news" shape as the short renderer's advisory. `-v` widens to
+/// the full list with file counts and tree hashes, on the principle
+/// that verbose callers want the diagnostic surface even when nothing
+/// is wrong.
+fn render_status_materialized(threads: &[MaterializedThreadInfo], verbose: bool) {
+    if threads.is_empty() {
+        return;
+    }
+    if !verbose {
+        let stale: Vec<&MaterializedThreadInfo> =
+            threads.iter().filter(|t| t.stale).collect();
+        if stale.is_empty() {
+            return;
+        }
+        println!();
+        println!("{}", style::bold("Materialized threads (stale)"));
+        for t in stale {
+            println!(
+                "  {} {} {} {}",
+                style::bold(&t.name),
+                style::dim(&t.state_id),
+                style::dim(&t.tree_hash_short),
+                style::warn("stale"),
+            );
+        }
+        return;
+    }
+    println!();
+    println!("{}", style::bold("Materialized threads"));
+    for t in threads {
+        let status_tag = if t.stale {
+            style::warn("stale")
+        } else {
+            style::dim("current")
+        };
+        println!(
+            "  {} {} {} files={} {}",
+            style::bold(&t.name),
+            style::dim(&t.state_id),
+            style::dim(&t.tree_hash_short),
+            t.file_count,
+            status_tag,
+        );
+    }
 }
 
 fn render_status_header(output: &StatusOutput) {
@@ -760,11 +862,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
             println!("{}", style::dim("Worktree"));
             emitted = true;
         }
-        let visibility = match mode {
-            ThreadMode::Materialized | ThreadMode::Lightweight => "heavy",
-            ThreadMode::Virtualized => "light",
-        };
-        println!("Workspace: {}", visibility);
+        println!("Workspace: {}", mode);
     }
     if let Some(state) = &output.thread_state {
         if !emitted {
@@ -961,6 +1059,40 @@ fn render_status_advice(output: &StatusOutput) {
     }
 }
 
+/// Walk `<heddle_dir>/threads/` and decorate each manifest with a
+/// staleness bit by comparing the manifest's recorded `state_id` to
+/// the current thread head in the ref backend.
+///
+/// Best-effort and read-only. Errors from `list_thread_manifests` or
+/// `get_thread` collapse to "nothing to advise" — the renderer must
+/// not nag the user about a probe that didn't run cleanly. The cost
+/// here is one `read_dir` + one `read_to_string` per thread, plus one
+/// ref lookup; well within `status`'s existing budget.
+fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo> {
+    let summaries =
+        match repo::thread_manifest::list_thread_manifests(repo.heddle_dir()) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+    summaries
+        .into_iter()
+        .map(|summary| {
+            let stale = match repo.refs().get_thread(&summary.thread) {
+                Ok(Some(head)) => head != summary.state_id,
+                _ => false,
+            };
+            let tree_hash = summary.tree_hash.to_string();
+            MaterializedThreadInfo {
+                name: summary.thread,
+                state_id: summary.state_id.short(),
+                tree_hash_short: tree_hash[..std::cmp::min(12, tree_hash.len())].to_string(),
+                file_count: summary.file_count,
+                stale,
+            }
+        })
+        .collect()
+}
+
 fn changed_path_count(
     thread: Option<&super::thread::ThreadSummary>,
     changes: &ChangesInfo,
@@ -1130,4 +1262,130 @@ fn normalize_presence_ws_url(upstream: &str) -> Result<String> {
     Err(anyhow::anyhow!(
         "unsupported hosted upstream url: {upstream}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use repo::Repository;
+    use tempfile::TempDir;
+
+    use super::{assess_materialized_threads, MaterializedThreadInfo, render_status_materialized};
+
+    fn init_repo_with_materialized_thread(content: &[u8]) -> (TempDir, TempDir, Repository) {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("hello.txt"), content).unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        repo.materialize_thread("main", &dest).unwrap();
+        (repo_dir, dest_holder, repo)
+    }
+
+    #[test]
+    fn assess_returns_empty_when_no_materialized_threads() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        assert!(assess_materialized_threads(&repo).is_empty());
+    }
+
+    #[test]
+    fn assess_reports_fresh_materialization_as_not_stale() {
+        let (_repo_dir, _dest_holder, repo) =
+            init_repo_with_materialized_thread(b"hello\n");
+        let infos = assess_materialized_threads(&repo);
+        assert_eq!(infos.len(), 1, "exactly one materialized thread");
+        let info = &infos[0];
+        assert_eq!(info.name, "main");
+        assert_eq!(info.file_count, 1);
+        assert!(!info.stale, "thread head unchanged → not stale");
+        assert!(!info.state_id.is_empty());
+        assert!(!info.tree_hash_short.is_empty());
+        assert!(
+            info.tree_hash_short.len() <= 12,
+            "tree_hash_short caps at 12 chars: got {}",
+            info.tree_hash_short
+        );
+    }
+
+    #[test]
+    fn assess_flags_thread_as_stale_when_head_advances_past_manifest() {
+        // Setup: materialize "main" at a path *separate from*
+        // `repo.root()`. After the post-bugfix snapshot path-gate
+        // landed (manifest is only refreshed when `self.root` matches
+        // the manifest's recorded worktree_path), running
+        // `repo.snapshot()` from the main repo dir advances the
+        // thread head WITHOUT auto-healing the manifest. The
+        // staleness check should then surface the materialized
+        // worktree as stale, which is the user-facing signal
+        // `heddle status` exists to deliver.
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        let mat = repo.materialize_thread("main", &dest).unwrap();
+
+        // Advance main from the main repo dir (not from dest).
+        fs::write(repo_dir.path().join("hello.txt"), b"hello world\n").unwrap();
+        let snap = repo.snapshot(Some("advance".into()), None).unwrap();
+        assert_ne!(snap.change_id, mat.state_id);
+
+        let infos = assess_materialized_threads(&repo);
+        assert_eq!(infos.len(), 1);
+        assert!(
+            infos[0].stale,
+            "manifest still names mat.state_id but main head is at snap.change_id → stale"
+        );
+    }
+
+    #[test]
+    fn render_status_materialized_skips_when_inventory_is_empty() {
+        // Renderer is `println!`-based; we can't capture stdout from
+        // a unit test, but we *can* assert the early-return path
+        // doesn't panic on an empty inventory or a non-verbose call
+        // with only fresh threads.
+        let empty: Vec<MaterializedThreadInfo> = Vec::new();
+        render_status_materialized(&empty, false);
+        render_status_materialized(&empty, true);
+    }
+
+    #[test]
+    fn render_status_materialized_handles_mixed_stale_and_fresh() {
+        let threads = vec![
+            MaterializedThreadInfo {
+                name: "fresh".into(),
+                state_id: "abcd".into(),
+                tree_hash_short: "1234".into(),
+                file_count: 3,
+                stale: false,
+            },
+            MaterializedThreadInfo {
+                name: "stale".into(),
+                state_id: "efgh".into(),
+                tree_hash_short: "5678".into(),
+                file_count: 7,
+                stale: true,
+            },
+        ];
+        // Short-form: only stale threads listed.
+        render_status_materialized(&threads, false);
+        // Long-form: every thread listed.
+        render_status_materialized(&threads, true);
+
+        // Short-form with only fresh threads: silent (no panic).
+        let fresh_only: Vec<MaterializedThreadInfo> = vec![MaterializedThreadInfo {
+            name: "fresh".into(),
+            state_id: "abcd".into(),
+            tree_hash_short: "1234".into(),
+            file_count: 3,
+            stale: false,
+        }];
+        render_status_materialized(&fresh_only, false);
+    }
 }

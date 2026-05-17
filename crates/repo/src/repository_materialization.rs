@@ -748,8 +748,17 @@ fn set_file_mode(path: &Path, executable: bool) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mode = if executable { 0o755 } else { 0o644 };
-        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        // Non-executable files inherit 0o644 from the loose-blob
+        // source — the object store opens loose blobs with explicit
+        // `OpenOptions::mode(0o644)` (see `fs_io::write_atomic`), and
+        // `clonefile`/`fs::copy` both preserve source mode on Unix.
+        // So `set_permissions` would be a no-op `chmod(2)` on every
+        // non-executable file: ~20–30 µs per call × N files, all of
+        // it pure waste. Skip the syscall outright; correctness is
+        // guaranteed by the producer-side mode contract.
+        if executable {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+        }
     }
     #[cfg(not(unix))]
     {

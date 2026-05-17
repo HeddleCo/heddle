@@ -162,6 +162,17 @@ impl PackedOpLog {
                 }
             };
 
+            // Reject nanos in the leap-second range (>= 1e9) explicitly.
+            // Heddle's serializer writes `timestamp_subsec_nanos()` which
+            // is always < 1e9 in normal time; chrono's `timestamp_opt`
+            // accepts nanos up to 2e9 for leap-second representation, so
+            // without this guard a corrupted oplog with nanos in
+            // [1e9, 2e9) would parse as a phantom leap-second timestamp.
+            if timestamp_ns >= 1_000_000_000 {
+                return Err(HeddleError::InvalidObject(format!(
+                    "invalid oplog timestamp secs={timestamp_secs} nanos={timestamp_ns}"
+                )));
+            }
             let timestamp = Utc
                 .timestamp_opt(timestamp_secs, timestamp_ns)
                 .single()

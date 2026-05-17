@@ -97,10 +97,62 @@ impl Repository {
             });
         }
 
+        // Materialized-thread context detection: when HEAD is attached
+        // to a thread and that thread has a manifest on disk *whose
+        // recorded worktree_path matches our `self.root`*, the agent
+        // is capturing inside a clonefile-backed materialized worktree
+        // (the day-one shape for `--workspace light`). Two opportunities:
+        //   1. Reuse the manifest's per-file stat-cache during the tree
+        //      build, so unchanged files skip `read + hash + put_blob`.
+        //      Wall-clock drop scales with file count × file size; on the
+        //      heddle workspace fixture, a single-file edit captures in
+        //      ~one read's worth of I/O instead of walking the entire tree.
+        //   2. Refresh the manifest after the capture lands so the next
+        //      `heddle capture` against the same worktree stays on the
+        //      fast path (stat fields drift forward; the cache shouldn't
+        //      get stale just because we ran `capture`).
+        //
+        // The `worktree_path` check is load-bearing: if the user
+        // materialized thread X at `/mat/` and then runs `heddle
+        // capture` from the *main* repo at `/repo/`, the manifest's
+        // stat records describe `/mat/`. Using it as a stat-cache
+        // against `/repo/`'s files always misses (wasted I/O); worse,
+        // refreshing the manifest with `/repo/`'s stats corrupts the
+        // sidecar so `heddle status` falsely reports `/mat/` as
+        // fresh when its on-disk content is actually stale. The
+        // guard restricts both legs to the case the comment promises.
+        //
+        // Best-effort and read-only on the detection side: a missing or
+        // malformed manifest collapses to the plain `build_tree_profiled`
+        // path. The slow path is always correct; the fast path is the
+        // optimisation.
+        let head_for_manifest = self.refs.read_head().ok();
+        let manifest_context: Option<(String, crate::thread_manifest::ThreadManifest)> =
+            match head_for_manifest.as_ref() {
+                Some(Head::Attached { thread }) => {
+                    match crate::thread_manifest::read_manifest(self.heddle_dir(), thread) {
+                        Ok(Some(m)) => {
+                            let self_root_canonical = super::repository_thread_materialize::canonical_worktree_path(&self.root);
+                            if m.worktree_path == self_root_canonical {
+                                Some((thread.clone(), m))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+
         self.store.begin_snapshot_write_batch()?;
         let snapshot = (|| -> Result<SnapshotExecution> {
             debug!("Building tree from worktree");
-            let (tree, tree_profile) = self.build_tree_profiled(&self.root)?;
+            let (tree, tree_profile) = match manifest_context.as_ref() {
+                Some((_, manifest)) => self
+                    .build_tree_profiled_with_stat_cache(&self.root, manifest)?,
+                None => self.build_tree_profiled(&self.root)?,
+            };
             debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
 
             debug!("Storing tree");
@@ -198,6 +250,51 @@ impl Repository {
                 thread.as_deref(),
                 Some(&self.op_scope()),
             )?;
+
+            // Refresh the thread manifest when capturing inside a
+            // materialized-thread worktree: bump `state_id` + `tree_hash`
+            // to the just-landed state, and re-stat the worktree so the
+            // per-file `(inode, mtime, ctime, mode)` reflects what's on
+            // disk *after* the capture. This keeps the stat-cache fast
+            // path live across consecutive captures. Best-effort: a
+            // failure here doesn't unwind the capture — the state +
+            // ref are already durable, and the next `capture` will
+            // fall through to the full read+hash path on a stale
+            // manifest and self-heal.
+            if let Some((thread_name, original)) = manifest_context.as_ref() {
+                // Preserve the worktree_path from the manifest we
+                // matched against — by construction it equals
+                // `self.root` canonicalized, which is the worktree
+                // we just captured from.
+                let mut refreshed = crate::thread_manifest::ThreadManifest::new(
+                    state.change_id,
+                    tree_hash,
+                    original.worktree_path.clone(),
+                );
+                if let Err(err) = super::repository_thread_materialize::populate_manifest_from_tree(
+                    self,
+                    &tree,
+                    &self.root,
+                    "",
+                    &mut refreshed.files,
+                ) {
+                    tracing::warn!(
+                        error = %err,
+                        thread = %thread_name,
+                        "manifest refresh post-capture failed; next capture will rebuild"
+                    );
+                } else if let Err(err) = crate::thread_manifest::write_manifest(
+                    self.heddle_dir(),
+                    thread_name,
+                    &refreshed,
+                ) {
+                    tracing::warn!(
+                        error = %err,
+                        thread = %thread_name,
+                        "manifest write post-capture failed; next capture will rebuild"
+                    );
+                }
+            }
 
             Ok(SnapshotExecution {
                 state,

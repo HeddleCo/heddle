@@ -665,7 +665,7 @@ fn enum_flag_table() -> BTreeMap<&'static str, Vec<&'static str>> {
     let mut t = BTreeMap::new();
     t.insert(
         "workspace",
-        vec!["auto", "light", "heavy", "private", "visible"],
+        vec!["auto", "materialized", "virtualized", "solid"],
     );
     t.insert("kind", vec!["constraint", "invariant", "rationale"]);
     // `--scope` is overloaded across verbs (`integration install
@@ -692,7 +692,7 @@ mod tests {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
-            "Try `heddle start probe --workspace virtualized` to see.",
+            "Try `heddle start probe --workspace ephemeral` to see.",
             &cli(),
             &mut issues,
         );
@@ -700,7 +700,7 @@ mod tests {
             issues
                 .iter()
                 .any(|i| matches!(i.kind, IssueKind::InvalidFlagValue)
-                    && i.invocation.contains("--workspace virtualized"))
+                    && i.invocation.contains("--workspace ephemeral"))
         );
     }
 
@@ -765,7 +765,7 @@ mod tests {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
-            "We use `heddle start <name> --workspace heavy --path <dir>` here.\n\
+            "We use `heddle start <name> --workspace materialized --path <dir>` here.\n\
              Also `heddle context set --path X --scope file --kind rationale -m \"y\"`.\n\
              And `heddle marker delete failed-build` works fine.\n",
             &cli(),
@@ -807,7 +807,7 @@ mod tests {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
-            "```bash\nheddle start probe --workspace virtualized\n```\n",
+            "```bash\nheddle start probe --workspace ephemeral\n```\n",
             &cli(),
             &mut issues,
         );

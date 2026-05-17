@@ -57,10 +57,9 @@ pub fn tier_of(verb: &str) -> Tier {
         | "fetch" | "fork" | "fsck" | "git-overlay" | "goto" | "hook" | "inspect"
         | "integration" | "maintenance" | "marker" | "presence" | "pull" | "purge" | "push"
         | "query" | "ready" | "rebase" | "redact" | "redo" | "remote" | "resolve" | "retro"
-        | "revert" | "run" | "schemas" | "semantic" | "session" | "ship" | "show" | "stash"
-        | "store" | "support" | "sync" | "thread" | "try" | "version" | "watch" | "workspace" => {
-            Tier::Advanced
-        }
+        | "revert" | "run" | "schemas" | "semantic" | "session" | "shell" | "ship" | "show"
+        | "stash" | "store" | "support" | "sync" | "thread" | "try" | "version" | "watch"
+        | "workspace" => Tier::Advanced,
 
         // ── Hidden ────────────────────────────────────────────────
         // `transaction` is hidden in alpha — buffered-op replay at
@@ -268,10 +267,11 @@ This is intentional. The everyday surface stays minimal so first-time users aren
 overwhelmed; agents and power users reach for the advanced affordances when they\n\
 need them.\n";
 
-const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are not interchangeable.\n\
+const DAEMON_TOPIC: &str =
+    "Two daemons — both have legitimate uses; they are not interchangeable.\n\
 \n\
 `heddle daemon`        — FUSE mount-daemon control plane. Owns FUSE sessions for\n\
-                         `--workspace light --daemon` threads. Linux only.\n\
+                         `--workspace virtualized --daemon` threads. Linux only.\n\
                          Subcommands: serve | status | stop.\n\
 \n\
 `heddle agent serve`   — Local gRPC daemon over a Unix socket inside the repo's\n\
@@ -282,7 +282,8 @@ const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are 
                          peer-cred check enforced. Out of scope for first ship:\n\
                          multi-user, remote, TLS.\n";
 
-const OPERATION_IDS_TOPIC: &str = "Idempotency — every state-changing call accepts a `client_operation_id`.\n\
+const OPERATION_IDS_TOPIC: &str =
+    "Idempotency — every state-changing call accepts a `client_operation_id`.\n\
 \n\
 The same id replayed with the same body returns the original outcome\n\
 bit-identical; with a different body it returns FAILED_PRECONDITION.\n\

@@ -11,8 +11,8 @@ use tracing::{debug, instrument, trace};
 use crate::{
     object::ContentHash,
     store::{
-        Result,
         pack::{ObjectType, PackObjectId, PackReader},
+        Result,
     },
 };
 
@@ -123,6 +123,23 @@ impl PackManager {
     #[instrument(skip(self), fields(hash = %hash.short()))]
     pub fn get_hashed_object(&self, hash: &ContentHash) -> Result<Option<(ObjectType, Vec<u8>)>> {
         self.get_object(&PackObjectId::Hash(*hash))
+    }
+
+    /// Zero-copy variant of `get_hashed_object`. Returns
+    /// [`bytes::Bytes`] views into the underlying pack mmap when
+    /// the entry is non-delta and stored uncompressed; falls back
+    /// to the standard decompress-into-Vec path otherwise.
+    pub fn get_hashed_object_bytes(
+        &self,
+        hash: &ContentHash,
+    ) -> Result<Option<(ObjectType, bytes::Bytes)>> {
+        let id = PackObjectId::Hash(*hash);
+        for pack in &self.packs {
+            if let Some((obj_type, data)) = pack.reader.get_object_bytes(&id)? {
+                return Ok(Some((obj_type, data)));
+            }
+        }
+        Ok(None)
     }
 
     pub fn has_object(&self, hash: &ContentHash) -> bool {

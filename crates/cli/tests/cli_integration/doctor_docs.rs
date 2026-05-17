@@ -24,7 +24,7 @@ fn flags_invalid_workspace_value() {
     let md = write_file(
         temp.path(),
         "drift.md",
-        "Run `heddle start probe --workspace virtualized` to see drift.\n",
+        "Run `heddle start probe --workspace ephemeral` to see drift.\n",
     );
 
     let output = heddle_output(
@@ -88,7 +88,7 @@ fn clean_markdown_exits_zero() {
     let md = write_file(
         temp.path(),
         "ok.md",
-        "Use `heddle start probe --workspace heavy --path ./checkout` for isolation.\n\
+        "Use `heddle start probe --workspace materialized --path ./checkout` for isolation.\n\
          For status, run `heddle status --json`.\n\
          Clean up with `heddle thread drop probe --delete-thread`.\n",
     );
@@ -121,7 +121,7 @@ fn human_output_renders_when_no_json() {
     let md = write_file(
         temp.path(),
         "drift.md",
-        "Run `heddle start probe --workspace virtualized`.\n",
+        "Run `heddle start probe --workspace ephemeral`.\n",
     );
 
     let output = heddle_output(
@@ -140,7 +140,7 @@ fn human_output_renders_when_no_json() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("doctor docs:") && stdout.contains("--workspace virtualized"),
+        stdout.contains("doctor docs:") && stdout.contains("--workspace ephemeral"),
         "expected human-readable summary; got: {}",
         stdout
     );
@@ -167,7 +167,7 @@ fn all_enumerates_markdown_without_git() {
     write_file(
         root,
         "README.md",
-        "Run `heddle start probe --workspace heavy --path foo`.\n",
+        "Run `heddle start probe --workspace materialized --path foo`.\n",
     );
     fs::create_dir_all(root.join("docs")).unwrap();
     write_file(

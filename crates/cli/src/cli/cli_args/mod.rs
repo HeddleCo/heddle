@@ -20,6 +20,7 @@ mod commands_remote;
 mod commands_review;
 #[cfg(feature = "semantic")]
 mod commands_semantic;
+mod commands_shell;
 mod commands_stash;
 mod commands_thread;
 mod commands_workspace;
@@ -73,6 +74,7 @@ pub use commands_review::{
 };
 #[cfg(feature = "semantic")]
 pub use commands_semantic::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
+pub use commands_shell::{ShellCommands, ShellKind};
 pub use commands_stash::StashCommands;
 pub use commands_thread::{ThreadCleanupArgs, ThreadCommands, ThreadListArgs};
 pub use commands_workspace::{WorkspaceCommands, WorkspaceShowArgs};

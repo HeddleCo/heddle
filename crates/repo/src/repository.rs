@@ -36,6 +36,8 @@ mod repository_snapshot;
 #[cfg(test)]
 #[path = "repository_tests.rs"]
 mod repository_tests;
+#[path = "repository_thread_materialize.rs"]
+mod repository_thread_materialize;
 #[path = "repository_tree.rs"]
 mod repository_tree;
 #[path = "repository_worktree_apply.rs"]
@@ -91,6 +93,7 @@ pub use repository_maintenance::{
     RepositoryPerformanceInspectionReport, WorktreeIndexInspection,
 };
 pub use repository_materialization::WarmCanonicalStoreStats;
+pub use repository_thread_materialize::ThreadCaptureOutcome;
 pub use repository_partial_fetch::MissingBlob;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};

@@ -18,7 +18,7 @@ use super::{
     },
     AgentCommands, BisectCommands, CheckpointArgs, ConflictCommands, ContextCommands,
     DiscussCommands, HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs,
-    RedactCommands, RemoteCommands, ReviewCommands, StashCommands, ThreadCommands,
+    RedactCommands, RemoteCommands, ReviewCommands, ShellCommands, StashCommands, ThreadCommands,
     TransactionCommands, WorkspaceCommands,
 };
 #[cfg(feature = "client")]
@@ -397,6 +397,12 @@ Examples:
         command: ThreadCommands,
     },
 
+    /// Shell integration helpers (auto-cd on thread start/switch/cd).
+    Shell {
+        #[command(subcommand)]
+        command: ShellCommands,
+    },
+
     /// Show the repo-wide workspace control tower.
     Workspace {
         #[command(subcommand)]
@@ -558,7 +564,7 @@ Examples:
     /// FUSE mount-daemon control plane — distinct from `agent`.
     ///
     /// `heddle daemon serve` runs a foreground mount daemon that
-    /// owns FUSE sessions for `--workspace light --daemon`
+    /// owns FUSE sessions for `--workspace virtualized --daemon`
     /// threads. It is normally spawned on demand by the per-thread
     /// CLI; running it interactively is for debugging.
     /// `status` reports liveness/uptime/mount count without spawning;
