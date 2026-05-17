@@ -93,20 +93,7 @@ pub(crate) fn extract_items(parsed: &ParsedFile) -> Vec<Item> {
     // Items can be reported in any DFS order; ensure source order for
     // deterministic reconstruction.
     items.sort_by_key(|item| item.start_byte);
-    // De-overlap: if a child item overlaps a parent (e.g. nested fn inside an
-    // impl method body), keep the outer one. The DFS skips into impl bodies
-    // but stops at function bodies — so this is defence-in-depth.
-    let mut out: Vec<Item> = Vec::new();
-    for item in items {
-        if let Some(last) = out.last()
-            && item.start_byte < last.end_byte
-        {
-            // Nested inside a previously-recorded item; drop.
-            continue;
-        }
-        out.push(item);
-    }
-    out
+    items
 }
 
 /// Top-level entry: segment a parsed file into items + record the source
@@ -155,26 +142,34 @@ fn collect_items(
                     signature_hash,
                     extra_scope,
                 } = classified;
-                let mut item_scope = scope.clone();
-                item_scope.extend(extra_scope);
-                let item_key = ItemKey {
-                    kind,
-                    name: name.clone(),
-                    scope: item_scope,
-                    signature_hash,
-                };
-                out.push(Item {
-                    key: item_key,
-                    start_byte: child.start_byte(),
-                    end_byte: child.end_byte(),
-                });
-                // For impl / mod / trait / class, schedule the body so
-                // we catch methods with their scope set to the
-                // container's name.
                 if let Some(body) = container_body {
+                    // Container with body (impl / trait / class / mod
+                    // with `{ ... }`): the container ITSELF is not an
+                    // item — its bytes become inter-item content
+                    // surrounding the per-method items inside. This
+                    // gives each method its own merge resolution
+                    // instead of forcing the whole container through
+                    // text_hunk_merge as a single unit.
                     let mut next_scope = scope.clone();
                     next_scope.push(name);
                     stack.push((body, next_scope, depth + 1));
+                } else {
+                    // Leaf item — top-level fn, struct, const, mod
+                    // header, etc. Push as item; nothing inside is
+                    // independently tracked.
+                    let mut item_scope = scope.clone();
+                    item_scope.extend(extra_scope);
+                    let item_key = ItemKey {
+                        kind,
+                        name,
+                        scope: item_scope,
+                        signature_hash,
+                    };
+                    out.push(Item {
+                        key: item_key,
+                        start_byte: child.start_byte(),
+                        end_byte: child.end_byte(),
+                    });
                 }
             } else {
                 // Unclassified at this level: walk it later so we still
