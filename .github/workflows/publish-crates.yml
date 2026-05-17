@@ -1,0 +1,14 @@
+name: Publish crates (stub)
+
+# Stub — heddle#72 red-commit-first DoD. Replaced in the next commit
+# with the real two-job pipeline (validate-publish + publish) that
+# scripts/check-publish-pipeline.sh enforces.
+on:
+  push:
+    branches: []
+
+jobs:
+  noop:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: 'echo "stub — see scripts/check-publish-pipeline.sh"'
