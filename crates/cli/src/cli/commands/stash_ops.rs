@@ -69,7 +69,7 @@ pub(super) fn restore_worktree(
 pub(super) fn apply_stash(repo: &Repository, stash: &StashEntry) -> Result<()> {
     let stash_tree_hash = ContentHash::from_hex(&stash.tree_hash)
         .map_err(|e| anyhow!("Invalid stash tree hash: {}", e))?;
-    let stash_tree = repo.store().get_tree(&stash_tree_hash)?.unwrap_or_default();
+    let stash_tree = repo.require_tree(&stash_tree_hash)?;
 
     for entry in stash_tree.entries() {
         let full_path = repo.root().join(&entry.name);
