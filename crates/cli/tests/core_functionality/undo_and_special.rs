@@ -1015,8 +1015,19 @@ fn test_undo_help_lists_undoable_and_unsupported() {
         "--help should list merge as undoable: {help}"
     );
     assert!(
-        lower.contains("push") || lower.contains("fetch") || lower.contains("cross-thread"),
+        lower.contains("push") || lower.contains("fetch") || lower.contains("cross-worktree"),
         "--help should call out what is NOT undoable: {help}"
+    );
+    // The worktree-attached refusal is a 0.3 contract — `--help` must
+    // surface it so users hit by the refusal can find the teardown
+    // path without reading source. See docs/design/cross-thread-undo.md.
+    assert!(
+        lower.contains("worktree") || lower.contains("--path"),
+        "--help should mention the worktree-attached ThreadCreate refusal: {help}"
+    );
+    assert!(
+        lower.contains("thread drop") || lower.contains("--delete-thread"),
+        "--help should redirect users to the teardown command for the worktree case: {help}"
     );
 }
 

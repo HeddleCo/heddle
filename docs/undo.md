@@ -2,9 +2,11 @@
 
 A safety net for the operations a daily user is most likely to want to roll back.
 
-This document describes the MVP scope shipped under
-[HeddleCo/heddle#23](https://github.com/HeddleCo/heddle/issues/23). Cross-thread
-undo, remote-affecting undo, and persistent cross-invocation redo are tracked as
+This document describes the user-facing surface shipped under
+[HeddleCo/heddle#23](https://github.com/HeddleCo/heddle/issues/23). The
+design + 0.3 scope cut for cross-thread cases lives in
+[docs/design/cross-thread-undo.md](design/cross-thread-undo.md). Remote-
+affecting undo and persistent cross-invocation redo are tracked as
 follow-ups.
 
 ## Undoable operations
@@ -39,10 +41,18 @@ own, are destructive by design, or need a substrate change we haven't shipped:
   reaches across a purged redaction is refused: the `Redaction` record is
   the only on-disk audit trail that the bytes were destroyed, and removing
   it would lie about local storage.
-- **Cross-thread undo** — today's undo only rewinds operations recorded on the
-  current checkout's HEAD path. Undoing an op that mutated a different thread
-  is the design problem heddle#23's title points at; the MVP ships the
-  single-thread safety net first.
+- **`heddle start <name> --path <dir>`** — refused while the materialized
+  worktree at `<dir>` still exists. The undo inverse only deletes the
+  thread ref; without first tearing the worktree down, the directory would
+  be left with a `.heddle/HEAD` pointing at a thread that no longer
+  exists. Tear it down explicitly with `heddle thread drop <name>
+  --delete-thread`, then re-run `heddle undo`. See
+  [docs/design/cross-thread-undo.md](design/cross-thread-undo.md) for
+  the full design.
+- **Cross-worktree shared-backend undo** — two checkouts sharing one
+  `.heddle/refstore` (the `heddle start --path` setup) can step on each
+  other's threads. 0.3 supports single-worktree usage only; cross-
+  worktree safety is filed as a follow-up. See the design doc.
 - **Redo across CLI invocations** — `heddle redo` works within the same shell
   session but is not yet persisted across processes.
 
@@ -70,6 +80,14 @@ contracts below are enforced by integration tests in
   reaching past the live oplog window — `heddle undo` refuses with a single
   clear message naming the missing op id. Restore from a backup or list past
   the boundary with `heddle undo --list`.
+- **Worktree-attached `ThreadCreate` refusal.** `heddle undo` refuses to
+  roll back a `heddle start <name> --path <dir>` while the materialized
+  worktree at `<dir>` is still on disk. The inverse only deletes the
+  thread ref; silently proceeding would orphan the worktree directory
+  with a broken `.heddle/HEAD`. Run `heddle thread drop <name>
+  --delete-thread` first, then re-run `heddle undo`. Same refusal fires
+  for `heddle undo --preview` so preview output is honest about what the
+  real command would do.
 - **Idempotent re-run.** Once a batch is marked undone, the next `heddle
   undo` picks the next still-active batch (or refuses if none remain). Re-
   running `heddle undo` is never destructive.

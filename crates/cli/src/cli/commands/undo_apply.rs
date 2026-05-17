@@ -51,6 +51,18 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         } => {}
         OpRecord::ThreadCreate { name, .. } => {
             delete_thread_safely(repo, name)?;
+            // Cross-thread contract rule 4 (docs/design/cross-thread-undo.md):
+            // the inverse of `ThreadCreate` must also remove the matching
+            // ThreadManager record so `heddle thread show` and the record-
+            // store readers don't surface a phantom entry for a thread
+            // whose ref no longer exists. The worktree-attached refusal in
+            // `ensure_thread_worktree_undo_safe` already gated us, so any
+            // record we hit here has `materialized_path = None` or a path
+            // that no longer exists — either way, dropping the record is
+            // safe. Missing record is fine: not every `ThreadCreate` path
+            // writes one (legacy oplog entries may predate the record
+            // store).
+            remove_thread_manager_record(repo, name)?;
         }
         OpRecord::ThreadDelete { name, state } => {
             repo.refs().set_thread(name, state)?;
@@ -232,6 +244,17 @@ fn sync_thread_record_state(
         thread.current_state = Some(state.short());
         thread.updated_at = chrono::Utc::now();
         manager.save(&thread)?;
+    }
+    Ok(())
+}
+
+/// Remove the ThreadManager record matching `thread_name`. No-op when no
+/// record exists. Used by the `ThreadCreate` inverse to keep refs and
+/// record-store state in lockstep (cross-thread undo contract rule 4).
+fn remove_thread_manager_record(repo: &Repository, thread_name: &str) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    if let Some(thread) = manager.find_by_thread(thread_name)? {
+        manager.delete(&thread.id)?;
     }
     Ok(())
 }

@@ -327,7 +327,13 @@ Undoable operations:
 Not undoable (file a follow-up if you need one):
   - heddle push / heddle fetch        (remote-affecting; out of scope)
   - heddle purge                      (destructive by design; irreversible)
-  - cross-thread undo                 (single-thread scope today)
+  - heddle start <name> --path <dir>  (refused while the materialized worktree
+                                       still exists — run `heddle thread drop
+                                       <name> --delete-thread` first, then
+                                       re-run `heddle undo`)
+  - cross-worktree shared-backend undo (no worktree registry yet; single-
+                                        worktree usage is the supported
+                                        configuration for 0.3)
   - redo across CLI invocations       (use `heddle redo` in the same shell)
 ")]
 pub struct UndoArgs {
