@@ -277,11 +277,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      # Cargo's documented env var for the publish token. The strict
-      # asserter verifies (a) this exact name and (b) that it reads
-      # from secrets.CARGO_REGISTRY_TOKEN — any rename on either side
-      # would silently break authentication.
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # The env var name (CARGO_REGISTRY_TOKEN) is cargo's documented
+      # name and is what `cargo publish` reads at runtime — it must
+      # stay exactly this. The GitHub Actions secret name
+      # (CRATES_IO_API_KEY) is independent: it's the label under repo
+      # Settings → Secrets and variables → Actions. The strict asserter
+      # verifies both halves of this mapping — any rename on either
+      # side would silently break authentication.
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -310,7 +313,7 @@ jobs:
           # punch list to act on. If the validation pass shipped
           # without a publish attempt, it'd be silent.
           if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
-            echo "::error::CARGO_REGISTRY_TOKEN secret is not set. Add it under repo Settings → Secrets and variables → Actions, then re-run."
+            echo "::error::CARGO_REGISTRY_TOKEN env var is empty — the CRATES_IO_API_KEY secret is unset or the mapping in publish-crates.yml is wrong. Add CRATES_IO_API_KEY under repo Settings → Secrets and variables → Actions, then re-run."
             exit 1
           fi
           echo "ok: CARGO_REGISTRY_TOKEN is present (length=${#CARGO_REGISTRY_TOKEN})"

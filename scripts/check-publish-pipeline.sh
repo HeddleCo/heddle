@@ -14,7 +14,12 @@
 #   - publish job pins checkout to validate-publish's commit SHA, not
 #     the mutable refs/heads/main (closes the TOCTOU window — same
 #     reason heddle#56's release.yml pins to tag_sha)
-#   - publish job reads CARGO_REGISTRY_TOKEN from secrets.* via env var
+#   - publish job exposes the CARGO_REGISTRY_TOKEN env var (cargo's
+#     documented name) AND maps it from secrets.CRATES_IO_API_KEY (the
+#     actual repo-settings secret name). The names are decoupled: cargo
+#     reads CARGO_REGISTRY_TOKEN; GitHub Actions looks up secrets by
+#     their settings name. The asserter checks both halves so a rename
+#     on either side fails loud.
 #   - explicit publishable-crates list (no auto-discovery — implicit
 #     `publish = true` in Cargo.toml is too easy to misconfigure)
 #
@@ -88,10 +93,14 @@ fi
 # any rename on either side would silently break authentication, and
 # the workflow would either fail loud at first publish or (worse) drop
 # the auth header entirely depending on cargo's behavior.
-if grep -F 'secrets.CARGO_REGISTRY_TOKEN' "$WF" >/dev/null; then
-  ok "publish step reads secrets.CARGO_REGISTRY_TOKEN"
+#
+# Note the decoupling: the repo-settings secret is CRATES_IO_API_KEY,
+# but cargo reads CARGO_REGISTRY_TOKEN from the process env. The
+# workflow does the mapping. Both halves are checked.
+if grep -F 'secrets.CRATES_IO_API_KEY' "$WF" >/dev/null; then
+  ok "publish step reads secrets.CRATES_IO_API_KEY"
 else
-  err "$WF must reference secrets.CARGO_REGISTRY_TOKEN"
+  err "$WF must reference secrets.CRATES_IO_API_KEY (the configured repo-settings secret name)"
 fi
 
 if grep -E '^\s*CARGO_REGISTRY_TOKEN:' "$WF" >/dev/null; then
@@ -267,9 +276,14 @@ else:
             oks.append("publish job pins checkout to validated commit_sha")
 
     # The token must reach cargo as the CARGO_REGISTRY_TOKEN env var
-    # (cargo's documented name) AND it must originate from
-    # secrets.CARGO_REGISTRY_TOKEN. Wiring it under a different env
-    # name silently breaks authentication.
+    # (cargo's documented name; renaming the env var would mean cargo
+    # can't find the token at all) AND it must originate from
+    # secrets.CRATES_IO_API_KEY (the actual repo-settings secret name;
+    # renaming this side would resolve to an empty string and break
+    # authentication at first publish).
+    #
+    # We assert each half separately so a regression on either side
+    # is reported on its own line.
     job_env = pub.get("env", {}) or {}
     token_envs = []
     if "CARGO_REGISTRY_TOKEN" in job_env:
@@ -286,14 +300,15 @@ else:
             "(at job or step scope) so cargo publish can authenticate"
         )
     else:
-        valid = [t for t in token_envs if "secrets.CARGO_REGISTRY_TOKEN" in str(t[1])]
+        oks.append("env var key is exactly CARGO_REGISTRY_TOKEN (the name cargo reads)")
+        valid = [t for t in token_envs if "secrets.CRATES_IO_API_KEY" in str(t[1])]
         if not valid:
             errors.append(
-                "CARGO_REGISTRY_TOKEN env var must read from secrets.CARGO_REGISTRY_TOKEN "
+                "CARGO_REGISTRY_TOKEN env var must read from secrets.CRATES_IO_API_KEY "
                 f"(got {token_envs!r})"
             )
         else:
-            oks.append("CARGO_REGISTRY_TOKEN wired from secrets.CARGO_REGISTRY_TOKEN")
+            oks.append("CARGO_REGISTRY_TOKEN wired from secrets.CRATES_IO_API_KEY")
 
 print("OKS:")
 for o in oks:

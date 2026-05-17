@@ -228,8 +228,9 @@ crates.io automatically on every push to `main` via
      (Cargo.toml downgrade — refuses).
    - `publish` runs only when `has_publishes == 'true'`, checks out
      the validated `commit_sha` (not `refs/heads/main` — see the
-     TOCTOU note in `release.yml`), asserts
-     `secrets.CARGO_REGISTRY_TOKEN` is configured, and runs
+     TOCTOU note in `release.yml`), asserts the `CARGO_REGISTRY_TOKEN`
+     env var is non-empty (sourced from `secrets.CRATES_IO_API_KEY` —
+     see [Token wiring](#token-wiring) below), and runs
      `cargo publish -p <crate>` for each entry in the publish set.
      "already exists" errors are treated as success (race / re-run);
      5xx errors retry with exponential backoff (1s → 4s → 16s);
@@ -260,6 +261,31 @@ flipping it would silently expand the public surface. Currently
 `publish = false`); the explicit list keeps that scope visible in
 diff.
 
+### Token wiring
+
+The workflow's publish job exposes the credential to cargo via:
+
+```yaml
+env:
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_API_KEY }}
+```
+
+The two names are deliberately distinct halves of the mapping:
+
+- `CARGO_REGISTRY_TOKEN` is the env-var name `cargo publish` reads at
+  runtime (cargo's documented name). Renaming this side would mean
+  cargo can't find the token at all.
+- `CRATES_IO_API_KEY` is the GitHub Actions secret name as configured
+  under repo Settings → Secrets and variables → Actions. Renaming this
+  side would resolve to an empty string and break authentication on
+  the first publish.
+
+The asserter (see below) checks both halves separately so a regression
+on either side surfaces with its own error line.
+
+To rotate the token: update the `CRATES_IO_API_KEY` secret in repo
+settings. No workflow change is needed.
+
 ### Pipeline-contract check
 
 `scripts/check-publish-pipeline.sh` runs alongside the binary
@@ -268,7 +294,7 @@ two-pass shape as `check-release-pipeline.sh`:
 
 - **Smoke (grep).** push-to-main trigger present, `workflow_dispatch`
   absent, `validate-publish` + `publish` jobs both present, publish
-  job declares `needs: validate-publish`, `secrets.CARGO_REGISTRY_TOKEN`
+  job declares `needs: validate-publish`, `secrets.CRATES_IO_API_KEY`
   and the `CARGO_REGISTRY_TOKEN` env var both referenced, explicit
   `PUBLISHABLE_CRATES` list present, this section exists in
   `RELEASING.md`.
@@ -277,8 +303,10 @@ two-pass shape as `check-release-pipeline.sh`:
   `needs: validate-publish` and gates `if:` on `has_publishes`;
   publish's `actions/checkout` pins `ref` to
   `${{ needs.validate-publish.outputs.commit_sha }}` (not
-  `refs/heads/main` — TOCTOU); `CARGO_REGISTRY_TOKEN` env var is
-  wired from `secrets.CARGO_REGISTRY_TOKEN`.
+  `refs/heads/main` — TOCTOU); the env-var key is exactly
+  `CARGO_REGISTRY_TOKEN` (cargo's documented name); that env var is
+  wired from `secrets.CRATES_IO_API_KEY` (the repo-settings secret
+  name).
 
 ### Verifying a publish
 
