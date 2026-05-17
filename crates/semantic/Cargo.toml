@@ -44,8 +44,14 @@ tree-sitter-typescript = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
+pprof = { version = "0.15", default-features = false, features = ["flamegraph"] }
 
 [[bench]]
 name = "merge_function_level"
+harness = false
+required-features = ["lang-rust"]
+
+[[bench]]
+name = "profile_target"
 harness = false
 required-features = ["lang-rust"]

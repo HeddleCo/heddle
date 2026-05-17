@@ -59,6 +59,42 @@ of file size during execution. At 60 KB per side this is ~180 KB peak; at
 the merge driver's transient lifecycle; not a concern at heddle's typical
 file sizes.
 
+## Flamegraph
+
+See [`semantic-merge-flame.svg`](semantic-merge-flame.svg) for the visual.
+Captured by running `crates/semantic/benches/profile_target.rs` with
+`pprof-rs` at 997 Hz × 200 iterations × 1000 functions
+(`HEDDLE_PROFILE_ITERS=200 HEDDLE_PROFILE_N=1000`).
+
+Top frames by sample share, out of 21,663 total samples in
+`semantic_three_way_merge`:
+
+| Frame | Samples | Share |
+|---|---:|---:|
+| `ParsedFile::parse` (tree-sitter) | 19,492 | **90.0 %** |
+| └ `ts_parser_parse_with_options` (libtree-sitter-rust) | 19,417 | 89.6 % |
+| `similar::algorithms::myers::conquer` (LCS for hunk-level) | 4,031 | 18.6 % |
+| `ts_parser__condense_stack` | 12,297 | 56.8 % |
+| `ts_parser__handle_error` | 12,097 | 55.8 % |
+
+The big takeaway: the parser owns ~90 % of wall time. The merge logic
+proper (item extraction, key matching, per-item resolution, inter-item
+concat + `text_hunk_merge`) is a rounding error by comparison.
+
+`ts_parser__handle_error` showing up at 55.8 % is interesting and tells
+us tree-sitter is spending substantial time on error-recovery paths even
+on syntactically valid input — likely the parse table exploring
+ambiguities during the LR walk. Optimizing this is out of scope; it's an
+upstream concern of `tree-sitter` itself.
+
+**Follow-up issue** (file separately): integrate
+`heddle-semantic::cache::SemanticParseCache` into the merge driver. The
+cache already keys `ParsedFile` by `(content_hash, language)` for the
+diff display path; reusing it during merge would amortize the parse
+cost across `--with-diff`'s post-merge call. Expected win: ~50 % drop in
+wall time when the diff display fires after a merge (both invocations
+share the parses).
+
 ## Reproducing
 
 ```sh
