@@ -1,14 +1,19 @@
 name: Release pipeline check
 
-# Static asserters for the two release pipelines:
+# Static asserters for the two release pipelines and the
+# silent-corruption invariant:
 #   - binary release (heddle#56) — release.yml fires on `v*` tag push
 #   - crates.io publish (heddle#72) — publish-crates.yml fires on push
 #     to main
+#   - silent-default tree load (heddle#90 + heddle#93) — the bug class
+#     where `get_tree(...)?.unwrap_or_default()` silently substituted
+#     `Tree::default()` for a missing subtree, masking store corruption
+#     as empty content / silent erase / silent no-op
 #
-# Both pipelines run only on their respective triggers, so this job is
-# what gives normal PRs a signal that the contracts are intact. Two
-# parallel jobs (one per pipeline) so a regression in one doesn't
-# silence the other.
+# These pipelines and patterns run only on their respective triggers
+# (or get hit only when grep finds something), so this job is what
+# gives normal PRs a signal that all three contracts are intact.
+# Parallel jobs so a regression in one doesn't silence the others.
 
 on:
   pull_request:
@@ -43,3 +48,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Assert publish pipeline contract
         run: bash scripts/check-publish-pipeline.sh
+
+  no-silent-default-tree-load:
+    name: no silent-default tree load (heddle#90 + #93)
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert no `get_tree(...)?.unwrap_or_default()` regressions
+        run: bash scripts/check-no-silent-default-tree-load.sh
