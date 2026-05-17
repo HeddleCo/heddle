@@ -1,0 +1,42 @@
+{
+  "schema": "heddle-merge-bench/v1",
+  "captured_on": "2026-05-17",
+  "platform": "Linux x86_64",
+  "rustc": "1.95.0",
+  "criterion": "0.8",
+  "bench": "crates/semantic/benches/merge_function_level.rs",
+  "command": "cargo bench -p heddle-semantic --bench merge_function_level -- --quick --measurement-time 1 --warm-up-time 1",
+  "note": "Captured under --quick at 1s/1s. Re-run without --quick for production numbers; the *ratios* between engines are stable across run lengths.",
+  "results_ns_median": {
+    "merge_throughput_disjoint": {
+      "text_hunk/10": 19564,
+      "semantic/10": 947830,
+      "text_hunk/100": 1833841,
+      "semantic/100": 10378053,
+      "text_hunk/1000": 9167669,
+      "semantic/1000": 89996852
+    },
+    "merge_throughput_structural_reshape": {
+      "text_hunk/10": 21414,
+      "semantic/10": 376836,
+      "text_hunk/100": 204914,
+      "semantic/100": 2647210,
+      "text_hunk/1000": 2164428,
+      "semantic/1000": 25651474
+    },
+    "merge_cost_split_1000_fns": {
+      "text_hunk_baseline": 9884501,
+      "parse_only_x3": 78131200,
+      "full_semantic_merge": 93015575
+    }
+  },
+  "observations": {
+    "parser_share_of_semantic_merge": "0.84 (78ms parse / 93ms full at 1000 fns)",
+    "semantic_vs_text_at_1000_fns_disjoint": "9.8x slower (90ms vs 9.2ms)",
+    "semantic_vs_text_at_1000_fns_reshape": "11.8x slower (25.6ms vs 2.2ms)",
+    "wall_clock_at_realistic_repo_scale": "Single 10k-line, 1000-function file: ~93ms semantic vs ~10ms text. A 100-file rebase touches ~10-30 files of this size; total bench-extrapolated overhead is sub-second."
+  },
+  "follow_ups": [
+    "Parser cost (tree-sitter) dominates >40% of wall-clock time at 1000 fns. Follow-up: investigate `SemanticParseCache` integration so a single tree-sitter parse can be amortized across `--with-diff` post-merge display and the merge itself."
+  ]
+}

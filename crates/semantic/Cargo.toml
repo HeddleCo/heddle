@@ -41,3 +41,11 @@ tree-sitter-javascript = { workspace = true, optional = true }
 tree-sitter-python = { workspace = true, optional = true }
 tree-sitter-rust = { workspace = true, optional = true }
 tree-sitter-typescript = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "merge_function_level"
+harness = false
+required-features = ["lang-rust"]
