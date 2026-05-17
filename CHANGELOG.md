@@ -11,6 +11,39 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
+## 0.2.5 - 2026-05-17
+
+### Changed
+
+- **`AuthService.FinishWebAuthnRegistration` renamed to
+  `RegisterPublicKey`** (HeddleCo/heddle#63;
+  `crates/grpc/proto/heddle/v1/service.proto`). The old name
+  reflected WebAuthn ceremony state; the new name reflects what
+  the call actually does — store a public key + attestation.
+  `BeginWebAuthnRegistration` keeps its name (it's a generic
+  challenge-init).
+  - The request message is renamed in lockstep:
+    `FinishWebAuthnRegistrationRequest` →
+    `RegisterPublicKeyRequest`.
+  - All field numbers are preserved, so any wire-compatible
+    consumer that doesn't pin the message-type name continues to
+    decode existing payloads.
+
+### Added
+
+- **Device-key binding-signature fields on `RegisterPublicKeyRequest`**
+  (HeddleCo/weft#131; tags 16/17/18). Lets the client prove that
+  the same WebAuthn authenticator that issued the attestation also
+  signs the renewal-anchor `device_public_key`, closing a gap where
+  a client could attach an unrelated Ed25519 key to a real
+  attestation. The server-side verifier lives in `weft-server` and
+  enforces the binding iff `device_public_key` is non-empty.
+  - `bytes device_binding_client_data_json = 16;`
+  - `bytes device_binding_authenticator_data = 17;`
+  - `bytes device_binding_signature = 18;`
+  - The challenge the assertion signs is
+    `base64url(SHA256("heddle-device-binding-v1" || 0x00 || device_public_key))`.
+
 ## 0.2.4 - 2026-05-14
 
 ### Added
