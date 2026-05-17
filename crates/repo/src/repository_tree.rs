@@ -428,7 +428,7 @@ impl<'a> TreeBuildPolicy<'a> {
         }
         let cached = cache.files.get(&rel_str)?;
         let (size, inode, mtime_ns, ctime_ns, mode) =
-            crate::stat_signature::stat_signature(&entry.metadata);
+            crate::stat_signature::stat_signature(entry.path, &entry.metadata);
         let stat = crate::thread_manifest::ManifestFile {
             hash: cached.hash,
             size,

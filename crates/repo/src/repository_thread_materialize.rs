@@ -320,7 +320,7 @@ pub(crate) fn populate_manifest_from_tree(
                     Err(e) => return Err(HeddleError::Io(e)),
                 };
                 let (size, inode, mtime_ns, ctime_ns, mode) =
-                    crate::stat_signature::stat_signature(&meta);
+                    crate::stat_signature::stat_signature(&on_disk, &meta);
                 out.insert(
                     rel_path,
                     ManifestFile {
@@ -520,7 +520,7 @@ fn walk_for_no_op(
                 Err(_) => return Ok(false),
             };
             let (size, inode, mtime_ns, ctime_ns, mode) =
-                crate::stat_signature::stat_signature(&meta);
+                crate::stat_signature::stat_signature(&path, &meta);
             let stat = ManifestFile {
                 hash: manifest_entry.hash,
                 size,

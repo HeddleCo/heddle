@@ -274,9 +274,12 @@ Remove-Item -Recurse -Force <root>
 ```
 
 Deleting the root strips both the reparse metadata and any
-hydrated placeholders. The sidecar GUID file
-(`<parent>\.<basename>.heddle-projfs-id`) is removed separately
-by `Remove-Item` matching its hidden name explicitly.
+hydrated placeholders. The sidecar GUID file has two possible
+locations depending on parent-directory writability at mount
+time — `<parent>\.<basename>.heddle-projfs-id` is the default,
+`<root>\.heddle-projfs-id` is the fallback when the parent ACL
+refuses writes — both should be removed to fully reset the
+instance identity.
 
 ### Running the ProjFS tests locally
 

@@ -48,8 +48,11 @@
 //! * [`projfs_mount_hides_instance_id_sidecar_from_listing`] —
 //!   regression catch for the heddle#54 leakage where the per-mount
 //!   GUID lived at `<root>/.heddle_projfs_id` and showed up in
-//!   `dir`. The sidecar is now stored in the *parent* directory; the
-//!   projection's listing must contain only the captured files.
+//!   `dir`. The sidecar is now stored in the *parent* directory by
+//!   default (with an in-root fallback when the parent ACL refuses
+//!   writes — see `crates/mount/src/projfs.rs::load_or_create_instance_id`);
+//!   the projection's listing must contain only the captured files
+//!   in the common case the smoke test runs in (writable temp parent).
 
 #![cfg(all(target_os = "windows", feature = "projfs"))]
 
@@ -294,6 +297,14 @@ fn projfs_mount_hides_instance_id_sidecar_from_listing() {
     // between NTFS-side and ProjFS-side enumeration: the NTFS list
     // included the sidecar, the projection callback did not, and
     // tools that hit the two paths got mismatched views.
+    //
+    // The smoke test asserts the *default* behaviour: when the
+    // parent directory is writable (always true under `TempDir`),
+    // the sidecar lands in the parent and the mountpoint listing
+    // stays clean. The in-root fallback used for restricted-parent
+    // mounts is exercised by the unit test
+    // `fallback_instance_id_sidecar_lives_inside_the_virtualization_root`
+    // in `src/projfs.rs`.
     let mut names: Vec<String> = fs::read_dir(mountpoint.path())
         .expect("read mountpoint dir")
         .filter_map(|e| e.ok())

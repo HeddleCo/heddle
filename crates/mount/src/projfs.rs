@@ -347,7 +347,7 @@ struct InstanceContext {
 /// cursor map by the raw `enumeration_id` ProjFS hands us. `GUID`
 /// itself is `Copy + Eq` but does not implement `Hash`, so we
 /// canonicalise to the little-endian byte form (matching the format
-/// the on-disk `.heddle_projfs_id` sidecar uses).
+/// the on-disk `.heddle-projfs-id` sidecar uses).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct EnumKey([u8; 16]);
 
@@ -450,12 +450,27 @@ fn resolve_path(shell: &Arc<dyn PlatformShell + Send + Sync>, relative: &Path) -
 /// Persist a per-virtualization-root GUID so reopens reuse the same
 /// instance identity.
 ///
-/// Stored at `<root>/../.<root_basename>.heddle-projfs-id` — i.e. a
-/// hidden sidecar in the *parent* directory of the virtualization
-/// root, not inside the root itself.
+/// Two-tier sidecar location, chosen at runtime based on which
+/// location is writable:
 ///
-/// Pre-fix this lived at `<root>/.heddle_projfs_id`, which had two
-/// production-blocking problems:
+/// 1. **Primary**: `<parent>/.<basename>.heddle-projfs-id` — sidecar
+///    lives in the parent directory of the virtualization root. The
+///    file is outside the projection envelope, invisible to
+///    `dir`/`Get-ChildItem`/`fs::read_dir` of the mountpoint, and
+///    survives remounts of the same path. This is the default and
+///    matches the common case where the parent is the same
+///    user-writable scratch area the mount root sits in.
+/// 2. **Fallback**: `<root>/.heddle-projfs-id` — sidecar inside the
+///    mount root. Used when the primary path can't be written
+///    (parent-directory ACL refuses us, parent is read-only, the
+///    process runs as a service account with write access only to the
+///    pre-created mount root, etc.). The trade-off: the sidecar shows
+///    up in NTFS-level enumerations of the mountpoint. Acceptable
+///    over failing the mount entirely; only triggers on restricted
+///    parent ACLs.
+///
+/// Pre-fix this lived solely at `<root>/.heddle_projfs_id`, which had
+/// two production-blocking problems:
 ///
 /// 1. The file showed up in `dir`/`Get-ChildItem` listings of the
 ///    mountpoint. ProjFS treats files that exist *before*
@@ -469,62 +484,107 @@ fn resolve_path(shell: &Arc<dyn PlatformShell + Send + Sync>, relative: &Path) -
 ///    callback (which doesn't) produced an inconsistent picture
 ///    depending on which API the caller used to enumerate.
 ///
-/// Parent-directory sidecar means the file is outside the projection
-/// envelope, invisible to users `ls`-ing the mountpoint, and survives
-/// remounts of the same path. Falls back to writing at `<root>` only
-/// when `<root>` has no parent (drive root); that's the unusual case
-/// and matches the pre-fix behaviour.
+/// The r1 fix moved the sidecar unconditionally to the parent
+/// directory, which fixed the listing leak but introduced a new
+/// failure mode: mounts into a writable directory whose parent had
+/// restricted ACLs would fail at sidecar-write time before
+/// virtualization could even start. The two-tier model here keeps
+/// the default behaviour clean while degrading gracefully when the
+/// parent isn't writable.
+///
+/// ## Read order
+///
+/// Reads probe both locations: if a sidecar exists in either spot
+/// (e.g. an older deployment wrote it to a fallback location and the
+/// user later relaxed parent ACLs), we honour it before generating a
+/// new GUID. The primary path wins if both exist.
 fn load_or_create_instance_id(root: &Path) -> Result<GUID> {
-    let id_path = instance_id_sidecar_path(root);
-    if let Ok(bytes) = std::fs::read(&id_path)
-        && bytes.len() == 16
-    {
-        // SAFETY: bytes is exactly 16 bytes (GUID layout).
-        return Ok(GUID::from_values(
-            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            u16::from_le_bytes([bytes[4], bytes[5]]),
-            u16::from_le_bytes([bytes[6], bytes[7]]),
-            [
-                bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14],
-                bytes[15],
-            ],
-        ));
+    let primary = instance_id_sidecar_path_primary(root);
+    let fallback = instance_id_sidecar_path_fallback(root);
+
+    // Probe both locations on read. Primary wins if both exist —
+    // we wrote there last, so it's the authoritative version.
+    for candidate in [&primary, &fallback] {
+        if let Ok(bytes) = std::fs::read(candidate)
+            && bytes.len() == 16
+        {
+            return Ok(decode_guid(&bytes));
+        }
     }
+
     let guid = GUID::new().map_err(|e| hresult_to_mount_error(e.code()))?;
-    let mut bytes = Vec::with_capacity(16);
-    bytes.extend_from_slice(&guid.data1.to_le_bytes());
-    bytes.extend_from_slice(&guid.data2.to_le_bytes());
-    bytes.extend_from_slice(&guid.data3.to_le_bytes());
-    bytes.extend_from_slice(&guid.data4);
-    if let Some(parent) = id_path.parent() {
-        // Best-effort: parent already exists in the common case
-        // (the CLI creates `<repo_parent>/.<repo_name>-heddle-mounts/`
-        // before calling us). Ignore failure; the write below will
-        // surface a real I/O error.
+    let bytes = encode_guid(&guid);
+
+    // Best-effort: ensure the primary's parent exists. The CLI
+    // usually creates `<repo_parent>/.<repo_name>-heddle-mounts/`
+    // before calling us, so this is a no-op in the common path.
+    if let Some(parent) = primary.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(&id_path, &bytes)
+
+    // Try primary; on any I/O failure (commonly EACCES against a
+    // restricted parent ACL, but we don't discriminate — any write
+    // failure is the same signal: "can't put a sidecar here, try
+    // the fallback") fall through to the in-root location.
+    if std::fs::write(&primary, &bytes).is_ok() {
+        return Ok(guid);
+    }
+
+    tracing::warn!(
+        primary = %primary.display(),
+        fallback = %fallback.display(),
+        "projfs: parent-dir sidecar write failed; falling back to in-root sidecar. \
+         The sidecar will appear in mountpoint listings; restrict only as needed.",
+    );
+    std::fs::write(&fallback, &bytes)
         .map_err(|e| MountError::Store(objects::error::HeddleError::Io(e)))?;
     Ok(guid)
 }
 
-/// Compute the sidecar path for `root`'s instance-ID GUID.
-///
-/// `<parent>/.<basename>.heddle-projfs-id` for the typical case;
-/// `<root>/.heddle-projfs-id` as a last-resort fallback when `root`
-/// has no parent (the user mounted a drive root, e.g. `C:\`) — in
-/// that pathological case the file shows up in the projection just
-/// like before, but the alternative is failing the mount, which
-/// is worse.
-fn instance_id_sidecar_path(root: &Path) -> PathBuf {
+/// Primary sidecar location: `<parent>/.<basename>.heddle-projfs-id`.
+/// Returns the in-root path when `root` has no parent (the user
+/// mounted a drive root, e.g. `C:\`) — there's no "outside" to put
+/// the sidecar so the primary collapses to the fallback location.
+fn instance_id_sidecar_path_primary(root: &Path) -> PathBuf {
     if let (Some(parent), Some(basename)) = (root.parent(), root.file_name()) {
         let mut name = OsString::from(".");
         name.push(basename);
         name.push(".heddle-projfs-id");
         parent.join(name)
     } else {
-        root.join(".heddle-projfs-id")
+        instance_id_sidecar_path_fallback(root)
     }
+}
+
+/// Fallback sidecar location: always `<root>/.heddle-projfs-id`,
+/// inside the virtualization root. Used when the primary location
+/// can't be written; the trade-off is that this file shows up in
+/// NTFS-level enumerations of the mountpoint.
+fn instance_id_sidecar_path_fallback(root: &Path) -> PathBuf {
+    root.join(".heddle-projfs-id")
+}
+
+/// Decode a 16-byte little-endian GUID buffer.
+fn decode_guid(bytes: &[u8]) -> GUID {
+    GUID::from_values(
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        u16::from_le_bytes([bytes[4], bytes[5]]),
+        u16::from_le_bytes([bytes[6], bytes[7]]),
+        [
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ],
+    )
+}
+
+/// Encode a GUID into a 16-byte little-endian buffer (matches
+/// `decode_guid` round-trip).
+fn encode_guid(guid: &GUID) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(&guid.data1.to_le_bytes());
+    bytes.extend_from_slice(&guid.data2.to_le_bytes());
+    bytes.extend_from_slice(&guid.data3.to_le_bytes());
+    bytes.extend_from_slice(&guid.data4);
+    bytes
 }
 
 fn hresult_to_mount_error(hr: HRESULT) -> MountError {
@@ -910,10 +970,30 @@ unsafe fn get_dir_enum_impl(
 }
 
 /// Emit entries from a pre-fetched slice into the ProjFS buffer.
-/// Returns the number of entries successfully written; when the
-/// kernel buffer fills (`ERROR_INSUFFICIENT_BUFFER`), returns the
-/// count *up to* the entry that overflowed so the caller can resume
-/// at the same index on the next call.
+///
+/// Returns:
+///
+/// * `Ok(n)` — `n` entries were successfully written (`n` may equal
+///   the slice length, or be less when the kernel buffer ran out
+///   AFTER at least one entry was written). The caller maps this to
+///   `S_OK` and advances its resume cursor by `n`.
+/// * `Err(HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER))` — the very
+///   first entry didn't fit. ProjFS's contract requires this exact
+///   HRESULT in that case so the kernel knows to retry the same
+///   callback with a larger buffer. Returning `S_OK` (or `Ok(0)`
+///   here) on a zero-progress invocation violates the protocol and,
+///   in practice, can cause repeated retries without progress or
+///   broken listings on deep trees with small initial buffers.
+/// * `Err(other)` — any other failure from [`PrjFillDirEntryBuffer`]
+///   propagates verbatim.
+///
+/// The "first entry vs. subsequent entry" distinction is the bit of
+/// the contract that's easy to miss: it's per *callback invocation*,
+/// not per *enumeration*. A second invocation of the callback (after
+/// the kernel grew the buffer) starts a fresh "first entry" count
+/// from the resumed cursor — the caller's `state.cursor` pointing at
+/// a non-zero index doesn't change the rule that `i == 0` here means
+/// "we wrote nothing in this call yet".
 fn emit_entry_slice(
     entries: &[Entry],
     buffer: PRJ_DIR_ENTRY_BUFFER_HANDLE,
@@ -945,6 +1025,13 @@ fn emit_entry_slice(
         };
         if let Err(e) = rc {
             if e.code() == HRESULT::from(ERROR_INSUFFICIENT_BUFFER) {
+                if i == 0 {
+                    // Zero entries written this call → must surface
+                    // INSUFFICIENT_BUFFER so the kernel grows the buffer
+                    // and retries; an S_OK here would falsely tell the
+                    // kernel we finished an empty page.
+                    return Err(HRESULT::from(ERROR_INSUFFICIENT_BUFFER));
+                }
                 return Ok(i);
             }
             return Err(e.code());
@@ -1161,23 +1248,23 @@ mod tests {
         let _ = ProjFsShell::is_runtime_available();
     }
 
-    /// The instance-ID sidecar must land in the *parent* directory,
-    /// not inside the virtualization root. Pre-fix the file lived at
-    /// `<root>/.heddle_projfs_id` and leaked into `dir`/`ls`
-    /// listings; the regression test in `tests/projfs_smoke.rs`
-    /// covers the on-disk side, this unit test covers the pure
-    /// path-derivation function in isolation so a refactor that
-    /// silently moves the sidecar back inside the root trips here
-    /// before it reaches the smoke matrix.
+    /// The primary instance-ID sidecar must land in the *parent*
+    /// directory, not inside the virtualization root. Pre-fix the
+    /// file lived at `<root>/.heddle_projfs_id` and leaked into
+    /// `dir`/`ls` listings; the regression test in
+    /// `tests/projfs_smoke.rs` covers the on-disk side, this unit
+    /// test covers the pure path-derivation function in isolation so
+    /// a refactor that silently moves the sidecar back inside the
+    /// root trips here before it reaches the smoke matrix.
     #[cfg(target_os = "windows")]
     #[test]
     #[ignore = "requires the projfs feature; opt-in via --features projfs"]
-    fn instance_id_sidecar_lives_outside_the_virtualization_root() {
+    fn primary_instance_id_sidecar_lives_outside_the_virtualization_root() {
         let root = Path::new("C:\\users\\test\\.heddle-mounts\\thread-x");
-        let sidecar = instance_id_sidecar_path(root);
+        let sidecar = instance_id_sidecar_path_primary(root);
         assert!(
             !sidecar.starts_with(root),
-            "sidecar must be outside virt root, got {}",
+            "primary sidecar must be outside virt root, got {}",
             sidecar.display(),
         );
         // Sanity: the file name encodes the basename so multiple
@@ -1187,6 +1274,27 @@ mod tests {
             "sidecar name must include the mount basename, got {}",
             sidecar.display(),
         );
+    }
+
+    /// The fallback sidecar — used when the primary location can't
+    /// be written (restricted parent ACL, service-account scenario)
+    /// — lives inside the virtualization root. Documenting it here
+    /// to lock in the contract for callers that need to clean up a
+    /// mount: removing both `<parent>/.<basename>.heddle-projfs-id`
+    /// AND `<root>/.heddle-projfs-id` is required to reset the
+    /// instance identity.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires the projfs feature; opt-in via --features projfs"]
+    fn fallback_instance_id_sidecar_lives_inside_the_virtualization_root() {
+        let root = Path::new("C:\\users\\test\\.heddle-mounts\\thread-x");
+        let sidecar = instance_id_sidecar_path_fallback(root);
+        assert!(
+            sidecar.starts_with(root),
+            "fallback sidecar must be inside virt root, got {}",
+            sidecar.display(),
+        );
+        assert_eq!(sidecar.file_name().unwrap(), ".heddle-projfs-id");
     }
 
     /// `EnumKey` is the hash-able wrapper around `GUID` we use to

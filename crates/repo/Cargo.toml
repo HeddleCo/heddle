@@ -35,6 +35,17 @@ tokio = { workspace = true, optional = true }
 toml.workspace = true
 tracing.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Needed for `GetFileInformationByHandleEx` / `FILE_ID_INFO` so the
+# Windows variant of `stat_signature` can return a real per-file
+# identity (NTFS file ID + volume serial) instead of a constant 0.
+# See `crates/repo/src/stat_signature.rs` for the bug context.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
+
 [features]
 default = ["git-overlay", "native", "zstd"]
 # Repository mode features. At least one must be enabled. The OSS CLI
