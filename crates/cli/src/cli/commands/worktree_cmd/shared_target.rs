@@ -152,7 +152,7 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
     // `create()` that would otherwise let two concurrent
     // `heddle start --shared-target` invocations race over a
     // user-managed config.
-    let mut file = match std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&config_path)
@@ -177,7 +177,13 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
     // a user-managed config, returning `Ok(false)` and never wiring
     // the redirect. Remove the partial file so the retry can recreate
     // it. Mirrors the cleanup pattern in `init.rs` (heddle#80 r3).
-    write_body_or_cleanup(&mut file, body.as_bytes(), &config_path)?;
+    //
+    // The helper takes the writer by value and drops it before
+    // attempting `remove_file`. On Windows, `DeleteFile` on a still-open
+    // handle (without `FILE_SHARE_DELETE`) fails with
+    // `ERROR_SHARING_VIOLATION`; the cleanup would silently no-op, the
+    // orphan would stay, and the retry would still hit `AlreadyExists`.
+    let file = write_body_or_cleanup(file, body.as_bytes(), &config_path)?;
     if let Err(err) = file.sync_all() {
         drop(file);
         let _ = std::fs::remove_file(&config_path);
@@ -186,20 +192,33 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
     Ok(true)
 }
 
-/// Write `body` to `writer`; on failure remove the orphan at
-/// `cleanup_path` and return the error. Generic over `Write` so tests
-/// can inject a failing writer to exercise the cleanup branch — the
-/// production caller passes the freshly-`create_new`'d file.
+/// Write `body` to `writer`; on failure drop the writer (closing any
+/// underlying OS handle) and remove the orphan at `cleanup_path`,
+/// returning the original write error. On success, return the writer so
+/// the caller can continue using it (e.g. for `sync_all`).
+///
+/// Generic over `Write` so tests can inject a failing writer to exercise
+/// the cleanup branch — the production caller passes the
+/// freshly-`create_new`'d file by value.
+///
+/// **Drop-before-remove is load-bearing on Windows.** Without
+/// `FILE_SHARE_DELETE`, `DeleteFile` against a still-open handle fails
+/// with `ERROR_SHARING_VIOLATION`. Taking the writer by value makes
+/// ownership obvious at the call site and forces the close to happen
+/// before `remove_file`.
 fn write_body_or_cleanup<W: Write>(
-    writer: &mut W,
+    mut writer: W,
     body: &[u8],
     cleanup_path: &Path,
-) -> Result<()> {
-    if let Err(err) = writer.write_all(body) {
-        let _ = std::fs::remove_file(cleanup_path);
-        return Err(err).with_context(|| format!("write '{}'", cleanup_path.display()));
+) -> Result<W> {
+    match writer.write_all(body) {
+        Ok(()) => Ok(writer),
+        Err(err) => {
+            drop(writer);
+            let _ = std::fs::remove_file(cleanup_path);
+            Err(err).with_context(|| format!("write '{}'", cleanup_path.display()))
+        }
     }
-    Ok(())
 }
 
 /// Count active materialized threads on the repo. "Active" means
@@ -333,8 +352,8 @@ mod tests {
         std::fs::write(&orphan, b"").unwrap();
         assert!(orphan.exists(), "test precondition: orphan staged");
 
-        let mut writer = FailingWriter;
-        let result = write_body_or_cleanup(&mut writer, b"would-be body", &orphan);
+        let writer = FailingWriter;
+        let result = write_body_or_cleanup(writer, b"would-be body", &orphan);
 
         assert!(
             result.is_err(),
@@ -344,6 +363,57 @@ mod tests {
             !orphan.exists(),
             "orphan file must be removed so a retry can re-create it cleanly"
         );
+    }
+
+    /// `Write` wrapper that flips a flag from its `Drop` impl. The
+    /// regression test below uses this to assert the writer is closed
+    /// before the helper's `remove_file` call — load-bearing on Windows,
+    /// where `DeleteFile` against a still-open handle fails with
+    /// `ERROR_SHARING_VIOLATION` and the orphan would otherwise survive.
+    struct DropTrackingFailingWriter<'a> {
+        dropped: &'a std::cell::Cell<bool>,
+    }
+    impl Write for DropTrackingFailingWriter<'_> {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("simulated write failure"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Drop for DropTrackingFailingWriter<'_> {
+        fn drop(&mut self) {
+            self.dropped.set(true);
+        }
+    }
+
+    #[test]
+    fn write_body_or_cleanup_drops_writer_before_returning_on_failure() {
+        // Regression for the Codex r1 finding on heddle#86. On Windows,
+        // `remove_file` against a still-open handle fails with
+        // `ERROR_SHARING_VIOLATION`; the orphan stays, and the retry
+        // never installs the redirect. The helper must take the writer
+        // by value and drop it before `remove_file`. POSIX would let the
+        // unlink succeed against an open handle, so this test asserts
+        // the ownership-transfer guarantee directly: by the time the
+        // helper returns, the writer has been dropped (i.e. on a real
+        // `File`, the OS handle is closed).
+        let temp = TempDir::new().unwrap();
+        let orphan = temp.path().join(".cargo").join("config.toml");
+        std::fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        std::fs::write(&orphan, b"").unwrap();
+
+        let dropped = std::cell::Cell::new(false);
+        let writer = DropTrackingFailingWriter { dropped: &dropped };
+        let result = write_body_or_cleanup(writer, b"would-be body", &orphan);
+
+        assert!(result.is_err());
+        assert!(
+            dropped.get(),
+            "writer must be dropped before the helper returns on failure — \
+             on Windows, the file handle must be closed before remove_file"
+        );
+        assert!(!orphan.exists());
     }
 
     #[test]
