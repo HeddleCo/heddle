@@ -10,6 +10,13 @@ cargo bench --features fuse -p heddle-mount --bench fuse_e2e
 …and the committed regression gate with:
 
 ```bash
+# Strict-coverage gate: every measurement in target/criterion/ must
+# have a baseline entry, and vice versa. If you've run sibling
+# benches (mount_read_paths, merge_throughput, etc.) in the same
+# target dir, clear it first or use a dedicated criterion path so
+# they don't surface as false-positive "unexpected ID" failures.
+rm -rf target/criterion
+cargo bench --features fuse -p heddle-mount --bench fuse_e2e
 python3 scripts/fuse-bench-compare.py \
     --criterion-dir target/criterion \
     --baseline crates/mount/benches/fuse_e2e_baseline.json \

@@ -334,6 +334,20 @@ jobs:
           fusermount3 --version
           ls -l /dev/fuse
 
+      # Clear any prior criterion output BEFORE running the bench.
+      # `Swatinem/rust-cache` restores `target/` between runs, and
+      # `cargo bench` does not delete benchmark dirs that the current
+      # run didn't touch — so a renamed-or-removed `(group, variant)`
+      # from a previous CI run would leave a stale `estimates.json`
+      # behind. The compare script (`discover_actual_ids`) walks the
+      # whole criterion tree to enforce coverage; without this
+      # cleanup, residue would surface as false-positive "unexpected
+      # ID" failures. Codex r2 P2 flagged this. The `cargo bench`
+      # incremental build cache lives elsewhere (target/release/) and
+      # is untouched.
+      - name: Clear stale criterion residue
+        run: rm -rf target/criterion
+
       # Run the bench. Criterion writes per-workload `estimates.json`
       # under `target/criterion/<group>/<variant>/new/` which the
       # compare script picks up. We capture the full stdout to an
