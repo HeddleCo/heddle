@@ -1773,6 +1773,75 @@ fn test_undo_thread_rename_round_trips_refs_and_record() {
     );
 }
 
+/// After `thread create` → `undo` → `redo`, the ThreadManager record must
+/// be present again with the same structural metadata (mode, base_state,
+/// id) it had pre-undo. Pre-fix `apply_redo_entry`'s `ThreadCreate` arm
+/// only restored the ref via `set_thread`; the record stayed gone because
+/// undo had destroyed it with no snapshot for redo to read back. Phantom
+/// shape: post-redo the thread ref exists but `heddle thread show`,
+/// `thread cd`, and any record-keyed command (delegate, integration
+/// policy) silently degrade. heddle#23 r2 Codex P1 (thread 3254698975).
+#[test]
+fn test_redo_thread_create_restores_manager_record() {
+    use repo::ThreadManager;
+
+    let temp = bootstrap_repo_with_initial_state();
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+
+    // Capture the structurally load-bearing fields the redo must restore.
+    let (orig_id, orig_mode, orig_base_state, orig_target_thread) = {
+        let repo = Repository::open(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let record = manager
+            .find_by_thread("feature")
+            .unwrap()
+            .expect("`thread create` writes a ThreadManager record");
+        (
+            record.id.clone(),
+            record.mode.clone(),
+            record.base_state.clone(),
+            record.target_thread.clone(),
+        )
+    };
+
+    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["redo"], temp.path());
+
+    let repo = Repository::open(temp.path()).unwrap();
+
+    // The ref is back — that part already worked pre-fix.
+    assert!(
+        repo.refs().get_thread("feature").unwrap().is_some(),
+        "redo of `thread create` must restore the thread ref"
+    );
+
+    // The fix: the ThreadManager record must also be back, with the
+    // structural fields the original record had. Without this, record-
+    // backed commands (`thread cd`, delegate, integration policy)
+    // silently degrade after an undo/redo round-trip.
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let restored = manager.find_by_thread("feature").unwrap().expect(
+        "redo of `thread create` must recreate the ThreadManager record \
+         (heddle#23 r2 Codex P1 — record/redo symmetry, cross-thread \
+         undo contract rule 4)",
+    );
+    assert_eq!(restored.id, orig_id, "id must round-trip");
+    assert_eq!(
+        format!("{:?}", restored.mode),
+        format!("{:?}", orig_mode),
+        "mode must round-trip"
+    );
+    assert_eq!(
+        restored.base_state, orig_base_state,
+        "base_state must round-trip"
+    );
+    assert_eq!(
+        restored.target_thread, orig_target_thread,
+        "target_thread must round-trip"
+    );
+}
+
 /// `heddle undo --preview` (alias `--dry-run`) must surface the
 /// worktree-attached refusal pre-mutation, matching the same
 /// preview-honesty rule used by the redaction gate at undo.rs:88.
