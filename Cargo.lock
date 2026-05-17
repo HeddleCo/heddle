@@ -3097,6 +3097,7 @@ version = "0.2.4"
 dependencies = [
  "anyhow",
  "heddle-objects",
+ "similar",
  "thiserror 2.0.18",
  "tree-sitter",
  "tree-sitter-c",

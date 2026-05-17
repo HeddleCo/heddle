@@ -1,0 +1,255 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Unit tests for the native hunk-level merge engine.
+
+use super::{ConflictMarkers, MergeOutcome, text_hunk_merge, text_hunk_merge_with_markers};
+
+/// Count `<<<<<<<` marker occurrences at column 0 (one per conflict triple).
+fn count_conflicts(bytes: &[u8]) -> usize {
+    let s = std::str::from_utf8(bytes).expect("merge output should be utf8");
+    s.lines().filter(|line| line.starts_with("<<<<<<<")).count()
+}
+
+/// Strict check: every `<<<<<<<`, `=======`, `>>>>>>>` marker sits at column 0.
+fn markers_well_formed(bytes: &[u8]) -> bool {
+    let s = std::str::from_utf8(bytes).expect("merge output should be utf8");
+    for line in s.lines() {
+        for marker in ["<<<<<<<", "=======", ">>>>>>>"] {
+            if line.contains(marker) && !line.starts_with(marker) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// =====================================================================
+// Red-commit fixture 1: semantic declines, line ranges DISJOINT.
+//
+// Two hunks edited on opposite ends of the file. Current implementation
+// (single-range merger) handles the simplest disjoint case but bails on
+// multi-hunk-per-side. This fixture pushes a multi-hunk case to force
+// the new engine. Expect: Clean, both edits present, no markers.
+// =====================================================================
+#[test]
+fn disjoint_multi_hunks_auto_resolve() {
+    let base = b"line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n";
+    // Ours: edits lines 1 and 7 (two disjoint hunks on our side)
+    let ours = b"OUR-1\nline 2\nline 3\nline 4\nline 5\nline 6\nOUR-7\nline 8\n";
+    // Theirs: edits line 4 only
+    let theirs = b"line 1\nline 2\nline 3\nTHEIR-4\nline 5\nline 6\nline 7\nline 8\n";
+
+    let outcome = text_hunk_merge(base, ours, theirs);
+    match outcome {
+        MergeOutcome::Clean(merged) => {
+            let text = String::from_utf8(merged).unwrap();
+            assert!(text.contains("OUR-1\n"), "missing ours hunk 1: {text}");
+            assert!(text.contains("OUR-7\n"), "missing ours hunk 2: {text}");
+            assert!(text.contains("THEIR-4\n"), "missing theirs hunk: {text}");
+            assert!(
+                !text.contains("<<<<<<<"),
+                "should have no markers: {text}"
+            );
+        }
+        other => panic!("expected Clean, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// Red-commit fixture 2: semantic declines, line ranges OVERLAP.
+//
+// Both sides modify the same line. Expect: Conflicts with per-hunk
+// markers (not whole-file), conflict_count > 0, surrounding unchanged
+// lines preserved verbatim.
+// =====================================================================
+#[test]
+fn overlapping_hunks_produce_hunk_markers() {
+    let base = b"line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n";
+    let ours = b"line 1\nline 2\nOUR-3\nline 4\nline 5\nline 6\nline 7\nline 8\n";
+    let theirs = b"line 1\nline 2\nTHEIR-3\nline 4\nline 5\nline 6\nline 7\nline 8\n";
+
+    let outcome = text_hunk_merge(base, ours, theirs);
+    match outcome {
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            conflict_count,
+        } => {
+            assert!(
+                conflict_count >= 1,
+                "expected at least one conflict, got {conflict_count}"
+            );
+            let text = String::from_utf8(merged_bytes_with_markers).unwrap();
+            assert!(
+                markers_well_formed(text.as_bytes()),
+                "markers should be at column 0: {text}"
+            );
+            // The unchanged outer lines must still appear verbatim — this is
+            // the heart of "hunk-level not whole-file".
+            assert!(text.starts_with("line 1\nline 2\n"), "prefix lost: {text}");
+            assert!(text.ends_with("line 4\nline 5\nline 6\nline 7\nline 8\n"), "suffix lost: {text}");
+            assert!(text.contains("OUR-3"), "missing ours conflict body: {text}");
+            assert!(text.contains("THEIR-3"), "missing theirs conflict body: {text}");
+        }
+        other => panic!("expected Conflicts, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// Red-commit fixture 3: heddle#54-shape large-file with disjoint
+// 3-line changes on each side.
+//
+// The trip report from heddle#54 had a 185-line file where heddle's
+// merger collided whole-file while git produced 3 small hunks. This
+// fixture reconstructs that shape: a 185-line file, ours edits lines
+// 30-32, theirs edits lines 150-152 (clearly disjoint). Expect: clean
+// resolution, both 3-line changes present, no markers.
+//
+// To prove "not the whole file", we additionally assert that any
+// conflict markers (there shouldn't be any here) wouldn't subsume the
+// untouched bulk of the file.
+// =====================================================================
+#[test]
+fn large_file_disjoint_3line_changes_resolve_cleanly() {
+    let base: String = (1..=185).map(|i| format!("line {i}\n")).collect();
+
+    // Ours: replace lines 30-32 with three OUR lines
+    let mut ours = String::new();
+    for i in 1..=185 {
+        if (30..=32).contains(&i) {
+            ours.push_str(&format!("OUR-{i}\n"));
+        } else {
+            ours.push_str(&format!("line {i}\n"));
+        }
+    }
+
+    // Theirs: replace lines 150-152 with three THEIR lines
+    let mut theirs = String::new();
+    for i in 1..=185 {
+        if (150..=152).contains(&i) {
+            theirs.push_str(&format!("THEIR-{i}\n"));
+        } else {
+            theirs.push_str(&format!("line {i}\n"));
+        }
+    }
+
+    let outcome = text_hunk_merge(base.as_bytes(), ours.as_bytes(), theirs.as_bytes());
+    match outcome {
+        MergeOutcome::Clean(merged) => {
+            let text = String::from_utf8(merged).unwrap();
+            // Both 3-line edits landed.
+            for i in 30..=32 {
+                assert!(text.contains(&format!("OUR-{i}\n")), "missing OUR-{i}: ...");
+            }
+            for i in 150..=152 {
+                assert!(
+                    text.contains(&format!("THEIR-{i}\n")),
+                    "missing THEIR-{i}: ..."
+                );
+            }
+            // Outer untouched lines remain verbatim.
+            assert!(text.contains("line 1\n"));
+            assert!(text.contains("line 100\n"));
+            assert!(text.contains("line 185\n"));
+            assert!(!text.contains("<<<<<<<"), "should have no markers");
+        }
+        other => panic!("expected Clean on disjoint hunks, got {other:?}"),
+    }
+}
+
+// =====================================================================
+// Edge cases beyond the brief's three red-commit fixtures.
+// =====================================================================
+
+#[test]
+fn identical_edit_on_both_sides_is_clean() {
+    let base = b"a\nb\nc\n";
+    let ours = b"a\nX\nc\n";
+    let theirs = b"a\nX\nc\n";
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => assert_eq!(out, b"a\nX\nc\n"),
+        other => panic!("expected Clean, got {other:?}"),
+    }
+}
+
+#[test]
+fn one_side_unchanged_takes_other() {
+    let base = b"a\nb\nc\n";
+    let ours = base.to_vec();
+    let theirs = b"a\nB\nc\n";
+    match text_hunk_merge(base, &ours, theirs) {
+        MergeOutcome::Clean(out) => assert_eq!(out, b"a\nB\nc\n"),
+        other => panic!("expected Clean (theirs), got {other:?}"),
+    }
+}
+
+#[test]
+fn binary_inputs_short_circuit() {
+    let base = b"a\nb\nc\n";
+    let ours = b"a\nb\n\0\n";
+    let theirs = b"a\nb\nC\n";
+    assert!(matches!(text_hunk_merge(base, ours, theirs), MergeOutcome::Binary));
+}
+
+#[test]
+fn marker_labels_threaded_through() {
+    let base = b"a\nb\nc\n";
+    let ours = b"a\nOUR\nc\n";
+    let theirs = b"a\nTHEIR\nc\n";
+    let markers = ConflictMarkers {
+        ours: "feat/branch",
+        theirs: "main",
+    };
+    let outcome = text_hunk_merge_with_markers(base, ours, theirs, markers);
+    let MergeOutcome::Conflicts {
+        merged_bytes_with_markers,
+        ..
+    } = outcome
+    else {
+        panic!("expected Conflicts");
+    };
+    let text = String::from_utf8(merged_bytes_with_markers).unwrap();
+    assert!(text.contains("<<<<<<< feat/branch\n"), "ours label: {text}");
+    assert!(text.contains(">>>>>>> main\n"), "theirs label: {text}");
+}
+
+#[test]
+fn trailing_newline_divergence_does_not_conflict() {
+    // Base has trailing newline; ours adds content keeping it; theirs adds
+    // content but drops the trailing newline. Should still merge cleanly
+    // on disjoint edits.
+    let base = b"a\nb\nc\n";
+    let ours = b"OUR-a\nb\nc\n";
+    let theirs = b"a\nb\nTHEIR-c"; // no trailing newline
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => {
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("OUR-a"));
+            assert!(text.contains("THEIR-c"));
+        }
+        other => panic!("expected Clean on disjoint hunks even with trailing-newline divergence, got {other:?}"),
+    }
+}
+
+#[test]
+fn two_separate_conflict_hunks_emit_two_marker_blocks() {
+    // Both sides edit two different hunks, but at one hunk both differ.
+    // Expect 1 conflict block, surrounded by the resolved hunk.
+    let base = b"a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+    let ours = b"a\nOURB\nc\nd\ne\nf\ng\nOURh\ni\nj\n";
+    let theirs = b"a\nTHEIRB\nc\nd\ne\nf\ng\nTHEIRh\ni\nj\n";
+
+    let MergeOutcome::Conflicts {
+        merged_bytes_with_markers,
+        conflict_count,
+    } = text_hunk_merge(base, ours, theirs)
+    else {
+        panic!("expected Conflicts");
+    };
+    assert_eq!(conflict_count, 2, "should see two distinct conflict hunks");
+    let count = count_conflicts(&merged_bytes_with_markers);
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn empty_inputs_clean() {
+    assert!(matches!(text_hunk_merge(b"", b"", b""), MergeOutcome::Clean(v) if v.is_empty()));
+}
