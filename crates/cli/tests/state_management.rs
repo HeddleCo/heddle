@@ -10,6 +10,8 @@ use tempfile::TempDir;
 mod clean;
 #[path = "state_management/merge.rs"]
 mod merge;
+#[path = "state_management/merge_store_integrity.rs"]
+mod merge_store_integrity;
 #[path = "state_management/revert.rs"]
 mod revert;
 #[path = "state_management/stash.rs"]

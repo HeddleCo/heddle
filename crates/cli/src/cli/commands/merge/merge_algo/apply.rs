@@ -1,18 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{collections::HashMap, fs, path::Path};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use objects::object::{Tree, TreeEntry};
 use repo::Repository;
 
 use super::super::prepare_dir_for_file_replacement;
 
 pub(crate) fn apply_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
-    let current_tree = repo
-        .current_state()?
-        .and_then(|s| repo.store().get_tree(&s.tree).transpose())
-        .transpose()?
-        .unwrap_or_default();
+    // Two distinct "no tree" cases collapse here. Keep them apart:
+    //
+    // * No current state — fresh repo / first capture / pre-init goto.
+    //   `Tree::default()` is the right baseline: there's nothing tracked
+    //   to diff against, so the merged tree wins outright.
+    // * Current state exists but its `state.tree` hash isn't in the
+    //   store — corruption. `Tree::default()` here causes the apply step
+    //   to think every currently-tracked file was dropped on the source
+    //   side, then materialize the merged tree as-if-from-scratch, which
+    //   on a partial overlap silently wipes files outside the merged
+    //   tree. Surface this as a hard error pointing the operator at
+    //   `heddle fsck --full`.
+    let current_tree = match repo.current_state()? {
+        Some(state) => repo.store().get_tree(&state.tree)?.ok_or_else(|| {
+            anyhow!(
+                "current state {} references tree {} but the object store has no such tree; \
+                 aborting merge application to avoid silently replacing tracked content with \
+                 an empty baseline. Run `heddle fsck --full` to inspect store integrity.",
+                state.change_id.short(),
+                state.tree,
+            )
+        })?,
+        None => Tree::default(),
+    };
 
     let current_entries: HashMap<&str, &TreeEntry> = current_tree
         .entries()
@@ -125,20 +144,39 @@ fn remove_path_for_type_change(
 }
 
 /// Resolve the subtree under `entry` (a top-level entry of `current_tree`).
-/// Falls back to an empty tree if the entry isn't a Tree-typed entry or
-/// the subtree object is missing — both cases mean "no tracked
-/// descendants" and the caller will skip removal.
+///
+/// The two `Ok(...)` arms model two genuinely-different "no subtree"
+/// cases and only one of them is corruption:
+///
+/// * `entry` is a non-Tree entry (Blob / Symlink). There's no subtree
+///   to descend into at all; "no tracked descendants" is the right
+///   answer, and the caller skips removal. Legitimate.
+/// * `entry` is a Tree entry but `resolve_subtree` returns `Ok(None)`.
+///   That can only happen when the store has no object for the entry's
+///   hash (the top-level entry is right there in `current_tree` and is
+///   typed as a Tree, so `descend_one` won't bail on type/name lookup).
+///   Pre-#90 this coerced to `Tree::default()`, causing the caller to
+///   skip removal of every tracked descendant — which on a merge that
+///   actually intended to drop the directory left orphaned files on
+///   disk that the next `heddle status` would surface as "added" out
+///   of nowhere. Surface the corruption.
 fn source_subtree_for(
     repo: &Repository,
     entry: &TreeEntry,
     current_tree: &Tree,
     name: &str,
 ) -> Result<Tree> {
-    if entry.entry_type == objects::object::EntryType::Tree {
-        Ok(repo
-            .resolve_subtree(current_tree, Path::new(name))?
-            .unwrap_or_default())
-    } else {
-        Ok(Tree::default())
+    if entry.entry_type != objects::object::EntryType::Tree {
+        return Ok(Tree::default());
     }
+    repo.resolve_subtree(current_tree, Path::new(name))?
+        .ok_or_else(|| {
+            anyhow!(
+                "current tree records subtree {:?} (hash {}) but the object store cannot \
+                 resolve it; aborting merge application to avoid leaving the subtree's tracked \
+                 descendants orphaned on disk. Run `heddle fsck --full` to inspect store integrity.",
+                name,
+                entry.hash,
+            )
+        })
 }
