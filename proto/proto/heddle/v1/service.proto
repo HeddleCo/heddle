@@ -71,7 +71,7 @@ service HostedUserService {
 
 service AuthService {
   rpc BeginWebAuthnRegistration(BeginWebAuthnRegistrationRequest) returns (AuthChallengeResponse);
-  rpc FinishWebAuthnRegistration(FinishWebAuthnRegistrationRequest) returns (AccessTokenResponse);
+  rpc RegisterPublicKey(RegisterPublicKeyRequest) returns (AccessTokenResponse);
   rpc BeginWebAuthnAuthentication(BeginWebAuthnAuthenticationRequest) returns (AuthChallengeResponse);
   rpc FinishWebAuthnAuthentication(FinishWebAuthnAuthenticationRequest) returns (AccessTokenResponse);
   rpc CreateDeviceAuthorization(CreateDeviceAuthorizationRequest) returns (DeviceAuthorizationResponse);
@@ -776,7 +776,7 @@ message BeginWebAuthnRegistrationRequest {
   string username = 1;
   string display_name = 2;
 }
-message FinishWebAuthnRegistrationRequest {
+message RegisterPublicKeyRequest {
   string challenge_id = 1;
   // Raw bytes per WebAuthn (clientDataJSON / attestationObject / authenticatorData
   // / signature are passed verbatim; the WebAuthn lib base64url-decodes them
@@ -784,9 +784,34 @@ message FinishWebAuthnRegistrationRequest {
   bytes client_data_json = 2;
   bytes attestation_object = 3;
   string device_label = 4;
+  // Raw 32-byte Ed25519 public key the client commits to as the
+  // renewal anchor for this device. Distinct from the WebAuthn
+  // credential's attested public key (COSE-encoded, lives in
+  // `webauthn_credentials`): this key lives in `device_roots` and
+  // is the one `mint_biscuit_keypair` calls
+  // `Ed25519Signer::verify_with_public_key` against on every
+  // `KeypairProof` renewal. Leave empty for browser-only flows.
+  //
+  // When non-empty, MUST be accompanied by a binding signature
+  // (see the three `device_binding_*` fields). Closes
+  // HeddleCo/weft#131.
   bytes device_public_key = 5;
   // Idempotency (audit-idempotency enforces tag 15).
   string client_operation_id = 15;
+  // === Device-key binding proof (HeddleCo/weft#131) ===
+  // Required iff `device_public_key` is non-empty. Together these
+  // carry a WebAuthn assertion (`navigator.credentials.get()`
+  // produced immediately after `create()` succeeds, signed by the
+  // same authenticator) whose challenge is
+  //   base64url(SHA256("heddle-device-binding-v1" || 0x00 || device_public_key))
+  // The server verifies the assertion's signature using the COSE
+  // public key extracted from the attestation, then persists
+  // `device_public_key` as the device root. Binds the two keys
+  // cryptographically: the renewal-path public key is only
+  // accepted if the WebAuthn credential signs it.
+  bytes device_binding_client_data_json = 16;
+  bytes device_binding_authenticator_data = 17;
+  bytes device_binding_signature = 18;
 }
 message BeginWebAuthnAuthenticationRequest {
   string username = 1;
