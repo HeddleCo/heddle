@@ -83,6 +83,19 @@ impl FuseShell {
         }
     }
 
+    /// Hand out a shared handle to the underlying mount.
+    ///
+    /// `mount_background` / `mount` consume `self`, so the only
+    /// chance to grab a long-lived handle is before mounting. Used
+    /// by the `fuse_e2e` bench to call
+    /// [`ContentAddressedMount::clear_blob_cache`] between iterations
+    /// without rebuilding the entire session — which is what makes
+    /// the cold-blob-cache benchmark intent (see the bench module
+    /// docs) actually hold across samples.
+    pub fn mount_handle(&self) -> Arc<ContentAddressedMount> {
+        Arc::clone(&self.inner)
+    }
+
     /// Mount synchronously. Blocks the calling thread for the lifetime
     /// of the mount (returns when unmounted or on error).
     pub fn mount(self, mountpoint: impl AsRef<Path>) -> Result<()> {

@@ -75,6 +75,20 @@ tempfile.workspace = true
 name = "mount_read_paths"
 harness = false
 
+# Linux FUSE end-to-end bench. Drives the mount through a real
+# `FuseShell::mount_background` session so every read pays the
+# kernel ↔ FUSE round-trip. Pairs each workload (sequential read,
+# mmap, concurrent read, random read, stat-storm, write throughput,
+# lifecycle) with a vanilla-ext4 `std::fs` baseline so the overhead
+# of the FUSE adapter + content-addressed core is visible at the
+# kernel boundary the daily user actually pays. Requires Linux +
+# `--features fuse`; the file is `cfg`-gated so non-Linux feature
+# combos still compile cleanly. See `benches/fuse_e2e.rs`.
+[[bench]]
+name = "fuse_e2e"
+harness = false
+required-features = ["fuse"]
+
 [features]
 default = []
 # Enable the FUSE shell. Linux-only; on other platforms the
