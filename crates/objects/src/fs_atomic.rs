@@ -147,6 +147,35 @@ pub fn temp_path(path: &Path) -> PathBuf {
     parent.join(format!(".{file_name}.tmp-{pid}-{unique}-{counter}"))
 }
 
+/// fsync the directory inode so a preceding `rename` is durable across
+/// crashes. POSIX-only — on Windows this is a no-op.
+///
+/// On Linux/macOS, after an `fsync(file)` + `rename(tmp, dest)` the
+/// rename itself still needs to be made durable, which requires
+/// `fsync(parent_dir)` (open parent for read, `sync_all`). Without it
+/// a crash between the rename and the next directory writeback can
+/// leave the destination dirent missing even though the file's data is
+/// on disk.
+///
+/// Windows directories don't support this pattern. `CreateFileW` with
+/// `GENERIC_READ` against a directory returns `ERROR_ACCESS_DENIED`
+/// unless the caller passes `FILE_FLAG_BACKUP_SEMANTICS`, and even
+/// then `FlushFileBuffers` on a directory handle is undefined — NTFS
+/// reports access-denied. Directory metadata durability on Windows is
+/// handled by the NTFS log; there is no userspace knob equivalent to
+/// `fsync(dirfd)`, and standard ecosystem crates (`tempfile`,
+/// `atomicwrites`) treat the directory sync as a Unix-only concern.
+///
+/// Returning `Ok(())` on Windows matches that consensus and fixes
+/// heddle#105 (`Repository::init_default` panicking with
+/// `PermissionDenied` on every `write_file_atomic` of an oplog or
+/// state file under a Windows tempdir).
+#[cfg(windows)]
+pub fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
 pub fn sync_directory(path: &Path) -> io::Result<()> {
     let dir = OpenOptions::new().read(true).open(path)?;
     dir.sync_all()
