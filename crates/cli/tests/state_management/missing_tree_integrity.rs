@@ -218,6 +218,40 @@ fn test_stash_pop_missing_tree_fails_loud_not_silent_noop() {
     assert_missing_tree_error(&err, &stash_tree_hex);
 }
 
+/// `heddle clean --force` — destructive mutation path that loads the
+/// current state's tree to distinguish tracked from untracked files.
+/// Pre-#93 a missing tree silently became `Tree::default()`, so the
+/// detailed-status comparison reported every tracked file as
+/// `untracked` and `clean --force` deleted them all — a corrupt repo
+/// silently became an empty worktree. The highest-stakes site in the
+/// Rule-7 sweep; this test pins the loud-failure contract.
+#[test]
+fn test_clean_force_missing_tree_fails_loud_not_wipe_tracked_files() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    heddle(&["capture", "-m", "initial"], Some(temp.path())).unwrap();
+
+    let tree_hex = current_state_tree_hex(temp.path());
+    assert!(
+        delete_loose_tree(temp.path(), &tree_hex),
+        "test setup: expected to find loose tree at hash {tree_hex} to delete",
+    );
+
+    let err = heddle(&["clean", "--force"], Some(temp.path())).expect_err(
+        "clean --force against a corrupt baseline tree must fail loud; \
+         pre-#93 it silently deleted every tracked file in the worktree",
+    );
+    assert_missing_tree_error(&err, &tree_hex);
+
+    // Belt-and-suspenders: the tracked file must still exist on disk.
+    // If the migration regressed, clean would have already deleted it.
+    assert!(
+        temp.path().join("tracked.txt").exists(),
+        "failed clean must not partially delete: tracked.txt should still exist",
+    );
+}
+
 /// `heddle goto <state>` — mutation path that loads the *current*
 /// state's tree to verify the worktree is clean before switching.
 /// Pre-#93 a missing current tree silently became `Tree::default()`,
