@@ -82,7 +82,7 @@ pub(crate) fn create_git_checkpoint(
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| anyhow!("no captured state found after bootstrap"))?;
-    let tree = repo.store().get_tree(&state.tree)?.unwrap_or_default();
+    let tree = repo.require_tree(&state.tree)?;
     let status = repo.compare_worktree_cached_with_options(&tree, &status_options)?;
     if !status.modified.is_empty() || !status.added.is_empty() || !status.deleted.is_empty() {
         bail!(
