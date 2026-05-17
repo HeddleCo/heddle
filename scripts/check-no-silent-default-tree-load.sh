@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Asserter for the silent-corruption-on-missing-tree class of bug
+# Asserter for the silent-corruption-on-missing-tree bug class
 # closed by heddle#90 (merge_algo) and heddle#93 (presentation +
 # mutation paths outside merge).
 #
@@ -17,6 +17,7 @@
 # reappear in production code:
 #   - get_tree(...)?.unwrap_or_default()
 #   - get_tree(...)?.unwrap_or_else(|| Tree::new())  / Tree::default()
+#   - get_tree(...)?.unwrap_or_else(|| { Tree::new() })  (braced body)
 #   - get_tree(...)?.unwrap_or_else(Tree::new)       / Tree::default
 #   - get_tree(...).ok().flatten().unwrap_or_default()
 #   - the .transpose()?.flatten().unwrap_or_default() Option-chain
@@ -27,6 +28,13 @@
 # whitelisted. The list of allowed-by-design lines lives below; add
 # to it explicitly with a justification when a new legitimate
 # sentinel appears.
+#
+# Regex caveat: this script uses ripgrep regexes, not a real parser.
+# The arg-matching alternation below balances up to two levels of
+# nested parens (e.g. `get_tree(&normalize(s.tree()))`), which covers
+# every shape currently in the tree. Deeper nesting will not match;
+# heddle#NN proposes replacing the whole regex pass with an AST walk
+# (syn / tree-sitter) to close this class permanently.
 
 set -euo pipefail
 
@@ -89,6 +97,43 @@ is_allowed() {
   return 1
 }
 
+# Match an entire `get_tree(...)` call, including args that themselves
+# contain nested parens up to two levels deep. The Codex r2 P2 bypass
+# was `get_tree(&normalize(s.tree()))` — one level of nesting was
+# enough to defeat the prior `[^)]*` arg matcher. Two-level balancing
+# covers every call shape currently in the tree; deeper nesting needs
+# the AST-walker follow-up (see header).
+GET_TREE_CALL='get_tree\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)'
+
+# Process raw `path:lineno:content` hits from rg: strip doc/inline
+# comments, apply the allowlist, and emit an error for the rest.
+# Used by both the single-shape `run_rg` driver and the multi-line
+# Option-chain branch — the latter previously skipped this filter,
+# letting multi-line doc comments quoting the legacy pattern fire
+# as false positives (Codex r2 P2).
+process_hits() {
+  local label="$1"
+  local hits="$2"
+  if [[ -z "$hits" ]]; then
+    ok "no occurrences: $label"
+    return
+  fi
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local key content
+    key="$(echo "$line" | awk -F: '{print $1":"$2}')"
+    content="$(echo "$line" | awk -F: '{$1=$2=""; sub(/^  /, ""); print}')"
+    if echo "$content" | grep -Eq '^[[:space:]]*(///|//!|//|\*|/\*)' ; then
+      continue
+    fi
+    if is_allowed "$key"; then
+      ok "exempt: $key — $label"
+      continue
+    fi
+    err "$label at $line"
+  done <<< "$hits"
+}
+
 run_rg() {
   local pattern="$1"
   local label="$2"
@@ -102,60 +147,39 @@ run_rg() {
   hits=$(rg --multiline --multiline-dotall \
             --line-number --no-heading --type rust \
             "$pattern" "${SEARCH_DIRS[@]}" 2>/dev/null || true)
-  if [[ -z "$hits" ]]; then
-    ok "no occurrences: $label"
-    return
-  fi
-  while IFS= read -r line; do
-    # Skip empty lines from the loop.
-    [[ -z "$line" ]] && continue
-    # Strip the ripgrep `path:lineno:content` prefix to a `path:lineno` key.
-    local key
-    key="$(echo "$line" | awk -F: '{print $1":"$2}')"
-    # Skip doc comments and inline comments — these legitimately
-    # quote the legacy pattern when describing the bug class.
-    local content
-    content="$(echo "$line" | awk -F: '{$1=$2=""; sub(/^  /, ""); print}')"
-    if echo "$content" | grep -Eq '^[[:space:]]*(///|//!|//|\*|/\*)' ; then
-      continue
-    fi
-    if is_allowed "$key"; then
-      ok "exempt: $key — $label"
-      continue
-    fi
-    err "$label at $line"
-  done <<< "$hits"
+  process_hits "$label" "$hits"
 }
 
 # Bug shapes. `\s*` between `?` and the unwrap call catches both
 # single-line and multi-line chains because run_rg passes
 # --multiline --multiline-dotall (so `\s` matches newlines).
-run_rg 'get_tree\([^)]*\)\?\s*\.unwrap_or_default\(\)' \
+#
+# The closure-form pattern accepts an OPTIONAL `{ ... }` block around
+# the `Tree::new()` / `Tree::default()` call body — Codex r2 P2 found
+# that `unwrap_or_else(|| { Tree::new() })` slipped past the prior
+# bare-expression matcher.
+run_rg "${GET_TREE_CALL}"'\?\s*\.unwrap_or_default\(\)' \
        'silent-default tree load (heddle#90/#93 bug class)'
-run_rg 'get_tree\([^)]*\)\?\s*\.unwrap_or_else\(\|\|\s*Tree::(new|default)\(\)\s*\)' \
+run_rg "${GET_TREE_CALL}"'\?\s*\.unwrap_or_else\(\|\|\s*\{?\s*Tree::(new|default)\(\)\s*\}?\s*\)' \
        'silent-default tree load via unwrap_or_else(closure)'
-run_rg 'get_tree\([^)]*\)\?\s*\.unwrap_or_else\(\s*Tree::(new|default)\s*\)' \
+run_rg "${GET_TREE_CALL}"'\?\s*\.unwrap_or_else\(\s*Tree::(new|default)\s*\)' \
        'silent-default tree load via unwrap_or_else(fn-pointer)'
-run_rg 'get_tree\([^)]*\)\.ok\(\)\s*\.flatten\(\)\s*\.unwrap_or_default\(\)' \
+run_rg "${GET_TREE_CALL}"'\.ok\(\)\s*\.flatten\(\)\s*\.unwrap_or_default\(\)' \
        'silent-default tree load via .ok().flatten().unwrap_or_default()'
 
-# Multi-line Option-chain — must enable rg's multiline mode.
+# Multi-line Option-chain — bounded non-greedy `[\s\S]{0,1000}?` between
+# hops. Codex r2 P2 raised the prior `{0,200}` cap as defeatable by a
+# >200-char comment between hops; 1000 chars/hop comfortably covers a
+# realistic multi-line doc comment without going unbounded. Unbounded
+# was tried and produced cross-function false positives — a `get_tree`
+# in one helper would match an unrelated `.unwrap_or_default()` 100
+# lines later. The 1000-char cap keeps matches local to a single chain
+# expression while still defeating any plausible bypass-via-comment.
+# (The real fix is AST scanning; tracked in the follow-up issue.)
 ML_HITS=$(rg --multiline --multiline-dotall --line-number --no-heading --type rust \
-             '\.get_tree\([^)]*\)[\s\S]{0,200}\.transpose\(\)\?[\s\S]{0,200}\.flatten\(\)[\s\S]{0,200}\.unwrap_or_default\(\)' \
+             '\.'"${GET_TREE_CALL}"'[\s\S]{0,1000}?\.transpose\(\)\?[\s\S]{0,1000}?\.flatten\(\)[\s\S]{0,1000}?\.unwrap_or_default\(\)' \
              "${SEARCH_DIRS[@]}" 2>/dev/null || true)
-if [[ -z "$ML_HITS" ]]; then
-  ok "no occurrences: Option-chain .transpose()?.flatten().unwrap_or_default() of get_tree"
-else
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    key="$(echo "$line" | awk -F: '{print $1":"$2}')"
-    if is_allowed "$key"; then
-      ok "exempt: $key — Option-chain"
-      continue
-    fi
-    err "Option-chain silent-default tree load at $line"
-  done <<< "$ML_HITS"
-fi
+process_hits 'Option-chain .transpose()?.flatten().unwrap_or_default() of get_tree' "$ML_HITS"
 
 if [[ "$fail" -ne 0 ]]; then
   cat >&2 <<'EOF'

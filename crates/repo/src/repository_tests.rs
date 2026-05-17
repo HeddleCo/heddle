@@ -1367,7 +1367,7 @@ mod require_tree_callback {
     //! `crates/cli/tests/state_management/missing_tree_integrity.rs`
     //! cover the on-disk wiring.
 
-    use objects::object::Tree;
+    use objects::object::{ContentHash, Tree};
 
     use super::create_test_repo;
     use crate::{HeddleError, Repository};
@@ -1386,19 +1386,18 @@ mod require_tree_callback {
     #[test]
     fn require_tree_returns_missing_object_when_absent() {
         let (_temp, repo): (_, Repository) = create_test_repo();
-        // Compute the hash of a tree we deliberately never put. The
-        // store has no entry for it; require_tree must error rather
-        // than silently substituting Tree::default().
-        let phantom = Tree::new();
-        let hash = phantom.hash();
-        // Ensure the store really doesn't have it (the `init_default`
-        // seeded a different tree, but no entry for our phantom shape
-        // unless that seed tree is also empty). Defensive: if the
-        // phantom happens to match a seeded empty tree, this assertion
-        // will catch the test setup drift.
-        if repo.store().has_tree(&hash).unwrap() {
-            return; // Empty tree may be pre-seeded; the positive test covers this case.
-        }
+        // Use a hash that cannot collide with anything `init_default`
+        // seeded: `Tree::new().hash()` was the prior choice, but
+        // `init_default` seeds the empty tree, so `has_tree(hash)`
+        // returned true and an early-return short-circuited the test
+        // before `require_tree` was ever called (Codex r2 P3). A
+        // synthetic all-`0xab` digest has no preimage and is
+        // guaranteed absent from any freshly-initialised store.
+        let hash = ContentHash::from_bytes([0xab; 32]);
+        assert!(
+            !repo.store().has_tree(&hash).unwrap(),
+            "synthetic phantom hash must be absent from a fresh store",
+        );
 
         let err = repo
             .require_tree(&hash)

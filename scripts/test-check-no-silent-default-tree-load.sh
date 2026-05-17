@@ -140,6 +140,68 @@ run_case \
   "doc-comment quoting the legacy pattern is not flagged" \
   "doccomment/crates" "" "pass"
 
+# --- Fixture 6: nested parens inside get_tree args (Codex r2 P2) ---------
+# r2's asserter used `get_tree\([^)]*\)` — the `[^)]*` stops at the
+# first close-paren, so any arg containing a nested call slipped past.
+# r3 must catch this.
+mkdir -p "$fixtures_root/nested/crates/foo/src"
+cat > "$fixtures_root/nested/crates/foo/src/lib.rs" <<'EOF'
+fn load(repo: &Repository, s: &State) -> Tree {
+    repo.store().get_tree(&normalize(s.tree()))?.unwrap_or_default()
+}
+EOF
+run_case \
+  "nested-paren get_tree(&normalize(s.tree())) is rejected (r2 regression)" \
+  "nested/crates" "" "fail"
+
+# --- Fixture 7: braced closure body (Codex r2 P2) -----------------------
+# `unwrap_or_else(|| { Tree::new() })` — the prior closure regex
+# required a bare expression with no `{ ... }` around it.
+mkdir -p "$fixtures_root/braced/crates/foo/src"
+cat > "$fixtures_root/braced/crates/foo/src/lib.rs" <<'EOF'
+fn load(repo: &Repository, h: &ContentHash) -> Tree {
+    repo.store().get_tree(h)?.unwrap_or_else(|| { Tree::new() })
+}
+EOF
+run_case \
+  "braced-closure unwrap_or_else(|| { Tree::new() }) is rejected (r2 regression)" \
+  "braced/crates" "" "fail"
+
+# --- Fixture 8: long gap between Option-chain hops (Codex r2 P2) --------
+# The Option-chain matcher capped each hop's gap at 200 chars in r2.
+# A >200-char comment between `.transpose()?` and `.unwrap_or_default()`
+# slipped through. r3 raises the cap to 1000/hop.
+mkdir -p "$fixtures_root/longgap/crates/foo/src"
+{
+  echo "fn load(repo: &Repository, h: &ContentHash) -> Tree {"
+  echo "    repo.store()"
+  echo "        .get_tree(h)"
+  echo "        .transpose()?"
+  echo "        // $(printf 'x%.0s' {1..400})"
+  echo "        .flatten()"
+  echo "        .unwrap_or_default()"
+  echo "}"
+} > "$fixtures_root/longgap/crates/foo/src/lib.rs"
+run_case \
+  "Option-chain with >200-char gap between hops is rejected (r2 regression)" \
+  "longgap/crates" "" "fail"
+
+# --- Fixture 9: multi-line doc-comment quoting the legacy chain ----------
+# r2's ML branch skipped the doc-comment filter entirely — any
+# `///`-prefixed prose mentioning the .transpose/.flatten/.unwrap_or_default
+# chain fired as a violation. r3 applies the same comment filter to
+# both branches via process_hits.
+mkdir -p "$fixtures_root/mldoccomment/crates/foo/src"
+cat > "$fixtures_root/mldoccomment/crates/foo/src/lib.rs" <<'EOF'
+/// Historic bug: the legacy code did
+/// `repo.store().get_tree(h).transpose()?.flatten().unwrap_or_default()`
+/// which silently substituted Tree::default() for a missing tree.
+fn noop() {}
+EOF
+run_case \
+  "multi-line doc-comment quoting the Option-chain is not flagged (r2 regression)" \
+  "mldoccomment/crates" "" "pass"
+
 if (( fail )); then
   echo "asserter self-tests FAILED" >&2
   exit 1
