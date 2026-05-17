@@ -172,6 +172,33 @@ class FuseBenchCompareTest(unittest.TestCase):
                 f"stdout={result.stdout}\nstderr={result.stderr}",
             )
 
+    def test_unexpected_top_level_group_exits_one(self) -> None:
+        """Codex r2 (P1) — wholly new top-level group in criterion
+        must be a coverage failure too, not just unexpected variants
+        inside known groups. Without this, a PR can add a brand-new
+        `bench_streaming_read` group without committing a baseline
+        entry and the gate silently exits 0. The r1 fix scoped
+        unexpected-ID detection to baseline-owned groups; this test
+        pins the un-scoped contract that closes that hole."""
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            baseline = tmp_path / "baseline.json"
+            criterion = tmp_path / "criterion"
+            _write_baseline(
+                baseline,
+                {"seq_read": {"heddle": {"ns_per_iter": 1000.0}}},
+            )
+            _write_estimate(criterion, "seq_read", "heddle", 1050.0)  # in budget
+            # Brand-new top-level group not represented in the baseline.
+            _write_estimate(criterion, "bench_streaming_read", "heddle", 5000.0)
+            result = _run_compare(criterion, baseline)
+            self.assertNotEqual(
+                result.returncode,
+                0,
+                f"compare must FAIL on new top-level benchmark groups.\n"
+                f"stdout={result.stdout}\nstderr={result.stderr}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
