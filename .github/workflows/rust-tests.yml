@@ -159,6 +159,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
       # Enable the ProjFS optional feature. `Client-ProjFS` is the
       # canonical name on Windows 10/11 client SKUs; `Projected-FS`
       # is the Server variant. Try Client first (matches the docs we
@@ -214,6 +216,10 @@ jobs:
         run: |
           cargo test --locked -p heddle-mount --features projfs --lib projfs:: `
             -- --ignored --test-threads=1
+
+      - name: sccache stats
+        shell: pwsh
+        run: sccache --show-stats
 
   # Coverage requires an instrumented build that can't share `target/`
   # with the regular profile, so it stays as its own job.
