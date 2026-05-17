@@ -1316,3 +1316,87 @@ fn outer() {
     let merged = assert_clean(merge_rust(base, ours, theirs));
     assert!(merged.contains("fn inner() { 99 }"));
 }
+
+// =====================================================================
+// Codex r1 P1 #1: signature data in semantic item keys.
+//
+// Overloads (same name, different parameter signatures) must be matched
+// independently. Pre-fix, ItemKey is (kind, name, scope) and the second
+// insert into the BTreeMap silently overwrites the first — so one
+// overload's edits AND original body are dropped from the merged
+// output entirely.
+// =====================================================================
+#[test]
+fn typescript_overload_signatures_not_collapsed_by_key_collision() {
+    // Two top-level function declarations sharing a name but differing
+    // in the parameter list. With name-only keys both collapse into one
+    // BTreeMap entry → the "first" overload disappears from output.
+    let base = "\
+function foo(x: number): number { return 1; }
+function foo(x: string): string { return \"a\"; }
+";
+    // ours edits foo(number); theirs edits foo(string). Disjoint
+    // overload edits — pre-fix both edits are lost because the overloads
+    // collapse to a single map entry.
+    let ours = "\
+function foo(x: number): number { return 100; }
+function foo(x: string): string { return \"a\"; }
+";
+    let theirs = "\
+function foo(x: number): number { return 1; }
+function foo(x: string): string { return \"AAA\"; }
+";
+    let merged = match merge_at(base, ours, theirs, "f.ts") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected outcome: {other:?}"),
+    };
+    // Both overload signatures must survive.
+    assert!(
+        merged.contains("x: number"),
+        "foo(number) overload lost: {merged}"
+    );
+    assert!(
+        merged.contains("x: string"),
+        "foo(string) overload lost: {merged}"
+    );
+    // Each side's disjoint edit must land.
+    assert!(merged.contains("return 100"), "ours edit lost: {merged}");
+    assert!(merged.contains("return \"AAA\""), "theirs edit lost: {merged}");
+}
+
+#[test]
+fn javascript_top_level_same_name_functions_distinguishable_by_arity() {
+    // Plain JavaScript allows two top-level `function foo` declarations
+    // with different arities; this parses as two `function_declaration`
+    // nodes with the same name. Pre-fix they collide on (Function, foo, [])
+    // and one is lost.
+    let base = "\
+function foo(x) { return x; }
+function foo(x, y) { return x + y; }
+";
+    // ours edits the one-arg variant; theirs edits the two-arg variant.
+    let ours = "\
+function foo(x) { return x + 10; }
+function foo(x, y) { return x + y; }
+";
+    let theirs = "\
+function foo(x) { return x; }
+function foo(x, y) { return x * y; }
+";
+    let merged = match merge_at(base, ours, theirs, "f.js") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    // Both arities must be present after merge.
+    assert!(
+        merged.contains("function foo(x)") && merged.contains("function foo(x, y)"),
+        "one of the arities lost: {merged}"
+    );
+    // Both disjoint edits must land.
+    assert!(merged.contains("return x + 10"), "ours edit lost: {merged}");
+    assert!(merged.contains("return x * y"), "theirs edit lost: {merged}");
+}
