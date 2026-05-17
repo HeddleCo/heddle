@@ -169,9 +169,20 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
             return Err(err).with_context(|| format!("create '{}'", config_path.display()));
         }
     };
+    // If `write_all` (or `sync_all`) fails after `create_new` already
+    // landed an empty file (ENOSPC, EIO, network FS hiccup), a naïve
+    // bail-out would leave a zero-byte or partial `config.toml` on
+    // disk. A retried `heddle start --shared-target` would then hit
+    // the `AlreadyExists` arm above and silently treat the orphan as
+    // a user-managed config, returning `Ok(false)` and never wiring
+    // the redirect. Remove the partial file so the retry can recreate
+    // it. Mirrors the cleanup pattern in `init.rs` (heddle#80 r3).
     write_body_or_cleanup(&mut file, body.as_bytes(), &config_path)?;
-    file.sync_all()
-        .with_context(|| format!("sync '{}'", config_path.display()))?;
+    if let Err(err) = file.sync_all() {
+        drop(file);
+        let _ = std::fs::remove_file(&config_path);
+        return Err(err).with_context(|| format!("sync '{}'", config_path.display()));
+    }
     Ok(true)
 }
 
@@ -184,9 +195,11 @@ fn write_body_or_cleanup<W: Write>(
     body: &[u8],
     cleanup_path: &Path,
 ) -> Result<()> {
-    writer
-        .write_all(body)
-        .with_context(|| format!("write '{}'", cleanup_path.display()))
+    if let Err(err) = writer.write_all(body) {
+        let _ = std::fs::remove_file(cleanup_path);
+        return Err(err).with_context(|| format!("write '{}'", cleanup_path.display()));
+    }
+    Ok(())
 }
 
 /// Count active materialized threads on the repo. "Active" means
