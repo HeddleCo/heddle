@@ -148,3 +148,74 @@ fn test_nested_tracked_heddle_paths_are_not_ignored_by_status_or_snapshot() {
         std::fs::read_to_string(temp.path().join("examples/calculator/.heddle/HEAD")).unwrap();
     assert_eq!(restored, "hd-examplehead-v1\n");
 }
+
+#[test]
+fn init_writes_default_heddleignore() {
+    // Red-commit for heddle#80: fresh `heddle init` must install the
+    // bundled `.heddleignore` so day-one users don't have to discover
+    // the file's existence before macOS noise lands.
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    let path = temp.path().join(".heddleignore");
+    assert!(
+        path.is_file(),
+        ".heddleignore must be installed by `heddle init`"
+    );
+    let contents = std::fs::read_to_string(&path).unwrap();
+    // Spot-check a few representative patterns from each family —
+    // template-completeness is unit-tested in the module itself.
+    assert!(contents.contains(".DS_Store"));
+    assert!(contents.contains("xcuserdata/"));
+    assert!(contents.contains("*.swp"));
+}
+
+#[test]
+fn init_preserves_existing_heddleignore() {
+    // If the operator already curated a `.heddleignore`, init must
+    // NOT clobber it. The default template is a starter, not a
+    // mandate.
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join(".heddleignore");
+    std::fs::write(&path, "# my custom rules\n*.private\n").unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(after.contains("*.private"));
+    assert!(
+        !after.contains(".DS_Store"),
+        "existing .heddleignore must not be overwritten"
+    );
+}
+
+#[test]
+fn default_heddleignore_suppresses_common_macos_noise() {
+    // Red-commit: after `heddle init`, dropping `.DS_Store` and an
+    // `xcuserdata/` tree into the worktree must NOT show them as
+    // untracked. This is the day-one friction the issue cites.
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("real.txt"), "content").unwrap();
+    std::fs::write(temp.path().join(".DS_Store"), b"\x00\x00\x00").unwrap();
+    let xcuserdata = temp.path().join("App.xcodeproj/xcuserdata/u.xcuserdatad");
+    std::fs::create_dir_all(&xcuserdata).unwrap();
+    std::fs::write(xcuserdata.join("UserInterfaceState.xcuserstate"), b"x").unwrap();
+
+    let status = heddle_must_succeed(&["--json", "status"], temp.path());
+    let status_json: Value = serde_json::from_str(&status).unwrap();
+    let untracked = status_json["changes"]["added"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let untracked_paths: Vec<&str> = untracked.iter().filter_map(|v| v.as_str()).collect();
+    assert!(
+        !untracked_paths.iter().any(|p| p.contains(".DS_Store")),
+        ".DS_Store must be suppressed by the default .heddleignore; saw: {untracked_paths:?}"
+    );
+    assert!(
+        !untracked_paths.iter().any(|p| p.contains("xcuserdata")),
+        "xcuserdata/ must be suppressed by the default .heddleignore; saw: {untracked_paths:?}"
+    );
+    assert!(
+        untracked_paths.iter().any(|p| p.contains("real.txt")),
+        "real.txt must still surface as untracked; saw: {untracked_paths:?}"
+    );
+}

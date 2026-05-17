@@ -119,7 +119,22 @@ pub(super) fn validate_git_state(
     if !unrelated.is_empty() {
         // Cap the rendered list — the user gets the count and a few
         // examples; the full set lives in the workspace anyway.
-        let preview: Vec<String> = unrelated.iter().take(5).cloned().collect();
+        // Per-path: if the path looks like common noise (`.DS_Store`,
+        // `xcuserdata/...`, editor swap files), append an inline
+        // `.heddleignore` hint so the user can fix the root cause in
+        // one edit instead of guessing the right glob.
+        let preview: Vec<String> = unrelated
+            .iter()
+            .take(5)
+            .map(|path| {
+                match super::super::heddleignore_defaults::noise_hint_for(std::path::Path::new(
+                    path,
+                )) {
+                    Some(hint) => format!("{path} {}", hint.render_inline()),
+                    None => path.clone(),
+                }
+            })
+            .collect();
         let suffix = if unrelated.len() > preview.len() {
             format!(" (+{} more)", unrelated.len() - preview.len())
         } else {

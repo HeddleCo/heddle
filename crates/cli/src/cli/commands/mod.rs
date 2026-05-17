@@ -31,6 +31,7 @@ mod fsck_checks;
 mod gc;
 mod goto;
 mod harness_bridge;
+pub(crate) mod heddleignore_defaults;
 mod history_target;
 mod hook;
 mod index;
@@ -167,12 +168,12 @@ pub use semantic_cmd::cmd_semantic;
 pub use session::{
     cmd_session_end, cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start,
 };
+pub use shell::cmd_shell;
 pub use show::cmd_show;
 pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
 pub use stash::cmd_stash;
 pub use status::cmd_status;
 pub use store_cmd::cmd_store;
-pub use shell::cmd_shell;
 pub use thread::{cmd_start, cmd_thread_show};
 pub use thread_cmd::cmd_thread;
 pub use thread_shaping::{
