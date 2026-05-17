@@ -312,7 +312,10 @@ Examples:
 
 Undoable operations:
   - heddle capture           (restores HEAD to the pre-capture parent)
-  - heddle merge             (FF and non-FF; restores HEAD + thread refs)
+  - heddle merge (non-FF)    (restores HEAD + both thread refs)
+  - heddle merge (FF)        (restores HEAD only; the merged-into thread ref
+                              stays at the FF target — run `heddle thread
+                              switch <name>` to re-attach. Data is never lost.)
   - heddle goto              (restores HEAD to the pre-goto state)
   - heddle thread create/drop/rename
   - heddle marker create/drop

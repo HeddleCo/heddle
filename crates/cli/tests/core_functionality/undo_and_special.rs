@@ -469,16 +469,19 @@ fn test_undo_capture_restores_head_to_parent() {
     );
 }
 
-/// Fast-forward merge undo: capture on main, branch off, capture on the
-/// feature thread, switch back to main (which is still at the original tip),
-/// `heddle merge feature` (fast-forwards main to feature's tip), `heddle
-/// undo`, and assert both thread refs are back at their pre-merge state.
+/// Fast-forward merge undo, current behavior: HEAD is restored to the
+/// pre-merge tip, but the *merged-into* thread ref is **stranded** at the FF
+/// target. This is a documented gap (`docs/undo.md` "Known caveats") tracked
+/// by heddle#99 — add an `OpRecord::FastForward` variant that records the
+/// pre-merge thread state so undo can reset the ref too.
 ///
-/// The pre-merge contract is: main's tip is the original capture, feature's
-/// tip is the feature capture. After FF merge, main advances to feature's tip
-/// while feature stays put. After undo, both must be back where they started.
+/// Why pin the bug instead of skipping the test: the day the FF undo is fixed
+/// this test will start failing on the stranded-ref assertion, which is
+/// exactly the signal we want — "the gap is closed, update the docs + this
+/// test." See also `test_undo_non_ff_merge_restores_both_threads` below for
+/// the non-FF path that already works end-to-end.
 #[test]
-fn test_undo_merge_ff_restores_both_threads() {
+fn test_undo_ff_merge_restores_head_but_strands_thread_ref() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -510,9 +513,9 @@ fn test_undo_merge_ff_restores_both_threads() {
         "undo of FF merge must restore HEAD to main's pre-merge tip"
     );
 
-    // The feature thread's tip must be unchanged across merge + undo (FF
-    // doesn't move feature, so undo has nothing to do for it).
     let repo = Repository::open(temp.path()).unwrap();
+
+    // Feature thread never moved during FF merge, so its tip is unchanged.
     let feature_tip = repo
         .refs()
         .get_thread("feature")
@@ -523,13 +526,32 @@ fn test_undo_merge_ff_restores_both_threads() {
         feature_tip, feature_tip_before,
         "feature thread tip must be unchanged across merge + undo"
     );
+
+    // The documented gap: the `main` thread ref is left at the FF target.
+    // Today's `OpRecord::Goto` inverse only rewinds HEAD; it carries no
+    // thread context to reset the ref. When the follow-up adds a
+    // `FastForward` op variant, flip this assertion to `main_tip_before`.
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, feature_tip_before,
+        "current behavior: `main` thread ref is stranded at the FF target \
+         after undo (see docs/undo.md 'Known caveats' + follow-up issue)"
+    );
 }
 
 /// Non-fast-forward merge undo: both threads have divergent work since the
 /// common ancestor. The merge synthesizes a new merge state with two parents.
 /// Undo must restore main to its pre-merge tip; feature's tip never moved.
+/// Unlike the FF path, this case exercises the `Snapshot` inverse (the merge
+/// records a new state with `thread = Some("main")`), so the thread ref *is*
+/// reset alongside HEAD.
 #[test]
-fn test_undo_merge_non_ff_restores_state() {
+fn test_undo_non_ff_merge_restores_both_threads() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -567,8 +589,22 @@ fn test_undo_merge_non_ff_restores_state() {
         "undo of non-FF merge must restore HEAD to main's pre-merge tip"
     );
 
-    // Feature is untouched throughout — its tip stays put.
     let repo = Repository::open(temp.path()).unwrap();
+
+    // The `main` thread ref must be reset too (not just HEAD): the `Snapshot`
+    // inverse for a merge carries the thread name so the ref rewinds with it.
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, main_tip_before,
+        "non-FF undo must reset the `main` thread ref to its pre-merge tip"
+    );
+
+    // Feature is untouched throughout — its tip stays put.
     let feature_tip = repo
         .refs()
         .get_thread("feature")
