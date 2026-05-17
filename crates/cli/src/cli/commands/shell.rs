@@ -30,14 +30,19 @@ use crate::cli::{ShellCommands, ShellKind};
 pub fn cmd_shell(command: ShellCommands) -> Result<()> {
     match command {
         ShellCommands::Init { kind } => {
-            let snippet = match kind {
-                ShellKind::Zsh | ShellKind::Bash => ZSH_BASH_SNIPPET,
-                ShellKind::Fish => FISH_SNIPPET,
-            };
             // Stdout — the caller is expected to redirect / `eval`.
-            print!("{snippet}");
+            print!("{}", snippet_for(kind));
             Ok(())
         }
+    }
+}
+
+/// Return the shell-hook snippet for `kind`. Pure function so the
+/// snippet selection is unit-testable without capturing stdout.
+fn snippet_for(kind: ShellKind) -> &'static str {
+    match kind {
+        ShellKind::Zsh | ShellKind::Bash => ZSH_BASH_SNIPPET,
+        ShellKind::Fish => FISH_SNIPPET,
     }
 }
 
@@ -107,3 +112,31 @@ function heddle
     end
 end
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippet_for_zsh_and_bash_share_the_same_body() {
+        assert!(std::ptr::eq(
+            snippet_for(ShellKind::Zsh),
+            snippet_for(ShellKind::Bash)
+        ));
+        assert!(snippet_for(ShellKind::Zsh).contains("heddle() {"));
+    }
+
+    #[test]
+    fn snippet_for_fish_uses_fish_function_syntax() {
+        let body = snippet_for(ShellKind::Fish);
+        assert!(body.contains("function heddle"));
+        assert!(body.contains("$argv"));
+    }
+
+    #[test]
+    fn cmd_shell_init_runs_for_every_shell_kind() {
+        for kind in [ShellKind::Zsh, ShellKind::Bash, ShellKind::Fish] {
+            cmd_shell(ShellCommands::Init { kind }).expect("init prints");
+        }
+    }
+}

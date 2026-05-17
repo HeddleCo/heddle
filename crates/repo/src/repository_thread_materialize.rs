@@ -688,6 +688,82 @@ mod tests {
         );
     }
 
+    /// `record_thread_manifest` should write a manifest sidecar that
+    /// matches what `materialize_thread` would have produced, for a
+    /// worktree the caller materialized directly via `materialize_tree`.
+    /// Used by the CLI's `start` path (which sets the worktree up
+    /// itself rather than going through `materialize_thread`).
+    #[test]
+    fn record_thread_manifest_writes_sidecar_for_externally_materialized_worktree() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("a.txt"), b"alpha\n").unwrap();
+        fs::write(repo_dir.path().join("b.txt"), b"beta\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+        let state_id = repo
+            .refs()
+            .get_thread("main")
+            .unwrap()
+            .expect("head present");
+
+        // Materialize externally via the lower-level `materialize_tree`
+        // path — the shape `start --workspace materialized` uses.
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        let state = repo.store().get_state(&state_id).unwrap().unwrap();
+        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+        repo.materialize_tree(&tree, &dest).unwrap();
+
+        // No manifest written yet — `materialize_tree` is the bytes-only
+        // step; the sidecar is recorded explicitly.
+        assert!(
+            read_manifest(repo.heddle_dir(), "feature/x")
+                .unwrap()
+                .is_none()
+        );
+
+        let recorded = repo
+            .record_thread_manifest("feature/x", &state_id, &dest)
+            .unwrap();
+        assert_eq!(recorded.state_id, state_id);
+        assert_eq!(recorded.tree_hash, state.tree);
+        assert!(recorded.files.contains_key("a.txt"));
+        assert!(recorded.files.contains_key("b.txt"));
+        assert_eq!(recorded.files["a.txt"].size, b"alpha\n".len() as u64);
+
+        // Sidecar persists at the expected location and round-trips.
+        let loaded = read_manifest(repo.heddle_dir(), "feature/x")
+            .unwrap()
+            .expect("manifest on disk");
+        assert_eq!(loaded.state_id, recorded.state_id);
+        assert_eq!(loaded.files.len(), recorded.files.len());
+
+        // Idempotent: a second recording for the same thread succeeds
+        // (used by `capture_thread_from_disk` post-capture refresh).
+        repo.record_thread_manifest("feature/x", &state_id, &dest)
+            .unwrap();
+    }
+
+    /// `record_thread_manifest` against an unknown `state_id` should
+    /// surface a clear "state missing" error instead of silently
+    /// writing a manifest with no files (which would later look like
+    /// a deletion of every tracked path).
+    #[test]
+    fn record_thread_manifest_errors_when_state_is_missing() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let dest = TempDir::new().unwrap();
+        let missing = objects::object::ChangeId::generate();
+        let err = repo
+            .record_thread_manifest("feature/x", &missing, &dest.path().join("out"))
+            .expect_err("should fail when state is unknown");
+        let message = format!("{err}");
+        assert!(
+            message.contains("missing"),
+            "error message names the missing artifact: {message}"
+        );
+    }
+
     #[test]
     fn materialize_unknown_thread_errors() {
         let repo_dir = TempDir::new().unwrap();
