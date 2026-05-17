@@ -261,3 +261,42 @@ fn two_separate_conflict_hunks_emit_two_marker_blocks() {
 fn empty_inputs_clean() {
     assert!(matches!(text_hunk_merge(b"", b"", b""), MergeOutcome::Clean(v) if v.is_empty()));
 }
+
+// heddle-specific UX: when both sides insert different content at the *same*
+// anchor point (empty base slice for the hunk), concatenate rather than
+// conflict. Preserves the parallel-thread append flow validated by the
+// state-management integration test
+// `test_merge_auto_merges_non_overlapping_same_file_appends_from_threads`.
+#[test]
+fn same_anchor_insertions_concat_rather_than_conflict() {
+    let base = b"a\nb\n";
+    let ours = b"a\nOUR-1\nOUR-2\nb\n";
+    let theirs = b"a\nTHEIR-1\nTHEIR-2\nb\n";
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => {
+            let text = String::from_utf8(out).unwrap();
+            assert!(
+                text == "a\nOUR-1\nOUR-2\nTHEIR-1\nTHEIR-2\nb\n",
+                "expected concat of ours-then-theirs at same anchor; got: {text:?}"
+            );
+        }
+        other => panic!("expected Clean (concat insertions), got {other:?}"),
+    }
+}
+
+// Append-to-EOF on both sides with different content — same UX rule.
+#[test]
+fn same_anchor_eof_appends_concat() {
+    let base = b"a\nb\n";
+    let ours = b"a\nb\nOUR\n";
+    let theirs = b"a\nb\nTHEIR\n";
+    match text_hunk_merge(base, ours, theirs) {
+        MergeOutcome::Clean(out) => {
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("OUR"));
+            assert!(text.contains("THEIR"));
+            assert!(!text.contains("<<<<<<<"));
+        }
+        other => panic!("expected Clean (concat EOF appends), got {other:?}"),
+    }
+}

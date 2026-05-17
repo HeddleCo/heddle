@@ -228,125 +228,75 @@ fn three_way_content_merge(
         return Ok(*our_hash);
     }
 
-    if let Some(merged_content) =
-        try_line_based_content_merge(store, base_hash, our_hash, their_hash)?
-    {
-        let blob = Blob::new(merged_content);
-        return Ok(store.put_blob(&blob)?);
-    }
-
-    content_conflict_merge(store, our_hash, their_hash, path, conflicts, labels)
+    text_hunk_merge_blobs(store, base_hash, our_hash, their_hash, path, conflicts, labels)
 }
 
-fn try_line_based_content_merge(
+#[cfg(feature = "semantic")]
+fn text_hunk_merge_blobs(
     store: &dyn ObjectStore,
     base_hash: &ContentHash,
     our_hash: &ContentHash,
     their_hash: &ContentHash,
-) -> Result<Option<Vec<u8>>> {
-    let Some(base_content) = store
-        .get_blob(base_hash)?
-        .map(|blob| blob.content().to_vec())
-    else {
-        return Ok(None);
+    path: &str,
+    conflicts: &mut Vec<String>,
+    labels: ConflictLabels<'_>,
+) -> Result<ContentHash> {
+    use semantic::merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
+
+    let base_content = load_blob_content(store, base_hash)?;
+    let our_content = load_blob_content(store, our_hash)?;
+    let their_content = load_blob_content(store, their_hash)?;
+
+    let markers = ConflictMarkers {
+        ours: labels.current,
+        theirs: labels.incoming,
     };
-    let Some(our_content) = store
-        .get_blob(our_hash)?
-        .map(|blob| blob.content().to_vec())
-    else {
-        return Ok(None);
-    };
-    let Some(their_content) = store
-        .get_blob(their_hash)?
-        .map(|blob| blob.content().to_vec())
-    else {
-        return Ok(None);
-    };
-
-    let Ok(base_text) = String::from_utf8(base_content) else {
-        return Ok(None);
-    };
-    let Ok(our_text) = String::from_utf8(our_content) else {
-        return Ok(None);
-    };
-    let Ok(their_text) = String::from_utf8(their_content) else {
-        return Ok(None);
-    };
-
-    Ok(merge_single_line_ranges(&base_text, &our_text, &their_text).map(String::into_bytes))
-}
-
-#[derive(Debug)]
-struct LineChange {
-    start: usize,
-    end: usize,
-    replacement: Vec<String>,
-}
-
-fn merge_single_line_ranges(base: &str, ours: &str, theirs: &str) -> Option<String> {
-    let base_lines = split_preserving_line_endings(base);
-    let our_change = changed_line_range(&base_lines, &split_preserving_line_endings(ours));
-    let their_change = changed_line_range(&base_lines, &split_preserving_line_endings(theirs));
-
-    if our_change.start == their_change.start
-        && our_change.end == their_change.end
-        && our_change.start == our_change.end
-    {
-        let mut merged = base_lines;
-        merged.splice(
-            our_change.start..our_change.end,
-            our_change
-                .replacement
-                .into_iter()
-                .chain(their_change.replacement),
-        );
-        return Some(merged.concat());
-    }
-
-    let (first, second) = if our_change.end <= their_change.start {
-        (our_change, their_change)
-    } else if their_change.end <= our_change.start {
-        (their_change, our_change)
-    } else {
-        return None;
-    };
-
-    let mut merged = base_lines;
-    merged.splice(second.start..second.end, second.replacement);
-    merged.splice(first.start..first.end, first.replacement);
-    Some(merged.concat())
-}
-
-fn changed_line_range(base: &[String], changed: &[String]) -> LineChange {
-    let prefix_len = base
-        .iter()
-        .zip(changed.iter())
-        .take_while(|(left, right)| left == right)
-        .count();
-    let suffix_len = base[prefix_len..]
-        .iter()
-        .rev()
-        .zip(changed[prefix_len..].iter().rev())
-        .take_while(|(left, right)| left == right)
-        .count();
-    let base_end = base.len() - suffix_len;
-    let changed_end = changed.len() - suffix_len;
-
-    LineChange {
-        start: prefix_len,
-        end: base_end,
-        replacement: changed[prefix_len..changed_end].to_vec(),
+    match text_hunk_merge_with_markers(&base_content, &our_content, &their_content, markers) {
+        MergeOutcome::Clean(bytes) => {
+            let blob = Blob::new(bytes);
+            Ok(store.put_blob(&blob)?)
+        }
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => {
+            let blob = Blob::new(merged_bytes_with_markers);
+            let hash = store.put_blob(&blob)?;
+            conflicts.push(path.to_string());
+            Ok(hash)
+        }
+        // Binary inputs: fall back to whole-file conflict markers, matching
+        // git's `binary file changed in both` shape. DeleteVsModify is
+        // never produced by text_hunk_merge (its signature has all three
+        // inputs present; deletion is detected at the tree layer).
+        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => {
+            content_conflict_merge(store, our_hash, their_hash, path, conflicts, labels)
+        }
     }
 }
 
-fn split_preserving_line_endings(text: &str) -> Vec<String> {
-    if text.is_empty() {
-        return Vec::new();
-    }
+#[cfg(not(feature = "semantic"))]
+fn text_hunk_merge_blobs(
+    store: &dyn ObjectStore,
+    _base_hash: &ContentHash,
+    our_hash: &ContentHash,
+    their_hash: &ContentHash,
+    path: &str,
+    conflicts: &mut Vec<String>,
+    labels: ConflictLabels<'_>,
+) -> Result<ContentHash> {
+    // No semantic feature → no native hunk-level merge engine. Fall back
+    // to whole-file conflict markers (preserves prior behavior for users
+    // who explicitly built with `--no-default-features` without
+    // re-enabling `semantic`).
+    content_conflict_merge(store, our_hash, their_hash, path, conflicts, labels)
+}
 
-    text.split_inclusive('\n')
-        .map(ToString::to_string)
-        .collect()
+fn load_blob_content(store: &dyn ObjectStore, hash: &ContentHash) -> Result<Vec<u8>> {
+    Ok(store
+        .get_blob(hash)?
+        .map(|blob| blob.content().to_vec())
+        .unwrap_or_default())
 }
 
 fn content_conflict_merge(

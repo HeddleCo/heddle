@@ -150,6 +150,16 @@ fn emit_hunk(
         emit_lines(out, our_slice);
     } else if slice_eq(our_slice, their_slice) || trailing_ws_equal(our_slice, their_slice) {
         emit_lines(out, prefer_clean(our_slice, their_slice));
+    } else if base_slice.is_empty() && !our_slice.is_empty() && !their_slice.is_empty() {
+        // Both sides inserted different content at the same anchor point
+        // (no base lines consumed by this hunk). heddle's UX choice — also
+        // the prior single-range merger's behavior — is to concatenate
+        // both insertions rather than emit a conflict, which preserves
+        // the common parallel-thread append flow (e.g. two workers each
+        // append a new function to the same file). Order is ours then
+        // theirs, matching the prior implementation.
+        emit_lines(out, our_slice);
+        emit_lines(out, their_slice);
     } else {
         emit_conflict(out, our_slice, their_slice, markers);
         *conflicts += 1;
