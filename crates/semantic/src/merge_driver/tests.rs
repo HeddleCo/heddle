@@ -1425,6 +1425,45 @@ func (b B) String() string { return \"B-THEIRS\" }
 }
 
 // =====================================================================
+// Codex r1 P2 #2: collect_items must not stack-overflow on deep trees.
+//
+// items.rs:155 recurses for every unclassified or container child.
+// Deeply-nested parseable trees → stack overflow → merge aborts.
+// =====================================================================
+#[test]
+fn deeply_nested_rust_modules_does_not_stack_overflow() {
+    // Build a Rust file with `depth` nested mod blocks holding one fn at
+    // the centre. Run the merge inside a thread with a small stack so a
+    // recursive walker overflows before reaching the leaf.
+    // 2000 nested mods on a 128 KiB stack. Per-frame recursion costs
+    // are tight in optimized Rust, so this is a guard rather than a
+    // proof-of-bug — but it pins the contract: collect_items must walk
+    // the AST without consuming bounded stack proportional to depth.
+    let depth = 2000usize;
+    let mut s = String::new();
+    for i in 0..depth {
+        s.push_str(&format!("mod m{i} {{\n"));
+    }
+    s.push_str("    fn inner() { 1 }\n");
+    for _ in 0..depth {
+        s.push_str("}\n");
+    }
+    let base = s.clone();
+    let ours = s.replace("fn inner() { 1 }", "fn inner() { 2 }");
+    let theirs = base.clone();
+
+    let handle = std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(move || {
+            merge_rust(&base, &ours, &theirs);
+        })
+        .expect("spawn");
+    handle
+        .join()
+        .expect("merge must not stack-overflow on deeply-nested input");
+}
+
+// =====================================================================
 // Codex r1 P2 #1: preserve order of multiple adjacent additions at the
 // same anchor.
 //

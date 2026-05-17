@@ -118,52 +118,70 @@ pub(crate) fn segment_file(parsed: &ParsedFile) -> FileSegments {
     }
 }
 
+/// Cap on AST traversal depth. Beyond this, nodes are not extracted as
+/// items — they remain inter-item content and merge via the text-level
+/// fallback. Picked well above realistic source nesting (deep generic
+/// expressions in real code rarely cross ~50 levels) so the cap only
+/// trips on pathological / synthetic input.
+const MAX_TRAVERSAL_DEPTH: usize = 256;
+
 fn collect_items(
     language: Language,
     source: &str,
-    node: Node<'_>,
-    scope: &[String],
+    root: Node<'_>,
+    base_scope: &[String],
     out: &mut Vec<Item>,
 ) {
-    // Walk this node's children, classifying each. We only recurse into
-    // *container* nodes whose children should themselves be considered top
-    // level (impl bodies, mod bodies, trait bodies). Inside a function body
-    // we stop — that function is the merge unit and nested fn / closure
-    // edits are resolved by its bytes-level merge.
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(classified) = classify_node(language, source, child) {
-            let Classified {
-                kind,
-                name,
-                container_body,
-                signature_hash,
-                extra_scope,
-            } = classified;
-            let mut item_scope = scope.to_vec();
-            item_scope.extend(extra_scope);
-            let item_key = ItemKey {
-                kind,
-                name: name.clone(),
-                scope: item_scope,
-                signature_hash,
-            };
-            out.push(Item {
-                key: item_key,
-                start_byte: child.start_byte(),
-                end_byte: child.end_byte(),
-            });
-            // For impl / mod / trait / class, recurse into the body so we
-            // catch methods with their scope set to the container's name.
-            if let Some(body) = container_body {
-                let mut next_scope = scope.to_vec();
-                next_scope.push(name);
-                collect_items(language, source, body, &next_scope, out);
+    // Iterative DFS over the AST. Avoids the unbounded recursion shape
+    // a deeply-parseable file could otherwise trigger — collect_items
+    // used to recurse for every container body AND every unclassified
+    // wrapper node, so a synthetic 50k-deep tree would blow the stack
+    // even though tree-sitter itself parses it iteratively. Each stack
+    // entry is (node-whose-children-to-walk, scope-at-that-node,
+    // depth-from-root); the depth guard bails out beyond
+    // `MAX_TRAVERSAL_DEPTH` rather than running unbounded work.
+    let mut stack: Vec<(Node<'_>, Vec<String>, usize)> = vec![(root, base_scope.to_vec(), 0)];
+    while let Some((node, scope, depth)) = stack.pop() {
+        if depth > MAX_TRAVERSAL_DEPTH {
+            continue;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(classified) = classify_node(language, source, child) {
+                let Classified {
+                    kind,
+                    name,
+                    container_body,
+                    signature_hash,
+                    extra_scope,
+                } = classified;
+                let mut item_scope = scope.clone();
+                item_scope.extend(extra_scope);
+                let item_key = ItemKey {
+                    kind,
+                    name: name.clone(),
+                    scope: item_scope,
+                    signature_hash,
+                };
+                out.push(Item {
+                    key: item_key,
+                    start_byte: child.start_byte(),
+                    end_byte: child.end_byte(),
+                });
+                // For impl / mod / trait / class, schedule the body so
+                // we catch methods with their scope set to the
+                // container's name.
+                if let Some(body) = container_body {
+                    let mut next_scope = scope.clone();
+                    next_scope.push(name);
+                    stack.push((body, next_scope, depth + 1));
+                }
+            } else {
+                // Unclassified at this level: walk it later so we still
+                // find items in anonymous wrapper nodes (e.g.
+                // `source_file` children, declaration_list wrappers).
+                stack.push((child, scope.clone(), depth + 1));
             }
-        } else {
-            // Unclassified at this level: recurse so we still find items in
-            // anonymous wrapper nodes (e.g. `source_file` children).
-            collect_items(language, source, child, scope, out);
         }
     }
 }
