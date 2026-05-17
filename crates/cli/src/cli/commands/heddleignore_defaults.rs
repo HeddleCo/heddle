@@ -33,13 +33,13 @@ pub const DEFAULT_HEDDLEIGNORE: &str = "\
 .DS_Store
 .AppleDouble
 .LSOverride
-# Custom-folder icon metadata: the on-disk basename is literally
-# `Icon\r` (four chars + a trailing carriage return). Plain `Icon`
-# would only catch a normal file named `Icon` (false positive on
-# real assets like an `Icon` source file) and miss the actual
-# metadata. The single-char glob `?` matches the `\r` byte.
-Icon?
 ._*
+# Note: macOS custom-folder icon metadata (`Icon\r` — four chars +
+# a trailing carriage return) is intentionally NOT suppressed by
+# default. The only safely-typable glob (`Icon?`) is too broad and
+# would also hide legitimate basenames like `Icons` or `Icon1`,
+# including directories. If your team needs this, see
+# `docs/heddleignore.md` for a project-specific recipe.
 
 # Xcode / iOS dev artifacts
 xcuserdata/
@@ -186,17 +186,12 @@ pub fn noise_hint_for(path: &Path) -> Option<NoiseHint> {
                 suggested_pattern: name_to_static(name),
             });
         }
-        // macOS custom-folder icon: the real on-disk name is
-        // `Icon\r`. Suggest the `Icon?` glob (matches the trailing
-        // `\r`) rather than a literal control-char line that's
-        // awkward to copy-paste.
-        "Icon\r" => {
-            return Some(NoiseHint {
-                category: NoiseCategory::MacOsFinder,
-                label: "macOS Finder metadata",
-                suggested_pattern: "Icon?",
-            });
-        }
+        // macOS custom-folder icon metadata (`Icon\r`) is deliberately
+        // not hinted: the only safely-typable suggestion is `Icon?`,
+        // which would also suppress legitimate basenames like `Icons`
+        // or `Icon1`. Leaving the path un-hinted lets the user choose
+        // a project-specific recipe rather than nudging them toward a
+        // broad pattern. See `docs/heddleignore.md`.
         "Thumbs.db" => {
             return Some(NoiseHint {
                 category: NoiseCategory::WindowsMetadata,
@@ -425,38 +420,36 @@ mod tests {
     }
 
     #[test]
-    fn macos_icon_metadata_hint() {
-        // The real on-disk filename ends in a carriage return —
-        // that's what `Finder` writes for a custom folder icon.
-        // The plain `Icon` arm used to (incorrectly) match a bare
-        // `Icon` file *and* miss this one. Now `Icon\r` matches
-        // and the suggestion is the `Icon?` glob.
-        let hint = noise_hint_for(&PathBuf::from("Icon\r")).unwrap();
-        assert_eq!(hint.category, NoiseCategory::MacOsFinder);
-        assert_eq!(hint.suggested_pattern, "Icon?");
+    fn macos_icon_metadata_returns_no_hint() {
+        // Regression: an earlier revision hinted `Icon?` for the
+        // `Icon\r` macOS metadata basename. The `Icon?` glob is too
+        // broad — it also matches `Icons`, `Icon1`, etc. — so we no
+        // longer nudge users toward it. The path is left un-hinted
+        // and the user can pick a project-specific recipe.
+        assert!(noise_hint_for(&PathBuf::from("Icon\r")).is_none());
     }
 
     #[test]
-    fn icon_glob_in_template_matches_real_metadata_filename() {
-        // Belt-and-braces: confirm the `Icon?` line in the bundled
-        // template actually suppresses the `Icon\r` basename when
-        // fed through the gitignore matcher, and that a plain
-        // `Icon` source file is NOT suppressed.
+    fn icon_glob_not_in_default_template() {
+        // Regression: the default template must not re-introduce
+        // `Icon?` (or a bare `Icon` line). Both are too broad and
+        // would silently hide legitimate basenames like `Icons` or
+        // an `Icon` source file from `status` / `capture`.
+        let tpl = DEFAULT_HEDDLEIGNORE;
+        assert!(!tpl.contains("\nIcon?\n"));
+        assert!(!tpl.contains("\nIcon\n"));
+        // And confirm the matcher would NOT suppress an `Icons`
+        // directory or an `Icon` source file given the current
+        // template — i.e. no other pattern accidentally covers them.
         use objects::worktree::worktree_ignore::should_ignore;
-        let patterns = vec!["Icon?".to_string()];
-        assert!(should_ignore(&PathBuf::from("Icon\r"), &patterns));
-        assert!(should_ignore(
-            &PathBuf::from("subdir/Icon\r"),
-            &patterns
-        ));
-        // `Icon?` is a single-char glob, so a bare `Icon` (only
-        // 4 chars) is NOT matched — the prior `Icon` literal would
-        // have suppressed it as a false positive. The narrower
-        // pattern is the win.
-        assert!(!should_ignore(&PathBuf::from("Icon"), &patterns));
-        assert!(!should_ignore(
-            &PathBuf::from("Icon-512.png"),
-            &patterns
-        ));
+        let patterns: Vec<String> = tpl
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+            .map(|l| l.to_string())
+            .collect();
+        assert!(!should_ignore(&PathBuf::from("Icons"), &patterns));
+        assert!(!should_ignore(&PathBuf::from("Icons/foo.png"), &patterns));
+        assert!(!should_ignore(&PathBuf::from("src/Icon"), &patterns));
+        assert!(!should_ignore(&PathBuf::from("Icon1"), &patterns));
     }
 }

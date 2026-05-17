@@ -68,6 +68,29 @@ Real source files (no matching noise category) are listed without a
 hint — heddle never suggests suppressing a path it doesn't recognize
 as noise.
 
+## macOS `Icon` metadata
+
+macOS Finder stores custom-folder icon metadata in a file whose
+basename is literally `Icon` followed by a carriage return (`Icon\r`
+— four chars + the `\r` byte). The default template does **not**
+suppress this. The only glob that targets it without an awkward
+literal control-char (`Icon?`) also matches legitimate basenames
+like `Icons`, `Icon1`, or an `Icons/` directory full of real
+assets, which would silently hide project content from `status` and
+`capture`.
+
+If your team uses macOS custom folder icons heavily and the
+metadata files become noise, add the literal-`\r` form as a
+project-specific pattern. Most editors won't insert a bare `\r`
+cleanly; the reliable recipe is to append it from a shell:
+
+```
+printf 'Icon\r\n' >> .heddleignore
+```
+
+Verify with `xxd .heddleignore | tail` that the line ends `49 63
+6f 6e 0d 0a` (`Icon\r\n`) rather than `49 63 6f 6e 0a`.
+
 ## Local-tool state (`.claude/`, etc.)
 
 The default template leaves `.claude/` commented out. Some teams
