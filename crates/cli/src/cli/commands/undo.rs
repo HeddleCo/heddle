@@ -84,6 +84,17 @@ pub fn cmd_undo(
         return Err(anyhow!("Nothing to undo"));
     }
 
+    // Run the redaction safety pre-flight before the `--preview`
+    // short-circuit so preview output is honest about refusals. A
+    // `Redact` without `--allow-redact-undo`, or any batch that crosses
+    // a `Purge`, must surface the same error here that the real undo
+    // would surface — otherwise `--preview` advertises "Would undo …"
+    // for a chain the real command would reject. The other pre-flights
+    // (`ensure_worktree_clean`, `ensure_undo_states_reachable`) stay
+    // post-preview: dirty worktree and gc-pruned states are conditions
+    // operators expect `--preview` to ignore.
+    ensure_redaction_undo_safe(&repo, &batches, allow_redact_undo)?;
+
     if preview {
         let output = UndoRedoOutput {
             action: "undo".to_string(),
@@ -112,12 +123,6 @@ pub fn cmd_undo(
     // Letting `apply_undo_batch` discover this mid-apply would leave the
     // repo half-undone (worktree partially rewritten, batch not marked).
     ensure_undo_states_reachable(&repo, &batches)?;
-    // Pre-flight the redaction-related ops in the batch chain so we
-    // refuse loudly before any state mutation. Purge is always
-    // irreversible; Redact is reversible but requires explicit opt-in
-    // (`--allow-redact-undo`) and refuses when the underlying bytes
-    // have since been purged.
-    ensure_redaction_undo_safe(&repo, &batches, allow_redact_undo)?;
 
     let mut updated_batches = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -156,6 +161,13 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         return Err(anyhow!("Nothing to redo"));
     }
 
+    // Same preview-honesty rule as `cmd_undo`: run the
+    // Redact/Purge-not-supported pre-flight before the `--preview`
+    // short-circuit so preview surfaces the refusal instead of
+    // advertising "Would redo …" for a chain the real command will
+    // reject.
+    ensure_redaction_redo_supported(&batches)?;
+
     if preview {
         let output = UndoRedoOutput {
             action: "redo".to_string(),
@@ -178,13 +190,6 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     }
 
     ensure_worktree_clean(&repo, "redo")?;
-    // Redo of `Redact` / `Purge` is intentionally unsupported in this
-    // MVP: the OpRecord doesn't preserve the full `Redaction` record
-    // (reason, redactor, timestamp, signature) needed to faithfully
-    // re-apply, and `Purge` is irreversible by design. Refuse before
-    // mutating anything so a multi-batch chain that includes one of
-    // these isn't half-applied.
-    ensure_redaction_redo_supported(&batches)?;
 
     let mut updated_batches = Vec::with_capacity(batches.len());
     for batch in batches {

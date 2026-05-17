@@ -73,14 +73,20 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         // future caller that bypasses the CLI gate can't lose the
         // audit trail of destroyed bytes.
         //
-        // Match by `(blob, state, path)` rather than the oplog's
-        // `redaction_id`: `redaction_content_hash` includes
-        // `purged_at`, so a later Purge shifts the on-disk id away
-        // from the recorded one. The triple is stable.
+        // Pass the oplog-recorded `redaction_id` through so a
+        // refinement pass (multiple records sharing the same
+        // `(blob, state, path)` with different reasons or signatures)
+        // undoes the exact record this op references rather than the
+        // first match in sidecar order. `remove_redaction` falls
+        // back to `(state, path)` only for the purge-id-shift case
+        // and refuses in that branch.
         OpRecord::Redact {
-            blob, state, path, ..
+            redaction_id,
+            blob,
+            state,
+            path,
         } => {
-            repo.remove_redaction(blob, state, path)?;
+            repo.remove_redaction(blob, state, path, redaction_id)?;
         }
         _ => {}
     }

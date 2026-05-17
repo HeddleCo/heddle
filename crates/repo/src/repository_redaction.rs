@@ -218,14 +218,22 @@ impl Repository {
     /// [`Repository::put_redaction`] — see [`OpRecord::Redact`](oplog::OpRecord)'s
     /// undo contract.
     ///
-    /// We match by `(blob, state, path)` rather than by the redaction's
-    /// content-addressed id because `redaction_content_hash` includes
-    /// every field in the canonical encoding, including `purged_at`.
-    /// A `Purge` between the original `redact apply` and this call
-    /// mutates `purged_at`, which shifts the on-disk id away from the
-    /// pre-purge id carried in `OpRecord::Redact.redaction_id`. The
-    /// `(blob, state, path)` triple is the redaction's user-visible
-    /// identity (one per spot) and is stable across purge.
+    /// Matches by the redaction's content-addressed `redaction_id`
+    /// first so a refinement pass that produced multiple records for
+    /// the same `(blob, state, path)` (e.g. a re-run of `redact apply`
+    /// with an updated `--reason` or `--sign-with`) undoes the exact
+    /// record the OpRecord references rather than the first one in
+    /// sidecar order.
+    ///
+    /// Falls back to `(blob, state, path)` lookup when the id doesn't
+    /// match any on-disk record. That case is the
+    /// purge-id-shift scenario: `redaction_content_hash` covers every
+    /// field including `purged_at`, so a `Purge` between
+    /// `redact apply` and this call rewrites every on-disk id away
+    /// from the pre-purge id carried in `OpRecord::Redact.redaction_id`.
+    /// The fallback locates the now-purged record by its stable
+    /// user-visible identity so the refusal below surfaces with the
+    /// right "audit trail" message instead of a generic not-found.
     ///
     /// Refuses if the matched redaction is purged: the record is then
     /// load-bearing audit trail for "these bytes were physically
@@ -238,12 +246,22 @@ impl Repository {
         blob: &ContentHash,
         state: &ChangeId,
         path: &str,
+        redaction_id: &ContentHash,
     ) -> Result<RemoveRedactionOutcome> {
         let mut redactions_blob = self.get_redactions_for_blob(blob)?;
-        let found_index = redactions_blob
-            .redactions
-            .iter()
-            .position(|r| r.state == *state && r.path == path);
+        let mut found_index: Option<usize> = None;
+        for (i, r) in redactions_blob.redactions.iter().enumerate() {
+            if redaction_content_hash(r)? == *redaction_id {
+                found_index = Some(i);
+                break;
+            }
+        }
+        if found_index.is_none() {
+            found_index = redactions_blob
+                .redactions
+                .iter()
+                .position(|r| r.state == *state && r.path == path);
+        }
         let Some(index) = found_index else {
             anyhow::bail!(
                 "redaction for blob {} at {} in {} not found — it may \
@@ -848,9 +866,9 @@ mod tests {
         let blob = r.redacted_blob;
         let state = r.state;
         let path = r.path.clone();
-        repo.put_redaction(r).unwrap();
+        let id = repo.put_redaction(r).unwrap();
         let outcome = repo
-            .remove_redaction(&blob, &state, &path)
+            .remove_redaction(&blob, &state, &path, &id)
             .expect("remove existing redaction");
         assert_eq!(outcome.blob, blob);
         assert!(
@@ -887,7 +905,7 @@ mod tests {
         let first_state = first.state;
         let first_path = first.path.clone();
         let blob = first.redacted_blob;
-        repo.put_redaction(first).unwrap();
+        let first_id = repo.put_redaction(first).unwrap();
         let second = Redaction {
             state: ChangeId::from_bytes([2u8; 16]),
             path: "config/other.toml".into(),
@@ -897,7 +915,7 @@ mod tests {
         repo.put_redaction(second).unwrap();
 
         let outcome = repo
-            .remove_redaction(&blob, &first_state, &first_path)
+            .remove_redaction(&blob, &first_state, &first_path, &first_id)
             .expect("remove first redaction");
         assert!(
             !outcome.sidecar_now_empty,
@@ -924,12 +942,12 @@ mod tests {
         let blob = r.redacted_blob;
         let state = r.state;
         let path = r.path.clone();
-        repo.put_redaction(r).unwrap();
+        let id = repo.put_redaction(r).unwrap();
         repo.purge_blob(&blob, &sample_principal())
             .expect("purge after redact");
 
         let err = repo
-            .remove_redaction(&blob, &state, &path)
+            .remove_redaction(&blob, &state, &path, &id)
             .expect_err("remove must refuse on a purged redaction");
         let msg = err.to_string();
         assert!(
@@ -953,13 +971,55 @@ mod tests {
         let (_dir, repo) = fresh_repo();
         let unknown_blob = ContentHash::from_bytes([0u8; 32]);
         let unknown_state = ChangeId::from_bytes([0u8; 16]);
+        let unknown_id = ContentHash::from_bytes([0u8; 32]);
         let err = repo
-            .remove_redaction(&unknown_blob, &unknown_state, "config/nope.toml")
+            .remove_redaction(&unknown_blob, &unknown_state, "config/nope.toml", &unknown_id)
             .expect_err("unknown record must error");
         let msg = err.to_string();
         assert!(
             msg.contains("not found"),
             "refusal must explain the missing-record cause: {msg}"
+        );
+    }
+
+    #[test]
+    fn remove_redaction_picks_exact_record_when_multiple_share_state_and_path() {
+        // Two redactions with identical (blob, state, path) but
+        // different reasons → distinct content-addressed ids. Removing
+        // by id must drop the targeted record only; the sibling
+        // record at the same triple must survive. The fallback
+        // `(state, path)` lookup would silently pick the first record
+        // in sidecar order and undo the wrong declaration.
+        let (_dir, repo) = fresh_repo();
+        let first = Redaction {
+            reason: "initial: leaked credential".into(),
+            ..sample_redaction()
+        };
+        let blob = first.redacted_blob;
+        let state = first.state;
+        let path = first.path.clone();
+        let first_id = repo.put_redaction(first).unwrap();
+        let second = Redaction {
+            reason: "refined: leaked api token v2".into(),
+            redacted_at: Utc.with_ymd_and_hms(2026, 5, 11, 9, 0, 0).unwrap(),
+            ..sample_redaction()
+        };
+        let second_id = repo.put_redaction(second).unwrap();
+        assert_ne!(
+            first_id, second_id,
+            "different reasons must produce distinct content ids"
+        );
+
+        repo.remove_redaction(&blob, &state, &path, &second_id)
+            .expect("remove second redaction by id");
+
+        let stored = repo
+            .get_redactions_for_blob(&blob)
+            .expect("read post-remove");
+        assert_eq!(stored.redactions.len(), 1);
+        assert_eq!(
+            stored.redactions[0].reason, "initial: leaked credential",
+            "the initial record must survive — exact-id match must not undo the wrong sibling",
         );
     }
 

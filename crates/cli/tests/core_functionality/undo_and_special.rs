@@ -1244,3 +1244,39 @@ fn test_undo_preview_refuses_redact_when_blob_already_purged() {
         "preview refusal must name purge/irreversibility: {err}"
     );
 }
+
+#[test]
+fn test_redo_preview_refuses_redact_chain() {
+    // Mirror of the undo `--preview` honesty rule on the redo side:
+    // `heddle redo --preview` against a previously-undone Redact must
+    // surface the same "no re-apply path" refusal the real `redo`
+    // would surface, not advertise "Would redo …".
+    let (temp, state) = setup_repo_with_secret();
+
+    heddle_must_succeed(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+        ],
+        temp.path(),
+    );
+    heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
+        .expect("undo of Redact must succeed with --allow-redact-undo");
+
+    let err = heddle(&["redo", "--preview"], Some(temp.path()))
+        .expect_err("redo --preview of an undone Redact must refuse");
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("redact"),
+        "redo preview refusal must mention Redact: {err}"
+    );
+    assert!(
+        lower.contains("redact apply") || lower.contains("re-apply"),
+        "redo preview refusal should redirect to `heddle redact apply`: {err}"
+    );
+}
