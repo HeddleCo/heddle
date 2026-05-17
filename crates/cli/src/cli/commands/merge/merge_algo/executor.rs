@@ -399,9 +399,24 @@ fn format_conflict_content(
 ) -> Vec<u8> {
     let our_text = String::from_utf8_lossy(our_content);
     let their_text = String::from_utf8_lossy(their_content);
+    // Conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) MUST start at
+    // column 0 — git diff/mergetool, IDE conflict resolvers, and the
+    // hunk-level merge engine all parse line-anchored. If a side's
+    // content lacks a trailing newline, inject one so the following
+    // marker doesn't get glued onto the last content line.
+    let our_sep = if our_text.is_empty() || our_text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let their_sep = if their_text.is_empty() || their_text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
     format!(
-        "<<<<<<< {}\n{}=======\n{}>>>>>>> {}\n",
-        labels.current, our_text, their_text, labels.incoming
+        "<<<<<<< {}\n{}{}=======\n{}{}>>>>>>> {}\n",
+        labels.current, our_text, our_sep, their_text, their_sep, labels.incoming
     )
     .into_bytes()
 }
