@@ -4125,3 +4125,178 @@ template<class T> void A<T&>::foo() {
         "disjoint edits on distinct partial specializations must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// r13 self-audit pre-fix A — same hazard class as Codex r12 P2
+// (cid 3258861174): the r12 finding correctly noticed that
+// `parameter_usage_arg_name` only accepts `type_descriptor` ->
+// `type_identifier` arguments, but its specific example
+// (`template<int N> void A<N>::foo()`) is a false positive — tree-
+// sitter-cpp 0.23 parses the non-type usage `<N>` as
+// `type_descriptor` -> `type_identifier "N"`, identical to the type-
+// parameter case `<T>`, so the existing matcher already handles it.
+//
+// Variadic parameter packs (`class... Ts`) are NOT a false positive.
+// At the use site, `Ts...` parses as `parameter_pack_expansion`
+// wrapping a `type_descriptor`, which the matcher rejects outright —
+// so an out-of-class `void A<Ts...>::foo()` keeps scope `["A<Ts...>"]`
+// while the inline form `template<class... Ts> class A { void foo() {} };`
+// keys at `["A"]`. The inline<->out-of-class refactor then looks like
+// delete+add and disjoint edits on the other side surface as
+// conflicts or get dropped.
+// =====================================================================
+#[test]
+fn cpp_variadic_template_method_refactor_inline_to_out_of_class_merges_cleanly() {
+    // base has inline `template<class... Ts> class A { void foo() {...} };`.
+    // ours refactors foo to an out-of-class definition. theirs edits
+    // foo's body inline. Disjoint changes — clean merge expected.
+    //
+    // Pre-fix: ours's out-of-class foo gets scope=["A<Ts...>"] while
+    // base/theirs's inline foo gets scope=["A"]. Different ItemKeys
+    // -> ours appears as delete + add; theirs's modify on the old key
+    // collides with the delete.
+    //
+    // Post-fix: `parameter_usage_arg_name` recognises
+    // `parameter_pack_expansion` whose pattern is a bare
+    // `type_descriptor` -> `type_identifier`, returning the pack
+    // name. `template_args_match_any_param_list` then matches
+    // `<Ts...>` against the enclosing `template<class... Ts>` and
+    // `c_function_scope` strips the args, so ["A<Ts...>"] normalises
+    // to ["A"] for cross-side identity.
+    let base = "\
+template<class... Ts> class A {
+void foo() {
+    int a = 0;
+    (void)a;
+}
+};
+";
+    let ours = "\
+template<class... Ts> class A {
+void foo();
+};
+template<class... Ts> void A<Ts...>::foo() {
+    int a = 0;
+    (void)a;
+}
+";
+    let theirs = "\
+template<class... Ts> class A {
+void foo() {
+    int a = 77;
+    (void)a;
+}
+};
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(
+        text.contains("void A<Ts...>::foo()"),
+        "ours's out-of-class signature must survive: {text}"
+    );
+    assert!(
+        text.contains("int a = 77"),
+        "theirs's body edit must survive: {text}"
+    );
+    let foo_body_count = text.matches("int a = 77").count();
+    assert_eq!(
+        foo_body_count, 1,
+        "foo body must appear exactly once after the refactor: got {foo_body_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "variadic inline-to-out-of-class refactor + disjoint body edit must merge cleanly: {text}"
+    );
+}
+
+// =====================================================================
+// r13 self-audit pre-fix B — same hazard class as Codex r12 P2
+// (cid 3258861174): template-template parameter usages
+// (`template<template<class> class Tmpl>` declared,
+// `A<Tmpl>` used) suffer the same inline<->out-of-class scope
+// mismatch as variadic packs, but via the OTHER helper:
+// `template_param_name` returns None for
+// `template_template_parameter_declaration` because its named
+// children are `template_parameter_list` + `type_parameter_declaration`,
+// neither of which matches the `identifier`/`type_identifier`
+// predicate. With param_lists empty, `scope_component_text` skips
+// the strip and `A<Tmpl>` is kept verbatim while the inline form
+// keys at `A`.
+// =====================================================================
+#[test]
+fn cpp_template_template_param_method_refactor_inline_to_out_of_class_merges_cleanly() {
+    // base has inline
+    // `template<template<class> class Tmpl> class A { void foo() {...} };`.
+    // ours refactors foo to out-of-class. theirs edits foo's body
+    // inline. Disjoint changes — clean merge expected.
+    //
+    // Pre-fix: ours's out-of-class foo gets scope=["A<Tmpl>"] while
+    // base/theirs's inline foo gets scope=["A"]. The ItemKeys
+    // diverge so ours looks like delete+add and the disjoint edit
+    // collides.
+    //
+    // Post-fix: `template_param_name` recognises
+    // `template_template_parameter_declaration` and returns the
+    // trailing identifier text (`Tmpl`). With param_lists=[["Tmpl"]],
+    // the arg `<Tmpl>` (parsed as `type_descriptor` ->
+    // `type_identifier "Tmpl"`) matches and `c_function_scope`
+    // strips the args, so ["A<Tmpl>"] normalises to ["A"].
+    let base = "\
+template<template<class> class Tmpl> class A {
+void foo() {
+    int a = 0;
+    (void)a;
+}
+};
+";
+    let ours = "\
+template<template<class> class Tmpl> class A {
+void foo();
+};
+template<template<class> class Tmpl> void A<Tmpl>::foo() {
+    int a = 0;
+    (void)a;
+}
+";
+    let theirs = "\
+template<template<class> class Tmpl> class A {
+void foo() {
+    int a = 55;
+    (void)a;
+}
+};
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(
+        text.contains("void A<Tmpl>::foo()"),
+        "ours's out-of-class signature must survive: {text}"
+    );
+    assert!(
+        text.contains("int a = 55"),
+        "theirs's body edit must survive: {text}"
+    );
+    let foo_body_count = text.matches("int a = 55").count();
+    assert_eq!(
+        foo_body_count, 1,
+        "foo body must appear exactly once after the refactor: got {foo_body_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "template-template inline-to-out-of-class refactor + disjoint body edit must merge cleanly: {text}"
+    );
+}
