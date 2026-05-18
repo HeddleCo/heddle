@@ -244,10 +244,13 @@ fn is_leading_metadata_for(
         },
         Language::Go => matches!(kind, "comment")
             && !has_blank_line_between(source, prev.end_byte(), next_start),
-        Language::Java => matches!(
-            kind,
-            "marker_annotation" | "annotation" | "line_comment" | "block_comment"
-        ),
+        Language::Java => match kind {
+            "marker_annotation" | "annotation" => true,
+            "line_comment" | "block_comment" => {
+                !has_blank_line_between(source, prev.end_byte(), next_start)
+            }
+            _ => false,
+        },
         Language::Python
         | Language::JavaScript
         | Language::TypeScript
@@ -423,6 +426,32 @@ fn classify_python_node<'a>(
                 container_body,
                 signature_hash: 0,
                 extra_scope: Vec::new(),
+            })
+        }
+        // tree-sitter Python wraps decorated symbols in
+        // `decorated_definition` with children:
+        //   * one or more `decorator` nodes (`@foo`, `@bar.baz`, ...)
+        //   * a `definition` field pointing at a class_definition or
+        //     function_definition
+        // Treat the whole wrapper as a leaf item so the decorators are
+        // part of the item's byte range. Otherwise the inner def
+        // classifies first and the decorators end up as orphaned
+        // inter-item content — reorder/delete merges drop or
+        // misattach them. Inner classification (name + signature) is
+        // copied from the inner definition; container_body is FORCED
+        // to None even when the inner is a class, so the decorated
+        // class merges as one atomic unit (we lose per-method
+        // resolution inside decorated classes, but keep the decorator
+        // bound to its class — the simpler trade-off, since reordering
+        // a decorated class while editing its methods is rarer than
+        // simply moving/deleting the whole decorated symbol).
+        "decorated_definition" => {
+            let inner = node.child_by_field_name("definition")?;
+            let inner_kind = inner.kind();
+            let inner_classified = classify_python_node(source, inner, inner_kind)?;
+            Some(Classified {
+                container_body: None,
+                ..inner_classified
             })
         }
         _ => None,
