@@ -3805,3 +3805,158 @@ void A<float>::foo() {
         "disjoint edits on distinct specializations must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// Codex r10 P2 (cid 3256487049): `c_signature_hash` uses
+// `find_descendant(declarator, ["parameter_list"])` which DFS-finds
+// the FIRST parameter_list anywhere under the function_declarator —
+// not necessarily the function's own. When the function's qualified
+// scope contains a `template_type` whose argument is itself a
+// function-pointer type (e.g. `A<int(*)(double)>::foo`), the
+// abstract_function_declarator inside the scope's template argument
+// has its own parameter_list — and DFS reaches THAT one before the
+// outer function_declarator's `parameters` field. All overloads of
+// `foo` on `A<int(*)(double)>` then hash the same `(double)`
+// parameter list and collapse onto identical signature_hashes, so
+// distinct overloads share an ItemKey and the merger cross-pairs
+// their bodies.
+// =====================================================================
+#[test]
+fn cpp_overloads_with_function_pointer_in_scope_template_arg_stay_distinct() {
+    // Two overloads of `foo` on a class template specialization whose
+    // type argument is a function-pointer (`int(*)(double)`). The
+    // overloads differ in their outer parameter (int vs char), so they
+    // are distinct overloads and must merge independently.
+    //
+    // Pre-fix c_signature_hash returns the FIRST parameter_list in
+    // DFS order from the function_declarator. The qualified scope's
+    // template argument carries an abstract_function_declarator whose
+    // parameter_list `(double)` is visited before the outer
+    // function_declarator's `(int x)` / `(char y)`. Both overloads
+    // hash the SAME `(double)` parameter list, ItemKeys collide, and
+    // base's int-overload pairs with theirs's int-overload edit
+    // correctly — but theirs's char-overload edit and ours's
+    // int-overload edit cross-pair, leaking ours's body into the
+    // char overload (or vice versa) when both overloads are touched.
+    //
+    // Post-fix c_signature_hash walks down to the function_declarator
+    // carrying the actual name and uses ITS `parameters` field, so
+    // outer `(int x)` and `(char y)` hash differently and the
+    // overloads stay distinct.
+    let base = "\
+void A<int(*)(double)>::foo(int x) {
+    int a = 0;
+    (void)a;
+    (void)x;
+}
+
+void A<int(*)(double)>::foo(char y) {
+    int b = 0;
+    (void)b;
+    (void)y;
+}
+";
+    // ours INSERTS a third overload `foo(short)` at the start AND
+    // edits `foo(char)`. The insertion shifts the per-side
+    // occurrence labels: ours has 3 occurrences vs base/theirs's 2.
+    // With overloads colliding on signature_hash (the pre-fix bug),
+    // (foo, scope, 1) pairs base=char / ours=int(unchanged) /
+    // theirs=char(edited) — wrong pairing that pulls theirs's
+    // `bb = b` edit onto the int overload's slot.
+    let ours = "\
+void A<int(*)(double)>::foo(short s) {
+    int c = 0;
+    (void)c;
+    (void)s;
+}
+
+void A<int(*)(double)>::foo(int x) {
+    int a = 0;
+    (void)a;
+    (void)x;
+}
+
+void A<int(*)(double)>::foo(char y) {
+    int b = 0;
+    (void)b;
+    (void)y;
+    int bb = b;
+    (void)bb;
+}
+";
+    let theirs = "\
+void A<int(*)(double)>::foo(int x) {
+    int a = 0;
+    (void)a;
+    (void)x;
+    int aa = a;
+    (void)aa;
+}
+
+void A<int(*)(double)>::foo(char y) {
+    int b = 0;
+    (void)b;
+    (void)y;
+}
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // Slice the merged text by overload header and assert each
+    // slice's content. The int overload must hold ours's `aa` edit;
+    // the char overload must hold theirs's `bb` edit; neither may
+    // leak the other's body.
+    fn body_for(text: &str, header: &str) -> String {
+        let start = text.find(header).expect(
+            "expected header in merged output",
+        );
+        let after = &text[start..];
+        let close = after.find("\n}\n").expect("expected close brace");
+        after[..close + 3].to_string()
+    }
+    let short_body = body_for(&text, "void A<int(*)(double)>::foo(short s)");
+    let int_body = body_for(&text, "void A<int(*)(double)>::foo(int x)");
+    let char_body = body_for(&text, "void A<int(*)(double)>::foo(char y)");
+    // The inserted short overload is ours-only and must keep ours's
+    // body verbatim.
+    assert!(
+        short_body.contains("int c = 0"),
+        "ours's inserted foo(short) must keep its own body: {short_body}"
+    );
+    assert!(
+        !short_body.contains("int aa = a"),
+        "theirs's edit on foo(int) must NOT leak into foo(short): {short_body}"
+    );
+    assert!(
+        !short_body.contains("int bb = b"),
+        "ours's edit on foo(char) must NOT leak into foo(short): {short_body}"
+    );
+    // theirs's edit on the int overload must land there only.
+    assert!(
+        int_body.contains("int aa = a"),
+        "theirs's edit on foo(int) must survive: {int_body}"
+    );
+    assert!(
+        !int_body.contains("int bb = b"),
+        "ours's edit on foo(char) must NOT leak into foo(int): {int_body}"
+    );
+    // ours's edit on the char overload must land there only.
+    assert!(
+        char_body.contains("int bb = b"),
+        "ours's edit on foo(char) must survive: {char_body}"
+    );
+    assert!(
+        !char_body.contains("int aa = a"),
+        "theirs's edit on foo(int) must NOT leak into foo(char): {char_body}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "disjoint overload edits must merge cleanly: {text}"
+    );
+}
