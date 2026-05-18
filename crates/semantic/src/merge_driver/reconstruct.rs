@@ -157,7 +157,7 @@ pub(crate) fn reconstruct_merged_file(
     }
     total_conflicts += post_conflicts;
 
-    ensure_trailing_newline(&mut output);
+    reconcile_trailing_newline(&mut output, base, ours, theirs);
 
     if total_conflicts == 0 {
         MergeOutcome::Clean(output)
@@ -409,6 +409,50 @@ fn ensure_trailing_newline(out: &mut Vec<u8>) {
     if !out.is_empty() && *out.last().unwrap() != b'\n' {
         out.push(b'\n');
     }
+}
+
+/// Match the trailing-newline state of `output` to the majority of the
+/// three input sides. `text_hunk_merge` preserves whatever its line
+/// splitter sees on the last line; the semantic path used to force a
+/// trailing `\n` unconditionally, which dirtied files that ended
+/// without one on every side (Codex r3 P2 #2).
+///
+/// Rule: count how many of `base`, `ours`, `theirs` end with `\n`. If
+/// the majority do, ensure output ends with `\n`; otherwise strip any
+/// `\n` we may have inherited from a single side's content. Empty
+/// inputs are not counted (they have no opinion on trailing-newline
+/// state).
+fn reconcile_trailing_newline(out: &mut Vec<u8>, base: &str, ours: &str, theirs: &str) {
+    if out.is_empty() {
+        return;
+    }
+    let want_newline = majority_ends_with_newline(base, ours, theirs);
+    let has_newline = *out.last().unwrap() == b'\n';
+    match (want_newline, has_newline) {
+        (true, false) => out.push(b'\n'),
+        (false, true) => {
+            out.pop();
+        }
+        _ => {}
+    }
+}
+
+fn majority_ends_with_newline(base: &str, ours: &str, theirs: &str) -> bool {
+    let mut with = 0u8;
+    let mut total = 0u8;
+    for s in [base, ours, theirs] {
+        if s.is_empty() {
+            continue;
+        }
+        total += 1;
+        if s.as_bytes().last() == Some(&b'\n') {
+            with += 1;
+        }
+    }
+    // Default to "yes" when nothing has an opinion (all sides empty —
+    // unreachable in practice since we'd have returned Clean(empty)
+    // before reconstruction), and require strict majority otherwise.
+    total == 0 || with * 2 > total
 }
 
 /// Emit a `<<<<<<< / ======= / >>>>>>>` conflict block wrapping two
