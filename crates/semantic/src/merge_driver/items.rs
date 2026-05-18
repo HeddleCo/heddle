@@ -404,7 +404,7 @@ fn classify_go_node<'a>(
 }
 
 /// Extract the receiver type from a Go `method_declaration` as a
-/// whitespace-normalized string (e.g. `"A"`, `"*A"`, `"Foo[T]"`). Returns
+/// whitespace-stripped string (e.g. `"A"`, `"*A"`, `"Foo[T]"`). Returns
 /// `None` for non-methods or malformed receivers.
 fn go_receiver_type(source: &str, node: Node<'_>) -> Option<String> {
     let receiver = node.child_by_field_name("receiver")?;
@@ -413,12 +413,7 @@ fn go_receiver_type(source: &str, node: Node<'_>) -> Option<String> {
         if child.kind() == "parameter_declaration"
             && let Some(ty) = child.child_by_field_name("type")
         {
-            return Some(
-                source[ty.byte_range()]
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
+            return Some(strip_whitespace(&source[ty.byte_range()]));
         }
     }
     None
@@ -508,10 +503,20 @@ fn signature_hash_from_field(source: &str, node: Node<'_>, field: &str) -> u64 {
 
 fn hash_normalized(s: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for token in s.split_whitespace() {
-        token.hash(&mut hasher);
-    }
+    // Strip whitespace rather than splitting on it: `split_whitespace`
+    // leaves punctuation attached to identifiers, so `foo(x,y)` and
+    // `foo(x, y)` produce different token streams and hash differently
+    // — the same function ends up with distinct ItemKeys across sides.
+    strip_whitespace(s).hash(&mut hasher);
     hasher.finish()
+}
+
+/// Drop all Unicode whitespace from `s`, preserving every other byte.
+/// Cosmetic reformatting that only adds/removes whitespace becomes
+/// invisible to the identity comparison; punctuation that semantically
+/// distinguishes spellings (`*A` vs `A`, `Foo[T]` vs `Foo`) is retained.
+fn strip_whitespace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 fn find_descendant<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
