@@ -2881,8 +2881,11 @@ name = "heddle-devtools"
 version = "0.2.4"
 dependencies = [
  "anyhow",
+ "proc-macro2",
  "protoc-bin-vendored",
+ "syn 2.0.117",
  "tempfile",
+ "walkdir",
 ]
 
 [[package]]
