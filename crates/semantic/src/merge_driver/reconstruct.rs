@@ -460,6 +460,11 @@ fn ensure_trailing_newline(out: &mut Vec<u8>) {
 /// `\n` we may have inherited from a single side's content. Empty
 /// inputs are not counted (they have no opinion on trailing-newline
 /// state).
+///
+/// CRLF is treated as a single unit: when popping a trailing `\n`, an
+/// immediately-preceding `\r` is popped along with it. Otherwise a
+/// CRLF-terminated postamble leaks a bare `\r` byte onto the output
+/// once `\n` is removed (Codex r5 P1 #4).
 fn reconcile_trailing_newline(out: &mut Vec<u8>, base: &str, ours: &str, theirs: &str) {
     if out.is_empty() {
         return;
@@ -470,6 +475,9 @@ fn reconcile_trailing_newline(out: &mut Vec<u8>, base: &str, ours: &str, theirs:
         (true, false) => out.push(b'\n'),
         (false, true) => {
             out.pop();
+            if out.last() == Some(&b'\r') {
+                out.pop();
+            }
         }
         _ => {}
     }
