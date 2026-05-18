@@ -584,6 +584,200 @@ fn test_extract_dependency_from_import() {
     );
 }
 
+// ── Duplicate-name redeclaration tests (BTreeMap-collapse hazard) ─────
+//
+// Mirrors the heddle#114 r5 P1 #2 fix (commit 2198b00) — keying per-side
+// item maps by bare name collapses same-name redeclarations into the
+// last occurrence, silently dropping earlier definitions. Both JS and
+// Python permit module-level redeclaration of the same function name.
+
+#[test]
+fn test_detect_duplicate_javascript_function_redeclarations_both_surface() {
+    // Two top-level `function foo()` declarations, both modified between
+    // old and new. A BTreeMap<String, FunctionDef> keyed on `f.name`
+    // would keep only the second `foo` on each side, so only one
+    // FunctionModified event would fire instead of two.
+    let old = "function foo() { return 1; }\nfunction foo() { return 2; }\n";
+    let new = "function foo() { return 10; }\nfunction foo() { return 20; }\n";
+    let changes = detect_function_changes(
+        std::path::Path::new("test.js"),
+        std::path::Path::new("test.js"),
+        old,
+        new,
+        SimilarityMethod::Lines,
+    );
+    let modified_count = changes
+        .iter()
+        .filter(|c| matches!(c, SemanticChange::FunctionModified { name, .. } if name == "foo"))
+        .count();
+    assert_eq!(
+        modified_count, 2,
+        "Both `foo` redeclarations should surface as FunctionModified; got: {:?}",
+        changes
+    );
+}
+
+#[test]
+fn test_detect_duplicate_python_function_redefinitions_both_surface() {
+    // Python permits top-level `def foo()` redefinition; only the last
+    // wins at runtime, but both occurrences exist in the AST and should
+    // both surface as changes when their bodies move between versions.
+    let old = "def foo():\n    return 1\n\ndef foo():\n    return 2\n";
+    let new = "def foo():\n    return 10\n\ndef foo():\n    return 20\n";
+    let changes = detect_function_changes(
+        std::path::Path::new("test.py"),
+        std::path::Path::new("test.py"),
+        old,
+        new,
+        SimilarityMethod::Lines,
+    );
+    let modified_count = changes
+        .iter()
+        .filter(|c| matches!(c, SemanticChange::FunctionModified { name, .. } if name == "foo"))
+        .count();
+    assert_eq!(
+        modified_count, 2,
+        "Both `foo` redefinitions should surface as FunctionModified; got: {:?}",
+        changes
+    );
+}
+
+// ── Insert-before-existing tests (positional-pairing breakage) ────────
+//
+// Pins the fix for the Codex finding on heddle#125 r2 (cid 3259311747):
+// per-side `(name, occurrence)` keying paired old `foo[0]` with new
+// `foo[0]` regardless of body content, so a fresh same-name definition
+// inserted *before* existing ones produced a bogus `FunctionModified`
+// (with the wrong content delta) plus a misclassified add/delete pair.
+// Content-similarity matching across the same-name bucket aligns the
+// surviving body with itself instead of with the inserted one.
+
+#[test]
+fn test_detect_insert_before_same_name_pairs_by_content_not_position() {
+    // Codex's example, expanded with distinct bodies so the mispairing
+    // is observable. Old has `bar(A)` and `foo(B)`; new has `bar(B)`
+    // (renamed-from-foo) followed by `bar(A)` (the original, pushed
+    // down one slot). Correct interpretation: foo → bar(B) rename,
+    // bar(A) survives unchanged.
+    let old = concat!(
+        "function bar() {\n",
+        "    let value = 1;\n",
+        "    let doubled = value * 2;\n",
+        "    console.log('marker_alpha', value, doubled);\n",
+        "    return doubled;\n",
+        "}\n",
+        "function foo() {\n",
+        "    const greeting = 'hello world';\n",
+        "    const repeated = greeting.repeat(3);\n",
+        "    console.log('marker_beta', greeting, repeated);\n",
+        "    return repeated;\n",
+        "}\n",
+    );
+    let new = concat!(
+        "function bar() {\n",
+        "    const greeting = 'hello world';\n",
+        "    const repeated = greeting.repeat(3);\n",
+        "    console.log('marker_beta', greeting, repeated);\n",
+        "    return repeated;\n",
+        "}\n",
+        "function bar() {\n",
+        "    let value = 1;\n",
+        "    let doubled = value * 2;\n",
+        "    console.log('marker_alpha', value, doubled);\n",
+        "    return doubled;\n",
+        "}\n",
+    );
+    let changes = detect_function_changes(
+        std::path::Path::new("test.js"),
+        std::path::Path::new("test.js"),
+        old,
+        new,
+        SimilarityMethod::Lines,
+    );
+
+    let has_foo_to_bar_rename = changes.iter().any(|c| {
+        matches!(
+            c,
+            SemanticChange::FunctionRenamed { old_name, new_name, .. }
+                if old_name == "foo" && new_name == "bar"
+        )
+    });
+    assert!(
+        has_foo_to_bar_rename,
+        "foo's body re-appearing under `bar` should be a FunctionRenamed{{foo→bar}}; got: {:?}",
+        changes
+    );
+
+    let has_modified = changes
+        .iter()
+        .any(|c| matches!(c, SemanticChange::FunctionModified { .. }));
+    assert!(
+        !has_modified,
+        "Inserting a same-name definition before an existing one must not synthesize a \
+         FunctionModified — the original body survived intact: {:?}",
+        changes
+    );
+}
+
+#[test]
+fn test_detect_same_name_insert_at_front_keeps_existing_body() {
+    // Smaller version of the same hazard: old has a single `foo(A)`;
+    // new prepends a fresh `foo(B)`. Correct: `foo(A)` is preserved
+    // (matched against itself by content), `foo(B)` is added.
+    // Positional pairing instead matches old `foo[0]=A` with new
+    // `foo[0]=B`, surfacing a spurious FunctionModified and reporting
+    // the surviving A as a new add.
+    let old = concat!(
+        "function foo() {\n",
+        "    let value = 1;\n",
+        "    let doubled = value * 2;\n",
+        "    console.log('marker_alpha', value, doubled);\n",
+        "    return doubled;\n",
+        "}\n",
+    );
+    let new = concat!(
+        "function foo() {\n",
+        "    const greeting = 'hello world';\n",
+        "    const repeated = greeting.repeat(3);\n",
+        "    console.log('marker_beta', greeting, repeated);\n",
+        "    return repeated;\n",
+        "}\n",
+        "function foo() {\n",
+        "    let value = 1;\n",
+        "    let doubled = value * 2;\n",
+        "    console.log('marker_alpha', value, doubled);\n",
+        "    return doubled;\n",
+        "}\n",
+    );
+    let changes = detect_function_changes(
+        std::path::Path::new("test.js"),
+        std::path::Path::new("test.js"),
+        old,
+        new,
+        SimilarityMethod::Lines,
+    );
+
+    let modified_count = changes
+        .iter()
+        .filter(|c| matches!(c, SemanticChange::FunctionModified { name, .. } if name == "foo"))
+        .count();
+    assert_eq!(
+        modified_count, 0,
+        "Surviving foo body must not be reported as FunctionModified: {:?}",
+        changes
+    );
+
+    let added_count = changes
+        .iter()
+        .filter(|c| matches!(c, SemanticChange::FunctionAdded { name, .. } if name == "foo"))
+        .count();
+    assert_eq!(
+        added_count, 1,
+        "The inserted foo should surface as a single FunctionAdded: {:?}",
+        changes
+    );
+}
+
 #[test]
 fn test_is_stdlib_dependency() {
     assert!(
