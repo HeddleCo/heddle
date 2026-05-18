@@ -2781,3 +2781,78 @@ void A::foo() { int a = 2; (void)a; }
         "disjoint cross-class edits + addition must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// Codex r6 P1 #2 (cid 3256117900): r6's structural signature hash uses
+// each parameter's `type` field text only. In C/C++, the parameter
+// `type` is the type-specifier (e.g. "int"), but pointer/reference/
+// array/function-pointer modifiers live in the `declarator` field
+// alongside the parameter name. So `f(int)`, `f(int*)`, `f(int&)`,
+// `f(int[])` all collapse to the same signature_hash and the same
+// ItemKey — distinct overloads share an identity slot.
+// =====================================================================
+#[test]
+fn cpp_pointer_overload_distinct_from_value_overload() {
+    // base has `void f(int)`. ours adds a new overload `void f(int*)`
+    // ABOVE it (a common refactor: add the more-specific overload
+    // first). theirs edits the body of `f(int)`. Disjoint changes —
+    // clean merge expected.
+    //
+    // Pre-fix every `f` keys identically because both params hash on
+    // type="int". Per-side occurrences:
+    //   base    [f(int)=0]
+    //   ours    [f(int*)=0, f(int)=1]
+    //   theirs  [f(int)=0]
+    // MatchKey (f,0) pairs base's f(int) with ours's f(int*) and
+    // theirs's f(int)-edited. resolve_item 3-way merges unrelated
+    // function bodies → conflict on what should be a clean merge.
+    //
+    // Post-fix the declarator shape ('*' for the pointer overload,
+    // empty for the value overload) feeds into the signature hash,
+    // so f(int) and f(int*) have distinct ItemKeys.
+    let base = "\
+void f(int) { int x = 0; (void)x; }
+";
+    let ours = "\
+void f(int* p) { int y = *p; (void)y; }
+void f(int) { int x = 0; (void)x; }
+";
+    let theirs = "\
+void f(int) { int x = 99; (void)x; }
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // theirs's edit on f(int) must land — pre-fix it's lost to ours's
+    // f(int*) bytes taking the (f,0) slot.
+    assert!(
+        text.contains("int x = 99"),
+        "theirs's edit on f(int) must survive: {text}"
+    );
+    // ours's added f(int*) body must land verbatim.
+    assert!(
+        text.contains("int y = *p"),
+        "ours's added f(int*) body must survive: {text}"
+    );
+    // No duplication or omission of either overload.
+    let value_overload = text.matches("void f(int)").count();
+    let ptr_overload = text.matches("void f(int* p)").count();
+    assert_eq!(
+        value_overload, 1,
+        "void f(int) must appear exactly once, got {value_overload}: {text}"
+    );
+    assert_eq!(
+        ptr_overload, 1,
+        "void f(int* p) must appear exactly once, got {ptr_overload}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "disjoint overload addition + body edit must merge cleanly: {text}"
+    );
+}
