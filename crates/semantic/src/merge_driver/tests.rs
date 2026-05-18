@@ -2036,6 +2036,36 @@ def foo():
 // a different item — behavior change without a conflict.
 // =====================================================================
 // =====================================================================
+// Codex r3 P2 #2: reconstruction unconditionally appends a trailing
+// `\n` via ensure_trailing_newline. When all three sides end without
+// one, the merged output dirties the file with a phantom newline
+// unique to the semantic path — text_hunk_merge preserves the
+// no-trailing-newline state. Clean merges show a spurious diff.
+// =====================================================================
+#[test]
+fn no_trailing_newline_on_any_side_preserves_no_trailing_newline() {
+    // All three sides end without `\n`. Output must also have no
+    // trailing `\n`.
+    let base = "fn foo() { 1 }";
+    let ours = "fn foo() { 1 }\nfn bar() {}";
+    let theirs = "fn foo() { 2 }";
+    let outcome = merge_rust(base, ours, theirs);
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(
+        !text.ends_with('\n'),
+        "expected no trailing newline, got bytes ending {:?}: {text}",
+        text.as_bytes().last()
+    );
+}
+
+// =====================================================================
 // Codex r3 P2 #1: rust_impl_name still tokenizes on whitespace
 // instead of stripping it, so cosmetic spaces around `::`, `<>`, etc.
 // break the impl-scope identity. Methods inside the reformatted impl
