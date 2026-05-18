@@ -317,3 +317,47 @@ fn node_text<'a>(node: &tree_sitter::Node, source: &'a [u8]) -> &'a str {
     let end = node.end_byte();
     std::str::from_utf8(&source[start..end]).unwrap_or("")
 }
+
+// =====================================================================
+// Codex r2 (heddle#68 cid 3255570487, heddle#120): find_definitions
+// must not stack-overflow on deeply-nested trees. Mirrors the
+// `collect_items` test added in heddle#114 commit 422031b.
+// =====================================================================
+#[cfg(all(test, feature = "lang-rust"))]
+mod tests {
+    use super::find_definitions;
+
+    #[test]
+    fn deeply_nested_rust_modules_does_not_stack_overflow() {
+        // Build a Rust file with `depth` nested mod blocks holding one
+        // fn at the centre. Parse it, then run find_definitions inside
+        // a thread with a small stack so a recursive walker overflows
+        // before reaching the leaf.
+        let depth = 2000usize;
+        let mut s = String::new();
+        for i in 0..depth {
+            s.push_str(&format!("mod m{i} {{\n"));
+        }
+        s.push_str("fn target() {}\n");
+        for _ in 0..depth {
+            s.push_str("}\n");
+        }
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .expect("set rust language");
+        let tree = parser.parse(&s, None).expect("parse");
+        let source = s.into_bytes();
+
+        let handle = std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let _ = find_definitions(&tree.root_node(), &source, "target");
+            })
+            .expect("spawn");
+        handle
+            .join()
+            .expect("find_definitions must not stack-overflow on deeply-nested input");
+    }
+}
