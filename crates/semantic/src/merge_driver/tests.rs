@@ -3352,3 +3352,56 @@ fn detect_eol_uses_majority_when_two_of_three_inputs_are_lf() {
         "merged output must end with LF (majority of inputs are LF): {merged:?}"
     );
 }
+
+// =====================================================================
+// Codex r8 P2 (cid 3256283857): `emit_addadd_conflict` calls
+// `detect_eol` over only the two item byte ranges. Single-line item
+// bodies carry zero `\n` observations, so the majority vote is 0-0 and
+// the LF fallback wins — even when the surrounding file is wholly
+// CRLF. Whole-file context belongs in the sample set so the marker
+// EOL matches the file's actual style.
+// =====================================================================
+#[test]
+fn addadd_conflict_markers_use_crlf_for_single_line_items_in_crlf_file() {
+    // base is a CRLF file with an existing comment header; both sides
+    // independently add the same-named function with single-line
+    // bodies that differ. Each added item's bytes contain ZERO `\n`
+    // characters (the bodies are one line), so without whole-file
+    // context `detect_eol` sees [0 CRLF, 0 LF] across the two item
+    // samples and falls back to LF. The body bytes themselves carry
+    // no newline, so the only EOL emitted into the conflict block
+    // comes from the marker lines — and a CRLF file gaining bare-LF
+    // marker lines breaks Windows tooling, the same hazard the r6
+    // P2 #1 fix addressed for multi-line items.
+    // Header comment is separated from the added function by a blank
+    // line on each side so `leading_metadata_start` does NOT absorb
+    // the comment into the function's item bytes — otherwise the
+    // absorbed `// header\r\n` would inject CRLF observations into the
+    // sample set and mask the bug we're testing.
+    let base = "// header\r\n\r\n";
+    let ours = "// header\r\n\r\nfn foo() { 1 }\r\n";
+    let theirs = "// header\r\n\r\nfn foo() { 2 }\r\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert_eq!(count, 1, "expected 1 conflict, got {count}: {text:?}");
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("<<<<<<<")
+            || line.starts_with("=======")
+            || line.starts_with(">>>>>>>")
+        {
+            assert!(
+                line.ends_with("\r\n"),
+                "marker line `{}` must end with CRLF in a CRLF file: {text:?}",
+                line.trim_end_matches('\n').trim_end_matches('\r'),
+            );
+        }
+    }
+    let bytes = text.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\n' {
+            assert!(
+                i > 0 && bytes[i - 1] == b'\r',
+                "bare LF at byte {i} in otherwise-CRLF output: {text:?}"
+            );
+        }
+    }
+}
