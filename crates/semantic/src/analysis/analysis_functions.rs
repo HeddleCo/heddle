@@ -10,6 +10,33 @@ use crate::parser::{FunctionDef, Language, ParsedFile};
 
 const FUNCTION_RENAME_SIMILARITY_THRESHOLD: f64 = 0.58;
 
+/// Identity used for cross-version function matching. The bare name
+/// would collapse same-name redeclarations — JavaScript permits two
+/// `function foo()` statements at module scope, Python permits
+/// repeated top-level `def foo()`, and `BTreeMap<String, FunctionDef>`
+/// would silently keep only the last occurrence per side. `FunctionKey`
+/// pairs the name with the function's per-name occurrence index within
+/// its side (0 for the first, 1 for the second, …) so each duplicate
+/// gets a distinct slot. Cross-version matching is then positional:
+/// old's first `foo` pairs with new's first `foo`. Mirrors the
+/// merge_driver pattern (commit 2198b00, heddle#114 r5 P1 #2).
+type FunctionKey = (String, usize);
+
+fn build_function_map(parsed: Option<&ParsedFile>) -> BTreeMap<FunctionKey, FunctionDef> {
+    let Some(parsed) = parsed else {
+        return BTreeMap::new();
+    };
+    let mut counters: BTreeMap<String, usize> = BTreeMap::new();
+    let mut map = BTreeMap::new();
+    for func in parsed.extract_functions() {
+        let n = counters.entry(func.name.clone()).or_insert(0);
+        let occurrence = *n;
+        *n += 1;
+        map.insert((func.name.clone(), occurrence), func);
+    }
+    map
+}
+
 /// Detect function-level changes between two file versions.
 pub fn detect_function_changes(
     old_path: &std::path::Path,
@@ -40,39 +67,26 @@ pub(crate) fn detect_function_changes_with_parsed(
     let mut changes = Vec::new();
     let mut file_modified = false;
 
-    let old_funcs: BTreeMap<String, FunctionDef> = old_parsed
-        .map(|p| {
-            p.extract_functions()
-                .into_iter()
-                .map(|f| (f.name.clone(), f))
-                .collect()
-        })
-        .unwrap_or_default();
+    let old_funcs = build_function_map(old_parsed);
+    let new_funcs = build_function_map(new_parsed);
 
-    let new_funcs: BTreeMap<String, FunctionDef> = new_parsed
-        .map(|p| {
-            p.extract_functions()
-                .into_iter()
-                .map(|f| (f.name.clone(), f))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let removed_old_names: BTreeSet<_> = old_funcs
+    let removed_old_keys: BTreeSet<FunctionKey> = old_funcs
         .keys()
-        .filter(|name| !new_funcs.contains_key(*name))
+        .filter(|k| !new_funcs.contains_key(*k))
         .cloned()
         .collect();
     let moved_function_names = stable_order_moved_names(&old_funcs, &new_funcs);
-    let mut matched_old_names = HashSet::new();
+    let mut matched_old_keys: HashSet<FunctionKey> = HashSet::new();
 
-    for (name, func) in &new_funcs {
-        if !old_funcs.contains_key(name) {
-            let renamed_from = removed_old_names
+    for (new_key, func) in &new_funcs {
+        let name = &new_key.0;
+        if !old_funcs.contains_key(new_key) {
+            let renamed_from = removed_old_keys
                 .iter()
-                .filter(|old_name| !matched_old_names.contains(old_name.as_str()))
-                .filter_map(|old_name| {
-                    let old_func = old_funcs.get(old_name)?;
+                .filter(|old_key| !matched_old_keys.contains(*old_key))
+                .filter_map(|old_key| {
+                    let old_name = &old_key.0;
+                    let old_func = old_funcs.get(old_key)?;
                     let similarity = compute_similarity_with_language(
                         &normalized_function_for_matching(&old_func.content, old_name),
                         &normalized_function_for_matching(&func.content, name),
@@ -84,19 +98,18 @@ pub(crate) fn detect_function_changes_with_parsed(
                         && old_func.start_line.abs_diff(func.start_line) <= 5
                         && similarity >= 0.30;
                     (similarity >= FUNCTION_RENAME_SIMILARITY_THRESHOLD || same_location_update)
-                        .then_some((old_name, similarity))
+                        .then_some((old_key, similarity))
                 })
-                .max_by(
-                    |(left_name, left_similarity), (right_name, right_similarity)| {
-                        left_similarity
-                            .total_cmp(right_similarity)
-                            .then_with(|| right_name.cmp(left_name))
-                    },
-                )
-                .map(|(old_name, _)| old_name.clone());
+                .max_by(|(left_key, left_similarity), (right_key, right_similarity)| {
+                    left_similarity
+                        .total_cmp(right_similarity)
+                        .then_with(|| right_key.cmp(left_key))
+                })
+                .map(|(old_key, _)| old_key.clone());
 
-            if let Some(old_name) = renamed_from {
-                matched_old_names.insert(old_name.clone());
+            if let Some(old_key) = renamed_from {
+                let old_name = old_key.0.clone();
+                matched_old_keys.insert(old_key);
                 changes.push(SemanticChange::FunctionRenamed {
                     file: new_path.to_path_buf(),
                     old_name,
@@ -126,21 +139,21 @@ pub(crate) fn detect_function_changes_with_parsed(
         }
     }
 
-    for name in removed_old_names {
-        if !changes.iter().any(
-            |c| matches!(c, SemanticChange::FunctionRenamed { old_name, .. } if old_name == &name),
-        ) {
-            changes.push(SemanticChange::FunctionDeleted {
-                file: new_path.to_path_buf(),
-                name,
-                importance: Some(ChangeImportance::High),
-            });
-            file_modified = true;
+    for old_key in removed_old_keys {
+        if matched_old_keys.contains(&old_key) {
+            continue;
         }
+        changes.push(SemanticChange::FunctionDeleted {
+            file: new_path.to_path_buf(),
+            name: old_key.0,
+            importance: Some(ChangeImportance::High),
+        });
+        file_modified = true;
     }
 
-    for (name, new_func) in &new_funcs {
-        if let Some(old_func) = old_funcs.get(name)
+    for (new_key, new_func) in &new_funcs {
+        let name = &new_key.0;
+        if let Some(old_func) = old_funcs.get(new_key)
             && old_func.signature != new_func.signature
         {
             changes.push(SemanticChange::SignatureChanged {
@@ -151,7 +164,7 @@ pub(crate) fn detect_function_changes_with_parsed(
                 importance: Some(ChangeImportance::Medium),
             });
             file_modified = true;
-        } else if let Some(old_func) = old_funcs.get(name) {
+        } else if let Some(old_func) = old_funcs.get(new_key) {
             if old_path == new_path
                 && old_func.content == new_func.content
                 && old_func.start_line != new_func.start_line
@@ -189,7 +202,7 @@ pub(crate) fn detect_function_changes_with_parsed(
 }
 
 fn extraction_source(
-    old_funcs: &BTreeMap<String, FunctionDef>,
+    old_funcs: &BTreeMap<FunctionKey, FunctionDef>,
     extracted: &FunctionDef,
 ) -> Option<String> {
     let extracted_lines = meaningful_body_lines(&extracted.content);
@@ -199,10 +212,10 @@ fn extraction_source(
 
     old_funcs
         .iter()
-        .filter_map(|(name, old_func)| {
+        .filter_map(|(key, old_func)| {
             let old_lines = meaningful_body_lines(&old_func.content);
             let evidence = extraction_evidence(&old_lines, &extracted_lines);
-            evidence.is_strong().then_some((name.clone(), evidence))
+            evidence.is_strong().then_some((key.0.clone(), evidence))
         })
         .max_by(|left, right| {
             left.1
@@ -334,8 +347,8 @@ fn meaningful_body_lines(content: &str) -> Vec<String> {
 }
 
 fn stable_order_moved_names(
-    old_funcs: &BTreeMap<String, FunctionDef>,
-    new_funcs: &BTreeMap<String, FunctionDef>,
+    old_funcs: &BTreeMap<FunctionKey, FunctionDef>,
+    new_funcs: &BTreeMap<FunctionKey, FunctionDef>,
 ) -> HashSet<String> {
     let mut old_order = stable_function_order(old_funcs, new_funcs, true);
     let mut new_order = stable_function_order(old_funcs, new_funcs, false);
@@ -353,21 +366,21 @@ fn stable_order_moved_names(
 }
 
 fn stable_function_order(
-    old_funcs: &BTreeMap<String, FunctionDef>,
-    new_funcs: &BTreeMap<String, FunctionDef>,
+    old_funcs: &BTreeMap<FunctionKey, FunctionDef>,
+    new_funcs: &BTreeMap<FunctionKey, FunctionDef>,
     use_old_position: bool,
 ) -> Vec<String> {
     let mut ordered = old_funcs
         .iter()
-        .filter_map(|(name, old_func)| {
-            let new_func = new_funcs.get(name)?;
+        .filter_map(|(key, old_func)| {
+            let new_func = new_funcs.get(key)?;
             (old_func.content == new_func.content).then_some((
                 if use_old_position {
                     old_func.start_line
                 } else {
                     new_func.start_line
                 },
-                name.clone(),
+                key.0.clone(),
             ))
         })
         .collect::<Vec<_>>();
