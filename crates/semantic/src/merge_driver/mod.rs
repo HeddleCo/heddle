@@ -82,13 +82,30 @@ pub fn semantic_three_way_merge(
     // double-emit its bridging content. text_hunk_merge handles the
     // full-file alignment without those artifacts, so route this
     // shape through it.
+    //
+    // EXCEPTION: empty base with both sides adding items that share
+    // keys (add/add). text_hunk_merge concatenates both insertions
+    // at the same anchor and silently produces duplicate definitions;
+    // `resolve_item`'s add/add arm is the only path that surfaces this
+    // as a conflict. Drop through to the reconstruct path in that case
+    // so the conflict is reported (Codex r3 P1 #1).
     let counts = [
         base_segments.items.len(),
         ours_segments.items.len(),
         theirs_segments.items.len(),
     ];
     if counts.contains(&0) && counts.iter().any(|&c| c > 0) {
-        return text_hunk_merge_with_markers(base, ours, theirs, markers);
+        let addadd_in_empty_base = base_segments.items.is_empty() && {
+            let ours_keys: std::collections::BTreeSet<_> =
+                ours_segments.items.iter().map(|i| &i.key).collect();
+            theirs_segments
+                .items
+                .iter()
+                .any(|i| ours_keys.contains(&i.key))
+        };
+        if !addadd_in_empty_base {
+            return text_hunk_merge_with_markers(base, ours, theirs, markers);
+        }
     }
 
     reconstruct_merged_file(
