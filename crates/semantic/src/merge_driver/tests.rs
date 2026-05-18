@@ -3480,3 +3480,75 @@ void foo() {
         "noexcept addition + disjoint body edit must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// Codex r9 P2 (cid 3256397421): a conditional noexcept clause
+// (`noexcept(noexcept(expr))`) hashed verbatim picks up parameter
+// names appearing in `expr`. A pure parameter rename then changes the
+// `c_signature_hash` text, splitting identity. The r9 P1 fix removes
+// `noexcept` from `c_signature_hash`, so the noexcept text isn't
+// hashed at all — this test locks in that invariant against future
+// regressions that try to re-fold any form of `noexcept` back in.
+// =====================================================================
+#[test]
+fn cpp_noexcept_clause_with_param_name_survives_pure_rename() {
+    // base declares `f(S x) noexcept(noexcept(x.bar()))` with a
+    // multi-line body. ours renames the parameter `x` -> `y`,
+    // including inside the noexcept clause. theirs edits a body
+    // line. Disjoint changes — clean merge expected.
+    //
+    // Pre-P1-fix: the noexcept clause text changes when x -> y, so
+    // c_signature_hash sees different bytes, ours and base/theirs
+    // get different ItemKeys, and the rename + body edit collide.
+    //
+    // Post-P1-fix: noexcept isn't part of the hash, identity holds
+    // across the rename, and the body merge picks up both edits.
+    let base = "\
+struct S { void bar() {} };
+void f(S x) noexcept(noexcept(x.bar())) {
+    int a = 0;
+    (void)a;
+}
+";
+    let ours = "\
+struct S { void bar() {} };
+void f(S y) noexcept(noexcept(y.bar())) {
+    int a = 0;
+    (void)a;
+}
+";
+    let theirs = "\
+struct S { void bar() {} };
+void f(S x) noexcept(noexcept(x.bar())) {
+    int a = 99;
+    (void)a;
+}
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(
+        text.contains("noexcept(y.bar())"),
+        "ours's rename inside the noexcept clause must survive: {text}"
+    );
+    assert!(
+        text.contains("int a = 99"),
+        "theirs's body edit must survive: {text}"
+    );
+    // The function definition must appear exactly once.
+    let f_count = text.matches("void f(S ").count();
+    assert_eq!(
+        f_count, 1,
+        "f must appear exactly once across the rename + body edit: got {f_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "param rename inside noexcept clause + disjoint body edit must merge cleanly: {text}"
+    );
+}
