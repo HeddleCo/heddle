@@ -3178,6 +3178,158 @@ class A {
 }
 
 // =====================================================================
+// Codex r8 P2 (cid 3256283862, was heddle#130): `classify_js_node`
+// recognizes `method_definition` (class methods with bodies) but not
+// `method_signature` (TS interface methods) or `abstract_method_signature`
+// (TS abstract class methods). Interfaces and abstract classes
+// therefore extract ZERO items and the whole interface body falls
+// through to text-merge — a method-level reorder collides with any
+// other body edit instead of resolving as per-method moves.
+// =====================================================================
+#[test]
+fn typescript_interface_method_reorder_merges_cleanly() {
+    // base declares an interface with many methods. ours fully
+    // reverses their order; theirs edits the first method's signature
+    // AND the last method's signature (now at distant lines in
+    // ours). Pre-fix the interface body extracts ZERO items so it
+    // routes through text-merge; theirs's edits to both endpoints
+    // overlap with ours's rewrite of those same line ranges and
+    // produce a whole-block conflict. Post-fix each method is its
+    // own item keyed by name + parameter signature, so the reorder
+    // splices independently of each per-method signature edit and
+    // the merge resolves cleanly.
+    let base = "\
+interface Foo {
+  a(): void;
+  b(): void;
+  c(): void;
+  d(): void;
+  e(): void;
+  f(): void;
+}
+";
+    let ours = "\
+interface Foo {
+  f(): void;
+  e(): void;
+  d(): void;
+  c(): void;
+  b(): void;
+  a(): void;
+}
+";
+    let theirs = "\
+interface Foo {
+  a(x: number): void;
+  b(): void;
+  c(): void;
+  d(): void;
+  e(): void;
+  f(y: string): void;
+}
+";
+    let outcome = merge_at(base, ours, theirs, "f.ts");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // theirs's edits on both endpoints (a and f) must land.
+    assert!(
+        text.contains("a(x: number)"),
+        "theirs's parameter-add on a must survive: {text}"
+    );
+    assert!(
+        text.contains("f(y: string)"),
+        "theirs's parameter-add on f must survive: {text}"
+    );
+    // every method must still be present exactly once.
+    for m in ["a(", "b(", "c(", "d(", "e(", "f("] {
+        let n = text.matches(m).count();
+        assert_eq!(n, 1, "{m} must appear exactly once, got {n}: {text}");
+    }
+    assert!(
+        !text.contains("<<<<<<<"),
+        "interface method reorder + disjoint signature edit must merge cleanly: {text}"
+    );
+}
+
+// =====================================================================
+// Codex r8 P2 follow-up: `abstract_method_signature` is the kind for
+// methods declared `abstract` inside an `abstract class`. Same shape
+// as `method_signature` — no body — so it must classify identically
+// or abstract classes regress into whole-class text-merge fallbacks.
+// =====================================================================
+#[test]
+fn typescript_abstract_class_method_reorder_merges_cleanly() {
+    let base = "\
+abstract class Foo {
+  abstract a(): void;
+  abstract b(): void;
+  abstract c(): void;
+  abstract d(): void;
+  abstract e(): void;
+  abstract f(): void;
+}
+";
+    let ours = "\
+abstract class Foo {
+  abstract f(): void;
+  abstract e(): void;
+  abstract d(): void;
+  abstract c(): void;
+  abstract b(): void;
+  abstract a(): void;
+}
+";
+    let theirs = "\
+abstract class Foo {
+  abstract a(x: number): void;
+  abstract b(): void;
+  abstract c(): void;
+  abstract d(): void;
+  abstract e(): void;
+  abstract f(y: string): void;
+}
+";
+    let outcome = merge_at(base, ours, theirs, "f.ts");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(
+        text.contains("abstract a(x: number)"),
+        "theirs's parameter-add on abstract a must survive: {text}"
+    );
+    assert!(
+        text.contains("abstract f(y: string)"),
+        "theirs's parameter-add on abstract f must survive: {text}"
+    );
+    for m in [
+        "abstract a(",
+        "abstract b(",
+        "abstract c(",
+        "abstract d(",
+        "abstract e(",
+        "abstract f(",
+    ] {
+        let n = text.matches(m).count();
+        assert_eq!(n, 1, "{m} must appear exactly once, got {n}: {text}");
+    }
+    assert!(
+        !text.contains("<<<<<<<"),
+        "abstract-method reorder + disjoint signature edit must merge cleanly: {text}"
+    );
+}
+
+// =====================================================================
 // Codex r7 P2 (cid 3256225712): `detect_eol` returns CRLF as soon as
 // ANY sample contains `\r\n`. A single CRLF side then forces `\r\n`
 // onto a merge whose base + other side are LF — wrong for the
