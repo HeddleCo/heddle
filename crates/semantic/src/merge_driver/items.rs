@@ -651,7 +651,9 @@ fn rust_impl_name(source: &str, node: Node<'_>) -> Option<String> {
     } else {
         type_name
     };
-    // Normalize whitespace within the key so cosmetic reformatting doesn't
-    // turn into a "different impl" misclassification.
-    Some(key.split_whitespace().collect::<Vec<_>>().join(" "))
+    // Strip ALL whitespace from the key so cosmetic reformatting around
+    // `::`, `<>`, etc. doesn't turn into a "different impl"
+    // misclassification — same shape as `hash_normalized` for signature
+    // hashes (r3 fix `021ed8e`).
+    Some(strip_whitespace(&key))
 }
