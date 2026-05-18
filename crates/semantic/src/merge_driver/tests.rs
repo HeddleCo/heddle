@@ -2858,6 +2858,51 @@ void f(int) { int x = 99; (void)x; }
 }
 
 // =====================================================================
+// Codex r6 P2 #1 (cid 3256117904): `emit_addadd_conflict` hardcodes
+// LF-only marker lines (`"\n"`). When a CRLF-style file hits the
+// semantic add/add path (empty base + both sides add the same item
+// with different bodies), the body bytes inherit CRLF from the
+// source but the conflict markers themselves end with bare LF —
+// mixed line endings break Windows tooling and produce noisy diffs.
+// =====================================================================
+#[test]
+fn crlf_add_add_conflict_markers_use_crlf() {
+    // base is empty (or comment-only) so both sides' new `foo()`
+    // items hit the resolve_item add/add path. All three inputs use
+    // CRLF line endings — the emitted conflict markers must do the
+    // same so the file isn't half-LF half-CRLF afterwards.
+    let base = "// header\r\n";
+    let ours = "// header\r\nfn foo() {\r\n    1\r\n}\r\n";
+    let theirs = "// header\r\nfn foo() {\r\n    2\r\n}\r\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert_eq!(count, 1, "expected 1 conflict, got {count}: {text:?}");
+    // Find every marker line and assert it ends with `\r\n`.
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("<<<<<<<")
+            || line.starts_with("=======")
+            || line.starts_with(">>>>>>>")
+        {
+            assert!(
+                line.ends_with("\r\n"),
+                "marker line `{}` must end with CRLF in a CRLF file: {text:?}",
+                line.trim_end_matches('\n').trim_end_matches('\r'),
+            );
+        }
+    }
+    // Stronger: no bare LF in the entire output (the file is wholly
+    // CRLF, so any `\n` not preceded by `\r` is a regression).
+    let bytes = text.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\n' {
+            assert!(
+                i > 0 && bytes[i - 1] == b'\r',
+                "bare LF at byte {i} in otherwise-CRLF output: {text:?}"
+            );
+        }
+    }
+}
+
+// =====================================================================
 // Self-audit prediction P2 (heddle#114 r7): r6's signature_hash walks
 // each parameter's `type` field text. In tree-sitter-typescript,
 // `required_parameter` and `optional_parameter` are different node
