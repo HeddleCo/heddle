@@ -594,7 +594,7 @@ fn classify_c_node<'a>(
             // to the same ItemKey and the per-side occurrence indexer
             // can pair unrelated functions across sides whenever one side
             // adds or reorders a same-named method (Codex r6 P1 #1).
-            let extra_scope = c_function_scope(source, declarator);
+            let extra_scope = c_function_scope(source, node, declarator);
             // C/C++ parameter list lives inside the declarator subtree as a
             // `parameter_list` node — find it for overload disambiguation.
             // Use the structural hash (arity + per-parameter type + per-
@@ -993,20 +993,40 @@ fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String
 /// component so cosmetic reformatting (`A :: foo` vs `A::foo`) doesn't
 /// produce different keys.
 ///
-/// Template-argument lists are stripped from each component so the
-/// out-of-class form `A<T>::foo` keys at the same scope as the inline
-/// form `class A { void foo() {} }` (which inherits scope from the
-/// `class_specifier.name` text — `A` only, never `A<T>`). Without this
-/// normalization, refactoring a method between inline and out-of-class
-/// looks like delete + add to the merger (Codex r9 P2, cid 3256397418).
+/// Template-argument lists on scope components are stripped ONLY when
+/// the function definition is wrapped in a `template_declaration` whose
+/// parameter list is non-empty — that is, when the scope's
+/// template-argument-list is a *usage* of the enclosing
+/// template_declaration's parameters (`A<T>::foo` inside
+/// `template <class T>`). The post-strip `["A"]` matches the inline form
+/// `class A { void foo() {} }` (which inherits scope from
+/// `class_specifier.name` — `A` only, never `A<T>`), so refactoring a
+/// method between inline and out-of-class keys at the same scope and
+/// merges cleanly (Codex r9 P2, cid 3256397418).
 ///
-/// The walk mirrors `c_function_name`: strip pointer/reference/array/
+/// Explicit specializations like `void A<int>::foo()` or
+/// `void A<float>::foo()` — defined OUTSIDE a `template_declaration`,
+/// or inside `template<>` (empty parameter list) — keep their
+/// arguments because `A<int>` and `A<float>` are distinct classes from
+/// C++'s perspective. Collapsing them to `A` would cross-pair edits
+/// across unrelated specializations when files hold multiple specs
+/// and a side reorders or inserts a new one (Codex r10 P2, cid
+/// 3256487042).
+///
+/// The walk mirrors `c_function_name`: strip pointer/reference/
 /// parenthesized wrappers via the `declarator` field, and at each
 /// `qualified_identifier` record its `scope` field text and descend
-/// into its `name` field. A `template_function` doesn't bear scope —
-/// stop the walk there.
-fn c_function_scope(source: &str, function_declarator: Node<'_>) -> Vec<String> {
+/// into its `name` field. `template_function` doesn't bear scope but
+/// its `name` field can be a qualified_identifier in some grammar
+/// shapes — descend through it (parity with `c_function_name`) so we
+/// never miss nested qualification (Codex r10 P2, cid 3256487046).
+fn c_function_scope(
+    source: &str,
+    function_definition: Node<'_>,
+    function_declarator: Node<'_>,
+) -> Vec<String> {
     let mut scope = Vec::new();
+    let strip_args = is_inside_non_empty_template_declaration(function_definition);
     let Some(mut current) = function_declarator.child_by_field_name("declarator") else {
         return scope;
     };
@@ -1015,8 +1035,19 @@ fn c_function_scope(source: &str, function_declarator: Node<'_>) -> Vec<String> 
             "qualified_identifier" => {
                 if let Some(s) = current.child_by_field_name("scope") {
                     let raw = strip_whitespace(&source[s.byte_range()]);
-                    scope.push(strip_template_args(&raw));
+                    let component = if strip_args {
+                        strip_template_args(&raw)
+                    } else {
+                        raw
+                    };
+                    scope.push(component);
                 }
+                let Some(next) = current.child_by_field_name("name") else {
+                    return scope;
+                };
+                current = next;
+            }
+            "template_function" => {
                 let Some(next) = current.child_by_field_name("name") else {
                     return scope;
                 };
@@ -1035,6 +1066,33 @@ fn c_function_scope(source: &str, function_declarator: Node<'_>) -> Vec<String> 
         }
     }
     scope
+}
+
+/// True iff `node`'s nearest enclosing `template_declaration` has a
+/// non-empty `template_parameter_list`. Used to decide whether
+/// template-argument lists on scope components are parameter usages
+/// (strip — they reference the enclosing template's parameters) or
+/// specialization arguments (keep — they're concrete types fully
+/// specifying which specialization is being defined).
+///
+/// `template<>` prefixes — empty parameter list — signal explicit
+/// specialization, so we return false and the scope keeps its
+/// arguments.
+fn is_inside_non_empty_template_declaration(node: Node<'_>) -> bool {
+    let mut current = node;
+    for _ in 0..32 {
+        let Some(parent) = current.parent() else {
+            return false;
+        };
+        if parent.kind() == "template_declaration" {
+            return parent
+                .child_by_field_name("parameters")
+                .map(|p| p.named_child_count() > 0)
+                .unwrap_or(false);
+        }
+        current = parent;
+    }
+    false
 }
 
 /// Strip a trailing template-argument list from a C++ scope component
