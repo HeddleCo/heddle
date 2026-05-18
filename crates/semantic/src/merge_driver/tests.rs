@@ -2460,3 +2460,97 @@ fn foo(x: u32) -> u32 {
         "expected ONE fn foo (parameter rename must not split identity), got {foo_count}: {merged}"
     );
 }
+
+// =====================================================================
+// Codex r5 P1 #2: C/C++ `classify_c_node` derives the function name
+// via `identifier_in_subtree` — a DFS over the declarator subtree that
+// matches the first `identifier` / `type_identifier` / etc. it sees.
+// For a templated out-of-class definition `void Foo<U>::bar()`, the
+// qualified identifier's scope is a `template_type` whose first
+// descendant is a `type_identifier` ("Foo") — that wins the DFS over
+// the actual method name ("bar"). All methods on the same templated
+// type collapse to name="Foo" and end up keyed positionally; an added
+// method in the middle of the run misaligns occurrence indexes, so
+// two unrelated methods get 3-way merged against each other.
+// =====================================================================
+#[test]
+fn cpp_templated_out_of_class_methods_keyed_by_their_own_name_not_template_scope() {
+    // base has `Foo<U>::bar` then `Foo<U>::foo`. ours inserts
+    // `Foo<U>::baz` between them. theirs edits `Foo<U>::foo`'s body.
+    // Each side touches a disjoint method — clean merge expected.
+    //
+    // Pre-fix every method classifies as name="Foo" (the template_type
+    // scope's first type_identifier). With ours's added middle
+    // method, the per-side occurrence indexes diverge: base/theirs
+    // place `foo` at index 1 while ours places `baz` at index 1. So
+    // resolve_item 3-way merges `Foo<U>::foo`'s body against
+    // `Foo<U>::baz`'s body — a clean source file gets corrupted.
+    let base = "\
+template <typename U>
+void Foo<U>::bar() { int x = 0; (void)x; }
+
+template <typename U>
+void Foo<U>::foo() { int y = 0; (void)y; }
+";
+    let ours = "\
+template <typename U>
+void Foo<U>::bar() { int x = 0; (void)x; }
+
+template <typename U>
+void Foo<U>::baz() { int z = 0; (void)z; }
+
+template <typename U>
+void Foo<U>::foo() { int y = 0; (void)y; }
+";
+    let theirs = "\
+template <typename U>
+void Foo<U>::bar() { int x = 0; (void)x; }
+
+template <typename U>
+void Foo<U>::foo() { int y = 0; (void)y; int yy = y; (void)yy; }
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // ours's added baz must land intact.
+    assert!(
+        text.contains("Foo<U>::baz()"),
+        "ours's added Foo<U>::baz() must appear: {text}"
+    );
+    assert!(
+        text.contains("int z = 0"),
+        "Foo<U>::baz's body must survive verbatim: {text}"
+    );
+    // theirs's edit on foo must land.
+    assert!(
+        text.contains("int yy = y"),
+        "theirs's edit on Foo<U>::foo must survive: {text}"
+    );
+    // Each named method appears exactly once — no duplication from
+    // re-emission via misaligned occurrence indexes, no body collapse.
+    let bar_count = text.matches("Foo<U>::bar()").count();
+    let foo_count = text.matches("Foo<U>::foo()").count();
+    let baz_count = text.matches("Foo<U>::baz()").count();
+    assert_eq!(
+        bar_count, 1,
+        "Foo<U>::bar() must appear exactly once, got {bar_count}: {text}"
+    );
+    assert_eq!(
+        foo_count, 1,
+        "Foo<U>::foo() must appear exactly once, got {foo_count}: {text}"
+    );
+    assert_eq!(
+        baz_count, 1,
+        "Foo<U>::baz() must appear exactly once, got {baz_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "merge must be clean — disjoint method edits + a clean addition: {text}"
+    );
+}
