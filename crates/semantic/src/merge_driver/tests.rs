@@ -2164,6 +2164,58 @@ fn foo() { 2 }
 // crate-level attributes like `#![no_std]`, changing compilation
 // behavior outside the edited item.
 // =====================================================================
+// =====================================================================
+// Codex r4 P1 #2: per-side item maps (`BTreeMap<ItemKey, &Item>` /
+// `BTreeMap<ItemKey, usize>`) collapse repeated declarations sharing a
+// key — only the LAST occurrence survives matching/indexing. In
+// languages that allow redeclaration (top-level JS/Python functions of
+// the same name + signature), earlier declarations silently disappear
+// during reconstruction.
+// =====================================================================
+#[test]
+fn javascript_duplicate_function_declarations_both_survive_merge() {
+    // Two `function foo` declarations in source — same name + same
+    // (empty) signature → identical ItemKey. ours modifies the SECOND;
+    // theirs modifies the FIRST. Both modifications must land. Pre-fix
+    // (BTreeMap collapse), only the LAST occurrence is kept per side,
+    // so theirs's modification to the first declaration is invisible
+    // and either gets dropped or surfaces as a spurious conflict.
+    let base = "\
+function foo() { return 1; }
+function foo() { return 2; }
+";
+    let ours = "\
+function foo() { return 1; }
+function foo() { return 22; }
+";
+    let theirs = "\
+function foo() { return 11; }
+function foo() { return 2; }
+";
+    let outcome = merge_at(base, ours, theirs, "f.js");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    let foo_count = text.matches("function foo").count();
+    assert_eq!(
+        foo_count, 2,
+        "both `function foo` declarations must survive, got {foo_count}: {text}"
+    );
+    assert!(
+        text.contains("return 11"),
+        "first declaration must show theirs's modification (return 11): {text}"
+    );
+    assert!(
+        text.contains("return 22"),
+        "second declaration must show ours's modification (return 22): {text}"
+    );
+}
+
 #[test]
 fn rust_inner_attribute_stays_at_crate_scope_when_added_item_conflicts() {
     // base has only `#![no_std]` (no items). Both sides add `fn foo`
