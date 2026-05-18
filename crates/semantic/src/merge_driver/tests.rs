@@ -4102,7 +4102,9 @@ template<class T> void A<T&>::foo() {
         "ours's edit on A<T&>::foo must survive: {r_body}"
     );
     // Each specialization appears exactly once — no duplication from
-    // re-emission via misaligned occurrence indexes.
+    // re-emission via misaligned occurrence indexes. The `>` after the
+    // partial-spec pattern disambiguates `A<T*>` from `A<T**>` in
+    // substring search.
     let pp_count = text.matches("A<T**>::foo()").count();
     let p_count = text.matches("A<T*>::foo()").count();
     let r_count = text.matches("A<T&>::foo()").count();
@@ -4110,12 +4112,9 @@ template<class T> void A<T&>::foo() {
         pp_count, 1,
         "A<T**>::foo must appear exactly once: got {pp_count}: {text}"
     );
-    // T*'s pattern is a prefix of T**'s pattern; subtract T** occurrences
-    // to get the bare T* count.
-    let bare_p_count = p_count - pp_count;
     assert_eq!(
-        bare_p_count, 1,
-        "A<T*>::foo must appear exactly once: got {bare_p_count}: {text}"
+        p_count, 1,
+        "A<T*>::foo must appear exactly once: got {p_count}: {text}"
     );
     assert_eq!(
         r_count, 1,

@@ -1058,39 +1058,39 @@ fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String
 /// produce different keys.
 ///
 /// Template-argument lists on scope components are stripped ONLY when
-/// the function definition is wrapped in a `template_declaration` whose
-/// parameter list is non-empty — that is, when the scope's
-/// template-argument-list is a *usage* of the enclosing
-/// template_declaration's parameters (`A<T>::foo` inside
-/// `template <class T>`). The post-strip `["A"]` matches the inline form
-/// `class A { void foo() {} }` (which inherits scope from
-/// `class_specifier.name` — `A` only, never `A<T>`), so refactoring a
-/// method between inline and out-of-class keys at the same scope and
-/// merges cleanly (Codex r9 P2, cid 3256397418).
+/// the args are a *usage* of an enclosing `template_declaration`'s
+/// parameters — i.e., the args list IS the parameter list spelled
+/// back out. `template<class T> void Foo<T>::bar()` strips to
+/// `["Foo"]` (the `<T>` references the enclosing template parameter)
+/// so it matches the inline form `template<class T> class Foo { void
+/// bar() {} };` (Codex r9 P2, cid 3256397418).
 ///
-/// Explicit specializations like `void A<int>::foo()` or
-/// `void A<float>::foo()` — defined OUTSIDE a `template_declaration`,
-/// or inside `template<>` (empty parameter list) — keep their
-/// arguments because `A<int>` and `A<float>` are distinct classes from
-/// C++'s perspective. Collapsing them to `A` would cross-pair edits
-/// across unrelated specializations when files hold multiple specs
-/// and a side reorders or inserts a new one (Codex r10 P2, cid
-/// 3256487042).
+/// Specialization arguments are NEVER stripped, so distinct
+/// specializations get distinct keys:
+///   * Explicit specializations defined outside a `template_declaration`
+///     or inside `template<>` (empty parameter list) keep their args:
+///     `void A<int>::foo()` and `void A<float>::foo()` get
+///     `["A<int>"]` vs `["A<float>"]` (Codex r10 P2, cid 3256487042).
+///   * Partial specializations under a non-empty `template_declaration`
+///     also keep their args because the args are NOT the bare
+///     parameter list: `template<class T> void A<T*>::foo()` keeps
+///     `["A<T*>"]` distinct from `template<class T> void A<T&>::foo()`'s
+///     `["A<T&>"]` (Codex r11 P1 #3, cid 3256623807).
 ///
 /// The walk mirrors `c_function_name`: strip pointer/reference/
 /// parenthesized wrappers via the `declarator` field, and at each
-/// `qualified_identifier` record its `scope` field text and descend
-/// into its `name` field. `template_function` doesn't bear scope but
-/// its `name` field can be a qualified_identifier in some grammar
-/// shapes — descend through it (parity with `c_function_name`) so we
-/// never miss nested qualification (Codex r10 P2, cid 3256487046).
+/// `qualified_identifier` record its `scope` field and descend into
+/// its `name` field. `template_function` doesn't bear scope but its
+/// `name` field can be a qualified_identifier in some grammar shapes —
+/// descend through it (parity with `c_function_name`) so we never miss
+/// nested qualification (Codex r10 P2, cid 3256487046).
 fn c_function_scope(
     source: &str,
     function_definition: Node<'_>,
     function_declarator: Node<'_>,
 ) -> Vec<String> {
     let mut scope = Vec::new();
-    let strip_args = is_inside_non_empty_template_declaration(function_definition);
+    let param_lists = enclosing_template_param_lists(function_definition, source);
     let Some(mut current) = function_declarator.child_by_field_name("declarator") else {
         return scope;
     };
@@ -1098,13 +1098,7 @@ fn c_function_scope(
         match current.kind() {
             "qualified_identifier" => {
                 if let Some(s) = current.child_by_field_name("scope") {
-                    let raw = strip_whitespace(&source[s.byte_range()]);
-                    let component = if strip_args {
-                        strip_template_args(&raw)
-                    } else {
-                        raw
-                    };
-                    scope.push(component);
+                    scope.push(scope_component_text(source, s, &param_lists));
                 }
                 let Some(next) = current.child_by_field_name("name") else {
                     return scope;
@@ -1132,47 +1126,149 @@ fn c_function_scope(
     scope
 }
 
-/// True iff `node`'s nearest enclosing `template_declaration` has a
-/// non-empty `template_parameter_list`. Used to decide whether
-/// template-argument lists on scope components are parameter usages
-/// (strip — they reference the enclosing template's parameters) or
-/// specialization arguments (keep — they're concrete types fully
-/// specifying which specialization is being defined).
+/// Render a single scope component as a `String`. Strips the template
+/// argument list iff `scope_node` is a `template_type` whose arguments
+/// are a parameter usage of some enclosing `template_declaration` —
+/// e.g. `Foo<T>` inside `template<class T> ...` collapses to `Foo`.
+/// Partial specialization patterns (`A<T*>`, `A<T&>`) and concrete
+/// specialization args (`A<int>`) fail the usage test and survive
+/// verbatim so distinct specializations get distinct keys.
+fn scope_component_text(
+    source: &str,
+    scope_node: Node<'_>,
+    param_lists: &[Vec<String>],
+) -> String {
+    let raw = strip_whitespace(&source[scope_node.byte_range()]);
+    if scope_node.kind() != "template_type" || param_lists.is_empty() {
+        return raw;
+    }
+    let Some(name_node) = scope_node.child_by_field_name("name") else {
+        return raw;
+    };
+    let Some(args_node) = scope_node.child_by_field_name("arguments") else {
+        return raw;
+    };
+    if template_args_match_any_param_list(source, args_node, param_lists) {
+        strip_whitespace(&source[name_node.byte_range()])
+    } else {
+        raw
+    }
+}
+
+/// Collect parameter-name lists from every `template_declaration`
+/// enclosing `node`, innermost first. Each list contains the parameter
+/// identifiers in declaration order (`class T` → `"T"`, `int N` →
+/// `"N"`). Lists are omitted if any parameter's name can't be extracted
+/// (variadic packs, template-template params, etc.) — better to
+/// over-keep template args than collapse a specialization onto the
+/// primary template's scope.
 ///
-/// `template<>` prefixes — empty parameter list — signal explicit
-/// specialization, so we return false and the scope keeps its
-/// arguments.
-fn is_inside_non_empty_template_declaration(node: Node<'_>) -> bool {
+/// Multiple enclosing template_declarations matter for member
+/// templates defined out-of-class:
+/// `template<class T> template<class U> void A<T>::foo()`. The
+/// innermost params are `[U]`, but the scope's `<T>` references the
+/// outer `[T]`. Stripping must succeed against ANY enclosing
+/// template_declaration's parameter list.
+fn enclosing_template_param_lists(node: Node<'_>, source: &str) -> Vec<Vec<String>> {
+    let mut lists = Vec::new();
     let mut current = node;
-    for _ in 0..32 {
+    for _ in 0..64 {
         let Some(parent) = current.parent() else {
-            return false;
+            break;
         };
-        if parent.kind() == "template_declaration" {
-            return parent
-                .child_by_field_name("parameters")
-                .map(|p| p.named_child_count() > 0)
-                .unwrap_or(false);
+        if parent.kind() == "template_declaration"
+            && let Some(params_node) = parent.child_by_field_name("parameters")
+        {
+            let mut names = Vec::new();
+            let mut cursor = params_node.walk();
+            let mut all_named = true;
+            for child in params_node.named_children(&mut cursor) {
+                match template_param_name(source, child) {
+                    Some(n) => names.push(n),
+                    None => {
+                        all_named = false;
+                        break;
+                    }
+                }
+            }
+            if all_named && !names.is_empty() {
+                lists.push(names);
+            }
         }
         current = parent;
     }
-    false
+    lists
 }
 
-/// Strip a trailing template-argument list from a C++ scope component
-/// for ItemKey normalization. `A<T>` → `A`, `Foo<int, std::map<K, V>>`
-/// → `Foo`, `Bar` → `Bar`. Match on the FIRST `<` so nested arguments
-/// are dropped wholesale alongside the outer pair.
-///
-/// Only intended for scope qualifier text (e.g. the `scope` field of a
-/// `qualified_identifier`). Not safe for arbitrary identifiers — an
-/// operator name like `operator<` would be truncated. Scope components
-/// can't be operator names in well-formed C++, so this is fine here.
-fn strip_template_args(s: &str) -> String {
-    match s.find('<') {
-        Some(i) => s[..i].to_string(),
-        None => s.to_string(),
+/// Extract the name of a single `template_parameter_list` child.
+/// Handles `type_parameter_declaration` (`class T` / `typename T` →
+/// `"T"`) and `parameter_declaration` for non-type parameters
+/// (`int N` → `"N"`) by returning the LAST `identifier`-or-
+/// `type_identifier` named-child's text. Returns `None` for shapes we
+/// don't recognise (parameter packs, template-template parameters,
+/// etc.) so the caller bails out conservatively.
+fn template_param_name(source: &str, param: Node<'_>) -> Option<String> {
+    let mut last = None;
+    let mut cursor = param.walk();
+    for child in param.named_children(&mut cursor) {
+        if matches!(child.kind(), "identifier" | "type_identifier") {
+            last = Some(child);
+        }
     }
+    last.map(|n| strip_whitespace(&source[n.byte_range()]))
+}
+
+/// True iff every named child of `args` (a `template_argument_list`)
+/// is a bare parameter-name reference AND that sequence of references
+/// equals some enclosing template_declaration's parameter list in
+/// order. A `type_descriptor` whose only named child is a single
+/// `type_identifier` counts as a bare reference; anything with a
+/// pointer/reference/array/function-pointer wrapper or non-type-
+/// descriptor shape (literal, template_type, etc.) is treated as a
+/// specialization pattern and short-circuits to false.
+fn template_args_match_any_param_list(
+    source: &str,
+    args: Node<'_>,
+    param_lists: &[Vec<String>],
+) -> bool {
+    let mut arg_names = Vec::new();
+    let mut cursor = args.walk();
+    for child in args.named_children(&mut cursor) {
+        let Some(name) = parameter_usage_arg_name(source, child) else {
+            return false;
+        };
+        arg_names.push(name);
+    }
+    param_lists.contains(&arg_names)
+}
+
+/// If `arg` is a bare parameter-name reference inside a
+/// `template_argument_list`, return that name. A bare reference is a
+/// `type_descriptor` whose only named child is a single
+/// `type_identifier` — meaning the argument is just `T`, with no
+/// pointer / reference / array / function-pointer wrappers. Any other
+/// shape (specialization pattern like `T*`, concrete type like `int`,
+/// nested template like `Foo<T>`, non-type literal like `5`) yields
+/// `None`.
+fn parameter_usage_arg_name(source: &str, arg: Node<'_>) -> Option<String> {
+    if arg.kind() != "type_descriptor" {
+        return None;
+    }
+    let mut cursor = arg.walk();
+    let mut only: Option<Node<'_>> = None;
+    let mut count = 0usize;
+    for child in arg.named_children(&mut cursor) {
+        count += 1;
+        only = Some(child);
+        if count > 1 {
+            return None;
+        }
+    }
+    let only = only?;
+    if only.kind() != "type_identifier" {
+        return None;
+    }
+    Some(strip_whitespace(&source[only.byte_range()]))
 }
 
 /// Name an impl block. Two impls of the same type with different traits must
