@@ -7,36 +7,25 @@
 
 use crate::symbol_resolver::ResolvedSymbol;
 
-/// Cap on AST traversal depth. Beyond this, nodes are not inspected —
-/// the walker simply stops descending. Picked well above realistic
-/// source nesting so the cap only trips on pathological / synthetic
-/// input. Mirrors the `MAX_TRAVERSAL_DEPTH` introduced in
-/// `merge_driver::items::collect_items` (heddle#114 422031b); duplicated
-/// here per the convention of keeping each AST walker self-contained.
-const MAX_TRAVERSAL_DEPTH: usize = 256;
-
 /// Walk tree-sitter AST to find function/method/struct/enum definitions
 /// matching a target name. Returns all matches.
 ///
-/// Iterative DFS over a `Vec<(Node, Option<String>, usize)>` stack —
-/// the stack-overflow shape that motivated the iterative form in
+/// Iterative DFS over a `Vec<(Node, Option<String>)>` stack — the
+/// stack-overflow shape that motivated the iterative form in
 /// `merge_driver::items::collect_items` (heddle#114 422031b) lives in
-/// this walker too: it recurses for every child of every non-scope
-/// node, so a deeply-parseable input drives call depth proportional to
-/// AST depth. tree-sitter itself parses iteratively, so the only guard
-/// is here.
+/// this walker too: a recursive walker recurses for every child of
+/// every non-scope node, so a deeply-parseable input drives call depth
+/// proportional to AST depth. The iterative form alone is the fix; no
+/// depth cap, which would silently drop deep definitions.
 pub(crate) fn find_definitions(
     node: &tree_sitter::Node,
     source: &[u8],
     target_name: &str,
 ) -> Vec<ResolvedSymbol> {
     let mut results = Vec::new();
-    let mut stack: Vec<(tree_sitter::Node, Option<String>, usize)> = vec![(*node, None, 0)];
+    let mut stack: Vec<(tree_sitter::Node, Option<String>)> = vec![(*node, None)];
 
-    while let Some((node, parent, depth)) = stack.pop() {
-        if depth > MAX_TRAVERSAL_DEPTH {
-            continue;
-        }
+    while let Some((node, parent)) = stack.pop() {
         let current_parent = parent.as_deref();
         let kind = node.kind();
         // True when the kind's arm below handles its own child traversal
@@ -69,7 +58,7 @@ pub(crate) fn find_definitions(
                 let mut cursor = node.walk();
                 let children: Vec<_> = node.children(&mut cursor).collect();
                 for child in children.into_iter().rev() {
-                    stack.push((child, impl_type_name.clone(), depth + 1));
+                    stack.push((child, impl_type_name.clone()));
                 }
                 descended_with_new_parent = true;
             }
@@ -122,7 +111,7 @@ pub(crate) fn find_definitions(
                 let mut cursor = node.walk();
                 let children: Vec<_> = node.children(&mut cursor).collect();
                 for child in children.into_iter().rev() {
-                    stack.push((child, class_name.clone(), depth + 1));
+                    stack.push((child, class_name.clone()));
                 }
                 descended_with_new_parent = true;
             }
@@ -210,7 +199,7 @@ pub(crate) fn find_definitions(
                 let mut cursor = node.walk();
                 let children: Vec<_> = node.children(&mut cursor).collect();
                 for child in children.into_iter().rev() {
-                    stack.push((child, class_name.clone(), depth + 1));
+                    stack.push((child, class_name.clone()));
                 }
                 descended_with_new_parent = true;
             }
@@ -279,7 +268,7 @@ pub(crate) fn find_definitions(
             let mut cursor = node.walk();
             let children: Vec<_> = node.children(&mut cursor).collect();
             for child in children.into_iter().rev() {
-                stack.push((child, parent.clone(), depth + 1));
+                stack.push((child, parent.clone()));
             }
         }
     }
