@@ -452,20 +452,59 @@ fn ensure_trailing_newline(out: &mut Vec<u8>, eol: &[u8]) {
     }
 }
 
-/// Pick the dominant line-ending across a set of byte samples. CRLF
-/// wins as soon as ANY sample contains `\r\n`: emitting bare LF into
-/// a file whose existing lines use CRLF produces mixed endings, which
-/// breaks Windows tooling and produces noisy diffs (Codex r6 P2 #1
-/// for marker lines; r7 prediction P1 for the trailing-newline ADD
-/// case). LF is the default for samples that have neither marker or
-/// only contain LF.
+/// Pick the dominant line-ending across a set of byte samples by
+/// counting `\r\n` occurrences vs bare `\n` (LF not preceded by CR)
+/// across all samples and returning whichever has more. Ties — and the
+/// all-zero case — fall back to the first sample's own dominant style
+/// (by convention callers pass `base` first), then to LF.
+///
+/// Earlier revisions returned CRLF as soon as ANY sample contained one
+/// `\r\n`; that wrongly flips a majority-LF file to CRLF when a single
+/// side happens to be CRLF (Codex r7 P2, cid 3256225712). Majority
+/// voting respects the file's actual style without overweighting a
+/// single divergent side.
 fn detect_eol(samples: &[&[u8]]) -> &'static [u8] {
+    let mut crlf = 0usize;
+    let mut lf = 0usize;
     for s in samples {
-        if s.windows(2).any(|w| w == b"\r\n") {
+        let (c, l) = count_eols(s);
+        crlf += c;
+        lf += l;
+    }
+    if crlf > lf {
+        return b"\r\n";
+    }
+    if lf > crlf {
+        return b"\n";
+    }
+    // Tie (including all-zero). Tie-break to the first sample's own
+    // dominant style — by convention callers pass `base` first.
+    if let Some(first) = samples.first() {
+        let (c, l) = count_eols(first);
+        if c > l {
             return b"\r\n";
         }
     }
     b"\n"
+}
+
+/// Count (`\r\n`, bare `\n`) occurrences in `s`. A `\n` is "bare" iff
+/// it is not preceded by `\r`.
+fn count_eols(s: &[u8]) -> (usize, usize) {
+    let mut crlf = 0usize;
+    let mut lf = 0usize;
+    let mut prev = 0u8;
+    for &b in s {
+        if b == b'\n' {
+            if prev == b'\r' {
+                crlf += 1;
+            } else {
+                lf += 1;
+            }
+        }
+        prev = b;
+    }
+    (crlf, lf)
 }
 
 /// Match the trailing-newline state of `output` to the majority of the
