@@ -443,10 +443,29 @@ fn compute_item_emit_order(
         .collect()
 }
 
-fn ensure_trailing_newline(out: &mut Vec<u8>) {
+/// Append `eol` to `out` unless `out` already ends with a `\n` (which
+/// covers both LF and CRLF terminations). Used to keep conflict-marker
+/// blocks well-formed when a body doesn't end with its own newline.
+fn ensure_trailing_newline(out: &mut Vec<u8>, eol: &[u8]) {
     if !out.is_empty() && *out.last().unwrap() != b'\n' {
-        out.push(b'\n');
+        out.extend_from_slice(eol);
     }
+}
+
+/// Pick the dominant line-ending across a set of byte samples. CRLF
+/// wins as soon as ANY sample contains `\r\n`: emitting bare LF into
+/// a file whose existing lines use CRLF produces mixed endings, which
+/// breaks Windows tooling and produces noisy diffs (Codex r6 P2 #1
+/// for marker lines; r7 prediction P1 for the trailing-newline ADD
+/// case). LF is the default for samples that have neither marker or
+/// only contain LF.
+fn detect_eol(samples: &[&[u8]]) -> &'static [u8] {
+    for s in samples {
+        if s.windows(2).any(|w| w == b"\r\n") {
+            return b"\r\n";
+        }
+    }
+    b"\n"
 }
 
 /// Match the trailing-newline state of `output` to the majority of the
@@ -505,18 +524,25 @@ fn majority_ends_with_newline(base: &str, ours: &str, theirs: &str) -> bool {
 /// insertion bodies. Mirrors the marker shape `heddle-merge::markers`
 /// produces so external validators (heddle#78) and IDE conflict tools
 /// parse it identically.
+///
+/// Line endings on the marker lines match the dominant style of the
+/// two bodies — a CRLF file gets CRLF markers and an LF file gets LF
+/// markers. Without that, a CRLF body wrapped in LF markers produces
+/// a mixed-endings file that breaks Windows tooling (Codex r6 P2 #1).
 fn emit_addadd_conflict(ours: &[u8], theirs: &[u8], markers: ConflictMarkers<'_>) -> Vec<u8> {
+    let eol = detect_eol(&[ours, theirs]);
     let mut out = Vec::with_capacity(ours.len() + theirs.len() + 64);
     out.extend_from_slice(b"<<<<<<< ");
     out.extend_from_slice(markers.ours.as_bytes());
-    out.push(b'\n');
+    out.extend_from_slice(eol);
     out.extend_from_slice(ours);
-    ensure_trailing_newline(&mut out);
-    out.extend_from_slice(b"=======\n");
+    ensure_trailing_newline(&mut out, eol);
+    out.extend_from_slice(b"=======");
+    out.extend_from_slice(eol);
     out.extend_from_slice(theirs);
-    ensure_trailing_newline(&mut out);
+    ensure_trailing_newline(&mut out, eol);
     out.extend_from_slice(b">>>>>>> ");
     out.extend_from_slice(markers.theirs.as_bytes());
-    out.push(b'\n');
+    out.extend_from_slice(eol);
     out
 }
