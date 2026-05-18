@@ -2035,6 +2035,48 @@ def foo():
 // attribute remains anchored to a byte position that now belongs to
 // a different item — behavior change without a conflict.
 // =====================================================================
+// =====================================================================
+// Codex r3 P2 #1: rust_impl_name still tokenizes on whitespace
+// instead of stripping it, so cosmetic spaces around `::`, `<>`, etc.
+// break the impl-scope identity. Methods inside the reformatted impl
+// key with a different scope than the same methods in the unchanged
+// impl, surfacing as spurious add/delete conflicts.
+// =====================================================================
+#[test]
+fn rust_impl_name_ignores_whitespace_around_path_punctuation() {
+    let base = "\
+impl std::vec::Vec<T> {
+    fn alpha() { 1 }
+}
+";
+    // ours reformats whitespace around `::` and `<>` — semantically
+    // identical impl, same method bodies.
+    let ours = "\
+impl std :: vec :: Vec < T > {
+    fn alpha() { 1 }
+}
+";
+    // theirs modifies alpha's body.
+    let theirs = "\
+impl std::vec::Vec<T> {
+    fn alpha() { 2 }
+}
+";
+    let outcome = merge_rust(base, ours, theirs);
+    let text = assert_clean(outcome);
+    // alpha's body reflects theirs's modification.
+    assert!(
+        text.contains("{ 2 }"),
+        "alpha body should be `2`: {text}"
+    );
+    // alpha appears exactly once — no spurious add/delete pair.
+    let alpha_count = text.matches("fn alpha").count();
+    assert_eq!(
+        alpha_count, 1,
+        "expected fn alpha exactly once, got {alpha_count}: {text}"
+    );
+}
+
 #[test]
 fn rust_outer_attribute_does_not_duplicate_when_adjacent_item_deleted() {
     // When one side deletes an item that immediately precedes an
