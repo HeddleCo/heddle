@@ -245,3 +245,47 @@ fn test_extract_functions_handles_deeply_nested_modules() {
     assert_eq!(functions.len(), 1);
     assert_eq!(functions[0].name, "deeply_nested");
 }
+
+#[cfg(feature = "lang-cpp")]
+#[test]
+fn test_cpp_templated_qualified_function_names() {
+    // For `void Foo<U>::bar()` the declarator subtree's first
+    // identifier in DFS order is the scope's `type_identifier` ("Foo"),
+    // so a plain DFS walk reports every method on the same templated
+    // scope as "Foo" and collides them. The fix walks the declarator's
+    // `declarator` field and recurses into `qualified_identifier` /
+    // `template_function`'s `name` field — see heddle#114 commit
+    // dc37af8 for the proven pattern (mirrored from
+    // `merge_driver::items::c_function_name`).
+    let source = r#"
+template <typename U>
+struct Foo {
+    void bar();
+    void baz();
+};
+
+template <typename U>
+void Foo<U>::bar() {}
+
+template <typename U>
+void Foo<U>::baz() {}
+"#;
+
+    let parsed = ParsedFile::parse(source, Language::Cpp).expect("Should parse");
+    let functions = parsed.extract_functions();
+    let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"bar"),
+        "expected templated qualified def to resolve as `bar`, got {names:?}"
+    );
+    assert!(
+        names.contains(&"baz"),
+        "expected templated qualified def to resolve as `baz`, got {names:?}"
+    );
+    let foo_count = names.iter().filter(|n| **n == "Foo").count();
+    assert_eq!(
+        foo_count, 0,
+        "templated qualified method defs should not resolve to scope name `Foo`: {names:?}"
+    );
+}
