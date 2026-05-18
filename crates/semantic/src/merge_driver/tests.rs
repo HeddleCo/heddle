@@ -2694,3 +2694,90 @@ fn crlf_trailing_pair_popped_as_unit_when_majority_has_no_trailing_newline() {
         "merged output should end at the closing brace (majority wants no trailing newline): {merged:?}"
     );
 }
+
+// =====================================================================
+// Codex r6 P1 #1 (cid 3256117895): C/C++ functions key on (kind, name,
+// signature) with `extra_scope=[]`. Two methods with the same name on
+// different classes/namespaces — `A::foo()` and `B::foo()` — collapse
+// to the same ItemKey. The MatchKey occurrence-index disambiguator
+// (r4 fix) saves the case where both sides preserve method order, but
+// when one side adds a new same-named method in a different class
+// BEFORE an existing one, occurrence indices misalign and
+// resolve_item 3-way merges UNRELATED functions across sides.
+// =====================================================================
+#[test]
+fn cpp_same_named_methods_in_different_classes_keep_distinct_identities() {
+    // base has only `A::foo`. ours adds a new class B with its own
+    // `B::foo` BEFORE A's definition (a perfectly valid C++ refactor:
+    // grouped class declarations followed by definitions). theirs
+    // edits A::foo's body, disjoint from ours's structural addition.
+    //
+    // Pre-fix every `foo` keys as (Function, "foo", [], sig). Per-side
+    // occurrence indices:
+    //   base    [A::foo=0]
+    //   ours    [B::foo=0, A::foo=1]
+    //   theirs  [A::foo=0]
+    // MatchKey (foo,0) pairs base's A::foo with ours's B::foo and
+    // theirs's A::foo. resolve_item runs a 3-way merge on three
+    // unrelated function bodies — base/theirs match (A unchanged on
+    // theirs's left vs base) but ours diverges with B's bytes, so it
+    // takes ours's B::foo bytes at A::foo's slot, dropping theirs's
+    // A::foo edit entirely and emitting B::foo at A's position.
+    //
+    // Post-fix `extra_scope=["A"]` and `["B"]` mean B::foo and A::foo
+    // have distinct ItemKeys; theirs's A::foo edit lands at A's
+    // position and ours's B::foo is cleanly added.
+    let base = "\
+class A { public: void foo(); };
+
+void A::foo() { int a = 0; (void)a; }
+";
+    let ours = "\
+class A { public: void foo(); };
+class B { public: void foo(); };
+
+void B::foo() { int b = 99; (void)b; }
+void A::foo() { int a = 0; (void)a; }
+";
+    let theirs = "\
+class A { public: void foo(); };
+
+void A::foo() { int a = 2; (void)a; }
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // theirs's edit on A::foo must land — pre-fix it's lost because
+    // (foo,0) takes ours's B::foo bytes in place of A::foo.
+    assert!(
+        text.contains("int a = 2"),
+        "theirs's A::foo edit must survive: {text}"
+    );
+    // ours's added B::foo must land with its body intact.
+    assert!(
+        text.contains("int b = 99"),
+        "ours's added B::foo body must survive: {text}"
+    );
+    // Each definition appears exactly once — no duplication, no
+    // cross-contamination via misaligned occurrence indexing.
+    let a_def_count = text.matches("void A::foo()").count();
+    let b_def_count = text.matches("void B::foo()").count();
+    assert_eq!(
+        a_def_count, 1,
+        "A::foo definition must appear exactly once, got {a_def_count}: {text}"
+    );
+    assert_eq!(
+        b_def_count, 1,
+        "B::foo definition must appear exactly once, got {b_def_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "disjoint cross-class edits + addition must merge cleanly: {text}"
+    );
+}
