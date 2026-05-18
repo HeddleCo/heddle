@@ -74,6 +74,23 @@ pub fn semantic_three_way_merge(
     let ours_segments = segment_file(&ours_parsed);
     let theirs_segments = segment_file(&theirs_parsed);
 
+    // When a side has zero parseable items but the others do, the
+    // per-item alignment has nothing to anchor on for that side and
+    // its contiguous content can't be cleanly split across the other
+    // sides' per-item segments — the surrounding preamble/postamble
+    // merges either drop the side's edits (Codex r2 P1 #3) or
+    // double-emit its bridging content. text_hunk_merge handles the
+    // full-file alignment without those artifacts, so route this
+    // shape through it.
+    let counts = [
+        base_segments.items.len(),
+        ours_segments.items.len(),
+        theirs_segments.items.len(),
+    ];
+    if counts.contains(&0) && counts.iter().any(|&c| c > 0) {
+        return text_hunk_merge_with_markers(base, ours, theirs, markers);
+    }
+
     reconstruct_merged_file(
         base_text,
         ours_text,
