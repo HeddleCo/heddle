@@ -2156,6 +2156,51 @@ fn foo() { 2 }
     assert!(text.contains("fn foo() { 2 }"), "foo body should reflect theirs: {text}");
 }
 
+// =====================================================================
+// Codex r4 P1 #1: `inner_attribute_item` was treated as leading metadata
+// for the next item. Inner attributes (`#![...]`) apply to the enclosing
+// module/crate, not the following function — so binding them to the
+// next item means deleting/relocating that item also deletes/relocates
+// crate-level attributes like `#![no_std]`, changing compilation
+// behavior outside the edited item.
+// =====================================================================
+#[test]
+fn rust_inner_attribute_stays_at_crate_scope_when_added_item_conflicts() {
+    // base has only `#![no_std]` (no items). Both sides add `fn foo`
+    // below it with diverging bodies. Pre-fix, foo's extended start
+    // byte absorbed `#![no_std]` on both sides, so the add/add
+    // conflict block contains `#![no_std]` on BOTH halves AND the
+    // base's `#![no_std]` bridges into the preamble — the crate
+    // attribute appears three times.
+    let base = "\
+#![no_std]
+";
+    let ours = "\
+#![no_std]
+
+fn foo() { 1 }
+";
+    let theirs = "\
+#![no_std]
+
+fn foo() { 2 }
+";
+    let outcome = merge_rust(base, ours, theirs);
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    let attr_count = text.matches("#![no_std]").count();
+    assert_eq!(
+        attr_count, 1,
+        "#![no_std] must appear exactly once at crate scope, got {attr_count}: {text}"
+    );
+}
+
 #[test]
 fn add_add_same_function_in_empty_base_surfaces_conflict_not_concatenation() {
     let base = "";
