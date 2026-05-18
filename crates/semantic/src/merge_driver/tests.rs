@@ -3018,3 +3018,27 @@ function foo(x: number): number {
         "disjoint overload addition + body edit must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// Codex r7 P2 (cid 3256225712): `detect_eol` returns CRLF as soon as
+// ANY sample contains `\r\n`. A single CRLF side then forces `\r\n`
+// onto a merge whose base + other side are LF — wrong for the
+// majority style of the file. Should be majority-of-occurrences with
+// base style as the tie-break.
+// =====================================================================
+#[test]
+fn detect_eol_uses_majority_when_two_of_three_inputs_are_lf() {
+    // base and theirs are LF (one bare `\n` each); ours uses CRLF
+    // internally but doesn't end with a newline, forcing the ADD
+    // branch of reconcile_trailing_newline. With the any-CRLF rule
+    // detect_eol picks CRLF and the merged file ends `\r\n`; with
+    // the majority rule it picks LF (2 LF samples vs 1 CRLF sample).
+    let base = "fn foo() {}\n";
+    let ours = "fn foo() {}\r\nfn bar() {}";
+    let theirs = "fn foo() { 1 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(
+        merged.ends_with('\n') && !merged.ends_with("\r\n"),
+        "merged output must end with LF (majority of inputs are LF): {merged:?}"
+    );
+}
