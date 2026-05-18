@@ -587,9 +587,15 @@ fn classify_c_node<'a>(
             // doesn't split function identity AND so pointer/reference/
             // array/function-pointer modifiers in the declarator field
             // disambiguate `f(int)` vs `f(int*)` (Codex r6 P1 #2).
-            let signature_hash = find_descendant(declarator, &["parameter_list"])
-                .map(|n| signature_hash_from_parameter_list(language, source, n))
-                .unwrap_or(0);
+            //
+            // Trailing function qualifiers (`const`, `volatile`, `&`,
+            // `&&`, `noexcept`) live as CHILDREN of the outer
+            // `function_declarator`, alongside `parameters` and
+            // `declarator`. Without folding them into the hash,
+            // member-function overloads on cv- or ref-qualifier alone
+            // (`foo()` vs `foo() const`) collapse to identical
+            // signature_hashes (Codex r8 P2, cid 3256283859).
+            let signature_hash = c_signature_hash(language, source, declarator);
             Some(Classified {
                 kind: ItemKind::Function,
                 name,
@@ -793,6 +799,35 @@ fn signature_hash_from_parameter_list(
         b"|".hash(&mut hasher);
     }
     arity.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Combined signature hash for a C/C++ outer `function_declarator`:
+/// mixes the parameter-list hash with the trailing function qualifiers
+/// (`type_qualifier`, `ref_qualifier`, `noexcept`) that live as direct
+/// children of the declarator.
+///
+/// Trailing-return-type and `virtual` are deliberately NOT mixed in:
+/// they shouldn't change overload identity. Source spelling is hashed
+/// after whitespace stripping so cosmetic reformatting (`foo() const`
+/// vs `foo()  const`) doesn't split keys.
+fn c_signature_hash(language: Language, source: &str, declarator: Node<'_>) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let param_hash = find_descendant(declarator, &["parameter_list"])
+        .map(|n| signature_hash_from_parameter_list(language, source, n))
+        .unwrap_or(0);
+    param_hash.hash(&mut hasher);
+    let mut cursor = declarator.walk();
+    for child in declarator.children(&mut cursor) {
+        match child.kind() {
+            "type_qualifier" | "ref_qualifier" | "noexcept" => {
+                b"@".hash(&mut hasher);
+                child.kind().hash(&mut hasher);
+                strip_whitespace(&source[child.byte_range()]).hash(&mut hasher);
+            }
+            _ => {}
+        }
+    }
     hasher.finish()
 }
 
