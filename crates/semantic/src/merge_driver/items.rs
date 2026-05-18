@@ -563,7 +563,7 @@ fn classify_c_node<'a>(
 ) -> Option<Classified<'a>> {
     if kind == "function_definition" {
         let declarator = node.child_by_field_name("declarator")?;
-        let name = identifier_in_subtree(source, declarator)?;
+        let name = c_function_name(source, declarator)?;
         // C/C++ parameter list lives inside the declarator subtree as a
         // `parameter_list` node — find it for overload disambiguation.
         // Use the structural hash (arity + per-parameter type) so a
@@ -691,16 +691,6 @@ fn signature_hash_from_parameter_list(source: &str, params: Node<'_>) -> u64 {
     hasher.finish()
 }
 
-fn hash_normalized(s: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    // Strip whitespace rather than splitting on it: `split_whitespace`
-    // leaves punctuation attached to identifiers, so `foo(x,y)` and
-    // `foo(x, y)` produce different token streams and hash differently
-    // — the same function ends up with distinct ItemKeys across sides.
-    strip_whitespace(s).hash(&mut hasher);
-    hasher.finish()
-}
-
 /// Drop all Unicode whitespace from `s`, preserving every other byte.
 /// Cosmetic reformatting that only adds/removes whitespace becomes
 /// invisible to the identity comparison; punctuation that semantically
@@ -729,19 +719,47 @@ fn name_from_field(source: &str, node: Node<'_>, field: &str) -> Option<String> 
     Some(source[name_node.byte_range()].to_string())
 }
 
-fn identifier_in_subtree(source: &str, node: Node<'_>) -> Option<String> {
-    let mut stack = vec![node];
-    while let Some(current) = stack.pop() {
-        if matches!(
-            current.kind(),
-            "identifier" | "field_identifier" | "type_identifier" | "property_identifier"
-        ) {
-            return Some(source[current.byte_range()].to_string());
-        }
-        for i in (0..current.child_count()).rev() {
-            if let Some(child) = current.child(i as u32) {
-                stack.push(child);
+/// Resolve the actual function name from a C/C++ `function_declarator`.
+/// `identifier_in_subtree` over the declarator subtree picks up the
+/// FIRST matching identifier in DFS order — for a templated qualified
+/// name like `Foo<U>::bar()` the scope's inner `type_identifier`
+/// ("Foo") wins and all methods on the same scope collide on
+/// name="Foo" (Codex r5 P1 #2).
+///
+/// Instead, walk the declarator's `declarator` field, stripping layers
+/// (`pointer_declarator`, `reference_declarator`, nested
+/// `function_declarator`) and recursing into `qualified_identifier`'s
+/// `name` field until a plain identifier-ish leaf is reached. That
+/// yields the actual method name regardless of how complex the scope
+/// prefix is (`Foo::Bar::baz` → "baz"; `Foo<U>::bar` → "bar";
+/// `ns::operator+` → "operator+"; `Foo::~Foo` → "~Foo").
+fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String> {
+    let mut current = function_declarator.child_by_field_name("declarator")?;
+    // Cap traversal so a pathological wrapper chain doesn't loop.
+    for _ in 0..32 {
+        match current.kind() {
+            "identifier"
+            | "field_identifier"
+            | "type_identifier"
+            | "property_identifier"
+            | "operator_name"
+            | "destructor_name" => {
+                return Some(source[current.byte_range()].to_string());
             }
+            // Scope-qualified names: descend to the name field so the
+            // scope's identifier never wins.
+            "qualified_identifier" | "template_function" => {
+                current = current.child_by_field_name("name")?;
+            }
+            // Wrappers that don't bear the name themselves; the name
+            // sits one level deeper in `declarator`.
+            "pointer_declarator"
+            | "reference_declarator"
+            | "function_declarator"
+            | "parenthesized_declarator" => {
+                current = current.child_by_field_name("declarator")?;
+            }
+            _ => return None,
         }
     }
     None
@@ -762,7 +780,6 @@ fn rust_impl_name(source: &str, node: Node<'_>) -> Option<String> {
     };
     // Strip ALL whitespace from the key so cosmetic reformatting around
     // `::`, `<>`, etc. doesn't turn into a "different impl"
-    // misclassification — same shape as `hash_normalized` for signature
-    // hashes (r3 fix `021ed8e`).
+    // misclassification (r3 fix `021ed8e`).
     Some(strip_whitespace(&key))
 }
