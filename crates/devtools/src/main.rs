@@ -7,12 +7,17 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
+mod check_no_silent_default_tree_load;
+
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("web-proto") => run_web_proto(args.collect()),
         Some("audit-idempotency") => run_audit_idempotency(),
         Some("audit-coverage") => run_audit_coverage(args.collect()),
+        Some("check-no-silent-default-tree-load") => {
+            check_no_silent_default_tree_load::run(args.collect())
+        }
         Some(command) => bail!("unknown command '{command}'"),
         None => bail!("expected a command (for example: web-proto)"),
     }
