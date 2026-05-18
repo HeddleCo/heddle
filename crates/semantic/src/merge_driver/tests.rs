@@ -2661,3 +2661,36 @@ class C {
         "merge must be clean — disjoint additions of decorated methods: {text}"
     );
 }
+
+// =====================================================================
+// Codex r5 P1 #4: `reconcile_trailing_newline` pops a single byte when
+// majority votes "no trailing newline". If the output ends with CRLF
+// (one side carries Windows line endings into the postamble), popping
+// the `\n` alone leaves a dangling `\r` — line-ending corruption.
+// CRLF must be popped AS A UNIT.
+// =====================================================================
+#[test]
+fn crlf_trailing_pair_popped_as_unit_when_majority_has_no_trailing_newline() {
+    // base and ours both lack a trailing newline. theirs is the only
+    // side that ends with CRLF. Majority (base + ours, 2 of 3) votes
+    // "no trailing newline" so reconcile_trailing_newline strips it.
+    // Pre-fix it pops a single byte (the `\n`), leaving a trailing
+    // `\r`. Post-fix it pops both bytes of the CRLF together.
+    //
+    // The body change on ours (and no change on theirs) is what funnels
+    // theirs's CRLF postamble into the output via the postamble merge.
+    let base = "fn foo() {}";
+    let ours = "fn foo() { 1 }";
+    let theirs = "fn foo() {}\r\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(
+        !merged.ends_with('\r'),
+        "merged output must not end with a dangling \\r (CRLF must pop as a unit): {merged:?}"
+    );
+    // Stronger: the output should end with `}` (matching the
+    // no-trailing-newline majority).
+    assert!(
+        merged.ends_with('}'),
+        "merged output should end at the closing brace (majority wants no trailing newline): {merged:?}"
+    );
+}
