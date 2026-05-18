@@ -51,15 +51,31 @@ jobs:
 
   no-silent-default-tree-load:
     name: no silent-default tree load (heddle#90 + #93)
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 5
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      # The asserter is now a Rust binary (heddle-devtools subcommand)
+      # using `syn` to walk the AST — replaced the regex implementation
+      # after three rounds of bypass-and-patch (heddle#103). Rust
+      # toolchain + cache so the build is fast on warm caches.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: asserter-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Build asserter binary
+        run: cargo build -p heddle-devtools --quiet
+
       # The mutation tests run first: if a future edit defeats the
-      # asserter (e.g. by reverting --multiline or widening the
-      # allowlist back to prefix-match), the self-tests fail before
-      # the asserter has a chance to silently pass.
+      # asserter (e.g. by loosening the chain walk or widening the
+      # allowlist to prefix match), the self-tests fail before the
+      # asserter has a chance to silently pass on production code.
       - name: Asserter self-tests (mutation fixtures)
         run: bash scripts/test-check-no-silent-default-tree-load.sh
+
       - name: Assert no `get_tree(...)?.unwrap_or_default()` regressions
         run: bash scripts/check-no-silent-default-tree-load.sh
