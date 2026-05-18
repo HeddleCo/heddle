@@ -1854,3 +1854,85 @@ func (a *A) M() int {
          whitespace), got {close_count} line-leading closing braces: {merged}"
     );
 }
+
+// =====================================================================
+// Codex r2 P2 #2: prevent duplicate preamble emission for leading
+// added items.
+//
+// reconstruct.rs:104 always takes each emitted key's original
+// preceding segment without tracking whether the side's preamble was
+// already emitted. When base has no items and both sides add
+// different items at the top with their own preambles
+// (imports/comments/docstring), the second emitted item's preceding
+// segment is the second side's preamble — which the first iteration
+// already pulled in via the missing-side fallback. Top-of-file
+// content gets duplicated.
+// =====================================================================
+#[test]
+fn no_base_items_both_sides_add_different_items_preamble_not_duplicated() {
+    // base has only a top-level comment; both sides add their own
+    // function with their own preamble (a use statement). The shared
+    // `// top header` line must appear exactly once in the output.
+    let base = "// top header\n";
+    let ours = "\
+// top header
+use std::a;
+
+fn alpha() { 1 }
+";
+    let theirs = "\
+// top header
+use std::b;
+
+fn beta() { 2 }
+";
+    let merged = match merge_rust(base, ours, theirs) {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    let header_count = merged.matches("// top header").count();
+    assert_eq!(
+        header_count, 1,
+        "expected `// top header` exactly once, got {header_count}: {merged}"
+    );
+}
+
+// =====================================================================
+// Codex r2 P1 #2: skip unconditional postamble merge for sides with
+// no items.
+//
+// reconstruct.rs:144 unconditionally emits each side's `last_segment`.
+// When a side has zero items, `inter_item_ranges()` returns one
+// segment — the whole file — and the first-item preamble fallback
+// has already consumed it. The postamble emission appends it again,
+// duplicating that side's content in the merged output.
+// =====================================================================
+#[test]
+fn zero_items_side_postamble_does_not_duplicate_bridging_segment() {
+    // ours has no parseable items (only a top-level `use`), base and
+    // theirs each have one function. Pre-fix, ours's "use std::io;\n"
+    // is consumed by the first iteration's preamble fallback AND
+    // re-emitted by the postamble merge — appearing twice in the
+    // output.
+    let base = "fn a() { 1 }\n";
+    let ours = "use std::io;\n";
+    let theirs = "fn a() { 2 }\n";
+    let outcome = merge_rust(base, ours, theirs);
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    let use_count = text.matches("use std::io").count();
+    assert_eq!(
+        use_count, 1,
+        "expected ours's `use std::io` exactly once, got {use_count}: {text}"
+    );
+}
