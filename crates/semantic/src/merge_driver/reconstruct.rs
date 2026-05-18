@@ -21,6 +21,11 @@ use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 
 use super::items::{FileSegments, Item, ItemKey};
 
+/// Three sides of the merge: `[base, ours, theirs]`. Each per-iteration
+/// segment contribution is indexed by [`Side`] so emission tracking can
+/// say "this side has already contributed range N — don't re-emit".
+const N_SIDES: usize = 3;
+
 /// Stitch three sides together via per-item resolution + inter-item hunk merge.
 pub(crate) fn reconstruct_merged_file(
     base: &str,
@@ -74,58 +79,57 @@ pub(crate) fn reconstruct_merged_file(
 
     // For each side, record each item's index so we can look up the
     // inter-item segment that preceded it in source.
-    let base_idx = item_index(base_segments);
-    let ours_idx = item_index(ours_segments);
-    let theirs_idx = item_index(theirs_segments);
+    let side_idx_maps = [
+        item_index(base_segments),
+        item_index(ours_segments),
+        item_index(theirs_segments),
+    ];
+    let side_ranges = [
+        base_segments.inter_item_ranges(),
+        ours_segments.inter_item_ranges(),
+        theirs_segments.inter_item_ranges(),
+    ];
+    let side_sources = [base, ours, theirs];
 
-    let base_ranges = base_segments.inter_item_ranges();
-    let ours_ranges = ours_segments.inter_item_ranges();
-    let theirs_ranges = theirs_segments.inter_item_ranges();
+    // Per-side set of inter-item range indices already emitted into
+    // `output`. A side's range is contributed to at most one slot —
+    // either the per-item preceding-segment merge for an item the
+    // side has, the bridging slot for an item the side lacks (next
+    // item the side has owns this range too — so the first occupant
+    // wins), or the postamble. Without this tracking the same range
+    // can be pulled into multiple slots — both Codex r2 P2 #2
+    // (leading-added-item preamble duplication) and P1 #2 (zero-items
+    // side postamble duplication) are this single shape.
+    let mut emitted: [BTreeSet<usize>; N_SIDES] =
+        [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
 
     // Walk emit_order. For each item, emit:
-    //   1. The inter-item segment that PRECEDED it in the side(s) that
-    //      have it. When the item is in base, 3-way merge the preceding
-    //      segments from base/ours/theirs; when added on one side, take
-    //      that side's preceding segment. This keeps top-level
-    //      executable statements (Python `x.init()`, Rust attributes)
-    //      at their original source position.
+    //   1. The inter-item segment that PRECEDED it in each side. When
+    //      the side has the item, that's the side's range immediately
+    //      before; when it doesn't, the "bridging" range (the range in
+    //      the side that spans where this item would be in emit order)
+    //      stands in. Either way, a range is only contributed if it
+    //      hasn't already been emitted on a prior iteration.
     //   2. The merged item bytes.
-    // After the last item, emit the postamble (the trailing inter-item
-    // segment on each side that has the last item).
+    // After the last item, emit the postamble (each side's final range,
+    // skipped per-side if already consumed).
     let mut output: Vec<u8> = Vec::new();
 
     for (emit_idx, key) in item_emit_order.iter().enumerate() {
-        let preceding = (
-            base_idx
-                .get(key)
-                .map(|i| inter_slice(base, &base_ranges, *i)),
-            ours_idx
-                .get(key)
-                .map(|i| inter_slice(ours, &ours_ranges, *i)),
-            theirs_idx
-                .get(key)
-                .map(|i| inter_slice(theirs, &theirs_ranges, *i)),
-        );
-        // First item: any side that has it contributes its preamble. If
-        // none of the sides have this item (shouldn't happen — all_keys
-        // is keyed on at least one side), fall through to base preamble.
-        let segment = if emit_idx == 0 {
-            select_preamble(
-                preceding.0,
-                preceding.1,
-                preceding.2,
-                &base_ranges,
-                &ours_ranges,
-                &theirs_ranges,
-                base,
-                ours,
-                theirs,
-            )
-        } else {
-            preceding
-        };
+        let mut segs: [Option<&str>; N_SIDES] = [None, None, None];
+        for s in 0..N_SIDES {
+            let r = side_range_for_emit(
+                &side_idx_maps[s],
+                key,
+                &item_emit_order,
+                emit_idx,
+            );
+            if emitted[s].insert(r) {
+                segs[s] = Some(inter_slice(side_sources[s], &side_ranges[s], r));
+            }
+        }
         let (seg_bytes, seg_conflicts) =
-            merge_segment(segment.0, segment.1, segment.2, markers);
+            merge_segment(segs[0], segs[1], segs[2], markers);
         output.extend_from_slice(&seg_bytes);
         total_conflicts += seg_conflicts;
 
@@ -134,17 +138,18 @@ pub(crate) fn reconstruct_merged_file(
         }
     }
 
-    // Postamble: the LAST inter-item segment on each side. We pick the
-    // postambles unconditionally rather than tying them to the final
-    // emitted item — even sides that don't contribute the final item
-    // may have a meaningful trailing newline / comment.
-    let post = (
-        last_segment(base, &base_ranges),
-        last_segment(ours, &ours_ranges),
-        last_segment(theirs, &theirs_ranges),
-    );
+    // Postamble: each side's last range, but only if that range
+    // wasn't already pulled in as a bridge above (the zero-items-side
+    // shape from P1 #2).
+    let mut post: [Option<&str>; N_SIDES] = [None, None, None];
+    for s in 0..N_SIDES {
+        let last = side_ranges[s].len() - 1;
+        if emitted[s].insert(last) {
+            post[s] = Some(inter_slice(side_sources[s], &side_ranges[s], last));
+        }
+    }
     let (post_bytes, post_conflicts) =
-        merge_segment(post.0, post.1, post.2, markers);
+        merge_segment(post[0], post[1], post[2], markers);
     // Only emit the postamble if it adds bytes — otherwise we risk
     // duplicating the trailing newline already in the last item's bytes.
     if !post_bytes.is_empty() {
@@ -178,31 +183,29 @@ fn inter_slice<'a>(source: &'a str, ranges: &[(usize, usize)], idx: usize) -> &'
     &source[start..end]
 }
 
-fn last_segment<'a>(source: &'a str, ranges: &[(usize, usize)]) -> Option<&'a str> {
-    ranges.last().map(|(s, e)| &source[*s..*e])
-}
-
-/// First-item preceding-segment selection. When an item is missing on a
-/// side, fall back to that side's actual preamble so the 3-way merge can
-/// compare like with like (otherwise preamble edits on a side that
-/// dropped the first item get silently dropped).
-#[allow(clippy::too_many_arguments)]
-fn select_preamble<'a>(
-    base_pre: Option<&'a str>,
-    ours_pre: Option<&'a str>,
-    theirs_pre: Option<&'a str>,
-    base_ranges: &[(usize, usize)],
-    ours_ranges: &[(usize, usize)],
-    theirs_ranges: &[(usize, usize)],
-    base: &'a str,
-    ours: &'a str,
-    theirs: &'a str,
-) -> (Option<&'a str>, Option<&'a str>, Option<&'a str>) {
-    (
-        base_pre.or_else(|| base_ranges.first().map(|(s, e)| &base[*s..*e])),
-        ours_pre.or_else(|| ours_ranges.first().map(|(s, e)| &ours[*s..*e])),
-        theirs_pre.or_else(|| theirs_ranges.first().map(|(s, e)| &theirs[*s..*e])),
-    )
+/// Pick the inter-item range index that represents `key`'s preceding
+/// segment on one side. If the side has `key`, that's the range
+/// immediately before it. If not, the bridging range is used: the
+/// range in the side that spans `key`'s position in `emit_order`. The
+/// bridging range is found by walking left in `emit_order` to the
+/// nearest prior key the side does have, then taking the range after
+/// that key's item; if no prior key exists, the side's preamble
+/// (range 0) bridges.
+fn side_range_for_emit(
+    side_idx_map: &BTreeMap<ItemKey, usize>,
+    key: &ItemKey,
+    emit_order: &[ItemKey],
+    emit_idx: usize,
+) -> usize {
+    if let Some(i) = side_idx_map.get(key) {
+        return *i;
+    }
+    for j in (0..emit_idx).rev() {
+        if let Some(i) = side_idx_map.get(&emit_order[j]) {
+            return i + 1;
+        }
+    }
+    0
 }
 
 /// 3-way merge a single inter-item segment. Handles "side doesn't have
