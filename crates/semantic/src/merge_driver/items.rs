@@ -566,8 +566,10 @@ fn classify_c_node<'a>(
         let name = identifier_in_subtree(source, declarator)?;
         // C/C++ parameter list lives inside the declarator subtree as a
         // `parameter_list` node — find it for overload disambiguation.
+        // Use the structural hash (arity + per-parameter type) so a
+        // parameter-name rename doesn't split function identity.
         let signature_hash = find_descendant(declarator, &["parameter_list"])
-            .map(|n| hash_normalized(&source[n.byte_range()]))
+            .map(|n| signature_hash_from_parameter_list(source, n))
             .unwrap_or(0);
         return Some(Classified {
             kind: ItemKind::Function,
@@ -628,14 +630,65 @@ fn simple_item<'a>(
     })
 }
 
-/// Hash the spelling of the parameter-list child named `field`, with
-/// whitespace normalized so cosmetic reformatting doesn't fragment matches.
-/// Returns 0 when the field is absent (e.g. parameterless declarations).
+/// Hash the parameter list at field `field`, keying on arity + types
+/// only. Returns 0 when the field is absent (e.g. parameterless
+/// declarations).
 fn signature_hash_from_field(source: &str, node: Node<'_>, field: &str) -> u64 {
     let Some(params) = node.child_by_field_name(field) else {
         return 0;
     };
-    hash_normalized(&source[params.byte_range()])
+    signature_hash_from_parameter_list(source, params)
+}
+
+/// Hash a parameter-list node by arity + per-parameter type spelling,
+/// IGNORING parameter names. A pure parameter rename (`foo(x: u32)` →
+/// `foo(y: u32)`) must NOT change the hash — otherwise the renamed
+/// function gets a different `ItemKey.signature_hash` from base, the
+/// merger treats it as delete+add, and a disjoint body change on the
+/// other side surfaces as a modify/delete conflict instead of merging
+/// cleanly (Codex r5 P1 #1).
+///
+/// The walk is uniform across languages: for each NAMED child of the
+/// parameter-list (anonymous punctuation `(`, `)`, `,` is skipped
+/// because tree-sitter anonymous nodes are excluded from named-children
+/// iteration), look for a `type` field. Hash its whitespace-stripped
+/// spelling when present, else a placeholder so untyped parameters
+/// still contribute to arity. Arity is mixed in at the end so
+/// `foo(x: u32)` and `foo(x: u32, y: u32)` don't collide.
+///
+/// Per-language notes on the `type` field:
+/// * Rust `parameter` has `type`; `self_parameter` does not — hashed
+///   as the placeholder (consistent across sides).
+/// * Python `typed_parameter` / `typed_default_parameter` have `type`;
+///   bare `identifier` / `default_parameter` (untyped) hash as the
+///   placeholder.
+/// * TypeScript `required_parameter` / `optional_parameter` have
+///   `type`; plain JavaScript parameters don't (placeholder).
+/// * Java `formal_parameter` and Go `parameter_declaration` always
+///   have `type`.
+/// * C/C++ `parameter_declaration` has `type` (the type specifier;
+///   the declarator carrying the name lives in a separate field that
+///   we deliberately don't read).
+fn signature_hash_from_parameter_list(source: &str, params: Node<'_>) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut cursor = params.walk();
+    let mut arity: u64 = 0;
+    for child in params.named_children(&mut cursor) {
+        if child.kind() == "comment" {
+            continue;
+        }
+        arity += 1;
+        let type_text = child
+            .child_by_field_name("type")
+            .map(|t| strip_whitespace(&source[t.byte_range()]))
+            .unwrap_or_else(|| "_".to_string());
+        type_text.hash(&mut hasher);
+        // Separator so `foo(ab, c)` and `foo(a, bc)` don't collide on
+        // concatenated type spellings.
+        b"|".hash(&mut hasher);
+    }
+    arity.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn hash_normalized(s: &str) -> u64 {
