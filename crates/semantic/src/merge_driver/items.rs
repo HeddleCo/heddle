@@ -215,12 +215,17 @@ fn leading_metadata_start(language: Language, source: &str, node: Node<'_>) -> u
 ///   when no blank line separates them (matches the Rust/Go rule —
 ///   standalone comments separated by blank lines must NOT migrate with
 ///   the next method/class during merges).
+/// * JavaScript / TypeScript: `decorator` siblings always bind to the
+///   following method / class. In tree-sitter-js/ts the decorator is a
+///   sibling of `method_definition` / `class_declaration` inside
+///   `class_body`, not a wrapper — so without explicit recognition the
+///   decorator stays in inter-item content and reorder / delete / add
+///   merges leak it onto the wrong symbol.
 ///
 /// Python decorators are not handled here because tree-sitter wraps them
 /// in `decorated_definition`, a different node kind than
-/// `function_definition` (handled at classification time).
-/// JavaScript / TypeScript / C / C++ have no equivalent leading-sibling
-/// metadata pattern that this driver currently recognises.
+/// `function_definition` (handled at classification time). C / C++
+/// have no equivalent leading-sibling metadata pattern.
 fn is_leading_metadata_for(
     language: Language,
     prev: Node<'_>,
@@ -251,12 +256,8 @@ fn is_leading_metadata_for(
             }
             _ => false,
         },
-        Language::Python
-        | Language::JavaScript
-        | Language::TypeScript
-        | Language::C
-        | Language::Cpp
-        | Language::Unknown => false,
+        Language::JavaScript | Language::TypeScript => kind == "decorator",
+        Language::Python | Language::C | Language::Cpp | Language::Unknown => false,
     }
 }
 
