@@ -318,9 +318,9 @@ fn classify_node<'a>(
     match language {
         Language::Rust => classify_rust_node(source, node, kind),
         Language::Python => classify_python_node(source, node, kind),
-        Language::JavaScript | Language::TypeScript => classify_js_node(source, node, kind),
+        Language::JavaScript | Language::TypeScript => classify_js_node(language, source, node, kind),
         Language::Go => classify_go_node(source, node, kind),
-        Language::C | Language::Cpp => classify_c_node(source, node, kind),
+        Language::C | Language::Cpp => classify_c_node(language, source, node, kind),
         Language::Java => classify_java_node(source, node, kind),
         Language::Unknown => None,
     }
@@ -334,7 +334,8 @@ fn classify_rust_node<'a>(
     match kind {
         "function_item" => {
             let name = name_from_field(source, node, "name")?;
-            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            let signature_hash =
+                signature_hash_from_field(Language::Rust, source, node, "parameters");
             Some(Classified {
                 kind: ItemKind::Function,
                 name,
@@ -346,7 +347,8 @@ fn classify_rust_node<'a>(
         "function_signature_item" => {
             // Trait method signature without body.
             let name = name_from_field(source, node, "name")?;
-            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            let signature_hash =
+                signature_hash_from_field(Language::Rust, source, node, "parameters");
             Some(Classified {
                 kind: ItemKind::Method,
                 name,
@@ -409,7 +411,8 @@ fn classify_python_node<'a>(
     match kind {
         "function_definition" => {
             let name = name_from_field(source, node, "name")?;
-            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            let signature_hash =
+                signature_hash_from_field(Language::Python, source, node, "parameters");
             Some(Classified {
                 kind: ItemKind::Function,
                 name,
@@ -460,6 +463,7 @@ fn classify_python_node<'a>(
 }
 
 fn classify_js_node<'a>(
+    language: Language,
     source: &'a str,
     node: Node<'a>,
     kind: &str,
@@ -467,7 +471,7 @@ fn classify_js_node<'a>(
     match kind {
         "function_declaration" | "generator_function_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            let signature_hash = signature_hash_from_field(language, source, node, "parameters");
             Some(Classified {
                 kind: ItemKind::Function,
                 name,
@@ -489,7 +493,7 @@ fn classify_js_node<'a>(
         }
         "method_definition" => {
             let name = name_from_field(source, node, "name")?;
-            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            let signature_hash = signature_hash_from_field(language, source, node, "parameters");
             Some(Classified {
                 kind: ItemKind::Method,
                 name,
@@ -510,7 +514,8 @@ fn classify_go_node<'a>(
     match kind {
         "function_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            let signature_hash =
+                signature_hash_from_field(Language::Go, source, node, "parameters");
             Some(Classified {
                 kind: ItemKind::Function,
                 name,
@@ -521,7 +526,8 @@ fn classify_go_node<'a>(
         }
         "method_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            let signature_hash =
+                signature_hash_from_field(Language::Go, source, node, "parameters");
             // Receiver type disambiguates two methods with the same name
             // on different receivers — `func (a A) String()` vs
             // `func (b B) String()`. Without it the BTreeMap collapses
@@ -558,6 +564,7 @@ fn go_receiver_type(source: &str, node: Node<'_>) -> Option<String> {
 }
 
 fn classify_c_node<'a>(
+    language: Language,
     source: &'a str,
     node: Node<'a>,
     kind: &str,
@@ -574,10 +581,13 @@ fn classify_c_node<'a>(
         let extra_scope = c_function_scope(source, declarator);
         // C/C++ parameter list lives inside the declarator subtree as a
         // `parameter_list` node — find it for overload disambiguation.
-        // Use the structural hash (arity + per-parameter type) so a
-        // parameter-name rename doesn't split function identity.
+        // Use the structural hash (arity + per-parameter type + per-
+        // parameter declarator shape) so a parameter-name rename
+        // doesn't split function identity AND so pointer/reference/
+        // array/function-pointer modifiers in the declarator field
+        // disambiguate `f(int)` vs `f(int*)` (Codex r6 P1 #2).
         let signature_hash = find_descendant(declarator, &["parameter_list"])
-            .map(|n| signature_hash_from_parameter_list(source, n))
+            .map(|n| signature_hash_from_parameter_list(language, source, n))
             .unwrap_or(0);
         return Some(Classified {
             kind: ItemKind::Function,
@@ -598,7 +608,8 @@ fn classify_java_node<'a>(
     match kind {
         "method_declaration" | "constructor_declaration" => {
             let name = name_from_field(source, node, "name")?;
-            let signature_hash = signature_hash_from_field(source, node, "parameters");
+            let signature_hash =
+                signature_hash_from_field(Language::Java, source, node, "parameters");
             Some(Classified {
                 kind: ItemKind::Method,
                 name,
@@ -641,11 +652,16 @@ fn simple_item<'a>(
 /// Hash the parameter list at field `field`, keying on arity + types
 /// only. Returns 0 when the field is absent (e.g. parameterless
 /// declarations).
-fn signature_hash_from_field(source: &str, node: Node<'_>, field: &str) -> u64 {
+fn signature_hash_from_field(
+    language: Language,
+    source: &str,
+    node: Node<'_>,
+    field: &str,
+) -> u64 {
     let Some(params) = node.child_by_field_name(field) else {
         return 0;
     };
-    signature_hash_from_parameter_list(source, params)
+    signature_hash_from_parameter_list(language, source, params)
 }
 
 /// Hash a parameter-list node by arity + per-parameter type spelling,
@@ -661,8 +677,21 @@ fn signature_hash_from_field(source: &str, node: Node<'_>, field: &str) -> u64 {
 /// because tree-sitter anonymous nodes are excluded from named-children
 /// iteration), look for a `type` field. Hash its whitespace-stripped
 /// spelling when present, else a placeholder so untyped parameters
-/// still contribute to arity. Arity is mixed in at the end so
-/// `foo(x: u32)` and `foo(x: u32, y: u32)` don't collide.
+/// still contribute to arity. The parameter node KIND is also mixed in
+/// so syntactically-distinct parameter classes (TypeScript
+/// `required_parameter` vs `optional_parameter` vs Python
+/// `default_parameter`) don't collapse on identical type field text —
+/// `foo(x: number)` and `foo(x?: number)` are different overload
+/// declarations. Arity is mixed in at the end so `foo(x: u32)` and
+/// `foo(x: u32, y: u32)` don't collide.
+///
+/// For C/C++ the parameter `type` field carries only the type
+/// specifier (`int`, `T`, `Foo`). Pointer / reference / array /
+/// function-pointer modifiers and cv-qualifiers live in the
+/// `declarator` field alongside the parameter name, so a name-stripped
+/// declarator shape is mixed in too — without it, `f(int)`, `f(int*)`,
+/// `f(int&)`, `f(int[])` all collapse to the same hash (Codex r6 P1
+/// #2).
 ///
 /// Per-language notes on the `type` field:
 /// * Rust `parameter` has `type`; `self_parameter` does not — hashed
@@ -674,23 +703,40 @@ fn signature_hash_from_field(source: &str, node: Node<'_>, field: &str) -> u64 {
 ///   `type`; plain JavaScript parameters don't (placeholder).
 /// * Java `formal_parameter` and Go `parameter_declaration` always
 ///   have `type`.
-/// * C/C++ `parameter_declaration` has `type` (the type specifier;
-///   the declarator carrying the name lives in a separate field that
-///   we deliberately don't read).
-fn signature_hash_from_parameter_list(source: &str, params: Node<'_>) -> u64 {
+/// * C/C++ `parameter_declaration` has `type` (the type specifier);
+///   modifiers come from the declarator shape, not the `type` field.
+fn signature_hash_from_parameter_list(
+    language: Language,
+    source: &str,
+    params: Node<'_>,
+) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut cursor = params.walk();
     let mut arity: u64 = 0;
+    let is_c_family = matches!(language, Language::C | Language::Cpp);
     for child in params.named_children(&mut cursor) {
         if child.kind() == "comment" {
             continue;
         }
         arity += 1;
+        // Parameter NODE KIND distinguishes `required_parameter` from
+        // `optional_parameter` etc. — same type field text, different
+        // overload identity.
+        child.kind().hash(&mut hasher);
+        b":".hash(&mut hasher);
         let type_text = child
             .child_by_field_name("type")
             .map(|t| strip_whitespace(&source[t.byte_range()]))
             .unwrap_or_else(|| "_".to_string());
         type_text.hash(&mut hasher);
+        if is_c_family {
+            b"@".hash(&mut hasher);
+            let mut shape = String::new();
+            if let Some(decl) = child.child_by_field_name("declarator") {
+                emit_c_declarator_shape(decl, &mut shape);
+            }
+            shape.hash(&mut hasher);
+        }
         // Separator so `foo(ab, c)` and `foo(a, bc)` don't collide on
         // concatenated type spellings.
         b"|".hash(&mut hasher);
@@ -705,6 +751,52 @@ fn signature_hash_from_parameter_list(source: &str, params: Node<'_>) -> u64 {
 /// distinguishes spellings (`*A` vs `A`, `Foo[T]` vs `Foo`) is retained.
 fn strip_whitespace(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Emit a name-stripped canonical shape for a C/C++ parameter
+/// declarator. Pointer / reference / array / function-pointer wrappers
+/// contribute single-character symbols; identifier leaves (the
+/// parameter name, when present) are dropped so a name-only rename
+/// doesn't change the hash. Abstract and named declarator variants
+/// (`int*` vs `int* p`) collapse to the same shape — they describe
+/// identical parameter types.
+///
+/// Examples:
+/// * `int x` (declarator: identifier) → ""
+/// * `int* p` / `int*` → "*"
+/// * `const T& r` → "&"
+/// * `int** pp` → "**"
+/// * `int (*fp)(int)` → "*()" (function-pointer wrapper around a
+///   pointer wrapper)
+/// * `T arr[]` → "[]"
+///
+/// Unknown declarator kinds emit a `<kind>` token verbatim so we don't
+/// silently collapse distinctions in rarer shapes (operator overloads
+/// with reference-qualifiers, structured-binding declarators, etc.).
+fn emit_c_declarator_shape(node: Node<'_>, out: &mut String) {
+    match node.kind() {
+        // Name leaves — strip across both named and abstract forms.
+        "identifier" | "field_identifier" | "type_identifier" => {}
+        "pointer_declarator" | "abstract_pointer_declarator" => out.push('*'),
+        "reference_declarator" | "abstract_reference_declarator" => out.push('&'),
+        "array_declarator" | "abstract_array_declarator" => out.push_str("[]"),
+        "function_declarator" | "abstract_function_declarator" => out.push_str("()"),
+        // Pass-through wrappers — no symbol of their own, just recurse.
+        "parenthesized_declarator" | "abstract_parenthesized_declarator" => {}
+        // Unknown shape — include verbatim so we don't lose signal.
+        k => {
+            out.push('<');
+            out.push_str(k);
+            out.push('>');
+        }
+    }
+    // Recurse into NAMED children so identifier leaves can be stripped
+    // by the leaf-clause above. Anonymous punctuation (`*`, `&`, etc.)
+    // is excluded from named-children iteration.
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        emit_c_declarator_shape(child, out);
+    }
 }
 
 fn find_descendant<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
