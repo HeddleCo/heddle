@@ -584,6 +584,64 @@ fn test_extract_dependency_from_import() {
     );
 }
 
+// ── Duplicate-name redeclaration tests (BTreeMap-collapse hazard) ─────
+//
+// Mirrors the heddle#114 r5 P1 #2 fix (commit 2198b00) — keying per-side
+// item maps by bare name collapses same-name redeclarations into the
+// last occurrence, silently dropping earlier definitions. Both JS and
+// Python permit module-level redeclaration of the same function name.
+
+#[test]
+fn test_detect_duplicate_javascript_function_redeclarations_both_surface() {
+    // Two top-level `function foo()` declarations, both modified between
+    // old and new. A BTreeMap<String, FunctionDef> keyed on `f.name`
+    // would keep only the second `foo` on each side, so only one
+    // FunctionModified event would fire instead of two.
+    let old = "function foo() { return 1; }\nfunction foo() { return 2; }\n";
+    let new = "function foo() { return 10; }\nfunction foo() { return 20; }\n";
+    let changes = detect_function_changes(
+        std::path::Path::new("test.js"),
+        std::path::Path::new("test.js"),
+        old,
+        new,
+        SimilarityMethod::Lines,
+    );
+    let modified_count = changes
+        .iter()
+        .filter(|c| matches!(c, SemanticChange::FunctionModified { name, .. } if name == "foo"))
+        .count();
+    assert_eq!(
+        modified_count, 2,
+        "Both `foo` redeclarations should surface as FunctionModified; got: {:?}",
+        changes
+    );
+}
+
+#[test]
+fn test_detect_duplicate_python_function_redefinitions_both_surface() {
+    // Python permits top-level `def foo()` redefinition; only the last
+    // wins at runtime, but both occurrences exist in the AST and should
+    // both surface as changes when their bodies move between versions.
+    let old = "def foo():\n    return 1\n\ndef foo():\n    return 2\n";
+    let new = "def foo():\n    return 10\n\ndef foo():\n    return 20\n";
+    let changes = detect_function_changes(
+        std::path::Path::new("test.py"),
+        std::path::Path::new("test.py"),
+        old,
+        new,
+        SimilarityMethod::Lines,
+    );
+    let modified_count = changes
+        .iter()
+        .filter(|c| matches!(c, SemanticChange::FunctionModified { name, .. } if name == "foo"))
+        .count();
+    assert_eq!(
+        modified_count, 2,
+        "Both `foo` redefinitions should surface as FunctionModified; got: {:?}",
+        changes
+    );
+}
+
 #[test]
 fn test_is_stdlib_dependency() {
     assert!(
