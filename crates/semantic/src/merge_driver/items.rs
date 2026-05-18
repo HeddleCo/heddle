@@ -997,21 +997,6 @@ fn emit_c_declarator_shape(node: Node<'_>, out: &mut String) {
     }
 }
 
-fn find_descendant<'a>(node: Node<'a>, kinds: &[&str]) -> Option<Node<'a>> {
-    let mut stack = vec![node];
-    while let Some(current) = stack.pop() {
-        if kinds.contains(&current.kind()) {
-            return Some(current);
-        }
-        for i in (0..current.child_count()).rev() {
-            if let Some(child) = current.child(i as u32) {
-                stack.push(child);
-            }
-        }
-    }
-    None
-}
-
 fn name_from_field(source: &str, node: Node<'_>, field: &str) -> Option<String> {
     let name_node = node.child_by_field_name(field)?;
     Some(source[name_node.byte_range()].to_string())
