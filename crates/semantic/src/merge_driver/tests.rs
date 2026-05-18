@@ -3960,3 +3960,169 @@ void A<int(*)(double)>::foo(char y) {
         "disjoint overload edits must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// Codex r11 P1 #3 (cid 3256623807): r10's `c_function_scope` strips
+// scope template-argument lists whenever the function definition is
+// wrapped in a `template_declaration` with a non-empty parameter list.
+// That gate fires for BOTH primary-template parameter usages
+// (`template<class T> void Foo<T>::bar()` — the `<T>` references the
+// enclosing template's parameter; strip to match inline `Foo`) AND
+// partial-specialization arguments (`template<class T> void A<T*>::foo()`
+// — the `<T*>` is the specialization pattern, NOT a parameter usage).
+// Stripping the latter collapses distinct partial specializations
+// (`A<T*>`, `A<T&>`) onto the same scope `["A"]`, so when one side adds
+// or reorders a partial specialization, the per-side occurrence
+// indexer mis-pairs unrelated methods across sides.
+// =====================================================================
+#[test]
+fn cpp_partial_specializations_keep_distinct_scopes_under_reorder() {
+    // base has out-of-class defs of A<T*>::foo and A<T&>::foo (partial
+    // specializations of a class template). ours INSERTS a new
+    // A<T**>::foo at the start AND edits A<T&>::foo. theirs edits
+    // A<T*>::foo. The two sides touch disjoint specializations —
+    // clean merge expected.
+    //
+    // Pre-fix: r10's strip_args fires for every scope inside a
+    // non-empty template_declaration, so `A<T*>`, `A<T&>`, `A<T**>`
+    // all normalize to `["A"]`. With ours inserting a method, the
+    // per-side occurrence labels diverge: base has (A,foo,0)=T* /
+    // (A,foo,1)=T&; ours has (A,foo,0)=T** / (A,foo,1)=T* /
+    // (A,foo,2)=T&; theirs has (A,foo,0)=T* / (A,foo,1)=T&.
+    // resolve_item pairs (A,foo,1) base=T& / ours=T*(unedited) /
+    // theirs=T&: wrong pairing forces theirs's no-op on T& to merge
+    // against ours's T*; ours's edit on T& lands at (A,foo,2) where
+    // base has nothing → looks like a fresh add of the OLD content.
+    //
+    // Post-fix: c_function_scope only strips template-argument lists
+    // when the args match the enclosing template_declaration's
+    // parameter list (true primary-template parameter usage). Partial
+    // specializations like `A<T*>`, `A<T&>` retain their scope text,
+    // so each specialization gets a distinct ItemKey and merges
+    // independently.
+    let base = "\
+template<class T> void A<T*>::foo() {
+    int x = 0;
+    (void)x;
+}
+
+template<class T> void A<T&>::foo() {
+    int y = 0;
+    (void)y;
+}
+";
+    let ours = "\
+template<class T> void A<T**>::foo() {
+    int z = 0;
+    (void)z;
+}
+
+template<class T> void A<T*>::foo() {
+    int x = 0;
+    (void)x;
+}
+
+template<class T> void A<T&>::foo() {
+    int y = 0;
+    (void)y;
+    int yy = y;
+    (void)yy;
+}
+";
+    let theirs = "\
+template<class T> void A<T*>::foo() {
+    int x = 0;
+    (void)x;
+    int xx = x;
+    (void)xx;
+}
+
+template<class T> void A<T&>::foo() {
+    int y = 0;
+    (void)y;
+}
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // Each partial specialization's body must contain only its own
+    // edits — no cross-contamination from collapsed-scope
+    // occurrence-pairing.
+    fn body_for(text: &str, header: &str) -> String {
+        let start = text
+            .find(header)
+            .unwrap_or_else(|| panic!("expected header {header:?} in merged output: {text}"));
+        let after = &text[start..];
+        let close = after.find("\n}\n").expect("expected close brace");
+        after[..close + 3].to_string()
+    }
+    let pp_body = body_for(&text, "void A<T**>::foo()");
+    let p_body = body_for(&text, "void A<T*>::foo()");
+    let r_body = body_for(&text, "void A<T&>::foo()");
+
+    // A<T**>::foo is ours-only — must contain only ours's body.
+    assert!(
+        pp_body.contains("int z = 0"),
+        "A<T**>::foo must keep its own body: {pp_body}"
+    );
+    assert!(
+        !pp_body.contains("int xx = x"),
+        "theirs's edit on A<T*>::foo must NOT leak into A<T**>::foo: {pp_body}"
+    );
+    assert!(
+        !pp_body.contains("int yy = y"),
+        "ours's edit on A<T&>::foo must NOT leak into A<T**>::foo: {pp_body}"
+    );
+    // A<T*>::foo is theirs-edited — must contain theirs's xx edit.
+    assert!(
+        p_body.contains("int x = 0"),
+        "A<T*>::foo must keep base's body: {p_body}"
+    );
+    assert!(
+        p_body.contains("int xx = x"),
+        "theirs's edit on A<T*>::foo must survive: {p_body}"
+    );
+    assert!(
+        !p_body.contains("int z = 0"),
+        "A<T**>::foo body must NOT leak into A<T*>::foo: {p_body}"
+    );
+    // A<T&>::foo is ours-edited — must contain ours's yy edit.
+    assert!(
+        r_body.contains("int y = 0"),
+        "A<T&>::foo must keep base's body: {r_body}"
+    );
+    assert!(
+        r_body.contains("int yy = y"),
+        "ours's edit on A<T&>::foo must survive: {r_body}"
+    );
+    // Each specialization appears exactly once — no duplication from
+    // re-emission via misaligned occurrence indexes.
+    let pp_count = text.matches("A<T**>::foo()").count();
+    let p_count = text.matches("A<T*>::foo()").count();
+    let r_count = text.matches("A<T&>::foo()").count();
+    assert_eq!(
+        pp_count, 1,
+        "A<T**>::foo must appear exactly once: got {pp_count}: {text}"
+    );
+    // T*'s pattern is a prefix of T**'s pattern; subtract T** occurrences
+    // to get the bare T* count.
+    let bare_p_count = p_count - pp_count;
+    assert_eq!(
+        bare_p_count, 1,
+        "A<T*>::foo must appear exactly once: got {bare_p_count}: {text}"
+    );
+    assert_eq!(
+        r_count, 1,
+        "A<T&>::foo must appear exactly once: got {r_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "disjoint edits on distinct partial specializations must merge cleanly: {text}"
+    );
+}
