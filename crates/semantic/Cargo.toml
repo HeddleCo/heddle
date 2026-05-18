@@ -28,6 +28,7 @@ lang-java = ["dep:tree-sitter-java"]
 
 [dependencies]
 anyhow.workspace = true
+merge = { path = "../merge", package = "heddle-merge", version = "0.2" }
 objects = { path = "../objects", package = "heddle-objects", version = "0.2", features = ["memory-backend"] }
 similar.workspace = true
 thiserror.workspace = true
@@ -40,3 +41,17 @@ tree-sitter-javascript = { workspace = true, optional = true }
 tree-sitter-python = { workspace = true, optional = true }
 tree-sitter-rust = { workspace = true, optional = true }
 tree-sitter-typescript = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = "0.8"
+pprof = { version = "0.15", default-features = false, features = ["flamegraph"] }
+
+[[bench]]
+name = "merge_function_level"
+harness = false
+required-features = ["lang-rust"]
+
+[[bench]]
+name = "profile_target"
+harness = false
+required-features = ["lang-rust"]

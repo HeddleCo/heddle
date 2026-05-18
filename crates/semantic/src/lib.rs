@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod cache;
 pub mod diff;
+pub mod merge_driver;
 pub mod parser;
 mod symbol_extraction;
 pub mod symbol_resolver;
@@ -25,4 +26,5 @@ pub use diff::{
     semantic_check_only, semantic_check_only_worktree, semantic_diff, semantic_diff_summary,
     semantic_diff_summary_worktree, semantic_diff_worktree,
 };
+pub use merge_driver::{MergeStrategy, semantic_three_way_merge, three_way_merge as merge_driver_three_way};
 pub use parser::{Language, ParsedFile};

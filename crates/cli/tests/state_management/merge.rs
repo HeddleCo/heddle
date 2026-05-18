@@ -1818,3 +1818,169 @@ fn test_merge_conflict_markers_well_formed_across_newline_shapes() {
         assert_markers_at_column_zero(&content, label);
     }
 }
+
+#[test]
+fn test_merge_semantic_resolves_disjoint_function_edits_clean() {
+    // heddle#68: with `--semantic`, two branches editing DIFFERENT functions
+    // in the same file should merge cleanly with zero conflict markers.
+    // Without `--semantic` the default text engine surfaces a hunk conflict
+    // around the rewritten regions because both sides modified the same
+    // file. The two outcomes encode the contract the trip report
+    // (heddle#54) asked for.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let src = temp.path().join("lib.rs");
+    fs::write(
+        &src,
+        "fn alpha() -> u32 { 1 }\n\nfn beta() -> u32 { 2 }\n\nfn gamma() -> u32 { 3 }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "create", "edit_alpha"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "edit_alpha"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "fn alpha() -> u32 { 11 }\n\nfn beta() -> u32 { 2 }\n\nfn gamma() -> u32 { 3 }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "alpha edit"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "fn alpha() -> u32 { 1 }\n\nfn beta() -> u32 { 2 }\n\nfn gamma() -> u32 { 333 }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "gamma edit"], Some(temp.path())).unwrap();
+
+    let result = heddle(&["merge", "edit_alpha", "--semantic"], Some(temp.path()));
+    assert!(result.is_ok(), "semantic merge should succeed");
+
+    let merged = fs::read_to_string(&src).unwrap();
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "disjoint function edits must not leave conflict markers under --semantic: {merged}"
+    );
+    assert!(merged.contains("fn alpha() -> u32 { 11 }"), "alpha edit lost: {merged}");
+    assert!(merged.contains("fn gamma() -> u32 { 333 }"), "gamma edit lost: {merged}");
+}
+
+#[test]
+fn test_merge_semantic_falls_through_on_text_file() {
+    // Files without a recognised language extension (a `.txt` file here)
+    // bypass the AST driver and use the existing hunk-level engine. The
+    // existing conflict-marker shape must be preserved.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let f = temp.path().join("notes.txt");
+    fs::write(&f, "base line\n").unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    fs::write(&f, "feature line\n").unwrap();
+    heddle(&["capture", "-m", "f"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    fs::write(&f, "main line\n").unwrap();
+    heddle(&["capture", "-m", "m"], Some(temp.path())).unwrap();
+
+    heddle(&["merge", "feature", "--semantic"], Some(temp.path())).unwrap();
+    let merged = fs::read_to_string(&f).unwrap();
+    assert!(
+        merged.contains("<<<<<<< CURRENT (main)"),
+        "same-line conflict on a non-language file must still produce markers under --semantic: {merged}"
+    );
+}
+
+/// Codex r13 P2 (cid 3261133187): `build_thread_preview_report_with_graph`
+/// hardcodes `MergeStrategy::HunkOnly`, so a structural-refactor scenario
+/// where the text engine surfaces conflicts but the semantic engine is
+/// clean prints contradictory preview lines (`blocked` / `conflicts:` in
+/// `preview_summary`) even though the actual merge plan and `conflicts`
+/// payload — both built with the real `--semantic` strategy — are clean.
+///
+/// Fixture shape mirrors the semantic crate's
+/// `semantic_beats_text_merge_on_structural_reshape` unit test, which
+/// asserts directly that `text_hunk_merge` surfaces ≥1 conflict on this
+/// exact base/ours/theirs trio. The CLI-level invariant under test: the
+/// preview summary must agree with the real merge result when
+/// `--semantic` is engaged.
+#[test]
+fn test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_reshape() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let src = temp.path().join("lib.rs");
+    fs::write(
+        &src,
+        "fn a() { let x = 1; }\nfn b() { let x = 2; }\nfn c() { let x = 3; }\nfn d() { let x = 4; }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    // feature: reorder + edit `b`. Created from main, so
+    // `target_thread = Some("main")` — required for the preview report
+    // to compute a 3-way merge.
+    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "fn d() { let x = 4; }\nfn c() { let x = 3; }\nfn b() { let x = 22; }\nfn a() { let x = 1; }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "feature: reorder + edit b"], Some(temp.path())).unwrap();
+
+    // main: edit `d` only.
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "fn a() { let x = 1; }\nfn b() { let x = 2; }\nfn c() { let x = 3; }\nfn d() { let x = 44; }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "main: edit d"], Some(temp.path())).unwrap();
+
+    let out = heddle(
+        &["--json", "merge", "feature", "--semantic", "--preview"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+
+    // Real merge plan (`--semantic`): clean. These come from
+    // `merge_plan.relation()` / `merge_result.conflicts`, both built
+    // with the operator-selected strategy.
+    let conflicts = parsed["conflicts"]
+        .as_array()
+        .expect("conflicts must be an array on a preview");
+    assert!(
+        conflicts.is_empty(),
+        "with --semantic, structural reshape must produce zero conflict paths: {parsed}"
+    );
+    assert_eq!(
+        parsed["conflict_count"], 0,
+        "with --semantic, conflict_count must be 0 on a clean structural-reshape merge: {parsed}"
+    );
+
+    // The bug: `preview_summary` is sourced from a preview report built
+    // with a hardcoded `MergeStrategy::HunkOnly`. On this fixture
+    // `text_hunk_merge` surfaces ≥1 conflict, so the preview report
+    // emits a misleading `conflicts: 1 path conflict(s)` line and
+    // potentially a `blocked: ...` line, contradicting `conflicts: []`
+    // and `conflict_count: 0` above.
+    let preview_summary = parsed["preview_summary"]
+        .as_array()
+        .expect("preview_summary must be an array");
+    let summary_strings: Vec<&str> = preview_summary
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        !summary_strings.iter().any(|line| line.starts_with("conflicts:")),
+        "preview_summary must not report conflicts when --semantic plan is clean: {summary_strings:?}"
+    );
+    assert!(
+        !summary_strings.iter().any(|line| line.starts_with("blocked:")),
+        "preview_summary must not report blocked when --semantic plan is clean: {summary_strings:?}"
+    );
+}
