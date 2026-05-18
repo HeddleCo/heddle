@@ -1936,3 +1936,78 @@ fn zero_items_side_postamble_does_not_duplicate_bridging_segment() {
         "expected ours's `use std::io` exactly once, got {use_count}: {text}"
     );
 }
+
+// =====================================================================
+// Codex r2 P1 #3: preserve segment edits when the opposite side
+// deletes an item.
+//
+// reconstruct.rs:226 — when (Some(b), Some(o), None) reaches
+// merge_segment because the missing side dropped this item, the code
+// treats the missing side as `base` ("no change") and discards any
+// real edits the deleting side made to the surrounding top-level
+// text. Those edits then leak into the unconditional postamble
+// merge, shifting them to the file tail.
+//
+// In this test one side deletes `foo` AND the other side edits both
+// the import and the trailing comment: those theirs-side edits must
+// land at their original positions, not be hoisted into the
+// preamble or appended to the file tail.
+// =====================================================================
+#[test]
+fn deletion_with_opposite_side_surrounding_edits_preserved_at_correct_positions() {
+    let base = "\
+import x
+
+def foo():
+    pass
+
+# trailing comment
+";
+    // ours deletes foo cleanly (no other edits).
+    let ours = "\
+import x
+
+# trailing comment
+";
+    // theirs keeps foo, edits import on line 1, edits trailing comment.
+    let theirs = "\
+import y
+
+def foo():
+    pass
+
+# trailing y
+";
+    let outcome = merge_at(base, ours, theirs, "f.py");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // theirs's import edit lands.
+    assert!(text.contains("import y"), "import edit lost: {text}");
+    // theirs's trailing edit lands.
+    assert!(text.contains("# trailing y"), "trailing edit lost: {text}");
+    // foo is deleted.
+    assert!(!text.contains("def foo"), "foo should be deleted: {text}");
+    // The trailing edit is at the bottom (after the import), not
+    // hoisted to the top.
+    let pos_import = text.find("import y").expect("import present");
+    let pos_trailing = text.find("# trailing y").expect("trailing present");
+    assert!(
+        pos_import < pos_trailing,
+        "trailing edit shifted ahead of import: {text}"
+    );
+    // No stale ORIGINAL versions of theirs's edited content.
+    assert!(
+        !text.contains("import x"),
+        "stale base import x present (theirs's edit got dropped): {text}"
+    );
+    assert!(
+        !text.contains("# trailing comment"),
+        "stale base trailing comment present (theirs's edit got dropped): {text}"
+    );
+}
