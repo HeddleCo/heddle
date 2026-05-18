@@ -26,6 +26,18 @@ use super::items::{FileSegments, Item, ItemKey};
 /// say "this side has already contributed range N — don't re-emit".
 const N_SIDES: usize = 3;
 
+/// Identity used for cross-side item matching. The bare [`ItemKey`]
+/// would collapse repeated declarations that share the same key — e.g.
+/// two top-level JavaScript `function foo() {}` statements with
+/// identical signatures, or two Python module-level `def foo()` blocks
+/// — and `BTreeMap<ItemKey, _>` would silently keep only the LAST
+/// occurrence per side. `MatchKey` pairs the key with the item's
+/// per-key occurrence index within its side (0 for the first, 1 for
+/// the second, …) so each duplicate gets a distinct slot. Matching
+/// across sides pairs same-key items positionally — base's first `foo`
+/// pairs with ours's first `foo` pairs with theirs's first `foo`.
+type MatchKey = (ItemKey, usize);
+
 /// Stitch three sides together via per-item resolution + inter-item hunk merge.
 pub(crate) fn reconstruct_merged_file(
     base: &str,
@@ -36,24 +48,41 @@ pub(crate) fn reconstruct_merged_file(
     theirs_segments: &FileSegments,
     markers: ConflictMarkers<'_>,
 ) -> MergeOutcome {
-    // Build (key -> item) maps per side for matching.
-    let base_map: BTreeMap<ItemKey, &Item> =
-        base_segments.items.iter().map(|i| (i.key.clone(), i)).collect();
-    let ours_map: BTreeMap<ItemKey, &Item> =
-        ours_segments.items.iter().map(|i| (i.key.clone(), i)).collect();
-    let theirs_map: BTreeMap<ItemKey, &Item> =
-        theirs_segments.items.iter().map(|i| (i.key.clone(), i)).collect();
+    // Per-side match keys walked in source order. Each item gets a
+    // (ItemKey, occurrence_within_side) tuple — see [`MatchKey`].
+    let base_mks = build_match_keys(base_segments);
+    let ours_mks = build_match_keys(ours_segments);
+    let theirs_mks = build_match_keys(theirs_segments);
 
-    let all_keys: BTreeSet<&ItemKey> = base_map
+    // Build (match-key -> item) maps per side for matching. Duplicates
+    // no longer collide because each occurrence has a distinct
+    // `MatchKey`.
+    let base_map: BTreeMap<MatchKey, &Item> = base_mks
+        .iter()
+        .zip(base_segments.items.iter())
+        .map(|(mk, i)| (mk.clone(), i))
+        .collect();
+    let ours_map: BTreeMap<MatchKey, &Item> = ours_mks
+        .iter()
+        .zip(ours_segments.items.iter())
+        .map(|(mk, i)| (mk.clone(), i))
+        .collect();
+    let theirs_map: BTreeMap<MatchKey, &Item> = theirs_mks
+        .iter()
+        .zip(theirs_segments.items.iter())
+        .map(|(mk, i)| (mk.clone(), i))
+        .collect();
+
+    let all_keys: BTreeSet<&MatchKey> = base_map
         .keys()
         .chain(ours_map.keys())
         .chain(theirs_map.keys())
         .collect();
 
-    // Resolve every key independently. Each resolution yields either
-    // (Some(merged_bytes), conflict_count) or `None` if both sides removed
-    // the item.
-    let mut resolved: BTreeMap<ItemKey, (Option<Vec<u8>>, usize)> = BTreeMap::new();
+    // Resolve every match-key independently. Each resolution yields
+    // either (Some(merged_bytes), conflict_count) or `None` if both
+    // sides removed the item.
+    let mut resolved: BTreeMap<MatchKey, (Option<Vec<u8>>, usize)> = BTreeMap::new();
     let mut total_conflicts = 0usize;
 
     for key in &all_keys {
@@ -71,18 +100,18 @@ pub(crate) fn reconstruct_merged_file(
     }
 
     let item_emit_order = compute_item_emit_order(
-        base_segments,
-        ours_segments,
-        theirs_segments,
+        &base_mks,
+        &ours_mks,
+        &theirs_mks,
         &all_keys,
     );
 
     // For each side, record each item's index so we can look up the
     // inter-item segment that preceded it in source.
     let side_idx_maps = [
-        item_index(base_segments),
-        item_index(ours_segments),
-        item_index(theirs_segments),
+        match_key_index(&base_mks),
+        match_key_index(&ours_mks),
+        match_key_index(&theirs_mks),
     ];
     let side_ranges = [
         base_segments.inter_item_ranges(),
@@ -169,12 +198,26 @@ pub(crate) fn reconstruct_merged_file(
     }
 }
 
-fn item_index(segments: &FileSegments) -> BTreeMap<ItemKey, usize> {
-    segments
-        .items
+/// Walk a side's items in source order and tag each with its
+/// per-key occurrence index — 0 for the first item with that key, 1
+/// for the second, and so on. Length matches `seg.items.len()`.
+fn build_match_keys(seg: &FileSegments) -> Vec<MatchKey> {
+    let mut counters: BTreeMap<ItemKey, usize> = BTreeMap::new();
+    seg.items
         .iter()
+        .map(|item| {
+            let n = counters.entry(item.key.clone()).or_insert(0);
+            let occurrence = *n;
+            *n += 1;
+            (item.key.clone(), occurrence)
+        })
+        .collect()
+}
+
+fn match_key_index(mks: &[MatchKey]) -> BTreeMap<MatchKey, usize> {
+    mks.iter()
         .enumerate()
-        .map(|(i, it)| (it.key.clone(), i))
+        .map(|(i, mk)| (mk.clone(), i))
         .collect()
 }
 
@@ -192,9 +235,9 @@ fn inter_slice<'a>(source: &'a str, ranges: &[(usize, usize)], idx: usize) -> &'
 /// that key's item; if no prior key exists, the side's preamble
 /// (range 0) bridges.
 fn side_range_for_emit(
-    side_idx_map: &BTreeMap<ItemKey, usize>,
-    key: &ItemKey,
-    emit_order: &[ItemKey],
+    side_idx_map: &BTreeMap<MatchKey, usize>,
+    key: &MatchKey,
+    emit_order: &[MatchKey],
     emit_idx: usize,
 ) -> usize {
     if let Some(i) = side_idx_map.get(key) {
@@ -357,34 +400,29 @@ fn materialize_outcome(outcome: MergeOutcome) -> (Option<Vec<u8>>, usize) {
 /// 3. If both ours and theirs added the same key independently and base
 ///    doesn't have it, we use ours's neighbour; ties go to ours.
 fn compute_item_emit_order(
-    base_segments: &FileSegments,
-    ours_segments: &FileSegments,
-    theirs_segments: &FileSegments,
-    all_keys: &BTreeSet<&ItemKey>,
-) -> Vec<ItemKey> {
-    let base_keys: Vec<ItemKey> = base_segments.items.iter().map(|i| i.key.clone()).collect();
+    base_mks: &[MatchKey],
+    ours_mks: &[MatchKey],
+    theirs_mks: &[MatchKey],
+    all_keys: &BTreeSet<&MatchKey>,
+) -> Vec<MatchKey> {
+    let mut order: Vec<MatchKey> = base_mks.to_vec();
+    let mut placed: BTreeSet<MatchKey> = order.iter().cloned().collect();
 
-    let mut order: Vec<ItemKey> = base_keys.clone();
-    let mut placed: BTreeSet<ItemKey> = base_keys.iter().cloned().collect();
-
-    let splice_added = |order: &mut Vec<ItemKey>,
-                        placed: &mut BTreeSet<ItemKey>,
-                        side_segments: &FileSegments| {
-        let side_keys: Vec<ItemKey> =
-            side_segments.items.iter().map(|i| i.key.clone()).collect();
-        for (idx, key) in side_keys.iter().enumerate() {
+    let mut splice_added = |side_mks: &[MatchKey]| {
+        for (idx, key) in side_mks.iter().enumerate() {
             if placed.contains(key) {
                 continue;
             }
-            // Anchor is the nearest key to the left in this side's source
-            // order that's already placed in `order`. That includes both
-            // base keys AND earlier-spliced additions from this side —
-            // so a run of N adjacent new items splices as a contiguous
-            // block preserving source order, rather than each one
-            // jumping ahead of its predecessor at the same base anchor.
+            // Anchor is the nearest match-key to the left in this
+            // side's source order that's already placed in `order`.
+            // That includes both base keys AND earlier-spliced
+            // additions from this side — so a run of N adjacent new
+            // items splices as a contiguous block preserving source
+            // order, rather than each one jumping ahead of its
+            // predecessor at the same base anchor.
             let mut insert_at = 0usize;
             for i in (0..idx).rev() {
-                if let Some(pos) = order.iter().position(|k| *k == side_keys[i]) {
+                if let Some(pos) = order.iter().position(|k| *k == side_mks[i]) {
                     insert_at = pos + 1;
                     break;
                 }
@@ -394,8 +432,8 @@ fn compute_item_emit_order(
         }
     };
 
-    splice_added(&mut order, &mut placed, ours_segments);
-    splice_added(&mut order, &mut placed, theirs_segments);
+    splice_added(ours_mks);
+    splice_added(theirs_mks);
 
     // Filter to keys that appear in the resolved set (some may have been
     // removed from all sides — those are absent from `all_keys`).
