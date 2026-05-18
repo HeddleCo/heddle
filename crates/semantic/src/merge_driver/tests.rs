@@ -1737,3 +1737,120 @@ function foo(x, y) { return x * y; }
     assert!(merged.contains("return x + 10"), "ours edit lost: {merged}");
     assert!(merged.contains("return x * y"), "theirs edit lost: {merged}");
 }
+
+// =====================================================================
+// Codex r2 P1 #1: canonicalize parameter signatures before hashing.
+//
+// items.rs:hash_normalized used split_whitespace() which keeps
+// punctuation attached to tokens — `foo(x,y)` and `foo(x, y)` hash
+// differently, so the same function gets distinct ItemKeys across
+// sides. The merger then treats it as delete+add, dropping one
+// side's edit and producing duplicate definitions.
+// =====================================================================
+#[test]
+fn signature_hash_canonicalizes_punctuation_so_formatting_only_change_matches() {
+    // ours reformats the parameter list (no space after comma) on
+    // line 1 AND edits the body. theirs preserves the original
+    // formatting and ALSO edits the body. Pre-fix, the signature
+    // spelling difference makes ours's foo a distinct ItemKey from
+    // base/theirs's foo: the merger emits ours's foo as a clean
+    // addition AND ALSO emits base/theirs's foo (via a
+    // modify-vs-delete path), producing two foo definitions.
+    let base = "\
+fn foo(x: u32, y: u32) -> u32 {
+    0
+}
+";
+    let ours = "\
+fn foo(x: u32,y: u32) -> u32 {
+    1
+}
+";
+    let theirs = "\
+fn foo(x: u32, y: u32) -> u32 {
+    2
+}
+";
+    let merged = match merge_rust(base, ours, theirs) {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // Pre-fix: ours's foo and base/theirs's foo are distinct
+    // ItemKeys, so the merger emits BOTH as complete definitions — 2
+    // closing braces. Post-fix: ItemKeys match, so the merger emits
+    // ONE foo whose body merge surfaces a conflict — 1 closing brace.
+    let close_brace_count = merged.matches('}').count();
+    assert_eq!(
+        close_brace_count, 1,
+        "expected ONE foo definition (signature hash must canonicalize \
+         formatting-only param changes), got {close_brace_count} closing \
+         braces: {merged}"
+    );
+}
+
+// =====================================================================
+// Codex r2 P2 #1: canonicalize Go receiver type spelling.
+//
+// items.rs:go_receiver_type normalized via split_whitespace().join(" "),
+// so `*A` (1 token, no space) and `* A` (2 tokens, joined with a
+// space) end up with distinct scope strings `"*A"` vs `"* A"`. The
+// same method on the same receiver gets distinct ItemKeys across
+// sides and the merger misclassifies it as delete/add.
+// =====================================================================
+#[test]
+fn go_receiver_type_canonicalizes_whitespace_around_pointer_star() {
+    // ours adds a space between `*` and `A` on the receiver declaration
+    // AND edits the body. theirs preserves the original spelling and
+    // ALSO edits the body. Pre-fix, the receiver-type string differs
+    // (`*A` vs `* A`) and the methods collapse to add+delete — ours's
+    // M() is emitted as an addition while base/theirs's M() goes
+    // through its own modify path, producing two M() definitions.
+    let base = "\
+package p
+
+type A struct{}
+
+func (a *A) M() int {
+    return 0
+}
+";
+    let ours = "\
+package p
+
+type A struct{}
+
+func (a * A) M() int {
+    return 1
+}
+";
+    let theirs = "\
+package p
+
+type A struct{}
+
+func (a *A) M() int {
+    return 2
+}
+";
+    let merged = match merge_at(base, ours, theirs, "f.go") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // Count `\n}` (closing brace at line start) — excludes the
+    // single-line `type A struct{}`. Pre-fix: each of two M() bodies
+    // contributes one. Post-fix: a single merged M() body contributes one.
+    let close_count = merged.matches("\n}").count();
+    assert_eq!(
+        close_count, 1,
+        "expected ONE M() definition (receiver type must canonicalize \
+         whitespace), got {close_count} line-leading closing braces: {merged}"
+    );
+}
