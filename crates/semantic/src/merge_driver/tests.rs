@@ -3106,6 +3106,78 @@ class A {
 }
 
 // =====================================================================
+// Codex r8 P2 (cid 3256283859): `signature_hash_from_parameter_list`
+// hashes only parameter types + declarator shapes — trailing function
+// qualifiers (`const`, `volatile`, `&`, `&&`, `noexcept`) live as
+// CHILDREN of the outer `function_declarator`, not inside the
+// `parameter_list`, so `void foo()` and `void foo() const` produce the
+// same signature_hash and collapse to one ItemKey. C++ member
+// overloads on cv- or ref-qualifier alone are then indistinguishable
+// from the merger's point of view.
+// =====================================================================
+#[test]
+fn cpp_const_qualified_overload_distinct_from_unqualified() {
+    // base has `int foo()`. ours adds the const-qualified overload
+    // `int foo() const` ABOVE it. theirs edits the body of the
+    // unqualified overload. Disjoint changes — clean merge expected.
+    //
+    // Pre-fix both `foo` keys collapse on (Function, "foo", ["A"], sig)
+    // because the signature hash ignores the `const` qualifier. Per-side
+    // occurrences misalign at slot (foo,0): base/theirs hold the
+    // unqualified overload; ours holds the const overload.
+    let base = "\
+class A {
+    int foo() { return 0; }
+};
+";
+    let ours = "\
+class A {
+    int foo() const { return 1; }
+    int foo() { return 0; }
+};
+";
+    let theirs = "\
+class A {
+    int foo() { return 99; }
+};
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // theirs's edit on the unqualified overload must land.
+    assert!(
+        text.contains("return 99"),
+        "theirs's edit on int foo() must survive: {text}"
+    );
+    // ours's added const overload body must land verbatim.
+    assert!(
+        text.contains("return 1"),
+        "ours's added int foo() const body must survive: {text}"
+    );
+    // Each overload appears exactly once.
+    let const_count = text.matches("int foo() const").count();
+    let unqual_count = text.matches("int foo()").count() - const_count;
+    assert_eq!(
+        const_count, 1,
+        "int foo() const must appear exactly once, got {const_count}: {text}"
+    );
+    assert_eq!(
+        unqual_count, 1,
+        "int foo() (unqualified) must appear exactly once, got {unqual_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "disjoint cv-qualifier overload addition + body edit must merge cleanly: {text}"
+    );
+}
+
+// =====================================================================
 // Codex r7 P2 (cid 3256225712): `detect_eol` returns CRLF as soon as
 // ANY sample contains `\r\n`. A single CRLF side then forces `\r\n`
 // onto a merge whose base + other side are LF — wrong for the
