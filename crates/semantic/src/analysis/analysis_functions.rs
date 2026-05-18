@@ -10,31 +10,89 @@ use crate::parser::{FunctionDef, Language, ParsedFile};
 
 const FUNCTION_RENAME_SIMILARITY_THRESHOLD: f64 = 0.58;
 
-/// Identity used for cross-version function matching. The bare name
-/// would collapse same-name redeclarations — JavaScript permits two
-/// `function foo()` statements at module scope, Python permits
-/// repeated top-level `def foo()`, and `BTreeMap<String, FunctionDef>`
-/// would silently keep only the last occurrence per side. `FunctionKey`
-/// pairs the name with the function's per-name occurrence index within
-/// its side (0 for the first, 1 for the second, …) so each duplicate
-/// gets a distinct slot. Cross-version matching is then positional:
-/// old's first `foo` pairs with new's first `foo`. Mirrors the
-/// merge_driver pattern (commit 2198b00, heddle#114 r5 P1 #2).
-type FunctionKey = (String, usize);
+/// Multi-map: function name → all definitions on this side with that
+/// name, in source order.
+///
+/// `BTreeMap<String, FunctionDef>` would silently collapse same-name
+/// redeclarations (JS allows two `function foo()` at module scope;
+/// Python allows repeated top-level `def foo()`). A prior fix (r1)
+/// keyed entries by `(name, occurrence)` to stop the collapse, but
+/// that paired old's `foo[0]` with new's `foo[0]` regardless of body
+/// content — so a fresh same-name definition inserted before existing
+/// ones produced a bogus FunctionModified with the wrong delta plus a
+/// misclassified add/delete (Codex cid 3259311747, heddle#125 r2).
+///
+/// Keeping a `Vec` per name lets us pair instances across versions by
+/// *content similarity* (see `pair_within_name`) rather than by
+/// within-side position. merge_driver keeps the positional keying
+/// (commit 2198b00) because its job is line-up merging within a
+/// logical slot; analysis_functions needs fuzzy cross-version identity.
+type FunctionMap = BTreeMap<String, Vec<FunctionDef>>;
 
-fn build_function_map(parsed: Option<&ParsedFile>) -> BTreeMap<FunctionKey, FunctionDef> {
+/// `(name, within-side index)` — identifies a single function instance
+/// on one side. Not a cross-version identity.
+type InstanceRef = (String, usize);
+
+fn build_function_map(parsed: Option<&ParsedFile>) -> FunctionMap {
     let Some(parsed) = parsed else {
         return BTreeMap::new();
     };
-    let mut counters: BTreeMap<String, usize> = BTreeMap::new();
-    let mut map = BTreeMap::new();
+    let mut map = FunctionMap::new();
     for func in parsed.extract_functions() {
-        let n = counters.entry(func.name.clone()).or_insert(0);
-        let occurrence = *n;
-        *n += 1;
-        map.insert((func.name.clone(), occurrence), func);
+        map.entry(func.name.clone()).or_default().push(func);
     }
     map
+}
+
+/// Greedy best-similarity matcher within a single name bucket. Returns
+/// (paired old/new indices, unpaired old indices, unpaired new indices).
+fn pair_within_name(
+    olds: &[FunctionDef],
+    news: &[FunctionDef],
+    similarity_method: SimilarityMethod,
+    language: Language,
+) -> (Vec<(usize, usize)>, Vec<usize>, Vec<usize>) {
+    let mut candidates: Vec<(usize, usize, f64)> = Vec::with_capacity(olds.len() * news.len());
+    for (i, o) in olds.iter().enumerate() {
+        for (j, n) in news.iter().enumerate() {
+            let similarity = if o.content == n.content {
+                1.0
+            } else {
+                compute_similarity_with_language(
+                    &o.content,
+                    &n.content,
+                    similarity_method,
+                    language,
+                )
+            };
+            candidates.push((i, j, similarity));
+        }
+    }
+    // Highest similarity first; deterministic tiebreak: lowest old, then lowest new.
+    candidates
+        .sort_by(|(li, lj, ls), (ri, rj, rs)| rs.total_cmp(ls).then(li.cmp(ri)).then(lj.cmp(rj)));
+
+    let mut old_used = vec![false; olds.len()];
+    let mut new_used = vec![false; news.len()];
+    let mut pairs = Vec::new();
+    for (i, j, _) in candidates {
+        if !old_used[i] && !new_used[j] {
+            old_used[i] = true;
+            new_used[j] = true;
+            pairs.push((i, j));
+        }
+    }
+    let unmatched_old = old_used
+        .iter()
+        .enumerate()
+        .filter_map(|(i, used)| (!*used).then_some(i))
+        .collect();
+    let unmatched_new = new_used
+        .iter()
+        .enumerate()
+        .filter_map(|(j, used)| (!*used).then_some(j))
+        .collect();
+    (pairs, unmatched_old, unmatched_new)
 }
 
 /// Detect function-level changes between two file versions.
@@ -69,93 +127,111 @@ pub(crate) fn detect_function_changes_with_parsed(
 
     let old_funcs = build_function_map(old_parsed);
     let new_funcs = build_function_map(new_parsed);
+    let language = Language::from_path(new_path);
 
-    let removed_old_keys: BTreeSet<FunctionKey> = old_funcs
-        .keys()
-        .filter(|k| !new_funcs.contains_key(*k))
-        .cloned()
-        .collect();
-    let moved_function_names = stable_order_moved_names(&old_funcs, &new_funcs);
-    let mut matched_old_keys: HashSet<FunctionKey> = HashSet::new();
+    // Phase 1: pair instances within each name bucket by content similarity.
+    let mut pairs: Vec<(String, usize, usize)> = Vec::new();
+    let mut unmatched_old: Vec<InstanceRef> = Vec::new();
+    let mut unmatched_new: Vec<InstanceRef> = Vec::new();
 
-    for (new_key, func) in &new_funcs {
-        let name = &new_key.0;
-        if !old_funcs.contains_key(new_key) {
-            let renamed_from = removed_old_keys
-                .iter()
-                .filter(|old_key| !matched_old_keys.contains(*old_key))
-                .filter_map(|old_key| {
-                    let old_name = &old_key.0;
-                    let old_func = old_funcs.get(old_key)?;
-                    let similarity = compute_similarity_with_language(
-                        &normalized_function_for_matching(&old_func.content, old_name),
-                        &normalized_function_for_matching(&func.content, name),
-                        similarity_method,
-                        Language::from_path(new_path),
-                    );
+    let mut all_names: BTreeSet<&str> = BTreeSet::new();
+    all_names.extend(old_funcs.keys().map(String::as_str));
+    all_names.extend(new_funcs.keys().map(String::as_str));
 
-                    let same_location_update = old_path == new_path
-                        && old_func.start_line.abs_diff(func.start_line) <= 5
-                        && similarity >= 0.30;
-                    (similarity >= FUNCTION_RENAME_SIMILARITY_THRESHOLD || same_location_update)
-                        .then_some((old_key, similarity))
-                })
-                .max_by(|(left_key, left_similarity), (right_key, right_similarity)| {
+    let empty: Vec<FunctionDef> = Vec::new();
+    for name in &all_names {
+        let olds = old_funcs.get(*name).unwrap_or(&empty);
+        let news = new_funcs.get(*name).unwrap_or(&empty);
+        let (within, u_old, u_new) = pair_within_name(olds, news, similarity_method, language);
+        for (oi, ni) in within {
+            pairs.push(((*name).to_string(), oi, ni));
+        }
+        unmatched_old.extend(u_old.into_iter().map(|i| ((*name).to_string(), i)));
+        unmatched_new.extend(u_new.into_iter().map(|i| ((*name).to_string(), i)));
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+
+    let moved_function_names = stable_order_moved_names(&old_funcs, &new_funcs, &pairs);
+
+    // Phase 2: cross-name rename detection over leftovers.
+    let mut consumed_old: HashSet<InstanceRef> = HashSet::new();
+    for (new_name, ni) in &unmatched_new {
+        let new_func = &new_funcs[new_name][*ni];
+        let renamed_from = unmatched_old
+            .iter()
+            .filter(|(on, oi)| !consumed_old.contains(&(on.clone(), *oi)))
+            .filter(|(on, _)| on != new_name)
+            .filter_map(|(on, oi)| {
+                let old_func = &old_funcs[on][*oi];
+                let similarity = compute_similarity_with_language(
+                    &normalized_function_for_matching(&old_func.content, on),
+                    &normalized_function_for_matching(&new_func.content, new_name),
+                    similarity_method,
+                    language,
+                );
+                let same_location_update = old_path == new_path
+                    && old_func.start_line.abs_diff(new_func.start_line) <= 5
+                    && similarity >= 0.30;
+                (similarity >= FUNCTION_RENAME_SIMILARITY_THRESHOLD || same_location_update)
+                    .then_some(((on.clone(), *oi), similarity))
+            })
+            .max_by(
+                |(left_key, left_similarity), (right_key, right_similarity)| {
                     left_similarity
                         .total_cmp(right_similarity)
                         .then_with(|| right_key.cmp(left_key))
-                })
-                .map(|(old_key, _)| old_key.clone());
+                },
+            )
+            .map(|(key, _)| key);
 
-            if let Some(old_key) = renamed_from {
-                let old_name = old_key.0.clone();
-                matched_old_keys.insert(old_key);
-                changes.push(SemanticChange::FunctionRenamed {
+        if let Some((old_name, old_idx)) = renamed_from {
+            consumed_old.insert((old_name.clone(), old_idx));
+            changes.push(SemanticChange::FunctionRenamed {
+                file: new_path.to_path_buf(),
+                old_name,
+                new_name: new_name.clone(),
+                importance: Some(ChangeImportance::Low),
+            });
+            file_modified = true;
+        } else {
+            let source = extraction_source(&old_funcs, new_func);
+            if let Some(source_name) = source {
+                changes.push(SemanticChange::FunctionExtracted {
                     file: new_path.to_path_buf(),
-                    old_name,
-                    new_name: name.clone(),
-                    importance: Some(ChangeImportance::Low),
+                    name: new_name.clone(),
+                    source_file: Some(old_path.to_path_buf()),
+                    source_name: Some(source_name),
+                    importance: Some(ChangeImportance::High),
                 });
-                file_modified = true;
             } else {
-                let source = extraction_source(&old_funcs, func);
-                if let Some(source_name) = source {
-                    changes.push(SemanticChange::FunctionExtracted {
-                        file: new_path.to_path_buf(),
-                        name: name.clone(),
-                        source_file: Some(old_path.to_path_buf()),
-                        source_name: Some(source_name),
-                        importance: Some(ChangeImportance::High),
-                    });
-                } else {
-                    changes.push(SemanticChange::FunctionAdded {
-                        file: new_path.to_path_buf(),
-                        name: name.clone(),
-                        importance: Some(ChangeImportance::High),
-                    });
-                }
-                file_modified = true;
+                changes.push(SemanticChange::FunctionAdded {
+                    file: new_path.to_path_buf(),
+                    name: new_name.clone(),
+                    importance: Some(ChangeImportance::High),
+                });
             }
+            file_modified = true;
         }
     }
 
-    for old_key in removed_old_keys {
-        if matched_old_keys.contains(&old_key) {
+    // Phase 3: unconsumed unmatched_old → deletions.
+    for (old_name, oi) in &unmatched_old {
+        if consumed_old.contains(&(old_name.clone(), *oi)) {
             continue;
         }
         changes.push(SemanticChange::FunctionDeleted {
             file: new_path.to_path_buf(),
-            name: old_key.0,
+            name: old_name.clone(),
             importance: Some(ChangeImportance::High),
         });
         file_modified = true;
     }
 
-    for (new_key, new_func) in &new_funcs {
-        let name = &new_key.0;
-        if let Some(old_func) = old_funcs.get(new_key)
-            && old_func.signature != new_func.signature
-        {
+    // Phase 4: paired instances → signature / move / modified.
+    for (name, oi, ni) in &pairs {
+        let old_func = &old_funcs[name][*oi];
+        let new_func = &new_funcs[name][*ni];
+        if old_func.signature != new_func.signature {
             changes.push(SemanticChange::SignatureChanged {
                 file: new_path.to_path_buf(),
                 name: name.clone(),
@@ -164,28 +240,26 @@ pub(crate) fn detect_function_changes_with_parsed(
                 importance: Some(ChangeImportance::Medium),
             });
             file_modified = true;
-        } else if let Some(old_func) = old_funcs.get(new_key) {
-            if old_path == new_path
-                && old_func.content == new_func.content
-                && old_func.start_line != new_func.start_line
-                && moved_function_names.contains(name)
-            {
-                changes.push(SemanticChange::FunctionMoved {
-                    file: new_path.to_path_buf(),
-                    name: name.clone(),
-                    old_start_line: old_func.start_line,
-                    new_start_line: new_func.start_line,
-                    importance: Some(ChangeImportance::Low),
-                });
-                file_modified = true;
-            } else if old_func.content != new_func.content {
-                changes.push(SemanticChange::FunctionModified {
-                    file: new_path.to_path_buf(),
-                    name: name.clone(),
-                    importance: Some(ChangeImportance::Medium),
-                });
-                file_modified = true;
-            }
+        } else if old_path == new_path
+            && old_func.content == new_func.content
+            && old_func.start_line != new_func.start_line
+            && moved_function_names.contains(name)
+        {
+            changes.push(SemanticChange::FunctionMoved {
+                file: new_path.to_path_buf(),
+                name: name.clone(),
+                old_start_line: old_func.start_line,
+                new_start_line: new_func.start_line,
+                importance: Some(ChangeImportance::Low),
+            });
+            file_modified = true;
+        } else if old_func.content != new_func.content {
+            changes.push(SemanticChange::FunctionModified {
+                file: new_path.to_path_buf(),
+                name: name.clone(),
+                importance: Some(ChangeImportance::Medium),
+            });
+            file_modified = true;
         }
     }
 
@@ -201,10 +275,7 @@ pub(crate) fn detect_function_changes_with_parsed(
     changes
 }
 
-fn extraction_source(
-    old_funcs: &BTreeMap<FunctionKey, FunctionDef>,
-    extracted: &FunctionDef,
-) -> Option<String> {
+fn extraction_source(old_funcs: &FunctionMap, extracted: &FunctionDef) -> Option<String> {
     let extracted_lines = meaningful_body_lines(&extracted.content);
     if extracted_lines.is_empty() {
         return None;
@@ -212,10 +283,11 @@ fn extraction_source(
 
     old_funcs
         .iter()
-        .filter_map(|(key, old_func)| {
+        .flat_map(|(name, funcs)| funcs.iter().map(move |func| (name.clone(), func)))
+        .filter_map(|(name, old_func)| {
             let old_lines = meaningful_body_lines(&old_func.content);
             let evidence = extraction_evidence(&old_lines, &extracted_lines);
-            evidence.is_strong().then_some((key.0.clone(), evidence))
+            evidence.is_strong().then_some((name, evidence))
         })
         .max_by(|left, right| {
             left.1
@@ -347,45 +419,34 @@ fn meaningful_body_lines(content: &str) -> Vec<String> {
 }
 
 fn stable_order_moved_names(
-    old_funcs: &BTreeMap<FunctionKey, FunctionDef>,
-    new_funcs: &BTreeMap<FunctionKey, FunctionDef>,
+    old_funcs: &FunctionMap,
+    new_funcs: &FunctionMap,
+    pairs: &[(String, usize, usize)],
 ) -> HashSet<String> {
-    let mut old_order = stable_function_order(old_funcs, new_funcs, true);
-    let mut new_order = stable_function_order(old_funcs, new_funcs, false);
+    let mut old_order: Vec<(usize, String)> = Vec::new();
+    let mut new_order: Vec<(usize, String)> = Vec::new();
+    for (name, oi, ni) in pairs {
+        let old_func = &old_funcs[name][*oi];
+        let new_func = &new_funcs[name][*ni];
+        if old_func.content == new_func.content {
+            old_order.push((old_func.start_line, name.clone()));
+            new_order.push((new_func.start_line, name.clone()));
+        }
+    }
+    old_order.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    new_order.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
-    if old_order == new_order {
+    let old_names: Vec<String> = old_order.into_iter().map(|(_, n)| n).collect();
+    let new_names: Vec<String> = new_order.into_iter().map(|(_, n)| n).collect();
+    if old_names == new_names {
         return HashSet::new();
     }
-
-    old_order
-        .drain(..)
-        .zip(new_order.drain(..))
+    old_names
+        .into_iter()
+        .zip(new_names)
         .filter_map(|(old_name, new_name)| (old_name != new_name).then_some([old_name, new_name]))
         .flatten()
         .collect()
-}
-
-fn stable_function_order(
-    old_funcs: &BTreeMap<FunctionKey, FunctionDef>,
-    new_funcs: &BTreeMap<FunctionKey, FunctionDef>,
-    use_old_position: bool,
-) -> Vec<String> {
-    let mut ordered = old_funcs
-        .iter()
-        .filter_map(|(key, old_func)| {
-            let new_func = new_funcs.get(key)?;
-            (old_func.content == new_func.content).then_some((
-                if use_old_position {
-                    old_func.start_line
-                } else {
-                    new_func.start_line
-                },
-                key.0.clone(),
-            ))
-        })
-        .collect::<Vec<_>>();
-    ordered.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
-    ordered.into_iter().map(|(_, name)| name).collect()
 }
 
 fn normalized_function_for_matching(content: &str, name: &str) -> String {
