@@ -378,12 +378,14 @@ mod tests {
 
         let handle = std::thread::Builder::new()
             .stack_size(128 * 1024)
-            .spawn(move || {
-                let _ = find_definitions(&tree.root_node(), &source, "target");
-            })
+            .spawn(move || find_definitions(&tree.root_node(), &source, "target"))
             .expect("spawn");
-        handle
+        let results = handle
             .join()
             .expect("find_definitions must not stack-overflow on deeply-nested input");
+        assert!(
+            results.iter().any(|r| r.name == "target"),
+            "deep target fn must be returned, not silently dropped by a depth cap; got {results:?}"
+        );
     }
 }
