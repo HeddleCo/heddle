@@ -271,9 +271,23 @@ pub(crate) fn merge_thread_into_current(
     }
 
     let mut graph = CommitGraphIndex::new(repo);
+    // Codex r13 P2: the preview report's content-merge strategy must
+    // match the strategy the actual merge plan (below) will use, so
+    // the `preview_summary` lines don't contradict the real outcome
+    // (e.g. reporting `conflicts: 1 path conflict(s)` on a structural
+    // reshape that semantic resolves cleanly).
+    let preview_strategy = if semantic {
+        merge_algo::MergeStrategy::Semantic
+    } else {
+        merge_algo::MergeStrategy::HunkOnly
+    };
     let preview_report = match thread.as_mut() {
         Some(thread) => Some(build_thread_preview_report_with_graph(
-            repo, &mut graph, thread, preview,
+            repo,
+            &mut graph,
+            thread,
+            preview,
+            preview_strategy,
         )?),
         None => None,
     };
@@ -1161,7 +1175,17 @@ pub(crate) fn build_thread_preview_report(
     prefer_apply_recommendation: bool,
 ) -> Result<ThreadPreviewReport> {
     let mut graph = CommitGraphIndex::new(repo);
-    build_thread_preview_report_with_graph(repo, &mut graph, thread, prefer_apply_recommendation)
+    // External callers (`heddle sync`, `heddle ship`, `heddle ready`)
+    // don't have a `--semantic` flag today; preserve the historic
+    // hunk-only preview behaviour. The merge command path threads its
+    // own strategy by calling `_with_graph` directly.
+    build_thread_preview_report_with_graph(
+        repo,
+        &mut graph,
+        thread,
+        prefer_apply_recommendation,
+        merge_algo::MergeStrategy::HunkOnly,
+    )
 }
 
 fn build_thread_preview_report_with_graph(
@@ -1169,6 +1193,7 @@ fn build_thread_preview_report_with_graph(
     graph: &mut CommitGraphIndex<'_>,
     thread: &mut Thread,
     prefer_apply_recommendation: bool,
+    strategy: MergeStrategy,
 ) -> Result<ThreadPreviewReport> {
     refresh_thread_freshness(repo, thread)?;
     let mut conflicts = Vec::new();
@@ -1191,7 +1216,7 @@ fn build_thread_preview_report_with_graph(
             ConflictLabels {
                 current: &current_label,
                 incoming: &incoming_label,
-                strategy: merge_algo::MergeStrategy::HunkOnly,
+                strategy,
             },
         )?;
         if let Some(merge_result) = merge_plan.merge_result() {
