@@ -480,10 +480,13 @@ fn detect_eol(samples: &[&[u8]]) -> &'static [u8] {
 /// inputs are not counted (they have no opinion on trailing-newline
 /// state).
 ///
-/// CRLF is treated as a single unit: when popping a trailing `\n`, an
-/// immediately-preceding `\r` is popped along with it. Otherwise a
-/// CRLF-terminated postamble leaks a bare `\r` byte onto the output
-/// once `\n` is removed (Codex r5 P1 #4).
+/// CRLF is treated as a single unit on BOTH the pop and push paths:
+/// when popping a trailing `\n`, an immediately-preceding `\r` is
+/// popped along with it (Codex r5 P1 #4); when pushing a trailing
+/// newline back, the dominant EOL of the inputs is pushed so a
+/// CRLF-canonical file doesn't gain a bare LF (heddle#114 r7 self-
+/// audit prediction P1, same hazard class as the r6 P2 #1 markers
+/// finding).
 fn reconcile_trailing_newline(out: &mut Vec<u8>, base: &str, ours: &str, theirs: &str) {
     if out.is_empty() {
         return;
@@ -491,7 +494,10 @@ fn reconcile_trailing_newline(out: &mut Vec<u8>, base: &str, ours: &str, theirs:
     let want_newline = majority_ends_with_newline(base, ours, theirs);
     let has_newline = *out.last().unwrap() == b'\n';
     match (want_newline, has_newline) {
-        (true, false) => out.push(b'\n'),
+        (true, false) => {
+            let eol = detect_eol(&[base.as_bytes(), ours.as_bytes(), theirs.as_bytes()]);
+            out.extend_from_slice(eol);
+        }
         (false, true) => {
             out.pop();
             if out.last() == Some(&b'\r') {
