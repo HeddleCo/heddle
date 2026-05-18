@@ -2165,6 +2165,132 @@ fn foo() { 2 }
 // behavior outside the edited item.
 // =====================================================================
 // =====================================================================
+// Codex r4 P2 #2: Java branch in `is_leading_metadata_for` absorbs ALL
+// `line_comment`/`block_comment` siblings unconditionally, unlike
+// Rust/Go which gate on no-blank-line-between. Standalone comments
+// separated by blank lines migrate with the next method during
+// structural merges, causing comment relocation/duplication.
+// =====================================================================
+#[test]
+fn java_standalone_comment_with_blank_line_does_not_move_with_next_method() {
+    let base = "\
+class C {
+    // standalone
+
+    void foo() {}
+
+    void bar() {}
+}
+";
+    // ours deletes foo. theirs modifies bar so the early base==theirs
+    // short-circuit doesn't fire. Pre-fix: `// standalone` is absorbed
+    // into foo's range (no blank-line gate on Java) and deleted with
+    // foo. Post-fix: blank line separates the comment from foo, so it
+    // is NOT absorbed and survives in the output.
+    let ours = "\
+class C {
+    // standalone
+
+    void bar() {}
+}
+";
+    let theirs = "\
+class C {
+    // standalone
+
+    void foo() {}
+
+    void bar() { return; }
+}
+";
+    let outcome = merge_at(base, ours, theirs, "C.java");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    let comment_count = text.matches("// standalone").count();
+    assert_eq!(
+        comment_count, 1,
+        "`// standalone` must survive exactly once: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "merge must be clean — pre-fix, ours's bar absorbed the comment (no blank-line gate) so the modify/modify on bar surfaces as a conflict; post-fix the comment stays in inter-item content and bar merges cleanly: {text}"
+    );
+}
+
+// =====================================================================
+// Codex r4 P2 #1: tree-sitter Python wraps decorated symbols in
+// `decorated_definition`, but `classify_python_node` only handles
+// `function_definition` and `class_definition` — so `@decorator` lines
+// end up in inter-item content and reorder/delete merges can orphan,
+// duplicate, or misattach them.
+// =====================================================================
+#[test]
+fn python_decorated_function_delete_drops_theirs_decorator_swap() {
+    // base has `@cache` on `alpha`. ours deletes `alpha` entirely.
+    // theirs swaps `@cache` for `@cached_property` (decorator-only
+    // change, alpha body unchanged). Pre-fix, the decorator lives in
+    // inter-item content while alpha is the item — so alpha's bytes
+    // are identical on base and theirs (`def alpha(): return 1`),
+    // resolve_item sees `b == t` and clean-deletes alpha, SILENTLY
+    // discarding theirs's decorator swap. Post-fix, the whole
+    // `decorated_definition` is one item; alpha's bytes differ
+    // (decorator included) and the modify/delete surfaces as a
+    // conflict instead of silent loss.
+    let base = "\
+@cache
+def alpha():
+    return 1
+
+def beta():
+    return 2
+";
+    let ours = "\
+def beta():
+    return 2
+";
+    let theirs = "\
+@cached_property
+def alpha():
+    return 1
+
+def beta():
+    return 2
+";
+    let outcome = merge_at(base, ours, theirs, "f.py");
+    let (text, has_conflicts) = match outcome {
+        MergeOutcome::Clean(b) => (String::from_utf8(b).unwrap(), false),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => (String::from_utf8(merged_bytes_with_markers).unwrap(), true),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // theirs's `@cached_property` swap must not be silently lost.
+    // Either it survives in the output, or the merge surfaces a
+    // conflict (modify-on-theirs vs delete-on-ours). What is NOT
+    // acceptable: a clean merge that loses theirs's modification.
+    let _ = has_conflicts;
+    // Pre-fix: alpha's bytes are identical on base/theirs (decorator
+    // is inter-item), so resolve_item clean-deletes alpha and theirs's
+    // intent to keep alpha (with a different decorator) vanishes —
+    // `def alpha` doesn't appear at all in the output, even though
+    // theirs explicitly kept the function. Post-fix: `decorated_definition`
+    // is one item; alpha's bytes include the decorator so b != t and a
+    // modify/delete conflict surfaces with the WHOLE decorated symbol
+    // (decorator + def line) in the conflict block.
+    assert!(
+        text.contains("def alpha"),
+        "theirs kept `def alpha` (with new decorator); it must not vanish silently: {text}"
+    );
+}
+
+// =====================================================================
 // Codex r4 P1 #2: per-side item maps (`BTreeMap<ItemKey, &Item>` /
 // `BTreeMap<ItemKey, usize>`) collapse repeated declarations sharing a
 // key — only the LAST occurrence survives matching/indexing. In
