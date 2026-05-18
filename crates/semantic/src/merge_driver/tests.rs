@@ -3020,6 +3020,92 @@ function foo(x: number): number {
 }
 
 // =====================================================================
+// Codex r8 P1 (cid 3256283864): `c_function_scope` only fires for
+// OUT-OF-CLASS definitions (`void A::foo()` where the declarator has
+// a qualified_identifier). Inline methods inside `class A { void foo()
+// { ... } }` have an unqualified declarator, so two classes with
+// same-signature inline methods both produce ItemKey
+// (Function, "foo", [], _) and collapse to one slot. When one side
+// adds a new class with a same-named inline method, the per-side
+// occurrence indexer mis-pairs unrelated functions across sides.
+// =====================================================================
+#[test]
+fn cpp_inline_same_named_methods_in_different_classes_keep_distinct_identities() {
+    // base has only `class A` with inline `foo`. ours adds a new
+    // `class B` with its own inline `foo` BEFORE A. theirs edits A's
+    // inline foo body. Disjoint changes — clean merge expected.
+    //
+    // Pre-fix every inline `foo` keys as (Function, "foo", [], sig).
+    // Per-side occurrences:
+    //   base    [A's foo=0]
+    //   ours    [B's foo=0, A's foo=1]
+    //   theirs  [A's foo=0]
+    // MatchKey (foo,0) pairs base's A::foo with ours's B::foo and
+    // theirs's A::foo — three unrelated bodies, so theirs's A::foo
+    // edit gets overwritten by ours's B::foo bytes at A::foo's slot
+    // and B::foo never lands at its own (foo,1) slot cleanly.
+    //
+    // Post-fix `class_specifier` walks up the scope, so A's foo gets
+    // scope=["A"] and B's foo gets scope=["B"]. Their ItemKeys are
+    // distinct; theirs's edit on A merges cleanly and B's add inserts.
+    let base = "\
+class A {
+    void foo() { int a = 0; (void)a; }
+};
+";
+    let ours = "\
+class B {
+    void foo() { int b = 99; (void)b; }
+};
+class A {
+    void foo() { int a = 0; (void)a; }
+};
+";
+    let theirs = "\
+class A {
+    void foo() { int a = 2; (void)a; }
+};
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    eprintln!("DEBUG merge result:\n{text}");
+    // theirs's edit on A's foo must land — pre-fix it's lost because
+    // (foo,0) takes ours's B::foo bytes in place of A::foo.
+    assert!(
+        text.contains("int a = 2"),
+        "theirs's A's foo edit must survive: {text}"
+    );
+    // ours's added B::foo body must land verbatim.
+    assert!(
+        text.contains("int b = 99"),
+        "ours's added B::foo body must survive: {text}"
+    );
+    // Each body appears exactly once — no duplication, no
+    // cross-contamination via misaligned occurrence indexing.
+    let a_body_count = text.matches("int a = 2").count();
+    let b_body_count = text.matches("int b = 99").count();
+    assert_eq!(
+        a_body_count, 1,
+        "A's foo body must appear exactly once, got {a_body_count}: {text}"
+    );
+    assert_eq!(
+        b_body_count, 1,
+        "B's foo body must appear exactly once, got {b_body_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "disjoint cross-class inline edits + addition must merge cleanly: {text}"
+    );
+}
+
+// =====================================================================
 // Codex r7 P2 (cid 3256225712): `detect_eol` returns CRLF as soon as
 // ANY sample contains `\r\n`. A single CRLF side then forces `\r\n`
 // onto a merge whose base + other side are LF — wrong for the
