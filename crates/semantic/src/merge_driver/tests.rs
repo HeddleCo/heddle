@@ -3641,3 +3641,167 @@ void foo() {
         "inline-to-out-of-class refactor + disjoint body edit must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// Codex r10 P2 (cid 3256487042): r9's `c_function_scope` strip_template_args
+// is applied to EVERY scope component, which collapses explicit class
+// template specializations (`A<int>`, `A<float>`) onto the same scope
+// key `"A"`. When a file holds multiple specializations of the same
+// primary template, a reorder/add on one side shifts the per-side
+// occurrence indexer relative to base/theirs, so the merger ends up
+// pairing edits across UNRELATED specializations — corrupting the
+// file or producing spurious conflicts. The fix retains specialization
+// arguments while still collapsing parameter-list usages (`A<T>` in a
+// templated out-of-class def vs inline `A`), keyed on whether the
+// function definition is wrapped in a `template_declaration` whose
+// parameter list is non-empty.
+// =====================================================================
+#[test]
+fn cpp_explicit_specializations_keep_distinct_scopes_under_reorder() {
+    // base has out-of-class defs of A<int>::foo and A<float>::foo
+    // (explicit specializations of a class template). ours INSERTS a
+    // new A<char>::foo at the start AND edits A<float>::foo. theirs
+    // edits A<int>::foo. The two sides touch disjoint specializations
+    // — clean merge expected.
+    //
+    // Pre-fix: r9's strip_template_args collapses every scope to
+    // `["A"]`. With ours inserting a method, the per-side occurrence
+    // labels diverge: base has (A,foo,0)=int / (A,foo,1)=float, ours
+    // has (A,foo,0)=char / (A,foo,1)=int / (A,foo,2)=float, theirs
+    // has (A,foo,0)=int / (A,foo,1)=float. resolve_item pairs
+    // (A,foo,1): base=float, ours=int(unedited), theirs=float — wrong
+    // pairing forces theirs's no-op on float to merge against ours's
+    // int. ours's edit on float lands at (A,foo,2) where base has
+    // nothing → looks like a fresh add of the OLD content.
+    //
+    // Post-fix: scope retains the specialization argument because
+    // the function definitions are NOT wrapped in a
+    // template_declaration with non-empty parameters. Distinct keys
+    // (foo,["A<int>"]), (foo,["A<float>"]), (foo,["A<char>"]) →
+    // each specialization merges independently.
+    let base = "\
+void A<int>::foo() {
+    int x = 0;
+    (void)x;
+}
+
+void A<float>::foo() {
+    int y = 0;
+    (void)y;
+}
+";
+    let ours = "\
+void A<char>::foo() {
+    int z = 0;
+    (void)z;
+}
+
+void A<int>::foo() {
+    int x = 0;
+    (void)x;
+}
+
+void A<float>::foo() {
+    int y = 0;
+    (void)y;
+    int yy = y;
+    (void)yy;
+}
+";
+    let theirs = "\
+void A<int>::foo() {
+    int x = 0;
+    (void)x;
+    int xx = x;
+    (void)xx;
+}
+
+void A<float>::foo() {
+    int y = 0;
+    (void)y;
+}
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // Each specialization's body must contain ONLY its own edits — no
+    // cross-contamination from collapsed-scope occurrence-pairing.
+    // Slice the merged text by specialization header and assert each
+    // slice's content.
+    fn body_for(text: &str, header: &str) -> String {
+        let start = text.find(header).expect(
+            "expected header in merged output",
+        );
+        let after = &text[start..];
+        // Body ends at the matching closing brace at column 0 (next "}").
+        let close = after.find("\n}\n").expect("expected close brace");
+        after[..close + 3].to_string()
+    }
+    let char_body = body_for(&text, "void A<char>::foo()");
+    let int_body = body_for(&text, "void A<int>::foo()");
+    let float_body = body_for(&text, "void A<float>::foo()");
+
+    // A<char>::foo is ours-only — must contain only ours's body.
+    assert!(
+        char_body.contains("int z = 0"),
+        "A<char>::foo must keep its own body: {char_body}"
+    );
+    assert!(
+        !char_body.contains("int xx = x"),
+        "theirs's edit on A<int>::foo must NOT leak into A<char>::foo: {char_body}"
+    );
+    assert!(
+        !char_body.contains("int yy = y"),
+        "ours's edit on A<float>::foo must NOT leak into A<char>::foo: {char_body}"
+    );
+    // A<int>::foo is theirs-edited — must contain theirs's xx edit and
+    // base's x body.
+    assert!(
+        int_body.contains("int x = 0"),
+        "A<int>::foo must keep base's body: {int_body}"
+    );
+    assert!(
+        int_body.contains("int xx = x"),
+        "theirs's edit on A<int>::foo must survive: {int_body}"
+    );
+    assert!(
+        !int_body.contains("int z = 0"),
+        "A<char>::foo body must NOT leak into A<int>::foo: {int_body}"
+    );
+    // A<float>::foo is ours-edited — must contain ours's yy edit.
+    assert!(
+        float_body.contains("int y = 0"),
+        "A<float>::foo must keep base's body: {float_body}"
+    );
+    assert!(
+        float_body.contains("int yy = y"),
+        "ours's edit on A<float>::foo must survive: {float_body}"
+    );
+    // Each specialization appears exactly once — no duplication from
+    // re-emission via misaligned occurrence indexes.
+    let int_count = text.matches("A<int>::foo()").count();
+    let float_count = text.matches("A<float>::foo()").count();
+    let char_count = text.matches("A<char>::foo()").count();
+    assert_eq!(
+        int_count, 1,
+        "A<int>::foo must appear exactly once: got {int_count}: {text}"
+    );
+    assert_eq!(
+        float_count, 1,
+        "A<float>::foo must appear exactly once: got {float_count}: {text}"
+    );
+    assert_eq!(
+        char_count, 1,
+        "A<char>::foo must appear exactly once: got {char_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "disjoint edits on distinct specializations must merge cleanly: {text}"
+    );
+}
