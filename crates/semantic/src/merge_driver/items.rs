@@ -569,35 +569,86 @@ fn classify_c_node<'a>(
     node: Node<'a>,
     kind: &str,
 ) -> Option<Classified<'a>> {
-    if kind == "function_definition" {
-        let declarator = node.child_by_field_name("declarator")?;
-        let name = c_function_name(source, declarator)?;
-        // Out-of-class definitions (`A::foo`, `ns::Foo::bar`) need the
-        // qualified scope as part of the key — without it, methods
-        // sharing a name across unrelated classes/namespaces collapse
-        // to the same ItemKey and the per-side occurrence indexer
-        // can pair unrelated functions across sides whenever one side
-        // adds or reorders a same-named method (Codex r6 P1 #1).
-        let extra_scope = c_function_scope(source, declarator);
-        // C/C++ parameter list lives inside the declarator subtree as a
-        // `parameter_list` node — find it for overload disambiguation.
-        // Use the structural hash (arity + per-parameter type + per-
-        // parameter declarator shape) so a parameter-name rename
-        // doesn't split function identity AND so pointer/reference/
-        // array/function-pointer modifiers in the declarator field
-        // disambiguate `f(int)` vs `f(int*)` (Codex r6 P1 #2).
-        let signature_hash = find_descendant(declarator, &["parameter_list"])
-            .map(|n| signature_hash_from_parameter_list(language, source, n))
-            .unwrap_or(0);
-        return Some(Classified {
-            kind: ItemKind::Function,
-            name,
-            container_body: None,
-            signature_hash,
-            extra_scope,
-        });
+    match kind {
+        "function_definition" => {
+            let declarator = node.child_by_field_name("declarator")?;
+            let name = c_function_name(source, declarator)?;
+            // Out-of-class definitions (`A::foo`, `ns::Foo::bar`) need the
+            // qualified scope as part of the key — without it, methods
+            // sharing a name across unrelated classes/namespaces collapse
+            // to the same ItemKey and the per-side occurrence indexer
+            // can pair unrelated functions across sides whenever one side
+            // adds or reorders a same-named method (Codex r6 P1 #1).
+            let extra_scope = c_function_scope(source, declarator);
+            // C/C++ parameter list lives inside the declarator subtree as a
+            // `parameter_list` node — find it for overload disambiguation.
+            // Use the structural hash (arity + per-parameter type + per-
+            // parameter declarator shape) so a parameter-name rename
+            // doesn't split function identity AND so pointer/reference/
+            // array/function-pointer modifiers in the declarator field
+            // disambiguate `f(int)` vs `f(int*)` (Codex r6 P1 #2).
+            let signature_hash = find_descendant(declarator, &["parameter_list"])
+                .map(|n| signature_hash_from_parameter_list(language, source, n))
+                .unwrap_or(0);
+            Some(Classified {
+                kind: ItemKind::Function,
+                name,
+                container_body: None,
+                signature_hash,
+                extra_scope,
+            })
+        }
+        // C++ user-defined-type containers: classify with the type's
+        // name as the scope component, walk into the body so per-method
+        // items inherit `scope=[ClassName]`. Without this, inline
+        // methods inside `class A { void foo() {} }` extract as
+        // (Function, "foo", [], _) — identical to inline `foo` in any
+        // other class — and the per-side occurrence indexer mis-pairs
+        // unrelated functions across sides whenever one side adds or
+        // reorders a same-named class (Codex r8 P1, cid 3256283864).
+        //
+        // Out-of-class definitions (`void A::foo()`) still land in the
+        // top-level walker with `extra_scope=["A"]` from
+        // `c_function_scope`, producing the same scope `["A"]` — so
+        // both forms key identically and merge consistently across
+        // refactors that move methods inside/outside class bodies.
+        //
+        // Anonymous classes / structs / unions (no `name` field) skip
+        // classification and fall through to the unclassified walker,
+        // contributing empty scope. That keeps existing behavior for
+        // anonymous types — their methods are rare and any disambiguation
+        // we'd invent would diverge between sides.
+        "class_specifier" | "struct_specifier" | "union_specifier" => {
+            let name = name_from_field(source, node, "name")
+                .map(|n| strip_whitespace(&n))?;
+            let container_body = node.child_by_field_name("body");
+            Some(Classified {
+                kind: ItemKind::Module,
+                name,
+                container_body,
+                signature_hash: 0,
+                extra_scope: Vec::new(),
+            })
+        }
+        "namespace_definition" if language == Language::Cpp => {
+            // Anonymous namespaces (`namespace { ... }`) have no `name`
+            // field — fall through to the walker so their contents key
+            // at file scope (consistent with C++ semantics where
+            // anonymous-namespace symbols have internal linkage at
+            // translation-unit scope).
+            let name = name_from_field(source, node, "name")
+                .map(|n| strip_whitespace(&n))?;
+            let container_body = node.child_by_field_name("body");
+            Some(Classified {
+                kind: ItemKind::Module,
+                name,
+                container_body,
+                signature_hash: 0,
+                extra_scope: Vec::new(),
+            })
+        }
+        _ => None,
     }
-    None
 }
 
 fn classify_java_node<'a>(
