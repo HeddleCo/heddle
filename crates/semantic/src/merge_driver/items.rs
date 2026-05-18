@@ -165,9 +165,11 @@ fn collect_items(
                         scope: item_scope,
                         signature_hash,
                     };
+                    let start_byte =
+                        leading_metadata_start(language, source, child);
                     out.push(Item {
                         key: item_key,
-                        start_byte: child.start_byte(),
+                        start_byte,
                         end_byte: child.end_byte(),
                     });
                 }
@@ -179,6 +181,85 @@ fn collect_items(
             }
         }
     }
+}
+
+/// Walk backward through `node`'s preceding siblings, extending the
+/// effective start of the item to absorb any "leading metadata" — outer
+/// attributes, decorators, annotations, and doc comments — that belong
+/// to the next item. Without this, structural reorder/delete merges leave
+/// the metadata stranded in inter-item content where it can be pulled
+/// into the wrong slot or duplicated across slots (Codex r3 P1 #2).
+fn leading_metadata_start(language: Language, source: &str, node: Node<'_>) -> usize {
+    let mut earliest = node.start_byte();
+    let mut current = node;
+    while let Some(prev) = current.prev_sibling() {
+        if !is_leading_metadata_for(language, prev, source, current.start_byte()) {
+            break;
+        }
+        earliest = prev.start_byte();
+        current = prev;
+    }
+    earliest
+}
+
+/// Whether `prev` is metadata that "belongs to" the item starting at
+/// `next_start`. Per-language rules:
+///
+/// * Rust: outer `attribute_item` always; line/block comments only when
+///   no blank line separates them from the item.
+/// * Go: line/block comments only when no blank line separates them.
+/// * Java: marker / regular annotations as siblings (most are children
+///   of `method_declaration` already, but standalone class-level
+///   annotations can appear as siblings).
+///
+/// Python decorators are not handled here because tree-sitter wraps them
+/// in `decorated_definition`, a different node kind than
+/// `function_definition` (handled at classification time if/when needed).
+/// JavaScript / TypeScript / C / C++ have no equivalent leading-sibling
+/// metadata pattern that this driver currently recognises.
+fn is_leading_metadata_for(
+    language: Language,
+    prev: Node<'_>,
+    source: &str,
+    next_start: usize,
+) -> bool {
+    let kind = prev.kind();
+    match language {
+        Language::Rust => match kind {
+            "attribute_item" | "inner_attribute_item" => true,
+            "line_comment" | "block_comment" => {
+                !has_blank_line_between(source, prev.end_byte(), next_start)
+            }
+            _ => false,
+        },
+        Language::Go => matches!(kind, "comment")
+            && !has_blank_line_between(source, prev.end_byte(), next_start),
+        Language::Java => matches!(
+            kind,
+            "marker_annotation" | "annotation" | "line_comment" | "block_comment"
+        ),
+        Language::Python
+        | Language::JavaScript
+        | Language::TypeScript
+        | Language::C
+        | Language::Cpp
+        | Language::Unknown => false,
+    }
+}
+
+/// Whether the byte range `start..end` contains a blank line — i.e.,
+/// two or more `\n` bytes. Used to distinguish a doc-comment block
+/// attached to the next item (no blank line) from a free-floating
+/// comment (blank line present).
+fn has_blank_line_between(source: &str, start: usize, end: usize) -> bool {
+    if start >= end {
+        return false;
+    }
+    source.as_bytes()[start..end]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
+        >= 2
 }
 
 /// Classifier output: what kind of item, its name, an optional body to
