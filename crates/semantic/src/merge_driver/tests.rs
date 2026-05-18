@@ -2856,3 +2856,82 @@ void f(int) { int x = 99; (void)x; }
         "disjoint overload addition + body edit must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// Self-audit prediction P2 (heddle#114 r7): r6's signature_hash walks
+// each parameter's `type` field text. In tree-sitter-typescript,
+// `required_parameter` and `optional_parameter` are different node
+// kinds — `foo(x: number)` vs `foo(x?: number)` — but they share the
+// same `type` field (a type_annotation around "number"). Without
+// hashing the parameter NODE KIND, the two overload signatures
+// collapse into one ItemKey.
+//
+// Same hazard class as the explicit C/C++ declarator-shape finding
+// (Codex r6 P1 #2): the `type` field doesn't carry the full identity,
+// so distinct overloads share a slot and the per-side occurrence
+// indexer mis-pairs them when one side adds the second overload
+// ahead of the first.
+// =====================================================================
+#[test]
+fn typescript_optional_parameter_distinct_from_required_parameter() {
+    // base has `foo(x: number)`. ours adds the optional-parameter
+    // overload `foo(x?: number)` ABOVE it. theirs edits the body of
+    // `foo(x: number)`. Disjoint edits — clean merge expected.
+    //
+    // Pre-fix both `foo` keys collapse on (Function, "foo", [], sig)
+    // because both params have type field "number". Per-side
+    // occurrences misalign at slot (foo,0): base/theirs hold the
+    // required overload but ours holds the optional overload.
+    let base = "\
+function foo(x: number): number {
+  return x + 0;
+}
+";
+    let ours = "\
+function foo(x?: number): number {
+  return (x ?? 0) + 1;
+}
+function foo(x: number): number {
+  return x + 0;
+}
+";
+    let theirs = "\
+function foo(x: number): number {
+  return x + 999;
+}
+";
+    let outcome = merge_at(base, ours, theirs, "f.ts");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // theirs's edit on the required overload must land.
+    assert!(
+        text.contains("return x + 999"),
+        "theirs's edit on foo(x: number) must survive: {text}"
+    );
+    // ours's added optional overload must land with its body intact.
+    assert!(
+        text.contains("return (x ?? 0) + 1"),
+        "ours's added foo(x?: number) body must survive: {text}"
+    );
+    // Each overload appears exactly once.
+    let required_count = text.matches("foo(x: number)").count();
+    let optional_count = text.matches("foo(x?: number)").count();
+    assert_eq!(
+        required_count, 1,
+        "foo(x: number) must appear exactly once, got {required_count}: {text}"
+    );
+    assert_eq!(
+        optional_count, 1,
+        "foo(x?: number) must appear exactly once, got {optional_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "disjoint overload addition + body edit must merge cleanly: {text}"
+    );
+}
