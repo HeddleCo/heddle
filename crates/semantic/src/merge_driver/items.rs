@@ -480,7 +480,15 @@ fn classify_js_node<'a>(
                 extra_scope: Vec::new(),
             })
         }
-        "class_declaration" => {
+        // `class_declaration` covers concrete classes;
+        // `abstract_class_declaration` is the TS-only variant for
+        // `abstract class`. `interface_declaration` is the TS
+        // interface container. All three carry a `name` and a body
+        // that holds methods we want extracted as per-method items —
+        // without explicit classification their bodies extract zero
+        // items and the whole container routes through whole-file
+        // text-merge (Codex r8 P2, cid 3256283862).
+        "class_declaration" | "abstract_class_declaration" | "interface_declaration" => {
             let name = name_from_field(source, node, "name")?;
             let container_body = node.child_by_field_name("body");
             Some(Classified {
@@ -491,7 +499,14 @@ fn classify_js_node<'a>(
                 extra_scope: Vec::new(),
             })
         }
-        "method_definition" => {
+        // `method_definition` is the concrete class/object method
+        // (with body). `method_signature` and `abstract_method_signature`
+        // are TS-only body-less declarations inside interfaces and
+        // abstract classes respectively. They share the same `name`
+        // and `parameters` field shape, so the same key-derivation
+        // applies — abstract methods just don't carry a body but
+        // remain identifiable by (name, parameter signature).
+        "method_definition" | "method_signature" | "abstract_method_signature" => {
             let name = name_from_field(source, node, "name")?;
             let signature_hash = signature_hash_from_field(language, source, node, "parameters");
             Some(Classified {
