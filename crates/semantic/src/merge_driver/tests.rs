@@ -2011,3 +2011,36 @@ def foo():
         "stale base trailing comment present (theirs's edit got dropped): {text}"
     );
 }
+
+// =====================================================================
+// Codex r3 P1 #1: zero-item fallback bypasses add/add conflict
+// detection.
+//
+// mod.rs:90 routes any (counts.contains(&0) && any > 0) shape through
+// text_hunk_merge. But when base is empty and BOTH sides add an item
+// with the same key (function name) and different bodies, text engine
+// concatenates the two insertions at the same anchor — producing
+// duplicate definitions instead of a conflict. The semantic path's
+// `resolve_item` add/add arm correctly surfaces this as a conflict;
+// the fallback bypasses it.
+// =====================================================================
+#[test]
+fn add_add_same_function_in_empty_base_surfaces_conflict_not_concatenation() {
+    let base = "";
+    let ours = "\
+fn foo() {
+    1
+}
+";
+    let theirs = "\
+fn foo() {
+    2
+}
+";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers around foo: {text}"
+    );
+}
