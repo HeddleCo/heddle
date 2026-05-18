@@ -3579,17 +3579,24 @@ fn cpp_template_method_refactor_inline_to_out_of_class_merges_cleanly() {
     // ["A<T>"] normalizes to ["A"]. All three sides share an
     // ItemKey across the refactor, and the body 3-way merge picks up
     // both ours's signature change and theirs's body edit.
+    // Body indentation is deliberately uniform across the inline and
+    // out-of-class forms (4 spaces, not the more idiomatic 8 spaces
+    // inside a class). The function_definition item bytes cover both
+    // signature and body — if the body indents differ between forms,
+    // every body line counts as a change in the 3-way text merge of
+    // item bytes and the disjoint-edit invariant breaks for reasons
+    // unrelated to the scope-normalization fix under test.
     let base = "\
 template<class T> class A {
-    void foo() {
-        int a = 0;
-        (void)a;
-    }
+void foo() {
+    int a = 0;
+    (void)a;
+}
 };
 ";
     let ours = "\
 template<class T> class A {
-    void foo();
+void foo();
 };
 template<class T> void A<T>::foo() {
     int a = 0;
@@ -3598,10 +3605,10 @@ template<class T> void A<T>::foo() {
 ";
     let theirs = "\
 template<class T> class A {
-    void foo() {
-        int a = 99;
-        (void)a;
-    }
+void foo() {
+    int a = 99;
+    (void)a;
+}
 };
 ";
     let outcome = merge_at(base, ours, theirs, "f.cpp");

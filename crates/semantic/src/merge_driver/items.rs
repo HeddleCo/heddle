@@ -989,9 +989,16 @@ fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String
 /// (`void foo()` inside the file scope) and the chain of scope
 /// identifiers for out-of-class definitions: `void A::foo()` → `["A"]`,
 /// `void ns::A::foo()` → `["ns", "A"]`, `template <T> void Foo<T>::bar()`
-/// → `["Foo<T>"]` (whitespace stripped). Whitespace is stripped from each
+/// → `["Foo"]` (whitespace stripped). Whitespace is stripped from each
 /// component so cosmetic reformatting (`A :: foo` vs `A::foo`) doesn't
 /// produce different keys.
+///
+/// Template-argument lists are stripped from each component so the
+/// out-of-class form `A<T>::foo` keys at the same scope as the inline
+/// form `class A { void foo() {} }` (which inherits scope from the
+/// `class_specifier.name` text — `A` only, never `A<T>`). Without this
+/// normalization, refactoring a method between inline and out-of-class
+/// looks like delete + add to the merger (Codex r9 P2, cid 3256397418).
 ///
 /// The walk mirrors `c_function_name`: strip pointer/reference/array/
 /// parenthesized wrappers via the `declarator` field, and at each
@@ -1007,7 +1014,8 @@ fn c_function_scope(source: &str, function_declarator: Node<'_>) -> Vec<String> 
         match current.kind() {
             "qualified_identifier" => {
                 if let Some(s) = current.child_by_field_name("scope") {
-                    scope.push(strip_whitespace(&source[s.byte_range()]));
+                    let raw = strip_whitespace(&source[s.byte_range()]);
+                    scope.push(strip_template_args(&raw));
                 }
                 let Some(next) = current.child_by_field_name("name") else {
                     return scope;
@@ -1027,6 +1035,22 @@ fn c_function_scope(source: &str, function_declarator: Node<'_>) -> Vec<String> 
         }
     }
     scope
+}
+
+/// Strip a trailing template-argument list from a C++ scope component
+/// for ItemKey normalization. `A<T>` → `A`, `Foo<int, std::map<K, V>>`
+/// → `Foo`, `Bar` → `Bar`. Match on the FIRST `<` so nested arguments
+/// are dropped wholesale alongside the outer pair.
+///
+/// Only intended for scope qualifier text (e.g. the `scope` field of a
+/// `qualified_identifier`). Not safe for arbitrary identifiers — an
+/// operator name like `operator<` would be truncated. Scope components
+/// can't be operator names in well-formed C++, so this is fine here.
+fn strip_template_args(s: &str) -> String {
+    match s.find('<') {
+        Some(i) => s[..i].to_string(),
+        None => s.to_string(),
+    }
 }
 
 /// Name an impl block. Two impls of the same type with different traits must
