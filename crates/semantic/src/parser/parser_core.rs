@@ -138,10 +138,13 @@ impl ParsedFile {
         if let Some(name) = node.child_by_field_name("name") {
             return Some(&self.source[name.byte_range()]);
         }
-        if let Some(declarator) = node.child_by_field_name("declarator")
-            && let Some(name) = self.find_identifier_in_subtree(declarator)
-        {
-            return Some(name);
+        if let Some(declarator) = node.child_by_field_name("declarator") {
+            if let Some(name) = self.c_function_name(declarator) {
+                return Some(name);
+            }
+            if let Some(name) = self.find_identifier_in_subtree(declarator) {
+                return Some(name);
+            }
         }
 
         for i in 0..node.child_count() {
@@ -152,6 +155,49 @@ impl ParsedFile {
                 )
             {
                 return Some(&self.source[child.byte_range()]);
+            }
+        }
+        None
+    }
+
+    /// Resolve the actual function name from a C/C++ declarator.
+    ///
+    /// Mirrors `merge_driver::items::c_function_name` (heddle#114
+    /// commit `dc37af8`, Codex r5 P1 #2). A plain DFS over the
+    /// declarator subtree returns the FIRST identifier-ish leaf — for
+    /// a templated qualified name like `void Foo<U>::bar()` the
+    /// scope's inner `type_identifier` ("Foo") wins, so every method
+    /// on the same scope collapses to name="Foo". Instead, walk the
+    /// declarator's `declarator` field, peel wrapper layers, and
+    /// recurse into `qualified_identifier` / `template_function`'s
+    /// `name` field so the scope's identifier never wins.
+    ///
+    /// Duplicated rather than lifted to a shared module: the function
+    /// is short, and `parser_core` vs `merge_driver` are different
+    /// concerns. Lift if a third caller appears.
+    fn c_function_name(&self, function_declarator: Node<'_>) -> Option<&str> {
+        let mut current = function_declarator.child_by_field_name("declarator")?;
+        // Cap traversal so a pathological wrapper chain doesn't loop.
+        for _ in 0..32 {
+            match current.kind() {
+                "identifier"
+                | "field_identifier"
+                | "type_identifier"
+                | "property_identifier"
+                | "operator_name"
+                | "destructor_name" => {
+                    return Some(&self.source[current.byte_range()]);
+                }
+                "qualified_identifier" | "template_function" => {
+                    current = current.child_by_field_name("name")?;
+                }
+                "pointer_declarator"
+                | "reference_declarator"
+                | "function_declarator"
+                | "parenthesized_declarator" => {
+                    current = current.child_by_field_name("declarator")?;
+                }
+                _ => return None,
             }
         }
         None
