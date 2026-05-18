@@ -2554,3 +2554,110 @@ void Foo<U>::foo() { int y = 0; (void)y; int yy = y; (void)yy; }
         "merge must be clean — disjoint method edits + a clean addition: {text}"
     );
 }
+
+// =====================================================================
+// Codex r5 P1 #3: tree-sitter JS/TS represents decorators as a
+// `decorator` node sibling that precedes the decorated `method_definition`
+// inside a `class_body`. `is_leading_metadata_for` returns false for
+// EVERY JS/TS node, so decorators end up in inter-item content. When
+// both sides add a new decorated method at the SAME structural position
+// (between two existing methods), each side's inter-item segment
+// carries a different decorator — the 3-way merge of those segments
+// surfaces a spurious conflict (or worse, leaks the wrong decorator
+// onto the wrong method). Post-fix decorators bind to their method's
+// item range; new decorated methods are added cleanly with their
+// decorators attached.
+// =====================================================================
+#[test]
+fn typescript_decorator_attaches_to_added_method_via_leading_metadata() {
+    // base has two undecorated methods. ours adds a new decorated
+    // method `middle` between them; theirs adds a different decorated
+    // method `other` between them. Pre-fix, the decorators live in
+    // ours's/theirs's inter-item segments between `foo` and the added
+    // method — and base's matching inter-item segment is just
+    // whitespace. The 3-way merge of those segments has all three
+    // sides disagreeing (base = `\n  `, ours has `@Get` text, theirs
+    // has `@Post` text), so a conflict marker drops into the inter-
+    // item gap. Post-fix `@Get()` is part of `middle`'s item range and
+    // `@Post()` is part of `other`'s, so the inter-item gap is just
+    // whitespace on every side and the merge resolves cleanly.
+    let base = "\
+class C {
+  foo() {}
+  bar() {}
+}
+";
+    let ours = "\
+class C {
+  foo() {}
+  @Get()
+  middle() {}
+  bar() {}
+}
+";
+    let theirs = "\
+class C {
+  foo() {}
+  @Post()
+  other() {}
+  bar() {}
+}
+";
+    let outcome = merge_at(base, ours, theirs, "f.ts");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    // Both added methods land.
+    assert!(text.contains("middle()"), "ours's middle() must land: {text}");
+    assert!(text.contains("other()"), "theirs's other() must land: {text}");
+    // Both decorators land — each EXACTLY once.
+    let get_count = text.matches("@Get(").count();
+    let post_count = text.matches("@Post(").count();
+    assert_eq!(
+        get_count, 1,
+        "@Get() must appear exactly once (attached to middle), got {get_count}: {text}"
+    );
+    assert_eq!(
+        post_count, 1,
+        "@Post() must appear exactly once (attached to other), got {post_count}: {text}"
+    );
+    // @Get must immediately precede middle (no other line between);
+    // @Post must immediately precede other.
+    let get_idx = text.find("@Get").expect("@Get present");
+    let middle_idx = text.find("middle()").expect("middle present");
+    let post_idx = text.find("@Post").expect("@Post present");
+    let other_idx = text.find("other()").expect("other present");
+    assert!(
+        get_idx < middle_idx,
+        "@Get must precede middle: {text}"
+    );
+    assert!(
+        post_idx < other_idx,
+        "@Post must precede other: {text}"
+    );
+    // Critical: each decorator binds to its OWN method, not the
+    // adjacent one. Concretely, between @Get and middle there should
+    // be no `bar` or `other` token; between @Post and other there
+    // should be no `bar` or `middle` token.
+    let between_get_and_middle = &text[get_idx..middle_idx];
+    assert!(
+        !between_get_and_middle.contains("other")
+            && !between_get_and_middle.contains("bar"),
+        "@Get must bind directly to middle, found stray tokens: {between_get_and_middle:?}"
+    );
+    let between_post_and_other = &text[post_idx..other_idx];
+    assert!(
+        !between_post_and_other.contains("middle")
+            && !between_post_and_other.contains("bar"),
+        "@Post must bind directly to other, found stray tokens: {between_post_and_other:?}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "merge must be clean — disjoint additions of decorated methods: {text}"
+    );
+}
