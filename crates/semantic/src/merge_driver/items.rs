@@ -565,6 +565,13 @@ fn classify_c_node<'a>(
     if kind == "function_definition" {
         let declarator = node.child_by_field_name("declarator")?;
         let name = c_function_name(source, declarator)?;
+        // Out-of-class definitions (`A::foo`, `ns::Foo::bar`) need the
+        // qualified scope as part of the key — without it, methods
+        // sharing a name across unrelated classes/namespaces collapse
+        // to the same ItemKey and the per-side occurrence indexer
+        // can pair unrelated functions across sides whenever one side
+        // adds or reorders a same-named method (Codex r6 P1 #1).
+        let extra_scope = c_function_scope(source, declarator);
         // C/C++ parameter list lives inside the declarator subtree as a
         // `parameter_list` node — find it for overload disambiguation.
         // Use the structural hash (arity + per-parameter type) so a
@@ -577,7 +584,7 @@ fn classify_c_node<'a>(
             name,
             container_body: None,
             signature_hash,
-            extra_scope: Vec::new(),
+            extra_scope,
         });
     }
     None
@@ -764,6 +771,51 @@ fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String
         }
     }
     None
+}
+
+/// Extract the qualified scope chain from a C/C++ `function_declarator`,
+/// outermost first. Returns `[]` for unqualified definitions
+/// (`void foo()` inside the file scope) and the chain of scope
+/// identifiers for out-of-class definitions: `void A::foo()` → `["A"]`,
+/// `void ns::A::foo()` → `["ns", "A"]`, `template <T> void Foo<T>::bar()`
+/// → `["Foo<T>"]` (whitespace stripped). Whitespace is stripped from each
+/// component so cosmetic reformatting (`A :: foo` vs `A::foo`) doesn't
+/// produce different keys.
+///
+/// The walk mirrors `c_function_name`: strip pointer/reference/array/
+/// parenthesized wrappers via the `declarator` field, and at each
+/// `qualified_identifier` record its `scope` field text and descend
+/// into its `name` field. A `template_function` doesn't bear scope —
+/// stop the walk there.
+fn c_function_scope(source: &str, function_declarator: Node<'_>) -> Vec<String> {
+    let mut scope = Vec::new();
+    let Some(mut current) = function_declarator.child_by_field_name("declarator") else {
+        return scope;
+    };
+    for _ in 0..32 {
+        match current.kind() {
+            "qualified_identifier" => {
+                if let Some(s) = current.child_by_field_name("scope") {
+                    scope.push(strip_whitespace(&source[s.byte_range()]));
+                }
+                let Some(next) = current.child_by_field_name("name") else {
+                    return scope;
+                };
+                current = next;
+            }
+            "pointer_declarator"
+            | "reference_declarator"
+            | "function_declarator"
+            | "parenthesized_declarator" => {
+                let Some(next) = current.child_by_field_name("declarator") else {
+                    return scope;
+                };
+                current = next;
+            }
+            _ => return scope,
+        }
+    }
+    scope
 }
 
 /// Name an impl block. Two impls of the same type with different traits must
