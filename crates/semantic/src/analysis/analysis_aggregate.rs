@@ -291,6 +291,53 @@ mod tests {
     }
 
     #[test]
+    fn test_dep_added_distinguishes_versions() {
+        // Same dep name at two different versions must NOT collapse into one group.
+        // Pre-fix the key was just `name`, so `serde 1.0` and `serde 2.0` merged.
+        let changes = vec![
+            SemanticChange::DependencyAdded {
+                name: "serde".into(),
+                version: "1.0".into(),
+            },
+            SemanticChange::DependencyAdded {
+                name: "serde".into(),
+                version: "1.0".into(),
+            },
+            SemanticChange::DependencyAdded {
+                name: "serde".into(),
+                version: "2.0".into(),
+            },
+            SemanticChange::DependencyAdded {
+                name: "serde".into(),
+                version: "2.0".into(),
+            },
+        ];
+
+        let result = aggregate_changes(changes);
+        assert_eq!(
+            result.groups.len(),
+            2,
+            "expected separate groups for serde 1.0 and serde 2.0, got {:?}",
+            result.groups.iter().map(|g| &g.label).collect::<Vec<_>>()
+        );
+        for g in &result.groups {
+            assert_eq!(g.kind, AggregateKind::DependencyChange);
+            assert_eq!(g.children.len(), 2);
+        }
+        let labels: Vec<&String> = result.groups.iter().map(|g| &g.label).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("1.0")),
+            "expected a label mentioning 1.0, got {:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("2.0")),
+            "expected a label mentioning 2.0, got {:?}",
+            labels
+        );
+    }
+
+    #[test]
     fn test_mixed_aggregation() {
         let changes = vec![
             SemanticChange::FileModified {
