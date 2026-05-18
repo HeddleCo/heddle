@@ -3405,3 +3405,78 @@ fn addadd_conflict_markers_use_crlf_for_single_line_items_in_crlf_file() {
         }
     }
 }
+
+// =====================================================================
+// Codex r9 P1 (cid 3256397416): C++ does NOT allow overloading by
+// exception specification. `void foo()` and `void foo() noexcept` are
+// REDECLARATIONS of the same function — not different overloads. The
+// r8 P2 fix folded `noexcept` into `c_signature_hash` alongside cv-
+// and ref-qualifiers, but unlike those, `noexcept` is metadata: it
+// must NOT change ItemKey identity. Including it splits a logical
+// function across sides whenever `noexcept` is added or removed,
+// degrading the resolution to delete + add and losing disjoint body
+// edits on the other side.
+// =====================================================================
+#[test]
+fn cpp_noexcept_addition_does_not_split_function_identity() {
+    // base has plain `void foo() { ... }`. ours adds `noexcept` to the
+    // signature line. theirs edits the body. Disjoint changes — clean
+    // merge expected.
+    //
+    // Pre-fix `noexcept` is in c_signature_hash, so ours's foo and
+    // base/theirs's foo get different ItemKeys. ours is treated as
+    // delete + add of foo; theirs's body modify on the old key races
+    // the delete and either conflicts or is overwritten.
+    //
+    // Post-fix `noexcept` is dropped from the hash, all three sides
+    // share an ItemKey, and the function-body 3-way merge picks up
+    // both edits (signature line and body line) cleanly.
+    let base = "\
+void foo() {
+    int a = 0;
+    (void)a;
+}
+";
+    let ours = "\
+void foo() noexcept {
+    int a = 0;
+    (void)a;
+}
+";
+    let theirs = "\
+void foo() {
+    int a = 99;
+    (void)a;
+}
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(
+        text.contains("noexcept"),
+        "ours's noexcept addition must survive: {text}"
+    );
+    assert!(
+        text.contains("int a = 99"),
+        "theirs's body edit must survive: {text}"
+    );
+    // foo definition must appear exactly once — pre-fix it can
+    // duplicate (ours's add + theirs's modify) or vanish (ours's
+    // delete wins).
+    let foo_signature_count =
+        text.matches("foo() noexcept").count() + text.matches("foo() {").count();
+    assert_eq!(
+        foo_signature_count, 1,
+        "foo definition must appear exactly once across the noexcept addition: got {foo_signature_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "noexcept addition + disjoint body edit must merge cleanly: {text}"
+    );
+}
