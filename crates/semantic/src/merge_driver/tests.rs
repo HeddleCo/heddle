@@ -2399,3 +2399,64 @@ fn foo() {
         "expected canonical conflict markers around foo: {text}"
     );
 }
+
+// =====================================================================
+// Codex r5 P1 #1: `signature_hash_from_field` hashes the whole
+// `parameters` text — INCLUDING parameter NAMES. A pure parameter
+// rename on one side (`foo(x: u32)` → `foo(y: u32)`) changes
+// `ItemKey.signature_hash` and the renamed function gets a distinct
+// match-key from base/theirs's foo. The merger then treats it as
+// delete+add, so an unrelated body change on the OTHER side surfaces
+// as a modify/delete conflict (or drops one edit) instead of merging
+// cleanly. Post-fix the hash is derived from arity + types only —
+// renaming a parameter doesn't change the key.
+// =====================================================================
+#[test]
+fn rust_parameter_rename_does_not_split_function_identity() {
+    // ours renames `x` → `y` in the signature AND the body line that
+    // references it (a pure rename refactor). theirs adds `+ 0` on
+    // an entirely DIFFERENT line — line-disjoint from ours's edits.
+    // Post-fix all three sides share the same ItemKey, so the body
+    // merge proceeds as a 3-way modify on line-disjoint edits and
+    // resolves cleanly: rename from ours, body tweak from theirs.
+    let base = "\
+fn foo(x: u32) -> u32 {
+    let r = x + 1;
+    r
+}
+";
+    let ours = "\
+fn foo(y: u32) -> u32 {
+    let r = y + 1;
+    r
+}
+";
+    let theirs = "\
+fn foo(x: u32) -> u32 {
+    let r = x + 1;
+    r + 0
+}
+";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    // ours's rename must land.
+    assert!(
+        merged.contains("fn foo(y: u32)"),
+        "ours's parameter rename lost (signature_hash must ignore parameter names): {merged}"
+    );
+    assert!(
+        merged.contains("let r = y + 1"),
+        "ours's body update of the renamed parameter lost: {merged}"
+    );
+    // theirs's body tweak must land.
+    assert!(
+        merged.contains("r + 0"),
+        "theirs's body edit lost: {merged}"
+    );
+    // The pre-fix duplication shape: two `fn foo` definitions in
+    // output. Guard against that.
+    let foo_count = merged.matches("fn foo").count();
+    assert_eq!(
+        foo_count, 1,
+        "expected ONE fn foo (parameter rename must not split identity), got {foo_count}: {merged}"
+    );
+}
