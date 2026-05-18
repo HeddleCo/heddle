@@ -2903,6 +2903,44 @@ fn crlf_add_add_conflict_markers_use_crlf() {
 }
 
 // =====================================================================
+// Self-audit prediction P1 (heddle#114 r7): r6's reconcile_trailing_newline
+// fix made the POP case CRLF-aware (popping `\r\n` as a unit). The
+// inverse path — when majority votes "yes trailing newline" and output
+// lacks one — still hardcodes `b'\n'`, so a CRLF-style file whose
+// reconstructed bytes happen to end without a newline gets a bare LF
+// appended. Same hazard class as the r6 P2 #1 markers finding: any
+// place that emits a newline must respect the file's existing EOL.
+// =====================================================================
+#[test]
+fn reconcile_trailing_newline_add_case_uses_crlf_when_file_is_crlf() {
+    // base and theirs both end with CRLF (both vote "yes trailing
+    // newline", so majority = yes). ours's modification appends a new
+    // function without a final newline, and the reconstruction
+    // pipeline ends the output at ours's last item — no trailing
+    // newline. reconcile_trailing_newline pushes one back; pre-fix
+    // it pushes `\n`, post-fix it pushes `\r\n` to match the file's
+    // existing CRLF style.
+    let base = "fn foo() {}\r\n";
+    let ours = "fn foo() {}\r\nfn bar() {}";
+    let theirs = "fn foo() { 1 }\r\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(
+        merged.ends_with("\r\n"),
+        "merged output must end with CRLF when the file is CRLF (ADD case): {merged:?}"
+    );
+    // Defence in depth: no bare LF anywhere in the output.
+    let bytes = merged.as_bytes();
+    for i in 0..bytes.len() {
+        if bytes[i] == b'\n' {
+            assert!(
+                i > 0 && bytes[i - 1] == b'\r',
+                "bare LF at byte {i} in otherwise-CRLF output: {merged:?}"
+            );
+        }
+    }
+}
+
+// =====================================================================
 // Self-audit prediction P2 (heddle#114 r7): r6's signature_hash walks
 // each parameter's `type` field text. In tree-sitter-typescript,
 // `required_parameter` and `optional_parameter` are different node
