@@ -54,8 +54,11 @@ pub fn aggregate_changes(changes: Vec<SemanticChange>) -> AggregationResult {
     let mut comment_files: Vec<(PathBuf, SemanticChange)> = Vec::new();
     // Key: (old_name, new_name) → list of (file, change)
     let mut fn_renames: HashMap<(String, String), Vec<(PathBuf, SemanticChange)>> = HashMap::new();
-    // Key: dep name → list of changes
-    let mut dep_added: HashMap<String, Vec<SemanticChange>> = HashMap::new();
+    // Key: (dep name, version) → list of changes. Version is part of the key so
+    // that two files adding `serde 1.0` vs `serde 2.0` don't silently collapse
+    // into one group (heddle#119; sibling of heddle#68 r1, fixed in PR #114
+    // commit c5a2f75 by keying ItemKey on more than just name).
+    let mut dep_added: HashMap<(String, String), Vec<SemanticChange>> = HashMap::new();
     let mut dep_removed: HashMap<String, Vec<SemanticChange>> = HashMap::new();
 
     let mut individual: Vec<SemanticChange> = Vec::new();
@@ -91,8 +94,11 @@ pub fn aggregate_changes(changes: Vec<SemanticChange>) -> AggregationResult {
                     .or_default()
                     .push((file.clone(), change));
             }
-            SemanticChange::DependencyAdded { name, .. } => {
-                dep_added.entry(name.clone()).or_default().push(change);
+            SemanticChange::DependencyAdded { name, version } => {
+                dep_added
+                    .entry((name.clone(), version.clone()))
+                    .or_default()
+                    .push(change);
             }
             SemanticChange::DependencyRemoved { name } => {
                 dep_removed.entry(name.clone()).or_default().push(change);
@@ -171,12 +177,12 @@ pub fn aggregate_changes(changes: Vec<SemanticChange>) -> AggregationResult {
         }
     }
 
-    // Dependency groups (only aggregate if same dep appears 2+ times).
-    for (name, entries) in dep_added {
+    // Dependency groups (only aggregate if same dep+version appears 2+ times).
+    for ((name, version), entries) in dep_added {
         if entries.len() >= 2 {
             let count = entries.len();
             groups.push(AggregatedChange {
-                label: format!("Added dependency {} ({} files)", name, count),
+                label: format!("Added dependency {} {} ({} files)", name, version, count),
                 kind: AggregateKind::DependencyChange,
                 files: Vec::new(),
                 importance: ChangeImportance::Low,
@@ -288,6 +294,53 @@ mod tests {
         assert!(result.groups[0].label.contains("foo"));
         assert_eq!(result.groups[0].files.len(), 2);
         assert_eq!(result.individual.len(), 1);
+    }
+
+    #[test]
+    fn test_dep_added_distinguishes_versions() {
+        // Same dep name at two different versions must NOT collapse into one group.
+        // Pre-fix the key was just `name`, so `serde 1.0` and `serde 2.0` merged.
+        let changes = vec![
+            SemanticChange::DependencyAdded {
+                name: "serde".into(),
+                version: "1.0".into(),
+            },
+            SemanticChange::DependencyAdded {
+                name: "serde".into(),
+                version: "1.0".into(),
+            },
+            SemanticChange::DependencyAdded {
+                name: "serde".into(),
+                version: "2.0".into(),
+            },
+            SemanticChange::DependencyAdded {
+                name: "serde".into(),
+                version: "2.0".into(),
+            },
+        ];
+
+        let result = aggregate_changes(changes);
+        assert_eq!(
+            result.groups.len(),
+            2,
+            "expected separate groups for serde 1.0 and serde 2.0, got {:?}",
+            result.groups.iter().map(|g| &g.label).collect::<Vec<_>>()
+        );
+        for g in &result.groups {
+            assert_eq!(g.kind, AggregateKind::DependencyChange);
+            assert_eq!(g.children.len(), 2);
+        }
+        let labels: Vec<&String> = result.groups.iter().map(|g| &g.label).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("1.0")),
+            "expected a label mentioning 1.0, got {:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("2.0")),
+            "expected a label mentioning 2.0, got {:?}",
+            labels
+        );
     }
 
     #[test]
