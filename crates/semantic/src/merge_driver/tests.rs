@@ -2024,6 +2024,66 @@ def foo():
 // `resolve_item` add/add arm correctly surfaces this as a conflict;
 // the fallback bypasses it.
 // =====================================================================
+// =====================================================================
+// Codex r3 P1 #2: leading attributes/doc-comments must stay attached
+// to their item across structural reorders.
+//
+// items.rs::collect_items extracts items at strictly `start_byte..end_byte`
+// of the classified node — so `#[test]` (an `attribute_item` sibling of
+// `function_item`) is excluded from the item's range and lives in
+// inter-item content. When the other side reorders items, the
+// attribute remains anchored to a byte position that now belongs to
+// a different item — behavior change without a conflict.
+// =====================================================================
+#[test]
+fn rust_outer_attribute_does_not_duplicate_when_adjacent_item_deleted() {
+    // When one side deletes an item that immediately precedes an
+    // attributed item, the attribute floating in inter-item content
+    // gets pulled into BOTH the deleted item's slot AND the
+    // surviving item's slot — producing duplicate `#[test]` lines.
+    //
+    // base:           ours:           theirs:
+    //   fn alpha {}     #[test]         fn alpha {}
+    //                   fn foo {}
+    //   #[test]                         #[test]
+    //   fn foo {}                       fn foo { 2 }
+    //
+    // Expected output: single `#[test] fn foo { 2 }`. Pre-fix:
+    // `#[test]` shows up twice.
+    let base = "\
+fn alpha() {}
+
+#[test]
+fn foo() { 1 }
+";
+    let ours = "\
+#[test]
+fn foo() { 1 }
+";
+    let theirs = "\
+fn alpha() {}
+
+#[test]
+fn foo() { 2 }
+";
+    let outcome = merge_rust(base, ours, theirs);
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    let attr_count = text.matches("#[test]").count();
+    assert_eq!(
+        attr_count, 1,
+        "expected #[test] exactly once, got {attr_count}: {text}"
+    );
+    assert!(!text.contains("fn alpha"), "alpha should be deleted: {text}");
+    assert!(text.contains("fn foo() { 2 }"), "foo body should reflect theirs: {text}");
+}
+
 #[test]
 fn add_add_same_function_in_empty_base_surfaces_conflict_not_concatenation() {
     let base = "";
