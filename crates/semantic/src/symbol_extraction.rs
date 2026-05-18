@@ -7,240 +7,52 @@
 
 use crate::symbol_resolver::ResolvedSymbol;
 
+/// Cap on AST traversal depth. Beyond this, nodes are not inspected —
+/// the walker simply stops descending. Picked well above realistic
+/// source nesting so the cap only trips on pathological / synthetic
+/// input. Mirrors the `MAX_TRAVERSAL_DEPTH` introduced in
+/// `merge_driver::items::collect_items` (heddle#114 422031b); duplicated
+/// here per the convention of keeping each AST walker self-contained.
+const MAX_TRAVERSAL_DEPTH: usize = 256;
+
 /// Walk tree-sitter AST to find function/method/struct/enum definitions
 /// matching a target name. Returns all matches.
+///
+/// Iterative DFS over a `Vec<(Node, Option<String>, usize)>` stack —
+/// the stack-overflow shape that motivated the iterative form in
+/// `merge_driver::items::collect_items` (heddle#114 422031b) lives in
+/// this walker too: it recurses for every child of every non-scope
+/// node, so a deeply-parseable input drives call depth proportional to
+/// AST depth. tree-sitter itself parses iteratively, so the only guard
+/// is here.
 pub(crate) fn find_definitions(
     node: &tree_sitter::Node,
     source: &[u8],
     target_name: &str,
 ) -> Vec<ResolvedSymbol> {
     let mut results = Vec::new();
-    find_definitions_recursive(node, source, target_name, None, &mut results);
-    results
-}
+    let mut stack: Vec<(tree_sitter::Node, Option<String>, usize)> = vec![(*node, None, 0)];
 
-fn find_definitions_recursive(
-    node: &tree_sitter::Node,
-    source: &[u8],
-    target_name: &str,
-    current_parent: Option<&str>,
-    results: &mut Vec<ResolvedSymbol>,
-) {
-    let kind = node.kind();
+    while let Some((node, parent, depth)) = stack.pop() {
+        if depth > MAX_TRAVERSAL_DEPTH {
+            continue;
+        }
+        let current_parent = parent.as_deref();
+        let kind = node.kind();
+        // True when the kind's arm below handles its own child traversal
+        // (scope-introducing nodes that re-parent their children). For
+        // these we skip the default "push all children with same parent"
+        // step at the bottom of the loop.
+        let mut descended_with_new_parent = false;
 
-    match kind {
-        // ── Rust ──────────────────────────────────────────────
-        "function_item" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = node_text(&name_node, source);
-                if name == target_name {
-                    results.push(ResolvedSymbol {
-                        name: name.to_string(),
-                        start_line: node.start_position().row as u32 + 1,
-                        end_line: node.end_position().row as u32 + 1,
-                        parent_name: current_parent.map(String::from),
-                    });
-                }
-            }
-        }
-        "impl_item" => {
-            // Extract the type name from the impl block.
-            let impl_type_name = extract_impl_type_name(node, source);
-            let parent = impl_type_name.as_deref();
-
-            // Walk children of impl block with the parent set.
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                find_definitions_recursive(&child, source, target_name, parent, results);
-            }
-            return; // Already recursed into children.
-        }
-        "struct_item" | "enum_item" | "type_item" | "trait_item" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = node_text(&name_node, source);
-                if name == target_name {
-                    results.push(ResolvedSymbol {
-                        name: name.to_string(),
-                        start_line: node.start_position().row as u32 + 1,
-                        end_line: node.end_position().row as u32 + 1,
-                        parent_name: current_parent.map(String::from),
-                    });
-                }
-            }
-        }
-
-        // ── Python ───────────────────────────────────────────
-        "function_definition" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = node_text(&name_node, source);
-                if name == target_name {
-                    results.push(ResolvedSymbol {
-                        name: name.to_string(),
-                        start_line: node.start_position().row as u32 + 1,
-                        end_line: node.end_position().row as u32 + 1,
-                        parent_name: current_parent.map(String::from),
-                    });
-                }
-            }
-        }
-        "class_definition" => {
-            let class_name = node
-                .child_by_field_name("name")
-                .map(|n| node_text(&n, source).to_string());
-
-            // The class itself is a definition.
-            if let Some(ref name) = class_name
-                && name == target_name
-            {
-                results.push(ResolvedSymbol {
-                    name: name.clone(),
-                    start_line: node.start_position().row as u32 + 1,
-                    end_line: node.end_position().row as u32 + 1,
-                    parent_name: current_parent.map(String::from),
-                });
-            }
-
-            // Recurse into class body with class name as parent.
-            let parent = class_name.as_deref();
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                find_definitions_recursive(&child, source, target_name, parent, results);
-            }
-            return;
-        }
-
-        // ── Go ───────────────────────────────────────────────
-        "function_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = node_text(&name_node, source);
-                if name == target_name {
-                    results.push(ResolvedSymbol {
-                        name: name.to_string(),
-                        start_line: node.start_position().row as u32 + 1,
-                        end_line: node.end_position().row as u32 + 1,
-                        parent_name: current_parent.map(String::from),
-                    });
-                }
-            }
-        }
-        "method_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = node_text(&name_node, source);
-                if name == target_name {
-                    // Try to extract the receiver type as the parent.
-                    let receiver_type = extract_go_receiver_type(node, source);
-                    results.push(ResolvedSymbol {
-                        name: name.to_string(),
-                        start_line: node.start_position().row as u32 + 1,
-                        end_line: node.end_position().row as u32 + 1,
-                        parent_name: receiver_type.or_else(|| current_parent.map(String::from)),
-                    });
-                }
-            }
-        }
-        "type_declaration" => {
-            // Go type declarations contain type_spec children.
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "type_spec"
-                    && let Some(name_node) = child.child_by_field_name("name")
-                {
+        match kind {
+            // ── Rust ──────────────────────────────────────────────
+            "function_item" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
                     let name = node_text(&name_node, source);
                     if name == target_name {
                         results.push(ResolvedSymbol {
                             name: name.to_string(),
-                            start_line: child.start_position().row as u32 + 1,
-                            end_line: child.end_position().row as u32 + 1,
-                            parent_name: current_parent.map(String::from),
-                        });
-                    }
-                }
-            }
-        }
-
-        // ── JavaScript / TypeScript ──────────────────────────
-        // Note: "function_declaration" is shared with Go and handled above.
-        "method_definition" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = node_text(&name_node, source);
-                if name == target_name {
-                    results.push(ResolvedSymbol {
-                        name: name.to_string(),
-                        start_line: node.start_position().row as u32 + 1,
-                        end_line: node.end_position().row as u32 + 1,
-                        parent_name: current_parent.map(String::from),
-                    });
-                }
-            }
-        }
-        "class_declaration" => {
-            let class_name = node
-                .child_by_field_name("name")
-                .map(|n| node_text(&n, source).to_string());
-
-            if let Some(ref name) = class_name
-                && name == target_name
-            {
-                results.push(ResolvedSymbol {
-                    name: name.clone(),
-                    start_line: node.start_position().row as u32 + 1,
-                    end_line: node.end_position().row as u32 + 1,
-                    parent_name: current_parent.map(String::from),
-                });
-            }
-
-            let parent = class_name.as_deref();
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                find_definitions_recursive(&child, source, target_name, parent, results);
-            }
-            return;
-        }
-        "lexical_declaration" | "variable_declaration" => {
-            // Handle `const foo = () => { ... }` or `const foo = function() { ... }`
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "variable_declarator"
-                    && let Some(name_node) = child.child_by_field_name("name")
-                {
-                    let name = node_text(&name_node, source);
-                    if name == target_name {
-                        // Check if the value is a function expression or arrow function.
-                        if let Some(value_node) = child.child_by_field_name("value") {
-                            let vkind = value_node.kind();
-                            if vkind == "arrow_function"
-                                || vkind == "function"
-                                || vkind == "function_expression"
-                            {
-                                results.push(ResolvedSymbol {
-                                    name: name.to_string(),
-                                    start_line: node.start_position().row as u32 + 1,
-                                    end_line: node.end_position().row as u32 + 1,
-                                    parent_name: current_parent.map(String::from),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Object literal property whose value is a function/arrow expression,
-        // e.g. `export const db = { insert: async (...) => {...} };` — a
-        // common TS/JS pattern that the variable_declarator branch above
-        // misses because the function lives one level deeper.
-        "pair" => {
-            if let Some(key_node) = node.child_by_field_name("key") {
-                let key = node_text(&key_node, source);
-                if key == target_name
-                    && let Some(value_node) = node.child_by_field_name("value")
-                {
-                    let vkind = value_node.kind();
-                    if vkind == "arrow_function"
-                        || vkind == "function"
-                        || vkind == "function_expression"
-                    {
-                        results.push(ResolvedSymbol {
-                            name: key.to_string(),
                             start_line: node.start_position().row as u32 + 1,
                             end_line: node.end_position().row as u32 + 1,
                             parent_name: current_parent.map(String::from),
@@ -248,16 +60,230 @@ fn find_definitions_recursive(
                     }
                 }
             }
+            "impl_item" => {
+                // Extract the type name from the impl block, then schedule
+                // children with that name as their parent scope. Push in
+                // reverse so popping yields the original child order — the
+                // public API documents matches in source order.
+                let impl_type_name = extract_impl_type_name(&node, source);
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.children(&mut cursor).collect();
+                for child in children.into_iter().rev() {
+                    stack.push((child, impl_type_name.clone(), depth + 1));
+                }
+                descended_with_new_parent = true;
+            }
+            "struct_item" | "enum_item" | "type_item" | "trait_item" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = node_text(&name_node, source);
+                    if name == target_name {
+                        results.push(ResolvedSymbol {
+                            name: name.to_string(),
+                            start_line: node.start_position().row as u32 + 1,
+                            end_line: node.end_position().row as u32 + 1,
+                            parent_name: current_parent.map(String::from),
+                        });
+                    }
+                }
+            }
+
+            // ── Python ───────────────────────────────────────────
+            "function_definition" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = node_text(&name_node, source);
+                    if name == target_name {
+                        results.push(ResolvedSymbol {
+                            name: name.to_string(),
+                            start_line: node.start_position().row as u32 + 1,
+                            end_line: node.end_position().row as u32 + 1,
+                            parent_name: current_parent.map(String::from),
+                        });
+                    }
+                }
+            }
+            "class_definition" => {
+                let class_name = node
+                    .child_by_field_name("name")
+                    .map(|n| node_text(&n, source).to_string());
+
+                // The class itself is a definition.
+                if let Some(ref name) = class_name
+                    && name == target_name
+                {
+                    results.push(ResolvedSymbol {
+                        name: name.clone(),
+                        start_line: node.start_position().row as u32 + 1,
+                        end_line: node.end_position().row as u32 + 1,
+                        parent_name: current_parent.map(String::from),
+                    });
+                }
+
+                // Schedule the class body with class name as parent scope.
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.children(&mut cursor).collect();
+                for child in children.into_iter().rev() {
+                    stack.push((child, class_name.clone(), depth + 1));
+                }
+                descended_with_new_parent = true;
+            }
+
+            // ── Go ───────────────────────────────────────────────
+            "function_declaration" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = node_text(&name_node, source);
+                    if name == target_name {
+                        results.push(ResolvedSymbol {
+                            name: name.to_string(),
+                            start_line: node.start_position().row as u32 + 1,
+                            end_line: node.end_position().row as u32 + 1,
+                            parent_name: current_parent.map(String::from),
+                        });
+                    }
+                }
+            }
+            "method_declaration" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = node_text(&name_node, source);
+                    if name == target_name {
+                        // Try to extract the receiver type as the parent.
+                        let receiver_type = extract_go_receiver_type(&node, source);
+                        results.push(ResolvedSymbol {
+                            name: name.to_string(),
+                            start_line: node.start_position().row as u32 + 1,
+                            end_line: node.end_position().row as u32 + 1,
+                            parent_name: receiver_type.or_else(|| current_parent.map(String::from)),
+                        });
+                    }
+                }
+            }
+            "type_declaration" => {
+                // Go type declarations contain type_spec children.
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "type_spec"
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        let name = node_text(&name_node, source);
+                        if name == target_name {
+                            results.push(ResolvedSymbol {
+                                name: name.to_string(),
+                                start_line: child.start_position().row as u32 + 1,
+                                end_line: child.end_position().row as u32 + 1,
+                                parent_name: current_parent.map(String::from),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // ── JavaScript / TypeScript ──────────────────────────
+            // Note: "function_declaration" is shared with Go and handled above.
+            "method_definition" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = node_text(&name_node, source);
+                    if name == target_name {
+                        results.push(ResolvedSymbol {
+                            name: name.to_string(),
+                            start_line: node.start_position().row as u32 + 1,
+                            end_line: node.end_position().row as u32 + 1,
+                            parent_name: current_parent.map(String::from),
+                        });
+                    }
+                }
+            }
+            "class_declaration" => {
+                let class_name = node
+                    .child_by_field_name("name")
+                    .map(|n| node_text(&n, source).to_string());
+
+                if let Some(ref name) = class_name
+                    && name == target_name
+                {
+                    results.push(ResolvedSymbol {
+                        name: name.clone(),
+                        start_line: node.start_position().row as u32 + 1,
+                        end_line: node.end_position().row as u32 + 1,
+                        parent_name: current_parent.map(String::from),
+                    });
+                }
+
+                let mut cursor = node.walk();
+                let children: Vec<_> = node.children(&mut cursor).collect();
+                for child in children.into_iter().rev() {
+                    stack.push((child, class_name.clone(), depth + 1));
+                }
+                descended_with_new_parent = true;
+            }
+            "lexical_declaration" | "variable_declaration" => {
+                // Handle `const foo = () => { ... }` or `const foo = function() { ... }`
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "variable_declarator"
+                        && let Some(name_node) = child.child_by_field_name("name")
+                    {
+                        let name = node_text(&name_node, source);
+                        if name == target_name {
+                            // Check if the value is a function expression or arrow function.
+                            if let Some(value_node) = child.child_by_field_name("value") {
+                                let vkind = value_node.kind();
+                                if vkind == "arrow_function"
+                                    || vkind == "function"
+                                    || vkind == "function_expression"
+                                {
+                                    results.push(ResolvedSymbol {
+                                        name: name.to_string(),
+                                        start_line: node.start_position().row as u32 + 1,
+                                        end_line: node.end_position().row as u32 + 1,
+                                        parent_name: current_parent.map(String::from),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Object literal property whose value is a function/arrow expression,
+            // e.g. `export const db = { insert: async (...) => {...} };` — a
+            // common TS/JS pattern that the variable_declarator branch above
+            // misses because the function lives one level deeper.
+            "pair" => {
+                if let Some(key_node) = node.child_by_field_name("key") {
+                    let key = node_text(&key_node, source);
+                    if key == target_name
+                        && let Some(value_node) = node.child_by_field_name("value")
+                    {
+                        let vkind = value_node.kind();
+                        if vkind == "arrow_function"
+                            || vkind == "function"
+                            || vkind == "function_expression"
+                        {
+                            results.push(ResolvedSymbol {
+                                name: key.to_string(),
+                                start_line: node.start_position().row as u32 + 1,
+                                end_line: node.end_position().row as u32 + 1,
+                                parent_name: current_parent.map(String::from),
+                            });
+                        }
+                    }
+                }
+            }
+
+            _ => {}
         }
 
-        _ => {}
+        // Default walk for non-scope-introducing nodes: schedule every
+        // child with the same parent scope. Skipped for scope-introducing
+        // arms above, which already pushed their children with a new
+        // parent.
+        if !descended_with_new_parent {
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            for child in children.into_iter().rev() {
+                stack.push((child, parent.clone(), depth + 1));
+            }
+        }
     }
-
-    // Default recursive walk for non-scope-introducing nodes.
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        find_definitions_recursive(&child, source, target_name, current_parent, results);
-    }
+    results
 }
 
 /// Extract the type name from a Rust `impl` block.
