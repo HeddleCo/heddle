@@ -85,11 +85,15 @@ pub(crate) fn reconstruct_merged_file(
     let mut resolved: BTreeMap<MatchKey, (Option<Vec<u8>>, usize)> = BTreeMap::new();
     let mut total_conflicts = 0usize;
 
+    // Whole-file source bundle: lets `resolve_item` slice per-item
+    // bytes AND lets `emit_addadd_conflict` back-fill its EOL
+    // detection from file context when single-line item bodies
+    // carry zero EOL observations (Codex r8 P2, cid 3256283857).
+    let sides = SideSources { base, ours, theirs };
+
     for key in &all_keys {
         let resolution = resolve_item(
-            base,
-            ours,
-            theirs,
+            sides,
             base_map.get(*key).copied(),
             ours_map.get(*key).copied(),
             theirs_map.get(*key).copied(),
@@ -307,21 +311,31 @@ fn materialize_segment(outcome: MergeOutcome, fallback: &str) -> (Vec<u8>, usize
     }
 }
 
+/// Whole-file source bundle threaded through item resolution. Lets
+/// `resolve_item` slice item bytes per side AND back-fills the EOL
+/// detection inside the add/add conflict-marker emission when both
+/// item bodies carry zero EOL observations (single-line items in a
+/// CRLF file — Codex r8 P2, cid 3256283857).
+#[derive(Clone, Copy)]
+struct SideSources<'a> {
+    base: &'a str,
+    ours: &'a str,
+    theirs: &'a str,
+}
+
 /// Resolve a single item's 3-way merge. Returns `(Some(bytes), n_conflicts)`
 /// when the item survives, `(None, n_conflicts)` when both sides removed
 /// it.
 fn resolve_item(
-    base: &str,
-    ours: &str,
-    theirs: &str,
+    sides: SideSources<'_>,
     base_item: Option<&Item>,
     ours_item: Option<&Item>,
     theirs_item: Option<&Item>,
     markers: ConflictMarkers<'_>,
 ) -> (Option<Vec<u8>>, usize) {
-    let base_bytes = base_item.map(|i| &base.as_bytes()[i.start_byte..i.end_byte]);
-    let ours_bytes = ours_item.map(|i| &ours.as_bytes()[i.start_byte..i.end_byte]);
-    let theirs_bytes = theirs_item.map(|i| &theirs.as_bytes()[i.start_byte..i.end_byte]);
+    let base_bytes = base_item.map(|i| &sides.base.as_bytes()[i.start_byte..i.end_byte]);
+    let ours_bytes = ours_item.map(|i| &sides.ours.as_bytes()[i.start_byte..i.end_byte]);
+    let theirs_bytes = theirs_item.map(|i| &sides.theirs.as_bytes()[i.start_byte..i.end_byte]);
 
     match (base_bytes, ours_bytes, theirs_bytes) {
         (None, None, None) => (None, 0),
@@ -338,7 +352,7 @@ fn resolve_item(
             if o == t {
                 (Some(o.to_vec()), 0)
             } else {
-                (Some(emit_addadd_conflict(o, t, markers)), 1)
+                (Some(emit_addadd_conflict(o, t, markers, sides)), 1)
             }
         }
         // Existed in base, removed on both sides → clean delete.
@@ -574,8 +588,27 @@ fn majority_ends_with_newline(base: &str, ours: &str, theirs: &str) -> bool {
 /// two bodies — a CRLF file gets CRLF markers and an LF file gets LF
 /// markers. Without that, a CRLF body wrapped in LF markers produces
 /// a mixed-endings file that breaks Windows tooling (Codex r6 P2 #1).
-fn emit_addadd_conflict(ours: &[u8], theirs: &[u8], markers: ConflictMarkers<'_>) -> Vec<u8> {
-    let eol = detect_eol(&[ours, theirs]);
+///
+/// Single-line item bodies contain zero `\n` observations, so the
+/// per-item samples alone are insufficient — without the whole-file
+/// fallback in `eol_context`, the detector returns LF and wraps a
+/// CRLF file with bare-LF marker lines (Codex r8 P2, cid 3256283857).
+/// The samples order is `[ours_item, theirs_item, base_file, ours_file,
+/// theirs_file]`: item bytes lead so they dominate when present, and
+/// the per-side files back-fill the count when they're empty.
+fn emit_addadd_conflict(
+    ours: &[u8],
+    theirs: &[u8],
+    markers: ConflictMarkers<'_>,
+    sides: SideSources<'_>,
+) -> Vec<u8> {
+    let eol = detect_eol(&[
+        ours,
+        theirs,
+        sides.base.as_bytes(),
+        sides.ours.as_bytes(),
+        sides.theirs.as_bytes(),
+    ]);
     let mut out = Vec::with_capacity(ours.len() + theirs.len() + 64);
     out.extend_from_slice(b"<<<<<<< ");
     out.extend_from_slice(markers.ours.as_bytes());
