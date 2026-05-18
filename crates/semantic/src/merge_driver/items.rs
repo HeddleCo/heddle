@@ -205,16 +205,20 @@ fn leading_metadata_start(language: Language, source: &str, node: Node<'_>) -> u
 /// Whether `prev` is metadata that "belongs to" the item starting at
 /// `next_start`. Per-language rules:
 ///
-/// * Rust: outer `attribute_item` always; line/block comments only when
-///   no blank line separates them from the item.
+/// * Rust: outer `attribute_item` (`#[...]`) always; line/block comments
+///   only when (a) they are not inner doc comments (`//!` / `/*!`) and
+///   (b) no blank line separates them from the item. `inner_attribute_item`
+///   (`#![...]`) is NEVER bound — it applies to the enclosing
+///   module/crate, not the following item.
 /// * Go: line/block comments only when no blank line separates them.
-/// * Java: marker / regular annotations as siblings (most are children
-///   of `method_declaration` already, but standalone class-level
-///   annotations can appear as siblings).
+/// * Java: marker / regular annotations always; line/block comments only
+///   when no blank line separates them (matches the Rust/Go rule —
+///   standalone comments separated by blank lines must NOT migrate with
+///   the next method/class during merges).
 ///
 /// Python decorators are not handled here because tree-sitter wraps them
 /// in `decorated_definition`, a different node kind than
-/// `function_definition` (handled at classification time if/when needed).
+/// `function_definition` (handled at classification time).
 /// JavaScript / TypeScript / C / C++ have no equivalent leading-sibling
 /// metadata pattern that this driver currently recognises.
 fn is_leading_metadata_for(
@@ -226,9 +230,15 @@ fn is_leading_metadata_for(
     let kind = prev.kind();
     match language {
         Language::Rust => match kind {
-            "attribute_item" | "inner_attribute_item" => true,
+            // Outer attributes only. `inner_attribute_item` (`#![...]`)
+            // applies to the enclosing scope — absorbing it into the
+            // next item drops or relocates crate-/module-level
+            // attributes (`#![no_std]`, `#![allow(...)]`) when that
+            // item is deleted, modified, or duplicated across sides.
+            "attribute_item" => true,
             "line_comment" | "block_comment" => {
-                !has_blank_line_between(source, prev.end_byte(), next_start)
+                !is_rust_inner_doc_comment(source, prev)
+                    && !has_blank_line_between(source, prev.end_byte(), next_start)
             }
             _ => false,
         },
@@ -245,6 +255,23 @@ fn is_leading_metadata_for(
         | Language::Cpp
         | Language::Unknown => false,
     }
+}
+
+/// Whether a Rust `line_comment` / `block_comment` is an *inner* doc
+/// comment (`//!` or `/*!`). Inner doc comments document the enclosing
+/// module/crate, not the following item, so they must not be absorbed
+/// into the next item's range — same reasoning as `inner_attribute_item`.
+/// Text-based rather than grammar-based so the check survives
+/// tree-sitter-rust grammar revisions that move the marker between
+/// child-node names.
+fn is_rust_inner_doc_comment(source: &str, node: Node<'_>) -> bool {
+    let bytes = source.as_bytes();
+    let start = node.start_byte();
+    if start + 3 > source.len() {
+        return false;
+    }
+    let head = &bytes[start..start + 3];
+    head == b"//!" || head == b"/*!"
 }
 
 /// Whether the byte range `start..end` contains a blank line — i.e.,
