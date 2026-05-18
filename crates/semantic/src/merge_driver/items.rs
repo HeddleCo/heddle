@@ -830,6 +830,19 @@ fn signature_hash_from_parameter_list(
 /// qualifiers (`type_qualifier`, `ref_qualifier`) that live as direct
 /// children of the declarator.
 ///
+/// The parameter list is resolved by walking down the declarator
+/// subtree to the function_declarator that carries the actual name —
+/// mirroring `c_function_name` — then taking its `parameters` field.
+/// DFS-finding the first `parameter_list` in the subtree (the r9
+/// implementation) picks the wrong list when the qualified scope's
+/// template arguments contain function-pointer types whose abstract
+/// declarators have their own parameter_list (e.g.
+/// `A<int(*)(double)>::foo(int x)` would hash `(double)` instead of
+/// `(int x)`), collapsing overloads onto identical signature hashes
+/// (Codex r10 P2, cid 3256487049). Going through the named
+/// function_declarator's field accessor avoids the DFS hazard
+/// entirely.
+///
 /// Trailing-return-type, `virtual`, and `noexcept` are deliberately
 /// NOT mixed in: none of them change overload identity. `noexcept`
 /// in particular is metadata — C++ does NOT allow overloading by
@@ -846,22 +859,88 @@ fn signature_hash_from_parameter_list(
 /// reformatting (`foo() const` vs `foo()  const`) doesn't split keys.
 fn c_signature_hash(language: Language, source: &str, declarator: Node<'_>) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let param_hash = find_descendant(declarator, &["parameter_list"])
+    let name_fd = c_name_bearing_function_declarator(declarator);
+    let param_hash = name_fd
+        .and_then(|fd| fd.child_by_field_name("parameters"))
         .map(|n| signature_hash_from_parameter_list(language, source, n))
         .unwrap_or(0);
     param_hash.hash(&mut hasher);
-    let mut cursor = declarator.walk();
-    for child in declarator.children(&mut cursor) {
-        match child.kind() {
-            "type_qualifier" | "ref_qualifier" => {
-                b"@".hash(&mut hasher);
-                child.kind().hash(&mut hasher);
-                strip_whitespace(&source[child.byte_range()]).hash(&mut hasher);
+    // cv-/ref-qualifiers live on the OUTER function_declarator
+    // alongside `parameters` and `declarator`. For
+    // function-returning-function-pointer shapes the outer
+    // function_declarator's qualifiers belong to the OUTER (return)
+    // function, not the one being defined; we want the qualifiers on
+    // the same function_declarator we took parameters from, so walk
+    // its direct children.
+    if let Some(fd) = name_fd {
+        let mut cursor = fd.walk();
+        for child in fd.children(&mut cursor) {
+            match child.kind() {
+                "type_qualifier" | "ref_qualifier" => {
+                    b"@".hash(&mut hasher);
+                    child.kind().hash(&mut hasher);
+                    strip_whitespace(&source[child.byte_range()]).hash(&mut hasher);
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
     hasher.finish()
+}
+
+/// Walk down the declarator chain to the function_declarator whose
+/// declarator field eventually resolves to the actual function name
+/// (identifier-ish leaf). Mirrors `c_function_name`'s walk through
+/// pointer/reference/parenthesized wrappers and through
+/// `qualified_identifier.name` / `template_function.name`. Returns
+/// the deepest `function_declarator` encountered on the path.
+///
+/// For `int* f()` (pointer return wrapping the function): outer
+/// pointer_declarator → function_declarator → identifier; returns the
+/// function_declarator.
+///
+/// For `int (*f(int x))(double)` (function returning function pointer):
+/// outer function_declarator (parameters `(double)`) →
+/// parenthesized_declarator → pointer_declarator → inner
+/// function_declarator (parameters `(int x)`) → identifier "f". The
+/// inner function_declarator is the name-bearing one, so its
+/// `(int x)` parameters are returned — not the outer's `(double)`.
+///
+/// For `void A<int(*)(double)>::foo(int x)` (templated scope with
+/// function-pointer argument): outer function_declarator (parameters
+/// `(int x)`) → qualified_identifier → identifier. The
+/// parameter_list inside the scope's template_argument_list is never
+/// visited, so it can't be picked up by mistake.
+fn c_name_bearing_function_declarator<'a>(declarator: Node<'a>) -> Option<Node<'a>> {
+    let mut current = declarator;
+    let mut last_fd: Option<Node<'a>> = None;
+    for _ in 0..32 {
+        match current.kind() {
+            "function_declarator" => {
+                last_fd = Some(current);
+                let Some(next) = current.child_by_field_name("declarator") else {
+                    return last_fd;
+                };
+                current = next;
+            }
+            "pointer_declarator"
+            | "reference_declarator"
+            | "parenthesized_declarator" => {
+                let Some(next) = current.child_by_field_name("declarator") else {
+                    return last_fd;
+                };
+                current = next;
+            }
+            "qualified_identifier" | "template_function" => {
+                let Some(next) = current.child_by_field_name("name") else {
+                    return last_fd;
+                };
+                current = next;
+            }
+            _ => return last_fd,
+        }
+    }
+    last_fd
 }
 
 /// Drop all Unicode whitespace from `s`, preserving every other byte.
