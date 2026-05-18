@@ -3552,3 +3552,85 @@ void f(S x) noexcept(noexcept(x.bar())) {
         "param rename inside noexcept clause + disjoint body edit must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// Codex r9 P2 (cid 3256397418): inline C++ methods inherit container
+// scope from `class_specifier.name` (`A`), while out-of-class
+// definitions extract scope text via `c_function_scope` from the
+// declarator's qualified prefix (`A<T>`). A templated method then
+// keys at scope=["A"] inline but scope=["A<T>"] out-of-class, so a
+// refactor that moves the method between the two forms looks like
+// delete + add to the merger and disjoint edits on the other side
+// surface as conflicts.
+// =====================================================================
+#[test]
+fn cpp_template_method_refactor_inline_to_out_of_class_merges_cleanly() {
+    // base has `template<class T> class A { void foo() {...} };`.
+    // ours refactors foo to an out-of-class definition (declaration
+    // stays inside the class body). theirs edits foo's body inline.
+    // Disjoint changes — clean merge expected.
+    //
+    // Pre-fix: ours's out-of-class foo gets scope=["A<T>"] while
+    // base/theirs's inline foo gets scope=["A"]. Different ItemKeys
+    // → ours appears as delete + add; theirs's modify on the old key
+    // collides with the delete.
+    //
+    // Post-fix: `c_function_scope` strips template-argument lists so
+    // ["A<T>"] normalizes to ["A"]. All three sides share an
+    // ItemKey across the refactor, and the body 3-way merge picks up
+    // both ours's signature change and theirs's body edit.
+    let base = "\
+template<class T> class A {
+    void foo() {
+        int a = 0;
+        (void)a;
+    }
+};
+";
+    let ours = "\
+template<class T> class A {
+    void foo();
+};
+template<class T> void A<T>::foo() {
+    int a = 0;
+    (void)a;
+}
+";
+    let theirs = "\
+template<class T> class A {
+    void foo() {
+        int a = 99;
+        (void)a;
+    }
+};
+";
+    let outcome = merge_at(base, ours, theirs, "f.cpp");
+    let text = match outcome {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(
+        text.contains("void A<T>::foo()"),
+        "ours's out-of-class signature must survive: {text}"
+    );
+    assert!(
+        text.contains("int a = 99"),
+        "theirs's body edit must survive: {text}"
+    );
+    // foo's body must appear exactly once — pre-fix it can duplicate
+    // (ours's add + theirs's modify both retained) or be dropped
+    // entirely if ours's delete races theirs's modify.
+    let foo_body_count = text.matches("int a = 99").count();
+    assert_eq!(
+        foo_body_count, 1,
+        "foo body must appear exactly once after the refactor: got {foo_body_count}: {text}"
+    );
+    assert!(
+        !text.contains("<<<<<<<"),
+        "inline-to-out-of-class refactor + disjoint body edit must merge cleanly: {text}"
+    );
+}
