@@ -603,13 +603,21 @@ fn classify_c_node<'a>(
             // array/function-pointer modifiers in the declarator field
             // disambiguate `f(int)` vs `f(int*)` (Codex r6 P1 #2).
             //
-            // Trailing function qualifiers (`const`, `volatile`, `&`,
-            // `&&`, `noexcept`) live as CHILDREN of the outer
+            // Trailing cv- and ref-qualifiers (`const`, `volatile`,
+            // `&`, `&&`) live as CHILDREN of the outer
             // `function_declarator`, alongside `parameters` and
             // `declarator`. Without folding them into the hash,
             // member-function overloads on cv- or ref-qualifier alone
             // (`foo()` vs `foo() const`) collapse to identical
             // signature_hashes (Codex r8 P2, cid 3256283859).
+            //
+            // `noexcept` is deliberately NOT folded in: C++ does not
+            // allow overloading by exception specification, so a
+            // noexcept addition/removal is a REDECLARATION of the
+            // same function — not a new overload. Including it would
+            // split identity across sides whenever noexcept changes,
+            // degrading the resolution to delete + add (Codex r9 P1,
+            // cid 3256397416).
             let signature_hash = c_signature_hash(language, source, declarator);
             Some(Classified {
                 kind: ItemKind::Function,
@@ -818,14 +826,24 @@ fn signature_hash_from_parameter_list(
 }
 
 /// Combined signature hash for a C/C++ outer `function_declarator`:
-/// mixes the parameter-list hash with the trailing function qualifiers
-/// (`type_qualifier`, `ref_qualifier`, `noexcept`) that live as direct
+/// mixes the parameter-list hash with the trailing cv- and ref-
+/// qualifiers (`type_qualifier`, `ref_qualifier`) that live as direct
 /// children of the declarator.
 ///
-/// Trailing-return-type and `virtual` are deliberately NOT mixed in:
-/// they shouldn't change overload identity. Source spelling is hashed
-/// after whitespace stripping so cosmetic reformatting (`foo() const`
-/// vs `foo()  const`) doesn't split keys.
+/// Trailing-return-type, `virtual`, and `noexcept` are deliberately
+/// NOT mixed in: none of them change overload identity. `noexcept`
+/// in particular is metadata — C++ does NOT allow overloading by
+/// exception specification, so `foo()` and `foo() noexcept` are
+/// REDECLARATIONS of the same function. Including it would split
+/// identity across sides whenever noexcept is added/removed and
+/// degrade the resolution to delete + add (Codex r9 P1, cid
+/// 3256397416). It also incidentally avoids the parameter-name
+/// leakage hazard from conditional `noexcept(noexcept(x.foo()))`
+/// clauses where parameter names appear in the hashed text (Codex
+/// r9 P2, cid 3256397421).
+///
+/// Source spelling is hashed after whitespace stripping so cosmetic
+/// reformatting (`foo() const` vs `foo()  const`) doesn't split keys.
 fn c_signature_hash(language: Language, source: &str, declarator: Node<'_>) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let param_hash = find_descendant(declarator, &["parameter_list"])
@@ -835,7 +853,7 @@ fn c_signature_hash(language: Language, source: &str, declarator: Node<'_>) -> u
     let mut cursor = declarator.walk();
     for child in declarator.children(&mut cursor) {
         match child.kind() {
-            "type_qualifier" | "ref_qualifier" | "noexcept" => {
+            "type_qualifier" | "ref_qualifier" => {
                 b"@".hash(&mut hasher);
                 child.kind().hash(&mut hasher);
                 strip_whitespace(&source[child.byte_range()]).hash(&mut hasher);
