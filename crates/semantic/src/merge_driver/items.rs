@@ -1202,12 +1202,42 @@ fn enclosing_template_param_lists(node: Node<'_>, source: &str) -> Vec<Vec<Strin
 
 /// Extract the name of a single `template_parameter_list` child.
 /// Handles `type_parameter_declaration` (`class T` / `typename T` →
-/// `"T"`) and `parameter_declaration` for non-type parameters
-/// (`int N` → `"N"`) by returning the LAST `identifier`-or-
-/// `type_identifier` named-child's text. Returns `None` for shapes we
-/// don't recognise (parameter packs, template-template parameters,
-/// etc.) so the caller bails out conservatively.
+/// `"T"`), `variadic_type_parameter_declaration` (`class... Ts` →
+/// `"Ts"`, whose `class` keyword and `...` punctuation are anonymous
+/// so the trailing `type_identifier` falls out of the default scan),
+/// `parameter_declaration` for non-type parameters (`int N` → `"N"`),
+/// and `template_template_parameter_declaration`
+/// (`template<...> class Tmpl` → `"Tmpl"`) by descending into the
+/// trailing inner declaration; the leading inner
+/// `template_parameter_list` belongs to `Tmpl`'s own template header
+/// and must not contribute to the outer name (Codex r12 audit
+/// pre-fix B).
+///
+/// Falls back to the LAST `identifier`-or-`type_identifier`
+/// named-child's text. Returns `None` for shapes we still don't
+/// recognise (e.g. parameter packs of template-template params) so
+/// the caller bails out conservatively and the enclosing
+/// `template_declaration`'s param list is dropped from matching.
 fn template_param_name(source: &str, param: Node<'_>) -> Option<String> {
+    // Template-template parameters wrap the declared name inside a
+    // trailing nested declaration node; the leading
+    // `template_parameter_list` is the inner-template header (not
+    // the parameter name) and must be skipped.
+    if param.kind() == "template_template_parameter_declaration" {
+        let mut cursor = param.walk();
+        let last_decl = param
+            .named_children(&mut cursor)
+            .filter(|c| {
+                matches!(
+                    c.kind(),
+                    "type_parameter_declaration"
+                        | "variadic_type_parameter_declaration"
+                        | "template_template_parameter_declaration"
+                )
+            })
+            .last();
+        return last_decl.and_then(|n| template_param_name(source, n));
+    }
     let mut last = None;
     let mut cursor = param.walk();
     for child in param.named_children(&mut cursor) {
@@ -1250,7 +1280,18 @@ fn template_args_match_any_param_list(
 /// shape (specialization pattern like `T*`, concrete type like `int`,
 /// nested template like `Foo<T>`, non-type literal like `5`) yields
 /// `None`.
+///
+/// Variadic parameter packs at the use site (`Ts...`) parse as
+/// `parameter_pack_expansion` wrapping the pattern (typically a
+/// `type_descriptor`); recurse on the pattern field so a pack
+/// usage of an enclosing `class... Ts` reads as a bare parameter
+/// usage of `Ts` — matching the param-list name and letting
+/// `c_function_scope` strip the args (Codex r12 audit pre-fix A).
 fn parameter_usage_arg_name(source: &str, arg: Node<'_>) -> Option<String> {
+    if arg.kind() == "parameter_pack_expansion" {
+        let pattern = arg.child_by_field_name("pattern")?;
+        return parameter_usage_arg_name(source, pattern);
+    }
     if arg.kind() != "type_descriptor" {
         return None;
     }
