@@ -2107,6 +2107,50 @@ impl std::vec::Vec<T> {
     );
 }
 
+// =====================================================================
+// heddle#121: rust_impl_name's old `split_whitespace().join(" ")` shape
+// kept whitespace attached to punctuation, so reformatting around `*`
+// or `&` (pointer/reference receivers in the `for <type>` slot) yielded
+// distinct impl keys. The `_path_punctuation` sibling above covers
+// `::`/`<>`; this exercises the pointer/reference case the r2-sweep
+// follow-up specifically called out.
+// =====================================================================
+#[test]
+fn rust_impl_name_ignores_whitespace_around_pointer_punctuation() {
+    let base = "\
+struct Foo;
+impl MyTrait for *const Foo {
+    fn alpha() { 1 }
+}
+";
+    // ours reformats whitespace around the `*` in the pointer type —
+    // semantically identical impl, same method body.
+    let ours = "\
+struct Foo;
+impl MyTrait for * const Foo {
+    fn alpha() { 1 }
+}
+";
+    // theirs modifies alpha's body.
+    let theirs = "\
+struct Foo;
+impl MyTrait for *const Foo {
+    fn alpha() { 2 }
+}
+";
+    let outcome = merge_rust(base, ours, theirs);
+    let text = assert_clean(outcome);
+    assert!(
+        text.contains("{ 2 }"),
+        "alpha body should be `2`: {text}"
+    );
+    let alpha_count = text.matches("fn alpha").count();
+    assert_eq!(
+        alpha_count, 1,
+        "expected fn alpha exactly once, got {alpha_count}: {text}"
+    );
+}
+
 #[test]
 fn rust_outer_attribute_does_not_duplicate_when_adjacent_item_deleted() {
     // When one side deletes an item that immediately precedes an
