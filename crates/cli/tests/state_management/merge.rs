@@ -1984,3 +1984,85 @@ fn test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_resha
         "preview_summary must not report blocked when --semantic plan is clean: {summary_strings:?}"
     );
 }
+
+/// heddle#117: `thread refresh` must route its 3-way merge fallback
+/// through the function-level semantic driver (added in heddle#68,
+/// PR #114, commit 79104f9). Before the fix, `try_three_way_merge_refresh`
+/// hardcoded `MergeStrategy::HunkOnly`, so a structural-reshape on the
+/// thread side combined with a disjoint edit on the target side made
+/// `heddle thread refresh` fail with "could not be refreshed cleanly"
+/// even though `heddle merge --semantic` resolves the same trio cleanly.
+///
+/// Fixture mirrors `test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_reshape`:
+/// `lib.rs` with four trivial fns; thread reorders + edits one fn; main
+/// edits a different fn. text_hunk_merge surfaces a conflict here (the
+/// reorder rewrites the whole file); the semantic driver does not.
+#[cfg(feature = "semantic")]
+#[test]
+fn test_thread_refresh_routes_through_semantic_driver_on_structural_reshape() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let src = temp.path().join("lib.rs");
+    fs::write(
+        &src,
+        "fn a() { let x = 1; }\nfn b() { let x = 2; }\nfn c() { let x = 3; }\nfn d() { let x = 4; }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    let beta_path = temp.path().join("threads/beta");
+    heddle(
+        &[
+            "--json",
+            "start",
+            "beta",
+            "--workspace",
+            "materialized",
+            "--path",
+            beta_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("start beta");
+
+    // Skip if `start` didn't wire up target_thread — refresh needs one.
+    let Some(beta_target) = thread_target(temp.path(), "beta") else {
+        eprintln!("beta has no target_thread; skipping semantic-refresh test");
+        return;
+    };
+
+    // beta: reorder all four fns + edit `b`. Captured from inside
+    // beta's checkout.
+    fs::write(
+        beta_path.join("lib.rs"),
+        "fn d() { let x = 4; }\nfn c() { let x = 3; }\nfn b() { let x = 22; }\nfn a() { let x = 1; }\n",
+    )
+    .unwrap();
+    heddle(
+        &["capture", "-m", "beta: reorder + edit b"],
+        Some(&beta_path),
+    )
+    .unwrap();
+
+    // target (typically `main`): edit `d` only. This is disjoint from
+    // beta's `b` edit at the AST level, but text-hunk merge sees the
+    // whole file rewritten by beta and surfaces a conflict.
+    heddle(&["thread", "switch", &beta_target], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "fn a() { let x = 1; }\nfn b() { let x = 2; }\nfn c() { let x = 3; }\nfn d() { let x = 44; }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "main: edit d"], Some(temp.path())).unwrap();
+
+    // Refresh beta. Before the heddle#117 fix this returned Err with
+    // "could not be refreshed cleanly: 1 conflicting path(s) (lib.rs)"
+    // because the 3-way merge fallback ran with `MergeStrategy::HunkOnly`.
+    // With the fix, the fallback routes through `semantic_three_way_merge`
+    // and resolves cleanly.
+    let refresh = heddle(&["thread", "refresh", "beta"], Some(temp.path()));
+    assert!(
+        refresh.is_ok(),
+        "thread refresh with disjoint AST-level edits must succeed via the semantic merge driver: {refresh:?}"
+    );
+}
