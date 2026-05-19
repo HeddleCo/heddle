@@ -401,6 +401,13 @@ fn try_three_way_merge_refresh(
 
     let current_label = format!("CURRENT ({})", thread.thread);
     let incoming_label = format!("INCOMING ({})", target_thread_name);
+    // Thread refresh is the canonical "I have local work, let me pull in
+    // upstream changes" workflow — exactly the case where structural-overlap
+    // merges benefit from function-level resolution. Route through the
+    // AST-aware driver from heddle#68 (PR #114, commit 79104f9); the driver
+    // itself falls back to text_hunk_merge on unknown / unparseable files,
+    // and when the `semantic` feature is compiled out the variant collapses
+    // to the same HunkOnly path the historical code took.
     let outcome = try_three_way_merge_between_tips(
         parent_repo,
         &thread_tip,
@@ -408,7 +415,7 @@ fn try_three_way_merge_refresh(
         ConflictLabels {
             current: &current_label,
             incoming: &incoming_label,
-            strategy: MergeStrategy::HunkOnly,
+            strategy: MergeStrategy::Semantic,
         },
     )?;
 
