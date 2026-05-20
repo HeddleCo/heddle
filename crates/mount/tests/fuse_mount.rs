@@ -262,6 +262,113 @@ fn kernel_at_least(major: u32, minor: u32) -> bool {
     (host_major, host_minor) >= (major, minor)
 }
 
+/// End-to-end verification of the write-side overlay ops added in
+/// heddle#180. Each kernel op the issue called out (`create`,
+/// `mkdir`, `unlink`, `rmdir`, `rename`, `setattr`/truncate,
+/// `symlink`) is exercised in sequence against a single mounted
+/// fixture, and the resulting state is read back through the same
+/// mount to confirm overlay visibility. This is the FUSE-layer
+/// analogue of the `tests::write_ops::*` unit tests — same
+/// behavior, but driven through the real kernel-userspace round
+/// trip so a regression in the trampoline / errno mapping / direct-
+/// io flag is caught even when the core remains correct.
+#[test]
+#[ignore = "requires FUSE on host; opt-in via --ignored"]
+fn fuse_mount_round_trips_write_side_ops() {
+    let (_repo_dir, repo) = build_fixture();
+    let (session, mountpoint) = mount_fixture(repo);
+    let root = mountpoint.path();
+
+    // create + write — the cargo `open(O_CREAT)` path. Before the
+    // shell wired this up, the very first cargo invocation hit
+    // ENOSYS on `Cargo.lock`.
+    let lock_path = root.join("Cargo.lock");
+    {
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&lock_path)
+            .expect("create + open Cargo.lock");
+        f.write_all(b"[package]\nname=\"x\"\n").expect("write");
+    }
+    let read_back = fs::read_to_string(&lock_path).expect("read created file");
+    assert_eq!(read_back, "[package]\nname=\"x\"\n");
+
+    // O_CREAT|O_EXCL against the same path must fail with EEXIST.
+    let excl_err = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&lock_path)
+        .expect_err("O_CREAT|O_EXCL on existing must fail");
+    assert_eq!(
+        excl_err.kind(),
+        std::io::ErrorKind::AlreadyExists,
+        "exclusive create surfaced wrong errno: {excl_err:?}"
+    );
+
+    // mkdir + nested create.
+    let target_dir = root.join("target");
+    fs::create_dir(&target_dir).expect("mkdir target/");
+    assert!(target_dir.is_dir(), "mkdir didn't make a directory");
+    let nested_file = target_dir.join("output.bin");
+    fs::write(&nested_file, b"build artifact").expect("write under new dir");
+    assert_eq!(fs::read(&nested_file).unwrap(), b"build artifact");
+
+    // rename — cargo's `.tmp → atomic-final` shape.
+    let tmp = root.join("hello.txt.tmp");
+    fs::write(&tmp, b"NEW\n").expect("write tmp");
+    fs::rename(&tmp, root.join("hello.txt")).expect("rename over existing");
+    assert!(!tmp.exists(), "tmp source still visible after rename");
+    let after_rename = fs::read_to_string(root.join("hello.txt")).expect("read renamed");
+    assert_eq!(after_rename, "NEW\n");
+
+    // setattr (truncate) — O_TRUNC against an existing overlay file
+    // (the just-renamed hello.txt). The kernel issues
+    // `setattr(size=0)` before the first write, which must clear the
+    // buffer; otherwise the next write would tack onto the existing
+    // bytes.
+    let trunc_path = root.join("hello.txt");
+    {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&trunc_path)
+            .expect("open O_TRUNC");
+        f.write_all(b"TRUNCATED").expect("write after truncate");
+    }
+    assert_eq!(
+        fs::read_to_string(&trunc_path).unwrap(),
+        "TRUNCATED",
+        "O_TRUNC didn't clear the prior content"
+    );
+
+    // symlink + readlink.
+    let link_path = root.join("hello.lnk");
+    std::os::unix::fs::symlink("hello.txt", &link_path).expect("symlink");
+    let resolved = fs::read_link(&link_path).expect("readlink");
+    assert_eq!(resolved.as_os_str(), "hello.txt");
+
+    // unlink — drop a captured file through the mount. Cargo.lock
+    // is the file we created at the top of the test; the captured
+    // hello.txt was already replaced via rename, so unlinking it now
+    // would only touch the overlay-only entry. Unlinking the freshly
+    // created Cargo.lock exercises the warm-tier-only deletion path.
+    fs::remove_file(root.join("Cargo.lock")).expect("unlink");
+    assert!(
+        !root.join("Cargo.lock").exists(),
+        "unlinked file still visible to the mount"
+    );
+
+    // rmdir empty pending dir (target/ had output.bin, so unlink it
+    // first to make rmdir succeed).
+    fs::remove_file(&nested_file).expect("unlink before rmdir");
+    fs::remove_dir(&target_dir).expect("rmdir of empty pending dir");
+    assert!(!target_dir.exists(), "rmdir didn't remove the directory");
+
+    drop(session);
+}
+
 #[test]
 #[ignore = "requires FUSE on host; opt-in via --ignored"]
 fn fuse_mount_unmounts_cleanly_on_session_drop() {

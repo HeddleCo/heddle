@@ -1347,14 +1347,51 @@ impl ContentAddressedMount {
             NodeKind::Symlink => self.move_symlink(&old_path, &new_path)?,
             NodeKind::Directory => self.move_overlay_dir(&old_path, &new_path)?,
         }
-        // Invalidate the inode cached for the destination, so its next
-        // `lookup` re-mints with the moved record.
-        self.inner
-            .inodes
-            .lock()
-            .expect("inode lock")
-            .by_path
-            .remove(&new_path);
+        // Maintain the inode↔path invariant for both the source and
+        // destination: the kernel may have cached either dentry from
+        // a prior lookup, and (for FUSE) it does not re-issue lookup
+        // after `rename` — it just rewrites its own dentry → inode
+        // table. So the source inode now resolves through dentry
+        // `new_name`, and any read against it must serve the new
+        // path's overlay state. Rewriting the source record's stored
+        // path is what keeps that consistent. The dest's old inode
+        // (which the kernel will issue `forget` for) gets dropped
+        // from `by_path` so the next lookup mints a fresh id.
+        {
+            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            // Drop any cached inode for the destination so the next
+            // lookup mints fresh (the old inode there pointed at the
+            // *captured* file, which is now logically replaced).
+            if let Some(dest_id) = inodes.by_path.remove(&new_path) {
+                inodes.by_id.remove(&dest_id);
+            }
+            // Rewrite the source inode's stored path so subsequent
+            // reads/attrs against it serve the new-path overlay.
+            // The kernel keeps using the source's NodeId after rename
+            // (it's just a dentry-table rewrite on its side) — without
+            // this, every read against the rebased dentry sees the
+            // stale path and returns ESTALE.
+            if let Some(src_id) = inodes.by_path.remove(&old_path) {
+                if let Some(record) = inodes.by_id.get_mut(&src_id) {
+                    match record {
+                        NodeRecord::PendingFile { path, .. }
+                        | NodeRecord::File { path, .. }
+                        | NodeRecord::PendingSymlink { path } => {
+                            *path = new_path.clone();
+                        }
+                        _ => {}
+                    }
+                }
+                inodes.by_path.insert(new_path.clone(), src_id);
+                drop(inodes);
+                // Same for any cached hot buffer keyed on the source
+                // node — its `path` field must follow.
+                let mut pending = self.inner.pending.lock().expect("pending lock");
+                if let Some(buf) = pending.hot.get_mut(&src_id) {
+                    buf.path = new_path.clone();
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2220,8 +2257,6 @@ fn resolve_thread(repo: &Repository, thread: &str) -> Result<MountState> {
 
 impl PlatformShell for ContentAddressedMount {
     fn lookup(&self, parent: NodeId, name: &OsStr) -> Result<Option<Entry>> {
-        // Re-derive the parent's authoritative state from the registry,
-        // so callers can't make us walk a tree we haven't blessed.
         let record = self.record_for(parent)?;
         let parent_path = match self.dir_path_of(&record) {
             Some(p) => p,
