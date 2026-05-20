@@ -807,7 +807,7 @@ fn run_stress(mode: Mode, args: &Args, sources: &Sources) -> Result<StressOutcom
             let mut errs: Vec<String> = Vec::new();
             while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
                 let t0 = Instant::now();
-                let r = run_cargo(&wd, &["build", "--workspace"]);
+                let r = run_cargo_killable(&wd, &["build", "--workspace"], &stop);
                 let dt = t0.elapsed().as_secs_f64();
                 match r {
                     Ok(()) => {
@@ -952,6 +952,76 @@ fn run_in(dir: &Path, prog: &str, args: &[&str]) -> Result<()> {
         &st.1,
         &format!("{prog} {args:?} (in {})", dir.display()),
     )
+}
+
+/// Like [`run_cargo`], but polls `stop` while cargo runs and escalates
+/// to SIGTERM → 5s grace → SIGKILL when the watchdog fires. Used by the
+/// stress loop so a wedged cargo subprocess can't pin a worker thread
+/// past the watchdog deadline.
+fn run_cargo_killable(workdir: &Path, args: &[&str], stop: &AtomicBool) -> Result<()> {
+    use std::io::Read as _;
+
+    let target = workdir.join(".cargo-target");
+    let mut child = Command::new("cargo")
+        .current_dir(workdir)
+        .env("CARGO_TARGET_DIR", &target)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pid = child.id() as i32;
+
+    // Drain stderr concurrently to avoid the pipe filling and deadlocking
+    // a build that emits a lot of warnings.
+    let stderr_pipe = child.stderr.take();
+    let stderr_handle = stderr_pipe.map(|mut s| {
+        thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf);
+            buf
+        })
+    });
+
+    let label = format!("cargo {args:?} (in {})", workdir.display());
+
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                let stderr = stderr_handle
+                    .and_then(|h| h.join().ok())
+                    .unwrap_or_default();
+                return check(&status, &stderr, &label);
+            }
+            None => {
+                if stop.load(Ordering::Relaxed) {
+                    // SIGTERM → 5s grace → SIGKILL.
+                    // SAFETY: kill(2) with a positive pid + signal is a
+                    // C-stable call that doesn't touch Rust memory; the
+                    // pid came from this Child and won't be reused
+                    // while the Child handle is alive.
+                    unsafe {
+                        libc::kill(pid, libc::SIGTERM);
+                    }
+                    let grace = Instant::now() + Duration::from_secs(5);
+                    while Instant::now() < grace {
+                        if child.try_wait()?.is_some() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    if child.try_wait()?.is_none() {
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                    if let Some(h) = stderr_handle {
+                        let _ = h.join();
+                    }
+                    bail!("{label}: terminated by stress watchdog");
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 fn run_cargo(workdir: &Path, args: &[&str]) -> Result<()> {
