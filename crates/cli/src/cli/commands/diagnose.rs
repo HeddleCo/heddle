@@ -8,7 +8,8 @@ use chrono::Utc;
 use objects::object::Tree;
 use repo::{
     GitRemoteTrackingStatus, Repository, RepositoryOperationStatus, Thread, ThreadFreshness,
-    ThreadImpactCategory, ThreadMode, ThreadState, describe_thread_advice,
+    ThreadImpactCategory, ThreadMode, ThreadState, describe_thread_advice_with_initial,
+    is_synthetic_root,
 };
 use serde::Serialize;
 
@@ -178,7 +179,11 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         });
     let thread_summary_ms = thread_summary_start.elapsed().as_millis();
 
-    let health = diagnose_health(&repo, current_summary, changes.total > 0);
+    let initial_state = current_state
+        .as_ref()
+        .map(is_synthetic_root)
+        .unwrap_or(true);
+    let health = diagnose_health(&repo, current_summary, changes.total > 0, initial_state);
     let workspace = diagnose_workspace(&summaries);
     let thread = current_summary.map(diagnose_thread);
     let state = current_state.as_ref().map(|state| DiagnoseStateOutput {
@@ -296,10 +301,13 @@ fn diagnose_health(
     repo: &Repository,
     current_summary: Option<&ThreadSummary>,
     worktree_dirty: bool,
+    initial_state: bool,
 ) -> DiagnoseHealthOutput {
     let Some(summary) = current_summary else {
         return DiagnoseHealthOutput {
-            status: if worktree_dirty {
+            status: if worktree_dirty && initial_state {
+                "uncaptured"
+            } else if worktree_dirty {
                 "dirty_worktree"
             } else {
                 "detached"
@@ -352,7 +360,8 @@ fn diagnose_health(
         auto: false,
         shared_target_dir: None,
     };
-    let advice = describe_thread_advice(&thread, worktree_dirty, 0, false);
+    let advice =
+        describe_thread_advice_with_initial(&thread, worktree_dirty, 0, false, initial_state);
     DiagnoseHealthOutput {
         status: advice.thread_health,
         blockers: advice.blockers,

@@ -12,7 +12,8 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use repo::{
     AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus, Thread,
-    ThreadFreshness, ThreadImpactCategory, ThreadMode, ThreadState, describe_thread_advice,
+    ThreadFreshness, ThreadImpactCategory, ThreadMode, ThreadState,
+    describe_thread_advice_with_initial, is_synthetic_root,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
@@ -540,9 +541,13 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         auto: false,
         shared_target_dir: None,
     });
-    let advice = thread_stub
+    let initial_state = current_state
         .as_ref()
-        .map(|thread| describe_thread_advice(thread, has_changes, 0, false));
+        .map(is_synthetic_root)
+        .unwrap_or(true);
+    let advice = thread_stub.as_ref().map(|thread| {
+        describe_thread_advice_with_initial(thread, has_changes, 0, false, initial_state)
+    });
     let output = StatusOutput {
         blockers: advice
             .as_ref()

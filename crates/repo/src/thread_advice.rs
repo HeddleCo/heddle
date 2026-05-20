@@ -44,6 +44,32 @@ pub fn describe_thread_advice(
     conflicts: usize,
     clean_ready_merges_to_apply: bool,
 ) -> ThreadAdvice {
+    describe_thread_advice_with_initial(
+        thread,
+        worktree_dirty,
+        conflicts,
+        clean_ready_merges_to_apply,
+        false,
+    )
+}
+
+/// Variant that distinguishes a worktree that diverges from the
+/// seeded genesis state (no user capture has happened yet) from one
+/// that has accumulated changes since a real capture.
+///
+/// When `initial_state` is true and the worktree is dirty, the thread
+/// is labeled `"uncaptured"` instead of `"dirty_worktree"`. The
+/// recommended action stays `heddle capture` — only the label
+/// changes, so the user-facing first impression matches the actual
+/// situation (nothing has been captured yet) rather than implying
+/// that something has drifted. See heddle#160.
+pub fn describe_thread_advice_with_initial(
+    thread: &Thread,
+    worktree_dirty: bool,
+    conflicts: usize,
+    clean_ready_merges_to_apply: bool,
+    initial_state: bool,
+) -> ThreadAdvice {
     // A freshly-initialized active thread with no work, no conflicts, no
     // merges pending, and no promotion warning is healthy. The advice
     // cascade below otherwise falls through to a misleading
@@ -101,7 +127,9 @@ pub fn describe_thread_advice(
         RecommendedAction::Ready
     };
 
-    let thread_health = if worktree_dirty {
+    let thread_health = if worktree_dirty && initial_state {
+        "uncaptured"
+    } else if worktree_dirty {
         "dirty_worktree"
     } else if !blockers.is_empty() {
         "blocked"
