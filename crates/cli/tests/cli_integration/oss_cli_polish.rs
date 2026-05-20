@@ -887,3 +887,72 @@ fn bridge_git_conflict_message_points_at_runnable_verbs() {
          (`heddle thread drop --delete-thread`): {conflict_block}"
     );
 }
+
+#[test]
+fn bridge_git_import_schema_declares_already_in_sync() {
+    // heddle#147 added `already_in_sync: bool` to the JSON output of
+    // `bridge git import`. The schema contract surfaced via
+    // `heddle schemas "bridge git import"` must list the field, or
+    // automation that validates against the schema will reject the
+    // new payload shape.
+    let schema = heddle(&["schemas", "bridge git import"], None)
+        .expect("heddle schemas \"bridge git import\"");
+    let parsed: Value = serde_json::from_str(&schema).expect("schema parses");
+    let props = parsed["properties"]
+        .as_object()
+        .expect("schema has properties");
+    assert!(
+        props.contains_key("already_in_sync"),
+        "BridgeImportSchema must declare `already_in_sync`: {schema}"
+    );
+    assert_eq!(
+        props["already_in_sync"]["type"], "boolean",
+        "`already_in_sync` must be a boolean: {schema}"
+    );
+}
+
+#[test]
+fn bridge_git_sync_after_clone_reports_zero_imported() {
+    // heddle#147 made the import walker count every walked commit in
+    // `commits_imported`. `bridge git sync` re-uses the importer, so
+    // a no-op sync of an already-synced overlay used to report the
+    // full walked history as `commits_imported` — exactly the signal
+    // operators rely on sync to suppress. Sync must keep its
+    // `commits_imported` scoped to commits that produced a new
+    // heddle state on this run.
+    let temp = TempDir::new().unwrap();
+    let bare = make_local_master_git_repo(temp.path(), 3);
+    let work = temp.path().join("work");
+
+    heddle(
+        &[
+            "clone",
+            bare.to_str().expect("origin path utf8"),
+            work.to_str().expect("work path utf8"),
+        ],
+        Some(temp.path()),
+    )
+    .expect("heddle clone");
+
+    let json = heddle(
+        &["--output", "json", "bridge", "git", "sync"],
+        Some(&work),
+    )
+    .expect("bridge git sync JSON");
+    let parsed: Value = serde_json::from_str(&json).expect("sync JSON parses");
+    assert_eq!(
+        parsed["commits_imported"], 0,
+        "no-op sync should report zero newly-imported commits, not the \
+         walked history: {json}"
+    );
+
+    let text = heddle(
+        &["--output", "text", "bridge", "git", "sync"],
+        Some(&work),
+    )
+    .expect("bridge git sync text");
+    assert!(
+        text.contains("imported: 0 commits") || text.contains("imported: 0"),
+        "text output should also report zero imported on a no-op sync: {text}"
+    );
+}

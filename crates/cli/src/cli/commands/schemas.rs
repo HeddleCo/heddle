@@ -495,6 +495,7 @@ pub struct BridgeImportSchema {
     pub tags_synced: u64,
     pub skipped_non_commit_refs: u64,
     pub partial_mirror_refs: u64,
+    pub already_in_sync: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

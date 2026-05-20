@@ -444,10 +444,22 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 None => import_all(&mut bridge, None)?,
             };
 
+            // sync's `commits_imported` keeps the historical "newly
+            // imported commits" meaning. After heddle#147, the import
+            // walker's `commits_imported` counts every commit it
+            // visited (mirroring `bridge git ingest` so a re-import
+            // doesn't read 0). That would make a no-op sync of an
+            // already-synced overlay look like it pulled the whole
+            // history again — exactly the operator signal sync is
+            // there to provide. Use `states_created` instead: it is
+            // the count of commits that produced a new heddle state
+            // on this sync, which is what callers reading
+            // `commits_imported` from a sync result actually want.
+            let sync_commits_imported = import_stats.states_created;
             if should_output_json(cli, Some(repo.config())) {
                 let out = serde_json::json!({
                     "states_exported": export_stats.states_exported,
-                    "commits_imported": import_stats.commits_imported,
+                    "commits_imported": sync_commits_imported,
                     "threads_synced": export_stats.threads_synced + import_stats.branches_synced,
                     "markers_synced": export_stats.markers_synced + import_stats.tags_synced,
                 });
@@ -465,7 +477,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     "  {}",
                     style::field(
                         "imported",
-                        &style::count(import_stats.commits_imported, "commit")
+                        &style::count(sync_commits_imported, "commit")
                     )
                 );
                 println!(
