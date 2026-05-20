@@ -118,7 +118,7 @@ Examples:
 ")]
 pub struct SnapshotArgs {
     /// Natural language intent for this recoverable step.
-    #[arg(short = 'm', long)]
+    #[arg(short = 'm', long, visible_alias = "message")]
     pub intent: Option<String>,
 
     /// Confidence level (0.0-1.0).
