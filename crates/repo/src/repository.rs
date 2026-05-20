@@ -1014,6 +1014,20 @@ impl Repository {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
+        // heddle#152: `heddle clone <url>` writes `.git/` as a bare
+        // mirror (`gix::init_bare`), so the embedded git has no
+        // working tree. Shelling out to `git -C <root> status
+        // --porcelain` then fails with "fatal: this operation must be
+        // run in a work tree" and surfaces as
+        // `Error: configuration error: git status failed at '...'`.
+        // When the embedded git is bare, report "no overlay status
+        // available" so callers fall back to heddle's own
+        // tree-compare path.
+        if let Ok(git_repo) = gix::open(&self.root)
+            && git_repo.workdir().is_none()
+        {
+            return Ok(None);
+        }
 
         let output = Command::new("git")
             .arg("-C")

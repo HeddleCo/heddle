@@ -7,8 +7,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use crate::{
-    ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, ThreadFreshness,
-    ThreadManager, WorktreeIndex,
+    ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
+    ThreadFreshness, ThreadManager, WorktreeIndex,
 };
 
 fn create_test_repo() -> (TempDir, Repository) {
@@ -1034,6 +1034,38 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
         head
     );
     assert_eq!(reopened.head().unwrap(), Some(state1.change_id));
+}
+
+/// Regression for heddle#152: `heddle clone <url>` produces a directory
+/// whose embedded `.git/` is a bare mirror (no working tree). Shelling
+/// out to `git -C <root> status --porcelain` then fails with
+/// "fatal: this operation must be run in a work tree" and surfaces as
+/// `Error: configuration error: git status failed at '...'` on
+/// `heddle status`. The accessor must instead report "no overlay
+/// status available" (`Ok(None)`) so callers fall back to heddle's own
+/// tree-compare path.
+#[test]
+fn git_overlay_worktree_status_is_none_when_embedded_git_is_bare() {
+    let temp_dir = TempDir::new().unwrap();
+    let git_dir = temp_dir.path().join(".git");
+    gix::init_bare(&git_dir).expect("init bare .git");
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    assert_eq!(
+        repo.capability(),
+        RepositoryCapability::GitOverlay,
+        "presence of .git/HEAD flips capability to GitOverlay"
+    );
+
+    let status = repo.git_overlay_worktree_status();
+    assert!(
+        matches!(status, Ok(None)),
+        "bare embedded .git must yield Ok(None); got {}",
+        match &status {
+            Ok(Some(_)) => "Ok(Some(..))".to_string(),
+            Ok(None) => "Ok(None)".to_string(),
+            Err(error) => format!("Err({error})"),
+        }
+    );
 }
 
 /// Regression: `op_scope` must not embed the user's absolute filesystem
