@@ -2066,3 +2066,98 @@ fn test_thread_refresh_routes_through_semantic_driver_on_structural_reshape() {
         "thread refresh with disjoint AST-level edits must succeed via the semantic merge driver: {refresh:?}"
     );
 }
+
+/// heddle#144: `heddle merge X --preview` must agree with the real merge
+/// outcome on the same inputs. Prior to the fix, the preview report's
+/// inner merge plan was computed against `thread X`'s `target_thread`
+/// (the destination thread *X intends to merge into*, i.e. the thread X
+/// was created from). When the operator runs `merge X` from a DIFFERENT
+/// current thread — e.g. on `B`, merging `A` whose `target_thread` is
+/// `main` — the inner preview computed `A → main` (often a clean
+/// fast-forward) while the actual merge_plan and apply path computed
+/// `A → B`. The two halves of the preview output disagreed:
+/// `preview_summary` line `semantic preview: <inner-result>` said one
+/// thing while the top-level `semantic_result` / `conflicts` said
+/// another. Worst case the inner-side claim of "clean / fast_forward"
+/// led an operator to expect a successful merge that then surfaced
+/// path conflicts at apply time.
+///
+/// The invariant under test: within a single `--preview` run, the
+/// `preview_summary` semantic-preview line MUST agree with the
+/// top-level `semantic_result`. And running the same merge for real
+/// must produce the same `semantic_result` the preview reported.
+#[test]
+fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let src = temp.path().join("calc.py");
+    fs::write(
+        &src,
+        "def multiply(a, b):\n    result = 0\n    for _ in range(b):\n        result += a\n    return result\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    // Thread A: rename `multiply` -> `product`. target_thread = main.
+    heddle(&["thread", "create", "A"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "A"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "def product(a, b):\n    result = 0\n    for _ in range(b):\n        result += a\n    return result\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "A: rename multiply -> product"], Some(temp.path())).unwrap();
+
+    // Thread B from main: rewrite `multiply`'s body. The operator's
+    // current thread when running `merge A` will be B, not main — so
+    // `A.target_thread` (main) differs from the real destination (B).
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "B"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "B"], Some(temp.path())).unwrap();
+    fs::write(&src, "def multiply(a, b):\n    return a * b\n").unwrap();
+    heddle(&["capture", "-m", "B: rewrite multiply body"], Some(temp.path())).unwrap();
+
+    // Preview the merge from B.
+    let preview_out = heddle(
+        &["--output", "json", "merge", "A", "--preview", "--semantic", "--with-diff"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let preview: Value = serde_json::from_str(&preview_out).expect("preview must emit JSON");
+    let preview_semantic = preview["semantic_result"].as_str().unwrap_or("");
+    let preview_summary: Vec<&str> = preview["preview_summary"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let semantic_preview_line = preview_summary
+        .iter()
+        .find_map(|line| line.strip_prefix("semantic preview: "))
+        .unwrap_or("");
+
+    // Invariant #1 (internal consistency): the `semantic preview: X` line
+    // emitted by the preview MUST match the top-level `semantic_result`
+    // on the same preview. Pre-fix this fails: the inner report keys off
+    // `thread.target_thread` (main) so it says `fast_forward` while the
+    // outer plan correctly says `path_conflicts` (or vice versa).
+    assert_eq!(
+        semantic_preview_line, preview_semantic,
+        "preview_summary's semantic-preview line must agree with top-level semantic_result; \
+         got summary line {semantic_preview_line:?} but top-level {preview_semantic:?}. \
+         Full preview: {preview}"
+    );
+
+    // Invariant #2 (preview vs reality): the real merge run on the same
+    // inputs must produce the same `semantic_result` the preview reported.
+    let real_out = heddle(
+        &["--output", "json", "merge", "A", "--semantic", "-m", "merge"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let real: Value = serde_json::from_str(&real_out).expect("real merge must emit JSON");
+    assert_eq!(
+        preview["semantic_result"], real["semantic_result"],
+        "preview's semantic_result must equal the real merge's semantic_result on identical inputs. \
+         preview={}, real={}",
+        preview["semantic_result"], real["semantic_result"]
+    );
+}
