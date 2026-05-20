@@ -437,6 +437,23 @@ mod tests {
         }
     }
 
+    /// Regression: heddle#154. OSS UX review flagged that `clone`,
+    /// `show`, `goto`, and `thread` are first-reach verbs for new
+    /// users but were hidden behind `heddle help advanced`. Promote
+    /// them onto the everyday surface so a first-time user discovers
+    /// them at the top.
+    #[test]
+    fn everyday_verbs_surface_first_reach_commands() {
+        let everyday: std::collections::HashSet<&str> = everyday_verbs().iter().copied().collect();
+        for verb in ["clone", "show", "goto", "thread"] {
+            assert!(
+                everyday.contains(verb),
+                "`{verb}` is a first-reach verb but is not advertised on \
+                 the everyday surface"
+            );
+        }
+    }
+
     #[test]
     fn hidden_aliases_are_hidden() {
         for verb in ["gc", "index", "monitor"] {
