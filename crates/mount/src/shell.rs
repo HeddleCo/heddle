@@ -14,12 +14,13 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    path::Path,
     time::SystemTime,
 };
 
 use objects::object::FileMode;
 
-use crate::error::Result;
+use crate::error::{MountError, Result};
 
 /// Identifier for a filesystem node within a single mount session.
 ///
@@ -152,6 +153,133 @@ pub trait PlatformShell {
     fn release(&self, node: NodeId) -> Result<()> {
         self.flush(node)
     }
+
+    /// Create a fresh regular file under `parent`. Mints a [`NodeId`]
+    /// for the new file in the writable overlay and returns its
+    /// [`Entry`]; subsequent [`write`](PlatformShell::write) calls
+    /// land in the per-thread hot tier.
+    ///
+    /// When `exclusive` is true (`O_CREAT|O_EXCL`), the call must
+    /// fail with [`MountError::AlreadyExists`] if `name` already
+    /// resolves under `parent` (either in the captured tree or the
+    /// pending tier). When `exclusive` is false, a hit on an
+    /// existing entry is returned as-is (same shape as `lookup`).
+    ///
+    /// Default: [`MountError::ReadOnly`] — implementations that
+    /// don't support mutation inherit a uniform errno.
+    fn create_file(
+        &self,
+        _parent: NodeId,
+        _name: &OsStr,
+        _mode: FileMode,
+        _exclusive: bool,
+    ) -> Result<Entry> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Create an empty directory under `parent` in the overlay.
+    /// Returns the new directory's [`Entry`]. Fails with
+    /// [`MountError::AlreadyExists`] when `name` already resolves.
+    fn make_dir(&self, _parent: NodeId, _name: &OsStr) -> Result<Entry> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Delete the file named `name` under `parent`. The captured-tree
+    /// entry (if any) is tombstoned so [`lookup`](Self::lookup) /
+    /// [`enumerate`](Self::enumerate) skip it; any pending-tier hot
+    /// buffer or warm blob for the path is dropped.
+    ///
+    /// Fails with [`MountError::NotFound`] if `name` doesn't resolve,
+    /// or [`MountError::IsADirectory`] if it resolves to a directory.
+    fn unlink_entry(&self, _parent: NodeId, _name: &OsStr) -> Result<()> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Remove the empty directory named `name` under `parent`. Fails
+    /// with [`MountError::NotADirectory`] for a file, with
+    /// [`MountError::NotEmpty`] when the directory still has visible
+    /// children (across captured tree + pending tier), or
+    /// [`MountError::NotFound`] when nothing resolves.
+    fn rmdir_entry(&self, _parent: NodeId, _name: &OsStr) -> Result<()> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Atomically rename `(old_parent, old_name)` to
+    /// `(new_parent, new_name)`. Handles both same-directory and
+    /// cross-directory cases. Replacing an existing entry of the
+    /// same kind is allowed (POSIX semantics); replacing a directory
+    /// with a file (or vice-versa) fails with
+    /// [`MountError::IsADirectory`] / [`MountError::NotADirectory`].
+    fn rename_entry(
+        &self,
+        _old_parent: NodeId,
+        _old_name: &OsStr,
+        _new_parent: NodeId,
+        _new_name: &OsStr,
+    ) -> Result<()> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Apply attribute updates to `node`. Returns the post-update
+    /// [`Attrs`] so callers can reply without a second `getattr`
+    /// round trip. See [`AttrUpdate`] for which fields the overlay
+    /// actually persists; unsupported fields are no-ops.
+    fn set_attrs(&self, _node: NodeId, _update: AttrUpdate) -> Result<Attrs> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Create a symbolic link named `name` under `parent` whose
+    /// target is the byte-equivalent of `target`. Returns the new
+    /// link's [`Entry`].
+    fn create_symlink(
+        &self,
+        _parent: NodeId,
+        _name: &OsStr,
+        _target: &Path,
+    ) -> Result<Entry> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Read the target of a symbolic link `node`. Returns the raw
+    /// bytes of the link target (which may not be valid UTF-8 on
+    /// some systems, hence [`OsString`]).
+    fn read_link(&self, _node: NodeId) -> Result<OsString> {
+        Err(MountError::ReadOnly)
+    }
+}
+
+/// Optional fields a caller may update via
+/// [`PlatformShell::set_attrs`]. Every field is `Option<_>`; `None`
+/// means "leave alone" (the kernel passes `None` for slots the
+/// `chmod`/`chown`/`truncate`/`utimensat` call didn't touch).
+///
+/// Heddle's tree model only carries three modes ([`FileMode::Normal`],
+/// [`FileMode::Executable`], [`FileMode::Symlink`]) — see
+/// `crates/objects/src/object/tree_types.rs`. A `chmod` that flips
+/// the user-executable bit (`0o100`) maps to the closest mode; bits
+/// outside that don't persist across `capture`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AttrUpdate {
+    /// New unix mode bits (including the type bits). When set, the
+    /// shell folds the user-executable bit into the captured
+    /// [`FileMode`]; other bits don't persist.
+    pub mode: Option<u32>,
+    /// New uid. The mount has no per-node uid storage (every node
+    /// reports the mount-owner's uid); shells may accept this as a
+    /// no-op so `chown` doesn't return an error to callers that
+    /// don't actually need ownership tracking.
+    pub uid: Option<u32>,
+    /// New gid. Same no-op contract as `uid`.
+    pub gid: Option<u32>,
+    /// New size. Truncates the hot-tier buffer (or seeds one from
+    /// the durable predecessor and truncates) when set. `O_TRUNC`
+    /// on the kernel side delivers `setattr(size=0)` before the
+    /// first `write`.
+    pub size: Option<u64>,
+    /// New mtime in seconds since the UNIX epoch. The overlay has
+    /// no per-node mtime storage today; shells accept this as a
+    /// no-op so the kernel's `utimensat` doesn't return an error.
+    pub mtime_sec: Option<i64>,
 }
 
 /// Convert a Heddle [`FileMode`] into a node kind.

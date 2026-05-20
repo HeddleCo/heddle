@@ -34,6 +34,31 @@ pub enum MountError {
     #[error("read-only filesystem")]
     ReadOnly,
 
+    /// An entry with this name already exists (e.g. `O_CREAT|O_EXCL`
+    /// against an existing file, or `mkdir` against an existing dir).
+    /// Maps to `EEXIST` so userspace tooling that exercises atomic
+    /// "create-or-skip" semantics (cargo's lockfile lease, git's
+    /// `objects/<n>/<n>.tmp` placement) sees the conventional errno.
+    #[error("already exists: {0}")]
+    AlreadyExists(String),
+
+    /// Tried to operate on a file as if it were a directory
+    /// (e.g. `unlink` against a path that resolves to a directory).
+    /// Maps to `EISDIR`.
+    #[error("is a directory: {0}")]
+    IsADirectory(String),
+
+    /// Tried to `rmdir` a directory that still has visible children
+    /// (across the captured tree + pending overlay). Maps to
+    /// `ENOTEMPTY`.
+    #[error("directory not empty: {0}")]
+    NotEmpty(String),
+
+    /// Invalid argument from the caller (e.g. a name containing
+    /// `/`, `\0`, or `.`/`..`). Maps to `EINVAL`.
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
     /// Errors bubbling up from the underlying object store / repo.
     #[error(transparent)]
     Store(#[from] HeddleError),
@@ -55,6 +80,10 @@ impl MountError {
             MountError::Stale(_) => stale_errno(),
             MountError::NotADirectory(_) => libc::ENOTDIR,
             MountError::ReadOnly => libc::EROFS,
+            MountError::AlreadyExists(_) => libc::EEXIST,
+            MountError::IsADirectory(_) => libc::EISDIR,
+            MountError::NotEmpty(_) => libc::ENOTEMPTY,
+            MountError::InvalidArgument(_) => libc::EINVAL,
             MountError::Store(HeddleError::NotFound(_))
             | MountError::Store(HeddleError::StateNotFound(_))
             | MountError::Store(HeddleError::MissingObject { .. }) => libc::ENOENT,

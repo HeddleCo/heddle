@@ -1382,6 +1382,426 @@ fn cross_thread_blob_dedup_at_scale() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Part 5: write-side overlay ops — create / mkdir / unlink / rmdir / rename /
+// setattr / symlink. Each op exercises the PlatformShell trait method on a
+// real ContentAddressedMount, so the test catches both the core implementation
+// and the trait dispatch (it's the same path FUSE / FSKit / ProjFS callbacks
+// take). Issue: heddle#180 — unblocks `open(O_CREAT)` and friends on the
+// Linux FUSE shell.
+// ---------------------------------------------------------------------------
+mod write_ops {
+    use super::*;
+    use crate::shell::AttrUpdate;
+    use objects::object::FileMode;
+    use std::path::Path;
+
+    /// `create_file` mints a fresh PendingFile under root, visible to
+    /// subsequent `lookup` / `read` calls. The first `write` against
+    /// the returned NodeId seeds an empty buffer; the byte stream
+    /// flows through the existing two-tier write model.
+    #[test]
+    fn create_file_in_root_then_write_and_read_back() {
+        let (_temp, mount) = open_mount();
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("Cargo.lock"), FileMode::Normal, false)
+            .expect("create_file");
+        assert_eq!(entry.kind, NodeKind::File);
+        assert_eq!(entry.name, "Cargo.lock");
+
+        // Lookup must now resolve the same path.
+        let looked_up = mount
+            .lookup(NodeId::ROOT, OsStr::new("Cargo.lock"))
+            .expect("lookup ok")
+            .expect("lookup hit");
+        assert_eq!(looked_up.node, entry.node);
+
+        // Write + read-back through the freshly minted NodeId.
+        mount.write(entry.node, 0, b"[package]\n").expect("write");
+        let mut buf = vec![0u8; 32];
+        let n = mount.read(entry.node, 0, &mut buf).expect("read");
+        assert_eq!(&buf[..n], b"[package]\n");
+    }
+
+    /// `create_file` with `exclusive=true` (`O_CREAT|O_EXCL`) against
+    /// an already-existing captured path must fail with
+    /// `AlreadyExists` (errno `EEXIST`).
+    #[test]
+    fn create_file_exclusive_against_existing_returns_eexist() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, true)
+            .expect_err("exclusive create on existing must fail");
+        assert!(matches!(err, MountError::AlreadyExists(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::EEXIST);
+    }
+
+    /// `create_file` with `exclusive=false` (`O_CREAT` without
+    /// `O_EXCL`) against an existing captured path returns the
+    /// existing entry — that's the POSIX `open(O_CREAT)` shape, and
+    /// what cargo / rustc rely on when re-opening an artifact for
+    /// rewrite.
+    #[test]
+    fn create_file_non_exclusive_returns_existing_entry() {
+        let (_temp, mount) = open_mount();
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .expect("non-exclusive create on existing returns entry");
+        assert_eq!(entry.name, "hello.txt");
+        let captured = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured.node, entry.node);
+    }
+
+    /// Names containing `/` or `\0`, or the reserved `.` / `..`
+    /// pseudo-entries, must be rejected at the create boundary with
+    /// `EINVAL` — not silently shoved into the overlay.
+    #[test]
+    fn create_file_rejects_invalid_names() {
+        let (_temp, mount) = open_mount();
+        for bad in ["", ".", "..", "a/b", "with\0nul"] {
+            let err = mount
+                .create_file(NodeId::ROOT, OsStr::new(bad), FileMode::Normal, false)
+                .expect_err(&format!("name {bad:?} must be rejected"));
+            assert!(matches!(err, MountError::InvalidArgument(_)), "{bad}: {err:?}");
+            assert_eq!(err.to_errno(), libc::EINVAL);
+        }
+    }
+
+    /// `make_dir` creates an empty pending directory under root that
+    /// shows up in lookup + enumerate immediately. Subsequent
+    /// `create_file` calls under it must work.
+    #[test]
+    fn make_dir_creates_empty_visible_dir() {
+        let (_temp, mount) = open_mount();
+        let dir_entry = mount
+            .make_dir(NodeId::ROOT, OsStr::new("target"))
+            .expect("make_dir");
+        assert_eq!(dir_entry.kind, NodeKind::Directory);
+
+        // Visible via lookup.
+        let looked = mount
+            .lookup(NodeId::ROOT, OsStr::new("target"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(looked.node, dir_entry.node);
+
+        // Root enumerate must include the new directory.
+        let root_entries = mount.enumerate(NodeId::ROOT).unwrap();
+        assert!(
+            root_entries.iter().any(|e| e.name == "target"
+                && e.kind == NodeKind::Directory),
+            "root enumerate did not include the new dir: {root_entries:?}"
+        );
+
+        // Create a file inside it; visible via lookup under the dir.
+        let file = mount
+            .create_file(dir_entry.node, OsStr::new("out.bin"), FileMode::Normal, false)
+            .expect("create_file under new dir");
+        let from_lookup = mount
+            .lookup(dir_entry.node, OsStr::new("out.bin"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(from_lookup.node, file.node);
+    }
+
+    /// `make_dir` against an existing path (captured or pending) is
+    /// `EEXIST`. POSIX `mkdir(2)` shape.
+    #[test]
+    fn make_dir_existing_returns_eexist() {
+        let (_temp, mount) = open_mount();
+        // `nested/` already exists in the fixture's captured tree.
+        let err = mount
+            .make_dir(NodeId::ROOT, OsStr::new("nested"))
+            .expect_err("mkdir on existing must fail");
+        assert_eq!(err.to_errno(), libc::EEXIST);
+    }
+
+    /// `unlink_entry` against a captured file tombstones it: post-
+    /// unlink lookup returns `None`, enumerate skips it, and a
+    /// subsequent `create_file` (POSIX `unlink+open(O_CREAT)`) mints
+    /// a fresh empty inode at the same path.
+    #[test]
+    fn unlink_entry_removes_captured_file_and_allows_recreate() {
+        let (_temp, mount) = open_mount();
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "post-unlink lookup must return None"
+        );
+        let entries = mount.enumerate(NodeId::ROOT).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.name == "hello.txt"),
+            "enumerate still surfaces unlinked file"
+        );
+
+        // Recreate.
+        let recreated = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .expect("recreate after unlink");
+        mount.write(recreated.node, 0, b"REBORN").unwrap();
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(recreated.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"REBORN");
+    }
+
+    /// `unlink_entry` on a directory is `EISDIR` (POSIX `unlink(2)`).
+    #[test]
+    fn unlink_entry_on_directory_returns_eisdir() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("nested"))
+            .expect_err("unlink on dir must fail");
+        assert_eq!(err.to_errno(), libc::EISDIR);
+    }
+
+    /// `unlink_entry` on a name that doesn't exist is `ENOENT`.
+    #[test]
+    fn unlink_entry_missing_returns_enoent() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("nonexistent"))
+            .expect_err("unlink missing must fail");
+        assert_eq!(err.to_errno(), libc::ENOENT);
+    }
+
+    /// `rmdir_entry` removes an empty pending directory. Subsequent
+    /// lookup returns `None`.
+    #[test]
+    fn rmdir_entry_removes_empty_pending_dir() {
+        let (_temp, mount) = open_mount();
+        let dir = mount.make_dir(NodeId::ROOT, OsStr::new("scratch")).unwrap();
+        let _ = dir; // keep alive
+        mount
+            .rmdir_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("rmdir");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("scratch"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// `rmdir_entry` on a directory that has any visible child (pending
+    /// or captured) must fail with `ENOTEMPTY`.
+    #[test]
+    fn rmdir_entry_non_empty_returns_enotempty() {
+        let (_temp, mount) = open_mount();
+        // The fixture's `nested/` has captured children.
+        let err = mount
+            .rmdir_entry(NodeId::ROOT, OsStr::new("nested"))
+            .expect_err("rmdir on non-empty must fail");
+        assert_eq!(err.to_errno(), libc::ENOTEMPTY);
+    }
+
+    /// `rmdir_entry` on a regular file is `ENOTDIR`.
+    #[test]
+    fn rmdir_entry_on_file_returns_enotdir() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .rmdir_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect_err("rmdir on file must fail");
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    /// File rename within the same directory: source disappears,
+    /// destination resolves to the renamed file with the same bytes.
+    /// This is the cargo / git path: write `foo.tmp` then rename to
+    /// `foo`.
+    #[test]
+    fn rename_entry_file_same_dir() {
+        let (_temp, mount) = open_mount();
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("Cargo.lock.tmp"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(src.node, 0, b"[atomic]\n").unwrap();
+        mount.flush(src.node).unwrap();
+
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("Cargo.lock.tmp"),
+                NodeId::ROOT,
+                OsStr::new("Cargo.lock"),
+            )
+            .expect("rename");
+
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("Cargo.lock.tmp"))
+                .unwrap()
+                .is_none(),
+            "source path must be gone after rename"
+        );
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("Cargo.lock"))
+            .unwrap()
+            .expect("dst resolves");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(dst.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"[atomic]\n");
+    }
+
+    /// Rename across directories: src in `nested/`, dst in root.
+    #[test]
+    fn rename_entry_cross_dir() {
+        let (_temp, mount) = open_mount();
+        // Source lives in the captured tree at `nested/inner.txt`.
+        let nested = mount
+            .lookup(NodeId::ROOT, OsStr::new("nested"))
+            .unwrap()
+            .unwrap();
+        mount
+            .rename_entry(
+                nested.node,
+                OsStr::new("inner.txt"),
+                NodeId::ROOT,
+                OsStr::new("moved.txt"),
+            )
+            .expect("cross-dir rename");
+
+        assert!(
+            mount
+                .lookup(nested.node, OsStr::new("inner.txt"))
+                .unwrap()
+                .is_none(),
+            "source path must be gone after rename"
+        );
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("moved.txt"))
+            .unwrap()
+            .expect("dst resolves");
+        let mut buf = vec![0u8; 32];
+        let n = mount.read(dst.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"deep");
+    }
+
+    /// Rename onto an existing file of the same kind: POSIX allows it
+    /// (atomic replace). The destination's prior content is gone.
+    #[test]
+    fn rename_entry_replaces_existing_file() {
+        let (_temp, mount) = open_mount();
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(src.node, 0, b"draft body").unwrap();
+        mount.flush(src.node).unwrap();
+        // hello.txt exists in the fixture; rename overwrites it.
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .unwrap();
+        let mut buf = vec![0u8; 32];
+        let n = mount.read(dst.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"draft body");
+    }
+
+    /// `set_attrs(size=0)` truncates the file's hot buffer to zero,
+    /// which is what the kernel issues for `O_TRUNC` before any
+    /// `write`. cargo writes use `O_CREAT|O_WRONLY|O_TRUNC`; without
+    /// this the second build cycle overlays bytes on top of the
+    /// previous artifact.
+    #[test]
+    fn set_attrs_truncate_zero_clears_buffer() {
+        let (_temp, mount) = open_mount();
+        let node = mount.lookup_path("hello.txt").unwrap();
+        // Seed a buffer first.
+        mount.write(node, 0, b"world-plus").unwrap();
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    size: Some(0),
+                    ..Default::default()
+                },
+            )
+            .expect("setattr size=0");
+        assert_eq!(attrs.size, 0);
+        // Subsequent read returns nothing.
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(node, 0, &mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// `set_attrs(size=N)` larger than the current buffer zero-fills
+    /// the gap (POSIX `ftruncate(2)`).
+    #[test]
+    fn set_attrs_truncate_grow_zero_fills() {
+        let (_temp, mount) = open_mount();
+        let node = mount.lookup_path("hello.txt").unwrap(); // "world", 5 bytes
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    size: Some(8),
+                    ..Default::default()
+                },
+            )
+            .expect("setattr grow");
+        assert_eq!(attrs.size, 8);
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"world\0\0\0");
+    }
+
+    /// `set_attrs(mode=0o755)` flips a Normal file to Executable in
+    /// the overlay; the change is visible on `attrs` immediately and
+    /// surfaces in `capture` output (so a freshly-built binary keeps
+    /// its `+x` bit).
+    #[test]
+    fn set_attrs_mode_sets_executable_bit() {
+        let (_temp, mount) = open_mount();
+        let node = mount.lookup_path("hello.txt").unwrap();
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    mode: Some(0o100755),
+                    ..Default::default()
+                },
+            )
+            .expect("setattr chmod");
+        assert_eq!(attrs.unix_mode & 0o111, 0o111);
+
+        // Refetched attrs preserve the override.
+        let again = mount.attrs(node).unwrap();
+        assert_eq!(again.unix_mode & 0o111, 0o111);
+    }
+
+    /// `create_symlink` records a link in the overlay; `read_link`
+    /// returns its target bytes.
+    #[test]
+    fn create_and_read_symlink() {
+        let (_temp, mount) = open_mount();
+        let entry = mount
+            .create_symlink(
+                NodeId::ROOT,
+                OsStr::new("alias.txt"),
+                Path::new("hello.txt"),
+            )
+            .expect("symlink");
+        assert_eq!(entry.kind, NodeKind::Symlink);
+        let target = mount.read_link(entry.node).expect("read_link");
+        assert_eq!(target.as_os_str(), OsStr::new("hello.txt"));
+    }
+}
+
 // D1. Property test for two-tier semantics.
 mod proptests {
     use std::collections::BTreeMap;
