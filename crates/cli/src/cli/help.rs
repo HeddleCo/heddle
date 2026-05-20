@@ -203,8 +203,8 @@ pub fn print_help(cmd: &clap::Command, topic: Option<&str>) -> std::io::Result<(
             writeln!(
                 out,
                 "Run `heddle help advanced` for advanced commands or \
-                 `heddle help <topic>` for a topic page (e.g. `daemon`, \
-                 `signals`, `bridge`, `operation-ids`)."
+                 `heddle help <topic>` for a topic page (e.g. `threads`, \
+                 `daemon`, `signals`, `bridge`, `operation-ids`)."
             )?;
         }
         Some("advanced") => {
@@ -254,6 +254,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
     Some(match topic {
         "advanced" => ADVANCED_HELP,
         "agent" | "daemon" => DAEMON_TOPIC,
+        "threads" | "model" => THREADS_TOPIC,
         "operation-ids" | "idempotency" => OPERATION_IDS_TOPIC,
         "review" => REVIEW_TOPIC,
         "discuss" | "discussions" => DISCUSS_TOPIC,
@@ -288,7 +289,115 @@ const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are 
                          peer-cred check enforced. Out of scope for first ship:\n\
                          multi-user, remote, TLS.\n";
 
-const OPERATION_IDS_TOPIC: &str = "Idempotency — every state-changing call accepts a `client_operation_id`.\n\
+const THREADS_TOPIC: &str =
+    "Threads — Heddle's unit of in-progress work.\n\
+\n\
+A thread is a named line of work with its own checkout, its own captured\n\
+history, and a target it eventually merges into. It is *not* a git branch:\n\
+the git-overlay branch is downstream plumbing (created at checkpoint),\n\
+not the primary object. You start work with `heddle start <name>`, switch\n\
+between threads with `heddle thread switch <name>`, and integrate with\n\
+`heddle ship` (or check readiness without merging via `heddle ready`).\n\
+\n\
+# Threads vs. git branches\n\
+\n\
+- A thread carries an isolated checkout (its own directory), captured\n\
+  state history, agent/task metadata, a freshness verdict against its\n\
+  target, and a workflow state (Ready/Blocked/Merged/...). A git branch\n\
+  is just a ref.\n\
+- Multiple threads coexist on disk simultaneously without `git stash` /\n\
+  `git worktree` gymnastics. Each thread's working tree is its own.\n\
+- `heddle capture` records into the thread's state history; `heddle\n\
+  checkpoint` is what materializes a git-overlay commit on the\n\
+  downstream branch.\n\
+\n\
+# Workspace modes (`--workspace`)\n\
+\n\
+The `--workspace` flag on `heddle start` selects how the thread's\n\
+checkout is realized on disk. These are storage strategies, not\n\
+workflow states:\n\
+\n\
+- `materialized` — clonefile/reflink the captured tree into the thread's\n\
+  directory (APFS / btrfs / XFS-with-reflinks / bcachefs / ReFS). Real\n\
+  `read(2)`-able bytes; ~zero disk cost until the agent diverges blocks.\n\
+  Day-one default on reflink-capable hosts.\n\
+- `virtualized` — project the captured tree through a content-addressed\n\
+  FUSE/FSKit/ProjFS mount. Nothing on disk until the kernel asks.\n\
+  Requires the `mount` feature.\n\
+- `solid` — full file copies, no shared extents. Strong isolation;\n\
+  the right choice on ext4/NTFS hosts that have neither reflinks nor a\n\
+  usable mount API.\n\
+- `auto` (default) — pick `materialized` when reflinks are available,\n\
+  `virtualized` when a mount is available, otherwise `solid`.\n\
+\n\
+A `solid` thread and a `materialized` thread are interchangeable from\n\
+the workflow's point of view — `capture`, `ship`, `goto`, etc. behave\n\
+identically. The mode only controls bytes-on-disk semantics.\n\
+\n\
+# Materialize vs. promote\n\
+\n\
+- Choose a workspace mode at `heddle start` time: pass `--workspace\n\
+  materialized` (or rely on `auto`) when you want real bytes on disk\n\
+  from the start.\n\
+- `heddle thread promote <name> --path <dir>` upgrades an existing\n\
+  thread to a heavy checkout at a chosen path. Use it when a thread\n\
+  that started lightweight (`virtualized`, or no on-disk checkout)\n\
+  needs to become a real working tree — for example, to hand it to a\n\
+  tool that can't read through the mount.\n\
+\n\
+# Sync: stale\n\
+\n\
+A thread is `current` when its base is the tip of its target, and\n\
+`stale` once the target has advanced past it. `heddle status` and\n\
+`heddle thread show` print this as `Sync: stale`.\n\
+\n\
+Resolution paths:\n\
+\n\
+- `heddle sync` — refresh the current thread onto its target when\n\
+  the replay is clean. The fast path for a stale thread with no\n\
+  conflicts.\n\
+- `heddle thread refresh <name>` — the same refresh, addressed by\n\
+  thread name rather than the current checkout.\n\
+- If `sync` reports conflicts or other blockers, use\n\
+  `heddle thread resolve <name>` to walk through the next steps, or\n\
+  `heddle conflict` to handle the conflicts as structured data.\n\
+- `heddle ship` will refresh-then-merge for you when the replay is\n\
+  clean; it fails closed when manual resolution is required.\n\
+\n\
+# `goto` vs. `git checkout` vs. `thread switch`\n\
+\n\
+These three look similar but operate at different layers:\n\
+\n\
+- `heddle thread switch <name>` — change which *thread* is active.\n\
+  Each thread has its own checkout; switching may auto-capture\n\
+  outstanding work on the thread you're leaving. Pair with the shell\n\
+  hook (`heddle shell init`) to auto-cd into the target thread's\n\
+  directory.\n\
+- `heddle goto <state>` — move the *current thread's* worktree to a\n\
+  specific captured state. It refuses with uncommitted changes unless\n\
+  `--force` is passed; it does not change which thread is active.\n\
+- `git checkout` — operates on the git-overlay branch and index\n\
+  directly. Heddle's thread metadata, captured state, and workflow\n\
+  state are not updated. Reach for it only when you specifically want\n\
+  the git-layer view; the thread-aware verbs are the supported path.\n\
+\n\
+# Capture vs. checkpoint\n\
+\n\
+- `heddle capture` records a recoverable Heddle step on the current\n\
+  thread — for undo, provenance, and review. Captures are\n\
+  fine-grained and accumulate freely as work progresses.\n\
+- `heddle checkpoint` commits the current captured work to the\n\
+  git-overlay branch/index. It refuses when the worktree has changes\n\
+  that haven't been captured yet — capture first, then checkpoint.\n\
+- The split lets agents and tools take many small captures (cheap,\n\
+  reversible) without producing a noisy git history; checkpoints are\n\
+  the durable downstream record.\n\
+\n\
+See also: `heddle help advanced` for the full operational surface,\n\
+`heddle thread --help` for the thread subcommand list.\n";
+
+const OPERATION_IDS_TOPIC: &str =
+    "Idempotency — every state-changing call accepts a `client_operation_id`.\n\
 \n\
 The same id replayed with the same body returns the original outcome\n\
 bit-identical; with a different body it returns FAILED_PRECONDITION.\n\
@@ -395,6 +504,8 @@ mod tests {
             "advanced",
             "agent",
             "daemon",
+            "threads",
+            "model",
             "operation-ids",
             "idempotency",
             "review",
