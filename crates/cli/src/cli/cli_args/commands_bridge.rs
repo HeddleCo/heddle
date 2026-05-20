@@ -98,10 +98,9 @@ pub enum GitCommands {
         #[arg(short, long, value_parser = parse_git_source)]
         path: Option<GitSource>,
 
-        /// Optional ref names to import (default: all branches/tags).
-        /// Codex's git-overlay foundation added this flag to scope
-        /// imports to a specific branch or remote-tracking ref —
-        /// kept here on the rebase onto main.
+        /// Ref names to import (repeatable). Scopes the import to the
+        /// listed branches, tags, or remote-tracking refs; omit to
+        /// import all branches and tags.
         #[arg(long = "ref", value_name = "REF")]
         refs: Vec<String>,
     },
