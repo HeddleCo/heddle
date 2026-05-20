@@ -1679,20 +1679,41 @@ mod tests {
         let empty_tree_oid: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
             .parse()
             .expect("parse empty tree oid");
-        src.commit(
-            "refs/heads/trunk",
-            "seed trunk",
-            empty_tree_oid,
-            gix::commit::NO_PARENT_IDS,
-        )
-        .expect("commit trunk");
-        src.commit(
-            "refs/heads/abc-feature",
-            "seed abc-feature",
-            empty_tree_oid,
-            gix::commit::NO_PARENT_IDS,
-        )
-        .expect("commit abc-feature");
+        // Use an explicit signature via `new_commit_as` rather than
+        // `Repository::commit`. The latter reads `user.name`/`user.email`
+        // from git config, which CI runners don't set — leading to
+        // `AuthorMissing` errors. The clone path under test doesn't care
+        // who authored these seed commits.
+        let sig = gix::actor::Signature {
+            name: "Heddle Test".into(),
+            email: "heddle@test".into(),
+            time: gix::date::Time {
+                seconds: 0,
+                offset: 0,
+            },
+        };
+        let mut committer_buf = gix::date::parse::TimeBuf::default();
+        let mut author_buf = gix::date::parse::TimeBuf::default();
+        let seed = src
+            .new_commit_as(
+                sig.to_ref(&mut committer_buf),
+                sig.to_ref(&mut author_buf),
+                "seed",
+                empty_tree_oid,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .expect("seed commit")
+            .id;
+        for name in ["refs/heads/trunk", "refs/heads/abc-feature"] {
+            set_reference(
+                &src,
+                name,
+                seed,
+                PreviousValue::Any,
+                "test: seed branch",
+            )
+            .expect("set ref");
+        }
         // Make sure HEAD on the source points at trunk so
         // `git ls-remote --symref` reports trunk.
         std::fs::write(source.join("HEAD"), b"ref: refs/heads/trunk\n").unwrap();
