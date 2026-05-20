@@ -281,6 +281,16 @@ pub(crate) fn merge_thread_into_current(
     } else {
         merge_algo::MergeStrategy::HunkOnly
     };
+    let current_thread = repo
+        .current_lane()?
+        .unwrap_or_else(|| "detached".to_string());
+    // heddle#144: the inner preview report MUST compute its 3-way merge
+    // against the actual destination of *this* merge (the operator's
+    // current HEAD), not `thread.target_thread`. Otherwise running
+    // `heddle merge A` from a thread B whose tip diverges from A's
+    // recorded target (often `main`) yields a preview whose
+    // `preview_summary` line claims one outcome while the apply path
+    // produces another.
     let preview_report = match thread.as_mut() {
         Some(thread) => Some(build_thread_preview_report_with_graph(
             repo,
@@ -288,13 +298,14 @@ pub(crate) fn merge_thread_into_current(
             thread,
             preview,
             preview_strategy,
+            Some(PreviewTarget {
+                label: &current_thread,
+                change_id: current_state.change_id,
+            }),
         )?),
         None => None,
     };
     let preview_summary = build_preview_summary(preview_report.as_ref());
-    let current_thread = repo
-        .current_lane()?
-        .unwrap_or_else(|| "detached".to_string());
     let current_label = format!("CURRENT ({current_thread})");
     let incoming_label = format!("INCOMING ({track_name})");
     let merge_plan = MergePlan::for_merge_command(
@@ -1185,7 +1196,21 @@ pub(crate) fn build_thread_preview_report(
         thread,
         prefer_apply_recommendation,
         merge_algo::MergeStrategy::HunkOnly,
+        None,
     )
+}
+
+/// Caller-supplied override for the destination side of the preview's
+/// 3-way merge. When `Some`, the inner preview MUST compute against
+/// this `(label, change_id)` instead of `thread.target_thread`. Used by
+/// `merge_thread_into_current` so the preview matches the actual merge
+/// — `heddle merge A` from thread B merges A → B, but A's
+/// `target_thread` is whatever A was created from (often `main`), so
+/// without an override the inner report computes A → main and
+/// contradicts the real outcome (heddle#144).
+pub(crate) struct PreviewTarget<'a> {
+    pub label: &'a str,
+    pub change_id: ChangeId,
 }
 
 fn build_thread_preview_report_with_graph(
@@ -1194,19 +1219,32 @@ fn build_thread_preview_report_with_graph(
     thread: &mut Thread,
     prefer_apply_recommendation: bool,
     strategy: MergeStrategy,
+    target_override: Option<PreviewTarget<'_>>,
 ) -> Result<ThreadPreviewReport> {
     refresh_thread_freshness(repo, thread)?;
     let mut conflicts = Vec::new();
-    let semantic_result = if let Some(target_thread) = thread.target_thread.as_deref() {
-        let target_id = repo
+    // Resolve the destination side. Prefer the caller's override (the
+    // merge command supplies the actual current HEAD); otherwise fall
+    // back to `thread.target_thread` for callers like `ready` / `sync` /
+    // `ship` that don't carry an explicit merge destination.
+    let resolved_target: Option<(String, ChangeId)> = if let Some(ovr) = target_override {
+        Some((ovr.label.to_string(), ovr.change_id))
+    } else if let Some(name) = thread.target_thread.as_deref() {
+        let id = repo
             .refs()
-            .get_thread(target_thread)?
-            .ok_or_else(|| anyhow!("Target thread '{}' not found", target_thread))?;
+            .get_thread(name)?
+            .ok_or_else(|| anyhow!("Target thread '{}' not found", name))?;
+        Some((name.to_string(), id))
+    } else {
+        None
+    };
+
+    let semantic_result = if let Some((target_label, target_id)) = resolved_target {
         let thread_id = repo
             .refs()
             .get_thread(&thread.thread)?
             .ok_or_else(|| anyhow!("Thread '{}' not found", thread.thread))?;
-        let current_label = format!("CURRENT ({target_thread})");
+        let current_label = format!("CURRENT ({target_label})");
         let incoming_label = format!("INCOMING ({})", thread.thread);
         let merge_plan = MergePlan::for_thread_preview(
             repo,
