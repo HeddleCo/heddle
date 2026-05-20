@@ -2161,3 +2161,102 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
         preview["semantic_result"], real["semantic_result"]
     );
 }
+
+/// heddle#153: `merge --preview --with-diff --semantic --output json` must
+/// surface symbol-level deltas at a discoverable location, not bury them
+/// inside `diff` where agents consuming the JSON miss them.
+///
+/// The bug premise: when the semantic driver detects a function rename
+/// (e.g. `multiply` -> `product`), the JSON should carry the rename
+/// record so agents can act on it programmatically. The data was being
+/// emitted only inside `diff.semantic_changes`, which is easy to overlook
+/// — and absent from the JSON entirely when `--with-diff` isn't passed.
+///
+/// Contract under test: with `--semantic` set, the merge output JSON
+/// includes a top-level `semantic_changes` array carrying the per-symbol
+/// delta entries, populated even when `--with-diff` isn't requested.
+#[test]
+fn test_merge_semantic_surfaces_top_level_symbol_deltas_on_rename() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let src = temp.path().join("calc.py");
+    fs::write(
+        &src,
+        "def multiply(a, b):\n    result = 0\n    for _ in range(b):\n        result += a\n    return result\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "create", "A"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "A"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "def product(a, b):\n    result = 0\n    for _ in range(b):\n        result += a\n    return result\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "rename multiply -> product"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+
+    let out = heddle(
+        &[
+            "--output", "json", "merge", "A", "--preview", "--with-diff", "--semantic",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&out).expect("merge --output json must be JSON");
+
+    // Top-level `semantic_changes` is the contract: agents shouldn't have
+    // to dig into `diff` to find symbol-level deltas. Its presence is
+    // also the signal that the semantic driver ran at all.
+    let semantic_changes = parsed
+        .get("semantic_changes")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| {
+            panic!(
+                "--semantic merge must surface top-level `semantic_changes` array: {parsed}"
+            )
+        });
+    let rename = semantic_changes
+        .iter()
+        .find(|c| c["change_type"] == "function_renamed")
+        .unwrap_or_else(|| {
+            panic!(
+                "top-level `semantic_changes` must include a `function_renamed` entry on a rename: {parsed}"
+            )
+        });
+    assert_eq!(
+        rename["old_name"], "multiply",
+        "rename entry must carry old name: {rename}"
+    );
+    assert_eq!(
+        rename["new_name"], "product",
+        "rename entry must carry new name: {rename}"
+    );
+    assert_eq!(
+        rename["path"], "calc.py",
+        "rename entry must carry the file path: {rename}"
+    );
+}
+
+/// heddle#153: when `--semantic` is NOT set, the top-level
+/// `semantic_changes` field must be absent (not `null`, not `[]`). That's
+/// the unambiguous "semantic mode was not honored" signal — consumers
+/// can branch on field presence alone.
+#[test]
+fn test_merge_without_semantic_omits_top_level_symbol_deltas() {
+    let temp = TempDir::new().unwrap();
+    create_simple_feature_thread(&temp);
+
+    let out = heddle(
+        &["--output", "json", "merge", "feature", "--preview", "--with-diff"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&out).expect("merge --output json must be JSON");
+
+    assert!(
+        parsed.get("semantic_changes").is_none(),
+        "top-level `semantic_changes` must be absent when --semantic is not set: {parsed}"
+    );
+}
