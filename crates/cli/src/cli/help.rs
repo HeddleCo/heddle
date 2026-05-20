@@ -17,8 +17,9 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
-    /// Front-door verbs: `init, start, capture, merge, log, status,
-    /// review, discuss, annotate, switch, undo, bridge`.
+    /// Front-door verbs: `init, clone, start, capture, merge, log,
+    /// status, show, goto, thread, review, discuss, context, undo,
+    /// bridge`. See [`everyday_verbs`] for the authoritative list.
     Everyday,
     /// Reachable via `heddle help advanced` or `heddle help <topic>`.
     /// Most agent-loop and operational verbs land here.
@@ -33,8 +34,14 @@ pub enum Tier {
 pub fn tier_of(verb: &str) -> Tier {
     match verb {
         // ── Everyday ──────────────────────────────────────────────
-        "init" | "start" | "capture" | "merge" | "log" | "status" | "review" | "discuss"
-        | "context" | "switch" | "undo" | "bridge" | "help" => Tier::Everyday,
+        // `clone`, `show`, `goto`, `thread` were promoted from
+        // Advanced after OSS UX review flagged them as first-reach
+        // verbs that a new user reaches for before reading the
+        // advanced page (heddle#154).
+        "init" | "clone" | "start" | "capture" | "merge" | "log" | "status" | "show" | "goto"
+        | "thread" | "review" | "discuss" | "context" | "switch" | "undo" | "bridge" | "help" => {
+            Tier::Everyday
+        }
         // The curated everyday set includes `annotate`. Heddle today
         // exposes annotation management under `context`
         // (set/get/list/edit). Map the missing front-door intent to
@@ -52,14 +59,13 @@ pub fn tier_of(verb: &str) -> Tier {
         // (Biscuit-gated `redact:repo`/`purge:repo` capabilities);
         // they're explicitly NOT everyday verbs.
         "abort" | "agent" | "actor" | "attempt" | "auth" | "bisect" | "blame" | "checkpoint"
-        | "cherry-pick" | "clean" | "clone" | "collapse" | "compare" | "completion"
-        | "conflict" | "continue" | "daemon" | "delegate" | "diagnose" | "diff" | "doctor"
-        | "fetch" | "fork" | "fsck" | "git-overlay" | "goto" | "hook" | "inspect"
-        | "integration" | "maintenance" | "marker" | "presence" | "pull" | "purge" | "push"
-        | "query" | "ready" | "rebase" | "redact" | "redo" | "remote" | "resolve" | "retro"
-        | "revert" | "run" | "schemas" | "semantic" | "session" | "shell" | "ship" | "show"
-        | "stash" | "store" | "support" | "sync" | "thread" | "try" | "version" | "watch"
-        | "workspace" => Tier::Advanced,
+        | "cherry-pick" | "clean" | "collapse" | "compare" | "completion" | "conflict"
+        | "continue" | "daemon" | "delegate" | "diagnose" | "diff" | "doctor" | "fetch"
+        | "fork" | "fsck" | "git-overlay" | "hook" | "inspect" | "integration" | "maintenance"
+        | "marker" | "presence" | "pull" | "purge" | "push" | "query" | "ready" | "rebase"
+        | "redact" | "redo" | "remote" | "resolve" | "retro" | "revert" | "run" | "schemas"
+        | "semantic" | "session" | "shell" | "ship" | "stash" | "store" | "support" | "sync"
+        | "try" | "version" | "watch" | "workspace" => Tier::Advanced,
 
         // ── Hidden ────────────────────────────────────────────────
         // `transaction` is hidden in alpha — buffered-op replay at
@@ -83,8 +89,8 @@ pub fn tier_of(verb: &str) -> Tier {
 /// here means there's a single source of truth for command summaries.
 pub fn everyday_verbs() -> &'static [&'static str] {
     &[
-        "init", "start", "capture", "merge", "log", "status", "review", "discuss", "context",
-        "undo", "bridge",
+        "init", "clone", "start", "capture", "merge", "log", "status", "show", "goto", "thread",
+        "review", "discuss", "context", "undo", "bridge",
     ]
 }
 
@@ -98,7 +104,6 @@ pub fn advanced_verbs() -> &'static [&'static str] {
         "agent",
         "daemon",
         "hook",
-        "thread",
         "fork",
         "collapse",
         "compare",
@@ -117,7 +122,6 @@ pub fn advanced_verbs() -> &'static [&'static str] {
         "redo",
         "revert",
         "clean",
-        "goto",
         "ready",
         "ship",
         "checkpoint",
@@ -131,10 +135,8 @@ pub fn advanced_verbs() -> &'static [&'static str] {
         "workspace",
         "integration",
         "maintenance",
-        "clone",
         "auth",
         "diagnose",
-        "show",
         "query",
         "session",
         "actor",
@@ -263,16 +265,16 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
 
 const ADVANCED_HELP: &str = "Advanced verbs — see `heddle help advanced` for the complete list.\n\
 \n\
-The default `heddle help` curates the everyday surface (init, start, capture, merge,\n\
-log, status, review, discuss, context, undo, bridge). Everything else lives behind\n\
-this topic and `heddle help <verb> --help` for the full clap-derived docs.\n\
+The default `heddle help` curates the everyday surface (init, clone, start, capture,\n\
+merge, log, status, show, goto, thread, review, discuss, context, undo, bridge).\n\
+Everything else lives behind this topic and `heddle help <verb> --help` for the full\n\
+clap-derived docs.\n\
 \n\
 This is intentional. The everyday surface stays minimal so first-time users aren't\n\
 overwhelmed; agents and power users reach for the advanced affordances when they\n\
 need them.\n";
 
-const DAEMON_TOPIC: &str =
-    "Two daemons — both have legitimate uses; they are not interchangeable.\n\
+const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are not interchangeable.\n\
 \n\
 `heddle daemon`        — FUSE mount-daemon control plane. Owns FUSE sessions for\n\
                          `--workspace virtualized --daemon` threads. Linux only.\n\
@@ -286,8 +288,7 @@ const DAEMON_TOPIC: &str =
                          peer-cred check enforced. Out of scope for first ship:\n\
                          multi-user, remote, TLS.\n";
 
-const OPERATION_IDS_TOPIC: &str =
-    "Idempotency — every state-changing call accepts a `client_operation_id`.\n\
+const OPERATION_IDS_TOPIC: &str = "Idempotency — every state-changing call accepts a `client_operation_id`.\n\
 \n\
 The same id replayed with the same body returns the original outcome\n\
 bit-identical; with a different body it returns FAILED_PRECONDITION.\n\
@@ -426,13 +427,29 @@ mod tests {
     /// users unable to discover the verb they were told to run.
     #[test]
     fn advanced_verbs_lists_tip_referenced_commands() {
-        let advanced: std::collections::HashSet<&str> =
-            advanced_verbs().iter().copied().collect();
+        let advanced: std::collections::HashSet<&str> = advanced_verbs().iter().copied().collect();
         for verb in ["query", "checkpoint", "continue", "abort"] {
             assert!(
                 advanced.contains(verb),
                 "`{verb}` is referenced in user-facing tips but is not \
                  advertised by `heddle help advanced`"
+            );
+        }
+    }
+
+    /// Regression: heddle#154. OSS UX review flagged that `clone`,
+    /// `show`, `goto`, and `thread` are first-reach verbs for new
+    /// users but were hidden behind `heddle help advanced`. Promote
+    /// them onto the everyday surface so a first-time user discovers
+    /// them at the top.
+    #[test]
+    fn everyday_verbs_surface_first_reach_commands() {
+        let everyday: std::collections::HashSet<&str> = everyday_verbs().iter().copied().collect();
+        for verb in ["clone", "show", "goto", "thread"] {
+            assert!(
+                everyday.contains(verb),
+                "`{verb}` is a first-reach verb but is not advertised on \
+                 the everyday surface"
             );
         }
     }

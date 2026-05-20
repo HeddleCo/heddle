@@ -338,15 +338,20 @@ fn test_cli_help_shows_thread_surface() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    // `ready` and `thread` live in the Advanced tier; the
-    // default help is curated to the everyday surface. The thread-
-    // surface terminology guarantee is still load-bearing: neither
-    // tier should resurrect the legacy `worktree`/`lane` verbs.
-    let help = heddle(&["help", "advanced"], Some(temp.path())).unwrap();
-    assert!(help.contains("ready"));
-    assert!(help.contains("\n  thread"));
-    assert!(!help.contains("\n  worktree"));
-    assert!(!help.contains("\n  lane"));
+    // `thread` was promoted onto the everyday surface (heddle#154)
+    // because new users reach for it before reading the advanced
+    // page. `ready` remains advanced. The thread-surface
+    // terminology guarantee is still load-bearing: neither tier
+    // should resurrect the legacy `worktree`/`lane` verbs.
+    let everyday = heddle(&["help"], Some(temp.path())).unwrap();
+    assert!(everyday.contains("\n  thread"));
+    assert!(!everyday.contains("\n  worktree"));
+    assert!(!everyday.contains("\n  lane"));
+
+    let advanced = heddle(&["help", "advanced"], Some(temp.path())).unwrap();
+    assert!(advanced.contains("ready"));
+    assert!(!advanced.contains("\n  worktree"));
+    assert!(!advanced.contains("\n  lane"));
 }
 
 #[test]
