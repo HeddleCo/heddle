@@ -746,3 +746,44 @@ fn assert_file_matches(generated: &Path, checked_in: &Path) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests_proto_single_source {
+    use std::path::PathBuf;
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root from CARGO_MANIFEST_DIR")
+            .to_path_buf()
+    }
+
+    // Heddle ships exactly one canonical `service.proto`, at
+    // `crates/grpc/proto/heddle/v1/service.proto`. The historical
+    // mirrors at `proto/heddle/v1/` and `proto/proto/heddle/v1/`
+    // drifted (missing `RedactionTransfer` before heddle#63 r1).
+    #[test]
+    fn only_canonical_proto_exists() {
+        let root = workspace_root();
+        let canonical = root.join("crates/grpc/proto/heddle/v1/service.proto");
+        assert!(
+            canonical.exists(),
+            "canonical proto missing at {}",
+            canonical.display()
+        );
+
+        for mirror in [
+            "proto/heddle/v1/service.proto",
+            "proto/proto/heddle/v1/service.proto",
+        ] {
+            let p = root.join(mirror);
+            assert!(
+                !p.exists(),
+                "duplicate proto mirror still present: {} — single-source contract requires {} only",
+                p.display(),
+                canonical.display()
+            );
+        }
+    }
+}
