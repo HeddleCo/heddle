@@ -416,6 +416,23 @@ mod tests {
         }
     }
 
+    /// Regression: heddle#150. `query`, `checkpoint`, `continue`, and
+    /// `abort` are referenced in inline tips and error messages but
+    /// were absent from the `heddle help advanced` listing, leaving
+    /// users unable to discover the verb they were told to run.
+    #[test]
+    fn advanced_verbs_lists_tip_referenced_commands() {
+        let advanced: std::collections::HashSet<&str> =
+            advanced_verbs().iter().copied().collect();
+        for verb in ["query", "checkpoint", "continue", "abort"] {
+            assert!(
+                advanced.contains(verb),
+                "`{verb}` is referenced in user-facing tips but is not \
+                 advertised by `heddle help advanced`"
+            );
+        }
+    }
+
     #[test]
     fn hidden_aliases_are_hidden() {
         for verb in ["gc", "index", "monitor"] {
