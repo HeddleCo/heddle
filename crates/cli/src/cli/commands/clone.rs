@@ -264,12 +264,33 @@ fn write_git_overlay_origin(local_path: &Path, remote_label: &str) -> Result<()>
 /// has no usable segment, return it unchanged so the rendered summary
 /// still carries something identifying.
 fn clone_repo_name_from_label(label: &str) -> &str {
-    // SSH form `git@github.com:owner/repo.git`: split on the colon
-    // first so the path segment isn't shadowed by the host.
-    let after_colon = label.rsplit(':').next().unwrap_or(label);
+    // `:` is only an SSH/SCP host/path separator when the prefix has no
+    // path separator (git's local-path rule) and isn't a Windows drive
+    // (`C:\…` or `C:/…`). Splitting unconditionally truncated Windows
+    // drive paths and any local path with a literal colon.
+    let after_colon = match label.find(':') {
+        Some(colon_pos) => {
+            let prefix = &label[..colon_pos];
+            let rest = &label[colon_pos + 1..];
+            let is_windows_drive = prefix.len() == 1
+                && prefix
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic())
+                && (rest.starts_with('\\') || rest.starts_with('/'));
+            let prefix_has_separator = prefix.contains('/') || prefix.contains('\\');
+            if is_windows_drive || prefix_has_separator {
+                label
+            } else {
+                rest
+            }
+        }
+        None => label,
+    };
+    let is_sep = |c: char| c == '/' || c == '\\';
     let segment = after_colon
-        .trim_end_matches('/')
-        .rsplit('/')
+        .trim_end_matches(is_sep)
+        .rsplit(is_sep)
         .find(|part| !part.is_empty())
         .unwrap_or(after_colon);
     segment.strip_suffix(".git").unwrap_or(segment)
@@ -844,6 +865,39 @@ mod tests {
         // so the rendered summary still carries *something* identifying.
         assert_eq!(clone_repo_name_from_label(""), "");
         assert_eq!(clone_repo_name_from_label("///"), "///");
+    }
+
+    #[test]
+    fn clone_repo_name_handles_windows_drive_paths() {
+        // Windows drive prefixes (`C:\…` and `C:/…`) are not SSH/SCP
+        // shorthand — earlier versions unconditionally split on `:` and
+        // dropped the drive letter, producing `\src\ripgrep` instead of
+        // `ripgrep`.
+        assert_eq!(
+            clone_repo_name_from_label("C:\\src\\ripgrep"),
+            "ripgrep"
+        );
+        assert_eq!(clone_repo_name_from_label("C:/src/ripgrep"), "ripgrep");
+        assert_eq!(
+            clone_repo_name_from_label("D:\\workspaces\\heddle.git"),
+            "heddle"
+        );
+    }
+
+    #[test]
+    fn clone_repo_name_handles_local_paths_with_colon() {
+        // Git treats `host:path` as SCP shorthand only when the prefix
+        // contains no path separator. `/tmp/foo:bar/repo` and
+        // `./foo:bar/repo.git` are valid local paths whose basename
+        // must not be shadowed by the colon.
+        assert_eq!(
+            clone_repo_name_from_label("/tmp/foo:bar/repo.git"),
+            "repo"
+        );
+        assert_eq!(
+            clone_repo_name_from_label("./foo:bar/repo.git"),
+            "repo"
+        );
     }
 
     #[test]
