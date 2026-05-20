@@ -27,6 +27,11 @@ pub enum ThreadCommands {
         ttl_secs: Option<u32>,
     },
 
+    /// Print the name of the current thread (the thread the working
+    /// checkout is attached to). Read-only — no state change.
+    /// Useful in shell pipelines: `cd "$(heddle thread cd "$(heddle thread current)")"`.
+    Current,
+
     /// Switch the current checkout to an existing thread ref.
     Switch {
         /// Thread identifier.
@@ -79,6 +84,7 @@ pub enum ThreadCommands {
     Promote(ThreadPromoteArgs),
 
     /// Drop a thread and mark it abandoned.
+    #[command(visible_alias = "delete")]
     Drop(ThreadDropArgs),
 
     /// Record a merge approval for `<source> -> <target>`.

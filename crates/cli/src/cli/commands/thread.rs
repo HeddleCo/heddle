@@ -1706,6 +1706,42 @@ fn open_main_repo_from_worktree_if_needed(repo: &Repository) -> Result<Option<Re
 /// Look up the on-disk path for `name` and print it on stdout. Read-only;
 /// no auto-capture, no state change. Powers the shell hook's
 /// `heddle thread cd` (the function `cd`s into the printed path).
+/// Print the name of the current thread — the thread the working
+/// checkout is attached to. Single-line plain output keeps the verb
+/// composable in shell pipelines (e.g. paired with `thread cd`). The
+/// JSON form wraps the name in a `{"thread": "..."}` object for
+/// scripted callers.
+pub(crate) fn cmd_thread_current(cli: &Cli, repo: &Repository) -> Result<()> {
+    let name = if let Some(lane) = repo.current_lane()? {
+        lane
+    } else if let Some(thread) = super::thread_cmd::current_thread(repo)? {
+        thread.thread
+    } else {
+        return Err(anyhow!(
+            "no current thread (HEAD is detached). Use `heddle thread switch <name>` to attach."
+        ));
+    };
+
+    // `thread current` is a single-token printer designed for shell
+    // composition (e.g. `heddle thread cd "$(heddle thread current)"`),
+    // so the default `Auto` output mode — which flips to JSON whenever
+    // stdout is piped — would be actively counterproductive here. Match
+    // `thread cd` and emit plain text by default; only honor an
+    // *explicit* request for JSON.
+    let explicit_json =
+        cli.json || matches!(cli.output, Some(crate::cli::OutputMode::Json));
+    if explicit_json {
+        #[derive(Serialize)]
+        struct CurrentOutput<'a> {
+            thread: &'a str,
+        }
+        println!("{}", serde_json::to_string(&CurrentOutput { thread: &name })?);
+    } else {
+        println!("{name}");
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_thread_cd(repo: &Repository, name: String) -> Result<()> {
     let manager = ThreadManager::new(repo.heddle_dir());
     let thread = manager

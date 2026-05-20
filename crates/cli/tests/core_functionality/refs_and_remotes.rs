@@ -57,6 +57,66 @@ fn test_track_cannot_delete_current() {
 }
 
 #[test]
+fn test_thread_current_after_init_is_main() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    let result = heddle(&["thread", "current"], Some(temp.path())).unwrap();
+    assert_eq!(
+        result.trim(),
+        "main",
+        "thread current should print the active thread name on a single line"
+    );
+}
+
+#[test]
+fn test_thread_current_after_switch() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("file.txt"), "content").unwrap();
+    heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
+    heddle_must_succeed(&["thread", "create", "feature/current"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature/current"], temp.path());
+
+    let result = heddle(&["thread", "current"], Some(temp.path())).unwrap();
+    assert_eq!(result.trim(), "feature/current");
+}
+
+#[test]
+fn test_thread_current_json_output() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    let result = heddle(&["--output", "json", "thread", "current"], Some(temp.path())).unwrap();
+    let value: Value = serde_json::from_str(&result).expect("thread current --json output");
+    assert_eq!(value["thread"], "main");
+}
+
+#[test]
+fn test_thread_delete_is_alias_for_drop() {
+    // `thread delete` is a visible alias for `thread drop` so new users
+    // whose mental model says "delete" land in the right verb. Bypass
+    // the test harness's legacy-args translator by spawning the binary
+    // directly — the translator rewrites `thread delete <name>` into
+    // `thread drop <name> --delete-thread`, which would mask the alias.
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("file.txt"), "content").unwrap();
+    heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
+    heddle_must_succeed(&["thread", "create", "feature/delete-alias"], temp.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["thread", "delete", "feature/delete-alias"])
+        .current_dir(temp.path())
+        .output()
+        .expect("spawn heddle");
+    assert!(
+        output.status.success(),
+        "thread delete (alias) failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
 fn test_remote_remove() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
