@@ -600,7 +600,14 @@ impl Repository {
                         // git's. Reading the existing head is a small file
                         // read; the write that follows hits atomic-rename
                         // machinery (sync + rename) which dominates here.
+                        //
+                        // Detached HEAD is treated as an explicit user
+                        // override (e.g. `heddle goto`) and is left alone —
+                        // otherwise every reopen would silently reattach
+                        // and subsequent ops would see the worktree as
+                        // dirty against the wrong state (heddle#146).
                         let stale = match repo.refs.read_head() {
+                            Ok(Head::Detached { .. }) => false,
                             Ok(current) => current != git_head,
                             Err(_) => true,
                         };
