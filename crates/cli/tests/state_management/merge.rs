@@ -158,10 +158,12 @@ fn test_continue_after_manual_marker_removal_says_mark_file_resolved() {
         blocked_continue["recommended_action"],
         "heddle resolve file.txt"
     );
-    assert!(blocked_continue["message"]
-        .as_str()
-        .unwrap()
-        .contains("mark each file resolved with `heddle resolve <path>`"));
+    assert!(
+        blocked_continue["message"]
+            .as_str()
+            .unwrap()
+            .contains("mark each file resolved with `heddle resolve <path>`")
+    );
 
     heddle(&["resolve", "file.txt"], Some(temp.path())).unwrap();
     let continued = heddle(&["--json", "continue"], Some(temp.path())).unwrap();
@@ -1862,8 +1864,14 @@ fn test_merge_semantic_resolves_disjoint_function_edits_clean() {
         !merged.contains("<<<<<<<"),
         "disjoint function edits must not leave conflict markers under --semantic: {merged}"
     );
-    assert!(merged.contains("fn alpha() -> u32 { 11 }"), "alpha edit lost: {merged}");
-    assert!(merged.contains("fn gamma() -> u32 { 333 }"), "gamma edit lost: {merged}");
+    assert!(
+        merged.contains("fn alpha() -> u32 { 11 }"),
+        "alpha edit lost: {merged}"
+    );
+    assert!(
+        merged.contains("fn gamma() -> u32 { 333 }"),
+        "gamma edit lost: {merged}"
+    );
 }
 
 #[test]
@@ -1929,7 +1937,11 @@ fn test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_resha
         "fn d() { let x = 4; }\nfn c() { let x = 3; }\nfn b() { let x = 22; }\nfn a() { let x = 1; }\n",
     )
     .unwrap();
-    heddle(&["capture", "-m", "feature: reorder + edit b"], Some(temp.path())).unwrap();
+    heddle(
+        &["capture", "-m", "feature: reorder + edit b"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     // main: edit `d` only.
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
@@ -1971,16 +1983,17 @@ fn test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_resha
     let preview_summary = parsed["preview_summary"]
         .as_array()
         .expect("preview_summary must be an array");
-    let summary_strings: Vec<&str> = preview_summary
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let summary_strings: Vec<&str> = preview_summary.iter().filter_map(|v| v.as_str()).collect();
     assert!(
-        !summary_strings.iter().any(|line| line.starts_with("conflicts:")),
+        !summary_strings
+            .iter()
+            .any(|line| line.starts_with("conflicts:")),
         "preview_summary must not report conflicts when --semantic plan is clean: {summary_strings:?}"
     );
     assert!(
-        !summary_strings.iter().any(|line| line.starts_with("blocked:")),
+        !summary_strings
+            .iter()
+            .any(|line| line.starts_with("blocked:")),
         "preview_summary must not report blocked when --semantic plan is clean: {summary_strings:?}"
     );
 }
@@ -2106,7 +2119,11 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
         "def product(a, b):\n    result = 0\n    for _ in range(b):\n        result += a\n    return result\n",
     )
     .unwrap();
-    heddle(&["capture", "-m", "A: rename multiply -> product"], Some(temp.path())).unwrap();
+    heddle(
+        &["capture", "-m", "A: rename multiply -> product"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     // Thread B from main: rewrite `multiply`'s body. The operator's
     // current thread when running `merge A` will be B, not main — so
@@ -2115,11 +2132,23 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
     heddle(&["thread", "create", "B"], Some(temp.path())).unwrap();
     heddle(&["thread", "switch", "B"], Some(temp.path())).unwrap();
     fs::write(&src, "def multiply(a, b):\n    return a * b\n").unwrap();
-    heddle(&["capture", "-m", "B: rewrite multiply body"], Some(temp.path())).unwrap();
+    heddle(
+        &["capture", "-m", "B: rewrite multiply body"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     // Preview the merge from B.
     let preview_out = heddle(
-        &["--output", "json", "merge", "A", "--preview", "--semantic", "--with-diff"],
+        &[
+            "--output",
+            "json",
+            "merge",
+            "A",
+            "--preview",
+            "--semantic",
+            "--with-diff",
+        ],
         Some(temp.path()),
     )
     .unwrap();
@@ -2149,7 +2178,15 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
     // Invariant #2 (preview vs reality): the real merge run on the same
     // inputs must produce the same `semantic_result` the preview reported.
     let real_out = heddle(
-        &["--output", "json", "merge", "A", "--semantic", "-m", "merge"],
+        &[
+            "--output",
+            "json",
+            "merge",
+            "A",
+            "--semantic",
+            "-m",
+            "merge",
+        ],
         Some(temp.path()),
     )
     .unwrap();
@@ -2159,5 +2196,119 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
         "preview's semantic_result must equal the real merge's semantic_result on identical inputs. \
          preview={}, real={}",
         preview["semantic_result"], real["semantic_result"]
+    );
+}
+
+/// heddle#153: `merge --preview --with-diff --semantic --output json` must
+/// surface symbol-level deltas at a discoverable location, not bury them
+/// inside `diff` where agents consuming the JSON miss them.
+///
+/// The bug premise: when the semantic driver detects a function rename
+/// (e.g. `multiply` -> `product`), the JSON should carry the rename
+/// record so agents can act on it programmatically. The data was being
+/// emitted only inside `diff.semantic_changes`, which is easy to overlook
+/// — and absent from the JSON entirely when `--with-diff` isn't passed.
+///
+/// Contract under test: with `--semantic` set, the merge output JSON
+/// includes a top-level `semantic_changes` array carrying the per-symbol
+/// delta entries, populated even when `--with-diff` isn't requested.
+#[test]
+fn test_merge_semantic_surfaces_top_level_symbol_deltas_on_rename() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let src = temp.path().join("calc.py");
+    fs::write(
+        &src,
+        "def multiply(a, b):\n    result = 0\n    for _ in range(b):\n        result += a\n    return result\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "create", "A"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "A"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "def product(a, b):\n    result = 0\n    for _ in range(b):\n        result += a\n    return result\n",
+    )
+    .unwrap();
+    heddle(
+        &["capture", "-m", "rename multiply -> product"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+
+    let out = heddle(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "A",
+            "--preview",
+            "--with-diff",
+            "--semantic",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&out).expect("merge --output json must be JSON");
+
+    // Top-level `semantic_changes` is the contract: agents shouldn't have
+    // to dig into `diff` to find symbol-level deltas. Its presence is
+    // also the signal that the semantic driver ran at all.
+    let semantic_changes = parsed
+        .get("semantic_changes")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| {
+            panic!("--semantic merge must surface top-level `semantic_changes` array: {parsed}")
+        });
+    let rename = semantic_changes
+        .iter()
+        .find(|c| c["change_type"] == "function_renamed")
+        .unwrap_or_else(|| {
+            panic!(
+                "top-level `semantic_changes` must include a `function_renamed` entry on a rename: {parsed}"
+            )
+        });
+    assert_eq!(
+        rename["old_name"], "multiply",
+        "rename entry must carry old name: {rename}"
+    );
+    assert_eq!(
+        rename["new_name"], "product",
+        "rename entry must carry new name: {rename}"
+    );
+    assert_eq!(
+        rename["path"], "calc.py",
+        "rename entry must carry the file path: {rename}"
+    );
+}
+
+/// heddle#153: when `--semantic` is NOT set, the top-level
+/// `semantic_changes` field must be absent (not `null`, not `[]`). That's
+/// the unambiguous "semantic mode was not honored" signal — consumers
+/// can branch on field presence alone.
+#[test]
+fn test_merge_without_semantic_omits_top_level_symbol_deltas() {
+    let temp = TempDir::new().unwrap();
+    create_simple_feature_thread(&temp);
+
+    let out = heddle(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature",
+            "--preview",
+            "--with-diff",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&out).expect("merge --output json must be JSON");
+
+    assert!(
+        parsed.get("semantic_changes").is_none(),
+        "top-level `semantic_changes` must be absent when --semantic is not set: {parsed}"
     );
 }
