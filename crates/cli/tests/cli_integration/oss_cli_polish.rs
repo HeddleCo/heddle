@@ -701,3 +701,271 @@ fn freshly_initialized_repo_reports_clean_health() {
         "fresh-init JSON should expose an empty recommended_action: {json}"
     );
 }
+
+/// Build a local bare git repo with `master` carrying `commits`
+/// commits, suitable for `heddle clone` from a local path.
+fn make_local_master_git_repo(parent: &std::path::Path, commits: usize) -> std::path::PathBuf {
+    let bare = parent.join("origin.git");
+    let repo = gix::init_bare(&bare).expect("init bare origin");
+    let mut parent_oid: Option<gix::hash::ObjectId> = None;
+    for i in 0..commits {
+        let blob = repo
+            .write_blob(format!("content {i}\n").as_bytes())
+            .expect("write blob")
+            .detach();
+        let empty = repo.empty_tree().id;
+        let mut editor = repo.edit_tree(empty).expect("edit tree");
+        editor
+            .upsert(
+                format!("f{i}.txt"),
+                gix::object::tree::EntryKind::Blob,
+                blob,
+            )
+            .expect("add file");
+        let tree = editor.write().expect("write tree").detach();
+        let parents = parent_oid.map(|p| vec![p]).unwrap_or_default();
+        let commit = git_commit_with_tree(
+            &repo,
+            Some("refs/heads/master"),
+            tree,
+            &format!("c{i}"),
+            &parents,
+        );
+        parent_oid = Some(commit);
+    }
+    // Honour the remote default branch so `heddle clone` picks `master`.
+    git_set_reference(&repo, "HEAD", parent_oid.expect("at least one commit"));
+    std::fs::write(bare.join("HEAD"), "ref: refs/heads/master\n")
+        .expect("pin remote HEAD to master");
+    bare
+}
+
+#[test]
+fn bridge_git_import_after_clone_reports_commits_not_zero() {
+    // heddle#147: rerunning `bridge git import --ref master --path .`
+    // after `heddle clone` used to land at `commits_imported: 0` even
+    // though every commit on master had been imported during clone —
+    // visually indistinguishable from "your import did nothing".
+    // After the fix, `commits_imported` reports commits walked (matching
+    // `bridge git ingest`), `states_created` carries the dedup story,
+    // and an `already_in_sync` flag tags the no-op case so callers can
+    // render the right thing.
+    let temp = TempDir::new().unwrap();
+    let bare = make_local_master_git_repo(temp.path(), 3);
+    let work = temp.path().join("work");
+
+    heddle(
+        &[
+            "clone",
+            bare.to_str().expect("origin path utf8"),
+            work.to_str().expect("work path utf8"),
+        ],
+        Some(temp.path()),
+    )
+    .expect("heddle clone should succeed");
+
+    let json = heddle(
+        &[
+            "--output",
+            "json",
+            "bridge",
+            "git",
+            "import",
+            "--ref",
+            "master",
+            "--path",
+            ".",
+        ],
+        Some(&work),
+    )
+    .expect("rerun bridge git import");
+    let parsed: Value = serde_json::from_str(&json).expect("import JSON parses");
+    assert_eq!(
+        parsed["commits_imported"], 3,
+        "commits_imported should report walked commits, not just new states: {json}"
+    );
+    assert_eq!(
+        parsed["states_created"], 0,
+        "no new heddle states should be created on a re-import: {json}"
+    );
+    assert_eq!(
+        parsed["already_in_sync"], true,
+        "already_in_sync should flag the no-op case: {json}"
+    );
+    assert_eq!(parsed["branches_synced"], 1);
+
+    let text = heddle(
+        &[
+            "--output",
+            "text",
+            "bridge",
+            "git",
+            "import",
+            "--ref",
+            "master",
+            "--path",
+            ".",
+        ],
+        Some(&work),
+    )
+    .expect("rerun import text");
+    assert!(
+        text.contains("already in sync"),
+        "text output should call out that the import was a no-op: {text}"
+    );
+}
+
+#[test]
+fn bridge_git_status_recommendation_runs_cleanly_after_clone() {
+    // heddle#148: the recommended-action chain from `bridge git status`
+    // used to dead-end at `heddle sync`. After clone, the bridge is in
+    // sync (no missing branches) — the import_hint must be absent.
+    // This is the structural side of the chain: status doesn't try to
+    // drive the operator into a verb that errors.
+    let temp = TempDir::new().unwrap();
+    let bare = make_local_master_git_repo(temp.path(), 2);
+    let work = temp.path().join("work");
+
+    heddle(
+        &[
+            "clone",
+            bare.to_str().expect("origin path utf8"),
+            work.to_str().expect("work path utf8"),
+        ],
+        Some(temp.path()),
+    )
+    .expect("heddle clone");
+
+    let json = heddle(
+        &["--output", "json", "bridge", "git", "status"],
+        Some(&work),
+    )
+    .expect("bridge git status JSON");
+    let parsed: Value = serde_json::from_str(&json).expect("status JSON parses");
+    assert!(
+        parsed["git_overlay_import_hint"].is_null(),
+        "bridge git status should report no missing branches after clone: {json}"
+    );
+}
+
+#[test]
+fn bridge_git_conflict_message_points_at_runnable_verbs() {
+    // heddle#148: the divergence error used to suggest `heddle sync`,
+    // which fails on a freshly-cloned overlay because the operator
+    // thread has no metadata in the thread manager. The new message
+    // must NOT mention `heddle sync` as the recovery, and must NOT
+    // recommend `heddle bridge git sync` as a generic reconcile: sync
+    // uses `PreviousValue::Any` when writing the Git branch ref
+    // (see `sync_track_to_branch` in `crates/cli/src/bridge/git_sync.rs`)
+    // so following that advice in a divergence drops branch-only
+    // commits. The message must instead present both directional
+    // escape hatches (Git-wins via `thread drop --delete-thread`,
+    // Heddle-wins via `git branch -D`) so the operator picks
+    // explicitly.
+    use std::path::PathBuf;
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("bridge")
+        .join("git_import.rs");
+    let body = std::fs::read_to_string(&src)
+        .unwrap_or_else(|err| panic!("read {}: {err}", src.display()));
+    let conflict_block = body
+        .split("differs from branch")
+        .nth(1)
+        .expect("conflict format string carries 'differs from branch'");
+    let conflict_block = conflict_block
+        .split("));")
+        .next()
+        .expect("conflict block terminates");
+    assert!(
+        !conflict_block.contains("`heddle sync`"),
+        "conflict message must not point at `heddle sync` — it errors on a \
+         freshly-cloned git-overlay repo (#148): {conflict_block}"
+    );
+    assert!(
+        !conflict_block.contains("heddle bridge git sync"),
+        "conflict message must not recommend `heddle bridge git sync` for \
+         divergent recovery — sync force-writes the Git branch via \
+         PreviousValue::Any and would drop branch-only commits: \
+         {conflict_block}"
+    );
+    assert!(
+        conflict_block.contains("--delete-thread"),
+        "conflict message should offer the Git-wins escape hatch \
+         (`heddle thread drop --delete-thread`): {conflict_block}"
+    );
+    assert!(
+        conflict_block.contains("git branch -D"),
+        "conflict message should offer the Heddle-wins escape hatch \
+         (`git branch -D`): {conflict_block}"
+    );
+}
+
+#[test]
+fn bridge_git_import_schema_declares_already_in_sync() {
+    // heddle#147 added `already_in_sync: bool` to the JSON output of
+    // `bridge git import`. The schema contract surfaced via
+    // `heddle schemas "bridge git import"` must list the field, or
+    // automation that validates against the schema will reject the
+    // new payload shape.
+    let schema = heddle(&["schemas", "bridge git import"], None)
+        .expect("heddle schemas \"bridge git import\"");
+    let parsed: Value = serde_json::from_str(&schema).expect("schema parses");
+    let props = parsed["properties"]
+        .as_object()
+        .expect("schema has properties");
+    assert!(
+        props.contains_key("already_in_sync"),
+        "BridgeImportSchema must declare `already_in_sync`: {schema}"
+    );
+    assert_eq!(
+        props["already_in_sync"]["type"], "boolean",
+        "`already_in_sync` must be a boolean: {schema}"
+    );
+}
+
+#[test]
+fn bridge_git_sync_after_clone_reports_zero_imported() {
+    // heddle#147 made the import walker count every walked commit in
+    // `commits_imported`. `bridge git sync` re-uses the importer, so
+    // a no-op sync of an already-synced overlay used to report the
+    // full walked history as `commits_imported` — exactly the signal
+    // operators rely on sync to suppress. Sync must keep its
+    // `commits_imported` scoped to commits that produced a new
+    // heddle state on this run.
+    let temp = TempDir::new().unwrap();
+    let bare = make_local_master_git_repo(temp.path(), 3);
+    let work = temp.path().join("work");
+
+    heddle(
+        &[
+            "clone",
+            bare.to_str().expect("origin path utf8"),
+            work.to_str().expect("work path utf8"),
+        ],
+        Some(temp.path()),
+    )
+    .expect("heddle clone");
+
+    let json = heddle(
+        &["--output", "json", "bridge", "git", "sync"],
+        Some(&work),
+    )
+    .expect("bridge git sync JSON");
+    let parsed: Value = serde_json::from_str(&json).expect("sync JSON parses");
+    assert_eq!(
+        parsed["commits_imported"], 0,
+        "no-op sync should report zero newly-imported commits, not the \
+         walked history: {json}"
+    );
+
+    let text = heddle(
+        &["--output", "text", "bridge", "git", "sync"],
+        Some(&work),
+    )
+    .expect("bridge git sync text");
+    assert!(
+        text.contains("imported: 0 commits") || text.contains("imported: 0"),
+        "text output should also report zero imported on a no-op sync: {text}"
+    );
+}

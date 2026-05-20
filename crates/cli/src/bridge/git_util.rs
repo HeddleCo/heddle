@@ -143,17 +143,23 @@ pub struct ExportStats {
 
 /// Statistics for import operation.
 ///
-/// `commits_imported` and `states_created` are equal in the current
-/// implementation (every commit walked produces one new state), but they are
-/// kept separate so future bridges can distinguish "commits seen during the
-/// walk" from "states actually written to the heddle store" — for example,
-/// when re-importing a previously exported repo, a commit may already map to
-/// an existing change_id and need no new state.
+/// `commits_imported` counts every commit visited by the ancestry walk;
+/// `states_created` counts only the commits whose heddle state did not
+/// yet exist in the store. They diverge whenever a ref is re-imported
+/// (the second `bridge git import --ref X` against the same source
+/// reports `commits_imported = N` and `states_created = 0`) — that
+/// distinction is what surfaces "already in sync" instead of leaving
+/// the operator staring at a misleading `commits_imported: 0`
+/// (heddle#147).
 #[derive(Debug, Default)]
 pub struct ImportStats {
-    /// Total commits walked and identified for import.
+    /// Total commits walked from the source refs, including ones whose
+    /// heddle state was already present. Mirrors what `bridge git
+    /// ingest` reports so the two verbs read the same way.
     pub commits_imported: usize,
-    /// New state objects written to the heddle store during this import.
+    /// New state objects written to the heddle store during this
+    /// import. Stays at 0 when every visited commit already had a
+    /// heddle state — that's the signal the bridge is in sync.
     pub states_created: usize,
     pub branches_synced: usize,
     pub tags_synced: usize,
