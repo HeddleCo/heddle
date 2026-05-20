@@ -395,7 +395,7 @@ fn run_audit_idempotency() -> Result<()> {
         .parent()
         .and_then(|path| path.parent())
         .context("failed to locate workspace root")?;
-    let proto_path = workspace_root.join("proto/heddle/v1/service.proto");
+    let proto_path = workspace_root.join("crates/grpc/proto/heddle/v1/service.proto");
     let source = fs::read_to_string(&proto_path)
         .with_context(|| format!("read {}", proto_path.display()))?;
 
@@ -649,7 +649,11 @@ fn run_web_proto(args: Vec<String>) -> Result<()> {
         .parent()
         .and_then(|path| path.parent())
         .context("failed to locate workspace root")?;
-    let proto_dir = workspace_root.join("proto");
+    // Canonical proto source — same path the `heddle-grpc` build
+    // script and the `audit-idempotency` lint read from. Keeping a
+    // single source eliminates the drift class that landed stale
+    // mirrors under `proto/` (see heddle#71).
+    let proto_dir = workspace_root.join("crates/grpc/proto");
     let proto_file = proto_dir.join("heddle/v1/service.proto");
     let web_dir = workspace_root.join("web");
     let output_root = web_dir.join("src/lib/gen/proto");

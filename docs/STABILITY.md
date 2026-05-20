@@ -102,7 +102,7 @@ they tune the 1.0 targets the next sections propose against it.
     `ReviewSignaturesBlob`, `FileProvenance`, `StructuredConflict`
     (`crates/objects/src/object/*.rs`).
 - **Wire protocol.** Package `heddle.v1` in
-  [`proto/heddle/v1/service.proto`](../proto/heddle/v1/service.proto)
+  [`crates/grpc/proto/heddle/v1/service.proto`](../crates/grpc/proto/heddle/v1/service.proto)
   defines 14 gRPC services (`RepoSyncService`, `HostedUserService`,
   `AuthService`, `ContentService`, `RepoEventService`,
   `ThreadWorkflowService`, `ReviewService`, `FeedService`,
@@ -504,7 +504,7 @@ exercised by the test suite and runs in O(oplog size).>
 ### 3.6 Wire protocol
 
 The gRPC services in
-[`proto/heddle/v1/service.proto`](../proto/heddle/v1/service.proto)
+[`crates/grpc/proto/heddle/v1/service.proto`](../crates/grpc/proto/heddle/v1/service.proto)
 sit under package `heddle.v1`. The package version segment (`v1`)
 is the wire-stability boundary: 1.0 servers and clients communicate
 on `heddle.v1`, and any non-backwards-compatible wire change moves

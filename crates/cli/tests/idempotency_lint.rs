@@ -18,7 +18,7 @@
 //! test` and fails the PR locally — same shape as
 //! [`crates/cli/tests/op_id_coverage.rs`] but on the server side.
 //!
-//! Source of truth: the proto. We parse `proto/heddle/v1/service.proto`
+//! Source of truth: the proto. We parse `crates/grpc/proto/heddle/v1/service.proto`
 //! and harvest every message that carries a `client_operation_id`
 //! field — those are the request types of state-changing RPCs. We
 //! then scan the service definitions to recover the RPC method names
@@ -59,6 +59,8 @@ const ALLOWLIST: &[(&str, &str)] = &[];
 #[test]
 fn every_state_changing_rpc_routes_through_dedup() {
     let proto = workspace_root()
+        .join("crates")
+        .join("grpc")
         .join("proto")
         .join("heddle")
         .join("v1")
