@@ -16,7 +16,7 @@ use repo::{
 use serde::Serialize;
 
 use super::{
-    diff::{DiffOutput, compute_state_diff},
+    diff::{DiffOutput, SemanticChangeEntry, compute_state_diff},
     operator_core::OperatorCommandOutput,
     snapshot::ensure_current_state,
     thread_cmd::refresh_thread_freshness,
@@ -89,6 +89,18 @@ pub(crate) struct MergeOutput {
     renames: Vec<RenameEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     directory_renames: Vec<RenameEntry>,
+    /// Per-symbol deltas produced by the semantic driver
+    /// (function_renamed, function_added, function_deleted,
+    /// signature_changed, etc.). Present when `--semantic` is set so
+    /// agents can detect that semantic analysis ran and act on the
+    /// rename/symbol mapping programmatically without parsing the
+    /// line-by-line `diff` payload. Absent (not `null`) when
+    /// `--semantic` is not set — that's the unambiguous "semantic mode
+    /// was not honored" signal. An empty array means "semantic ran but
+    /// found no symbol-level deltas" (e.g. non-source files or a
+    /// no-op fast-forward).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_changes: Option<Vec<SemanticChangeEntry>>,
     /// Diff between the parent's tip and the thread's tip. Populated
     /// only when the caller passes `--with-diff`. On a successful
     /// non-preview merge the from/to are the pre-merge parent tip and
@@ -128,6 +140,11 @@ struct MergeOutputInput<'a> {
     /// the operator's final `blockers` list and force `status` to
     /// `"blocked"` even when the heddle merge itself completed.
     extra_blockers: Vec<String>,
+    /// Top-level mirror of `diff.semantic_changes`. Threaded through
+    /// `MergeOutputInput` so every return path sets it consistently
+    /// (instead of relying on each call site to remember). See the
+    /// field doc on `MergeOutput::semantic_changes`.
+    semantic_changes: Option<Vec<SemanticChangeEntry>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -337,6 +354,24 @@ pub(crate) fn merge_thread_into_current(
         }
         Ok(Some(compute_state_diff(repo, from, to, semantic, 3)?))
     };
+    // heddle#153: surface per-symbol deltas at the top level so agents
+    // can detect that semantic analysis ran and act on the rename
+    // mapping without digging into `diff.semantic_changes`. We derive
+    // this from the (already-computed) diff payload when both
+    // `--semantic` and `--with-diff` are set; without `--with-diff` the
+    // diff isn't computed at all, so there's nothing to mirror. Use
+    // `Some(vec![])` (not `None`) on the with-diff+semantic path even
+    // when the driver found no symbol changes, so consumers can branch
+    // on field presence to detect "semantic mode honored".
+    let top_level_semantic = |diff: Option<&DiffOutput>| -> Option<Vec<SemanticChangeEntry>> {
+        if !semantic || !with_diff {
+            return None;
+        }
+        Some(
+            diff.and_then(|d| d.semantic_changes.clone())
+                .unwrap_or_default(),
+        )
+    };
 
     if merge_plan.relation().kind() == MergeRelationKind::AlreadyUpToDate {
         // Already-up-to-date means the merge doesn't write anything — the
@@ -361,6 +396,7 @@ pub(crate) fn merge_thread_into_current(
             merge_state: None,
             fast_forward: false,
             preview_only: preview,
+            semantic_changes: top_level_semantic(already_up_to_date_diff.as_ref()),
             diff: already_up_to_date_diff,
             git_commit_preview: None,
             git_commit: None,
@@ -409,6 +445,7 @@ pub(crate) fn merge_thread_into_current(
                 merge_state: None,
                 fast_forward: false,
                 preview_only: preview,
+                semantic_changes: top_level_semantic(ff_diff.as_ref()),
                 diff: ff_diff,
                 git_commit_preview: None,
                 git_commit: None,
@@ -569,6 +606,7 @@ pub(crate) fn merge_thread_into_current(
                 .unwrap_or_else(|| "clean".to_string()),
             renames: vec![],
             directory_renames: vec![],
+            semantic_changes: top_level_semantic(ff_diff.as_ref()),
             diff: ff_diff,
             git_commit_preview: git_commit_preview_payload,
             git_commit: git_commit_info,
@@ -641,6 +679,7 @@ pub(crate) fn merge_thread_into_current(
             merge_state: None,
             fast_forward: false,
             preview_only: true,
+            semantic_changes: top_level_semantic(preview_diff.as_ref()),
             diff: preview_diff,
             git_commit_preview,
             git_commit: None,
@@ -680,6 +719,7 @@ pub(crate) fn merge_thread_into_current(
             merge_state: None,
             fast_forward: false,
             preview_only: false,
+            semantic_changes: top_level_semantic(conflict_diff.as_ref()),
             diff: conflict_diff,
             git_commit_preview: None,
             git_commit: None,
@@ -712,6 +752,7 @@ pub(crate) fn merge_thread_into_current(
             merge_state: None,
             fast_forward: false,
             preview_only: false,
+            semantic_changes: top_level_semantic(no_commit_diff.as_ref()),
             diff: no_commit_diff,
             git_commit_preview: None,
             git_commit: None,
@@ -779,6 +820,7 @@ pub(crate) fn merge_thread_into_current(
             merge_state: None,
             fast_forward: false,
             preview_only: false,
+            semantic_changes: top_level_semantic(blocked_diff.as_ref()),
             diff: blocked_diff,
             git_commit_preview: None,
             git_commit: None,
@@ -875,6 +917,7 @@ pub(crate) fn merge_thread_into_current(
         merge_state: Some(new_state.change_id.short()),
         fast_forward: false,
         preview_only: false,
+        semantic_changes: top_level_semantic(committed_diff.as_ref()),
         diff: committed_diff,
         git_commit_preview: None,
         git_commit: git_commit_info,
@@ -1442,6 +1485,7 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
             .unwrap_or_else(|| "active".to_string()),
         renames: input.renames,
         directory_renames: input.directory_renames,
+        semantic_changes: input.semantic_changes,
         diff: input.diff,
         git_commit_preview: input.git_commit_preview,
         git_commit: input.git_commit,

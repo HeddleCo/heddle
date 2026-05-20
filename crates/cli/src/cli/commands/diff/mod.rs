@@ -6,4 +6,4 @@ mod diff_output;
 mod diff_types;
 
 pub use diff_compute::{cmd_diff, compute_state_diff};
-pub use diff_types::DiffOutput;
+pub use diff_types::{DiffOutput, SemanticChangeEntry};
