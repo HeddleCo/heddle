@@ -65,12 +65,17 @@ pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
                 return Err(GitBridgeError::Conflict(format!(
                     "thread {name} at {existing} differs from branch {name} at \
                      {change_id}. The Heddle thread and the Git branch have \
-                     diverged — neither is an ancestor of the other. To \
-                     recover: run `heddle bridge git sync` to reconcile \
-                     both sides (exports Heddle states then re-imports), \
-                     or if the Git branch should replace the Heddle thread \
-                     wholesale, drop the thread first with `heddle thread \
-                     drop {name} --delete-thread` and rerun the import.",
+                     diverged — neither is an ancestor of the other. Heddle \
+                     will not auto-reconcile: pick which side wins. If the \
+                     Git branch should replace the Heddle thread wholesale, \
+                     drop the thread with `heddle thread drop {name} \
+                     --delete-thread` and rerun (this discards thread-only \
+                     states). If the Heddle thread should replace the Git \
+                     branch, delete the Git branch with `git branch -D \
+                     {name}` and rerun (this discards branch-only commits). \
+                     To merge or rebase the two histories instead, do the \
+                     merge in Git first, then re-run sync on the merged \
+                     branch.",
                 )));
             }
 

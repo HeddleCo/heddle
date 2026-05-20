@@ -853,9 +853,15 @@ fn bridge_git_conflict_message_points_at_runnable_verbs() {
     // heddle#148: the divergence error used to suggest `heddle sync`,
     // which fails on a freshly-cloned overlay because the operator
     // thread has no metadata in the thread manager. The new message
-    // must NOT mention `heddle sync` as the recovery; the two pointers
-    // it offers (`bridge git sync` and `thread drop --delete-thread`)
-    // are both verbs that work on a git-overlay repo.
+    // must NOT mention `heddle sync` as the recovery, and must NOT
+    // recommend `heddle bridge git sync` as a generic reconcile: sync
+    // uses `PreviousValue::Any` when writing the Git branch ref
+    // (see `sync_track_to_branch` in `crates/cli/src/bridge/git_sync.rs`)
+    // so following that advice in a divergence drops branch-only
+    // commits. The message must instead present both directional
+    // escape hatches (Git-wins via `thread drop --delete-thread`,
+    // Heddle-wins via `git branch -D`) so the operator picks
+    // explicitly.
     use std::path::PathBuf;
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
@@ -877,14 +883,21 @@ fn bridge_git_conflict_message_points_at_runnable_verbs() {
          freshly-cloned git-overlay repo (#148): {conflict_block}"
     );
     assert!(
-        conflict_block.contains("heddle bridge git sync"),
-        "conflict message should recommend `heddle bridge git sync` (the \
-         bridge-aware bidirectional reconcile): {conflict_block}"
+        !conflict_block.contains("heddle bridge git sync"),
+        "conflict message must not recommend `heddle bridge git sync` for \
+         divergent recovery — sync force-writes the Git branch via \
+         PreviousValue::Any and would drop branch-only commits: \
+         {conflict_block}"
     );
     assert!(
         conflict_block.contains("--delete-thread"),
-        "conflict message should offer the wholesale-replace escape hatch \
+        "conflict message should offer the Git-wins escape hatch \
          (`heddle thread drop --delete-thread`): {conflict_block}"
+    );
+    assert!(
+        conflict_block.contains("git branch -D"),
+        "conflict message should offer the Heddle-wins escape hatch \
+         (`git branch -D`): {conflict_block}"
     );
 }
 
