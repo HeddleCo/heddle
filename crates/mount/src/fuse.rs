@@ -8,6 +8,36 @@
 //! /`release`, and folded into a real heddle state by
 //! [`ContentAddressedMount::capture`].
 //!
+//! ## Implemented kernel callbacks
+//!
+//! Read path:
+//! * `init` — opts into `FUSE_DIRECT_IO_ALLOW_MMAP` so mmap works
+//!   alongside `FOPEN_DIRECT_IO`.
+//! * `lookup` / `getattr` / `open` / `read` / `readdir` / `flush` /
+//!   `release` / `opendir` / `releasedir` / `destroy`.
+//!
+//! Write path (heddle#180):
+//! * `create` — `open(O_CREAT[|O_EXCL|O_TRUNC])`. EEXIST on O_EXCL
+//!   clash. Returns `FOPEN_DIRECT_IO`.
+//! * `mkdir` — empty directory in the overlay.
+//! * `mknod` — regular files only; non-`S_IFREG` returns EPERM.
+//! * `unlink` / `rmdir`.
+//! * `rename` — overlay+captured file/symlink + overlay-only dir.
+//!   RENAME_NOREPLACE honoured; EXCHANGE and WHITEOUT return EINVAL.
+//! * `setattr` — chmod (folded to FileMode), ftruncate / O_TRUNC,
+//!   mtime / uid / gid accepted as no-ops.
+//! * `symlink` / `readlink`.
+//! * `link` — returns EPERM (no nlink in heddle's tree model).
+//! * `write` — already implemented; the freshly created file inherits
+//!   the same hot-tier behaviour as a write to a captured file.
+//!
+//! Anything not listed (xattrs, locks, statfs, ioctl, fsync,
+//! fsyncdir, copy_file_range, lseek, fallocate, etc.) inherits
+//! fuser's default reply (ENOSYS / OK depending on the op) and is
+//! out of scope until a real workload needs it. See
+//! `crates/mount/README.md` ("Per-thread overlay semantics") for
+//! the matching write-side state model.
+//!
 //! ## Panic safety
 //!
 //! Every callback body runs inside [`std::panic::catch_unwind`] via
@@ -591,8 +621,8 @@ impl Filesystem for FuseShell {
         _rdev: u32,
         reply: ReplyEntry,
     ) {
-        let kind = mode & libc::S_IFMT as u32;
-        if kind != libc::S_IFREG as u32 && kind != 0 {
+        let kind = mode & libc::S_IFMT;
+        if kind != libc::S_IFREG && kind != 0 {
             reply.error(Errno::from_i32(libc::EPERM));
             return;
         }

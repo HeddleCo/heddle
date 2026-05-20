@@ -1372,15 +1372,13 @@ impl ContentAddressedMount {
             // this, every read against the rebased dentry sees the
             // stale path and returns ESTALE.
             if let Some(src_id) = inodes.by_path.remove(&old_path) {
-                if let Some(record) = inodes.by_id.get_mut(&src_id) {
-                    match record {
-                        NodeRecord::PendingFile { path, .. }
-                        | NodeRecord::File { path, .. }
-                        | NodeRecord::PendingSymlink { path } => {
-                            *path = new_path.clone();
-                        }
-                        _ => {}
-                    }
+                if let Some(
+                    NodeRecord::PendingFile { path, .. }
+                    | NodeRecord::File { path, .. }
+                    | NodeRecord::PendingSymlink { path },
+                ) = inodes.by_id.get_mut(&src_id)
+                {
+                    *path = new_path.clone();
                 }
                 inodes.by_path.insert(new_path.clone(), src_id);
                 drop(inodes);
@@ -1419,18 +1417,18 @@ impl ContentAddressedMount {
             Warm { blob: ContentHash, mode: FileMode, size: u64 },
             Captured { blob: ContentHash, mode: FileMode, size: u64 },
         }
-        let source = {
-            let pending = self.inner.pending.lock().expect("pending lock");
-            if let Some(entry) = pending.warm.get(old_path) {
-                Some(Source::Warm {
-                    blob: entry.blob,
-                    mode: entry.mode,
-                    size: entry.size,
-                })
-            } else {
-                None
-            }
-        };
+        let source = self
+            .inner
+            .pending
+            .lock()
+            .expect("pending lock")
+            .warm
+            .get(old_path)
+            .map(|entry| Source::Warm {
+                blob: entry.blob,
+                mode: entry.mode,
+                size: entry.size,
+            });
         let source = match source {
             Some(s) => s,
             None => {
@@ -1661,13 +1659,11 @@ impl ContentAddressedMount {
                 FileMode::Normal
             };
             let mut inodes = self.inner.inodes.lock().expect("inode lock");
-            if let Some(record) = inodes.by_id.get_mut(&node.0) {
-                match record {
-                    NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. } => {
-                        *mode = new_mode;
-                    }
-                    _ => {}
-                }
+            if let Some(
+                NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. },
+            ) = inodes.by_id.get_mut(&node.0)
+            {
+                *mode = new_mode;
             }
             drop(inodes);
             // Reflect the mode in any open hot buffer + warm-tier
@@ -2023,7 +2019,7 @@ impl ContentAddressedMount {
 /// validator: empty, the `.`/`..` pseudo-entries, anything with a
 /// path separator, anything with a NUL byte. Returns the validated
 /// name as a `&str` so callers can build paths without re-decoding.
-fn validate_entry_name<'a>(name: &'a OsStr) -> Result<&'a str> {
+fn validate_entry_name(name: &OsStr) -> Result<&str> {
     use std::os::unix::ffi::OsStrExt;
     let bytes = name.as_bytes();
     if bytes.is_empty() {

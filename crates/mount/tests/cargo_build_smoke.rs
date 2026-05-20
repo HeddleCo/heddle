@@ -193,3 +193,95 @@ fn cargo_build_succeeds_against_virtualized_mount() {
     // dir and the source tempdirs.
     drop(session);
 }
+
+/// End-to-end canary for heddle#180: `cargo build` with cargo's
+/// `target/` dropped *inside* the mount, so the build exercises
+/// every new write-side callback (`mkdir target/`, `create
+/// target/debug/...`, `rename .tmp → final`, `setattr(size=0)` for
+/// O_TRUNC, `unlink` of stale dep-info files, etc).
+///
+/// This is the canonical "did this actually unblock the use case"
+/// check the issue's acceptance criteria call for. Before heddle#180
+/// landed, the very first `mkdir target/` returned `ENOSYS` and
+/// cargo aborted with a build error. Now it succeeds end-to-end.
+///
+/// Distinct from `cargo_build_succeeds_against_virtualized_mount`,
+/// which redirects `CARGO_TARGET_DIR` *outside* the mount (to lock
+/// in the read path under direct-io + mmap).
+#[test]
+#[ignore = "requires FUSE + cargo on host; opt-in via --ignored"]
+fn cargo_build_in_mount_target_dir_exercises_write_side_ops() {
+    if !Path::new("/dev/fuse").exists() {
+        eprintln!("skipping: /dev/fuse not present on this host");
+        return;
+    }
+    if Command::new("cargo").arg("--version").output().is_err() {
+        eprintln!("skipping: `cargo` not on PATH");
+        return;
+    }
+
+    let repo_dir = TempDir::new().expect("repo tempdir");
+    let crate_root = repo_dir.path();
+    fs::create_dir_all(crate_root.join("src")).expect("create src/");
+    fs::write(crate_root.join("Cargo.toml"), FIXTURE_CARGO_TOML).expect("write Cargo.toml");
+    fs::write(crate_root.join("src").join("main.rs"), FIXTURE_MAIN_RS).expect("write main.rs");
+
+    let repo = Repository::init_default(crate_root).expect("init heddle repo");
+    repo.snapshot(Some("calc-fixture".into()), None)
+        .expect("snapshot fixture");
+
+    let mount = ContentAddressedMount::new(repo, "main").expect("build mount");
+    let mountpoint = TempDir::new().expect("mount tempdir");
+    let session = FuseShell::new(mount)
+        .mount_background(mountpoint.path())
+        .expect("spawn FUSE background session");
+
+    let cargo_toml_in_mount = mountpoint.path().join("Cargo.toml");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !cargo_toml_in_mount.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        cargo_toml_in_mount.exists(),
+        "Cargo.toml never appeared in mount — FUSE worker may not have started",
+    );
+
+    // Pin CARGO_TARGET_DIR inside the mount to force cargo's target/
+    // emit into the writable overlay. (Without an explicit env, cargo
+    // would inherit the workspace-root `.cargo/config.toml`'s
+    // shared target dir and the write side of the mount never gets
+    // exercised.)
+    let in_mount_target = mountpoint.path().join("target");
+    let output = Command::new("cargo")
+        .arg("build")
+        .arg("--offline")
+        .arg("--manifest-path")
+        .arg(mountpoint.path().join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", &in_mount_target)
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_BUILD_RUSTFLAGS")
+        .output()
+        .expect("invoke cargo build");
+
+    if !output.status.success() {
+        panic!(
+            "cargo build with target/ in-mount failed (status={:?})\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    // The binary should be visible through the mount at the
+    // conventional target/debug/<crate-name> path. Reading it through
+    // the mount one more time also exercises the read-after-create-
+    // after-flush path.
+    let bin_in_mount = mountpoint.path().join("target/debug/calc");
+    assert!(
+        bin_in_mount.exists(),
+        "cargo build claimed success but binary missing in mount at {}",
+        bin_in_mount.display(),
+    );
+
+    drop(session);
+}
