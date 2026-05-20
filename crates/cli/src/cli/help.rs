@@ -120,9 +120,12 @@ pub fn advanced_verbs() -> &'static [&'static str] {
         "goto",
         "ready",
         "ship",
+        "checkpoint",
         "sync",
         "delegate",
         "run",
+        "continue",
+        "abort",
         "diff",
         "marker",
         "workspace",
@@ -132,6 +135,7 @@ pub fn advanced_verbs() -> &'static [&'static str] {
         "auth",
         "diagnose",
         "show",
+        "query",
         "session",
         "actor",
         "store",
@@ -412,6 +416,23 @@ mod tests {
             assert!(
                 matches!(t, Tier::Advanced),
                 "expected Advanced for {verb}, got {t:?}"
+            );
+        }
+    }
+
+    /// Regression: heddle#150. `query`, `checkpoint`, `continue`, and
+    /// `abort` are referenced in inline tips and error messages but
+    /// were absent from the `heddle help advanced` listing, leaving
+    /// users unable to discover the verb they were told to run.
+    #[test]
+    fn advanced_verbs_lists_tip_referenced_commands() {
+        let advanced: std::collections::HashSet<&str> =
+            advanced_verbs().iter().copied().collect();
+        for verb in ["query", "checkpoint", "continue", "abort"] {
+            assert!(
+                advanced.contains(verb),
+                "`{verb}` is referenced in user-facing tips but is not \
+                 advertised by `heddle help advanced`"
             );
         }
     }
