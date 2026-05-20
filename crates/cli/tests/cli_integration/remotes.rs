@@ -217,28 +217,49 @@ fn test_cli_clone_git_overlay_lands_on_remote_default_branch_and_log_walks_histo
     let empty_tree: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         .parse()
         .expect("parse empty tree oid");
-    let trunk_first = src
-        .commit(
-            "refs/heads/trunk",
-            "seed trunk",
+    // Use an explicit signature via `new_commit_as` rather than
+    // `Repository::commit`. The latter reads `user.name`/`user.email`
+    // from git config, which CI runners don't set — leading to
+    // `AuthorMissing` errors. The clone path under test doesn't care
+    // who authored these seed commits.
+    let sig = gix::actor::Signature {
+        name: "Heddle Test".into(),
+        email: "heddle@test".into(),
+        time: gix::date::Time {
+            seconds: 0,
+            offset: 0,
+        },
+    };
+    let commit_as = |message: &str, parents: Vec<gix::ObjectId>| -> gix::ObjectId {
+        let mut committer_buf = gix::date::parse::TimeBuf::default();
+        let mut author_buf = gix::date::parse::TimeBuf::default();
+        src.new_commit_as(
+            sig.to_ref(&mut committer_buf),
+            sig.to_ref(&mut author_buf),
+            message,
             empty_tree,
-            gix::commit::NO_PARENT_IDS,
+            parents,
         )
-        .expect("commit trunk seed");
-    src.commit(
+        .expect("commit succeeds")
+        .id
+    };
+    let trunk_first = commit_as("seed trunk", vec![]);
+    let trunk_tip = commit_as("advance trunk", vec![trunk_first]);
+    let abc_feature = commit_as("seed abc-feature", vec![]);
+    src.reference(
         "refs/heads/trunk",
-        "advance trunk",
-        empty_tree,
-        [trunk_first],
+        trunk_tip,
+        gix::refs::transaction::PreviousValue::Any,
+        "test: seed trunk",
     )
-    .expect("commit trunk tip");
-    src.commit(
+    .expect("set trunk ref");
+    src.reference(
         "refs/heads/abc-feature",
-        "seed abc-feature",
-        empty_tree,
-        gix::commit::NO_PARENT_IDS,
+        abc_feature,
+        gix::refs::transaction::PreviousValue::Any,
+        "test: seed abc-feature",
     )
-    .expect("commit abc-feature");
+    .expect("set abc-feature ref");
     std::fs::write(source.join("HEAD"), b"ref: refs/heads/trunk\n").unwrap();
 
     let source_arg = source.to_str().expect("source path utf8");
