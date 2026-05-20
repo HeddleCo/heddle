@@ -2983,6 +2983,7 @@ dependencies = [
  "libc",
  "proc-macro2",
  "protoc-bin-vendored",
+ "serde_json",
  "syn 2.0.117",
  "tempfile",
  "walkdir",

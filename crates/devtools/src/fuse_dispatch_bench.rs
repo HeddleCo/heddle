@@ -341,9 +341,12 @@ pub fn run(raw: Vec<String>) -> Result<()> {
     if !args.keep_workdirs {
         // Best-effort cleanup of mode workdirs (sources stay so a re-run
         // doesn't re-import). Failures here are logged not fatal.
+        // `stress-<mode>` trees are bench-owned too and carry their own
+        // `.cargo-target` directories, which are sizable — drop those
+        // in the same pass.
         for mode in &args.modes {
-            let p = args.out_dir.join(format!("work-{}", mode.as_str()));
-            let _ = fs::remove_dir_all(&p);
+            let _ = fs::remove_dir_all(args.out_dir.join(format!("work-{}", mode.as_str())));
+            let _ = fs::remove_dir_all(args.out_dir.join(format!("stress-{}", mode.as_str())));
         }
     }
     Ok(())
@@ -355,30 +358,64 @@ pub fn run(raw: Vec<String>) -> Result<()> {
 /// run. Best-effort; failures (no mounts, or unprivileged caller) are
 /// silently ignored. Without this, a re-run trips over `rm -rf` of a
 /// live mount point and aborts before measurement starts.
+///
+/// Scoping is intentionally narrow: a mount only qualifies if **all**
+/// of these hold, so a user pointing `--out-dir` at a broad subtree
+/// (`/tmp`, `$HOME`) can't make us unmount an unrelated sshfs/ntfs-3g
+/// or another in-flight heddle workflow.
+///   1. Filesystem type starts with `fuse` (excludes sshfs-as-non-fuse
+///      edge cases and any non-FUSE bind mounts).
+///   2. Mount source identifies as heddle (`heddle-mount` is what the
+///      daemon registers; we also accept any source containing
+///      `heddle` to remain forward-compatible).
+///   3. Mountpoint path contains a `bench-` component — the bench is
+///      the only producer that names threads `bench-<mode>-<idx>-…`,
+///      so this filters out concurrent non-bench heddle threads.
+///   4. Mountpoint is under the canonical out-dir.
 fn unmount_stale_fuse_under(root: &Path) {
     let out = match Command::new("mount").output() {
         Ok(o) => o,
         Err(_) => return,
     };
     let body = String::from_utf8_lossy(&out.stdout);
-    // Component-wise path comparison so a sibling directory whose name
-    // shares the out-dir's textual prefix (e.g. `/tmp/out-dir-other/...`
-    // when out-dir is `/tmp/out-dir`) is *not* treated as in-scope.
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     for line in body.lines() {
-        // mount lines look like: "heddle-mount on /tmp/.../mounts/X type fuse ..."
-        if let Some(rest) = line.split(" on ").nth(1)
-            && let Some(mp) = rest.split(" type ").next()
-        {
-            let mp_path = Path::new(mp);
-            let mp_canon = mp_path
-                .canonicalize()
-                .unwrap_or_else(|_| mp_path.to_path_buf());
-            if mp_canon.starts_with(&canonical_root) {
-                let _ = Command::new("fusermount3").args(["-u", mp]).status();
-                let _ = Command::new("fusermount").args(["-u", mp]).status();
-            }
+        // mount lines look like: "<src> on <mp> type <fstype> (<opts>)"
+        let Some((src, rest)) = line.split_once(" on ") else {
+            continue;
+        };
+        let Some((mp, rest)) = rest.split_once(" type ") else {
+            continue;
+        };
+        let fstype = rest.split_whitespace().next().unwrap_or("");
+        if !fstype.starts_with("fuse") {
+            continue;
         }
+        if !src.contains("heddle") {
+            continue;
+        }
+        let mp_path = Path::new(mp);
+        let mp_canon = mp_path
+            .canonicalize()
+            .unwrap_or_else(|_| mp_path.to_path_buf());
+        if !mp_canon.starts_with(&canonical_root) {
+            continue;
+        }
+        // Require a `bench-` component anywhere in the path. This is the
+        // bench-owned tag — heddle thread names produced by this tool
+        // always start with `bench-<mode>-`, so the mount path contains
+        // a `bench-…` component. Without this filter, an unrelated
+        // heddle thread mounted under a shared out-dir would be torn
+        // down here.
+        if !mp_canon.components().any(|c| {
+            c.as_os_str()
+                .to_str()
+                .is_some_and(|s| s.starts_with("bench-"))
+        }) {
+            continue;
+        }
+        let _ = Command::new("fusermount3").args(["-u", mp]).status();
+        let _ = Command::new("fusermount").args(["-u", mp]).status();
     }
 }
 
@@ -493,11 +530,29 @@ struct Sources {
 
 fn prepare_sources(args: &Args) -> Result<Sources> {
     let snapshot = args.out_dir.join("snapshot");
+    let manifest_path = snapshot.join(".manifest");
+    let want_manifest = workload_manifest(&args.workload)?;
+    let manifest_match = manifest_path
+        .is_file()
+        .then(|| fs::read_to_string(&manifest_path).ok())
+        .flatten()
+        .is_some_and(|s| s.trim() == want_manifest);
+    // Whenever the workload fingerprint changes (or no fingerprint
+    // exists yet), blow away the derived stack — snapshot, git-source,
+    // heddle-source. Without this, a second run with `--out-dir`
+    // reused after the user edited the workload would silently
+    // benchmark the *old* workload contents.
+    if !manifest_match {
+        let _ = fs::remove_dir_all(&snapshot);
+        let _ = fs::remove_dir_all(args.out_dir.join("git-source"));
+        let _ = fs::remove_dir_all(args.out_dir.join("heddle-source"));
+    }
     if !snapshot.exists() {
         copy_tree(&args.workload, &snapshot)?;
         // Strip out any existing .git so we own the history shape.
         let _ = fs::remove_dir_all(snapshot.join(".git"));
         let _ = fs::remove_dir_all(snapshot.join(".heddle"));
+        fs::write(&manifest_path, &want_manifest)?;
     }
 
     let git_source = args.out_dir.join("git-source");
@@ -563,6 +618,60 @@ fn prepare_sources(args: &Args) -> Result<Sources> {
     })
 }
 
+/// Fingerprint of the workload tree, stored in `snapshot/.manifest` so
+/// a reused `--out-dir` can detect a stale snapshot and re-copy. The
+/// digest mixes each file's relative path, byte length, and mtime
+/// (nanos); identical-content reruns hash to the same value, and any
+/// edit to the workload flips it. Skip noisy dirs that shouldn't be
+/// part of the input (`target/`, `.git/`, etc.).
+fn workload_manifest(root: &Path) -> Result<String> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut entries: Vec<(String, u64, i128)> = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !matches!(
+                name.as_ref(),
+                "target" | ".cargo-target" | ".git" | ".heddle" | "node_modules"
+            )
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .unwrap_or(entry.path())
+            .to_string_lossy()
+            .into_owned();
+        let md = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let len = md.len();
+        let mtime_nanos: i128 = md
+            .modified()
+            .ok()
+            .and_then(|t| {
+                t.duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as i128)
+                    .ok()
+            })
+            .unwrap_or(0);
+        entries.push((rel, len, mtime_nanos));
+    }
+    entries.sort();
+    let mut h = DefaultHasher::new();
+    entries.hash(&mut h);
+    Ok(format!("v1 {:016x}", h.finish()))
+}
+
 // ---------- The matrix ----------
 
 fn run_matrix(mode: Mode, args: &Args, sources: &Sources) -> Result<ModeResult> {
@@ -592,14 +701,30 @@ fn run_matrix(mode: Mode, args: &Args, sources: &Sources) -> Result<ModeResult> 
         *actual_slots[i].lock().unwrap() = Some(actual);
         Ok(())
     });
+    // Drain slots regardless of success: on partial failure we still
+    // need to know which children created something so we can tear those
+    // down rather than leaking mounts/worktrees/branches.
+    let created: Vec<(usize, PathBuf)> = actual_slots
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.lock().unwrap().take().map(|p| (i, p)))
+        .collect();
     if !res.create.all_ok {
         res.notes
             .push(format!("create failed: {:?}", res.create.error));
+        let partial_workdirs: Vec<PathBuf> = created.iter().map(|(_, p)| p.clone()).collect();
+        let partial_branches: Vec<Option<String>> = created
+            .iter()
+            .map(|(i, _)| branch_name_for(mode, args, *i))
+            .collect();
+        teardown_workdirs(mode, sources, &partial_workdirs, &partial_branches);
         return Ok(res);
     }
-    let workdirs: Vec<PathBuf> = actual_slots
-        .into_iter()
-        .map(|s| s.lock().unwrap().take().unwrap_or_default())
+    // All N children succeeded — `created` has length args.parallel in
+    // index order.
+    let workdirs: Vec<PathBuf> = created.iter().map(|(_, p)| p.clone()).collect();
+    let branches: Vec<Option<String>> = (0..args.parallel)
+        .map(|i| branch_name_for(mode, args, i))
         .collect();
 
     // 2. Disk usage post-create.
@@ -638,9 +763,19 @@ fn run_matrix(mode: Mode, args: &Args, sources: &Sources) -> Result<ModeResult> 
     res.disk_post_build = workdirs.iter().map(|w| dir_size_bytes(w)).collect();
 
     // 7. Teardown.
-    teardown_workdirs(mode, sources, &workdirs);
+    teardown_workdirs(mode, sources, &workdirs, &branches);
 
     Ok(res)
+}
+
+/// Reconstruct the branch name used by `create_workdir` for a given
+/// (mode, idx) so teardown can delete the ref. Returns `None` for
+/// non-git modes.
+fn branch_name_for(mode: Mode, args: &Args, idx: usize) -> Option<String> {
+    match mode {
+        Mode::Git => Some(format!("bench-{idx}-{}", args.run_token)),
+        Mode::Solid | Mode::Virt => None,
+    }
 }
 
 /// Create a workdir for `mode` and return the *actual* on-disk path
@@ -724,32 +859,50 @@ fn create_workdir(
                 );
             }
             let stdout = String::from_utf8_lossy(&out.stdout);
-            // Find the *last* "path":"..." occurrence — the trailing
-            // top-level `path` field is what we want (the `thread.path`
-            // earlier in the object has the same value, so the parse
-            // is robust to either).
-            let actual = stdout
-                .rmatch_indices("\"path\":\"")
-                .next()
-                .and_then(|(start, marker)| {
-                    let from = start + marker.len();
-                    stdout[from..]
-                        .find('"')
-                        .map(|end| stdout[from..from + end].to_string())
-                })
-                .ok_or_else(|| {
-                    anyhow!(
-                        "could not parse 'path' from heddle start stdout: {}",
-                        stdout
-                    )
-                })?;
+            // Real JSON decode — earlier versions sliced on a raw `"`,
+            // which broke as soon as the daemon emitted a path
+            // containing an escaped quote (or any future field that
+            // happened to contain the substring `"path":"`).
+            let actual = extract_thread_path(&stdout).with_context(|| {
+                format!("could not parse 'path' from heddle start stdout: {stdout}")
+            })?;
             Ok(PathBuf::from(actual))
         }
     }
 }
 
-fn teardown_workdirs(mode: Mode, sources: &Sources, workdirs: &[PathBuf]) {
-    for w in workdirs {
+/// Decode the workdir / mount path out of `heddle start --output json`
+/// stdout. The daemon emits a JSON object with a top-level `path` field
+/// and a nested `thread.path` carrying the same value; we prefer the
+/// top-level one but fall back to the nested form for older heddles.
+fn extract_thread_path(stdout: &str) -> Result<String> {
+    // Strip any leading non-JSON noise (a stray banner line, etc.) by
+    // locating the first `{`.
+    let json_start = stdout
+        .find('{')
+        .ok_or_else(|| anyhow!("no JSON object found"))?;
+    let v: serde_json::Value = serde_json::from_str(&stdout[json_start..])
+        .map_err(|e| anyhow!("invalid JSON from heddle start: {e}"))?;
+    if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+        return Ok(p.to_string());
+    }
+    if let Some(p) = v
+        .get("thread")
+        .and_then(|t| t.get("path"))
+        .and_then(|x| x.as_str())
+    {
+        return Ok(p.to_string());
+    }
+    Err(anyhow!("no 'path' field in heddle start JSON"))
+}
+
+fn teardown_workdirs(
+    mode: Mode,
+    sources: &Sources,
+    workdirs: &[PathBuf],
+    branches: &[Option<String>],
+) {
+    for (i, w) in workdirs.iter().enumerate() {
         match mode {
             Mode::Git => {
                 // git worktree remove handles the metadata; even if it
@@ -762,6 +915,19 @@ fn teardown_workdirs(mode: Mode, sources: &Sources, workdirs: &[PathBuf]) {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
+                // Delete the per-run branch ref so reruns against the
+                // same `--out-dir` (and therefore same reused git
+                // source) don't accumulate `bench-<idx>-<token>`
+                // branches forever. `worktree remove` leaves the branch
+                // intact by design.
+                if let Some(Some(br)) = branches.get(i) {
+                    let _ = Command::new("git")
+                        .args(["-C", sources.git_source.to_str().unwrap()])
+                        .args(["branch", "-D", br])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
             }
             Mode::Virt => {
                 // In-process mount: best-effort fusermount.
@@ -788,9 +954,22 @@ fn run_stress(mode: Mode, args: &Args, sources: &Sources) -> Result<StressOutcom
         .map(|i| parent.join(format!("agent-{i}")))
         .collect();
     let mut workdirs: Vec<PathBuf> = Vec::with_capacity(args.parallel);
+    let mut branches: Vec<Option<String>> = Vec::with_capacity(args.parallel);
     for (i, wd) in desired.iter().enumerate() {
-        let actual = create_workdir(mode, args, sources, wd, 1000 + i)?;
-        workdirs.push(actual);
+        let idx = 1000 + i;
+        match create_workdir(mode, args, sources, wd, idx) {
+            Ok(actual) => {
+                workdirs.push(actual);
+                branches.push(branch_name_for(mode, args, idx));
+            }
+            Err(e) => {
+                // Roll back any already-created workdirs so we don't
+                // leak FUSE mounts / git worktrees / branches when one
+                // of the N stress workers fails to spin up.
+                teardown_workdirs(mode, sources, &workdirs, &branches);
+                return Err(e);
+            }
+        }
     }
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -885,7 +1064,7 @@ fn run_stress(mode: Mode, args: &Args, sources: &Sources) -> Result<StressOutcom
         }
     }
 
-    teardown_workdirs(mode, sources, &workdirs);
+    teardown_workdirs(mode, sources, &workdirs, &branches);
     Ok(out)
 }
 
@@ -1109,27 +1288,49 @@ fn touch_one_file(workdir: &Path) -> Result<()> {
     let candidates = [workdir.join("src/lib.rs"), workdir.join("src/main.rs")];
     for c in &candidates {
         if c.is_file() {
-            let mut f = fs::OpenOptions::new().append(true).open(c)?;
-            writeln!(f, "// bench touch {}", uniq())?;
-            return Ok(());
+            return append_touch_line(c);
         }
     }
-    // Fallback: scan top-level for crates/*/src/{lib,main}.rs — accept
-    // either so workspaces composed of binary-only crates (no `lib.rs`)
-    // still hit the incremental phase.
-    if let Ok(rd) = fs::read_dir(workdir.join("crates")) {
-        for e in rd.flatten() {
-            for sub in ["src/lib.rs", "src/main.rs"] {
-                let p = e.path().join(sub);
-                if p.is_file() {
-                    let mut f = fs::OpenOptions::new().append(true).open(&p)?;
-                    writeln!(f, "// bench touch {}", uniq())?;
-                    return Ok(());
-                }
+    // Walk every Cargo.toml under the workdir and look at the src/
+    // sibling. This catches workspaces whose members are not under
+    // `crates/*` — e.g. `members = ["packages/*", "tools/*"]`, or a
+    // flat layout. We use walkdir (already a workspace dep) with a
+    // depth cap so we don't recurse into deps' `target/` if one
+    // exists, and skip the cargo target dir explicitly.
+    for entry in walkdir::WalkDir::new(workdir)
+        .max_depth(6)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            // Skip noisy dirs that can't host workspace members.
+            !matches!(
+                name.as_ref(),
+                "target" | ".cargo-target" | ".git" | ".heddle" | "node_modules"
+            )
+        })
+        .flatten()
+    {
+        if entry.file_name() != "Cargo.toml" {
+            continue;
+        }
+        let Some(parent) = entry.path().parent() else {
+            continue;
+        };
+        for sub in ["src/lib.rs", "src/main.rs"] {
+            let p = parent.join(sub);
+            if p.is_file() {
+                return append_touch_line(&p);
             }
         }
     }
     bail!("no .rs file found to touch in {}", workdir.display())
+}
+
+fn append_touch_line(p: &Path) -> Result<()> {
+    let mut f = fs::OpenOptions::new().append(true).open(p)?;
+    writeln!(f, "// bench touch {}", uniq())?;
+    Ok(())
 }
 
 fn uniq() -> u128 {
