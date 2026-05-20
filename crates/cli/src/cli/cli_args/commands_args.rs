@@ -1352,6 +1352,41 @@ pub struct WatchArgs {
 // originals and we re-added them mid-rebase). Removed.
 
 #[cfg(test)]
+mod capture_message_alias_tests {
+    use clap::Parser;
+
+    use crate::cli::{Cli, Commands, SnapshotArgs};
+
+    fn parse_capture(extra: &[&str]) -> Result<SnapshotArgs, clap::Error> {
+        let mut argv: Vec<&str> = vec!["heddle", "capture"];
+        argv.extend_from_slice(extra);
+        let cli = Cli::try_parse_from(argv)?;
+        match cli.command {
+            Commands::Capture(args) => Ok(args),
+            _ => panic!("expected Commands::Capture"),
+        }
+    }
+
+    #[test]
+    fn capture_accepts_message_alias() {
+        let args = parse_capture(&["--message", "my change"]).expect("--message should parse");
+        assert_eq!(args.intent.as_deref(), Some("my change"));
+    }
+
+    #[test]
+    fn capture_accepts_intent_long_form() {
+        let args = parse_capture(&["--intent", "my change"]).expect("--intent should parse");
+        assert_eq!(args.intent.as_deref(), Some("my change"));
+    }
+
+    #[test]
+    fn capture_accepts_short_m() {
+        let args = parse_capture(&["-m", "my change"]).expect("-m should parse");
+        assert_eq!(args.intent.as_deref(), Some("my change"));
+    }
+}
+
+#[cfg(test)]
 mod clone_filter_tests {
     use clap::Parser;
 
