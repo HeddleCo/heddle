@@ -2980,8 +2980,10 @@ name = "heddle-devtools"
 version = "0.2.4"
 dependencies = [
  "anyhow",
+ "libc",
  "proc-macro2",
  "protoc-bin-vendored",
+ "serde_json",
  "syn 2.0.117",
  "tempfile",
  "walkdir",

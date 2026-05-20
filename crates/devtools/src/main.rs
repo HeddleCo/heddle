@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 mod check_no_silent_default_tree_load;
+mod fuse_dispatch_bench;
 
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
@@ -18,6 +19,7 @@ fn main() -> Result<()> {
         Some("check-no-silent-default-tree-load") => {
             check_no_silent_default_tree_load::run(args.collect())
         }
+        Some("fuse-dispatch-bench") => fuse_dispatch_bench::run(args.collect()),
         Some(command) => bail!("unknown command '{command}'"),
         None => bail!("expected a command (for example: web-proto)"),
     }
@@ -310,14 +312,8 @@ end_of_record
         // A `crates/<name>/<other>/...` shape where `<other>` isn't a
         // recognized role dir is rejected — typical for generated files
         // (target/, build/) that shouldn't count toward the gate.
-        assert_eq!(
-            crate_of("crates/repo/target/debug/build/foo.rs"),
-            None
-        );
-        assert_eq!(
-            crate_of("/work/crates/repo/.cargo/config.toml"),
-            None
-        );
+        assert_eq!(crate_of("crates/repo/target/debug/build/foo.rs"), None);
+        assert_eq!(crate_of("/work/crates/repo/.cargo/config.toml"), None);
     }
 
     #[test]
