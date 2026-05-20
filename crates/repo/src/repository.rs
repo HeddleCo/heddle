@@ -600,9 +600,28 @@ impl Repository {
                         // git's. Reading the existing head is a small file
                         // read; the write that follows hits atomic-rename
                         // machinery (sync + rename) which dominates here.
-                        let stale = match repo.refs.read_head() {
-                            Ok(current) => current != git_head,
-                            Err(_) => true,
+                        //
+                        // Detached HEAD only counts as an explicit user
+                        // override (e.g. `heddle goto`) when the detached
+                        // state diverges from git's current branch tip.
+                        // `cmd_clone` writes Head::Attached then calls
+                        // repo.goto() — which unconditionally detaches —
+                        // and relies on this reopen path to re-attach;
+                        // when the detached state still matches the branch
+                        // tip we treat that as a bootstrap leftover and
+                        // sync. A user `heddle goto <other>` lands on a
+                        // state that does *not* match the branch tip, so
+                        // it survives (heddle#146).
+                        let stale = match (repo.refs.read_head(), &git_head) {
+                            (Ok(Head::Detached { state }), Head::Attached { thread }) => {
+                                match repo.refs.get_thread(thread) {
+                                    Ok(Some(tip)) => tip == state,
+                                    _ => false,
+                                }
+                            }
+                            (Ok(Head::Detached { .. }), _) => false,
+                            (Ok(current), _) => current != git_head,
+                            (Err(_), _) => true,
                         };
                         if stale {
                             repo.refs.write_head(&git_head)?;
