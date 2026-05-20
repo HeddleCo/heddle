@@ -227,23 +227,12 @@ fn finish_git_overlay_clone(
             stats.commits_imported
         );
     } else {
-        println!(
-            "{} cloned {} into {}",
-            style::ok_marker(),
-            style::dim(&remote_label),
-            style::bold(&local_path.display().to_string())
-        );
-        println!(
-            "  {}",
-            style::field(
-                "imported",
-                &format!(
-                    "{}; checked out {}",
-                    style::count(stats.commits_imported, "Git commit"),
-                    style::bold(&track_name)
-                )
-            )
-        );
+        let repo_name = clone_repo_name_from_label(&remote_label);
+        for line in
+            format_clone_completion_lines(repo_name, stats.commits_imported, &track_name)
+        {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -262,6 +251,56 @@ fn write_git_overlay_origin(local_path: &Path, remote_label: &str) -> Result<()>
     ));
     fs::write(config_path, contents)?;
     Ok(())
+}
+
+/// Best-effort repo-name extraction for the text-mode clone summary.
+///
+/// The remote label can be a HTTPS URL, an SSH spec
+/// (`git@host:owner/repo.git`), a `file://` URL, or a plain filesystem
+/// path. We do not try to fully parse any of these — we just want the
+/// last path-like segment so the human-facing line can say "Cloned
+/// ripgrep" instead of dumping the whole URL again next to where the
+/// URL was already echoed by the dim-styled source label. If the input
+/// has no usable segment, return it unchanged so the rendered summary
+/// still carries something identifying.
+fn clone_repo_name_from_label(label: &str) -> &str {
+    // SSH form `git@github.com:owner/repo.git`: split on the colon
+    // first so the path segment isn't shadowed by the host.
+    let after_colon = label.rsplit(':').next().unwrap_or(label);
+    let segment = after_colon
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(after_colon);
+    segment.strip_suffix(".git").unwrap_or(segment)
+}
+
+/// Render the human-facing clone-completion summary as three lines.
+///
+/// The shape — repo name + commit count, current thread, next-step
+/// hint — comes from heddle#161: the previous text mode printed a terse
+/// `cloned <url> into <path>` / `imported: N Git commits` pair that
+/// scanned like a JSON dump rather than guidance. Returning a `Vec<String>`
+/// (one entry per output line) keeps the formatter unit-testable without
+/// having to capture process stdout.
+fn format_clone_completion_lines(
+    repo_name: &str,
+    commits_imported: usize,
+    thread_name: &str,
+) -> Vec<String> {
+    vec![
+        format!(
+            "{} Cloned {} ({} imported).",
+            style::ok_marker(),
+            style::bold(repo_name),
+            style::count(commits_imported, "commit"),
+        ),
+        format!(
+            "  {}",
+            style::field("current thread", &style::bold(thread_name))
+        ),
+        format!("  Next: {}", style::bold("heddle log")),
+    ]
 }
 
 /// Pick which imported branch the clone should land on.
