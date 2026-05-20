@@ -80,6 +80,20 @@ struct Args {
     json_out: Option<PathBuf>,
     md_out: Option<PathBuf>,
     keep_workdirs: bool,
+    /// Per-invocation uniqueness token, used to disambiguate names
+    /// (git branches, heddle thread names, default out-dir suffix) so
+    /// that two runs in the same shell — or two runs in the same wall
+    /// second — don't collide. Format: `<nanos>-<pid>`.
+    run_token: String,
+}
+
+fn make_run_token() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    format!("{nanos:x}-{pid}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,19 +159,14 @@ fn parse_args(raw: Vec<String>) -> Result<Args> {
     let heddle_bin = heddle_bin
         .context("--heddle-bin is required")?
         .canonicalize()?;
+    let run_token = make_run_token();
     let out_dir = match out_dir {
         Some(p) => {
             fs::create_dir_all(&p)?;
             p.canonicalize()?
         }
         None => {
-            let p = std::env::temp_dir().join(format!(
-                "fuse-dispatch-bench-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-            ));
+            let p = std::env::temp_dir().join(format!("fuse-dispatch-bench-{run_token}"));
             fs::create_dir_all(&p)?;
             p
         }
@@ -186,6 +195,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args> {
         json_out,
         md_out,
         keep_workdirs,
+        run_token,
     })
 }
 
@@ -195,7 +205,8 @@ fn print_help() {
 
 Required:
   --workload <PATH>        path to a cargo workspace to use as the test load
-  --heddle-bin <PATH>      path to a heddle binary built with --features fuse
+  --heddle-bin <PATH>      path to a heddle binary built with --features mount
+                           (the user-facing flag for the FUSE mount backend)
 
 Optional:
   --out-dir <PATH>         where to put generated workdirs (default: $TMPDIR/...)
@@ -350,15 +361,23 @@ fn unmount_stale_fuse_under(root: &Path) {
         Err(_) => return,
     };
     let body = String::from_utf8_lossy(&out.stdout);
-    let prefix = root.to_string_lossy().to_string();
+    // Component-wise path comparison so a sibling directory whose name
+    // shares the out-dir's textual prefix (e.g. `/tmp/out-dir-other/...`
+    // when out-dir is `/tmp/out-dir`) is *not* treated as in-scope.
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     for line in body.lines() {
         // mount lines look like: "heddle-mount on /tmp/.../mounts/X type fuse ..."
         if let Some(rest) = line.split(" on ").nth(1)
             && let Some(mp) = rest.split(" type ").next()
-            && mp.starts_with(&prefix)
         {
-            let _ = Command::new("fusermount3").args(["-u", mp]).status();
-            let _ = Command::new("fusermount").args(["-u", mp]).status();
+            let mp_path = Path::new(mp);
+            let mp_canon = mp_path
+                .canonicalize()
+                .unwrap_or_else(|_| mp_path.to_path_buf());
+            if mp_canon.starts_with(&canonical_root) {
+                let _ = Command::new("fusermount3").args(["-u", mp]).status();
+                let _ = Command::new("fusermount").args(["-u", mp]).status();
+            }
         }
     }
 }
@@ -638,6 +657,10 @@ fn create_workdir(
 ) -> Result<PathBuf> {
     match mode {
         Mode::Git => {
+            // Suffix with the per-run token so repeated invocations
+            // against the same `--out-dir` (and thus the same reused
+            // `git-source` repo) don't collide on an existing
+            // `bench-<idx>` branch ref.
             sh(
                 "git",
                 &[
@@ -647,7 +670,7 @@ fn create_workdir(
                     "add",
                     desired_path.to_str().unwrap(),
                     "-b",
-                    &format!("bench-{idx}"),
+                    &format!("bench-{idx}-{}", args.run_token),
                     "main",
                 ],
             )?;
@@ -667,7 +690,11 @@ fn create_workdir(
             cmd.args(["--repo", hs.to_str().unwrap()])
                 .args([
                     "start",
-                    &format!("bench-{}-{idx}", mode.as_str()),
+                    // Suffix with the per-run token so a rerun of the
+                    // bench against the same heddle source doesn't
+                    // collide with the previous run's still-registered
+                    // thread name (`bench-virt-0`, etc.).
+                    &format!("bench-{}-{idx}-{}", mode.as_str(), args.run_token),
                     "--workspace",
                     workspace,
                     "--path",
@@ -1017,14 +1044,18 @@ fn touch_one_file(workdir: &Path) -> Result<()> {
             return Ok(());
         }
     }
-    // Fallback: scan top-level for crates/*/src/lib.rs
+    // Fallback: scan top-level for crates/*/src/{lib,main}.rs — accept
+    // either so workspaces composed of binary-only crates (no `lib.rs`)
+    // still hit the incremental phase.
     if let Ok(rd) = fs::read_dir(workdir.join("crates")) {
         for e in rd.flatten() {
-            let lib = e.path().join("src/lib.rs");
-            if lib.is_file() {
-                let mut f = fs::OpenOptions::new().append(true).open(&lib)?;
-                writeln!(f, "// bench touch {}", uniq())?;
-                return Ok(());
+            for sub in ["src/lib.rs", "src/main.rs"] {
+                let p = e.path().join(sub);
+                if p.is_file() {
+                    let mut f = fs::OpenOptions::new().append(true).open(&p)?;
+                    writeln!(f, "// bench touch {}", uniq())?;
+                    return Ok(());
+                }
             }
         }
     }
