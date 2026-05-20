@@ -99,8 +99,8 @@ pub enum GitCommands {
         path: Option<GitSource>,
 
         /// Ref names to import (repeatable). Scopes the import to the
-        /// listed branches or remote-tracking refs; omit to import all
-        /// branches and tags.
+        /// listed branches, tags, or remote-tracking refs; omit to
+        /// import all branches and tags.
         #[arg(long = "ref", value_name = "REF")]
         refs: Vec<String>,
     },
