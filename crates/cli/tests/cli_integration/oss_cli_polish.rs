@@ -857,24 +857,12 @@ fn bridge_git_conflict_message_points_at_runnable_verbs() {
     // it offers (`bridge git sync` and `thread drop --delete-thread`)
     // are both verbs that work on a git-overlay repo.
     use std::path::PathBuf;
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let src = manifest_dir.join("../../crates/cli/src/bridge/git_import.rs");
-    let body = std::fs::read_to_string(&src).unwrap_or_else(|err| {
-        // Fall back to the canonical path when CARGO_MANIFEST_DIR is
-        // already the crate root.
-        std::fs::read_to_string(
-            manifest_dir
-                .join("src")
-                .join("bridge")
-                .join("git_import.rs"),
-        )
-        .unwrap_or_else(|err2| {
-            panic!(
-                "can't read git_import.rs from {} or fallback: {err} / {err2}",
-                src.display()
-            )
-        })
-    });
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("bridge")
+        .join("git_import.rs");
+    let body = std::fs::read_to_string(&src)
+        .unwrap_or_else(|err| panic!("read {}: {err}", src.display()));
     let conflict_block = body
         .split("differs from branch")
         .nth(1)
