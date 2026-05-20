@@ -80,7 +80,7 @@ use tracing::{debug, instrument, warn};
 
 use crate::{
     error::{MountError, Result},
-    shell::{Attrs, DIR_UNIX_MODE, Entry, NodeId, NodeKind, PlatformShell, kind_for_mode},
+    shell::{AttrUpdate, Attrs, DIR_UNIX_MODE, Entry, NodeId, NodeKind, PlatformShell, kind_for_mode},
 };
 
 /// Default promotion idle window: a buffer with no writes for this
@@ -159,6 +159,12 @@ enum NodeRecord {
         path: PathBuf,
         mode: FileMode,
     },
+    /// A symlink created through the mount. Target bytes live in
+    /// [`Pending::symlinks`]; we don't promote the symlink to a CAS
+    /// blob until [`ContentAddressedMount::capture`].
+    PendingSymlink {
+        path: PathBuf,
+    },
 }
 
 impl NodeRecord {
@@ -170,7 +176,7 @@ impl NodeRecord {
             NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. } => {
                 kind_for_mode(*mode)
             }
-            NodeRecord::Symlink { .. } => NodeKind::Symlink,
+            NodeRecord::Symlink { .. } | NodeRecord::PendingSymlink { .. } => NodeKind::Symlink,
         }
     }
 
@@ -182,7 +188,9 @@ impl NodeRecord {
             NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. } => {
                 mode.to_unix_mode()
             }
-            NodeRecord::Symlink { .. } => FileMode::Symlink.to_unix_mode(),
+            NodeRecord::Symlink { .. } | NodeRecord::PendingSymlink { .. } => {
+                FileMode::Symlink.to_unix_mode()
+            }
         }
     }
 }
@@ -269,7 +277,9 @@ impl Inodes {
                 self.by_id.insert(id, record);
                 NodeId(id)
             }
-            NodeRecord::File { path, .. } | NodeRecord::PendingFile { path, .. } => {
+            NodeRecord::File { path, .. }
+            | NodeRecord::PendingFile { path, .. }
+            | NodeRecord::PendingSymlink { path } => {
                 if let Some(&id) = self.by_path.get(path) {
                     // If the path's record is being upgraded
                     // (e.g. PendingFile -> File after capture, or
@@ -319,7 +329,9 @@ impl Inodes {
                 NodeRecord::Dir { path, .. } | NodeRecord::PendingDir { path } => {
                     self.by_path.remove(&path);
                 }
-                NodeRecord::File { path, .. } | NodeRecord::PendingFile { path, .. } => {
+                NodeRecord::File { path, .. }
+                | NodeRecord::PendingFile { path, .. }
+                | NodeRecord::PendingSymlink { path } => {
                     self.by_path.remove(&path);
                 }
                 NodeRecord::Symlink { blob } => {
@@ -367,8 +379,24 @@ struct Pending {
     /// Warm tier: paths whose latest content has been promoted.
     warm: BTreeMap<PathBuf, PendingEntry>,
     /// Tombstones — paths the mount has deleted. Suppress the
-    /// underlying state's entry on reads.
+    /// underlying state's entry on reads. File-only; directories
+    /// use [`Self::dir_tombstones`].
     tombstones: BTreeSet<PathBuf>,
+    /// Directory tombstones — captured-tree directories the mount
+    /// has `rmdir`'d. Distinct from file tombstones because the
+    /// capture-time `apply_pending_to_tree` walk has to drop the
+    /// whole subtree, not a single leaf.
+    dir_tombstones: BTreeSet<PathBuf>,
+    /// Directories the mount has `mkdir`'d into the overlay that
+    /// don't (yet) have any children. Without this, an empty
+    /// `mkdir target/` wouldn't survive across a `lookup` /
+    /// `enumerate` round-trip (nothing under it means
+    /// [`pending_dir_exists`] would return false).
+    explicit_dirs: BTreeSet<PathBuf>,
+    /// Symlinks created through the mount, keyed by mount-relative
+    /// path. The bytes are the target as the kernel handed them to
+    /// `symlink`; capture hashes them into a CAS blob.
+    symlinks: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 /// In-mount overlay: a snapshot-time view of the parent state plus
@@ -1038,6 +1066,7 @@ impl ContentAddressedMount {
                 Some(path.clone())
             }
             NodeRecord::Dir { path, .. } | NodeRecord::PendingDir { path } => Some(path.clone()),
+            NodeRecord::PendingSymlink { path } => Some(path.clone()),
             _ => None,
         }
     }
@@ -1070,6 +1099,703 @@ impl ContentAddressedMount {
         Ok(())
     }
 
+    // --- Write-side overlay ops (heddle#180) -----------------------------------
+    //
+    // Each method below corresponds to one FUSE callback the kernel
+    // emits on cargo / git / npm style workloads:
+    //
+    //   create  → `create_file`      open(O_CREAT)
+    //   mkdir   → `make_dir`
+    //   unlink  → `unlink_entry`
+    //   rmdir   → `rmdir_entry`
+    //   rename  → `rename_entry`
+    //   setattr → `set_attrs`        chmod / ftruncate / O_TRUNC
+    //   symlink → `create_symlink`
+    //   readlink→ `read_link`
+    //
+    // All mutations land in the per-thread overlay (pending tier):
+    //
+    //   * `Pending::hot` / `Pending::warm` — file bytes (existing).
+    //   * `Pending::tombstones`            — file deletions (existing).
+    //   * `Pending::dir_tombstones`        — `rmdir` of a captured dir.
+    //   * `Pending::explicit_dirs`         — empty mkdirs.
+    //   * `Pending::symlinks`              — link target bytes.
+    //
+    // None of these touch the underlying CAS until `capture()` folds
+    // the overlay into a real heddle state.
+
+    /// Open-or-create a regular file under `parent`, mirroring
+    /// `open(O_CREAT[|O_EXCL])` from userspace.
+    ///
+    /// When the named entry doesn't exist, mints a fresh
+    /// [`NodeRecord::PendingFile`] inode + an empty hot buffer so the
+    /// new path is immediately visible to [`lookup`](Self::lookup) /
+    /// [`attrs`](Self::attrs) and the first
+    /// [`write`](Self::write) drops cleanly into the existing
+    /// two-tier model.
+    ///
+    /// When the named entry already exists:
+    ///   * `exclusive=true` ⇒ [`MountError::AlreadyExists`] (errno
+    ///     `EEXIST`).
+    ///   * `exclusive=false` ⇒ returns the existing entry. The kernel
+    ///     follows up with `setattr(size=0)` for `O_TRUNC` callers,
+    ///     which we honour in [`set_attrs`](Self::set_attrs).
+    pub fn create_file(
+        &self,
+        parent: NodeId,
+        name: &OsStr,
+        mode: FileMode,
+        exclusive: bool,
+    ) -> Result<Entry> {
+        let name_str = validate_entry_name(name)?;
+        if let Some(existing) = self.lookup(parent, name)? {
+            if exclusive {
+                return Err(MountError::AlreadyExists(name_str.to_string()));
+            }
+            return Ok(existing);
+        }
+        let parent_record = self.record_for(parent)?;
+        let parent_path = self
+            .dir_path_of(&parent_record)
+            .ok_or_else(|| MountError::NotADirectory(format!("{parent_record:?}")))?;
+        let child_path = join_child(&parent_path, name_str);
+
+        {
+            let mut pending = self.inner.pending.lock().expect("pending lock");
+            // A prior unlink left a tombstone — clear it; the file
+            // exists again.
+            pending.tombstones.remove(&child_path);
+            // An overlay-only directory used to live here; it's gone.
+            pending.explicit_dirs.remove(&child_path);
+        }
+
+        let node = self.intern(NodeRecord::PendingFile {
+            path: child_path.clone(),
+            mode,
+        });
+
+        // Seed an empty hot buffer so the freshly-minted inode reads
+        // as a 0-byte file even before any `write` callback fires.
+        // Mirrors what userspace expects from `open(O_CREAT)`: the
+        // file exists at length 0 immediately on return.
+        {
+            let mut pending = self.inner.pending.lock().expect("pending lock");
+            pending.hot.insert(
+                node.0,
+                HotBuffer {
+                    path: child_path.clone(),
+                    mode,
+                    bytes: Vec::new(),
+                    last_touched: Instant::now(),
+                },
+            );
+            pending.hot_by_path.insert(child_path, node.0);
+        }
+
+        Ok(Entry {
+            node,
+            name: name.to_os_string(),
+            kind: kind_for_mode(mode),
+            size: 0,
+            unix_mode: mode.to_unix_mode(),
+        })
+    }
+
+    /// Create an empty directory under `parent`. Recorded as an
+    /// [`Pending::explicit_dirs`] entry so the new path is visible to
+    /// lookup/enumerate even when no child has been written yet.
+    pub fn make_dir(&self, parent: NodeId, name: &OsStr) -> Result<Entry> {
+        let name_str = validate_entry_name(name)?;
+        if self.lookup(parent, name)?.is_some() {
+            return Err(MountError::AlreadyExists(name_str.to_string()));
+        }
+        let parent_record = self.record_for(parent)?;
+        let parent_path = self
+            .dir_path_of(&parent_record)
+            .ok_or_else(|| MountError::NotADirectory(format!("{parent_record:?}")))?;
+        let child_path = join_child(&parent_path, name_str);
+
+        {
+            let mut pending = self.inner.pending.lock().expect("pending lock");
+            // A rmdir of this exact path now reverts to "present".
+            pending.dir_tombstones.remove(&child_path);
+            // Clear any colliding file tombstone too.
+            pending.tombstones.remove(&child_path);
+            pending.explicit_dirs.insert(child_path.clone());
+        }
+
+        let node = self.intern(NodeRecord::PendingDir {
+            path: child_path,
+        });
+        Ok(Entry {
+            node,
+            name: name.to_os_string(),
+            kind: NodeKind::Directory,
+            size: 0,
+            unix_mode: DIR_UNIX_MODE,
+        })
+    }
+
+    /// Delete a regular file (or symlink) named `name` under `parent`.
+    /// Drops any hot buffer / warm-tier blob / symlink entry for the
+    /// path and records a tombstone so the captured-tree entry (if
+    /// any) is hidden until capture folds the deletion in.
+    pub fn unlink_entry(&self, parent: NodeId, name: &OsStr) -> Result<()> {
+        let name_str = validate_entry_name(name)?;
+        let entry = self
+            .lookup(parent, name)?
+            .ok_or_else(|| MountError::NotFound(name_str.to_string()))?;
+        if entry.kind == NodeKind::Directory {
+            return Err(MountError::IsADirectory(name_str.to_string()));
+        }
+        let parent_record = self.record_for(parent)?;
+        let parent_path = self
+            .dir_path_of(&parent_record)
+            .ok_or_else(|| MountError::NotADirectory(format!("{parent_record:?}")))?;
+        let child_path = join_child(&parent_path, name_str);
+
+        let mut pending = self.inner.pending.lock().expect("pending lock");
+        if let Some(node_id) = pending.hot_by_path.remove(&child_path) {
+            pending.hot.remove(&node_id);
+        }
+        pending.warm.remove(&child_path);
+        pending.symlinks.remove(&child_path);
+        pending.tombstones.insert(child_path);
+        Ok(())
+    }
+
+    /// Remove the empty directory `name` under `parent`. Fails with
+    /// `ENOTEMPTY` if any child resolves through the mount.
+    pub fn rmdir_entry(&self, parent: NodeId, name: &OsStr) -> Result<()> {
+        let name_str = validate_entry_name(name)?;
+        let entry = self
+            .lookup(parent, name)?
+            .ok_or_else(|| MountError::NotFound(name_str.to_string()))?;
+        if entry.kind != NodeKind::Directory {
+            return Err(MountError::NotADirectory(name_str.to_string()));
+        }
+        // Empty check via enumerate — already overlay-aware (hot,
+        // warm, symlinks, captured-with-pending-overlay).
+        let children = self.enumerate(entry.node)?;
+        if !children.is_empty() {
+            return Err(MountError::NotEmpty(name_str.to_string()));
+        }
+        let parent_record = self.record_for(parent)?;
+        let parent_path = self
+            .dir_path_of(&parent_record)
+            .ok_or_else(|| MountError::NotADirectory(format!("{parent_record:?}")))?;
+        let child_path = join_child(&parent_path, name_str);
+
+        let mut pending = self.inner.pending.lock().expect("pending lock");
+        pending.explicit_dirs.remove(&child_path);
+        pending.dir_tombstones.insert(child_path);
+        Ok(())
+    }
+
+    /// Move `(old_parent, old_name)` to `(new_parent, new_name)`.
+    /// Handles file + symlink renames across any pair of overlay /
+    /// captured paths, and overlay-only directory rename (a captured
+    /// directory rename would require recursively rewriting the
+    /// tombstone/warm map — out of scope for the cargo / git path).
+    pub fn rename_entry(
+        &self,
+        old_parent: NodeId,
+        old_name: &OsStr,
+        new_parent: NodeId,
+        new_name: &OsStr,
+    ) -> Result<()> {
+        let old_name_str = validate_entry_name(old_name)?;
+        let new_name_str = validate_entry_name(new_name)?;
+        let src = self
+            .lookup(old_parent, old_name)?
+            .ok_or_else(|| MountError::NotFound(format!("rename src {old_name_str}")))?;
+        let old_parent_record = self.record_for(old_parent)?;
+        let new_parent_record = self.record_for(new_parent)?;
+        let old_parent_path = self
+            .dir_path_of(&old_parent_record)
+            .ok_or_else(|| MountError::NotADirectory(format!("{old_parent_record:?}")))?;
+        let new_parent_path = self
+            .dir_path_of(&new_parent_record)
+            .ok_or_else(|| MountError::NotADirectory(format!("{new_parent_record:?}")))?;
+        let old_path = join_child(&old_parent_path, old_name_str);
+        let new_path = join_child(&new_parent_path, new_name_str);
+        if old_path == new_path {
+            return Ok(());
+        }
+
+        // POSIX: destination of a different kind is an error.
+        if let Some(dst) = self.lookup(new_parent, new_name)? {
+            match (src.kind, dst.kind) {
+                (NodeKind::Directory, NodeKind::Directory) => {
+                    let dst_children = self.enumerate(dst.node)?;
+                    if !dst_children.is_empty() {
+                        return Err(MountError::NotEmpty(new_name_str.to_string()));
+                    }
+                }
+                (NodeKind::Directory, _) => {
+                    return Err(MountError::NotADirectory(new_name_str.to_string()));
+                }
+                (_, NodeKind::Directory) => {
+                    return Err(MountError::IsADirectory(new_name_str.to_string()));
+                }
+                _ => {}
+            }
+        }
+
+        match src.kind {
+            NodeKind::File => self.move_file(&old_path, &new_path)?,
+            NodeKind::Symlink => self.move_symlink(&old_path, &new_path)?,
+            NodeKind::Directory => self.move_overlay_dir(&old_path, &new_path)?,
+        }
+        // Invalidate the inode cached for the destination, so its next
+        // `lookup` re-mints with the moved record.
+        self.inner
+            .inodes
+            .lock()
+            .expect("inode lock")
+            .by_path
+            .remove(&new_path);
+        Ok(())
+    }
+
+    /// Promote the source's hot buffer (if any), then rewrite the
+    /// warm-tier entry / captured-blob reference at the new path.
+    fn move_file(&self, old_path: &Path, new_path: &Path) -> Result<()> {
+        // Promote any in-flight buffer at the source so the move is
+        // entirely a warm-tier operation.
+        let pending_node = self
+            .inner
+            .pending
+            .lock()
+            .expect("pending lock")
+            .hot_by_path
+            .get(old_path)
+            .copied();
+        if let Some(id) = pending_node {
+            self.flush_node(NodeId(id))?;
+        }
+
+        // Resolve the source's durable identity (warm-tier promotion
+        // wins over captured-tree blob — that's the priority used
+        // everywhere else in read).
+        enum Source {
+            Warm { blob: ContentHash, mode: FileMode, size: u64 },
+            Captured { blob: ContentHash, mode: FileMode, size: u64 },
+        }
+        let source = {
+            let pending = self.inner.pending.lock().expect("pending lock");
+            if let Some(entry) = pending.warm.get(old_path) {
+                Some(Source::Warm {
+                    blob: entry.blob,
+                    mode: entry.mode,
+                    size: entry.size,
+                })
+            } else {
+                None
+            }
+        };
+        let source = match source {
+            Some(s) => s,
+            None => {
+                // Walk the captured tree by path.
+                let (blob, mode, size) = self.captured_file_at(old_path)?;
+                Source::Captured { blob, mode, size }
+            }
+        };
+        let (blob, mode, size) = match source {
+            Source::Warm { blob, mode, size } | Source::Captured { blob, mode, size } => {
+                (blob, mode, size)
+            }
+        };
+
+        // Apply.
+        let mut pending = self.inner.pending.lock().expect("pending lock");
+        // Drop any old destination state.
+        if let Some(id) = pending.hot_by_path.remove(new_path) {
+            pending.hot.remove(&id);
+        }
+        pending.warm.remove(new_path);
+        pending.symlinks.remove(new_path);
+        pending.tombstones.remove(new_path);
+        // Move source.
+        pending.warm.remove(old_path);
+        pending.symlinks.remove(old_path);
+        pending.warm.insert(
+            new_path.to_path_buf(),
+            PendingEntry { blob, mode, size },
+        );
+        // Tombstone the source so a captured-tree entry there gets
+        // hidden post-capture.
+        pending.tombstones.insert(old_path.to_path_buf());
+        // Clear any tombstone covering the destination.
+        pending.tombstones.remove(new_path);
+        Ok(())
+    }
+
+    fn move_symlink(&self, old_path: &Path, new_path: &Path) -> Result<()> {
+        // Resolve target bytes from pending overlay, else from a
+        // captured-tree symlink blob.
+        let target_bytes = {
+            let pending = self.inner.pending.lock().expect("pending lock");
+            pending.symlinks.get(old_path).cloned()
+        };
+        let target_bytes = match target_bytes {
+            Some(b) => b,
+            None => {
+                let blob = self.captured_symlink_at(old_path)?;
+                (*self.load_blob_bytes(&blob)?).to_vec()
+            }
+        };
+        let mut pending = self.inner.pending.lock().expect("pending lock");
+        if let Some(id) = pending.hot_by_path.remove(new_path) {
+            pending.hot.remove(&id);
+        }
+        pending.warm.remove(new_path);
+        pending.symlinks.remove(new_path);
+        pending.tombstones.remove(new_path);
+        pending.symlinks.remove(old_path);
+        pending.symlinks.insert(new_path.to_path_buf(), target_bytes);
+        pending.tombstones.insert(old_path.to_path_buf());
+        Ok(())
+    }
+
+    fn move_overlay_dir(&self, old_path: &Path, new_path: &Path) -> Result<()> {
+        // We only support overlay-only directory renames here. If the
+        // source dir has any captured-tree backing, refuse — a full
+        // captured-tree rename would need to rewrite every descendant
+        // tombstone/warm entry.
+        if self.captured_dir_exists(old_path)? {
+            return Err(MountError::InvalidArgument(format!(
+                "cross-tree directory rename {} → {} not supported by the overlay",
+                old_path.display(),
+                new_path.display()
+            )));
+        }
+        let mut pending = self.inner.pending.lock().expect("pending lock");
+        // Move explicit_dirs and any deeper overlay entries under
+        // old_path/ to new_path/. Symlinks, warm, hot_by_path,
+        // tombstones, explicit_dirs all need rewriting.
+        fn rebase(p: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
+            let tail = p.strip_prefix(old).ok()?;
+            Some(new.join(tail))
+        }
+        let mut new_explicit: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut new_warm: BTreeMap<PathBuf, PendingEntry> = BTreeMap::new();
+        let mut new_symlinks: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
+        let mut new_tombstones: BTreeSet<PathBuf> = BTreeSet::new();
+        let mut new_hot_by_path: BTreeMap<PathBuf, u64> = BTreeMap::new();
+        let mut hot_path_updates: Vec<(u64, PathBuf)> = Vec::new();
+        for explicit in std::mem::take(&mut pending.explicit_dirs) {
+            match rebase(&explicit, old_path, new_path) {
+                Some(rebased) => {
+                    new_explicit.insert(rebased);
+                }
+                None => {
+                    if explicit != old_path {
+                        new_explicit.insert(explicit);
+                    }
+                }
+            }
+        }
+        for (path, entry) in std::mem::take(&mut pending.warm) {
+            match rebase(&path, old_path, new_path) {
+                Some(rebased) => {
+                    new_warm.insert(rebased, entry);
+                }
+                None => {
+                    new_warm.insert(path, entry);
+                }
+            }
+        }
+        for (path, target) in std::mem::take(&mut pending.symlinks) {
+            match rebase(&path, old_path, new_path) {
+                Some(rebased) => {
+                    new_symlinks.insert(rebased, target);
+                }
+                None => {
+                    new_symlinks.insert(path, target);
+                }
+            }
+        }
+        for path in std::mem::take(&mut pending.tombstones) {
+            match rebase(&path, old_path, new_path) {
+                Some(rebased) => {
+                    new_tombstones.insert(rebased);
+                }
+                None => {
+                    new_tombstones.insert(path);
+                }
+            }
+        }
+        for (path, id) in std::mem::take(&mut pending.hot_by_path) {
+            match rebase(&path, old_path, new_path) {
+                Some(rebased) => {
+                    hot_path_updates.push((id, rebased.clone()));
+                    new_hot_by_path.insert(rebased, id);
+                }
+                None => {
+                    new_hot_by_path.insert(path, id);
+                }
+            }
+        }
+        // Rewrite hot-buffer path fields to match.
+        for (id, new_p) in hot_path_updates {
+            if let Some(buf) = pending.hot.get_mut(&id) {
+                buf.path = new_p;
+            }
+        }
+        // Ensure the destination directory itself is registered.
+        new_explicit.insert(new_path.to_path_buf());
+        pending.explicit_dirs = new_explicit;
+        pending.warm = new_warm;
+        pending.symlinks = new_symlinks;
+        pending.tombstones = new_tombstones;
+        pending.hot_by_path = new_hot_by_path;
+        Ok(())
+    }
+
+    /// Resolve a captured-tree file at `path`; returns its
+    /// `(blob, mode, size)`. Errors with `NotFound` if no captured
+    /// entry exists.
+    fn captured_file_at(&self, path: &Path) -> Result<(ContentHash, FileMode, u64)> {
+        let entry = self.captured_tree_entry(path)?;
+        let mode = entry.mode;
+        let size = self.blob_size(&entry.hash)?;
+        Ok((entry.hash, mode, size))
+    }
+
+    fn captured_symlink_at(&self, path: &Path) -> Result<ContentHash> {
+        let entry = self.captured_tree_entry(path)?;
+        if !matches!(entry.entry_type, objects::object::EntryType::Symlink) {
+            return Err(MountError::InvalidArgument(format!(
+                "{} is not a symlink in the captured tree",
+                path.display()
+            )));
+        }
+        Ok(entry.hash)
+    }
+
+    fn captured_tree_entry(&self, path: &Path) -> Result<TreeEntry> {
+        let root_record = self.record_for(NodeId::ROOT)?;
+        let mut tree = self.tree_for_record(&root_record)?;
+        let comps: Vec<&str> = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .collect();
+        let (leaf, dirs) = comps
+            .split_last()
+            .ok_or_else(|| MountError::NotFound(path.display().to_string()))?;
+        for d in dirs {
+            let e = tree
+                .get(d)
+                .ok_or_else(|| MountError::NotFound(path.display().to_string()))?;
+            if !e.is_tree() {
+                return Err(MountError::NotADirectory(d.to_string()));
+            }
+            tree = self.load_tree(&e.hash)?;
+        }
+        let entry = tree
+            .get(leaf)
+            .cloned()
+            .ok_or_else(|| MountError::NotFound(path.display().to_string()))?;
+        Ok(entry)
+    }
+
+    fn captured_dir_exists(&self, path: &Path) -> Result<bool> {
+        match self.captured_tree_entry(path) {
+            Ok(e) => Ok(e.is_tree()),
+            Err(MountError::NotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Apply attribute updates from a FUSE `setattr` / FSKit
+    /// `setattr` / etc. Returns post-update [`Attrs`] for an
+    /// inline reply.
+    pub fn set_attrs(&self, node: NodeId, update: AttrUpdate) -> Result<Attrs> {
+        // Mode mutation: only meaningful for file-kind records.
+        if let Some(raw_mode) = update.mode {
+            let new_mode = if (raw_mode & 0o111) != 0 {
+                FileMode::Executable
+            } else {
+                FileMode::Normal
+            };
+            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            if let Some(record) = inodes.by_id.get_mut(&node.0) {
+                match record {
+                    NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. } => {
+                        *mode = new_mode;
+                    }
+                    _ => {}
+                }
+            }
+            drop(inodes);
+            // Reflect the mode in any open hot buffer + warm-tier
+            // entry so a subsequent `capture` keeps the new mode.
+            let record = self.record_for(node)?;
+            if let Some(path) = match &record {
+                NodeRecord::File { path, .. } | NodeRecord::PendingFile { path, .. } => Some(path),
+                _ => None,
+            } {
+                let path = path.clone();
+                let mut pending = self.inner.pending.lock().expect("pending lock");
+                if let Some(buf) = pending.hot.get_mut(&node.0) {
+                    buf.mode = new_mode;
+                }
+                if let Some(other_id) = pending.hot_by_path.get(&path).copied()
+                    && let Some(buf) = pending.hot.get_mut(&other_id)
+                {
+                    buf.mode = new_mode;
+                }
+                if let Some(entry) = pending.warm.get_mut(&path) {
+                    entry.mode = new_mode;
+                }
+            }
+        }
+
+        // Size mutation: O_TRUNC, ftruncate, etc.
+        if let Some(new_size) = update.size {
+            self.apply_truncate(node, new_size)?;
+        }
+        // uid/gid/mtime: accepted as no-ops. The overlay doesn't carry
+        // per-node ownership / timestamps yet (capture re-derives both
+        // from the agent's principal + mount mtime).
+        self.attrs(node)
+    }
+
+    fn apply_truncate(&self, node: NodeId, new_size: u64) -> Result<()> {
+        let record = self.record_for(node)?;
+        let (path, mode, captured_blob) = match &record {
+            NodeRecord::File {
+                path, mode, blob, ..
+            } => (path.clone(), *mode, Some(*blob)),
+            NodeRecord::PendingFile { path, mode } => (path.clone(), *mode, None),
+            _ => {
+                return Err(MountError::IsADirectory(format!(
+                    "setattr(size) on non-file {record:?}"
+                )));
+            }
+        };
+
+        // If a hot buffer already exists for this node or path,
+        // resize in place.
+        let resized_in_place = {
+            let mut pending = self.inner.pending.lock().expect("pending lock");
+            let id = if pending.hot.contains_key(&node.0) {
+                Some(node.0)
+            } else {
+                pending.hot_by_path.get(&path).copied()
+            };
+            if let Some(id) = id
+                && let Some(buf) = pending.hot.get_mut(&id)
+            {
+                buf.bytes.resize(new_size as usize, 0);
+                buf.last_touched = Instant::now();
+                true
+            } else {
+                false
+            }
+        };
+        if resized_in_place {
+            return Ok(());
+        }
+
+        // No hot buffer — seed from the durable predecessor (warm
+        // tier wins over captured tree) and resize.
+        let seed_blob = {
+            let pending = self.inner.pending.lock().expect("pending lock");
+            pending
+                .warm
+                .get(&path)
+                .map(|e| e.blob)
+                .or(captured_blob)
+        };
+        let mut bytes = match seed_blob {
+            Some(hash) => (*self.load_blob_bytes(&hash)?).to_vec(),
+            None => Vec::new(),
+        };
+        bytes.resize(new_size as usize, 0);
+        let mut pending = self.inner.pending.lock().expect("pending lock");
+        pending.tombstones.remove(&path);
+        pending.hot.insert(
+            node.0,
+            HotBuffer {
+                path: path.clone(),
+                mode,
+                bytes,
+                last_touched: Instant::now(),
+            },
+        );
+        pending.hot_by_path.insert(path, node.0);
+        Ok(())
+    }
+
+    /// Create a symbolic link under `parent`. Target bytes are kept
+    /// in the pending tier verbatim; `capture` writes them as a CAS
+    /// blob and emits a `Symlink` tree entry.
+    pub fn create_symlink(
+        &self,
+        parent: NodeId,
+        name: &OsStr,
+        target: &Path,
+    ) -> Result<Entry> {
+        use std::os::unix::ffi::OsStrExt;
+        let name_str = validate_entry_name(name)?;
+        if self.lookup(parent, name)?.is_some() {
+            return Err(MountError::AlreadyExists(name_str.to_string()));
+        }
+        let parent_record = self.record_for(parent)?;
+        let parent_path = self
+            .dir_path_of(&parent_record)
+            .ok_or_else(|| MountError::NotADirectory(format!("{parent_record:?}")))?;
+        let child_path = join_child(&parent_path, name_str);
+        let target_bytes = target.as_os_str().as_bytes().to_vec();
+        let target_len = target_bytes.len() as u64;
+
+        {
+            let mut pending = self.inner.pending.lock().expect("pending lock");
+            pending.tombstones.remove(&child_path);
+            pending.symlinks.insert(child_path.clone(), target_bytes);
+        }
+        let node = self.intern(NodeRecord::PendingSymlink {
+            path: child_path,
+        });
+        Ok(Entry {
+            node,
+            name: name.to_os_string(),
+            kind: NodeKind::Symlink,
+            size: target_len,
+            unix_mode: FileMode::Symlink.to_unix_mode(),
+        })
+    }
+
+    /// Read the target of a symlink `node`. Works for both overlay
+    /// (`PendingSymlink`) and captured (`Symlink`) records.
+    pub fn read_link(&self, node: NodeId) -> Result<OsString> {
+        use std::os::unix::ffi::OsStrExt;
+        let record = self.record_for(node)?;
+        match record {
+            NodeRecord::PendingSymlink { path } => {
+                let pending = self.inner.pending.lock().expect("pending lock");
+                let bytes = pending
+                    .symlinks
+                    .get(&path)
+                    .ok_or_else(|| MountError::Stale(format!("symlink {}", path.display())))?;
+                Ok(OsStr::from_bytes(bytes).to_os_string())
+            }
+            NodeRecord::Symlink { blob } => {
+                let bytes = self.load_blob_bytes(&blob)?;
+                Ok(OsStr::from_bytes(&bytes).to_os_string())
+            }
+            other => Err(MountError::InvalidArgument(format!(
+                "read_link on non-symlink record: {other:?}"
+            ))),
+        }
+    }
+
     /// Flush all hot buffers to CAS. Useful at the start of `capture`
     /// or when tests want a deterministic warm state.
     pub fn flush_all(&self) -> Result<()> {
@@ -1096,6 +1822,11 @@ impl ContentAddressedMount {
         if pending.tombstones.contains(path) {
             return Some(PendingHit::Tombstone);
         }
+        if let Some(target) = pending.symlinks.get(path) {
+            return Some(PendingHit::Symlink {
+                target_len: target.len() as u64,
+            });
+        }
         if let Some(node_id) = pending.hot_by_path.get(path)
             && let Some(buf) = pending.hot.get(node_id)
         {
@@ -1115,14 +1846,36 @@ impl ContentAddressedMount {
         None
     }
 
+    /// True if the parent dir or any ancestor of `path` has been
+    /// `rmdir`'d through the mount. Used by lookup/enumerate so the
+    /// kernel never sees stale captured children of a directory the
+    /// agent removed.
+    fn ancestor_is_dir_tombstoned(&self, pending: &Pending, path: &Path) -> bool {
+        let mut cursor = path.parent();
+        while let Some(p) = cursor {
+            if p.as_os_str().is_empty() {
+                break;
+            }
+            if pending.dir_tombstones.contains(p) {
+                return true;
+            }
+            cursor = p.parent();
+        }
+        false
+    }
+
     /// Does any pending entry sit *under* `dir` as a strict prefix?
     /// I.e. has an agent created `dir/something` even though `dir`
-    /// itself isn't in the captured tree yet?
+    /// itself isn't in the captured tree yet? An explicit `mkdir dir`
+    /// also counts (so an empty mkdir survives without children).
     fn pending_dir_exists(&self, dir: &Path) -> bool {
         if dir.as_os_str().is_empty() {
             return false;
         }
         let pending = self.inner.pending.lock().expect("pending lock");
+        if pending.explicit_dirs.contains(dir) {
+            return true;
+        }
         let prefix = dir;
         let probe = |path: &Path| -> bool {
             path.strip_prefix(prefix)
@@ -1138,6 +1891,7 @@ impl ContentAddressedMount {
                 .hot_by_path
                 .keys()
                 .any(|p| !pending.tombstones.contains(p) && probe(p))
+            || pending.symlinks.keys().any(|p| probe(p))
     }
 
     /// Direct children of `dir` that exist purely in the pending
@@ -1202,7 +1956,67 @@ impl ContentAddressedMount {
                 });
             }
         }
+        for (path, target) in pending.symlinks.iter() {
+            let Some((name, is_dir)) = project(path) else {
+                continue;
+            };
+            if is_dir {
+                out.entry(name).or_insert(PendingChildKind::Dir);
+            } else {
+                out.entry(name).or_insert(PendingChildKind::Symlink {
+                    size: target.len() as u64,
+                });
+            }
+        }
+        // Explicit empty mkdirs that haven't picked up any pending
+        // children yet. Surface them as direct children when their
+        // parent matches `dir`, and as transitive implicit dirs when
+        // an ancestor matches.
+        for explicit in pending.explicit_dirs.iter() {
+            let Some((name, _is_deeper)) = project(explicit) else {
+                continue;
+            };
+            out.entry(name).or_insert(PendingChildKind::Dir);
+        }
         out.into_iter().collect()
+    }
+}
+
+/// Reject FUSE entry names that wouldn't survive a `TreeEntry`'s
+/// validator: empty, the `.`/`..` pseudo-entries, anything with a
+/// path separator, anything with a NUL byte. Returns the validated
+/// name as a `&str` so callers can build paths without re-decoding.
+fn validate_entry_name<'a>(name: &'a OsStr) -> Result<&'a str> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = name.as_bytes();
+    if bytes.is_empty() {
+        return Err(MountError::InvalidArgument("empty entry name".into()));
+    }
+    if bytes == b"." || bytes == b".." {
+        return Err(MountError::InvalidArgument(format!(
+            "'{}' is not a valid entry name",
+            name.to_string_lossy()
+        )));
+    }
+    if bytes.iter().any(|&b| b == 0 || b == b'/') {
+        return Err(MountError::InvalidArgument(format!(
+            "entry name {:?} contains NUL or '/'",
+            name
+        )));
+    }
+    name.to_str().ok_or_else(|| {
+        MountError::InvalidArgument(format!("entry name {name:?} is not valid UTF-8"))
+    })
+}
+
+/// Join a parent mount-relative path with a leaf name. Mirrors the
+/// shape every write-side op uses, so the construction stays
+/// consistent across the file.
+fn join_child(parent: &Path, name: &str) -> PathBuf {
+    if parent.as_os_str().is_empty() {
+        PathBuf::from(name)
+    } else {
+        parent.join(name)
     }
 }
 
@@ -1253,6 +2067,9 @@ enum PendingHit {
         size: u64,
         mode: FileMode,
     },
+    Symlink {
+        target_len: u64,
+    },
     Tombstone,
 }
 
@@ -1269,6 +2086,9 @@ enum PendingChildKind {
     WarmFile {
         size: u64,
         mode: FileMode,
+    },
+    Symlink {
+        size: u64,
     },
     Dir,
 }
@@ -1446,7 +2266,30 @@ impl PlatformShell for ContentAddressedMount {
                     unix_mode: mode.to_unix_mode(),
                 }));
             }
+            Some(PendingHit::Symlink { target_len }) => {
+                let node = self.intern(NodeRecord::PendingSymlink {
+                    path: child_path.clone(),
+                });
+                return Ok(Some(Entry {
+                    node,
+                    name: OsString::from(name_str),
+                    kind: NodeKind::Symlink,
+                    size: target_len,
+                    unix_mode: FileMode::Symlink.to_unix_mode(),
+                }));
+            }
             None => {}
+        }
+
+        // Did an ancestor get rmdir'd? Then the captured-tree entry
+        // is no longer addressable through this mount.
+        {
+            let pending = self.inner.pending.lock().expect("pending lock");
+            if pending.dir_tombstones.contains(&child_path)
+                || self.ancestor_is_dir_tombstoned(&pending, &child_path)
+            {
+                return Ok(None);
+            }
         }
 
         // Captured tree wins over implicit pending dirs: if both
@@ -1693,6 +2536,19 @@ impl PlatformShell for ContentAddressedMount {
         let tree = self.tree_for_record(&record)?;
         let mut by_name: BTreeMap<String, Entry> = BTreeMap::new();
 
+        // If this directory itself is dir-tombstoned, enumerate
+        // returns empty regardless of any captured children. (A
+        // child rmdir doesn't affect us — only an ancestor or self
+        // tombstone does.)
+        {
+            let pending = self.inner.pending.lock().expect("pending lock");
+            if pending.dir_tombstones.contains(&parent_path)
+                || self.ancestor_is_dir_tombstoned(&pending, &parent_path)
+            {
+                return Ok(vec![]);
+            }
+        }
+
         // Pass 1: captured-tree entries, with pending overlay.
         for tree_entry in tree.entries() {
             let entry_path = if parent_path.as_os_str().is_empty() {
@@ -1700,6 +2556,13 @@ impl PlatformShell for ContentAddressedMount {
             } else {
                 parent_path.join(&tree_entry.name)
             };
+            // Whole-subtree rmdir on a captured dir entry.
+            {
+                let pending = self.inner.pending.lock().expect("pending lock");
+                if pending.dir_tombstones.contains(&entry_path) {
+                    continue;
+                }
+            }
             match self.pending_lookup(&entry_path) {
                 Some(PendingHit::Tombstone) => continue,
                 Some(PendingHit::Hot { node, size, mode }) => {
@@ -1732,6 +2595,22 @@ impl PlatformShell for ContentAddressedMount {
                             kind: kind_for_mode(mode),
                             size,
                             unix_mode: mode.to_unix_mode(),
+                        },
+                    );
+                    continue;
+                }
+                Some(PendingHit::Symlink { target_len }) => {
+                    let node = self.intern(NodeRecord::PendingSymlink {
+                        path: entry_path,
+                    });
+                    by_name.insert(
+                        tree_entry.name.clone(),
+                        Entry {
+                            node,
+                            name: OsString::from(&tree_entry.name),
+                            kind: NodeKind::Symlink,
+                            size: target_len,
+                            unix_mode: FileMode::Symlink.to_unix_mode(),
                         },
                     );
                     continue;
@@ -1796,6 +2675,21 @@ impl PlatformShell for ContentAddressedMount {
                             kind: NodeKind::Directory,
                             size: child_count,
                             unix_mode: DIR_UNIX_MODE,
+                        },
+                    );
+                }
+                PendingChildKind::Symlink { size } => {
+                    let node = self.intern(NodeRecord::PendingSymlink {
+                        path: full_path,
+                    });
+                    by_name.insert(
+                        name.clone(),
+                        Entry {
+                            node,
+                            name: OsString::from(&name),
+                            kind: NodeKind::Symlink,
+                            size,
+                            unix_mode: FileMode::Symlink.to_unix_mode(),
                         },
                     );
                 }
@@ -1865,8 +2759,20 @@ impl PlatformShell for ContentAddressedMount {
                     .ok_or_else(|| MountError::Stale(format!("pending file {}", path.display())))?;
                 let size = match hit {
                     PendingHit::Hot { size, .. } | PendingHit::Warm { size, .. } => size,
+                    PendingHit::Symlink { target_len } => target_len,
                     PendingHit::Tombstone => 0,
                 };
+                (size, 1)
+            }
+            NodeRecord::PendingSymlink { path } => {
+                let pending = self.inner.pending.lock().expect("pending lock");
+                let size = pending
+                    .symlinks
+                    .get(path)
+                    .map(|t| t.len() as u64)
+                    .ok_or_else(|| {
+                        MountError::Stale(format!("pending symlink {}", path.display()))
+                    })?;
                 (size, 1)
             }
         };
@@ -1901,6 +2807,55 @@ impl PlatformShell for ContentAddressedMount {
 
     fn release(&self, node: NodeId) -> Result<()> {
         self.flush_node(node)
+    }
+
+    fn create_file(
+        &self,
+        parent: NodeId,
+        name: &OsStr,
+        mode: FileMode,
+        exclusive: bool,
+    ) -> Result<Entry> {
+        ContentAddressedMount::create_file(self, parent, name, mode, exclusive)
+    }
+
+    fn make_dir(&self, parent: NodeId, name: &OsStr) -> Result<Entry> {
+        ContentAddressedMount::make_dir(self, parent, name)
+    }
+
+    fn unlink_entry(&self, parent: NodeId, name: &OsStr) -> Result<()> {
+        ContentAddressedMount::unlink_entry(self, parent, name)
+    }
+
+    fn rmdir_entry(&self, parent: NodeId, name: &OsStr) -> Result<()> {
+        ContentAddressedMount::rmdir_entry(self, parent, name)
+    }
+
+    fn rename_entry(
+        &self,
+        old_parent: NodeId,
+        old_name: &OsStr,
+        new_parent: NodeId,
+        new_name: &OsStr,
+    ) -> Result<()> {
+        ContentAddressedMount::rename_entry(self, old_parent, old_name, new_parent, new_name)
+    }
+
+    fn set_attrs(&self, node: NodeId, update: AttrUpdate) -> Result<Attrs> {
+        ContentAddressedMount::set_attrs(self, node, update)
+    }
+
+    fn create_symlink(
+        &self,
+        parent: NodeId,
+        name: &OsStr,
+        target: &Path,
+    ) -> Result<Entry> {
+        ContentAddressedMount::create_symlink(self, parent, name, target)
+    }
+
+    fn read_link(&self, node: NodeId) -> Result<OsString> {
+        ContentAddressedMount::read_link(self, node)
     }
 }
 
@@ -2045,6 +3000,9 @@ impl ContentAddressedMount {
             pending.hot_by_path.clear();
             pending.warm.clear();
             pending.tombstones.clear();
+            pending.dir_tombstones.clear();
+            pending.explicit_dirs.clear();
+            pending.symlinks.clear();
         }
         let mut state_lock = self.inner.state.write().expect("mount state lock");
         *state_lock = MountState {
@@ -2096,8 +3054,21 @@ fn apply_pending_to_tree(
         /// File leaves to plant in this directory (overrides any
         /// captured entry of the same name).
         files: BTreeMap<String, (ContentHash, FileMode)>,
+        /// Symlink leaves: name → (blob_oid, target_len). The blob
+        /// is hashed + written at apply time so empty-symlink rename
+        /// flows just need to point at the same hash.
+        symlinks: BTreeMap<String, ContentHash>,
         /// Names to tombstone (file or subdirectory).
         deletions: BTreeSet<String>,
+        /// Subtrees to drop entirely (captured-dir `rmdir`). The
+        /// materialize pass removes both the captured entry and any
+        /// pending children planted by a deeper write under it.
+        dir_deletions: BTreeSet<String>,
+        /// Empty mkdirs that should survive even when no child was
+        /// written. Captured-dir collision is impossible here: an
+        /// existing captured dir would have made the `mkdir` itself
+        /// fail with EEXIST.
+        explicit_empty: BTreeSet<String>,
         /// Named child directories that have pending content.
         children: BTreeMap<String, VDir>,
     }
@@ -2130,6 +3101,50 @@ fn apply_pending_to_tree(
         dir.deletions.remove(*leaf_name);
     }
 
+    // Plant symlinks. Their target bytes get written as a CAS blob
+    // here (lazily) so we never duplicate the hashing cost in the
+    // hot path of `symlink`.
+    for (path, target_bytes) in &pending.symlinks {
+        let comps: Vec<&str> = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .collect();
+        let Some((leaf_name, dir_components)) = comps.split_last() else {
+            continue;
+        };
+        let blob = Blob::new(target_bytes.clone());
+        let blob_oid = store.put_blob(&blob).map_err(MountError::Store)?;
+        let dir = descend(&mut root, dir_components);
+        dir.symlinks.insert((*leaf_name).to_string(), blob_oid);
+        dir.deletions.remove(*leaf_name);
+    }
+
+    // Plant explicit-empty directories. We descend to the leaf dir
+    // and mark its name in the *parent*'s `explicit_empty` set, so
+    // materialize emits a zero-entry subtree even with no children.
+    for explicit in &pending.explicit_dirs {
+        let comps: Vec<&str> = explicit
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .collect();
+        let Some((leaf_name, dir_components)) = comps.split_last() else {
+            continue;
+        };
+        let parent_dir = descend(&mut root, dir_components);
+        parent_dir
+            .explicit_empty
+            .insert((*leaf_name).to_string());
+        // Also ensure the dir's own VDir exists so materialize
+        // visits it (descend into the leaf one extra step).
+        parent_dir.children.entry((*leaf_name).to_string()).or_default();
+    }
+
     // Plant tombstones. Each tombstone names a *file* the agent
     // deleted; we record it on the leaf directory so materialization
     // skips both any pre-existing entry and any virtual file with
@@ -2147,7 +3162,30 @@ fn apply_pending_to_tree(
         };
         let dir = descend(&mut root, dir_components);
         dir.files.remove(*leaf_name);
+        dir.symlinks.remove(*leaf_name);
         dir.deletions.insert((*leaf_name).to_string());
+    }
+
+    // Plant directory tombstones. Each names a captured-tree
+    // directory the agent `rmdir`'d. The materialize pass deletes
+    // both the captured entry and any virtual children that ended
+    // up under it (a pathological case — `rmdir` requires empty —
+    // but cheap to guard against).
+    for tomb in &pending.dir_tombstones {
+        let comps: Vec<&str> = tomb
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(n) => n.to_str(),
+                _ => None,
+            })
+            .collect();
+        let Some((leaf_name, dir_components)) = comps.split_last() else {
+            continue;
+        };
+        let dir = descend(&mut root, dir_components);
+        dir.children.remove(*leaf_name);
+        dir.explicit_empty.remove(*leaf_name);
+        dir.dir_deletions.insert((*leaf_name).to_string());
     }
 
     /// Materialize a virtual directory against its captured counterpart
@@ -2171,6 +3209,9 @@ fn apply_pending_to_tree(
         for name in &v.deletions {
             entries.remove(name);
         }
+        for name in &v.dir_deletions {
+            entries.remove(name);
+        }
 
         // File overrides.
         for (name, (blob, mode)) in &v.files {
@@ -2181,8 +3222,24 @@ fn apply_pending_to_tree(
             entries.insert(name.clone(), entry);
         }
 
+        // Symlink overrides.
+        for (name, blob) in &v.symlinks {
+            let entry = TreeEntry::symlink(name.clone(), *blob).map_err(|e| {
+                MountError::Store(objects::error::HeddleError::InvalidObject(e.to_string()))
+            })?;
+            entries.insert(name.clone(), entry);
+        }
+
         // Recurse into each pending subdirectory.
         for (name, child) in &v.children {
+            // dir_deletions wins: if the agent `rmdir`'d this name,
+            // drop the whole subtree regardless of any pending
+            // virtual children (which `rmdir` requires to be empty
+            // — this branch is the belt + braces).
+            if v.dir_deletions.contains(name) {
+                entries.remove(name);
+                continue;
+            }
             // Captured counterpart: if `captured` already has a
             // subdir under this name, load it; otherwise start from
             // an empty tree.
@@ -2193,8 +3250,19 @@ fn apply_pending_to_tree(
                     .unwrap_or_default(),
                 _ => Tree::new(),
             };
+            let force_empty = v.explicit_empty.contains(name);
             match materialize(child, &child_captured, store)? {
                 Some(hash) => {
+                    let entry = TreeEntry::directory(name.clone(), hash).map_err(|e| {
+                        MountError::Store(objects::error::HeddleError::InvalidObject(e.to_string()))
+                    })?;
+                    entries.insert(name.clone(), entry);
+                }
+                None if force_empty => {
+                    // Empty mkdir survives capture as a 0-entry tree.
+                    let hash = store
+                        .put_tree(&Tree::new())
+                        .map_err(MountError::Store)?;
                     let entry = TreeEntry::directory(name.clone(), hash).map_err(|e| {
                         MountError::Store(objects::error::HeddleError::InvalidObject(e.to_string()))
                     })?;
