@@ -46,7 +46,7 @@ Heddle's CLI follows five operating principles — trust, disposability, composa
 
 ### Foundation in place
 
-- Hosted client (`heddle-cli`'s optional `client` feature pulls in `weft-client-shim` for talking to a hosted backend)
+- Hosted client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to a hosted backend; `weft-client-shim` is always present as a non-optional dep)
 - Verification and trust metadata across the wire protocol
 
 ### Planned
@@ -114,14 +114,14 @@ heddle blame path/to/file.rs
 
 ## Agent-friendly output
 
-Heddle is designed for programmatic use by agents and automation. Most read-shaped commands take `--json`:
+Heddle is designed for programmatic use by agents and automation. Most read-shaped commands take `--output json` (the legacy `--json` flag is deprecated; `--output auto` — the default — renders text on a TTY and JSON when stdout is piped):
 
 ```bash
-heddle status --json
-heddle diagnose --json
-heddle diff --json
-heddle log --json
-heddle show HEAD --json
+heddle status --output json
+heddle diagnose --output json
+heddle diff --output json
+heddle log --output json
+heddle show HEAD --output json
 ```
 
 See [.agents/agent-workflows.md](.agents/agent-workflows.md) for durable automation guidance.
