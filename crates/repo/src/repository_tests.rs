@@ -992,6 +992,50 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
     }
 }
 
+/// Regression for heddle#146: in git-overlay mode `Repository::open`
+/// auto-syncs heddle's HEAD to git's branch tip. That sync MUST NOT
+/// clobber an explicit `Head::Detached` written by `heddle goto`.
+/// Otherwise the next `open()` (every CLI invocation reopens) silently
+/// reattaches HEAD, and subsequent commands compare the worktree against
+/// the wrong state — `status` reports the goto target as "dirty" and
+/// `undo` refuses with "uncommitted changes".
+#[test]
+fn test_open_preserves_explicit_detached_head_in_git_overlay() {
+    let temp_dir = TempDir::new().unwrap();
+    // Fake a minimal git-overlay layout: just `.git/HEAD` pointing at a
+    // branch ref. `has_git_metadata` flips capability to GitOverlay; the
+    // open-time sync reads this file via `detect_git_head_fast`.
+    let git_dir = temp_dir.path().join(".git");
+    fs::create_dir_all(&git_dir).unwrap();
+    fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+
+    fs::write(temp_dir.path().join("a.txt"), "version 1").unwrap();
+    let state1 = repo.snapshot(Some("v1".to_string()), None).unwrap();
+    fs::write(temp_dir.path().join("a.txt"), "version 2").unwrap();
+    let _state2 = repo.snapshot(Some("v2".to_string()), None).unwrap();
+
+    repo.goto(&state1.change_id).unwrap();
+    assert!(
+        matches!(repo.refs().read_head().unwrap(), Head::Detached { state } if state == state1.change_id),
+        "goto should leave HEAD detached at the target"
+    );
+    drop(repo);
+
+    // Reopen: this is what every subsequent CLI invocation does. The
+    // open-time git-overlay sync used to overwrite the detached HEAD
+    // with `Head::Attached { thread: "main" }`.
+    let reopened = Repository::open(temp_dir.path()).unwrap();
+    let head = reopened.refs().read_head().unwrap();
+    assert!(
+        matches!(head, Head::Detached { state } if state == state1.change_id),
+        "reopen must preserve explicit detached HEAD; got {:?}",
+        head
+    );
+    assert_eq!(reopened.head().unwrap(), Some(state1.change_id));
+}
+
 /// Regression: `op_scope` must not embed the user's absolute filesystem
 /// path. The previous behavior canonicalized HEAD to its absolute path
 /// and recorded that on every oplog entry — when an oplog containing
