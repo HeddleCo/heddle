@@ -391,7 +391,7 @@ fn run_audit_idempotency() -> Result<()> {
         .parent()
         .and_then(|path| path.parent())
         .context("failed to locate workspace root")?;
-    let proto_path = workspace_root.join("proto/heddle/v1/service.proto");
+    let proto_path = workspace_root.join("crates/grpc/proto/heddle/v1/service.proto");
     let source = fs::read_to_string(&proto_path)
         .with_context(|| format!("read {}", proto_path.display()))?;
 
@@ -645,7 +645,11 @@ fn run_web_proto(args: Vec<String>) -> Result<()> {
         .parent()
         .and_then(|path| path.parent())
         .context("failed to locate workspace root")?;
-    let proto_dir = workspace_root.join("proto");
+    // Canonical proto source — same path the `heddle-grpc` build
+    // script and the `audit-idempotency` lint read from. Keeping a
+    // single source eliminates the drift class that landed stale
+    // mirrors under `proto/` (see heddle#71).
+    let proto_dir = workspace_root.join("crates/grpc/proto");
     let proto_file = proto_dir.join("heddle/v1/service.proto");
     let web_dir = workspace_root.join("web");
     let output_root = web_dir.join("src/lib/gen/proto");
@@ -741,4 +745,45 @@ fn assert_file_matches(generated: &Path, checked_in: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests_proto_single_source {
+    use std::path::PathBuf;
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root from CARGO_MANIFEST_DIR")
+            .to_path_buf()
+    }
+
+    // Heddle ships exactly one canonical `service.proto`, at
+    // `crates/grpc/proto/heddle/v1/service.proto`. The historical
+    // mirrors at `proto/heddle/v1/` and `proto/proto/heddle/v1/`
+    // drifted (missing `RedactionTransfer` before heddle#63 r1).
+    #[test]
+    fn only_canonical_proto_exists() {
+        let root = workspace_root();
+        let canonical = root.join("crates/grpc/proto/heddle/v1/service.proto");
+        assert!(
+            canonical.exists(),
+            "canonical proto missing at {}",
+            canonical.display()
+        );
+
+        for mirror in [
+            "proto/heddle/v1/service.proto",
+            "proto/proto/heddle/v1/service.proto",
+        ] {
+            let p = root.join(mirror);
+            assert!(
+                !p.exists(),
+                "duplicate proto mirror still present: {} — single-source contract requires {} only",
+                p.display(),
+                canonical.display()
+            );
+        }
+    }
 }
