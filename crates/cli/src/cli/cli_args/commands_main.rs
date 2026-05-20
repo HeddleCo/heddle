@@ -215,6 +215,7 @@ Examples:
     /// --first-parent <branch>`. To see every ancestor reachable through
     /// merge commits, pass `--graph` (which renders the full DAG) or
     /// `--all` (which lists every state regardless of ancestry).
+    #[command(visible_alias = "history")]
     Log(LogArgs),
 
     /// Show state details.

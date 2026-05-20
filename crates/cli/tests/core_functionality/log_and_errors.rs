@@ -91,3 +91,24 @@ fn test_log_path_filter_rejects_parent_traversal() {
     let result = heddle(&["log", "--path", "../secret"], Some(temp.path()));
     assert!(result.is_err());
 }
+
+/// `heddle history` is a discoverability alias for `heddle log`.
+///
+/// `history` is the verb users reach for first when they want to see
+/// state history; the OSS UX review (heddle#149) caught that it was
+/// missing and clap suggested unrelated commands. The alias keeps the
+/// natural verb working without splitting the implementation.
+#[test]
+fn test_history_alias_for_log() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("file.txt"), "first").unwrap();
+    heddle_must_succeed(&["capture", "-m", "First"], temp.path());
+    std::fs::write(temp.path().join("file.txt"), "second").unwrap();
+    heddle_must_succeed(&["capture", "-m", "Second"], temp.path());
+
+    let log_out = heddle(&["log", "--json"], Some(temp.path())).unwrap();
+    let history_out = heddle(&["history", "--json"], Some(temp.path()))
+        .expect("`heddle history` should be accepted as an alias for `heddle log`");
+    assert_eq!(log_out, history_out);
+}
