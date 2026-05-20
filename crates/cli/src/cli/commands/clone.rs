@@ -227,23 +227,12 @@ fn finish_git_overlay_clone(
             stats.commits_imported
         );
     } else {
-        println!(
-            "{} cloned {} into {}",
-            style::ok_marker(),
-            style::dim(&remote_label),
-            style::bold(&local_path.display().to_string())
-        );
-        println!(
-            "  {}",
-            style::field(
-                "imported",
-                &format!(
-                    "{}; checked out {}",
-                    style::count(stats.commits_imported, "Git commit"),
-                    style::bold(&track_name)
-                )
-            )
-        );
+        let repo_name = clone_repo_name_from_label(&remote_label);
+        for line in
+            format_clone_completion_lines(repo_name, stats.commits_imported, &track_name)
+        {
+            println!("{line}");
+        }
     }
     Ok(())
 }
@@ -262,6 +251,77 @@ fn write_git_overlay_origin(local_path: &Path, remote_label: &str) -> Result<()>
     ));
     fs::write(config_path, contents)?;
     Ok(())
+}
+
+/// Best-effort repo-name extraction for the text-mode clone summary.
+///
+/// The remote label can be a HTTPS URL, an SSH spec
+/// (`git@host:owner/repo.git`), a `file://` URL, or a plain filesystem
+/// path. We do not try to fully parse any of these — we just want the
+/// last path-like segment so the human-facing line can say "Cloned
+/// ripgrep" instead of dumping the whole URL again next to where the
+/// URL was already echoed by the dim-styled source label. If the input
+/// has no usable segment, return it unchanged so the rendered summary
+/// still carries something identifying.
+fn clone_repo_name_from_label(label: &str) -> &str {
+    // `:` is only an SSH/SCP host/path separator when the prefix has no
+    // path separator (git's local-path rule) and isn't a Windows drive
+    // (`C:\…` or `C:/…`). Splitting unconditionally truncated Windows
+    // drive paths and any local path with a literal colon.
+    let after_colon = match label.find(':') {
+        Some(colon_pos) => {
+            let prefix = &label[..colon_pos];
+            let rest = &label[colon_pos + 1..];
+            let is_windows_drive = prefix.len() == 1
+                && prefix
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic())
+                && (rest.starts_with('\\') || rest.starts_with('/'));
+            let prefix_has_separator = prefix.contains('/') || prefix.contains('\\');
+            if is_windows_drive || prefix_has_separator {
+                label
+            } else {
+                rest
+            }
+        }
+        None => label,
+    };
+    let is_sep = |c: char| c == '/' || c == '\\';
+    let segment = after_colon
+        .trim_end_matches(is_sep)
+        .rsplit(is_sep)
+        .find(|part| !part.is_empty())
+        .unwrap_or(after_colon);
+    segment.strip_suffix(".git").unwrap_or(segment)
+}
+
+/// Render the human-facing clone-completion summary as three lines.
+///
+/// The shape — repo name + commit count, current thread, next-step
+/// hint — comes from heddle#161: the previous text mode printed a terse
+/// `cloned <url> into <path>` / `imported: N Git commits` pair that
+/// scanned like a JSON dump rather than guidance. Returning a `Vec<String>`
+/// (one entry per output line) keeps the formatter unit-testable without
+/// having to capture process stdout.
+fn format_clone_completion_lines(
+    repo_name: &str,
+    commits_imported: usize,
+    thread_name: &str,
+) -> Vec<String> {
+    vec![
+        format!(
+            "{} Cloned {} ({} imported).",
+            style::ok_marker(),
+            style::bold(repo_name),
+            style::count(commits_imported, "commit"),
+        ),
+        format!(
+            "  {}",
+            style::field("current thread", &style::bold(thread_name))
+        ),
+        format!("  Next: {}", style::bold("heddle log")),
+    ]
 }
 
 /// Pick which imported branch the clone should land on.
@@ -769,6 +829,116 @@ mod tests {
     #[test]
     fn reject_unsupported_passes_when_no_flags_set() {
         assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
+    }
+
+    // ---- clone text-mode summary helpers (heddle#161) ----
+
+    #[test]
+    fn clone_repo_name_strips_https_url_and_dot_git() {
+        assert_eq!(
+            clone_repo_name_from_label("https://github.com/BurntSushi/ripgrep.git"),
+            "ripgrep"
+        );
+        assert_eq!(
+            clone_repo_name_from_label("https://github.com/BurntSushi/ripgrep"),
+            "ripgrep"
+        );
+    }
+
+    #[test]
+    fn clone_repo_name_strips_ssh_url_and_dot_git() {
+        assert_eq!(
+            clone_repo_name_from_label("git@github.com:owner/repo.git"),
+            "repo"
+        );
+    }
+
+    #[test]
+    fn clone_repo_name_extracts_last_filesystem_segment() {
+        assert_eq!(clone_repo_name_from_label("/home/user/foo"), "foo");
+        assert_eq!(clone_repo_name_from_label("file:///tmp/projects/bar/"), "bar");
+    }
+
+    #[test]
+    fn clone_repo_name_falls_back_to_label_when_no_segment() {
+        // Empty or pathologic input: don't panic, return the input as-is
+        // so the rendered summary still carries *something* identifying.
+        assert_eq!(clone_repo_name_from_label(""), "");
+        assert_eq!(clone_repo_name_from_label("///"), "///");
+    }
+
+    #[test]
+    fn clone_repo_name_handles_windows_drive_paths() {
+        // Windows drive prefixes (`C:\…` and `C:/…`) are not SSH/SCP
+        // shorthand — earlier versions unconditionally split on `:` and
+        // dropped the drive letter, producing `\src\ripgrep` instead of
+        // `ripgrep`.
+        assert_eq!(
+            clone_repo_name_from_label("C:\\src\\ripgrep"),
+            "ripgrep"
+        );
+        assert_eq!(clone_repo_name_from_label("C:/src/ripgrep"), "ripgrep");
+        assert_eq!(
+            clone_repo_name_from_label("D:\\workspaces\\heddle.git"),
+            "heddle"
+        );
+    }
+
+    #[test]
+    fn clone_repo_name_handles_local_paths_with_colon() {
+        // Git treats `host:path` as SCP shorthand only when the prefix
+        // contains no path separator. `/tmp/foo:bar/repo` and
+        // `./foo:bar/repo.git` are valid local paths whose basename
+        // must not be shadowed by the colon.
+        assert_eq!(
+            clone_repo_name_from_label("/tmp/foo:bar/repo.git"),
+            "repo"
+        );
+        assert_eq!(
+            clone_repo_name_from_label("./foo:bar/repo.git"),
+            "repo"
+        );
+    }
+
+    #[test]
+    fn format_clone_completion_text_names_repo_and_count_and_thread_and_next_command() {
+        // Style helpers are no-ops when color is uninitialized (test
+        // default), so substring assertions work on the raw text. Keeps
+        // the assertions independent of ANSI escape sequences.
+        let lines = format_clone_completion_lines("ripgrep", 2249, "master");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("ripgrep"),
+            "summary must name the repo: {joined}"
+        );
+        assert!(
+            joined.contains("2249"),
+            "summary must include the commit count: {joined}"
+        );
+        assert!(
+            joined.contains("commit"),
+            "summary must use the word 'commit': {joined}"
+        );
+        assert!(
+            joined.contains("master"),
+            "summary must name the current thread: {joined}"
+        );
+        assert!(
+            joined.to_lowercase().contains("heddle log"),
+            "summary must suggest `heddle log` as the next step: {joined}"
+        );
+    }
+
+    #[test]
+    fn format_clone_completion_singularizes_one_commit() {
+        // Avoid "1 commits" — the style::count helper already singularizes,
+        // but pin it here so a future formatter refactor doesn't regress.
+        let lines = format_clone_completion_lines("tiny", 1, "main");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("1 commit ") || joined.contains("1 commit\n") || joined.ends_with("1 commit"),
+            "one commit must not pluralize: {joined}"
+        );
     }
 
     #[cfg(feature = "client")]
