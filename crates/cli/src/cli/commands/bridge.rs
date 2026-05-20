@@ -353,6 +353,8 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             progress.advance("writing refs");
             progress.finish();
 
+            let already_in_sync =
+                stats.states_created == 0 && stats.commits_imported > 0;
             if should_output_json(cli, Some(repo.config())) {
                 let out = serde_json::json!({
                     "commits_imported": stats.commits_imported,
@@ -361,14 +363,24 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     "tags_synced": stats.tags_synced,
                     "skipped_non_commit_refs": stats.skipped_non_commit_refs.len(),
                     "partial_mirror_refs": stats.partial_mirror_refs.len(),
+                    "already_in_sync": already_in_sync,
                 });
                 println!("{out}");
             } else {
-                println!(
-                    "{} imported Git history from {}",
-                    style::ok_marker(),
-                    style::dim(&source_label)
-                );
+                if already_in_sync {
+                    println!(
+                        "{} already in sync with {} — every commit was \
+                         already imported",
+                        style::ok_marker(),
+                        style::dim(&source_label)
+                    );
+                } else {
+                    println!(
+                        "{} imported Git history from {}",
+                        style::ok_marker(),
+                        style::dim(&source_label)
+                    );
+                }
                 println!(
                     "  {}",
                     style::field("commits", &style::bold(&stats.commits_imported.to_string()))

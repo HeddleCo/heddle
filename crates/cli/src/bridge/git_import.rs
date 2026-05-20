@@ -531,11 +531,14 @@ fn import_with_ref_filter(
                 && !thread_can_adopt_change(bridge.heddle_repo, &existing, &change_id)?
             {
                 return Err(GitBridgeError::Conflict(format!(
-                    "thread {} at {} differs from branch {} at {}. \
-                     To recover, switch to '{}' and run `heddle sync` after \
-                     resolving the divergent history, or explicitly reset the \
-                     Heddle thread if the Git branch should replace it.",
-                    name, existing, name, change_id, name
+                    "thread {name} at {existing} differs from branch {name} at \
+                     {change_id}. The Heddle thread and the Git branch have \
+                     diverged — neither is an ancestor of the other. To \
+                     recover: run `heddle bridge git sync` to reconcile \
+                     both sides (exports Heddle states then re-imports), \
+                     or if the Git branch should replace the Heddle thread \
+                     wholesale, drop the thread first with `heddle thread \
+                     drop {name} --delete-thread` and rerun the import.",
                 )));
             }
 
@@ -704,9 +707,17 @@ fn import_commit_ancestry(
                         oid,
                     )?;
                     bridge.mapping.insert(change_id, oid);
-                    stats.commits_imported += 1;
                     stats.states_created += 1;
                 }
+                // Counted regardless of `needs_state`: `commits_imported`
+                // reports commits **walked from the source**, mirroring
+                // what `bridge git ingest` reports. Without this, an
+                // already-imported ref read 0 in the JSON even though
+                // every commit in the ancestry had been resolved —
+                // which is what made heddle#147 look like a silent
+                // failure next to `ingest`. `states_created` retains
+                // the "new heddle states written" meaning.
+                stats.commits_imported += 1;
                 visiting.remove(&oid);
                 imported.insert(oid);
             }
