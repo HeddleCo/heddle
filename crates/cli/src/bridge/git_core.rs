@@ -1155,7 +1155,71 @@ pub fn clone_url_to_bare(
     if filter.is_some() {
         return clone_url_to_bare_via_git(url, dest, depth, filter);
     }
-    clone_url_to_bare_via_gix(url, dest, depth)
+    clone_url_to_bare_via_gix(url, dest, depth)?;
+    // gix's `init_bare` writes `.git/HEAD = ref: refs/heads/<init.defaultBranch>`
+    // (typically "main" or "master") regardless of what the remote
+    // advertises, and the fetch above doesn't touch HEAD. If we leave
+    // that in place, downstream `select_clone_thread` and
+    // `detect_git_head` will steer the user to a branch the remote may
+    // not even have — observed: cloning ripgrep landed users on
+    // `ag/bstr-migration` (alphabetically first imported thread) when
+    // the remote's actual default is `master`. Honour the remote's
+    // `HEAD` symref when we can resolve it.
+    if let Some(branch) = resolve_remote_default_branch(url)
+        && dest.join("refs").join("heads").join(&branch).exists()
+    {
+        fs::write(dest.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
+    }
+    Ok(())
+}
+
+/// Resolve the remote's default branch via `git ls-remote --symref <url> HEAD`.
+///
+/// Returns the short branch name (e.g. `"master"`) when the remote
+/// advertises `HEAD` as a symbolic ref under `refs/heads/`. Returns
+/// `None` on any failure — missing `git` binary, network error,
+/// detached remote HEAD, malformed output — so callers can fall back to
+/// the previous heuristic without breaking.
+///
+/// We shell out rather than re-using the gix fetch handshake because
+/// gix 0.80's high-level builder doesn't surface the symref capability
+/// through the prepare/receive API: the symref metadata is parsed into
+/// per-ref `Mapping`s only as a side-effect of capability negotiation,
+/// and the public `Prepare` doesn't expose it on the gix versions we
+/// pin. `git ls-remote --symref` is a single round trip and is
+/// available wherever the `--filter` path is.
+pub fn resolve_remote_default_branch(url: &gix::Url) -> Option<String> {
+    let output = Command::new("git")
+        .args(["ls-remote", "--symref"])
+        .arg(url.to_string())
+        .arg("HEAD")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = std::str::from_utf8(&output.stdout).ok()?;
+    parse_symref_head(stdout)
+}
+
+/// Parse the first `ref: refs/heads/<branch>\tHEAD` line from
+/// `git ls-remote --symref` output. Extracted so the parsing rules
+/// (which catch malformed servers and detached HEAD) can be unit-tested
+/// without invoking the git binary.
+fn parse_symref_head(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        let rest = line.strip_prefix("ref: ")?;
+        let (target, label) = rest.split_once('\t')?;
+        if label.trim() != "HEAD" {
+            continue;
+        }
+        let branch = target.strip_prefix("refs/heads/")?;
+        if branch.is_empty() {
+            return None;
+        }
+        return Some(branch.to_string());
+    }
+    None
 }
 
 fn clone_url_to_bare_via_gix(url: &gix::Url, dest: &Path, depth: Option<u32>) -> GitResult<()> {
@@ -1539,4 +1603,132 @@ fn read_receive_pack_status(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_symref_head_reads_branch_from_typical_output() {
+        // Real `git ls-remote --symref <url> HEAD` shape: a `ref:`
+        // symref line followed by the resolved OID/HEAD line.
+        let stdout = "ref: refs/heads/master\tHEAD\n\
+                      9abc123def456\tHEAD\n";
+        assert_eq!(parse_symref_head(stdout), Some("master".to_string()));
+    }
+
+    #[test]
+    fn parse_symref_head_handles_branch_names_with_slashes() {
+        // Cloning into a non-namespaced branch like `feature/foo` is
+        // exotic for a remote default, but the parser must not split
+        // on the first `/` — only on the leading `refs/heads/` prefix.
+        let stdout = "ref: refs/heads/release/v1\tHEAD\n";
+        assert_eq!(parse_symref_head(stdout), Some("release/v1".to_string()));
+    }
+
+    #[test]
+    fn parse_symref_head_returns_none_for_detached_head() {
+        // A remote with detached HEAD doesn't emit a `ref:` line —
+        // only a raw OID. Returning `None` keeps the caller on its
+        // fallback path (alphabetical-first) rather than guessing.
+        let stdout = "9abc123def456\tHEAD\n";
+        assert_eq!(parse_symref_head(stdout), None);
+    }
+
+    #[test]
+    fn parse_symref_head_rejects_symref_to_non_heads_namespace() {
+        // A symref pointing outside `refs/heads/` (e.g. a tag) can't
+        // be honoured by our flow — `select_clone_thread` only
+        // imports `refs/heads/*` as threads, so we'd be pinning HEAD
+        // to a name with no matching thread.
+        let stdout = "ref: refs/tags/v1.0\tHEAD\n";
+        assert_eq!(parse_symref_head(stdout), None);
+    }
+
+    #[test]
+    fn parse_symref_head_returns_none_for_empty_branch_name() {
+        // Defensive: a malformed `ref: refs/heads/\tHEAD` line
+        // shouldn't crash, and shouldn't return an empty string that
+        // would later become an empty thread name.
+        let stdout = "ref: refs/heads/\tHEAD\n";
+        assert_eq!(parse_symref_head(stdout), None);
+    }
+
+    /// heddle#141 regression: when the URL-fetch path of
+    /// `clone_url_to_bare` runs against a bare repo whose `HEAD`
+    /// points at a branch that is *not* alphabetically first (and
+    /// crucially, not what gix's `init_bare` defaults to), the
+    /// resulting dest bare must have `HEAD` pointing at the remote
+    /// default — not gix's init-time guess.
+    #[test]
+    fn clone_url_to_bare_via_gix_honours_remote_head_symref() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("source.git");
+        let dest = tmp.path().join("dest.git");
+
+        // Build a bare source with two branches under
+        // deliberately-non-default names: `trunk` (will be the
+        // remote default — neither gix's `init.defaultBranch` nor
+        // the alphabetically-first imported ref would land here by
+        // accident) and `abc-feature` (alphabetically first — what
+        // the buggy fallback used to pick).
+        let src = gix::init_bare(&source).expect("init bare source");
+        // Empty tree (well-known OID) so we don't have to build a
+        // tree object explicitly.
+        let empty_tree_oid: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+            .parse()
+            .expect("parse empty tree oid");
+        // Use an explicit signature via `new_commit_as` rather than
+        // `Repository::commit`. The latter reads `user.name`/`user.email`
+        // from git config, which CI runners don't set — leading to
+        // `AuthorMissing` errors. The clone path under test doesn't care
+        // who authored these seed commits.
+        let sig = gix::actor::Signature {
+            name: "Heddle Test".into(),
+            email: "heddle@test".into(),
+            time: gix::date::Time {
+                seconds: 0,
+                offset: 0,
+            },
+        };
+        let mut committer_buf = gix::date::parse::TimeBuf::default();
+        let mut author_buf = gix::date::parse::TimeBuf::default();
+        let seed = src
+            .new_commit_as(
+                sig.to_ref(&mut committer_buf),
+                sig.to_ref(&mut author_buf),
+                "seed",
+                empty_tree_oid,
+                gix::commit::NO_PARENT_IDS,
+            )
+            .expect("seed commit")
+            .id;
+        for name in ["refs/heads/trunk", "refs/heads/abc-feature"] {
+            set_reference(
+                &src,
+                name,
+                seed,
+                PreviousValue::Any,
+                "test: seed branch",
+            )
+            .expect("set ref");
+        }
+        // Make sure HEAD on the source points at trunk so
+        // `git ls-remote --symref` reports trunk.
+        std::fs::write(source.join("HEAD"), b"ref: refs/heads/trunk\n").unwrap();
+
+        let url = gix::url::parse(format!("file://{}", source.display()).as_bytes().into())
+            .expect("parse file:// url");
+        clone_url_to_bare(&url, &dest, None, None).expect("clone url to bare");
+
+        let dest_head = std::fs::read_to_string(dest.join("HEAD")).expect("read dest HEAD");
+        assert_eq!(
+            dest_head.trim(),
+            "ref: refs/heads/trunk",
+            "dest HEAD must mirror the remote's symref (trunk), not gix's \
+             init-time default and not the alphabetically-first branch \
+             (abc-feature) — see heddle#141"
+        );
+    }
 }

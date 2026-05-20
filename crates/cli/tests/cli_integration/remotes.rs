@@ -189,6 +189,126 @@ fn test_cli_clone_git_overlay_lazy_is_rejected() {
     );
 }
 
+/// heddle#141 + heddle#142 regression: cloning a git repo whose `HEAD`
+/// points at a branch that is not alphabetically first must (1) land
+/// the user on the remote's actual default branch and (2) leave
+/// `heddle log` walking the imported history, not just a freshly
+/// minted bootstrap state.
+///
+/// We exercise the local-overlay path (`copy_local_repo_to_bare`)
+/// because it's hermetic. The URL-overlay path has its own unit-level
+/// regression in `bridge::git_core::tests` that verifies
+/// `clone_url_to_bare` mirrors the remote symref into `.git/HEAD`,
+/// which is what feeds the same `select_clone_thread` selection
+/// logic this test pins.
+#[test]
+fn test_cli_clone_git_overlay_lands_on_remote_default_branch_and_log_walks_history() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.git");
+    let work = temp.path().join("work");
+
+    // Build a bare git source with `trunk` (the default, with two
+    // commits so we can confirm log walks history) and
+    // `abc-feature` (alphabetically first — the trap heddle#141 used
+    // to fall into). Branch names deliberately avoid `main`/`master`
+    // so neither gix's `init.defaultBranch` nor the previous
+    // fallback could land here by accident.
+    let src = gix::init_bare(&source).expect("init bare source");
+    let empty_tree: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        .parse()
+        .expect("parse empty tree oid");
+    // Use an explicit signature via `new_commit_as` rather than
+    // `Repository::commit`. The latter reads `user.name`/`user.email`
+    // from git config, which CI runners don't set — leading to
+    // `AuthorMissing` errors. The clone path under test doesn't care
+    // who authored these seed commits.
+    let sig = gix::actor::Signature {
+        name: "Heddle Test".into(),
+        email: "heddle@test".into(),
+        time: gix::date::Time {
+            seconds: 0,
+            offset: 0,
+        },
+    };
+    let commit_as = |message: &str, parents: Vec<gix::ObjectId>| -> gix::ObjectId {
+        let mut committer_buf = gix::date::parse::TimeBuf::default();
+        let mut author_buf = gix::date::parse::TimeBuf::default();
+        src.new_commit_as(
+            sig.to_ref(&mut committer_buf),
+            sig.to_ref(&mut author_buf),
+            message,
+            empty_tree,
+            parents,
+        )
+        .expect("commit succeeds")
+        .id
+    };
+    let trunk_first = commit_as("seed trunk", vec![]);
+    let trunk_tip = commit_as("advance trunk", vec![trunk_first]);
+    let abc_feature = commit_as("seed abc-feature", vec![]);
+    src.reference(
+        "refs/heads/trunk",
+        trunk_tip,
+        gix::refs::transaction::PreviousValue::Any,
+        "test: seed trunk",
+    )
+    .expect("set trunk ref");
+    src.reference(
+        "refs/heads/abc-feature",
+        abc_feature,
+        gix::refs::transaction::PreviousValue::Any,
+        "test: seed abc-feature",
+    )
+    .expect("set abc-feature ref");
+    std::fs::write(source.join("HEAD"), b"ref: refs/heads/trunk\n").unwrap();
+
+    let source_arg = source.to_str().expect("source path utf8");
+    let work_arg = work.to_str().expect("work path utf8");
+    let output = heddle(&["clone", source_arg, work_arg], None).expect("clone succeeds");
+    assert!(
+        output.contains("trunk"),
+        "clone output should advertise the chosen branch (trunk): {output}"
+    );
+
+    // heddle#141: HEAD should land on `trunk`, not the
+    // alphabetically-first `abc-feature`.
+    let heddle_head =
+        std::fs::read_to_string(work.join(".heddle").join("HEAD")).expect("read heddle HEAD");
+    assert_eq!(
+        heddle_head.trim(),
+        "ref: trunk",
+        "heddle HEAD must attach to the remote's default branch (trunk), \
+         not the alphabetically-first imported branch (abc-feature) — \
+         see heddle#141. Got: {heddle_head:?}"
+    );
+
+    // heddle#142: log must walk the imported history, not surface a
+    // freshly-minted bootstrap state. Two trunk commits → two real
+    // states (the synthetic `heddle init` root is filtered).
+    let log_json = heddle(&["log", "--output", "json"], Some(&work)).expect("log succeeds");
+    let parsed: serde_json::Value = serde_json::from_str(&log_json).expect("log json parses");
+    let states = parsed
+        .get("states")
+        .and_then(|s| s.as_array())
+        .expect("log output has a states array");
+    assert!(
+        states.len() >= 2,
+        "heddle log should walk the imported trunk history (>=2 states), \
+         not just a fresh bootstrap snapshot — see heddle#142. \
+         States: {states:#?}"
+    );
+    let bootstrap_only = states.len() == 1
+        && states[0]
+            .get("intent")
+            .and_then(|v| v.as_str())
+            .is_some_and(|intent| intent.contains("Bootstrap git-overlay"));
+    assert!(
+        !bootstrap_only,
+        "heddle log surfaced only the synthetic bootstrap state — \
+         this is the heddle#142 failure mode. States: {states:#?}"
+    );
+}
+
 #[test]
 fn test_cli_clone_git_overlay_filter_is_rejected() {
     // Issue 49 / 20b: same shape as --depth / --lazy — `--filter` is
@@ -310,12 +430,11 @@ fn test_cli_fetch_local_creates_remote_thread_and_marker() {
     assert!(heddle(&["fetch", "origin"], Some(local.path())).is_ok());
 
     let repo = Repository::open(local.path()).unwrap();
-    assert!(
-        repo.refs()
-            .get_remote_thread("origin", "main")
-            .unwrap()
-            .is_some()
-    );
+    assert!(repo
+        .refs()
+        .get_remote_thread("origin", "main")
+        .unwrap()
+        .is_some());
     assert!(repo.refs().get_marker("v1.0").unwrap().is_some());
 }
 

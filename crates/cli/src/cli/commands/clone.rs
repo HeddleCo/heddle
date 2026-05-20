@@ -144,14 +144,18 @@ fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
     if let Some(filter) = options.filter.as_deref() {
         return Err(anyhow!(
             "--filter {} is not yet supported for Git-overlay clones; \
-             the import step requires all blobs locally. Run a full clone for now.",
+             the import step requires all blobs locally. Run a full clone \
+             for now — lazy hydration over the Git transport is planned \
+             for v0.3.1 (see heddle#143).",
             filter
         ));
     }
     if options.lazy {
         return Err(anyhow!(
             "--lazy is not yet supported for Git-overlay clones; \
-             the import step requires all blobs locally. Run a full clone for now."
+             the import step requires all blobs locally. Run a full clone \
+             for now — lazy hydration over the Git transport is planned \
+             for v0.3.1 (see heddle#143)."
         ));
     }
     if options.depth.is_some() {
@@ -184,15 +188,35 @@ fn finish_git_overlay_clone(
         import_all(&mut bridge, Some(&local_path.join(".git"))).map_err(anyhow::Error::msg)?
     };
 
-    let track_name = select_clone_thread(&repo, options.thread.as_deref())?;
-    repo.refs().write_head(&Head::Attached {
-        thread: track_name.clone(),
-    })?;
+    let track_name = select_clone_thread(
+        &repo,
+        options.thread.as_deref(),
+        read_git_head_branch(&local_path.join(".git")).as_deref(),
+    )?;
     let state_id = repo
         .refs()
         .get_thread(&track_name)?
         .ok_or_else(|| anyhow!("Git clone did not import branch '{}'", track_name))?;
+    // Materialize the imported tip *while HEAD is still on the
+    // init-time default* — `goto` writes `Head::Detached`, which is
+    // fine here because we re-attach immediately below. Switching to
+    // `fast_forward_attached` would mis-advance whichever thread HEAD
+    // happens to be on at this point (the seeded `main`, not the
+    // cloned thread).
     repo.goto(&state_id)?;
+    // Re-attach HEAD to the cloned thread, AND mirror the choice into
+    // `.git/HEAD`. `Repository::open` on a git-overlay repo
+    // unconditionally syncs heddle's HEAD from `.git/HEAD` via
+    // `detect_git_head`, so if we left `.git/HEAD` pointing at gix's
+    // init-time default ("main" / "master") the very next `heddle`
+    // command would silently reset HEAD to a thread that doesn't
+    // exist — and `current_state` would return `None`, causing
+    // `heddle log` to snapshot a "Bootstrap git-overlay before
+    // viewing log" state instead of walking the imported history.
+    repo.refs().write_head(&Head::Attached {
+        thread: track_name.clone(),
+    })?;
+    write_git_head_branch(&local_path.join(".git"), &track_name)?;
 
     if should_output_json(cli, Some(repo.config())) {
         println!(
@@ -240,11 +264,40 @@ fn write_git_overlay_origin(local_path: &Path, remote_label: &str) -> Result<()>
     Ok(())
 }
 
-fn select_clone_thread(repo: &Repository, requested: Option<&str>) -> Result<String> {
+/// Pick which imported branch the clone should land on.
+///
+/// Priority order:
+///
+/// 1. `--thread <name>` if the user asked for one explicitly. We
+///    trust the user even if the name doesn't match a thread yet —
+///    the subsequent `get_thread` lookup will surface a clear error.
+/// 2. The branch the remote advertises as `HEAD` (passed in via
+///    `git_head_branch_hint`, read from `.git/HEAD` after the bare
+///    clone — `git clone --bare` and our `clone_url_to_bare` +
+///    `git ls-remote --symref` path both mirror the remote's
+///    symref). This is what fixes heddle#141: cloning ripgrep should
+///    land on `master`, not the alphabetically-first imported branch
+///    `ag/bstr-migration`.
+/// 3. `"main"` if present — preserves the long-standing UX for
+///    repos that *do* have a `main` branch but somehow lack a
+///    `.git/HEAD` symref (e.g. transports that don't surface one).
+/// 4. Alphabetically first imported thread, as a last resort. We
+///    deliberately keep this fallback because erroring out on an
+///    unhinted clone would be worse than landing on a working ref.
+fn select_clone_thread(
+    repo: &Repository,
+    requested: Option<&str>,
+    git_head_branch_hint: Option<&str>,
+) -> Result<String> {
     if let Some(requested) = requested {
         return Ok(requested.to_string());
     }
     let threads = repo.refs().list_threads()?;
+    if let Some(hint) = git_head_branch_hint
+        && threads.iter().any(|thread| thread == hint)
+    {
+        return Ok(hint.to_string());
+    }
     if threads.iter().any(|thread| thread == "main") {
         return Ok("main".to_string());
     }
@@ -252,6 +305,30 @@ fn select_clone_thread(repo: &Repository, requested: Option<&str>) -> Result<Str
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("Git clone did not import any branch refs"))
+}
+
+/// Read `.git/HEAD` as a symbolic ref into `refs/heads/`, returning
+/// the bare branch name. Returns `None` for detached HEAD, malformed
+/// files, or symrefs outside `refs/heads/` — none of which can drive
+/// thread selection.
+fn read_git_head_branch(git_dir: &Path) -> Option<String> {
+    let contents = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let trimmed = contents.trim();
+    let suffix = trimmed.strip_prefix("ref: ")?;
+    let branch = suffix.strip_prefix("refs/heads/")?;
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch.to_string())
+    }
+}
+
+/// Pin `.git/HEAD` to `refs/heads/<branch>`. Called after clone so a
+/// future `Repository::open` reads the same branch heddle attached to,
+/// rather than the init-time default gix wrote (typically `main`).
+fn write_git_head_branch(git_dir: &Path, branch: &str) -> Result<()> {
+    fs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
+    Ok(())
 }
 
 async fn clone_local(

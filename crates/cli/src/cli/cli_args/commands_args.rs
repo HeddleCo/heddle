@@ -1056,13 +1056,19 @@ pub struct CloneArgs {
     pub depth: Option<u32>,
 
     /// Leave blob content absent by design and hydrate it explicitly later.
+    /// Supported for hosted/network remotes only; Git-overlay clones
+    /// (plain `https://…/repo.git` URLs and local-path clones) reject
+    /// this flag today and report a clear error — lazy hydration over
+    /// the Git transport is planned for v0.3.1.
     #[arg(long)]
     pub lazy: bool,
 
-    /// Partial-clone filter spec. Currently only `blob:none` is supported,
-    /// which is a synonym for `--lazy` (skip blob content; hydrate on demand
-    /// later). Other git-style filters such as `tree:0` or `blob:limit=…`
-    /// are rejected.
+    /// Partial-clone filter spec. Only `blob:none` is accepted; other
+    /// git-style filters such as `tree:0` or `blob:limit=…` are
+    /// rejected at parse time. On hosted/network remotes `blob:none`
+    /// is a synonym for `--lazy` (skip blob content; hydrate on
+    /// demand). Git-overlay clones reject the flag at runtime; this
+    /// is planned for v0.3.1.
     #[arg(long, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
     pub filter: Option<String>,
 }
