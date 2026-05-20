@@ -50,11 +50,63 @@ fn test_cli_diagnose_json_profile() {
     assert_eq!(parsed["thread"]["name"], "main");
     assert_eq!(parsed["changes"]["added"].as_array().unwrap().len(), 1);
     assert_eq!(parsed["changes"]["total"], 1);
-    assert_eq!(parsed["health"]["status"], "dirty_worktree");
+    assert_eq!(parsed["health"]["status"], "uncaptured");
     assert_eq!(parsed["health"]["recommended_action"], "heddle capture");
     assert!(
         parsed["profile"]["total_ms"].is_number(),
         "profile should include total_ms: {parsed}"
+    );
+}
+
+/// After `heddle init` on a fresh repo, the worktree differs from the
+/// (empty) seeded state purely because nothing has been captured yet —
+/// reporting that as `dirty_worktree` reads as a problem on first
+/// impression. Label it `uncaptured` instead. The recommended action
+/// (`heddle capture`) stays the same. See heddle#160.
+#[test]
+fn status_reports_uncaptured_for_freshly_initialized_repo() {
+    let temp = TempDir::new().unwrap();
+
+    let status = Command::new("git")
+        .arg("init")
+        .current_dir(temp.path())
+        .status()
+        .expect("git init should run");
+    assert!(status.success());
+    for (key, value) in [("user.name", "Heddle Test"), ("user.email", "h@example.com")]
+    {
+        let status = Command::new("git")
+            .args(["config", key, value])
+            .current_dir(temp.path())
+            .status()
+            .expect("git config should run");
+        assert!(status.success());
+    }
+    std::fs::write(temp.path().join("a"), "").unwrap();
+    let status = Command::new("git")
+        .args(["add", "."])
+        .current_dir(temp.path())
+        .status()
+        .expect("git add should run");
+    assert!(status.success());
+    let status = Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(temp.path())
+        .status()
+        .expect("git commit should run");
+    assert!(status.success());
+
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let json = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&json).expect("status JSON parses");
+    assert_eq!(
+        parsed["thread_health"], "uncaptured",
+        "freshly-initialized worktree should read as uncaptured, not dirty_worktree: {parsed}"
+    );
+    assert_eq!(
+        parsed["recommended_action"], "heddle capture",
+        "uncaptured state should still recommend `heddle capture`: {parsed}"
     );
 }
 

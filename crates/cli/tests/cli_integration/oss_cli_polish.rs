@@ -41,8 +41,8 @@ fn doctor_uses_recovery_language_without_breaking_json() {
         "doctor should render a human header: {text}"
     );
     assert!(
-        text.contains("Health: dirty_worktree"),
-        "doctor should show health: {text}"
+        text.contains("Health: uncaptured"),
+        "doctor should label the freshly-initialized worktree as uncaptured: {text}"
     );
     assert!(
         text.contains("Next step: heddle capture"),
