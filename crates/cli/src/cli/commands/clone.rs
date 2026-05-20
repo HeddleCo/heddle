@@ -771,6 +771,83 @@ mod tests {
         assert!(reject_unsupported_for_git_overlay(&opts(None, false, None)).is_ok());
     }
 
+    // ---- clone text-mode summary helpers (heddle#161) ----
+
+    #[test]
+    fn clone_repo_name_strips_https_url_and_dot_git() {
+        assert_eq!(
+            clone_repo_name_from_label("https://github.com/BurntSushi/ripgrep.git"),
+            "ripgrep"
+        );
+        assert_eq!(
+            clone_repo_name_from_label("https://github.com/BurntSushi/ripgrep"),
+            "ripgrep"
+        );
+    }
+
+    #[test]
+    fn clone_repo_name_strips_ssh_url_and_dot_git() {
+        assert_eq!(
+            clone_repo_name_from_label("git@github.com:owner/repo.git"),
+            "repo"
+        );
+    }
+
+    #[test]
+    fn clone_repo_name_extracts_last_filesystem_segment() {
+        assert_eq!(clone_repo_name_from_label("/home/user/foo"), "foo");
+        assert_eq!(clone_repo_name_from_label("file:///tmp/projects/bar/"), "bar");
+    }
+
+    #[test]
+    fn clone_repo_name_falls_back_to_label_when_no_segment() {
+        // Empty or pathologic input: don't panic, return the input as-is
+        // so the rendered summary still carries *something* identifying.
+        assert_eq!(clone_repo_name_from_label(""), "");
+        assert_eq!(clone_repo_name_from_label("///"), "///");
+    }
+
+    #[test]
+    fn format_clone_completion_text_names_repo_and_count_and_thread_and_next_command() {
+        // Style helpers are no-ops when color is uninitialized (test
+        // default), so substring assertions work on the raw text. Keeps
+        // the assertions independent of ANSI escape sequences.
+        let lines = format_clone_completion_lines("ripgrep", 2249, "master");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("ripgrep"),
+            "summary must name the repo: {joined}"
+        );
+        assert!(
+            joined.contains("2249"),
+            "summary must include the commit count: {joined}"
+        );
+        assert!(
+            joined.contains("commit"),
+            "summary must use the word 'commit': {joined}"
+        );
+        assert!(
+            joined.contains("master"),
+            "summary must name the current thread: {joined}"
+        );
+        assert!(
+            joined.to_lowercase().contains("heddle log"),
+            "summary must suggest `heddle log` as the next step: {joined}"
+        );
+    }
+
+    #[test]
+    fn format_clone_completion_singularizes_one_commit() {
+        // Avoid "1 commits" — the style::count helper already singularizes,
+        // but pin it here so a future formatter refactor doesn't regress.
+        let lines = format_clone_completion_lines("tiny", 1, "main");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("1 commit ") || joined.contains("1 commit\n") || joined.ends_with("1 commit"),
+            "one commit must not pluralize: {joined}"
+        );
+    }
+
     #[cfg(feature = "client")]
     #[test]
     fn hosted_endpoint_spec_preserves_hostname_with_port() {
