@@ -79,7 +79,9 @@ pub use snapshot_metadata::{
     summarize_verification, update_thread_state_from_state,
 };
 pub use stash::{StashEntry, StashManager};
-pub use thread_advice::{RecommendedAction, ThreadAdvice, describe_thread_advice};
+pub use thread_advice::{
+    RecommendedAction, ThreadAdvice, describe_thread_advice, describe_thread_advice_with_initial,
+};
 pub use thread_model::{
     ConfidenceBand, EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
     ThreadImpactCategory, ThreadIntegrationPolicy, ThreadLifecycleState, ThreadMode, ThreadRecord,
