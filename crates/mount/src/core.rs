@@ -1254,13 +1254,24 @@ impl ContentAddressedMount {
             .ok_or_else(|| MountError::NotADirectory(format!("{parent_record:?}")))?;
         let child_path = join_child(&parent_path, name_str);
 
-        let mut pending = self.inner.pending.lock().expect("pending lock");
-        if let Some(node_id) = pending.hot_by_path.remove(&child_path) {
-            pending.hot.remove(&node_id);
+        {
+            let mut pending = self.inner.pending.lock().expect("pending lock");
+            if let Some(node_id) = pending.hot_by_path.remove(&child_path) {
+                pending.hot.remove(&node_id);
+            }
+            pending.warm.remove(&child_path);
+            pending.symlinks.remove(&child_path);
+            pending.tombstones.insert(child_path.clone());
         }
-        pending.warm.remove(&child_path);
-        pending.symlinks.remove(&child_path);
-        pending.tombstones.insert(child_path);
+        // Retire the path→inode mapping so a subsequent `create_file`
+        // at the same name mints a fresh inode (POSIX unlink/recreate
+        // isolation — open-unlinked temp files must not be aliased by
+        // a replacement at the same path). The `by_id` record stays so
+        // any still-open kernel handle keeps resolving until `forget`.
+        {
+            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            inodes.by_path.remove(&child_path);
+        }
         Ok(())
     }
 
@@ -1359,12 +1370,12 @@ impl ContentAddressedMount {
         // from `by_path` so the next lookup mints a fresh id.
         {
             let mut inodes = self.inner.inodes.lock().expect("inode lock");
-            // Drop any cached inode for the destination so the next
-            // lookup mints fresh (the old inode there pointed at the
-            // *captured* file, which is now logically replaced).
-            if let Some(dest_id) = inodes.by_path.remove(&new_path) {
-                inodes.by_id.remove(&dest_id);
-            }
+            // Detach the destination's path mapping. The inode record
+            // stays in `by_id` so any kernel handle the FS still holds
+            // for the replaced file keeps resolving (the kernel cleans
+            // up via `forget` on close). POSIX semantics: rename-over
+            // must not invalidate an already-open dest descriptor.
+            inodes.by_path.remove(&new_path);
             // Rewrite the source inode's stored path so subsequent
             // reads/attrs against it serve the new-path overlay.
             // The kernel keeps using the source's NodeId after rename
@@ -1375,15 +1386,55 @@ impl ContentAddressedMount {
                 if let Some(
                     NodeRecord::PendingFile { path, .. }
                     | NodeRecord::File { path, .. }
-                    | NodeRecord::PendingSymlink { path },
+                    | NodeRecord::PendingSymlink { path }
+                    | NodeRecord::Dir { path, .. }
+                    | NodeRecord::PendingDir { path },
                 ) = inodes.by_id.get_mut(&src_id)
                 {
                     *path = new_path.clone();
                 }
                 inodes.by_path.insert(new_path.clone(), src_id);
+                // For a directory rename, also rebase every cached
+                // descendant inode. The kernel may already hold dentry
+                // → inode bindings for `old_path/<child>` from prior
+                // lookups, and reads against those inodes would
+                // otherwise resolve through the stale path (ESTALE on
+                // PendingFile, or the wrong overlay on File). Walk
+                // by_path once, collect the entries under the old
+                // prefix, then rewrite both the mapping and the
+                // NodeRecord's stored path.
+                if src.kind == NodeKind::Directory {
+                    let descendants: Vec<(PathBuf, PathBuf, u64)> = inodes
+                        .by_path
+                        .iter()
+                        .filter_map(|(p, id)| {
+                            let tail = p.strip_prefix(&old_path).ok()?;
+                            if tail.as_os_str().is_empty() {
+                                return None;
+                            }
+                            Some((p.clone(), new_path.join(tail), *id))
+                        })
+                        .collect();
+                    for (old_key, new_key, id) in descendants {
+                        inodes.by_path.remove(&old_key);
+                        if let Some(
+                            NodeRecord::PendingFile { path, .. }
+                            | NodeRecord::File { path, .. }
+                            | NodeRecord::PendingSymlink { path }
+                            | NodeRecord::Dir { path, .. }
+                            | NodeRecord::PendingDir { path },
+                        ) = inodes.by_id.get_mut(&id)
+                        {
+                            *path = new_key.clone();
+                        }
+                        inodes.by_path.insert(new_key, id);
+                    }
+                }
                 drop(inodes);
                 // Same for any cached hot buffer keyed on the source
-                // node — its `path` field must follow.
+                // node — its `path` field must follow. (Descendant
+                // hot-buffer paths are already rebased in
+                // `move_overlay_dir`'s `hot_path_updates` pass.)
                 let mut pending = self.inner.pending.lock().expect("pending lock");
                 if let Some(buf) = pending.hot.get_mut(&src_id) {
                     buf.path = new_path.clone();
