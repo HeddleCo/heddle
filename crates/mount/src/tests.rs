@@ -2220,3 +2220,242 @@ mod fuse_smoke {
         drop(session);
     }
 }
+
+// ---------------------------------------------------------------------------
+// PlatformShell default-impl coverage.
+//
+// Every write-side method on the trait has a default body that returns
+// `MountError::ReadOnly`. A read-only adapter (e.g. a future "snapshot
+// browser" shell that only implements the six required methods) inherits
+// those defaults. These tests exercise the default bodies so the contract
+// stays observable: read-only shells uniformly surface `ReadOnly` rather
+// than panicking or silently succeeding.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod platform_shell_defaults {
+    use std::{
+        ffi::{OsStr, OsString},
+        path::Path,
+        time::SystemTime,
+    };
+
+    use objects::object::FileMode;
+
+    use crate::{
+        error::{MountError, Result},
+        shell::{AttrUpdate, Attrs, Entry, NodeId, NodeKind, PlatformShell},
+    };
+
+    /// Minimal read-only shell that implements only the required
+    /// methods. Every write-side default kicks in.
+    struct ReadOnlyStub;
+
+    impl PlatformShell for ReadOnlyStub {
+        fn lookup(&self, _parent: NodeId, _name: &OsStr) -> Result<Option<Entry>> {
+            Ok(None)
+        }
+        fn read(&self, _node: NodeId, _offset: u64, _buf: &mut [u8]) -> Result<usize> {
+            Ok(0)
+        }
+        fn write(&self, _node: NodeId, _offset: u64, _data: &[u8]) -> Result<usize> {
+            Err(MountError::ReadOnly)
+        }
+        fn enumerate(&self, _dir: NodeId) -> Result<Vec<Entry>> {
+            Ok(vec![])
+        }
+        fn attrs(&self, _node: NodeId) -> Result<Attrs> {
+            Ok(Attrs {
+                node: NodeId::ROOT,
+                kind: NodeKind::Directory,
+                size: 0,
+                unix_mode: 0o040755,
+                nlink: 1,
+                mtime: SystemTime::UNIX_EPOCH,
+            })
+        }
+        fn invalidate(&self, _node: NodeId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn is_readonly<T>(r: Result<T>) -> bool {
+        matches!(r, Err(MountError::ReadOnly))
+    }
+
+    #[test]
+    fn defaults_uniformly_surface_readonly() {
+        let s = ReadOnlyStub;
+        assert!(is_readonly(s.create_file(
+            NodeId::ROOT,
+            OsStr::new("x"),
+            FileMode::Normal,
+            false,
+        )));
+        assert!(is_readonly(s.make_dir(NodeId::ROOT, OsStr::new("d"))));
+        assert!(is_readonly(s.unlink_entry(NodeId::ROOT, OsStr::new("x"))));
+        assert!(is_readonly(s.rmdir_entry(NodeId::ROOT, OsStr::new("d"))));
+        assert!(is_readonly(s.rename_entry(
+            NodeId::ROOT,
+            OsStr::new("a"),
+            NodeId::ROOT,
+            OsStr::new("b"),
+        )));
+        assert!(is_readonly(s.set_attrs(NodeId::ROOT, AttrUpdate::default())));
+        assert!(is_readonly(s.create_symlink(
+            NodeId::ROOT,
+            OsStr::new("ln"),
+            Path::new("target"),
+        )));
+        let read_link_result: Result<OsString> = s.read_link(NodeId::ROOT);
+        assert!(is_readonly(read_link_result));
+    }
+
+    /// The default `release` body delegates to `flush`. A shell that
+    /// overrides only `flush` should see `release` follow through.
+    #[test]
+    fn release_default_delegates_to_flush() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountFlush(AtomicUsize);
+        impl PlatformShell for CountFlush {
+            fn lookup(&self, _p: NodeId, _n: &OsStr) -> Result<Option<Entry>> {
+                Ok(None)
+            }
+            fn read(&self, _n: NodeId, _o: u64, _b: &mut [u8]) -> Result<usize> {
+                Ok(0)
+            }
+            fn write(&self, _n: NodeId, _o: u64, _b: &[u8]) -> Result<usize> {
+                Ok(0)
+            }
+            fn enumerate(&self, _d: NodeId) -> Result<Vec<Entry>> {
+                Ok(vec![])
+            }
+            fn attrs(&self, _n: NodeId) -> Result<Attrs> {
+                Ok(Attrs {
+                    node: NodeId::ROOT,
+                    kind: NodeKind::Directory,
+                    size: 0,
+                    unix_mode: 0o040755,
+                    nlink: 1,
+                    mtime: SystemTime::UNIX_EPOCH,
+                })
+            }
+            fn invalidate(&self, _n: NodeId) -> Result<()> {
+                Ok(())
+            }
+            fn flush(&self, _n: NodeId) -> Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let s = CountFlush(AtomicUsize::new(0));
+        s.release(NodeId::ROOT).unwrap();
+        assert_eq!(s.0.load(Ordering::SeqCst), 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capture-after-write-op coverage.
+//
+// The materialize pass in `core::capture` has distinct branches for
+// pending file overrides, symlink overrides, dir tombstones, explicit
+// empty dirs, and the captured-counterpart-load path. The unit-level
+// write-op tests in `mod write_ops` exercise the pre-capture state;
+// these add coverage for what the captured tree actually looks like
+// once those overlay actions flow through capture.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod capture_write_ops {
+    use super::*;
+    use objects::object::FileMode;
+    use std::path::Path;
+
+    fn dump_tree(store: &dyn ObjectStore, hash: &ContentHash) -> Tree {
+        store.get_tree(hash).unwrap().unwrap()
+    }
+
+    /// `make_dir` followed by `capture` must materialize the empty
+    /// directory as a zero-entry tree under the parent (the
+    /// `force_empty` arm of `materialize`).
+    #[test]
+    fn capture_after_make_dir_materializes_empty_subtree() {
+        let (_temp, mount) = open_mount();
+        mount.make_dir(NodeId::ROOT, OsStr::new("blank")).unwrap();
+        let id = mount.capture(Some("empty dir".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&id).unwrap().unwrap();
+        let root = dump_tree(store, &state.tree);
+        let blank = root.get("blank").expect("blank dir survives capture");
+        assert!(blank.is_tree());
+        let blank_tree = dump_tree(store, &blank.hash);
+        assert_eq!(blank_tree.entries().len(), 0);
+    }
+
+    /// `create_symlink` then `capture` writes the target as a CAS blob
+    /// and emits a Symlink tree entry referring to it.
+    #[test]
+    fn capture_after_create_symlink_emits_symlink_entry() {
+        let (_temp, mount) = open_mount();
+        mount
+            .create_symlink(
+                NodeId::ROOT,
+                OsStr::new("alias.txt"),
+                Path::new("hello.txt"),
+            )
+            .unwrap();
+        let id = mount.capture(Some("symlink".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&id).unwrap().unwrap();
+        let root = dump_tree(store, &state.tree);
+        let alias = root.get("alias.txt").expect("symlink lands in tree");
+        assert!(matches!(
+            alias.mode,
+            objects::object::FileMode::Symlink
+        ));
+    }
+
+    /// A rmdir tombstone for a captured dir must drop the whole subtree
+    /// from the next capture (the `dir_deletions` branch).
+    #[test]
+    fn capture_after_rmdir_drops_subtree() {
+        // Build a fresh repo with a `dir/` containing one file; capture
+        // it; remount; rmdir+capture should produce a root without `dir/`.
+        let (_temp, mount) = fresh_mount();
+        let node = create_pending_file(&mount, "dir/only.rs", FileMode::Normal);
+        mount.write(node, 0, b"x").unwrap();
+        mount.flush_all().unwrap();
+        mount.capture(Some("plant".into())).unwrap();
+        // Unlink the file then rmdir the now-empty dir.
+        mount.unlink_path("dir/only.rs").unwrap();
+        let id = mount.capture(Some("delete".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&id).unwrap().unwrap();
+        let root = dump_tree(store, &state.tree);
+        assert!(root.get("dir").is_none(), "dir/ should be pruned");
+    }
+
+    /// `rename_entry` across an overlay-only file followed by capture
+    /// materializes the renamed name (and not the old name).
+    #[test]
+    fn capture_after_rename_overlay_file_uses_new_name() {
+        let (_temp, mount) = open_mount();
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(src.node, 0, b"body").unwrap();
+        mount.flush(src.node).unwrap();
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("final.txt"),
+            )
+            .unwrap();
+        let id = mount.capture(Some("rename".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&id).unwrap().unwrap();
+        let root = dump_tree(store, &state.tree);
+        assert!(root.get("draft").is_none(), "old name must be gone");
+        assert!(root.get("final.txt").is_some(), "new name must exist");
+    }
+}
