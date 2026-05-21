@@ -1712,6 +1712,119 @@ mod write_ops {
         assert_eq!(&buf[..n], b"draft body");
     }
 
+    /// After `unlink_entry` the path→inode mapping must be retired so
+    /// a subsequent `create_file` at the same name mints a *fresh*
+    /// inode. Otherwise a still-open handle to the unlinked file would
+    /// silently start resolving to the freshly created replacement —
+    /// breaks unlink-then-recreate isolation (POSIX open-unlinked temp
+    /// files).
+    #[test]
+    fn unlink_then_recreate_mints_fresh_inode() {
+        let (_temp, mount) = open_mount();
+        let original = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("captured hello.txt");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        let recreated = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .expect("recreate");
+        assert_ne!(
+            original.node, recreated.node,
+            "recreated inode must be distinct from the unlinked one"
+        );
+    }
+
+    /// Rename-over must keep the replaced destination's inode record
+    /// resolvable — only the path→inode link is detached. Without this
+    /// any FD still holding the dest inode surfaces as ESTALE on the
+    /// next callback. POSIX requires open handles to the replaced file
+    /// to remain valid.
+    #[test]
+    fn rename_over_preserves_replaced_destination_inode() {
+        let (_temp, mount) = open_mount();
+        let dest_orig = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("captured hello.txt");
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(src.node, 0, b"replacement").unwrap();
+        mount.flush(src.node).unwrap();
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        // The old destination inode must still resolve — not ESTALE.
+        let attrs = mount
+            .attrs(dest_orig.node)
+            .expect("orphaned dest inode must remain valid");
+        assert_eq!(attrs.kind, NodeKind::File);
+    }
+
+    /// A directory rename must rebase the `by_path` mapping for every
+    /// already-cached descendant inode (not just the directory's own
+    /// record). Otherwise an open handle to `old_dir/leaf` still
+    /// references the stale path and post-rename reads return ESTALE
+    /// — even though the leaf is reachable through the new directory.
+    #[test]
+    fn directory_rename_rebases_descendant_inode_paths() {
+        let (_temp, mount) = open_mount();
+        // Build an overlay-only directory with a leaf so the rename
+        // exercises `move_overlay_dir` + the inode rebase pass.
+        mount.make_dir(NodeId::ROOT, OsStr::new("from_dir")).unwrap();
+        let from = mount
+            .lookup(NodeId::ROOT, OsStr::new("from_dir"))
+            .unwrap()
+            .unwrap();
+        let leaf = mount
+            .create_file(from.node, OsStr::new("leaf.txt"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(leaf.node, 0, b"payload").unwrap();
+        mount.flush(leaf.node).unwrap();
+        // Cache the leaf inode by looking it up explicitly — this is
+        // what the kernel does for any FD-holding lookup.
+        let cached = mount
+            .lookup(from.node, OsStr::new("leaf.txt"))
+            .unwrap()
+            .expect("leaf resolves pre-rename");
+        assert_eq!(cached.node, leaf.node);
+
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("from_dir"),
+                NodeId::ROOT,
+                OsStr::new("to_dir"),
+            )
+            .expect("dir rename");
+
+        // The cached leaf inode must still resolve — its stored path
+        // should now be `to_dir/leaf.txt`.
+        let mut buf = vec![0u8; 16];
+        let n = mount
+            .read(cached.node, 0, &mut buf)
+            .expect("read via descendant inode after dir rename");
+        assert_eq!(&buf[..n], b"payload");
+        // And the new path resolves to the same inode.
+        let to_dir = mount
+            .lookup(NodeId::ROOT, OsStr::new("to_dir"))
+            .unwrap()
+            .unwrap();
+        let via_new = mount
+            .lookup(to_dir.node, OsStr::new("leaf.txt"))
+            .unwrap()
+            .expect("leaf resolves via new dir");
+        assert_eq!(via_new.node, cached.node);
+    }
+
     /// `set_attrs(size=0)` truncates the file's hot buffer to zero,
     /// which is what the kernel issues for `O_TRUNC` before any
     /// `write`. cargo writes use `O_CREAT|O_WRONLY|O_TRUNC`; without
