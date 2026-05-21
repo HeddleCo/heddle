@@ -3329,7 +3329,12 @@ fn apply_pending_to_tree(
                 Some(e) if e.is_tree() => store
                     .get_tree(&e.hash)
                     .map_err(MountError::Store)?
-                    .unwrap_or_default(),
+                    .ok_or_else(|| {
+                        MountError::Store(objects::error::HeddleError::MissingObject {
+                            object_type: "tree".to_string(),
+                            id: e.hash.to_string(),
+                        })
+                    })?,
                 _ => Tree::new(),
             };
             let force_empty = v.explicit_empty.contains(name);
