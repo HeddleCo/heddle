@@ -1826,7 +1826,6 @@ impl ContentAddressedMount {
         name: &OsStr,
         target: &Path,
     ) -> Result<Entry> {
-        use std::os::unix::ffi::OsStrExt;
         let name_str = validate_entry_name(name)?;
         if self.lookup(parent, name)?.is_some() {
             return Err(MountError::AlreadyExists(name_str.to_string()));
@@ -1836,7 +1835,7 @@ impl ContentAddressedMount {
             .dir_path_of(&parent_record)
             .ok_or_else(|| MountError::NotADirectory(format!("{parent_record:?}")))?;
         let child_path = join_child(&parent_path, name_str);
-        let target_bytes = target.as_os_str().as_bytes().to_vec();
+        let target_bytes = target.as_os_str().as_encoded_bytes().to_vec();
         let target_len = target_bytes.len() as u64;
 
         {
@@ -1859,7 +1858,6 @@ impl ContentAddressedMount {
     /// Read the target of a symlink `node`. Works for both overlay
     /// (`PendingSymlink`) and captured (`Symlink`) records.
     pub fn read_link(&self, node: NodeId) -> Result<OsString> {
-        use std::os::unix::ffi::OsStrExt;
         let record = self.record_for(node)?;
         match record {
             NodeRecord::PendingSymlink { path } => {
@@ -1868,11 +1866,16 @@ impl ContentAddressedMount {
                     .symlinks
                     .get(&path)
                     .ok_or_else(|| MountError::Stale(format!("symlink {}", path.display())))?;
-                Ok(OsStr::from_bytes(bytes).to_os_string())
+                // SAFETY: bytes were written via `OsStr::as_encoded_bytes()` in
+                // `create_symlink`, which is the documented inverse of
+                // `from_encoded_bytes_unchecked`.
+                Ok(unsafe { OsStr::from_encoded_bytes_unchecked(bytes) }.to_os_string())
             }
             NodeRecord::Symlink { blob } => {
                 let bytes = self.load_blob_bytes(&blob)?;
-                Ok(OsStr::from_bytes(&bytes).to_os_string())
+                // SAFETY: same provenance as above — the blob was minted from
+                // `as_encoded_bytes()` at capture time.
+                Ok(unsafe { OsStr::from_encoded_bytes_unchecked(&bytes) }.to_os_string())
             }
             other => Err(MountError::InvalidArgument(format!(
                 "read_link on non-symlink record: {other:?}"
@@ -2071,8 +2074,7 @@ impl ContentAddressedMount {
 /// path separator, anything with a NUL byte. Returns the validated
 /// name as a `&str` so callers can build paths without re-decoding.
 fn validate_entry_name(name: &OsStr) -> Result<&str> {
-    use std::os::unix::ffi::OsStrExt;
-    let bytes = name.as_bytes();
+    let bytes = name.as_encoded_bytes();
     if bytes.is_empty() {
         return Err(MountError::InvalidArgument("empty entry name".into()));
     }
