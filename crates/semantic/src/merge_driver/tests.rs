@@ -2947,6 +2947,51 @@ fn crlf_add_add_conflict_markers_use_crlf() {
 }
 
 // =====================================================================
+// Codex r2 P2 (PR #193, cid 3291860840): the EolPolicy refactor
+// (heddle#189 r1) consolidated detection to a single whole-file policy
+// computed once from `[base, ours, theirs]`. That dropped the previous
+// per-item weighting in `emit_addadd_conflict`: in a mixed-EOL file
+// where the LF surrounding context outnumbers a CRLF-bodied add/add
+// item, the markers flip to LF and wrap a CRLF body — reintroducing
+// the exact mixed-EOL hunk shape the r6 P2 #1 fix avoided. Markers
+// must follow the EOL of the items they bracket.
+// =====================================================================
+#[test]
+fn mixed_eol_add_add_marker_follows_item_bytes_not_whole_file() {
+    // Surrounding context is mostly LF (many `\n` lines) but the new
+    // `foo` items both arrive with CRLF bodies. Pre-fix: whole-file
+    // policy votes LF (LF count >> CRLF count) → markers emit LF
+    // wrapping a CRLF body. Post-fix: marker EOL follows the item
+    // bytes, so both items being CRLF means the markers are CRLF.
+    // Blank lines between the LF-only padding comments and `fn foo`
+    // prevent the comments from being absorbed as `foo`'s leading
+    // metadata — `foo`'s item bytes stay purely CRLF (3 CRLF, 0 LF),
+    // while the whole-file count is dominated by LF surroundings.
+    let pad = "// pad 1\n// pad 2\n// pad 3\n// pad 4\n// pad 5\n// pad 6\n// pad 7\n// pad 8\n";
+    let base = format!("fn bar() {{}}\n\n{pad}\n");
+    let ours = format!("fn bar() {{}}\n\n{pad}\nfn foo() {{\r\n    1\r\n}}\r\n");
+    let theirs = format!("fn bar() {{}}\n\n{pad}\nfn foo() {{\r\n    2\r\n}}\r\n");
+    let base = base.as_str();
+    let ours = ours.as_str();
+    let theirs = theirs.as_str();
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert_eq!(count, 1, "expected 1 conflict, got {count}: {text:?}");
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("<<<<<<<")
+            || line.starts_with("=======")
+            || line.starts_with(">>>>>>>")
+        {
+            assert!(
+                line.ends_with("\r\n"),
+                "marker line `{}` must use CRLF to match the CRLF item bodies it wraps, \
+                 even though the surrounding file is majority-LF: {text:?}",
+                line.trim_end_matches('\n').trim_end_matches('\r'),
+            );
+        }
+    }
+}
+
+// =====================================================================
 // Self-audit prediction P1 (heddle#114 r7): r6's reconcile_trailing_newline
 // fix made the POP case CRLF-aware (popping `\r\n` as a unit). The
 // inverse path — when majority votes "yes trailing newline" and output
