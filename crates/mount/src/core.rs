@@ -369,18 +369,65 @@ struct PendingEntry {
     size: u64,
 }
 
+/// Per-NodeId lifecycle state. Tracks both whether an inode is still
+/// resolvable via `inodes.by_path` (Live) or has had its directory
+/// entry removed but is still held by an open fd (Orphan), and the
+/// open-handle refcount that drives the final-close cleanup.
+///
+/// Absence from [`Pending::state`] is the third state — Released —
+/// matching the spike model (`docs/design/mount-posix-semantics.md`
+/// §1.1). The type system makes "orphaned with no open count" and
+/// "open count without orphan flag" unrepresentable, replacing the
+/// old `orphans: BTreeSet<u64>` + `open_handles: BTreeMap<u64, u32>`
+/// pair with one map and forcing every callback that branches on
+/// lifecycle to `match`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeState {
+    /// Live: the inode owns a binding in `inodes.by_path`. The
+    /// refcount tracks how many FUSE `open` / `create` callbacks
+    /// have minted handles to it; `release` drives it back down.
+    /// At T1 (unlink with N ≥ 0), the count is carried over into
+    /// `Orphan { open_count }`.
+    Live { open_count: u32 },
+    /// Orphan: directory entry gone (`unlink_entry` or `rename`-over
+    /// of the displaced destination) but `open_count` kernel fds
+    /// still hold the NodeId. Bytes in `hot[node]` / `warm[node]`
+    /// outlive the transition; the cleanup happens on the final
+    /// `release` (count drops to 0 → state entry removed + bytes
+    /// dropped).
+    Orphan { open_count: u32 },
+}
+
 /// The two-tier write state for a mount.
+///
+/// Post-spike (`docs/design/mount-posix-semantics.md` §2.1) the cache
+/// is **NodeId-keyed throughout**: `hot[id]` and `warm[id]` carry the
+/// bytes; path-keyed helpers (`hot_by_path`, `tombstones`,
+/// `dir_tombstones`, `explicit_dirs`, `symlinks`) are
+/// directory-entry-level concepts only. The Live → Orphan transition
+/// never moves bytes — it just rewrites `state[id]` and the path-side
+/// bookkeeping. That collapse eliminates the cache-layer asymmetry
+/// (Bug Class A in the spike doc §4) that produced every Codex
+/// finding r6 → r9 on PR #182.
 #[derive(Default)]
 struct Pending {
     /// Hot tier: per-`NodeId` open-file buffers.
     hot: BTreeMap<u64, HotBuffer>,
-    /// Reverse: which NodeId currently owns a buffer for `path`. We
-    /// only allow one at a time — opening the same file twice from
-    /// different node ids resolves to the same buffer because the
-    /// inode registry coalesces by path for pending files.
+    /// Reverse-index for the hot tier: which NodeId currently owns a
+    /// buffer for `path`. Path-keyed because FUSE `lookup` arrives
+    /// with paths, not NodeIds. Only one at a time — opening the
+    /// same file twice from different node ids resolves to the same
+    /// buffer because the inode registry coalesces by path for
+    /// pending files. Removed on `unlink_entry` / rebound on
+    /// `rename_entry`.
     hot_by_path: BTreeMap<PathBuf, u64>,
-    /// Warm tier: paths whose latest content has been promoted.
-    warm: BTreeMap<PathBuf, PendingEntry>,
+    /// Warm tier: per-`NodeId` promoted bytes. Bytes survive the
+    /// Live → Orphan transition without a migration step — that's
+    /// Decision A of the spike. `pending_lookup` resolves a path to
+    /// its current Live NodeId via `inodes.by_path` and then reads
+    /// `warm[id]`; orphan branches in `read` / `attrs` / `write` /
+    /// `apply_truncate` consult `warm[node]` directly.
+    warm: BTreeMap<u64, PendingEntry>,
     /// Tombstones — paths the mount has deleted. Suppress the
     /// underlying state's entry on reads. File-only; directories
     /// use [`Self::dir_tombstones`].
@@ -398,41 +445,37 @@ struct Pending {
     explicit_dirs: BTreeSet<PathBuf>,
     /// Symlinks created through the mount, keyed by mount-relative
     /// path. The bytes are the target as the kernel handed them to
-    /// `symlink`; capture hashes them into a CAS blob.
+    /// `symlink`; capture hashes them into a CAS blob. Symlinks are
+    /// not openable for IO; no orphan story applies.
     symlinks: BTreeMap<PathBuf, Vec<u8>>,
-    /// Inodes whose directory entry has been removed (`unlink`) but
-    /// whose `NodeId` may still be held by a kernel fd. Set at
-    /// `unlink_entry` time and consulted by `write` / `flush_node`:
-    /// any further write through one of these `NodeId`s must update
-    /// only the per-`NodeId` buffer — NOT republish `hot_by_path`
-    /// nor clear the tombstone — and the buffer must be discarded
-    /// (rather than warm-promoted) when the kernel finally calls
-    /// `release` / `forget`. POSIX: the inode lives behind the fd,
-    /// but the directory entry stays gone until the last close.
-    ///
-    /// A fresh inode minted at the same name (`create_file` after
-    /// the unlink) gets a brand-new `NodeId` via
-    /// [`Inodes::intern`], so it is *not* in this set and takes
-    /// the normal write/flush path.
-    orphans: BTreeSet<u64>,
-    /// Warm-tier bytes preserved on behalf of an orphaned NodeId. The
-    /// path-keyed `warm[path]` map is mutated by directory operations
-    /// (unlink drops it, rename-over replaces it with the source's
-    /// bytes); both routes would otherwise lose the bytes a surviving
-    /// fd needs. When orphaning a node whose path had warm-tier bytes,
-    /// we relocate the entry here keyed by NodeId so reads/writes/
-    /// truncates against that fd keep seeing the inode's own data.
-    /// Cleared on final `release`, on `invalidate`/`forget`, and on
-    /// `capture` (which empties the whole pending tier).
-    orphan_warm: BTreeMap<u64, PendingEntry>,
-    /// Per-inode open-handle refcount. Bumped on the FUSE `open` /
-    /// `create` callback (via [`PlatformShell::on_open`]); decremented
-    /// on the FUSE `release` callback. The orphan marker — and any
-    /// preserved orphan bytes — clear only when this count reaches
-    /// zero on a `release`, NOT on the per-descriptor-close `flush`.
-    /// See the lifecycle distinction documented on
-    /// [`PlatformShell::flush`] and [`PlatformShell::release`].
-    open_handles: BTreeMap<u64, u32>,
+    /// Per-NodeId lifecycle state. See [`NodeState`]. Replaces the
+    /// pre-spike `orphans: BTreeSet<u64>` + `open_handles:
+    /// BTreeMap<u64, u32>` pair. Absence from this map is the third
+    /// state (Released) — entries are removed on final `release`,
+    /// `invalidate`, and `capture`.
+    state: BTreeMap<u64, NodeState>,
+}
+
+impl Pending {
+    /// True iff the NodeId is currently Orphan (directory entry gone
+    /// but `open_count >= 0` fds still reference the inode). Every
+    /// callback that branches on lifecycle goes through this helper
+    /// (or matches `state` directly) so the "implicitly assume Live"
+    /// failure mode is hard to write.
+    fn is_orphan(&self, id: u64) -> bool {
+        matches!(self.state.get(&id), Some(NodeState::Orphan { .. }))
+    }
+
+    /// Current open-handle refcount for the NodeId, or zero if
+    /// untracked. Used by [`MountInner::release_node`] to drive the
+    /// final-close cleanup and by [`unlink_entry`] / [`rename_entry`]
+    /// to carry the count over into `Orphan { open_count }` at T1/T3.
+    fn open_count(&self, id: u64) -> u32 {
+        match self.state.get(&id) {
+            Some(NodeState::Live { open_count } | NodeState::Orphan { open_count }) => *open_count,
+            None => 0,
+        }
+    }
 }
 
 /// In-mount overlay: a snapshot-time view of the parent state plus
@@ -1143,9 +1186,24 @@ impl ContentAddressedMount {
     /// (FUSE `open` / `create` callback). Used to time the orphan
     /// cleanup against the *final* close (see
     /// [`Self::release_node`] / [`MountInner::release_node`]).
+    ///
+    /// Bumps the open count on the existing `NodeState`, minting a
+    /// `Live { open_count: 1 }` entry if the node is untracked. An
+    /// Orphan can also be opened (rare — only via an fh the kernel
+    /// still holds across a re-lookup race); we bump its refcount so
+    /// the final release fires correctly.
     pub fn on_open(&self, node: NodeId) -> Result<()> {
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        *pending.open_handles.entry(node.0).or_insert(0) += 1;
+        let next = match pending.state.get(&node.0).copied() {
+            None => NodeState::Live { open_count: 1 },
+            Some(NodeState::Live { open_count }) => NodeState::Live {
+                open_count: open_count.saturating_add(1),
+            },
+            Some(NodeState::Orphan { open_count }) => NodeState::Orphan {
+                open_count: open_count.saturating_add(1),
+            },
+        };
+        pending.state.insert(node.0, next);
         Ok(())
     }
 
@@ -1153,15 +1211,38 @@ impl ContentAddressedMount {
     /// `lookup`/`enumerate` calls will skip the underlying captured
     /// entry, and `capture()` will fold the deletion into the new
     /// state's tree (pruning empty parent dirs as needed).
+    ///
+    /// Low-level (path-based) helper — unlike [`Self::unlink_entry`]
+    /// it does not honour POSIX open-unlinked semantics. Used by
+    /// tests that bypass the FUSE-callback lifecycle. The
+    /// NodeId-keyed buffers for the path's current owner are dropped
+    /// (no orphan tracking).
     pub fn unlink_path(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref().to_path_buf();
+        // Resolve path → NodeId via the inode registry so we can drop
+        // the per-NodeId warm/hot bytes.
+        let bound_id = {
+            let inodes = self.inner.inodes.lock().expect("inode lock");
+            inodes.by_path.get(&path).copied()
+        };
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        // Drop any in-flight buffer for this path.
         if let Some(node_id) = pending.hot_by_path.remove(&path) {
             pending.hot.remove(&node_id);
+            pending.warm.remove(&node_id);
+            pending.state.remove(&node_id);
         }
-        pending.warm.remove(&path);
-        pending.tombstones.insert(path);
+        if let Some(node_id) = bound_id {
+            pending.hot.remove(&node_id);
+            pending.warm.remove(&node_id);
+            pending.state.remove(&node_id);
+        }
+        pending.symlinks.remove(&path);
+        pending.tombstones.insert(path.clone());
+        drop(pending);
+        if bound_id.is_some() {
+            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            inodes.by_path.remove(&path);
+        }
         Ok(())
     }
 
@@ -1310,9 +1391,17 @@ impl ContentAddressedMount {
     }
 
     /// Delete a regular file (or symlink) named `name` under `parent`.
-    /// Drops any hot buffer / warm-tier blob / symlink entry for the
-    /// path and records a tombstone so the captured-tree entry (if
-    /// any) is hidden until capture folds the deletion in.
+    ///
+    /// POSIX open-unlinked semantics: the directory entry goes (path
+    /// tombstoned, `inodes.by_path[path]` retired), but if any fd
+    /// still references the inode, the bytes survive in `hot[node]` /
+    /// `warm[node]` until the final `release`. Under the post-spike
+    /// unified NodeId-keyed model
+    /// (`docs/design/mount-posix-semantics.md` §1.2 T1/T2), this is a
+    /// state transition only — no byte migration. Pre-spike code
+    /// dropped `pending.hot[node_id]` here (Codex thread 3293307302
+    /// r9) and migrated `warm[path]` into `orphan_warm[node]` (r8);
+    /// both steps go away.
     pub fn unlink_entry(&self, parent: NodeId, name: &OsStr) -> Result<()> {
         // R8: serialize with other write-side mutations.
         let _write_guard = self.inner.write_mu.lock().expect("write mu");
@@ -1328,32 +1417,28 @@ impl ContentAddressedMount {
             .dir_path_of(&parent_record)
             .ok_or_else(|| MountError::NotADirectory(format!("{parent_record:?}")))?;
         let child_path = join_child(&parent_path, name_str);
+        let node_id = entry.node.0;
 
         {
             let mut pending = self.inner.pending.lock().expect("pending lock");
-            if let Some(node_id) = pending.hot_by_path.remove(&child_path) {
-                pending.hot.remove(&node_id);
-                // Any subsequent write through this NodeId — the
-                // kernel may still hold an fd to it — must not
-                // republish the path or clear the tombstone. See
-                // `Pending::orphans` and the orphan branches in
-                // `write` / `flush_node`.
-                pending.orphans.insert(node_id);
-            }
-            // The lookup-returned inode is also a candidate orphan
-            // (an open captured-file fd that was unlinked but never
-            // had an in-flight hot buffer). Insert is idempotent.
-            pending.orphans.insert(entry.node.0);
-            // R8 (Codex Thread 3293235164): preserve any path-keyed
-            // warm bytes for the surviving fd. The path tombstones
-            // immediately below would otherwise make the bytes
-            // unreachable. `orphan_warm[entry.node.0]` is consulted
-            // by the orphan branches of `read` / `attrs` / `write` /
-            // `apply_truncate` so the open-unlinked inode keeps
-            // seeing its own bytes until the final `release`.
-            if let Some(warm_entry) = pending.warm.remove(&child_path) {
-                pending.orphan_warm.insert(entry.node.0, warm_entry);
-            }
+            // Detach the path-level hot binding. The bytes follow the
+            // NodeId, so `hot[node_id]` / `warm[node_id]` stay put —
+            // the surviving fd reads them via the orphan branches in
+            // `read` / `attrs` / `write` / `apply_truncate`.
+            // (r9 fix: pre-spike code called `pending.hot.remove(&node_id)`
+            // here and the unflushed bytes vanished.)
+            pending.hot_by_path.remove(&child_path);
+            // Transition T1: Live → Orphan { open_count: N }. Carry
+            // the current open count over so the final `release`
+            // fires correctly. N == 0 is permitted; the inode stays
+            // tracked until `release` / `invalidate` / `capture`
+            // drops it (matching pre-spike orphan-set semantics for
+            // tests that skip the explicit `on_open`).
+            let open_count = pending.open_count(node_id);
+            pending
+                .state
+                .insert(node_id, NodeState::Orphan { open_count });
+            // Symlinks are not openable; no orphan story applies.
             pending.symlinks.remove(&child_path);
             pending.tombstones.insert(child_path.clone());
         }
@@ -1594,32 +1679,46 @@ impl ContentAddressedMount {
                 buf.path = new_path.clone();
             }
             if let Some(dest_id) = displaced_dest {
-                pending.orphans.insert(dest_id);
+                // T3: the displaced destination transitions to Orphan.
+                // Bytes (hot[dest_id], warm[dest_id]) stay put so the
+                // surviving fd keeps reading the inode's own data
+                // (spike doc §1.2 T3).
+                let open_count = pending.open_count(dest_id);
+                pending
+                    .state
+                    .insert(dest_id, NodeState::Orphan { open_count });
             }
         }
         Ok(())
     }
 
-    /// Promote the source's hot buffer (if any), then rewrite the
-    /// warm-tier entry / captured-blob reference at the new path.
+    /// Rename a regular file. Under the post-spike unified
+    /// NodeId-keyed model
+    /// (`docs/design/mount-posix-semantics.md` §2.4), the source's
+    /// bytes follow its NodeId — no byte migration step. The displaced
+    /// destination keeps its own `hot[id]` / `warm[id]` so the
+    /// surviving fd reads its own data. The work here is path-level:
+    /// retire the destination's path-keyed hot binding, rebase the
+    /// source's hot buffer's `path` field (so a subsequent `flush`
+    /// promotes under the new path), seed warm if the source had only
+    /// captured-tree bytes (so capture can plant the file at the new
+    /// path), and tombstone the old path.
     ///
-    /// `displaced_inode_id` names the inode that *was* at `new_path`
-    /// before this rename (None if the destination was empty). When
-    /// present, the displaced inode is becoming an orphan — its
-    /// surviving fds need access to its pre-rename bytes. R8 (Codex
-    /// Thread 3293235162): we relocate `pending.warm[new_path]` (if
-    /// any) into `orphan_warm[displaced_inode_id]` rather than
-    /// dropping it; the orphan read/attrs/write paths consult that
-    /// per-NodeId map.
+    /// `displaced_inode_id` is no longer used as a side-channel for
+    /// byte preservation — the caller (`rename_entry_with_options`)
+    /// handles the orphan state transition independently.
     fn move_file(
         &self,
         old_path: &Path,
         new_path: &Path,
         displaced_inode_id: Option<u64>,
     ) -> Result<()> {
-        // Promote any in-flight buffer at the source so the move is
-        // entirely a warm-tier operation.
-        let pending_node = self
+        // Snapshot whether the source has a hot buffer (drain it to
+        // warm so the warm tier becomes authoritative for capture
+        // under the new path) and whether the source is captured-only
+        // (then synthesize a warm entry so capture plants the bytes
+        // at new_path).
+        let src_id_opt = self
             .inner
             .pending
             .lock()
@@ -1627,76 +1726,73 @@ impl ContentAddressedMount {
             .hot_by_path
             .get(old_path)
             .copied();
-        if let Some(id) = pending_node {
+        if let Some(id) = src_id_opt {
             self.flush_node(NodeId(id))?;
         }
-
-        // Resolve the source's durable identity (warm-tier promotion
-        // wins over captured-tree blob — that's the priority used
-        // everywhere else in read).
-        enum Source {
-            Warm { blob: ContentHash, mode: FileMode, size: u64 },
-            Captured { blob: ContentHash, mode: FileMode, size: u64 },
-        }
-        let source = self
-            .inner
-            .pending
-            .lock()
-            .expect("pending lock")
-            .warm
-            .get(old_path)
-            .map(|entry| Source::Warm {
-                blob: entry.blob,
-                mode: entry.mode,
-                size: entry.size,
-            });
-        let source = match source {
-            Some(s) => s,
-            None => {
-                // Walk the captured tree by path.
-                let (blob, mode, size) = self.captured_file_at(old_path)?;
-                Source::Captured { blob, mode, size }
-            }
+        // After the flush, the source's bytes (if any) live in
+        // `warm[src_id]`. If the source had no warm entry — captured
+        // only — synthesize one keyed by the source's NodeId so
+        // `apply_pending_to_tree` plants the file under new_path. We
+        // resolve src_id via the path → inode reverse-index (or via
+        // the captured-tree walk for a captured-only source).
+        let src_id = {
+            let inodes = self.inner.inodes.lock().expect("inode lock");
+            inodes.by_path.get(old_path).copied()
         };
-        let (blob, mode, size) = match source {
-            Source::Warm { blob, mode, size } | Source::Captured { blob, mode, size } => {
-                (blob, mode, size)
-            }
+        let needs_synth = match src_id {
+            Some(id) => !self
+                .inner
+                .pending
+                .lock()
+                .expect("pending lock")
+                .warm
+                .contains_key(&id),
+            None => true,
+        };
+        let captured_seed = if needs_synth {
+            // Captured-only source: pull (blob, mode, size) from the
+            // captured tree so the rename survives `capture`.
+            Some(self.captured_file_at(old_path)?)
+        } else {
+            None
         };
 
-        // Apply.
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        // Detach the destination's path overlay. The hot buffer keyed
-        // by the displaced inode id is preserved — `rename_entry`
-        // marks that inode as orphan so its still-open fd keeps
-        // reading via the per-NodeId buffer (and any further write
-        // through that fd takes the orphan branch in `write`, which
-        // does not republish `hot_by_path`). POSIX rename-over: open
-        // dest descriptors must keep referencing the displaced inode
-        // until close.
+        // Detach the destination's path-keyed hot binding. The
+        // displaced inode's bytes are keyed by NodeId — they stay put
+        // for the surviving fd. POSIX rename-over: open destination
+        // descriptors keep referencing the displaced inode until close.
         pending.hot_by_path.remove(new_path);
-        // R8 (Codex Thread 3293235162): preserve the displaced
-        // inode's warm bytes for surviving fds. Without this, an open
-        // fd on a warm-promoted dest reads the source's replacement
-        // bytes via the now-rebound `warm[new_path]`.
-        let displaced_warm = pending.warm.remove(new_path);
-        if let (Some(id), Some(entry)) = (displaced_inode_id, displaced_warm) {
-            pending.orphan_warm.insert(id, entry);
-        }
+        // Symlinks are path-keyed; clear at both endpoints.
         pending.symlinks.remove(new_path);
-        pending.tombstones.remove(new_path);
-        // Move source.
-        pending.warm.remove(old_path);
         pending.symlinks.remove(old_path);
-        pending.warm.insert(
-            new_path.to_path_buf(),
-            PendingEntry { blob, mode, size },
-        );
-        // Tombstone the source so a captured-tree entry there gets
-        // hidden post-capture.
+        // Source: if a hot buffer survived the flush above (only
+        // possible if the source was Orphan, which can't happen for
+        // a valid rename source — but be defensive), rebase its
+        // path-binding.
+        if let Some(id) = pending.hot_by_path.remove(old_path) {
+            if let Some(buf) = pending.hot.get_mut(&id) {
+                buf.path = new_path.to_path_buf();
+            }
+            pending.hot_by_path.insert(new_path.to_path_buf(), id);
+        }
+        // Captured-only source: synthesize a warm entry so capture
+        // plants the bytes at new_path. The entry is keyed by the
+        // source's NodeId; `apply_pending_to_tree` resolves its
+        // current path through `inodes.by_path`.
+        if let (Some(id), Some((blob, mode, size))) = (src_id, captured_seed) {
+            pending
+                .warm
+                .insert(id, PendingEntry { blob, mode, size });
+        }
+        // Path-level bookkeeping: tombstone old_path so the captured
+        // tree's old entry is hidden; clear any tombstone at
+        // new_path (rename made it valid again).
         pending.tombstones.insert(old_path.to_path_buf());
-        // Clear any tombstone covering the destination.
         pending.tombstones.remove(new_path);
+        // The displaced inode is handled by the caller via the
+        // NodeState transition; no byte work here.
+        let _ = displaced_inode_id;
         Ok(())
     }
 
@@ -1706,8 +1802,9 @@ impl ContentAddressedMount {
         new_path: &Path,
         displaced_inode_id: Option<u64>,
     ) -> Result<()> {
-        // Resolve target bytes from pending overlay, else from a
-        // captured-tree symlink blob.
+        // Resolve target bytes from the pending overlay or the
+        // captured-tree blob — symlinks are path-keyed (not openable
+        // for IO; no orphan story applies).
         let target_bytes = {
             let pending = self.inner.pending.lock().expect("pending lock");
             pending.symlinks.get(old_path).cloned()
@@ -1720,24 +1817,16 @@ impl ContentAddressedMount {
             }
         };
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        // Same rename-over discipline as `move_file`: detach the
-        // destination path overlay but preserve the displaced inode's
-        // hot buffer (if any). The caller orphans the inode so reads
-        // through its still-open fd consult the per-NodeId buffer and
-        // subsequent writes/setattrs take the orphan branch.
+        // Detach the displaced destination's path-keyed hot binding.
+        // Its NodeId-keyed bytes stay put for the surviving fd; the
+        // caller's NodeState transition handles the orphan tracking.
         pending.hot_by_path.remove(new_path);
-        // R8 (Codex Thread 3293235162): symlink-over-file rename
-        // displaces a file inode with warm bytes; preserve them for
-        // the surviving fd via `orphan_warm`.
-        let displaced_warm = pending.warm.remove(new_path);
-        if let (Some(id), Some(entry)) = (displaced_inode_id, displaced_warm) {
-            pending.orphan_warm.insert(id, entry);
-        }
         pending.symlinks.remove(new_path);
-        pending.tombstones.remove(new_path);
         pending.symlinks.remove(old_path);
         pending.symlinks.insert(new_path.to_path_buf(), target_bytes);
+        pending.tombstones.remove(new_path);
         pending.tombstones.insert(old_path.to_path_buf());
+        let _ = displaced_inode_id;
         Ok(())
     }
 
@@ -1745,7 +1834,7 @@ impl ContentAddressedMount {
         // We only support overlay-only directory renames here. If the
         // source dir has any captured-tree backing, refuse — a full
         // captured-tree rename would need to rewrite every descendant
-        // tombstone/warm entry.
+        // tombstone entry.
         if self.captured_dir_exists(old_path)? {
             return Err(MountError::InvalidArgument(format!(
                 "cross-tree directory rename {} → {} not supported by the overlay",
@@ -1754,15 +1843,15 @@ impl ContentAddressedMount {
             )));
         }
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        // Move explicit_dirs and any deeper overlay entries under
-        // old_path/ to new_path/. Symlinks, warm, hot_by_path,
-        // tombstones, explicit_dirs all need rewriting.
+        // Path-keyed structures under `old_path/` need to be rebased
+        // to `new_path/`. Warm bytes follow the NodeId (unified shape)
+        // so warm[id] is unaffected by this rewrite — descendant
+        // NodeRecord paths get rebased in `rename_entry_with_options`.
         fn rebase(p: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
             let tail = p.strip_prefix(old).ok()?;
             Some(new.join(tail))
         }
         let mut new_explicit: BTreeSet<PathBuf> = BTreeSet::new();
-        let mut new_warm: BTreeMap<PathBuf, PendingEntry> = BTreeMap::new();
         let mut new_symlinks: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
         let mut new_tombstones: BTreeSet<PathBuf> = BTreeSet::new();
         let mut new_hot_by_path: BTreeMap<PathBuf, u64> = BTreeMap::new();
@@ -1776,16 +1865,6 @@ impl ContentAddressedMount {
                     if explicit != old_path {
                         new_explicit.insert(explicit);
                     }
-                }
-            }
-        }
-        for (path, entry) in std::mem::take(&mut pending.warm) {
-            match rebase(&path, old_path, new_path) {
-                Some(rebased) => {
-                    new_warm.insert(rebased, entry);
-                }
-                None => {
-                    new_warm.insert(path, entry);
                 }
             }
         }
@@ -1829,7 +1908,6 @@ impl ContentAddressedMount {
         // Ensure the destination directory itself is registered.
         new_explicit.insert(new_path.to_path_buf());
         pending.explicit_dirs = new_explicit;
-        pending.warm = new_warm;
         pending.symlinks = new_symlinks;
         pending.tombstones = new_tombstones;
         pending.hot_by_path = new_hot_by_path;
@@ -1938,13 +2016,21 @@ impl ContentAddressedMount {
                 // now living at the same name; touching
                 // `warm[path]` would land the change on the sibling
                 // at capture time.
-                if !pending.orphans.contains(&node.0) {
+                if !pending.is_orphan(node.0) {
                     if let Some(other_id) = pending.hot_by_path.get(&path).copied()
                         && let Some(buf) = pending.hot.get_mut(&other_id)
                     {
                         buf.mode = new_mode;
                     }
-                    if let Some(entry) = pending.warm.get_mut(&path) {
+                    // Warm is NodeId-keyed: rebind via inodes if the
+                    // path still resolves Live to a tracked NodeId.
+                    let warm_id = {
+                        let inodes = self.inner.inodes.lock().expect("inode lock");
+                        inodes.by_path.get(&path).copied()
+                    };
+                    if let Some(id) = warm_id
+                        && let Some(entry) = pending.warm.get_mut(&id)
+                    {
                         entry.mode = new_mode;
                     }
                 }
@@ -1994,8 +2080,16 @@ impl ContentAddressedMount {
             },
         }
         let phase1 = {
+            // Resolve the path's current Live NodeId via the inode
+            // registry — under the unified shape `warm` is
+            // NodeId-keyed, and the Live owner of `path` is the
+            // sibling we'd seed from when no per-inode buffer exists.
+            let path_owner = {
+                let inodes = self.inner.inodes.lock().expect("inode lock");
+                inodes.by_path.get(&path).copied()
+            };
             let mut pending = self.inner.pending.lock().expect("pending lock");
-            let orphan = pending.orphans.contains(&node.0);
+            let orphan = pending.is_orphan(node.0);
             let id = if pending.hot.contains_key(&node.0) {
                 Some(node.0)
             } else if orphan {
@@ -2015,20 +2109,21 @@ impl ContentAddressedMount {
             } else {
                 let seed = if orphan {
                     // Orphan: only the inode's pre-displacement
-                    // content is valid. R8 — prefer the inode's
-                    // preserved warm bytes (`orphan_warm[node.0]`)
-                    // over the captured-blob fallback. The path-
-                    // keyed `warm[path]` now belongs to the sibling
-                    // at the rebound name (rename-over) or is gone
-                    // (unlink); the relocated copy in `orphan_warm`
-                    // is the authoritative source for this inode.
+                    // content is valid. Under the unified shape its
+                    // own warm bytes live at `warm[node.0]`; fall
+                    // back to the captured blob (this inode's own,
+                    // not the sibling at the rebound name).
                     pending
-                        .orphan_warm
+                        .warm
                         .get(&node.0)
                         .map(|e| e.blob)
                         .or(captured_blob)
                 } else {
-                    pending.warm.get(&path).map(|e| e.blob).or(captured_blob)
+                    // Live: the path's bytes live at `warm[id]` where
+                    // id is the Live owner via `inodes.by_path`.
+                    path_owner
+                        .and_then(|id| pending.warm.get(&id).map(|e| e.blob))
+                        .or(captured_blob)
                 };
                 Phase1::NeedSeed { orphan, seed }
             }
@@ -2165,6 +2260,10 @@ impl ContentAddressedMount {
     /// Look up a path in the pending tier. Order: hot buffer (in-flight
     /// writes), then warm tier (promoted blob), then None (caller must
     /// fall back to the immutable state's tree).
+    ///
+    /// Under the unified NodeId-keyed model warm bytes live at
+    /// `warm[id]`; the path → id resolution goes through
+    /// `inodes.by_path` (lock order: pending ⊐ inodes).
     fn pending_lookup(&self, path: &Path) -> Option<PendingHit> {
         let pending = self.inner.pending.lock().expect("pending lock");
         if pending.tombstones.contains(path) {
@@ -2184,14 +2283,16 @@ impl ContentAddressedMount {
                 mode: buf.mode,
             });
         }
-        if let Some(entry) = pending.warm.get(path) {
-            return Some(PendingHit::Warm {
-                blob: entry.blob,
-                size: entry.size,
-                mode: entry.mode,
-            });
-        }
-        None
+        // Warm needs path → NodeId resolution. Acquire inodes inside
+        // the pending lock (lock order: pending ⊐ inodes).
+        let inodes = self.inner.inodes.lock().expect("inode lock");
+        let id = *inodes.by_path.get(path)?;
+        let entry = pending.warm.get(&id)?;
+        Some(PendingHit::Warm {
+            blob: entry.blob,
+            size: entry.size,
+            mode: entry.mode,
+        })
     }
 
     /// True if the parent dir or any ancestor of `path` has been
@@ -2231,10 +2332,26 @@ impl ContentAddressedMount {
                 .and_then(|tail| tail.components().next())
                 .is_some()
         };
-        pending
-            .warm
-            .keys()
-            .any(|p| !pending.tombstones.contains(p) && probe(p))
+        // Warm is NodeId-keyed under the unified shape; resolve paths
+        // via the inode registry. Skip orphans (their NodeRecord may
+        // still carry the pre-orphan path, but bytes are unreachable
+        // by path post-T1/T3).
+        let warm_under = {
+            let inodes = self.inner.inodes.lock().expect("inode lock");
+            pending.warm.keys().any(|id| {
+                if pending.is_orphan(*id) {
+                    return false;
+                }
+                let Some(record) = inodes.by_id.get(id) else {
+                    return false;
+                };
+                match warm_path_of_record(record) {
+                    Some(p) => !pending.tombstones.contains(&p) && probe(&p),
+                    None => false,
+                }
+            })
+        };
+        warm_under
             || pending
                 .hot_by_path
                 .keys()
@@ -2288,11 +2405,24 @@ impl ContentAddressedMount {
                 );
             }
         }
-        for (path, entry) in pending.warm.iter() {
-            if pending.tombstones.contains(path) {
+        // Warm is NodeId-keyed; resolve each entry's current path via
+        // the inode registry. Skip orphans (no path identity) and
+        // skip entries whose path tombstones (deleted overlays).
+        let inodes = self.inner.inodes.lock().expect("inode lock");
+        for (id, entry) in pending.warm.iter() {
+            if pending.is_orphan(*id) {
                 continue;
             }
-            let Some((name, is_dir)) = project(path) else {
+            let Some(record) = inodes.by_id.get(id) else {
+                continue;
+            };
+            let Some(path) = warm_path_of_record(record) else {
+                continue;
+            };
+            if pending.tombstones.contains(&path) {
+                continue;
+            }
+            let Some((name, is_dir)) = project(&path) else {
                 continue;
             };
             if is_dir {
@@ -2304,6 +2434,7 @@ impl ContentAddressedMount {
                 });
             }
         }
+        drop(inodes);
         for (path, target) in pending.symlinks.iter() {
             let Some((name, is_dir)) = project(path) else {
                 continue;
@@ -2354,6 +2485,19 @@ fn validate_entry_name(name: &OsStr) -> Result<&str> {
     name.to_str().ok_or_else(|| {
         MountError::InvalidArgument(format!("entry name {name:?} is not valid UTF-8"))
     })
+}
+
+/// Mount-relative path for a warm-tier entry, derived from its
+/// [`NodeRecord`]. The NodeId-keyed warm tier doesn't store the path
+/// directly; `apply_pending_to_tree` / `pending_dir_exists` /
+/// `pending_children_at` resolve it via the inode registry. Only
+/// file-like records (`File`, `PendingFile`) carry warm bytes; the
+/// other variants return `None`.
+fn warm_path_of_record(record: &NodeRecord) -> Option<PathBuf> {
+    match record {
+        NodeRecord::File { path, .. } | NodeRecord::PendingFile { path, .. } => Some(path.clone()),
+        _ => None,
+    }
 }
 
 /// Join a parent mount-relative path with a leaf name. Mirrors the
@@ -2478,11 +2622,11 @@ impl MountInner {
             let mut pending = self.pending.lock().expect("pending lock");
             // Orphan: keep the buffer alive across `flush` events.
             // POSIX open-unlinked semantics: bytes persist for the
-            // surviving fds; the marker survives so subsequent writes
+            // surviving fds; the state survives so subsequent writes
             // through those fds keep taking the orphan branch (no
             // path republish, no warm promotion). The final clear
             // happens in `release_node`.
-            if pending.orphans.contains(&node.0) {
+            if pending.is_orphan(node.0) {
                 return Ok(());
             }
             let Some(buf) = pending.hot.remove(&node.0) else {
@@ -2507,8 +2651,10 @@ impl MountInner {
             .map_err(MountError::Store)?;
         debug!(?path, %blob_oid, size, "promoted hot buffer to CAS");
         let mut pending = self.pending.lock().expect("pending lock");
+        // Warm is NodeId-keyed. The path-keyed tombstone clear below
+        // is a separate concern (directory-entry level).
         pending.warm.insert(
-            path.clone(),
+            node.0,
             PendingEntry {
                 blob: blob_oid,
                 mode,
@@ -2520,61 +2666,71 @@ impl MountInner {
         Ok(())
     }
 
-    /// Final close of `node` from a FUSE `release` callback. Decrements
-    /// the open-handle refcount; when it reaches zero, retires any
-    /// orphan-tracking state for the inode. Non-orphan paths are
-    /// indistinguishable from `flush_node` (a non-orphan release still
-    /// promotes any hot buffer to CAS).
+    /// Final close of `node` from a FUSE `release` callback. Drives
+    /// the per-NodeId lifecycle: decrement the open count carried on
+    /// `state[node]`; on the final close of an Orphan, drop bytes
+    /// and remove the state entry; on the final close of a Live
+    /// (or untracked) node, promote any hot buffer to warm via
+    /// `flush_node`.
+    ///
+    /// The orphan branch never warm-promotes — an orphan's bytes are
+    /// unreachable by path post-T1/T3, so promoting them would leak
+    /// data into the captured tree at a now-tombstoned path.
     fn release_node(&self, node: NodeId) -> Result<()> {
-        // Step 1: decide whether this is the *final* release. We
-        // track the open count separately from any lifecycle state
-        // so the bookkeeping is cheap (no allocation, no lookup
-        // beyond `BTreeMap::entry`).
-        let final_release = {
+        // Action determined under the lock so we don't re-read state
+        // after dropping bytes.
+        enum Outcome {
+            /// Mid-life (non-final) close OR final close of a Live
+            /// node. Either way: forward to `flush_node`. (`flush_node`
+            /// is a no-op for Orphan, so the mid-life Orphan case is
+            /// also safe to forward.)
+            Flush,
+            /// Final close of an Orphan. Bytes were dropped under the
+            /// lock; nothing else to do (no warm promotion — see the
+            /// doc comment above).
+            OrphanFinalDone,
+        }
+        let outcome = {
             let mut pending = self.pending.lock().expect("pending lock");
-            let entry = pending.open_handles.entry(node.0).or_insert(0);
-            if *entry > 0 {
-                *entry -= 1;
-            }
-            if *entry == 0 {
-                pending.open_handles.remove(&node.0);
-                true
-            } else {
-                false
+            match pending.state.get(&node.0).copied() {
+                None => {
+                    // Untracked release (no on_open was ever
+                    // recorded). Treat as Live final-close — flush
+                    // any hot buffer.
+                    Outcome::Flush
+                }
+                Some(NodeState::Live { open_count }) => {
+                    let n = open_count.saturating_sub(1);
+                    if n == 0 {
+                        pending.state.remove(&node.0);
+                    } else {
+                        pending.state.insert(node.0, NodeState::Live { open_count: n });
+                    }
+                    Outcome::Flush
+                }
+                Some(NodeState::Orphan { open_count }) => {
+                    let n = open_count.saturating_sub(1);
+                    if n == 0 {
+                        // Final release of an Orphan — POSIX "inode
+                        // lives until last close" ends here. Drop
+                        // bytes and the state entry.
+                        pending.state.remove(&node.0);
+                        pending.hot.remove(&node.0);
+                        pending.warm.remove(&node.0);
+                        Outcome::OrphanFinalDone
+                    } else {
+                        pending.state.insert(node.0, NodeState::Orphan { open_count: n });
+                        // Mid-life Orphan release: forward to
+                        // flush_node (which no-ops for orphans).
+                        Outcome::Flush
+                    }
+                }
             }
         };
-
-        if !final_release {
-            // Mid-life release (multiple opens still hold the
-            // inode). Equivalent to `flush` for promotion: don't
-            // disturb the orphan marker or its preserved bytes; let
-            // any non-orphan hot buffer flow through the normal
-            // path. `flush_node`'s orphan branch is a no-op so
-            // calling it here is safe in both cases.
-            return self.flush_node(node);
+        match outcome {
+            Outcome::Flush => self.flush_node(node),
+            Outcome::OrphanFinalDone => Ok(()),
         }
-
-        // Step 2: final release. If the inode is orphaned, drop all
-        // its state (hot buffer, preserved warm bytes, marker). The
-        // POSIX promise — "the inode lives until the last close" —
-        // ends right here. We do this BEFORE the promotion attempt
-        // so an orphan never lands in the warm tier.
-        let was_orphan = {
-            let mut pending = self.pending.lock().expect("pending lock");
-            if pending.orphans.remove(&node.0) {
-                pending.hot.remove(&node.0);
-                pending.orphan_warm.remove(&node.0);
-                true
-            } else {
-                false
-            }
-        };
-        if was_orphan {
-            return Ok(());
-        }
-
-        // Step 3: non-orphan final release — same as flush.
-        self.flush_node(node)
     }
 }
 
@@ -2767,14 +2923,14 @@ impl PlatformShell for ContentAddressedMount {
                 // the buffer (e.g. after rename/coalesce). Orphan
                 // PendingFiles skip the path overlay — the path is
                 // gone (open-unlinked) or rebound (rename-over) — but
-                // r8 preserves the inode's own warm bytes (if any) in
-                // `orphan_warm[node.0]`. With no warm fallback there
-                // is no captured-tier source either, so the read
-                // errors with Stale.
+                // the unified shape preserves the inode's own warm
+                // bytes (if any) at `warm[node.0]`. With no warm
+                // fallback there is no captured-tier source either,
+                // so the read errors with Stale.
                 let warm_blob = {
                     let pending = self.inner.pending.lock().expect("pending lock");
-                    if pending.orphans.contains(&node.0) {
-                        return match pending.orphan_warm.get(&node.0).map(|e| e.blob) {
+                    if pending.is_orphan(node.0) {
+                        return match pending.warm.get(&node.0).map(|e| e.blob) {
                             Some(blob) => {
                                 drop(pending);
                                 let bytes = self.load_blob_bytes(&blob)?;
@@ -2791,7 +2947,14 @@ impl PlatformShell for ContentAddressedMount {
                     {
                         return Ok(copy_into(&hot.bytes, offset, buf));
                     }
-                    pending.warm.get(path).map(|e| e.blob)
+                    // Warm is NodeId-keyed; resolve path → id via the
+                    // inode registry.
+                    let inodes = self.inner.inodes.lock().expect("inode lock");
+                    inodes
+                        .by_path
+                        .get(path)
+                        .copied()
+                        .and_then(|id| pending.warm.get(&id).map(|e| e.blob))
                 };
                 match warm_blob {
                     Some(blob) => {
@@ -2829,14 +2992,14 @@ impl PlatformShell for ContentAddressedMount {
                 // captured blob — that's the inode's own data.
                 let overlay = {
                     let pending = self.inner.pending.lock().expect("pending lock");
-                    if pending.orphans.contains(&node.0) {
-                        // R8: serve the inode's preserved warm bytes
-                        // first if any. With none, fall through to
-                        // the captured blob — that's still the
-                        // orphan's own data (rename-over of a
-                        // captured-only file).
+                    if pending.is_orphan(node.0) {
+                        // Serve the inode's own warm bytes first
+                        // (unified shape: `warm[node.0]`). With none,
+                        // fall through to the captured blob — that's
+                        // still the orphan's own data (rename-over of
+                        // a captured-only file).
                         pending
-                            .orphan_warm
+                            .warm
                             .get(&node.0)
                             .map(|warm| Overlay::Warm(warm.blob))
                     } else if pending.tombstones.contains(path) {
@@ -2846,7 +3009,14 @@ impl PlatformShell for ContentAddressedMount {
                     {
                         Some(Overlay::Hot(hot.bytes.clone()))
                     } else {
-                        pending.warm.get(path).map(|warm| Overlay::Warm(warm.blob))
+                        // Warm is NodeId-keyed; resolve path → id via
+                        // the inode registry.
+                        let inodes = self.inner.inodes.lock().expect("inode lock");
+                        inodes
+                            .by_path
+                            .get(path)
+                            .copied()
+                            .and_then(|id| pending.warm.get(&id).map(|warm| Overlay::Warm(warm.blob)))
                     }
                 };
                 match overlay {
@@ -2918,8 +3088,15 @@ impl PlatformShell for ContentAddressedMount {
             Blob(ContentHash),
         }
         let seed = {
+            // Resolve the path's current Live owner via the inode
+            // registry — warm bytes for the path live at
+            // `warm[live_id]` under the unified shape.
+            let path_owner = {
+                let inodes = self.inner.inodes.lock().expect("inode lock");
+                inodes.by_path.get(&path).copied()
+            };
             let pending = self.inner.pending.lock().expect("pending lock");
-            let orphan = pending.orphans.contains(&node.0);
+            let orphan = pending.is_orphan(node.0);
             if pending.hot.contains_key(&node.0) {
                 // The per-NodeId buffer is always authoritative —
                 // both for live writes (this fd's accumulated bytes)
@@ -2938,13 +3115,12 @@ impl PlatformShell for ContentAddressedMount {
                 // inode, not us).
                 Seed::None
             } else if orphan {
-                // R8: orphan-aware seeding. The path's overlay
-                // (`warm[path]`) belongs to the sibling at the
-                // rebound name. Prefer the inode's preserved warm
-                // bytes (`orphan_warm[node.0]`), then its captured
-                // blob, then empty.
+                // Orphan-aware seeding. The path's overlay belongs
+                // to the sibling at the rebound name; this inode's
+                // own bytes live at `warm[node.0]` (or in the
+                // captured blob).
                 pending
-                    .orphan_warm
+                    .warm
                     .get(&node.0)
                     .map(|e| Seed::Blob(e.blob))
                     .or_else(|| captured_blob.map(Seed::Blob))
@@ -2953,7 +3129,7 @@ impl PlatformShell for ContentAddressedMount {
                 // Unlink-then-write through a fresh inode (POSIX
                 // unlink+open(O_CREAT)): start from empty.
                 Seed::None
-            } else if let Some(entry) = pending.warm.get(&path) {
+            } else if let Some(entry) = path_owner.and_then(|id| pending.warm.get(&id)) {
                 Seed::Blob(entry.blob)
             } else if let Some(blob) = captured_blob {
                 Seed::Blob(blob)
@@ -2993,7 +3169,7 @@ impl PlatformShell for ContentAddressedMount {
         //     `flush_node` reads the same `orphans` signal at
         //     promotion time and drops the buffer instead of warming
         //     it.
-        let orphan = pending.orphans.contains(&node.0);
+        let orphan = pending.is_orphan(node.0);
         if !orphan {
             // Coalesce two NodeIds for the same path onto the same buffer.
             if let Some(existing_id) = pending.hot_by_path.get(&path).copied()
@@ -3242,13 +3418,12 @@ impl PlatformShell for ContentAddressedMount {
                     let pending = self.inner.pending.lock().expect("pending lock");
                     if let Some(buf) = pending.hot.get(&node.0) {
                         Some(Some(buf.bytes.len() as u64))
-                    } else if pending.orphans.contains(&node.0) {
-                        // R8: prefer the preserved orphan warm size
-                        // (if any) over the captured fallback. With
-                        // no preserved warm, `None` falls through to
-                        // `blob_size(blob)` — the captured size is
-                        // the orphan's own.
-                        pending.orphan_warm.get(&node.0).map(|e| Some(e.size))
+                    } else if pending.is_orphan(node.0) {
+                        // Prefer the orphan's own warm size (unified
+                        // shape: `warm[node.0]`). With no warm, fall
+                        // through to `blob_size(blob)` — the captured
+                        // size is the orphan's own.
+                        pending.warm.get(&node.0).map(|e| Some(e.size))
                     } else if pending.tombstones.contains(path) {
                         // Tombstoned via the mount: treat as
                         // not-yet-collected. The path is gone but the
@@ -3259,7 +3434,14 @@ impl PlatformShell for ContentAddressedMount {
                     {
                         Some(Some(hot.bytes.len() as u64))
                     } else {
-                        pending.warm.get(path).map(|warm| Some(warm.size))
+                        // Warm is NodeId-keyed; resolve path → id via
+                        // the inode registry.
+                        let inodes = self.inner.inodes.lock().expect("inode lock");
+                        inodes
+                            .by_path
+                            .get(path)
+                            .copied()
+                            .and_then(|id| pending.warm.get(&id).map(|warm| Some(warm.size)))
                     }
                 };
                 match overlay_size {
@@ -3277,19 +3459,19 @@ impl PlatformShell for ContentAddressedMount {
             NodeRecord::PendingFile { path, .. } => {
                 // Orphan branch: a rename-displaced or
                 // unlinked-but-still-open PendingFile reports either
-                // its per-NodeId hot buffer length, or its preserved
-                // `orphan_warm[node.0]` size (R8). `pending_lookup`
-                // would otherwise consult the rebound path overlay
-                // and serve the sibling's size.
+                // its per-NodeId hot buffer length, or its own
+                // `warm[node.0]` size. `pending_lookup` would
+                // otherwise consult the rebound path overlay and
+                // serve the sibling's size.
                 let orphan_size = {
                     let pending = self.inner.pending.lock().expect("pending lock");
-                    if pending.orphans.contains(&node.0) {
+                    if pending.is_orphan(node.0) {
                         Some(
                             pending
                                 .hot
                                 .get(&node.0)
                                 .map(|buf| buf.bytes.len() as u64)
-                                .or_else(|| pending.orphan_warm.get(&node.0).map(|e| e.size)),
+                                .or_else(|| pending.warm.get(&node.0).map(|e| e.size)),
                         )
                     } else {
                         None
@@ -3353,15 +3535,12 @@ impl PlatformShell for ContentAddressedMount {
             {
                 pending.hot_by_path.remove(&buf.path);
             }
-            // The kernel is forgetting this inode; any orphan
-            // tracking we kept for it is now dead weight. Drop it
-            // so the set doesn't accumulate across long sessions.
-            // R8: also clear orphan-preserved warm bytes and the
-            // open-handle refcount so a long-running mount doesn't
-            // accumulate dead entries.
-            pending.orphans.remove(&node.0);
-            pending.orphan_warm.remove(&node.0);
-            pending.open_handles.remove(&node.0);
+            // The kernel is forgetting this inode; any lifecycle
+            // tracking we kept for it is now dead weight. Drop the
+            // state entry and any NodeId-keyed warm bytes so a
+            // long-running mount doesn't accumulate dead entries.
+            pending.state.remove(&node.0);
+            pending.warm.remove(&node.0);
         }
         self.inner.inodes.lock().expect("inode lock").forget(node);
         Ok(())
@@ -3502,7 +3681,8 @@ impl ContentAddressedMount {
         // dirs prune naturally.
         let tree_hash = {
             let pending = self.inner.pending.lock().expect("pending lock");
-            apply_pending_to_tree(self.store(), &parent_tree, &pending)?
+            let inodes = self.inner.inodes.lock().expect("inode lock");
+            apply_pending_to_tree(self.store(), &parent_tree, &pending, &inodes)?
         };
 
         // Step 2: record a new state. Mirrors
@@ -3581,11 +3761,10 @@ impl ContentAddressedMount {
             warn!(?err, "thread metadata refresh from mount capture failed");
         }
 
-        // Step 4: clear the pending tier and refresh state. R8: also
-        // clear orphan bookkeeping — the new state's tree is
-        // canonical, so any open fds the kernel still holds against
-        // pre-capture inodes will get refreshed via `forget` /
-        // re-lookup as normal.
+        // Step 4: clear the pending tier and refresh state. The new
+        // state's tree is canonical, so any open fds the kernel still
+        // holds against pre-capture inodes will get refreshed via
+        // `forget` / re-lookup as normal.
         {
             let mut pending = self.inner.pending.lock().expect("pending lock");
             pending.hot.clear();
@@ -3595,9 +3774,7 @@ impl ContentAddressedMount {
             pending.dir_tombstones.clear();
             pending.explicit_dirs.clear();
             pending.symlinks.clear();
-            pending.orphans.clear();
-            pending.orphan_warm.clear();
-            pending.open_handles.clear();
+            pending.state.clear();
         }
         let mut state_lock = self.inner.state.write().expect("mount state lock");
         *state_lock = MountState {
@@ -3640,6 +3817,7 @@ fn apply_pending_to_tree(
     store: &dyn ObjectStore,
     parent: &Tree,
     pending: &Pending,
+    inodes: &Inodes,
 ) -> Result<ContentHash> {
     /// In-memory virtual tree: a directory's local file overrides,
     /// tombstones, and named child directories. Built lazily during
@@ -3678,8 +3856,28 @@ fn apply_pending_to_tree(
         cursor
     }
 
-    // Plant warm entries.
-    for (path, entry) in &pending.warm {
+    // Plant warm entries. Warm is NodeId-keyed; resolve each entry's
+    // current Live path via the inode registry. Skip Orphan entries —
+    // their bytes are unreachable by path post-T1/T3 and must not
+    // resurface in the captured tree.
+    for (id, entry) in &pending.warm {
+        if pending.is_orphan(*id) {
+            continue;
+        }
+        let Some(record) = inodes.by_id.get(id) else {
+            continue;
+        };
+        let Some(path) = warm_path_of_record(record) else {
+            continue;
+        };
+        // Sanity: the record's stored path must still bind to this
+        // NodeId in `by_path`. If `inodes.by_path[path]` resolves to
+        // a different inode the record is stale (e.g. a Live → Orphan
+        // transition that didn't update the state map yet) and we
+        // skip rather than plant phantom bytes.
+        if inodes.by_path.get(&path) != Some(id) {
+            continue;
+        }
         let comps: Vec<&str> = path
             .components()
             .filter_map(|c| match c {
@@ -3894,16 +4092,18 @@ fn apply_pending_to_tree(
 
 impl ContentAddressedMount {
     /// Test-only accessor for the warm tier so unit tests can verify
-    /// promotions landed without going through `read`.
+    /// promotions landed without going through `read`. Returns paths
+    /// resolved via the inode registry (warm is NodeId-keyed under
+    /// the unified shape).
     #[cfg(test)]
     pub(crate) fn warm_keys(&self) -> Vec<PathBuf> {
-        self.inner
-            .pending
-            .lock()
-            .expect("pending lock")
+        let pending = self.inner.pending.lock().expect("pending lock");
+        let inodes = self.inner.inodes.lock().expect("inode lock");
+        pending
             .warm
             .keys()
-            .cloned()
+            .filter(|id| !pending.is_orphan(**id))
+            .filter_map(|id| inodes.by_id.get(id).and_then(warm_path_of_record))
             .collect()
     }
 
@@ -3911,12 +4111,21 @@ impl ContentAddressedMount {
     /// the blob oid so dedup tests can compare across mounts.
     #[cfg(test)]
     pub(crate) fn warm_blob(&self, path: impl AsRef<Path>) -> Option<ContentHash> {
+        let path = path.as_ref();
+        let id = self
+            .inner
+            .inodes
+            .lock()
+            .expect("inode lock")
+            .by_path
+            .get(path)
+            .copied()?;
         self.inner
             .pending
             .lock()
             .expect("pending lock")
             .warm
-            .get(path.as_ref())
+            .get(&id)
             .map(|e| e.blob)
     }
 
@@ -3954,23 +4163,7 @@ impl ContentAddressedMount {
             .pending
             .lock()
             .expect("pending lock")
-            .orphans
-            .contains(&node.0)
-    }
-
-    /// Test-only accessor: orphan-preserved warm-tier blob for `node`,
-    /// if any. Mirrors [`Self::warm_blob`] but keyed by NodeId rather
-    /// than path.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn orphan_warm_blob(&self, node: NodeId) -> Option<ContentHash> {
-        self.inner
-            .pending
-            .lock()
-            .expect("pending lock")
-            .orphan_warm
-            .get(&node.0)
-            .map(|e| e.blob)
+            .is_orphan(node.0)
     }
 }
 
