@@ -274,7 +274,7 @@ state that hasn't been checked.
 | # | r11 finding                                                           | Why it can't compile                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | - | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | 1 | `transition_to_orphan` accepts `open_count == 0`                      | `Pending::transition_to_orphan(&mut self, w: Witness<'_, LiveNonZero>)`. `Witness<LiveNonZero>` is constructed only by `witness_live_nonzero(id)`, which returns `Some` iff `state[id] == Live { open_count >= 1 }`. There is no other constructor. Calling on a `LiveZero` node returns `None` at the witness-construction call site, the early-`?` propagates upward, and the transition never fires.                                                                                                                              |
-| 2 | `drain_for_capture` drops `Live` with `open_count > 0`                | `drain_for_capture`'s contract is "drop `LiveZero` and Live-untracked; keep `LiveNonZero` (their fds will close mid-mount and finalise the Live exit path) and `Orphan` (open-unlinked POSIX); drop `Released`". The implementation iterates the `state` map and `match`es the variant. The `match` is exhaustive and the variant types are different — a future refactor that adds a fifth state forces every match to be revisited. The "drop `LiveNonZero`" line cannot be written without naming `LiveNonZero` explicitly.        |
+| 2 | `drain_for_capture` drops `Live` with `open_count > 0`                | `drain_for_capture`'s contract is "drop `LiveZero`; preserve `LiveNonZero` (their fds will close mid-mount and finalise the Live exit path); preserve `Orphan` (open-unlinked POSIX)". `Released` is the absence-of-entry state — values loaded from the `state` map are one of the three resident variants, so the inner `match` is exhaustive over those three. A future refactor that adds a fourth resident state forces every match to be revisited; the "drop `LiveNonZero`" line cannot be written without naming `LiveNonZero` explicitly.        |
 | 3 | `kernel_forget_inode` removes `hot[id]` before state check            | `kernel_forget_inode` takes a `KernelForgetWitness`. The witness is constructed by an FSM-aware function whose body IS the lifecycle check. The method body cannot reach the `self.hot.remove(&id)` line on a state for which that check did not pass — the witness wouldn't exist. The race window between "check passed" and "method body runs" is closed by the `&mut Pending` borrow held by the witness's lifetime.                                                                                                              |
 | 4 | `rename_entry_with_options` calls `transition_to_orphan` on a symlink | This is a *caller* bug, but the same gating applies one level up. The caller has to construct a `Witness<LiveNonZero>` to call `transition_to_orphan`. A symlink or directory NodeId is never registered in `state` with a `LiveNonZero` discriminant (symlinks have no open/release lifecycle; `record_open` is never called for them, so the state never goes Live-with-handles). `witness_live_nonzero(symlink_id)` returns `None`. The caller's existing code becomes a no-op for symlinks instead of polluting the `state` map. |
 
@@ -352,7 +352,7 @@ Three phases, each its own impl sub-issue (§6):
    `LiveZero`, `Orphan`, `Released`, `Witness<'p, S>`, `KernelForgetWitness<'p>`,
    and the four `witness_*` constructors on `Pending`. No retrofitting of
    callsites yet. Substrate-only; type-checks; no behaviour change.
-2. **Transition retrofits (sub-issues 2 and 3).** Change
+2. **Transition retrofits (sub-issues 2, 3, and 4).** Change
    `transition_to_orphan`, `drain_for_capture`, `kernel_forget_inode`
    signatures; thread witnesses at the ~8 callsites in `core.rs`. Findings
    #1, #2, #3, #4 all close in this phase.
@@ -471,15 +471,20 @@ of the rename caller short-circuit when `witness_live_nonzero` returns
 ## Premise
 `Pending::drain_for_capture` currently uses a runtime `match` on
 `NodeState`. Convert the implementation to exhaustively match the
-state types and use the types to encode "drop Live; keep Orphan".
-The signature gains no parameters (capture-drain is whole-map by
-construction), but the inner loop is rewritten to surface the
-LiveNonZero / LiveZero distinction so the "drop Live with N > 0" bug
-becomes unwritable.
+state types and use the types to encode "drop `LiveZero`; preserve
+`LiveNonZero`; preserve `Orphan`". The signature gains no parameters
+(capture-drain is whole-map by construction), but the inner loop is
+rewritten to surface the `LiveNonZero` / `LiveZero` distinction so
+the "drop Live with `open_count > 0`" bug (r11 #2) becomes unwritable.
 
 ## Acceptance criteria
-- [ ] Inner `match` is exhaustive over the four `Lifecycle` types.
-- [ ] LiveNonZero entries are preserved across capture (POSIX
+- [ ] Inner `match` is exhaustive over the three *resident* `Lifecycle`
+      types — `LiveNonZero`, `LiveZero`, `Orphan`. `Released` is the
+      absence-of-entry state and is never stored in the map, so the
+      value loaded via `map.get(...)` cannot be `Released`; the impl
+      should document this with a code comment so future readers don't
+      add a `Released` arm.
+- [ ] `LiveNonZero` entries are preserved across capture (POSIX
       last-close-wins regression test).
 - [ ] r10 fixture tests still pass.
 - [ ] New proptest fixture: random FSM trace ending in a capture
