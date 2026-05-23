@@ -2001,6 +2001,40 @@ mod write_ops {
         assert_eq!(again.unix_mode & 0o111, 0o111);
     }
 
+    /// `enumerate` surfaces overlay symlinks both as standalone
+    /// pending-only children (pass-2 `PendingChildKind::Symlink`)
+    /// and as overrides on captured-tree entries (pass-1 hit on
+    /// `PendingHit::Symlink`). One enumerate exercises both arms.
+    #[test]
+    fn enumerate_surfaces_overlay_symlinks_in_both_passes() {
+        let (_temp, mount) = open_mount();
+        // Pass-2 path: brand-new symlink at a name with no captured
+        // counterpart.
+        mount
+            .create_symlink(NodeId::ROOT, OsStr::new("alias"), Path::new("hello.txt"))
+            .expect("fresh symlink");
+        // Pass-1 path: overlay symlink replaces a captured file.
+        // (`run.sh` is in the fixture as an executable file.)
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("run.sh"))
+            .expect("clear captured run.sh");
+        mount
+            .create_symlink(NodeId::ROOT, OsStr::new("run.sh"), Path::new("hello.txt"))
+            .expect("symlink overrides captured file");
+
+        let entries = mount.enumerate(NodeId::ROOT).unwrap();
+        let alias = entries
+            .iter()
+            .find(|e| e.name == "alias")
+            .expect("fresh symlink missing from enumerate");
+        assert_eq!(alias.kind, NodeKind::Symlink);
+        let run = entries
+            .iter()
+            .find(|e| e.name == "run.sh")
+            .expect("overlay symlink override missing from enumerate");
+        assert_eq!(run.kind, NodeKind::Symlink);
+    }
+
     /// `create_symlink` records a link in the overlay; `read_link`
     /// returns its target bytes.
     #[test]
@@ -2016,6 +2050,256 @@ mod write_ops {
         assert_eq!(entry.kind, NodeKind::Symlink);
         let target = mount.read_link(entry.node).expect("read_link");
         assert_eq!(target.as_os_str(), OsStr::new("hello.txt"));
+    }
+
+    /// `rename_entry` over a symlink in the overlay moves the target
+    /// bytes and tombstones the source — `move_symlink`'s overlay-only
+    /// path. Existing capture/diff tests don't reach this branch, so
+    /// it's the main contributor to uncovered patch lines.
+    #[test]
+    fn rename_entry_moves_overlay_symlink() {
+        let (_temp, mount) = open_mount();
+        mount
+            .create_symlink(
+                NodeId::ROOT,
+                OsStr::new("alias"),
+                Path::new("hello.txt"),
+            )
+            .expect("create symlink");
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("alias"),
+                NodeId::ROOT,
+                OsStr::new("alias2"),
+            )
+            .expect("rename symlink");
+        assert!(
+            mount.lookup(NodeId::ROOT, OsStr::new("alias")).unwrap().is_none(),
+            "source symlink path must be gone after rename",
+        );
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("alias2"))
+            .unwrap()
+            .expect("renamed symlink resolves");
+        assert_eq!(dst.kind, NodeKind::Symlink);
+        let target = mount.read_link(dst.node).expect("read_link via new path");
+        assert_eq!(target.as_os_str(), OsStr::new("hello.txt"));
+    }
+
+    /// Cross-tree directory rename — i.e. renaming a captured-tree
+    /// directory — is intentionally refused by `move_overlay_dir`;
+    /// the overlay would otherwise need to rewrite every descendant
+    /// tombstone/warm key. Exercises the error path explicitly so
+    /// the refusal isn't accidentally relaxed by a later change.
+    #[test]
+    fn rename_entry_refuses_captured_directory_rename() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("nested"),
+                NodeId::ROOT,
+                OsStr::new("nested2"),
+            )
+            .expect_err("captured-dir rename must be refused");
+        assert!(matches!(err, MountError::InvalidArgument(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    /// `move_overlay_dir` rebases every overlay slot under the source
+    /// dir, but slots OUTSIDE the source must survive unchanged. This
+    /// hits the `None` arms of each `rebase` match — the largest
+    /// untouched cluster of patch-uncovered lines in this PR.
+    #[test]
+    fn rename_overlay_dir_preserves_sibling_overlay_state() {
+        let (_temp, mount) = open_mount();
+        // Two overlay dirs side by side; rename one. The other's
+        // children/state — explicit_dirs, warm (via flushed write),
+        // a symlink, and a tombstone — must all stay put.
+        mount.make_dir(NodeId::ROOT, OsStr::new("from_dir")).unwrap();
+        mount.make_dir(NodeId::ROOT, OsStr::new("keep_dir")).unwrap();
+        let keep = mount.lookup(NodeId::ROOT, OsStr::new("keep_dir")).unwrap().unwrap();
+        // Warm (flushed) leaf under `keep_dir/`.
+        let kept_file = mount
+            .create_file(keep.node, OsStr::new("warm.txt"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(kept_file.node, 0, b"persist").unwrap();
+        mount.flush(kept_file.node).unwrap();
+        // Symlink under `keep_dir/`.
+        mount
+            .create_symlink(keep.node, OsStr::new("alias"), Path::new("warm.txt"))
+            .unwrap();
+        // Tombstone the captured `hello.txt` so the tombstone-rebase
+        // branch is exercised against a non-prefixed path.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink captured file");
+
+        // The actual rename.
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("from_dir"),
+                NodeId::ROOT,
+                OsStr::new("to_dir"),
+            )
+            .expect("dir rename");
+
+        // The sibling's children survive.
+        let keep_after = mount.lookup(NodeId::ROOT, OsStr::new("keep_dir")).unwrap().unwrap();
+        assert_eq!(keep_after.node, keep.node);
+        let warm_after = mount
+            .lookup(keep_after.node, OsStr::new("warm.txt"))
+            .unwrap()
+            .expect("warm leaf must remain at sibling dir");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(warm_after.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"persist");
+        let alias_after = mount
+            .lookup(keep_after.node, OsStr::new("alias"))
+            .unwrap()
+            .expect("sibling symlink must remain");
+        assert_eq!(alias_after.kind, NodeKind::Symlink);
+        // The unrelated tombstone survives.
+        assert!(
+            mount.lookup(NodeId::ROOT, OsStr::new("hello.txt")).unwrap().is_none(),
+            "unrelated tombstone must survive the rename pass",
+        );
+        // And the rename itself landed.
+        assert!(
+            mount.lookup(NodeId::ROOT, OsStr::new("from_dir")).unwrap().is_none(),
+            "source dir must be gone",
+        );
+        assert!(
+            mount.lookup(NodeId::ROOT, OsStr::new("to_dir")).unwrap().is_some(),
+            "destination dir must be present",
+        );
+    }
+
+    /// Self-rename (same source and destination) is a POSIX no-op:
+    /// returns success without touching any state. Without the early
+    /// return, the move + tombstone-source path would actually delete
+    /// the file.
+    #[test]
+    fn rename_entry_self_rename_is_noop() {
+        let (_temp, mount) = open_mount();
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("self-rename succeeds");
+        // The file remains addressable + readable.
+        let hit = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("self-rename did not delete the file");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(hit.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"world");
+    }
+
+    /// POSIX: renaming a directory over a regular file is `ENOTDIR`
+    /// (the destination must also be a directory). Catches the
+    /// `(Directory, _)` arm of the kind-mismatch guard.
+    #[test]
+    fn rename_entry_directory_over_file_returns_enotdir() {
+        let (_temp, mount) = open_mount();
+        mount.make_dir(NodeId::ROOT, OsStr::new("srcdir")).unwrap();
+        let err = mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("srcdir"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect_err("dir-over-file must fail");
+        assert!(matches!(err, MountError::NotADirectory(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    /// POSIX: renaming a regular file over a directory is `EISDIR`.
+    /// Catches the `(_, Directory)` arm of the kind-mismatch guard.
+    #[test]
+    fn rename_entry_file_over_directory_returns_eisdir() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                NodeId::ROOT,
+                OsStr::new("nested"),
+            )
+            .expect_err("file-over-dir must fail");
+        assert!(matches!(err, MountError::IsADirectory(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::EISDIR);
+    }
+
+    /// POSIX: directory-over-directory rename only succeeds if the
+    /// destination is empty; a non-empty destination is `ENOTEMPTY`.
+    /// Catches the inner branch of the (Directory, Directory) arm.
+    #[test]
+    fn rename_entry_directory_over_nonempty_directory_returns_enotempty() {
+        let (_temp, mount) = open_mount();
+        mount.make_dir(NodeId::ROOT, OsStr::new("srcdir")).unwrap();
+        mount.make_dir(NodeId::ROOT, OsStr::new("dstdir")).unwrap();
+        let dstdir = mount.lookup(NodeId::ROOT, OsStr::new("dstdir")).unwrap().unwrap();
+        mount
+            .create_file(dstdir.node, OsStr::new("child.txt"), FileMode::Normal, false)
+            .unwrap();
+        let err = mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("srcdir"),
+                NodeId::ROOT,
+                OsStr::new("dstdir"),
+            )
+            .expect_err("non-empty dest must fail");
+        assert!(matches!(err, MountError::NotEmpty(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::ENOTEMPTY);
+    }
+
+    /// `invalidate` on an orphaned NodeId (an inode the kernel forgets
+    /// after `unlink + release`) must retire the orphan tracking entry
+    /// — otherwise the `orphans` set accumulates dead IDs across the
+    /// session. Indirectly observed via a follow-up unlink+write cycle
+    /// on a new NodeId at the same name: that write must take the
+    /// normal (republishing) branch, not the orphan branch.
+    #[test]
+    fn invalidate_clears_orphan_tracking_for_forgotten_inode() {
+        let (_temp, mount) = open_mount();
+        // Round 1: create, write, unlink — orphans the inode.
+        let v1 = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(v1.node, 0, b"v1").unwrap();
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .unwrap();
+        // The kernel issues `release` then `forget`; both flow
+        // through `invalidate` in our trait surface.
+        mount.invalidate(v1.node).expect("invalidate orphan");
+
+        // Round 2: a fresh inode at the same name. Its writes must
+        // republish the path normally — the orphan-cleanup pass in
+        // `invalidate` is what keeps the orphan set from making this
+        // node mistakenly take the orphan branch.
+        let v2 = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .unwrap();
+        assert_ne!(v1.node, v2.node);
+        mount.write(v2.node, 0, b"v2-fresh").expect("normal write");
+        let hit = mount
+            .lookup(NodeId::ROOT, OsStr::new("scratch"))
+            .unwrap()
+            .expect("recreated path resolves");
+        assert_eq!(hit.node, v2.node);
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(v2.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"v2-fresh");
     }
 }
 
