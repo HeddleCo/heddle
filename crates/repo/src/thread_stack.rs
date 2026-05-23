@@ -311,12 +311,24 @@ where
             format!("{thread_name}@projected")
         };
 
+        // A step is a root iff `parent_thread.is_none()`. The source
+        // record's `parent_thread` may point at a thread outside the
+        // record set (e.g. `main`); for the planner that still counts
+        // as a root and the field is informational/historical only, so
+        // we erase it at depth 0 to make root-detection unambiguous
+        // downstream.
+        let parent_thread = if depth == 0 {
+            None
+        } else {
+            record.parent_thread.clone()
+        };
+
         steps.push(StackRebaseStep {
             thread: thread_name.to_string(),
             current_state: current,
             old_base: record.base_state.clone(),
             new_base: new_base.clone(),
-            parent_thread: record.parent_thread.clone(),
+            parent_thread,
             depth,
         });
 
@@ -576,6 +588,35 @@ mod tests {
         assert_eq!(by_thread["b"].new_base, "a@projected");
         assert_eq!(by_thread["d"].new_base, "a@projected");
         assert_eq!(by_thread["c"].new_base, "b@projected");
+    }
+
+    #[test]
+    fn plan_root_step_parent_thread_is_none_even_when_record_names_external_parent() {
+        // The record names `main` as parent. Since `main` isn't in the
+        // record set, `feat-a` is treated as a root. The emitted step's
+        // `parent_thread` must be `None` regardless of what the source
+        // record says — downstream root-classification keys off that
+        // field, not on `depth == 0`.
+        let records = vec![
+            record_at("feat-a", Some("main"), "main-1"),
+            record_at("feat-b", Some("feat-a"), "feat-a-tip"),
+        ];
+        let mut current = HashMap::new();
+        current.insert("feat-a", "feat-a-tip");
+        current.insert("feat-b", "feat-b-tip");
+        let plan =
+            plan_stack_rebase(&records, "feat-a", "main-2", current_states(&current)).unwrap();
+        let by_thread: HashMap<&str, &StackRebaseStep> =
+            plan.steps.iter().map(|s| (s.thread.as_str(), s)).collect();
+        assert_eq!(
+            by_thread["feat-a"].parent_thread, None,
+            "root step must erase the record's external parent"
+        );
+        assert_eq!(
+            by_thread["feat-b"].parent_thread,
+            Some("feat-a".to_string()),
+            "descendant step must retain its in-stack parent"
+        );
     }
 
     #[test]
