@@ -844,6 +844,9 @@ message FinishWebAuthnAuthenticationRequest {
   bytes authenticator_data = 4;
   bytes signature = 5;
   bytes user_handle = 6;
+  // Client-side device pubkey the client wants the access token bound
+  // to. Server validates this against the user's active device_roots.
+  bytes device_public_key = 7;
   // Idempotency (audit-idempotency enforces tag 15).
   string client_operation_id = 15;
 }
@@ -946,6 +949,10 @@ message AccessTokenResponse {
   // credential row (device, service-account, agent). Empty for
   // browser sessions.
   string credential_id = 6;
+  // Server-issued GrantEnvelope authenticating the client's pubkey +
+  // session for biscuit minting. Empty on legacy / unauthenticated
+  // responses.
+  bytes grant_envelope = 7;
 }
 
 message ListSessionsRequest {}
