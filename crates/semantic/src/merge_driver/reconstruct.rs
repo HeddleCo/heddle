@@ -86,10 +86,14 @@ pub(crate) fn reconstruct_merged_file(
     let mut total_conflicts = 0usize;
 
     // Whole-file source bundle: lets `resolve_item` slice per-item
-    // bytes AND lets `emit_addadd_conflict` back-fill its EOL
-    // detection from file context when single-line item bodies
-    // carry zero EOL observations (Codex r8 P2, cid 3256283857).
-    let sides = SideSources { base, ours, theirs };
+    // bytes AND carries a whole-file `EolPolicy` used by the trailing
+    // newline path (`reconcile_trailing_newline`) and as a fallback by
+    // the marker path (`emit_addadd_conflict`) when the conflicting
+    // item bodies carry zero EOL observations (Codex r8, cid
+    // 3256283857). The marker path otherwise weights its policy on
+    // the items' own bytes so a CRLF item in a majority-LF file gets
+    // CRLF markers (Codex r2 P2 on PR #193, cid 3291860840).
+    let sides = SideSources::new(base, ours, theirs);
 
     for key in &all_keys {
         let resolution = resolve_item(
@@ -190,7 +194,7 @@ pub(crate) fn reconstruct_merged_file(
     }
     total_conflicts += post_conflicts;
 
-    reconcile_trailing_newline(&mut output, base, ours, theirs);
+    reconcile_trailing_newline(&mut output, sides);
 
     if total_conflicts == 0 {
         MergeOutcome::Clean(output)
@@ -312,15 +316,80 @@ fn materialize_segment(outcome: MergeOutcome, fallback: &str) -> (Vec<u8>, usize
 }
 
 /// Whole-file source bundle threaded through item resolution. Lets
-/// `resolve_item` slice item bytes per side AND back-fills the EOL
-/// detection inside the add/add conflict-marker emission when both
-/// item bodies carry zero EOL observations (single-line items in a
-/// CRLF file — Codex r8 P2, cid 3256283857).
+/// `resolve_item` slice item bytes per side AND carries the
+/// whole-file `EolPolicy` used by `reconcile_trailing_newline` and as
+/// the zero-observation fallback by `emit_addadd_conflict`. The
+/// marker path's primary policy is per-item — see
+/// `emit_addadd_conflict` — but reuses this whole-file policy when
+/// the conflicting items contribute no `\n` of their own
+/// (single-line items, Codex r8 cid 3256283857).
 #[derive(Clone, Copy)]
 struct SideSources<'a> {
     base: &'a str,
     ours: &'a str,
     theirs: &'a str,
+    eol_policy: EolPolicy,
+}
+
+impl<'a> SideSources<'a> {
+    fn new(base: &'a str, ours: &'a str, theirs: &'a str) -> Self {
+        let eol_policy =
+            EolPolicy::detect(&[base.as_bytes(), ours.as_bytes(), theirs.as_bytes()]);
+        SideSources { base, ours, theirs, eol_policy }
+    }
+}
+
+/// Dominant line-ending across a set of byte samples. Built via
+/// [`EolPolicy::detect`] once over the whole-file sources (see
+/// [`SideSources::new`]) and reused everywhere downstream that needs
+/// to emit a newline. Counts `\r\n` occurrences vs bare `\n` (LF not
+/// preceded by CR); the strict majority wins, and ties fall back to
+/// the first sample's own dominant style — by convention callers pass
+/// `base` first — then to LF.
+///
+/// Earlier revisions returned CRLF as soon as ANY sample contained
+/// one `\r\n`; that wrongly flipped a majority-LF file to CRLF when a
+/// single side happened to be CRLF (Codex r7 P2, cid 3256225712).
+/// Majority voting respects the file's actual style without
+/// overweighting a single divergent side.
+#[derive(Clone, Copy)]
+struct EolPolicy {
+    crlf: usize,
+    lf: usize,
+    first_crlf: usize,
+    first_lf: usize,
+}
+
+impl EolPolicy {
+    fn detect(samples: &[&[u8]]) -> Self {
+        let mut crlf = 0usize;
+        let mut lf = 0usize;
+        let mut first_crlf = 0usize;
+        let mut first_lf = 0usize;
+        for (i, s) in samples.iter().enumerate() {
+            let (c, l) = count_eols(s);
+            crlf += c;
+            lf += l;
+            if i == 0 {
+                first_crlf = c;
+                first_lf = l;
+            }
+        }
+        EolPolicy { crlf, lf, first_crlf, first_lf }
+    }
+
+    fn eol(self) -> &'static [u8] {
+        if self.crlf > self.lf {
+            return b"\r\n";
+        }
+        if self.lf > self.crlf {
+            return b"\n";
+        }
+        if self.first_crlf > self.first_lf {
+            return b"\r\n";
+        }
+        b"\n"
+    }
 }
 
 /// Resolve a single item's 3-way merge. Returns `(Some(bytes), n_conflicts)`
@@ -466,42 +535,6 @@ fn ensure_trailing_newline(out: &mut Vec<u8>, eol: &[u8]) {
     }
 }
 
-/// Pick the dominant line-ending across a set of byte samples by
-/// counting `\r\n` occurrences vs bare `\n` (LF not preceded by CR)
-/// across all samples and returning whichever has more. Ties — and the
-/// all-zero case — fall back to the first sample's own dominant style
-/// (by convention callers pass `base` first), then to LF.
-///
-/// Earlier revisions returned CRLF as soon as ANY sample contained one
-/// `\r\n`; that wrongly flips a majority-LF file to CRLF when a single
-/// side happens to be CRLF (Codex r7 P2, cid 3256225712). Majority
-/// voting respects the file's actual style without overweighting a
-/// single divergent side.
-fn detect_eol(samples: &[&[u8]]) -> &'static [u8] {
-    let mut crlf = 0usize;
-    let mut lf = 0usize;
-    for s in samples {
-        let (c, l) = count_eols(s);
-        crlf += c;
-        lf += l;
-    }
-    if crlf > lf {
-        return b"\r\n";
-    }
-    if lf > crlf {
-        return b"\n";
-    }
-    // Tie (including all-zero). Tie-break to the first sample's own
-    // dominant style — by convention callers pass `base` first.
-    if let Some(first) = samples.first() {
-        let (c, l) = count_eols(first);
-        if c > l {
-            return b"\r\n";
-        }
-    }
-    b"\n"
-}
-
 /// Count (`\r\n`, bare `\n`) occurrences in `s`. A `\n` is "bare" iff
 /// it is not preceded by `\r`.
 fn count_eols(s: &[u8]) -> (usize, usize) {
@@ -540,16 +573,15 @@ fn count_eols(s: &[u8]) -> (usize, usize) {
 /// CRLF-canonical file doesn't gain a bare LF (heddle#114 r7 self-
 /// audit prediction P1, same hazard class as the r6 P2 #1 markers
 /// finding).
-fn reconcile_trailing_newline(out: &mut Vec<u8>, base: &str, ours: &str, theirs: &str) {
+fn reconcile_trailing_newline(out: &mut Vec<u8>, sides: SideSources<'_>) {
     if out.is_empty() {
         return;
     }
-    let want_newline = majority_ends_with_newline(base, ours, theirs);
+    let want_newline = majority_ends_with_newline(sides.base, sides.ours, sides.theirs);
     let has_newline = *out.last().unwrap() == b'\n';
     match (want_newline, has_newline) {
         (true, false) => {
-            let eol = detect_eol(&[base.as_bytes(), ours.as_bytes(), theirs.as_bytes()]);
-            out.extend_from_slice(eol);
+            out.extend_from_slice(sides.eol_policy.eol());
         }
         (false, true) => {
             out.pop();
@@ -584,31 +616,35 @@ fn majority_ends_with_newline(base: &str, ours: &str, theirs: &str) -> bool {
 /// produces so external validators (heddle#78) and IDE conflict tools
 /// parse it identically.
 ///
-/// Line endings on the marker lines match the dominant style of the
-/// two bodies — a CRLF file gets CRLF markers and an LF file gets LF
-/// markers. Without that, a CRLF body wrapped in LF markers produces
-/// a mixed-endings file that breaks Windows tooling (Codex r6 P2 #1).
+/// Line endings on the marker lines come from a per-item [`EolPolicy`]
+/// computed over the two conflicting item bodies, NOT the whole-file
+/// policy carried by `sides`. The markers and the body they bracket
+/// are derived from the same sample, so the r8 invariant (markers +
+/// body cannot disagree) holds — but they now reflect the item's own
+/// EOL discipline rather than the surrounding file. In a mixed-EOL
+/// file where the LF context outnumbers a CRLF item, the whole-file
+/// policy would vote LF and wrap a CRLF body with bare-LF markers,
+/// reintroducing the mixed-EOL hunk shape (Codex r2 P2, PR #193 cid
+/// 3291860840).
 ///
-/// Single-line item bodies contain zero `\n` observations, so the
-/// per-item samples alone are insufficient — without the whole-file
-/// fallback in `eol_context`, the detector returns LF and wraps a
-/// CRLF file with bare-LF marker lines (Codex r8 P2, cid 3256283857).
-/// The samples order is `[ours_item, theirs_item, base_file, ours_file,
-/// theirs_file]`: item bytes lead so they dominate when present, and
-/// the per-side files back-fill the count when they're empty.
+/// When both items carry zero EOL observations — single-line bodies
+/// in a CRLF file — the per-item policy ties to LF by default, which
+/// reintroduces Codex r8 P2 (cid 3256283857). The whole-file
+/// `sides.eol_policy` fills that case: it counts the surrounding
+/// file context, so a CRLF file resolves to CRLF markers even when
+/// the items contribute no observations of their own.
 fn emit_addadd_conflict(
     ours: &[u8],
     theirs: &[u8],
     markers: ConflictMarkers<'_>,
     sides: SideSources<'_>,
 ) -> Vec<u8> {
-    let eol = detect_eol(&[
-        ours,
-        theirs,
-        sides.base.as_bytes(),
-        sides.ours.as_bytes(),
-        sides.theirs.as_bytes(),
-    ]);
+    let items_policy = EolPolicy::detect(&[ours, theirs]);
+    let eol = if items_policy.crlf + items_policy.lf > 0 {
+        items_policy.eol()
+    } else {
+        sides.eol_policy.eol()
+    };
     let mut out = Vec::with_capacity(ours.len() + theirs.len() + 64);
     out.extend_from_slice(b"<<<<<<< ");
     out.extend_from_slice(markers.ours.as_bytes());
