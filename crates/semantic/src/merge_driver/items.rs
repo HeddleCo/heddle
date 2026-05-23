@@ -392,8 +392,8 @@ fn classify_rust_node<'a>(
                 extra_scope: Vec::new(),
             })
         }
-        "struct_item" => simple_item(source, node, "name", ItemKind::Struct),
-        "enum_item" => simple_item(source, node, "name", ItemKind::Enum),
+        "struct_item" => leaf_item(ItemKind::Struct, source, node, "name"),
+        "enum_item" => leaf_item(ItemKind::Enum, source, node, "name"),
         "trait_item" => {
             let name = name_from_field(source, node, "name")?;
             let container_body = node.child_by_field_name("body");
@@ -405,10 +405,10 @@ fn classify_rust_node<'a>(
                 extra_scope: Vec::new(),
             })
         }
-        "union_item" => simple_item(source, node, "name", ItemKind::Struct),
-        "type_item" => simple_item(source, node, "name", ItemKind::TypeAlias),
-        "const_item" => simple_item(source, node, "name", ItemKind::Const),
-        "static_item" => simple_item(source, node, "name", ItemKind::Static),
+        "union_item" => leaf_item(ItemKind::Struct, source, node, "name"),
+        "type_item" => leaf_item(ItemKind::TypeAlias, source, node, "name"),
+        "const_item" => leaf_item(ItemKind::Const, source, node, "name"),
+        "static_item" => leaf_item(ItemKind::Static, source, node, "name"),
         _ => None,
     }
 }
@@ -721,11 +721,20 @@ fn classify_java_node<'a>(
     }
 }
 
-fn simple_item<'a>(
+/// Classify a leaf item (no container body, no parameter signature, no extra
+/// scope) — the shared shape of Rust `struct` / `enum` / `union` / `type` /
+/// `const` / `static`. `name_field` names the tree-sitter field carrying the
+/// declared name.
+///
+/// Note: source is `&str` and the return type is `Classified` (not `&[u8]` /
+/// `ItemClassification` as the audit prototype sketched) — those are the
+/// names the rest of this module uses, and changing them would ripple far
+/// outside the leaf-classifier consolidation this helper is meant to do.
+fn leaf_item<'a>(
+    kind: ItemKind,
     source: &'a str,
     node: Node<'a>,
     name_field: &str,
-    kind: ItemKind,
 ) -> Option<Classified<'a>> {
     let name = name_from_field(source, node, name_field)?;
     Some(Classified {
