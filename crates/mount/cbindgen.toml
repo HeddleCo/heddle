@@ -1,0 +1,46 @@
+# cbindgen config for the FSKit Swift bridging header.
+#
+# The generator scans `src/fskit/c_abi.rs` (the single source of
+# truth for the FSKit C ABI) and writes a header that the Swift
+# adapter at `swift/HeddleFSKit/HeddleFSKit.swift` consumes via
+# its bridging header path.
+#
+# Style choices:
+#   * `language = "C"` — Swift's bridging header expects plain C.
+#   * `cpp_compat = true` — emit `extern "C" { ... }` guards so the
+#     same header is also safe to include from C++ (cheap insurance).
+#   * `include_guard` instead of `pragma_once` — Apple's bridging
+#     headers conventionally use macro guards, and Xcode's indexer
+#     handles them slightly more reliably across SDK versions.
+#   * `no_includes = true` + explicit `sys_includes` — cbindgen's
+#     default kitchen-sink (`stdarg.h`, `stdbool.h`, `stdlib.h`)
+#     is unnecessary here; we only need `stdint.h` and `stddef.h`.
+
+language = "C"
+cpp_compat = true
+no_includes = true
+sys_includes = ["stdint.h", "stddef.h"]
+include_guard = "HEDDLE_FSKIT_BRIDGING_H"
+documentation = false
+line_length = 80
+tab_width = 4
+style = "type"
+
+# Banner reviewers see at the top of the generated header.
+header = """// HeddleFSKit-Bridging.h
+//
+// GENERATED FROM `crates/mount/src/fskit/c_abi.rs` BY cbindgen.
+// DO NOT EDIT BY HAND — re-run `cargo build -p mount --features fskit`.
+//
+// This is the C ABI surface that the Rust `fskit` shell calls into.
+// The Swift implementation lives in `HeddleFSKit.swift`; the
+// authoritative Rust declarations live in `crates/mount/src/fskit/c_abi.rs`.
+// A change in Rust regenerates this header on the next build, and
+// any drift between the Rust ABI and Swift's call sites becomes a
+// `swiftc` compile error rather than runtime undefined behaviour."""
+
+# Don't pull in dependency crates' types — the C ABI in `c_abi.rs`
+# is self-contained (only `std::ffi` types, all of which cbindgen
+# maps to plain C primitives).
+[parse]
+parse_deps = false

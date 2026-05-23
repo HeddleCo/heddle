@@ -1,0 +1,57 @@
+[package]
+name = "heddle-semantic"
+version = "0.2.4"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+name = "semantic"
+[features]
+default = ["common-languages"]
+common-languages = ["lang-rust", "lang-python", "lang-javascript", "lang-typescript"]
+extended-languages = ["lang-c", "lang-cpp", "lang-go", "lang-java"]
+lang-rust = ["dep:tree-sitter-rust"]
+lang-python = ["dep:tree-sitter-python"]
+lang-javascript = ["dep:tree-sitter-javascript"]
+lang-typescript = ["dep:tree-sitter-typescript"]
+lang-go = ["dep:tree-sitter-go"]
+lang-c = ["dep:tree-sitter-c"]
+lang-cpp = ["dep:tree-sitter-cpp"]
+lang-java = ["dep:tree-sitter-java"]
+
+[dependencies]
+anyhow.workspace = true
+merge = { path = "../merge", package = "heddle-merge", version = "0.2" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.2", features = ["memory-backend"] }
+similar.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+tree-sitter-c = { workspace = true, optional = true }
+tree-sitter-cpp = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+tree-sitter-java = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = "0.8"
+pprof = { version = "0.15", default-features = false, features = ["flamegraph"] }
+
+[[bench]]
+name = "merge_function_level"
+harness = false
+required-features = ["lang-rust"]
+
+[[bench]]
+name = "profile_target"
+harness = false
+required-features = ["lang-rust"]

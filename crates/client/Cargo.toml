@@ -1,0 +1,62 @@
+[package]
+name = "heddle-client"
+version = "0.2.4"
+edition.workspace = true
+authors.workspace = true
+description = "Heddle hosted-backend client: auth, support, presence, the gRPC client wrappers, and the global credential store."
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+biscuit-auth.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+clap.workspace = true
+futures.workspace = true
+hex.workspace = true
+hyper-util.workspace = true
+ignore.workspace = true
+jsonwebtoken.workspace = true
+libc.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+reqwest.workspace = true
+rmp-serde.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tokio-stream.workspace = true
+tokio-tungstenite.workspace = true
+toml.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+tower = { version = "0.5", default-features = false, features = ["util"] }
+tracing.workspace = true
+walkdir.workspace = true
+
+# Workspace heddle crates — sibling paths plus crates.io versions so
+# downstream consumers (closed weft, third parties) pull the published
+# matching versions from the registry.
+cli-shared = { path = "../cli-shared", package = "heddle-cli-shared", version = "0.2" }
+crypto = { path = "../crypto", package = "heddle-crypto", version = "0.2" }
+grpc = { path = "../grpc", package = "heddle-grpc", version = "0.3" }
+objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
+proto = { path = "../proto", package = "heddle-proto", version = "0.2", default-features = false }
+refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
+repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false, features = ["git-overlay", "native"] }
+weft-client-shim = { path = "../weft-client-shim", package = "weft-client-shim", version = "0.2" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lib]
+path = "src/lib.rs"

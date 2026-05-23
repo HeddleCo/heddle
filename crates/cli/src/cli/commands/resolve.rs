@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Resolve command implementation.
+
+use std::fs;
+
+use anyhow::{Result, anyhow};
+use repo::{MergeState, Repository};
+use serde::Serialize;
+
+use super::advice::RecoveryAdvice;
+use crate::cli::{Cli, should_output_json};
+
+#[derive(Serialize)]
+struct ResolveOutput {
+    message: String,
+    resolved: Vec<String>,
+    remaining: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ConflictList {
+    conflicts: Vec<String>,
+}
+
+pub fn cmd_resolve(
+    cli: &Cli,
+    path: Option<String>,
+    all: bool,
+    list: bool,
+    ours: bool,
+    theirs: bool,
+    abort: bool,
+) -> Result<()> {
+    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let merge_manager = repo.merge_state_manager();
+
+    if abort {
+        return cmd_resolve_abort(&repo, &merge_manager, cli);
+    }
+
+    if list {
+        return cmd_resolve_list(&repo, &merge_manager, cli);
+    }
+
+    if all {
+        return cmd_resolve_all(&repo, &merge_manager, cli, ours, theirs);
+    }
+
+    let Some(path) = path else {
+        return Err(anyhow!(
+            "Specify a file to resolve, or use --all, --list, or --abort"
+        ));
+    };
+
+    cmd_resolve_file(&repo, &merge_manager, cli, &path, ours, theirs)
+}
+
+fn cmd_resolve_abort(
+    repo: &Repository,
+    merge_manager: &repo::MergeStateManager,
+    cli: &Cli,
+) -> Result<()> {
+    abort_merge_state(repo, merge_manager)?;
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!(
+            "{}",
+            serde_json::to_string(&ResolveOutput {
+                message: "Merge aborted".to_string(),
+                resolved: vec![],
+                remaining: vec![],
+            })?
+        );
+    } else {
+        println!("Merge aborted");
+    }
+
+    Ok(())
+}
+
+pub(crate) fn abort_merge_state(
+    repo: &Repository,
+    merge_manager: &repo::MergeStateManager,
+) -> Result<()> {
+    let merge_state = load_merge_state_or_advice(merge_manager, "abort merge")?;
+    // The 3-way merge that preceded this abort wrote a partial tree
+    // (conflict markers) but did not move HEAD or the target thread
+    // ref — both stay at `ours` throughout the conflicted-merge
+    // window. The FF here is therefore a worktree reset to `ours`,
+    // not a thread advance, so the recorded `FastForwardV2`'s
+    // `pre_target_id` and `post_target_id` are equal. Migrated as
+    // part of the heddle#110 Rule-7 sweep for uniformity with the
+    // other `fast_forward_attached` callers: a future merge variant
+    // that *does* move HEAD before aborting (e.g. a partial-apply
+    // shape) would then get correct undo semantics for free without
+    // a second migration.
+    super::ff_record::record_ff_advance(repo, "<abort>", &merge_state.ours)?;
+    merge_manager.abort()?;
+    Ok(())
+}
+
+fn cmd_resolve_list(
+    repo: &Repository,
+    merge_manager: &repo::MergeStateManager,
+    cli: &Cli,
+) -> Result<()> {
+    let merge_state = load_merge_state_or_advice(merge_manager, "list merge conflicts")?;
+    let unresolved = unresolved_paths(&merge_state);
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!(
+            "{}",
+            serde_json::to_string(&ConflictList {
+                conflicts: unresolved.clone(),
+            })?
+        );
+    } else if unresolved.is_empty() {
+        println!("No unresolved conflicts");
+    } else {
+        for path in &unresolved {
+            println!("{}", path);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_resolve_all(
+    repo: &Repository,
+    merge_manager: &repo::MergeStateManager,
+    cli: &Cli,
+    ours: bool,
+    theirs: bool,
+) -> Result<()> {
+    let merge_state = load_merge_state_or_advice(merge_manager, "resolve merge conflicts")?;
+    let unresolved = unresolved_paths(&merge_state);
+
+    if unresolved.is_empty() {
+        return Err(anyhow!(no_conflicts_to_resolve_advice()));
+    }
+
+    for path in &unresolved {
+        resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
+        merge_manager.resolve(path)?;
+    }
+
+    let remaining = merge_manager.unresolved()?;
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!(
+            "{}",
+            serde_json::to_string(&ResolveOutput {
+                message: format!("Resolved {} conflict(s)", unresolved.len()),
+                resolved: unresolved.clone(),
+                remaining: remaining.clone(),
+            })?
+        );
+    } else {
+        println!("Resolved {} conflict(s)", unresolved.len());
+        for path in &unresolved {
+            println!("  {}", path);
+        }
+        if !remaining.is_empty() {
+            println!("Remaining: {} conflict(s)", remaining.len());
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_resolve_file(
+    repo: &Repository,
+    merge_manager: &repo::MergeStateManager,
+    cli: &Cli,
+    path: &str,
+    ours: bool,
+    theirs: bool,
+) -> Result<()> {
+    let merge_state = load_merge_state_or_advice(merge_manager, "resolve merge conflict")?;
+    resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
+    merge_manager.resolve(path)?;
+
+    let remaining = merge_manager.unresolved()?;
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!(
+            "{}",
+            serde_json::to_string(&ResolveOutput {
+                message: format!("Resolved {}", path),
+                resolved: vec![path.to_string()],
+                remaining,
+            })?
+        );
+    } else {
+        println!("Resolved {}", path);
+        if !remaining.is_empty() {
+            println!("{} conflict(s) remaining", remaining.len());
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_file_with_version(
+    repo: &Repository,
+    merge_state: &MergeState,
+    path: &str,
+    ours: bool,
+    theirs: bool,
+) -> Result<()> {
+    if !ours && !theirs {
+        return Ok(());
+    }
+
+    let full_path = repo.root().join(path);
+
+    if ours {
+        let our_state = repo
+            .store()
+            .get_state(&merge_state.ours)?
+            .ok_or_else(|| anyhow!("Our state not found"))?;
+        let our_tree = repo.require_tree(&our_state.tree)?;
+
+        if let Some(entry) = our_tree.get(path) {
+            let blob = repo.require_blob(&entry.hash)?;
+            fs::write(&full_path, blob.content())?;
+        }
+    } else if theirs {
+        let their_state = repo
+            .store()
+            .get_state(&merge_state.theirs)?
+            .ok_or_else(|| anyhow!("Their state not found"))?;
+        let their_tree = repo.require_tree(&their_state.tree)?;
+
+        if let Some(entry) = their_tree.get(path) {
+            let blob = repo.require_blob(&entry.hash)?;
+            fs::write(&full_path, blob.content())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn load_merge_state_or_advice(
+    merge_manager: &repo::MergeStateManager,
+    action: &'static str,
+) -> Result<MergeState> {
+    merge_manager
+        .load()?
+        .ok_or_else(|| anyhow!(no_merge_in_progress_advice(action)))
+}
+
+fn unresolved_paths(merge_state: &MergeState) -> Vec<String> {
+    merge_state
+        .conflicts
+        .iter()
+        .filter(|conflict| !merge_state.resolved.contains(conflict))
+        .cloned()
+        .collect()
+}
+
+fn no_merge_in_progress_advice(action: &'static str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "no_merge_in_progress",
+        "No merge in progress",
+        "Inspect the current operation state with `heddle status`.",
+        "the repository has no persisted Heddle merge state",
+        format!("{action} would need to read or update conflict state for an active merge"),
+        "repository state was left unchanged",
+        "heddle status",
+        vec!["heddle status".to_string()],
+    )
+}
+
+fn no_conflicts_to_resolve_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "no_conflicts_to_resolve",
+        "No conflicts to resolve",
+        "Inspect the current conflict set with `heddle resolve --list`.",
+        "the active merge has no unresolved conflict paths",
+        "resolve --all would not update any files or merge state",
+        "repository state was left unchanged",
+        "heddle resolve --list",
+        vec!["heddle resolve --list".to_string()],
+    )
+}

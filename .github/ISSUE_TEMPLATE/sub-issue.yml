@@ -1,0 +1,59 @@
+name: Sub-issue
+description: A scoped piece of work that rolls up to an epic on the HeddleCo kanban board.
+title: "[short imperative title — no leading verb noise]"
+labels: ["p1"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for normal sub-issues that an agent (human or AI) can pick up and ship in one PR.
+
+        Before filing: skim [BOARD.md](https://github.com/HeddleCo/.github/blob/main/profile/BOARD.md) for field conventions. After filing: set the project fields on the issue card (Epic, Scope, DoD Type, Size, Priority).
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this matters, how we got here, and what the agent picking this up cold needs to know to start. 2–6 sentences.
+      placeholder: One paragraph. Link the parent epic (`Part of #N`) and any prior issues/PRs that informed this.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: Concrete checkboxes that define done. Each one must be verifiable from the diff or a CI artifact. Avoid prose; prefer bullets that read as "thing exists / behaviour holds".
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: file-scope
+    attributes:
+      label: File scope
+      description: Paths the agent expects to touch. Used by the orchestrator to detect parallel-work collisions. If unsure, infer from the parent epic's `## Critical files` and update later.
+      value: |
+        - `path/to/file_or_dir/`
+        - `another/path.rs`
+  - type: textarea
+    id: blocked-by
+    attributes:
+      label: Blocked by
+      description: Issues that must close before this one can move from Backlog to Ready. Cross-repo refs allowed (`HeddleCo/weft#42`).
+      placeholder: |
+        - HeddleCo/heddle#19
+        - HeddleCo/weft#42
+  - type: textarea
+    id: dod
+    attributes:
+      label: Definition of Done
+      description: Standard DoD shell — leave as-is unless the issue genuinely doesn't need a particular line. Which lines apply depends on the project board's `DoD Type` field.
+      value: |
+        - [ ] **Red-commit first** (Rust): failing tests pushed before implementation; link the red SHA in the PR.
+        - [ ] **Playwright e2e + verification checklist** (UI): viewports, auth states, before/after screenshots in PR.
+        - [ ] PR description includes test command output + coverage delta + perf delta where relevant.
+        - [ ] Cross-repo PRs all linked back to this issue.
+        - [ ] Acceptance criteria above all checked.
+    validations:
+      required: true

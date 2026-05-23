@@ -1,0 +1,250 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Marker commands.
+
+use anyhow::{Result, anyhow};
+use repo::Repository;
+use serde::Serialize;
+
+use super::{advice::RecoveryAdvice, snapshot::ensure_current_state};
+use crate::{
+    cli::{Cli, MarkerCommands, should_output_json},
+    config::UserConfig,
+};
+
+#[derive(Serialize)]
+struct MarkerListOutput {
+    markers: Vec<MarkerEntry>,
+}
+
+#[derive(Serialize)]
+struct MarkerEntry {
+    name: String,
+    /// Short change-id of the state the marker points at.
+    change_id: String,
+}
+
+#[derive(Serialize)]
+struct MarkerOpOutput {
+    name: String,
+    /// Short change-id of the state the marker pointed at after the op.
+    /// `None` for ops that delete the marker.
+    change_id: Option<String>,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct MarkerBulkDeleteOutput {
+    deleted: Vec<MarkerEntry>,
+    count: usize,
+    message: String,
+}
+
+pub fn cmd_marker(cli: &Cli, command: MarkerCommands) -> Result<()> {
+    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+
+    match command {
+        MarkerCommands::List { filter } => cmd_marker_list(cli, &repo, filter),
+        MarkerCommands::Create { name, .. } => cmd_marker_create(cli, &repo, name),
+        MarkerCommands::Delete { name, prefix } => match (name, prefix) {
+            (Some(name), None) => cmd_marker_delete(cli, &repo, name),
+            (None, Some(prefix)) => cmd_marker_delete_prefix(cli, &repo, prefix),
+            // Clap enforces required_unless_present + conflicts_with, so
+            // these branches are unreachable in practice. Guard defensively
+            // in case the constraint is ever relaxed.
+            (Some(_), Some(_)) => Err(anyhow!(
+                "marker delete: cannot combine <NAME> with --prefix"
+            )),
+            (None, None) => Err(anyhow!(
+                "marker delete: provide either <NAME> or --prefix <PFX>"
+            )),
+        },
+        MarkerCommands::Show { name } => cmd_marker_show(cli, &repo, name),
+    }
+}
+
+fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Result<()> {
+    let markers = repo.refs().list_markers()?;
+
+    let entries: Vec<MarkerEntry> = markers
+        .iter()
+        .filter(|name| match filter.as_deref() {
+            // Prefix match (not a glob). An empty filter is treated as
+            // "no filter" rather than "match every marker" — passing
+            // `--filter ""` is almost always an unintended shell
+            // expansion accident, and the no-op behavior is the
+            // friendliest interpretation. (The symmetric `marker
+            // delete --prefix ""` rejects the empty string for safety,
+            // because the consequence there is destructive.)
+            Some(prefix) if !prefix.is_empty() => name.starts_with(prefix),
+            _ => true,
+        })
+        .filter_map(|name| {
+            let state = repo.refs().get_marker(name).ok()??;
+            Some(MarkerEntry {
+                name: name.clone(),
+                change_id: state.short(),
+            })
+        })
+        .collect();
+
+    let output = MarkerListOutput { markers: entries };
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        for entry in &output.markers {
+            println!("{} -> {}", entry.name, entry.change_id);
+        }
+        if output.markers.is_empty() {
+            println!("No markers");
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
+    let current = ensure_current_state(
+        repo,
+        &UserConfig::load_default().unwrap_or_default(),
+        Some(format!(
+            "Bootstrap git-overlay before creating marker {}",
+            name
+        )),
+    )?;
+
+    repo.refs().create_marker(&name, &current)?;
+    repo.oplog().record_marker_create(&name, &current)?;
+
+    let output = MarkerOpOutput {
+        name: name.clone(),
+        change_id: Some(current.short()),
+        message: format!("Created marker '{}' at {}", name, current.short()),
+    };
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!("{}", output.message);
+    }
+
+    Ok(())
+}
+
+fn cmd_marker_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
+    let state = repo
+        .refs()
+        .delete_marker(&name)?
+        .ok_or_else(|| anyhow!("Marker not found: {}", name))?;
+
+    repo.oplog().record_marker_delete(&name, &state)?;
+
+    let output = MarkerOpOutput {
+        name: name.clone(),
+        change_id: None,
+        message: format!("Deleted marker '{}'", name),
+    };
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!("{}", output.message);
+    }
+
+    Ok(())
+}
+
+fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Result<()> {
+    if prefix.is_empty() {
+        return Err(anyhow!(marker_delete_empty_prefix_advice()));
+    }
+
+    let all = repo.refs().list_markers()?;
+    let matches: Vec<String> = all
+        .into_iter()
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+
+    let mut deleted: Vec<MarkerEntry> = Vec::with_capacity(matches.len());
+    for name in &matches {
+        // Skip if it disappeared between list and delete (concurrent delete).
+        if let Some(state) = repo.refs().delete_marker(name)? {
+            repo.oplog().record_marker_delete(name, &state)?;
+            deleted.push(MarkerEntry {
+                name: name.clone(),
+                change_id: state.short(),
+            });
+        }
+    }
+
+    let count = deleted.len();
+    let message = match count {
+        0 => format!("No markers matched prefix '{}'", prefix),
+        1 => format!("Deleted 1 marker matching prefix '{}'", prefix),
+        n => format!("Deleted {} markers matching prefix '{}'", n, prefix),
+    };
+
+    let output = MarkerBulkDeleteOutput {
+        deleted,
+        count,
+        message,
+    };
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!("{}", output.message);
+        for entry in &output.deleted {
+            println!("  {} -> {}", entry.name, entry.change_id);
+        }
+    }
+
+    Ok(())
+}
+
+fn marker_delete_empty_prefix_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "marker_delete_empty_prefix",
+        "Refusing to delete markers: --prefix must be non-empty",
+        "Inspect markers with `heddle marker list`, then rerun with a non-empty `--prefix`.",
+        "an empty marker prefix matches every marker",
+        "`heddle marker delete --prefix \"\"` would delete every marker ref",
+        "no marker refs were deleted",
+        "heddle marker list",
+        vec![
+            "heddle marker list".to_string(),
+            "heddle marker delete --prefix <prefix>".to_string(),
+        ],
+    )
+}
+
+fn cmd_marker_show(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
+    let state_id = repo
+        .refs()
+        .get_marker(&name)?
+        .ok_or_else(|| anyhow!("Marker not found: {}", name))?;
+
+    let state = repo
+        .store()
+        .get_state(&state_id)?
+        .ok_or_else(|| anyhow!("State not found for marker: {}", name))?;
+
+    let output = MarkerOpOutput {
+        name: name.clone(),
+        change_id: Some(state_id.short()),
+        message: format!("Marker '{}' -> {}", name, state_id.short()),
+    };
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!("Marker: {}", name);
+        println!("State: {}", state_id.short());
+        if let Some(intent) = &state.intent {
+            println!("Intent: {}", intent);
+        }
+        println!("Created: {}", state.created_at.format("%Y-%m-%d %H:%M:%S"));
+    }
+
+    Ok(())
+}

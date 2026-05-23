@@ -1,0 +1,43 @@
+# Hermetic registry for launch-quality Git-overlay stress fixtures.
+#
+# Each entry pins a real public-repository tip captured by `vendor.sh` into a
+# self-contained shallow bare clone. The harness extracts the matching tarball
+# under `fixtures/<name>/` at test time and asserts the tip OID matches the
+# `commit` recorded here, so a re-vendored tarball that doesn't update this
+# file fails fast rather than silently testing against drifted state.
+#
+# To refresh: run `crates/cli/tests/realworld_git/fixtures/vendor.sh`, paste
+# the manifest tip OIDs into the `commit` fields below, and review the size
+# delta on the four `*.tar.gz` files before committing.
+
+[[repo]]
+name = "gix-shaped"
+source = "https://github.com/GitoxideLabs/gitoxide"
+fixture = "fixtures/gix-shaped.tar.gz"
+commit = "4e028c91db6c1a39179f4663f28527b15b5b5915"
+shape = ["packed-refs", "large-history", "binary-churn", "tags"]
+
+[[repo]]
+name = "tokio-shaped"
+source = "https://github.com/tokio-rs/tokio"
+fixture = "fixtures/tokio-shaped.tar.gz"
+commit = "dcbc47e18cdbc41cb712f4132cdeb39fde6944b1"
+shape = ["merge-heavy", "multi-branch", "rename-heavy"]
+
+[[repo]]
+name = "ripgrep-shaped"
+source = "https://github.com/BurntSushi/ripgrep"
+fixture = "fixtures/ripgrep-shaped.tar.gz"
+commit = "3c8a18dbe809a11a713055414ced0477c8d7b66e"
+shape = ["many-small-files", "concurrent-branches"]
+
+# `git-shaped` carries the `sha1collisiondetection` submodule, so it
+# also exercises heddle's clone-time gitlink-skip path. The other three
+# fixtures cover regular trees; this one is what makes the matrix prove
+# `heddle clone` survives a real-world submodule entry.
+[[repo]]
+name = "git-shaped"
+source = "https://github.com/git/git"
+fixture = "fixtures/git-shaped.tar.gz"
+commit = "019fcf90a159a6b2b479301916031c06ddf06f84"
+shape = ["deep-dag", "octopus-merge", "annotated-tags", "gitlink"]

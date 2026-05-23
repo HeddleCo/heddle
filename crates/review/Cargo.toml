@@ -1,0 +1,27 @@
+[package]
+name = "heddle-review"
+version = "0.2.4"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+jsonwebtoken.workspace = true
+regex-lite.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "review"

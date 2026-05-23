@@ -1,0 +1,10 @@
+**/target
+.env
+.env.*
+.heddle/
+.codex/
+.DS_Store
+*.swp
+.idea/
+.vscode/
+publish-0.2.0.log

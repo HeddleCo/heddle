@@ -1,0 +1,39 @@
+[package]
+name = "heddle-proto"
+version = "0.2.4"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# `objects/zstd` is forwarded via this crate's own `zstd` feature
+# instead of being hardcoded on. Hardcoding here meant every consumer
+# (repo → ingest → cli) got zstd unconditionally even
+# when they explicitly built with `--no-default-features`. Default-on
+# preserves the historical behavior; downstream can disable with
+# `--no-default-features` cleanly.
+objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
+blake3.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["zstd"]
+zstd = ["objects/zstd"]
+
+[lib]
+path = "src/lib.rs"
+
+name = "proto"
+[dev-dependencies]
+# Circular: heddle-repo depends on heddle-proto. We keep the path-dep
+# for local testing but omit `version` so cargo strips this entry from
+# the published manifest (dev-deps without version are not packaged).
+repo = { path = "../repo", package = "heddle-repo" }
+tempfile.workspace = true
+chrono.workspace = true

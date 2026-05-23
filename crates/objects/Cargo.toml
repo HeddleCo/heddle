@@ -1,0 +1,60 @@
+[package]
+name = "heddle-objects"
+version = "0.2.4"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base32.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+fs2.workspace = true
+hex.workspace = true
+ignore.workspace = true
+libc = "0.2"
+memmap2.workspace = true
+rand.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+walkdir.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+zstd = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-smithy-async = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.2", optional = true }
+
+[features]
+s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:async-trait", "dep:tokio", "dep:runtime-bridge"]
+memory-backend = []
+zstd = ["dep:zstd"]
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio-test.workspace = true
+serial_test.workspace = true
+ntest.workspace = true
+tokio = { workspace = true, features = ["full"] }
+s3s.workspace = true
+s3s-fs.workspace = true
+hyper-util.workspace = true
+proptest.workspace = true
+
+[lib]
+path = "src/lib.rs"
+name = "objects"

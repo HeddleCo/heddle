@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 78f5a2bd734aba0cc7907cbc7001d47a301ee02157b88b3327862e4829ad6749 # shrinks to ops = [WriteFresh { name: "nested/c.txt", bytes: [0, 0, 0, 0] }, WriteFresh { name: "nested/c.txt", bytes: [] }, Read { name: "nested/c.txt", len: 1 }]
+cc 66ac6a900e16da93db6577c4e5cb0322b999fe05af93fbce1455e98d23eb9da8 # shrinks to ops = [WriteFresh { name: "a.txt", bytes: [0, 0, 0, 0, 0, 0, 0, 0, 0] }, Capture, WriteFresh { name: "a.txt", bytes: [0] }]
+cc 483032854bf349dc93b16e76932e5ada12c8ddca04f8ba1ad08f79ff368987be # shrinks to ops = [WriteFresh { name: "nested/d.txt", bytes: [0] }, Capture, WriteFresh { name: "nested/c.txt", bytes: [0] }, Read { name: "nested/d.txt", len: 1 }]
+cc 770b551aa2911a27905952cb7987aa831120b9a5bcbc7f50d57bdf5d45c41bc1 # shrinks to ops = [WriteFresh { name: "nested/c.txt", bytes: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }, WriteFresh { name: "nested/c.txt", bytes: [0] }, Read { name: "nested/c.txt", len: 2 }]

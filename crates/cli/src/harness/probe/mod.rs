@@ -1,0 +1,206 @@
+// SPDX-License-Identifier: Apache-2.0
+use std::collections::BTreeMap;
+
+use anyhow::Result;
+use proto::{TranscriptAttachmentRef, UsageTotals};
+
+mod claude_code;
+mod codex;
+mod opencode;
+
+pub(crate) use claude_code::ClaudeCodeProbe;
+pub(crate) use codex::CodexProbe;
+pub(crate) use opencode::OpenCodeProbe;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HarnessProbeInput {
+    pub argv: Option<Vec<String>>,
+    pub env_hints: BTreeMap<String, String>,
+    pub explicit_harness: Option<String>,
+    pub explicit_provider: Option<String>,
+    pub explicit_model: Option<String>,
+    pub explicit_thinking_level: Option<String>,
+    pub explicit_policy: Option<String>,
+    pub probe_metadata: BTreeMap<String, String>,
+    pub current_provider: Option<String>,
+    pub current_model: Option<String>,
+    pub current_policy: Option<String>,
+    #[allow(dead_code)]
+    pub repo_root: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HarnessAttachHints {
+    pub root_actor: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HarnessProbeResult {
+    pub harness: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub thinking_level: Option<String>,
+    pub policy: Option<String>,
+    pub native_actor_key: Option<String>,
+    pub native_parent_actor_key: Option<String>,
+    pub native_instance_key: Option<String>,
+    #[allow(dead_code)]
+    pub thread_hint: Option<String>,
+    pub usage_totals: UsageTotals,
+    pub touched_paths: Vec<String>,
+    pub transcript_refs: Vec<TranscriptAttachmentRef>,
+    pub attach_hints: HarnessAttachHints,
+    pub confidence: Option<f32>,
+    pub probe_source: Option<String>,
+}
+
+pub(crate) trait HarnessActorProbe {
+    fn harness_name(&self) -> &'static str;
+    fn matches(&self, input: &HarnessProbeInput) -> bool;
+    fn probe(&self, input: &HarnessProbeInput) -> Result<HarnessProbeResult>;
+}
+
+pub(crate) fn probe_harness_actor(input: &HarnessProbeInput) -> Result<HarnessProbeResult> {
+    let probes: [&dyn HarnessActorProbe; 3] = [&CodexProbe, &OpenCodeProbe, &ClaudeCodeProbe];
+    if let Some(explicit) = input.explicit_harness.as_deref()
+        && let Some(probe) = probes
+            .into_iter()
+            .find(|probe| probe.harness_name() == explicit)
+    {
+        return probe.probe(input);
+    }
+    let probes: [&dyn HarnessActorProbe; 3] = [&CodexProbe, &OpenCodeProbe, &ClaudeCodeProbe];
+    if let Some(probe) = probes.into_iter().find(|probe| probe.matches(input)) {
+        return probe.probe(input);
+    }
+    Ok(generic_probe(input))
+}
+
+fn generic_probe(input: &HarnessProbeInput) -> HarnessProbeResult {
+    let fingerprint = fingerprint_from_hints(input.argv.as_deref(), &input.env_hints);
+    HarnessProbeResult {
+        harness: input.explicit_harness.clone().or(fingerprint.harness),
+        provider: input.explicit_provider.clone().or(fingerprint.provider),
+        model: input.explicit_model.clone().or(fingerprint.model),
+        thinking_level: input
+            .explicit_thinking_level
+            .clone()
+            .or(fingerprint.thinking_level),
+        policy: input.explicit_policy.clone().or(fingerprint.policy),
+        confidence: Some(if input.explicit_harness.is_some() {
+            1.0
+        } else {
+            0.4
+        }),
+        probe_source: Some(if input.explicit_harness.is_some() {
+            ProbeSource::ExplicitPayload.as_str().to_string()
+        } else {
+            ProbeSource::ArgvEnv.as_str().to_string()
+        }),
+        ..HarnessProbeResult::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProbeSource {
+    ExplicitPayload,
+    AppProtocol,
+    HookPayload,
+    StatusPayload,
+    SseOrRest,
+    ArgvEnv,
+    #[allow(dead_code)]
+    ConfigOverride,
+}
+
+impl ProbeSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitPayload => "explicit_payload",
+            Self::AppProtocol => "app_protocol",
+            Self::HookPayload => "hook_payload",
+            Self::StatusPayload => "status_payload",
+            Self::SseOrRest => "sse_or_rest",
+            Self::ArgvEnv => "argv_env",
+            Self::ConfigOverride => "config_override",
+        }
+    }
+}
+
+#[derive(Default)]
+struct FingerprintedIdentity {
+    harness: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    thinking_level: Option<String>,
+    policy: Option<String>,
+}
+
+fn fingerprint_from_hints(
+    argv: Option<&[String]>,
+    env_hints: &BTreeMap<String, String>,
+) -> FingerprintedIdentity {
+    let mut fingerprint = FingerprintedIdentity::default();
+    let program = argv
+        .and_then(|args| args.first())
+        .map(|arg| arg.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if program.contains("claude") || env_hints.contains_key("CLAUDECODE") {
+        fingerprint.harness = Some("claude-code".to_string());
+        fingerprint.provider = Some("anthropic".to_string());
+    } else if program.contains("codex") || env_hints.contains_key("CODEX_SANDBOX") {
+        fingerprint.harness = Some("codex".to_string());
+        fingerprint.provider = Some("openai".to_string());
+    } else if program.contains("opencode") || env_hints.contains_key("OPENCODE_CLIENT") {
+        fingerprint.harness = Some("opencode".to_string());
+    } else if program.contains("aider") {
+        fingerprint.harness = Some("aider".to_string());
+    }
+
+    fingerprint.model = env_hints
+        .get("HEDDLE_AGENT_MODEL")
+        .cloned()
+        .or_else(|| env_hints.get("CLAUDE_MODEL").cloned())
+        .or_else(|| env_hints.get("ANTHROPIC_MODEL").cloned())
+        .or_else(|| env_hints.get("OPENAI_MODEL").cloned())
+        .or_else(|| env_hints.get("MODEL").cloned());
+    fingerprint.thinking_level = env_hints
+        .get("THINKING_LEVEL")
+        .cloned()
+        .or_else(|| env_hints.get("REASONING_EFFORT").cloned())
+        .or_else(|| env_hints.get("OPENAI_REASONING_EFFORT").cloned());
+    fingerprint.policy = env_hints
+        .get("HEDDLE_AGENT_POLICY")
+        .cloned()
+        .or_else(|| env_hints.get("PROMPT_POLICY").cloned());
+    fingerprint
+}
+
+pub(crate) fn argv_value(argv: &[String], flag: &str) -> Option<String> {
+    let mut iter = argv.iter();
+    while let Some(arg) = iter.next() {
+        if arg == flag {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix(&(flag.to_string() + "=")) {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+pub(crate) fn csv_paths(value: Option<&String>) -> Vec<String> {
+    value
+        .map(|raw| {
+            raw.split(',')
+                .map(|path| path.trim().replace('\\', "/"))
+                .filter(|path| !path.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn parse_u64(value: Option<&String>) -> Option<u64> {
+    value.and_then(|v| v.parse().ok())
+}

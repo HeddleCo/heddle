@@ -1,0 +1,38 @@
+[package]
+name = "heddle-refs"
+version = "0.2.4"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+chrono.workspace = true
+objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
+rand.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.2", optional = true }
+sqlx = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = "0.8"
+tempfile.workspace = true
+
+[features]
+postgres = ["dep:sqlx", "dep:tokio", "dep:uuid", "dep:runtime-bridge"]
+
+[lib]
+path = "src/lib.rs"
+name = "refs"
+
+[[bench]]
+name = "reftable_vs_packed"
+harness = false
