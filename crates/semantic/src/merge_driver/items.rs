@@ -16,6 +16,16 @@ use tree_sitter::Node;
 
 use crate::parser::{Language, ParsedFile};
 
+/// Cap on per-traversal iterations. **If you bump this, audit every walk for
+/// cycle safety** — tree-sitter nodes form a DAG in practice but pathological
+/// inputs can create cycle-shaped traversals.
+const WALK_LIMIT: usize = 32;
+
+/// Cap on parent-chain traversal depth. **If you bump this, audit every walk
+/// for cycle safety** — tree-sitter nodes form a DAG in practice but
+/// pathological inputs can create cycle-shaped traversals.
+const MAX_PARENT_WALK_DEPTH: usize = 64;
+
 /// Categorisation of an item. Used as part of [`ItemKey`] so two items with
 /// the same name but different shapes (e.g. a struct `Foo` and a function
 /// `Foo`) don't collide.
@@ -912,7 +922,7 @@ fn c_signature_hash(language: Language, source: &str, declarator: Node<'_>) -> u
 fn c_name_bearing_function_declarator<'a>(declarator: Node<'a>) -> Option<Node<'a>> {
     let mut current = declarator;
     let mut last_fd: Option<Node<'a>> = None;
-    for _ in 0..32 {
+    for _ in 0..WALK_LIMIT {
         match current.kind() {
             "function_declarator" => {
                 last_fd = Some(current);
@@ -1021,7 +1031,7 @@ fn stripped_name(source: &str, node: Node<'_>, field: &str) -> Option<String> {
 fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String> {
     let mut current = function_declarator.child_by_field_name("declarator")?;
     // Cap traversal so a pathological wrapper chain doesn't loop.
-    for _ in 0..32 {
+    for _ in 0..WALK_LIMIT {
         match current.kind() {
             "identifier"
             | "field_identifier"
@@ -1096,7 +1106,7 @@ fn c_function_scope(
     let Some(mut current) = function_declarator.child_by_field_name("declarator") else {
         return scope;
     };
-    for _ in 0..32 {
+    for _ in 0..WALK_LIMIT {
         match current.kind() {
             "qualified_identifier" => {
                 if let Some(s) = current.child_by_field_name("scope") {
@@ -1174,7 +1184,7 @@ fn scope_component_text(
 fn enclosing_template_param_lists(node: Node<'_>, source: &str) -> Vec<Vec<String>> {
     let mut lists = Vec::new();
     let mut current = node;
-    for _ in 0..64 {
+    for _ in 0..MAX_PARENT_WALK_DEPTH {
         let Some(parent) = current.parent() else {
             break;
         };
