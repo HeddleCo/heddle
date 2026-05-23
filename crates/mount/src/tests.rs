@@ -2301,6 +2301,214 @@ mod write_ops {
         let n = mount.read(v2.node, 0, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"v2-fresh");
     }
+
+    // --- Codex round 7 findings: orphan-aware write-side ops ----------------
+    //
+    // r6 fixed `write` so a write through an unlinked-but-still-open fd
+    // does not republish the path. Codex r7 surfaced four more write-side
+    // ops with the same shape — operations that touch `hot_by_path`,
+    // `tombstones`, or path-keyed `warm` entries without consulting the
+    // orphan set. Each test below pins one contract from the brief.
+
+    /// `ftruncate` through an unlinked-but-still-open captured fd must
+    /// affect only the anonymous open inode. POSIX unlink semantics:
+    /// the directory entry stays gone until the last close, and a
+    /// flush of the orphan must not warm-promote its buffer. Without
+    /// the fix, `apply_truncate`'s tombstone-clear + `hot_by_path`
+    /// rebind republished the name to every other observer.
+    #[test]
+    fn truncate_unlinked_open_doesnt_resurrect_path() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("hello.txt")` — captured file, no overlay yet.
+        let node = mount.lookup_path("hello.txt").unwrap();
+        // `unlink("hello.txt")` while the handle is still in use.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "post-unlink lookup must return None"
+        );
+        // `ftruncate(fd, 2)` through the now-orphaned NodeId.
+        mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    size: Some(2),
+                    ..Default::default()
+                },
+            )
+            .expect("ftruncate through unlinked-open fd");
+        // Decisive check: the path must still be gone.
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "truncate after unlink must not resurrect the path"
+        );
+        let entries = mount.enumerate(NodeId::ROOT).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.name == "hello.txt"),
+            "enumerate must not surface the unlinked path: {entries:?}"
+        );
+        // Flushing the orphan must not warm-promote it — a subsequent
+        // capture would otherwise resurrect the path in the captured
+        // tree.
+        mount.flush(node).expect("flush orphan");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "post-flush lookup must still be gone (orphan must not warm-promote)"
+        );
+    }
+
+    /// Rename-over with the destination still open + holding a hot
+    /// buffer must preserve the buffer. Reads through the original
+    /// NodeId must continue to see the pre-rename bytes. Without the
+    /// fix, `move_file`'s blind `pending.hot.remove(&dest_id)` dropped
+    /// the buffer, and reads through the still-open fd then routed
+    /// through the rebased path overlay and observed the replacement.
+    #[test]
+    fn rename_over_preserves_replaced_open_fd() {
+        let (_temp, mount) = open_mount();
+        // Open the captured "hello.txt", write through it, do NOT
+        // flush. The hot buffer keyed by dest_id holds "ORIG-DATA".
+        let dest_id = mount.lookup_path("hello.txt").unwrap();
+        mount.write(dest_id, 0, b"ORIG-DATA").expect("write to dest");
+        // Build a source file with replacement bytes; flush so the
+        // rename's start-of-move flush_node is a no-op.
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .expect("create src");
+        mount.write(src.node, 0, b"REPLACE-DATA").expect("write src");
+        mount.flush(src.node).expect("flush src");
+        // Rename src over dest. dest's pathname is rebound to src;
+        // dest's open fd must continue to see "ORIG-DATA".
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(dest_id, 0, &mut buf)
+            .expect("read via replaced dest fd");
+        assert_eq!(
+            &buf[..n],
+            b"ORIG-DATA",
+            "open fd on replaced dest must see pre-rename bytes",
+        );
+    }
+
+    /// Captured-file rename-over: dest has no hot buffer at the time
+    /// of the rename, only the captured-tree blob. Reads/attrs through
+    /// the still-open fd must serve the captured bytes, not the
+    /// source's replacement. Without the fix, the captured-file branch
+    /// of `read` consulted `warm[new_path]` (now the source's data)
+    /// before falling through to the captured blob.
+    #[test]
+    fn rename_over_destination_data_via_old_fd() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("hello.txt")` — captured file, no overlay.
+        let dest_id = mount.lookup_path("hello.txt").unwrap();
+        // Source file with replacement payload; flush so move_file's
+        // flush_node returns immediately.
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .expect("create src");
+        mount.write(src.node, 0, b"REPLACE-DATA").expect("write src");
+        mount.flush(src.node).expect("flush src");
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        // Read via the displaced inode id must serve the original
+        // captured bytes ("world", 5 bytes) — not the source's
+        // "REPLACE-DATA" (12 bytes).
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(dest_id, 0, &mut buf)
+            .expect("read via replaced dest fd");
+        assert_eq!(
+            &buf[..n],
+            b"world",
+            "open fd on replaced captured dest must see captured bytes, not replacement",
+        );
+        // attrs must report the captured size too — a stale size from
+        // the path overlay would clip the kernel's read buffer.
+        let attrs = mount.attrs(dest_id).expect("attrs via replaced dest fd");
+        assert_eq!(
+            attrs.size, 5,
+            "attrs on replaced captured dest must report captured size, not replacement",
+        );
+    }
+
+    /// `fchmod` on an unlinked-but-still-open fd must affect only the
+    /// inode behind that fd. The brief's threat model:
+    /// `open(old) → unlink(old) → create(old) → fchmod(orphan_fd, +x)`.
+    /// Without the fix, `set_attrs`'s mode mutation updated
+    /// `hot_by_path[path]` and `warm[path]` too, flipping the
+    /// newly-created file's mode at the same pathname.
+    #[test]
+    fn fchmod_on_unlinked_open_doesnt_leak_to_recreated() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("hello.txt")` — captured Normal-mode file.
+        let orphan_id = mount.lookup_path("hello.txt").unwrap();
+        // `unlink("hello.txt")` while the fd lives on.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        // `create("hello.txt")` mints a fresh inode at the same
+        // pathname. Writing some bytes guarantees the hot buffer
+        // exists so a leak via `hot_by_path[path]` is visible.
+        let fresh = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .expect("recreate at same name");
+        assert_ne!(orphan_id, fresh.node);
+        mount
+            .write(fresh.node, 0, b"REBORN")
+            .expect("write to recreated file");
+        // `fchmod(orphan_fd, 0o755)` — the orphan inode's mode flip
+        // must not propagate to the fresh inode at the same pathname.
+        mount
+            .set_attrs(
+                orphan_id,
+                AttrUpdate {
+                    mode: Some(0o100755),
+                    ..Default::default()
+                },
+            )
+            .expect("chmod on orphan");
+        // Drive the recreated file through flush + capture so the
+        // buffer's `mode` field — which gets persisted into the
+        // warm-tier entry and ultimately the captured tree — is
+        // observable. A leak shows up as Executable at the new
+        // path; the contract says Normal.
+        mount.flush(fresh.node).expect("flush fresh");
+        let change_id = mount.capture(Some("orphan chmod".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&change_id).unwrap().unwrap();
+        let root_tree = store.get_tree(&state.tree).unwrap().unwrap();
+        let entry = root_tree.get("hello.txt").expect("recreated file in tree");
+        assert!(
+            matches!(entry.mode, objects::object::FileMode::Normal),
+            "chmod on orphan must not leak to recreated file: got mode {:?}",
+            entry.mode,
+        );
+    }
 }
 
 // D1. Property test for two-tier semantics.
