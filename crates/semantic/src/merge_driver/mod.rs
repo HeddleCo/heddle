@@ -15,6 +15,7 @@ use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 use crate::parser::{Language, ParsedFile};
 
 mod items;
+mod language_rules;
 mod reconstruct;
 
 #[cfg(test)]
