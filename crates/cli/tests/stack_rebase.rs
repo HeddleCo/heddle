@@ -403,3 +403,54 @@ fn stack_next_action_top_active_means_waiting_on_review() {
         other => panic!("expected WaitingOnReview, got {other:?}"),
     }
 }
+
+#[test]
+fn repository_snapshot_for_stack_scopes_to_one_stack_only() {
+    // Two disjoint stacks live in the same repo. `for_stack("feat-a")`
+    // must drop the other stack from the serialized payload — otherwise
+    // `heddle stack snapshot --thread feat-a` leaks sibling-stack data
+    // into per-thread tooling output.
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    let manager = ThreadManager::new(repo.heddle_dir());
+
+    save_thread_record(
+        &manager,
+        "feat-a",
+        None,
+        "main-1",
+        "feat-a-tip",
+        ThreadState::Active,
+    );
+    save_thread_record(
+        &manager,
+        "feat-b",
+        Some("feat-a"),
+        "feat-a-tip",
+        "feat-b-tip",
+        ThreadState::Active,
+    );
+    save_thread_record(
+        &manager,
+        "infra-x",
+        None,
+        "main-1",
+        "infra-x-tip",
+        ThreadState::Active,
+    );
+
+    let full = RepositorySnapshot::capture(&repo).unwrap();
+    assert_eq!(full.stacks.len(), 2, "fixture must have two stacks");
+
+    let scoped = full
+        .for_stack("feat-a")
+        .expect("feat-a belongs to a stack");
+    assert_eq!(scoped.stacks.len(), 1);
+    assert_eq!(scoped.stacks[0].root_name(), "feat-a");
+    let names: Vec<&str> = scoped.threads.iter().map(|t| t.thread.as_str()).collect();
+    assert_eq!(names, vec!["feat-a", "feat-b"]);
+    assert!(
+        !names.contains(&"infra-x"),
+        "scoped snapshot must not leak the sibling stack"
+    );
+}

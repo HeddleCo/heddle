@@ -175,18 +175,18 @@ fn cmd_stack_ready(cli: &Cli, repo: &Repository, thread: Option<String>) -> Resu
 // ── stack snapshot ──────────────────────────────────────────────────────
 
 fn cmd_stack_snapshot(cli: &Cli, repo: &Repository, thread: Option<String>) -> Result<()> {
-    let snapshot = RepositorySnapshot::capture(repo)?;
-    // The thread override is accepted for forward-compatibility — current
-    // snapshots cover the whole corpus, but a future per-stack subview
-    // would slice on this. Reject unknown threads up-front so the CLI is
-    // honest about what we know.
-    if let Some(name) = thread.as_deref()
-        && snapshot.stack_containing(name).is_none()
-    {
-        return Err(anyhow!(
-            "thread '{name}' is not part of any known stack in this repo"
-        ));
-    }
+    let full = RepositorySnapshot::capture(repo)?;
+    // When `--thread <name>` is given, scope the snapshot to just the
+    // stack containing that thread — the documented contract is "snapshot
+    // the thread's stack", not "snapshot the whole repo and also check
+    // the thread exists". Without scoping, the payload bleeds sibling
+    // stacks into per-thread tooling output.
+    let snapshot = match thread.as_deref() {
+        Some(name) => full.for_stack(name).ok_or_else(|| {
+            anyhow!("thread '{name}' is not part of any known stack in this repo")
+        })?,
+        None => full,
+    };
 
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&snapshot)?);

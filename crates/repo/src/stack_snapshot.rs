@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Repository, Result, ThreadFreshness, ThreadState,
-    thread_stack::{ThreadStack, compute_stacks, stack_for},
+    thread_stack::{StackNode, ThreadStack, compute_stacks, stack_for},
     thread_storage::ThreadManager,
 };
 
@@ -208,15 +208,13 @@ impl RepositorySnapshot {
             return Ok(StackNextAction::Ready);
         }
 
-        // Otherwise the bottleneck is the top of the chain that isn't
-        // Ready yet — that's the thread waiting on review. We walk
-        // root-first DFS and pick the deepest still-in-flight thread.
-        let mut bottleneck: Option<String> = None;
-        for name in &members {
-            if let Some(ThreadState::Active | ThreadState::Draft) = state_of(name) {
-                bottleneck = Some(name.clone());
-            }
-        }
+        // Otherwise the bottleneck is the deepest still-in-flight thread
+        // in the stack — that's the one waiting on review. DFS-order
+        // "last Active/Draft" is wrong for branched stacks (a deep
+        // Active in an early subtree loses to a shallow Active in a
+        // later sibling), so we recurse with explicit depth tracking
+        // and pick the maximum.
+        let bottleneck = deepest_in_flight(&stack.root, 0, &state_of).map(|(name, _)| name);
         match bottleneck {
             Some(thread) => Ok(StackNextAction::WaitingOnReview { thread }),
             // Defensive fallback: no blocked, not all shippable, no
@@ -224,6 +222,33 @@ impl RepositorySnapshot {
             // as Unknown rather than guessing.
             None => Ok(StackNextAction::Unknown),
         }
+    }
+
+    /// Project the snapshot down to just the stack containing
+    /// `thread_name`. Returns `None` if the thread isn't in any known
+    /// stack. The returned snapshot has `version`/`captured_at` carried
+    /// over but `stacks` and `threads` filtered to that one stack —
+    /// suitable for serializing a per-thread view without leaking
+    /// sibling stacks into the payload.
+    pub fn for_stack(&self, thread_name: &str) -> Option<Self> {
+        let stack = self.stack_containing(thread_name)?.clone();
+        let members: std::collections::HashSet<String> = stack
+            .member_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        let threads = self
+            .threads
+            .iter()
+            .filter(|t| members.contains(&t.thread))
+            .cloned()
+            .collect();
+        Some(Self {
+            version: self.version,
+            captured_at: self.captured_at,
+            stacks: vec![stack],
+            threads,
+        })
     }
 
     /// Reconstruct a minimal `Vec<ThreadRecord>` from the snapshot so
@@ -261,6 +286,35 @@ impl RepositorySnapshot {
             })
             .collect()
     }
+}
+
+/// Walk the stack tree from `node` (at `depth`) and return the deepest
+/// thread whose state is `Active` or `Draft`, paired with its depth.
+/// Ties prefer earlier (DFS-order) siblings — deterministic given the
+/// child sort applied at stack-build time.
+fn deepest_in_flight<F>(node: &StackNode, depth: usize, state_of: &F) -> Option<(String, usize)>
+where
+    F: Fn(&str) -> Option<ThreadState>,
+{
+    let mut best: Option<(String, usize)> = None;
+    let consider = |slot: &mut Option<(String, usize)>, cand: Option<(String, usize)>| {
+        if let Some((name, d)) = cand
+            && slot.as_ref().is_none_or(|(_, best_d)| d > *best_d)
+        {
+            *slot = Some((name, d));
+        }
+    };
+
+    if matches!(
+        state_of(&node.name),
+        Some(ThreadState::Active | ThreadState::Draft)
+    ) {
+        consider(&mut best, Some((node.name.clone(), depth)));
+    }
+    for child in &node.children {
+        consider(&mut best, deepest_in_flight(child, depth + 1, state_of));
+    }
+    best
 }
 
 #[cfg(test)]
@@ -358,6 +412,53 @@ mod tests {
             action,
             StackNextAction::WaitingOnReview { thread: "c".into() }
         );
+    }
+
+    #[test]
+    fn next_action_picks_deepest_active_across_branches() {
+        // a (Ready)
+        // ├── b (Active) — depth 1
+        // │   └── c (Active) — depth 2
+        // │       └── d (Active) — depth 3
+        // └── e (Active) — depth 1
+        //
+        // DFS-pre-order is [a, b, c, d, e]; the old "last Active in DFS
+        // order" picked `e` even though `d` is the deepest in-flight
+        // thread. Pin depth-correctness here.
+        let snapshot = snapshot_with_threads(vec![
+            snap("a", None, ThreadState::Ready),
+            snap("b", Some("a"), ThreadState::Active),
+            snap("c", Some("b"), ThreadState::Active),
+            snap("d", Some("c"), ThreadState::Active),
+            snap("e", Some("a"), ThreadState::Active),
+        ]);
+        assert_eq!(
+            snapshot.next_action_for("a").unwrap(),
+            StackNextAction::WaitingOnReview { thread: "d".into() }
+        );
+    }
+
+    #[test]
+    fn for_stack_filters_to_containing_stack_only() {
+        // Two disjoint stacks; for_stack("x") should keep only x's stack.
+        let snapshot = snapshot_with_threads(vec![
+            snap("x", None, ThreadState::Active),
+            snap("y", Some("x"), ThreadState::Active),
+            snap("p", None, ThreadState::Active),
+        ]);
+        let scoped = snapshot.for_stack("x").expect("x belongs to a stack");
+        assert_eq!(scoped.stacks.len(), 1);
+        assert_eq!(scoped.stacks[0].root_name(), "x");
+        let names: Vec<&str> = scoped.threads.iter().map(|t| t.thread.as_str()).collect();
+        assert_eq!(names, vec!["x", "y"]);
+        assert_eq!(scoped.version, snapshot.version);
+        assert_eq!(scoped.captured_at, snapshot.captured_at);
+    }
+
+    #[test]
+    fn for_stack_returns_none_for_unknown_thread() {
+        let snapshot = snapshot_with_threads(vec![snap("a", None, ThreadState::Ready)]);
+        assert!(snapshot.for_stack("nope").is_none());
     }
 
     #[test]

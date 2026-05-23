@@ -367,12 +367,22 @@ impl Repository {
         onto: &str,
     ) -> Result<std::result::Result<StackRebasePlan, PlanRebaseError>> {
         let records = ThreadManager::new(self.heddle_dir()).list_records()?;
+        // Pre-fetch live tips so ref I/O errors surface here instead of
+        // being swallowed inside the (infallible) planner closure. A
+        // truly-absent thread ref (Ok(None)) is allowed — the planner
+        // falls back to the thread name as a sentinel — but an Err from
+        // `get_thread` must propagate, otherwise downstream code would
+        // act on a fake base/tip and could produce destructive plans.
         let refs = self.refs();
+        let mut tips: HashMap<String, String> = HashMap::new();
+        for record in &records {
+            if let Some(id) = refs.get_thread(&record.thread)? {
+                tips.insert(record.thread.clone(), id.to_string());
+            }
+        }
         let plan = plan_stack_rebase(&records, root_thread, onto, |name| {
-            refs.get_thread(name)
-                .ok()
-                .flatten()
-                .map(|id| id.to_string())
+            tips.get(name)
+                .cloned()
                 .unwrap_or_else(|| name.to_string())
         });
         Ok(plan)
