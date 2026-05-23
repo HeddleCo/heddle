@@ -397,6 +397,21 @@ struct Pending {
     /// path. The bytes are the target as the kernel handed them to
     /// `symlink`; capture hashes them into a CAS blob.
     symlinks: BTreeMap<PathBuf, Vec<u8>>,
+    /// Inodes whose directory entry has been removed (`unlink`) but
+    /// whose `NodeId` may still be held by a kernel fd. Set at
+    /// `unlink_entry` time and consulted by `write` / `flush_node`:
+    /// any further write through one of these `NodeId`s must update
+    /// only the per-`NodeId` buffer — NOT republish `hot_by_path`
+    /// nor clear the tombstone — and the buffer must be discarded
+    /// (rather than warm-promoted) when the kernel finally calls
+    /// `release` / `forget`. POSIX: the inode lives behind the fd,
+    /// but the directory entry stays gone until the last close.
+    ///
+    /// A fresh inode minted at the same name (`create_file` after
+    /// the unlink) gets a brand-new `NodeId` via
+    /// [`Inodes::intern`], so it is *not* in this set and takes
+    /// the normal write/flush path.
+    orphans: BTreeSet<u64>,
 }
 
 /// In-mount overlay: a snapshot-time view of the parent state plus
@@ -1258,7 +1273,17 @@ impl ContentAddressedMount {
             let mut pending = self.inner.pending.lock().expect("pending lock");
             if let Some(node_id) = pending.hot_by_path.remove(&child_path) {
                 pending.hot.remove(&node_id);
+                // Any subsequent write through this NodeId — the
+                // kernel may still hold an fd to it — must not
+                // republish the path or clear the tombstone. See
+                // `Pending::orphans` and the orphan branches in
+                // `write` / `flush_node`.
+                pending.orphans.insert(node_id);
             }
+            // The lookup-returned inode is also a candidate orphan
+            // (an open captured-file fd that was unlinked but never
+            // had an in-flight hot buffer). Insert is idempotent.
+            pending.orphans.insert(entry.node.0);
             pending.warm.remove(&child_path);
             pending.symlinks.remove(&child_path);
             pending.tombstones.insert(child_path.clone());
@@ -2211,7 +2236,28 @@ impl MountInner {
             let Some(buf) = pending.hot.remove(&node.0) else {
                 return Ok(());
             };
-            pending.hot_by_path.remove(&buf.path);
+            // Orphan check: `unlink_entry` recorded this NodeId
+            // because the kernel still held an fd to it. Any
+            // accumulated bytes belong to the open handle only;
+            // POSIX says they die with the last close, so we must
+            // drop the buffer without warm-promoting it and without
+            // touching the tombstone or any `hot_by_path` mapping a
+            // fresh inode at the same name may have installed.
+            if pending.orphans.remove(&node.0) {
+                debug_assert!(
+                    pending.hot_by_path.get(&buf.path) != Some(&node.0),
+                    "orphan buffer must not own its path mapping",
+                );
+                return Ok(());
+            }
+            // Only retract the path mapping if it still points at
+            // us; an unlink-then-recreate that happened between
+            // write and flush may have moved the live mapping to a
+            // fresh inode (whose path coincidentally matches), and
+            // a blind `remove` would yank that fresh entry.
+            if pending.hot_by_path.get(&buf.path) == Some(&node.0) {
+                pending.hot_by_path.remove(&buf.path);
+            }
             (buf.path, buf.mode, buf.bytes)
         };
         let size = bytes.len() as u64;
@@ -2573,21 +2619,45 @@ impl PlatformShell for ContentAddressedMount {
         // phases (e.g. a coalesce from another NodeId), prefer the
         // existing buffer's bytes — our `seed_bytes` are stale.
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        // Coalesce two NodeIds for the same path onto the same buffer.
-        if let Some(existing_id) = pending.hot_by_path.get(&path).copied()
-            && existing_id != node.0
-            && let Some(buf) = pending.hot.remove(&existing_id)
-        {
-            pending.hot.insert(node.0, buf);
+        // POSIX unlink+open semantics. Two write shapes share this
+        // method and must be kept separate:
+        //
+        //   * unlink-then-create (`unlink P; open(P, O_CREAT); write`)
+        //     — `create_file` minted a fresh `NodeId` and cleared the
+        //     tombstone for P. Our `node.0` is not in `orphans` and
+        //     the write republishes the name normally.
+        //
+        //   * open-then-unlink (`open(P); unlink P; write through old
+        //     fd`) — `unlink_entry` recorded `node.0` in `orphans`
+        //     and left the tombstone in place. POSIX is explicit:
+        //     the inode lives behind the fd, but the directory entry
+        //     must stay gone. Republishing `hot_by_path[P] = node.0`
+        //     or clearing the tombstone would resurrect the pathname
+        //     for every other observer (lookup, enumerate, capture).
+        //     The orphan branch updates only the per-NodeId buffer;
+        //     `flush_node` reads the same `orphans` signal at
+        //     promotion time and drops the buffer instead of warming
+        //     it.
+        let orphan = pending.orphans.contains(&node.0);
+        if !orphan {
+            // Coalesce two NodeIds for the same path onto the same buffer.
+            if let Some(existing_id) = pending.hot_by_path.get(&path).copied()
+                && existing_id != node.0
+                && let Some(buf) = pending.hot.remove(&existing_id)
+            {
+                pending.hot.insert(node.0, buf);
+            }
+            pending.hot_by_path.insert(path.clone(), node.0);
+            // A live hot buffer means the file exists again — clear
+            // any tombstone for this path so subsequent
+            // `pending_lookup` calls see the buffer instead of a
+            // "deleted" sentinel. POSIX:
+            // unlink+open(O_CREAT)+pwrite reborns the path. The seed
+            // logic above already starts the buffer empty when a
+            // tombstone is present, so we don't need to inspect the
+            // tombstone here.
+            pending.tombstones.remove(&path);
         }
-        pending.hot_by_path.insert(path.clone(), node.0);
-        // A live hot buffer means the file exists again — clear any
-        // tombstone for this path so subsequent `pending_lookup` calls
-        // see the buffer instead of a "deleted" sentinel. POSIX:
-        // unlink+open(O_CREAT)+pwrite reborns the path. The seed
-        // logic above already starts the buffer empty when a tombstone
-        // is present, so we don't need to inspect the tombstone here.
-        pending.tombstones.remove(&path);
         let buf = pending.hot.entry(node.0).or_insert_with(|| HotBuffer {
             path: path.clone(),
             mode,
@@ -2875,11 +2945,21 @@ impl PlatformShell for ContentAddressedMount {
         // Drop any hot buffer attached to this NodeId — the kernel
         // is telling us our cached identity is no longer valid, and
         // we don't want a stale buffer surviving the inode flip.
+        // Only retract the path → inode mapping if it still points
+        // at us; an unlink-then-recreate sequence may have moved
+        // the live mapping to a fresh inode at the same name, and
+        // a blind `remove` would yank that fresh inode's entry.
         {
             let mut pending = self.inner.pending.lock().expect("pending lock");
-            if let Some(buf) = pending.hot.remove(&node.0) {
+            if let Some(buf) = pending.hot.remove(&node.0)
+                && pending.hot_by_path.get(&buf.path) == Some(&node.0)
+            {
                 pending.hot_by_path.remove(&buf.path);
             }
+            // The kernel is forgetting this inode; any orphan
+            // tracking we kept for it is now dead weight. Drop it
+            // so the set doesn't accumulate across long sessions.
+            pending.orphans.remove(&node.0);
         }
         self.inner.inodes.lock().expect("inode lock").forget(node);
         Ok(())
