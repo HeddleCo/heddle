@@ -31,10 +31,12 @@ mod stat_signature;
 /// continue to import `repo::symbol_resolver::*` unchanged.
 #[cfg(feature = "tree-sitter-symbols")]
 pub use semantic::symbol_resolver;
+mod stack_snapshot;
 mod thread_advice;
 pub mod thread_manifest;
 mod thread_model;
 mod thread_record_store;
+mod thread_stack;
 mod thread_storage;
 mod worktree_ignore;
 pub mod worktree_index;
@@ -79,8 +81,15 @@ pub use snapshot_metadata::{
     summarize_verification, update_thread_state_from_state,
 };
 pub use stash::{StashEntry, StashManager};
+pub use stack_snapshot::{
+    REPOSITORY_SNAPSHOT_SCHEMA_VERSION, RepositorySnapshot, StackNextAction, ThreadSnapshot,
+};
 pub use thread_advice::{
     RecommendedAction, ThreadAdvice, describe_thread_advice, describe_thread_advice_with_initial,
+};
+pub use thread_stack::{
+    PlanRebaseError, StackNode, StackRebasePlan, StackRebaseStep, ThreadStack, compute_stacks,
+    plan_stack_rebase, stack_for,
 };
 pub use thread_model::{
     ConfidenceBand, EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadId,

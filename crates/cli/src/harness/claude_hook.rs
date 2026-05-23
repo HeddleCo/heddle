@@ -7,7 +7,10 @@
 //!   surfaces active Heddle annotations for the target file as `additionalContext`
 //!   in the hook's `hookSpecificOutput` JSON. Claude Code injects that string
 //!   into the tool-call context so constraints/invariants/rationale travel with
-//!   the code.
+//!   the code. When the current thread is part of a stack with siblings or
+//!   descendants, the stack's `next_action` verdict and member list are
+//!   appended so the agent knows whether it's safe to ship or whether a
+//!   parent is blocked.
 //! * **Stop** (and **SubagentStop**) captures a Heddle state from the worktree
 //!   with agent attribution derived from the hook payload, then returns. The
 //!   capture is skipped when the worktree tree matches HEAD so repeated Stop
@@ -27,7 +30,8 @@ use objects::{
     object::{AnnotationKind, AnnotationScope, AnnotationStatus, ContextTarget},
     store::{AgentRegistry, AgentStatus},
 };
-use repo::{Repository, SessionManager};
+use refs::Head;
+use repo::{Repository, RepositorySnapshot, SessionManager, StackNextAction};
 use serde_json::{Value, json};
 use tracing::debug;
 
@@ -65,12 +69,91 @@ pub(crate) fn handle_pre_tool_use(repo: &Repository, payload: &Value) -> Result<
             return Ok(());
         }
     };
-    if annotations.is_empty() {
+    let stack_context = stack_context_for_current_thread(repo);
+    if annotations.is_empty() && stack_context.is_none() {
         return Ok(());
     }
-    let body = format_annotations(&rel_path, &annotations);
+    let mut body = String::new();
+    if !annotations.is_empty() {
+        body.push_str(&format_annotations(&rel_path, &annotations));
+    }
+    if let Some(stack_body) = stack_context {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str(&stack_body);
+    }
     emit_hook_specific_output("PreToolUse", &body);
     Ok(())
+}
+
+/// Render the current thread's stack context as additional context for
+/// the agent. Returns `None` when no current thread is attached or the
+/// thread isn't part of a multi-member stack (single-thread stacks add
+/// no signal worth burning context on).
+///
+/// All errors are swallowed and logged — best-effort by contract.
+fn stack_context_for_current_thread(repo: &Repository) -> Option<String> {
+    let current = match repo.head_ref().ok()? {
+        Head::Attached { thread } => thread,
+        Head::Detached { .. } => return None,
+    };
+    let snapshot = match RepositorySnapshot::capture(repo) {
+        Ok(s) => s,
+        Err(err) => {
+            debug!(?err, "stack snapshot capture failed in PreToolUse hook");
+            return None;
+        }
+    };
+    let stack = snapshot.stack_containing(&current)?;
+    if stack.member_count() < 2 {
+        return None;
+    }
+    let action = snapshot.next_action_for(&current).ok()?;
+    Some(format_stack_context(&current, stack, &action))
+}
+
+fn format_stack_context(
+    current: &str,
+    stack: &repo::ThreadStack,
+    action: &StackNextAction,
+) -> String {
+    let mut body = format!(
+        "Heddle stack: `{current}` is part of `{root}` ({size} threads, depth {depth}).\n",
+        root = stack.root_name(),
+        size = stack.member_count(),
+        depth = stack.depth()
+    );
+    body.push_str("Members (root-first): ");
+    let members: Vec<String> = stack
+        .member_names()
+        .into_iter()
+        .map(|name| {
+            if name == current {
+                format!("**{name}**")
+            } else {
+                name.to_string()
+            }
+        })
+        .collect();
+    body.push_str(&members.join(" → "));
+    body.push('\n');
+    let verdict = match action {
+        StackNextAction::Ready => {
+            "next-action: ready — every thread is shippable.".to_string()
+        }
+        StackNextAction::Blocked { thread } => {
+            format!("next-action: blocked — `{thread}` is in Blocked state; resolve before shipping.")
+        }
+        StackNextAction::WaitingOnReview { thread } => {
+            format!("next-action: waiting-on-review — `{thread}` is still in flight.")
+        }
+        StackNextAction::Unknown => {
+            "next-action: unknown — stack state is exotic; run `heddle stack ready` for details.".to_string()
+        }
+    };
+    body.push_str(&verdict);
+    body
 }
 
 /// Stop / SubagentStop capture.
@@ -397,6 +480,36 @@ mod tests {
         assert!(rendered.contains("[rationale · symbol:foo]"));
         assert!(rendered.contains("via alice"));
         assert!(rendered.contains("supersede"));
+    }
+
+    #[test]
+    fn format_stack_context_highlights_current_thread_and_verdict() {
+        use repo::{StackNode, ThreadStack};
+        let stack = ThreadStack {
+            root: StackNode {
+                name: "feature-a".to_string(),
+                children: vec![StackNode {
+                    name: "feature-b".to_string(),
+                    children: vec![StackNode {
+                        name: "feature-c".to_string(),
+                        children: vec![],
+                    }],
+                }],
+            },
+        };
+        let body = format_stack_context(
+            "feature-b",
+            &stack,
+            &StackNextAction::WaitingOnReview {
+                thread: "feature-c".to_string(),
+            },
+        );
+        assert!(body.contains("`feature-b`"));
+        assert!(body.contains("`feature-a`"));
+        assert!(body.contains("3 threads, depth 2"));
+        assert!(body.contains("feature-a → **feature-b** → feature-c"));
+        assert!(body.contains("waiting-on-review"));
+        assert!(body.contains("`feature-c`"));
     }
 
     #[test]

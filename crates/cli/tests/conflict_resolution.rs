@@ -1,8 +1,12 @@
 //! Conflict resolution and merge tests.
 //!
-//! Tests for handling divergent histories and merge conflicts.
+//! Tests for handling divergent histories and merge conflicts. The
+//! second half drives `repo::MergeState` / `MergeStateManager` through
+//! the lifecycle a stack-aware rebase produces — start → resolve →
+//! finish / abort / carry_forward.
 
-use repo::Repository;
+use objects::object::ChangeId;
+use repo::{MergeState, MergeStateManager, Repository};
 use tempfile::TempDir;
 
 /// Test that forked histories can be detected.
@@ -288,4 +292,162 @@ fn test_directory_file_conflict() {
         .unwrap();
 
     // Directory/file conflict
+}
+
+// ── MergeState lifecycle (stack-aware rebase paths) ─────────────────────
+
+fn merge_manager(temp: &TempDir) -> (Repository, MergeStateManager) {
+    let repo = Repository::init_default(temp.path()).unwrap();
+    let manager = repo.merge_state_manager();
+    (repo, manager)
+}
+
+fn sample_ids() -> (ChangeId, ChangeId, ChangeId) {
+    (
+        ChangeId::generate(),
+        ChangeId::generate(),
+        ChangeId::generate(),
+    )
+}
+
+#[test]
+fn merge_state_start_persists_initial_conflict_set() {
+    let temp = TempDir::new().unwrap();
+    let (_repo, manager) = merge_manager(&temp);
+    let (ours, theirs, base) = sample_ids();
+
+    manager
+        .start(
+            ours,
+            theirs,
+            Some(base),
+            vec!["a.txt".into(), "b.txt".into()],
+        )
+        .unwrap();
+
+    let loaded: MergeState = manager.load().unwrap().unwrap();
+    assert_eq!(loaded.ours, ours);
+    assert_eq!(loaded.theirs, theirs);
+    assert_eq!(loaded.base, Some(base));
+    assert_eq!(loaded.conflicts.len(), 2);
+    assert!(loaded.resolved.is_empty());
+    assert!(manager.is_merge_in_progress());
+}
+
+#[test]
+fn merge_state_resolve_one_path_at_a_time() {
+    let temp = TempDir::new().unwrap();
+    let (_repo, manager) = merge_manager(&temp);
+    let (ours, theirs, _) = sample_ids();
+
+    manager
+        .start(ours, theirs, None, vec!["a.txt".into(), "b.txt".into()])
+        .unwrap();
+
+    manager.resolve("a.txt").unwrap();
+    assert_eq!(manager.unresolved().unwrap(), vec!["b.txt".to_string()]);
+    manager.resolve("b.txt").unwrap();
+    assert!(manager.unresolved().unwrap().is_empty());
+}
+
+#[test]
+fn merge_state_finish_fails_when_anything_unresolved() {
+    let temp = TempDir::new().unwrap();
+    let (_repo, manager) = merge_manager(&temp);
+    let (ours, theirs, _) = sample_ids();
+
+    manager
+        .start(ours, theirs, None, vec!["a.txt".into()])
+        .unwrap();
+    let err = manager.finish().unwrap_err();
+    assert!(
+        format!("{err}").contains("Unresolved conflicts"),
+        "expected Unresolved Conflicts error, got: {err}"
+    );
+    assert!(
+        manager.is_merge_in_progress(),
+        "merge stays alive when finish fails"
+    );
+}
+
+#[test]
+fn merge_state_finish_clears_state_when_everything_resolved() {
+    let temp = TempDir::new().unwrap();
+    let (_repo, manager) = merge_manager(&temp);
+    let (ours, theirs, _) = sample_ids();
+
+    manager
+        .start(ours, theirs, None, vec!["a.txt".into()])
+        .unwrap();
+    manager.resolve("a.txt").unwrap();
+    let final_state = manager.finish().unwrap();
+    assert_eq!(final_state.ours, ours);
+    assert!(manager.load().unwrap().is_none());
+}
+
+#[test]
+fn merge_state_abort_drops_state_without_requiring_resolution() {
+    let temp = TempDir::new().unwrap();
+    let (_repo, manager) = merge_manager(&temp);
+    let (ours, theirs, _) = sample_ids();
+
+    manager
+        .start(ours, theirs, None, vec!["a.txt".into(), "b.txt".into()])
+        .unwrap();
+    let aborted = manager.abort().unwrap();
+    assert_eq!(aborted.theirs, theirs);
+    assert!(manager.load().unwrap().is_none());
+}
+
+#[test]
+fn merge_state_carry_forward_repoints_ours_without_ending_merge() {
+    // This is the path stack-aware mid-merge checkpoints use: capture a
+    // WIP state, re-point `ours` at it, then keep the merge alive so the
+    // operator can finish resolving against the just-committed tip.
+    let temp = TempDir::new().unwrap();
+    let (_repo, manager) = merge_manager(&temp);
+    let (ours, theirs, base) = sample_ids();
+    let new_ours = ChangeId::generate();
+
+    manager
+        .start(
+            ours,
+            theirs,
+            Some(base),
+            vec!["a.txt".into(), "b.txt".into()],
+        )
+        .unwrap();
+    // Resolve one path so we can verify it survives the carry-forward.
+    manager.resolve("a.txt").unwrap();
+
+    let after = manager.carry_forward(new_ours).unwrap();
+    assert_eq!(after.ours, new_ours, "ours repointed");
+    assert_eq!(after.theirs, theirs, "theirs preserved");
+    assert_eq!(after.base, Some(base), "base preserved");
+    assert_eq!(after.resolved, vec!["a.txt".to_string()], "resolved preserved");
+    assert!(manager.is_merge_in_progress(), "merge stays alive");
+    assert_eq!(manager.unresolved().unwrap(), vec!["b.txt".to_string()]);
+}
+
+#[test]
+fn merge_state_resolve_all_marks_remaining_paths() {
+    let temp = TempDir::new().unwrap();
+    let (_repo, manager) = merge_manager(&temp);
+    let (ours, theirs, _) = sample_ids();
+
+    manager
+        .start(
+            ours,
+            theirs,
+            None,
+            vec!["a.txt".into(), "b.txt".into(), "c.txt".into()],
+        )
+        .unwrap();
+    manager.resolve("b.txt").unwrap();
+    let newly = manager.resolve_all().unwrap();
+    // Only paths NOT already resolved come back in the newly-resolved list.
+    assert_eq!(newly.len(), 2);
+    assert!(newly.contains(&"a.txt".to_string()));
+    assert!(newly.contains(&"c.txt".to_string()));
+    assert!(manager.unresolved().unwrap().is_empty());
 }

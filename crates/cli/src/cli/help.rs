@@ -64,8 +64,8 @@ pub fn tier_of(verb: &str) -> Tier {
         | "fork" | "fsck" | "git-overlay" | "hook" | "inspect" | "integration" | "maintenance"
         | "marker" | "presence" | "pull" | "purge" | "push" | "query" | "ready" | "rebase"
         | "redact" | "redo" | "remote" | "resolve" | "retro" | "revert" | "run" | "schemas"
-        | "semantic" | "session" | "shell" | "ship" | "stash" | "store" | "support" | "sync"
-        | "try" | "version" | "watch" | "workspace" => Tier::Advanced,
+        | "semantic" | "session" | "shell" | "ship" | "stack" | "stash" | "store" | "support"
+        | "sync" | "try" | "version" | "watch" | "workspace" => Tier::Advanced,
 
         // ── Hidden ────────────────────────────────────────────────
         // `transaction` is hidden in alpha — buffered-op replay at
@@ -124,6 +124,7 @@ pub fn advanced_verbs() -> &'static [&'static str] {
         "clean",
         "ready",
         "ship",
+        "stack",
         "checkpoint",
         "sync",
         "delegate",
