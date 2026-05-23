@@ -1400,14 +1400,14 @@ impl ContentAddressedMount {
             // for the replaced file keeps resolving (the kernel cleans
             // up via `forget` on close). POSIX semantics: rename-over
             // must not invalidate an already-open dest descriptor.
-            inodes.by_path.remove(&new_path);
+            let displaced_dest = inodes.by_path.remove(&new_path);
             // Rewrite the source inode's stored path so subsequent
             // reads/attrs against it serve the new-path overlay.
             // The kernel keeps using the source's NodeId after rename
             // (it's just a dentry-table rewrite on its side) — without
             // this, every read against the rebased dentry sees the
             // stale path and returns ESTALE.
-            if let Some(src_id) = inodes.by_path.remove(&old_path) {
+            let rebased_src = if let Some(src_id) = inodes.by_path.remove(&old_path) {
                 if let Some(
                     NodeRecord::PendingFile { path, .. }
                     | NodeRecord::File { path, .. }
@@ -1455,15 +1455,33 @@ impl ContentAddressedMount {
                         inodes.by_path.insert(new_key, id);
                     }
                 }
-                drop(inodes);
-                // Same for any cached hot buffer keyed on the source
-                // node — its `path` field must follow. (Descendant
-                // hot-buffer paths are already rebased in
-                // `move_overlay_dir`'s `hot_path_updates` pass.)
-                let mut pending = self.inner.pending.lock().expect("pending lock");
-                if let Some(buf) = pending.hot.get_mut(&src_id) {
-                    buf.path = new_path.clone();
-                }
+                Some(src_id)
+            } else {
+                None
+            };
+            drop(inodes);
+            // Reach into pending for two cleanups under one lock:
+            //   * The source's hot buffer (if any) carries the old
+            //     path; rebase it. Descendant hot-buffer paths are
+            //     already handled by `move_overlay_dir`'s
+            //     `hot_path_updates` pass.
+            //   * The displaced destination (if any) becomes an
+            //     orphan: its directory entry is gone but the inode
+            //     id may still be held by a kernel fd. Subsequent
+            //     `write` / `apply_truncate` / `set_attrs` /
+            //     `read` / `attrs` calls through that fd consult
+            //     `Pending::orphans` and take the per-NodeId branch
+            //     instead of the rebased path overlay. The companion
+            //     orphan branch in `flush_node` drops any preserved
+            //     buffer without warm-promoting.
+            let mut pending = self.inner.pending.lock().expect("pending lock");
+            if let Some(src_id) = rebased_src
+                && let Some(buf) = pending.hot.get_mut(&src_id)
+            {
+                buf.path = new_path.clone();
+            }
+            if let Some(dest_id) = displaced_dest {
+                pending.orphans.insert(dest_id);
             }
         }
         Ok(())
@@ -1521,10 +1539,15 @@ impl ContentAddressedMount {
 
         // Apply.
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        // Drop any old destination state.
-        if let Some(id) = pending.hot_by_path.remove(new_path) {
-            pending.hot.remove(&id);
-        }
+        // Detach the destination's path overlay. The hot buffer keyed
+        // by the displaced inode id is preserved — `rename_entry`
+        // marks that inode as orphan so its still-open fd keeps
+        // reading via the per-NodeId buffer (and any further write
+        // through that fd takes the orphan branch in `write`, which
+        // does not republish `hot_by_path`). POSIX rename-over: open
+        // dest descriptors must keep referencing the displaced inode
+        // until close.
+        pending.hot_by_path.remove(new_path);
         pending.warm.remove(new_path);
         pending.symlinks.remove(new_path);
         pending.tombstones.remove(new_path);
@@ -1558,9 +1581,12 @@ impl ContentAddressedMount {
             }
         };
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        if let Some(id) = pending.hot_by_path.remove(new_path) {
-            pending.hot.remove(&id);
-        }
+        // Same rename-over discipline as `move_file`: detach the
+        // destination path overlay but preserve the displaced inode's
+        // hot buffer (if any). The caller orphans the inode so reads
+        // through its still-open fd consult the per-NodeId buffer and
+        // subsequent writes/setattrs take the orphan branch.
+        pending.hot_by_path.remove(new_path);
         pending.warm.remove(new_path);
         pending.symlinks.remove(new_path);
         pending.tombstones.remove(new_path);
@@ -1751,16 +1777,31 @@ impl ContentAddressedMount {
             } {
                 let path = path.clone();
                 let mut pending = self.inner.pending.lock().expect("pending lock");
+                // Always flip the per-NodeId buffer's mode — that's
+                // the orphan's own bookkeeping when fd-based, and
+                // the live buffer for non-orphan callers.
                 if let Some(buf) = pending.hot.get_mut(&node.0) {
                     buf.mode = new_mode;
                 }
-                if let Some(other_id) = pending.hot_by_path.get(&path).copied()
-                    && let Some(buf) = pending.hot.get_mut(&other_id)
-                {
-                    buf.mode = new_mode;
-                }
-                if let Some(entry) = pending.warm.get_mut(&path) {
-                    entry.mode = new_mode;
+                // Orphan branch: `unlink_entry` / `rename_entry`
+                // recorded this NodeId because the kernel still
+                // holds an fd to it, but the directory entry is
+                // gone (or rebound to a sibling). POSIX is explicit:
+                // an fd-based attribute change applies only to the
+                // file referenced by that fd. Touching
+                // `hot_by_path[path]` would mutate the fresh inode
+                // now living at the same name; touching
+                // `warm[path]` would land the change on the sibling
+                // at capture time.
+                if !pending.orphans.contains(&node.0) {
+                    if let Some(other_id) = pending.hot_by_path.get(&path).copied()
+                        && let Some(buf) = pending.hot.get_mut(&other_id)
+                    {
+                        buf.mode = new_mode;
+                    }
+                    if let Some(entry) = pending.warm.get_mut(&path) {
+                        entry.mode = new_mode;
+                    }
                 }
             }
         }
@@ -1789,12 +1830,34 @@ impl ContentAddressedMount {
             }
         };
 
-        // If a hot buffer already exists for this node or path,
-        // resize in place.
-        let resized_in_place = {
+        // Phase 1: under the lock, decide whether a buffer already
+        // exists (resize in place), and otherwise record orphan-ness
+        // + the seed source. Drop the lock for the CAS read.
+        //
+        // POSIX `ftruncate` on an open-unlinked / rename-displaced fd
+        // (an orphan in our terminology) must touch only the
+        // anonymous open inode. The orphan branch never resizes a
+        // sibling buffer at the rebased path, never seeds from
+        // `warm[path]` (now owned by the sibling), and in Phase 2
+        // never republishes `hot_by_path[path]` nor clears the
+        // tombstone.
+        enum Phase1 {
+            ResizedInPlace,
+            NeedSeed {
+                orphan: bool,
+                seed: Option<ContentHash>,
+            },
+        }
+        let phase1 = {
             let mut pending = self.inner.pending.lock().expect("pending lock");
+            let orphan = pending.orphans.contains(&node.0);
             let id = if pending.hot.contains_key(&node.0) {
                 Some(node.0)
+            } else if orphan {
+                // Never resize a sibling buffer through the orphan
+                // fd — that buffer belongs to a fresh inode at the
+                // rebound name.
+                None
             } else {
                 pending.hot_by_path.get(&path).copied()
             };
@@ -1803,42 +1866,60 @@ impl ContentAddressedMount {
             {
                 buf.bytes.resize(new_size as usize, 0);
                 buf.last_touched = Instant::now();
-                true
+                Phase1::ResizedInPlace
             } else {
-                false
+                let seed = if orphan {
+                    // Orphan: only the inode's pre-displacement
+                    // content is valid. For a captured-file orphan
+                    // that's `captured_blob`; a PendingFile orphan
+                    // with no warm fallback starts empty.
+                    captured_blob
+                } else {
+                    pending.warm.get(&path).map(|e| e.blob).or(captured_blob)
+                };
+                Phase1::NeedSeed { orphan, seed }
             }
         };
-        if resized_in_place {
-            return Ok(());
-        }
-
-        // No hot buffer — seed from the durable predecessor (warm
-        // tier wins over captured tree) and resize.
-        let seed_blob = {
-            let pending = self.inner.pending.lock().expect("pending lock");
-            pending
-                .warm
-                .get(&path)
-                .map(|e| e.blob)
-                .or(captured_blob)
+        let (orphan, seed_blob) = match phase1 {
+            Phase1::ResizedInPlace => return Ok(()),
+            Phase1::NeedSeed { orphan, seed } => (orphan, seed),
         };
+
         let mut bytes = match seed_blob {
             Some(hash) => (*self.load_blob_bytes(&hash)?).to_vec(),
             None => Vec::new(),
         };
         bytes.resize(new_size as usize, 0);
         let mut pending = self.inner.pending.lock().expect("pending lock");
-        pending.tombstones.remove(&path);
-        pending.hot.insert(
-            node.0,
-            HotBuffer {
-                path: path.clone(),
-                mode,
-                bytes,
-                last_touched: Instant::now(),
-            },
-        );
-        pending.hot_by_path.insert(path, node.0);
+        if orphan {
+            // Per-NodeId buffer only. Skip the tombstone-clear and
+            // the `hot_by_path` rebind — the directory entry must
+            // stay gone (open-unlinked) or stay rebound to the
+            // sibling (rename-over). The companion orphan branch in
+            // `flush_node` drops this buffer on release without
+            // warm-promoting it.
+            pending.hot.insert(
+                node.0,
+                HotBuffer {
+                    path,
+                    mode,
+                    bytes,
+                    last_touched: Instant::now(),
+                },
+            );
+        } else {
+            pending.tombstones.remove(&path);
+            pending.hot.insert(
+                node.0,
+                HotBuffer {
+                    path: path.clone(),
+                    mode,
+                    bytes,
+                    last_touched: Instant::now(),
+                },
+            );
+            pending.hot_by_path.insert(path, node.0);
+        }
         Ok(())
     }
 
@@ -2469,9 +2550,18 @@ impl PlatformShell for ContentAddressedMount {
         match &record {
             NodeRecord::PendingFile { path, .. } => {
                 // Same shape, keyed by path: another NodeId may own
-                // the buffer (e.g. after rename/coalesce).
+                // the buffer (e.g. after rename/coalesce). Orphan
+                // PendingFiles skip the path overlay — the path is
+                // gone (open-unlinked) or rebound (rename-over) and
+                // there is no captured-tier fallback to serve.
                 let warm_blob = {
                     let pending = self.inner.pending.lock().expect("pending lock");
+                    if pending.orphans.contains(&node.0) {
+                        return Err(MountError::Stale(format!(
+                            "orphan pending file {} has no readable bytes",
+                            path.display()
+                        )));
+                    }
                     if let Some(id) = pending.hot_by_path.get(path).copied()
                         && let Some(hot) = pending.hot.get(&id)
                     {
@@ -2504,9 +2594,20 @@ impl PlatformShell for ContentAddressedMount {
                 //
                 // Priority: hot @ another NodeId → warm → tombstone
                 // (ENOENT-shaped Stale) → captured blob.
+                //
+                // Orphan exception: an open-unlinked or
+                // rename-displaced inode must skip the path overlay
+                // entirely. `tombstones[path]` / `hot_by_path[path]`
+                // / `warm[path]` now reflect a sibling at the same
+                // name; serving them would let the open fd observe
+                // (or even modify, via Overlay::Hot) bytes that
+                // POSIX assigns to the sibling. Fall through to the
+                // captured blob — that's the inode's own data.
                 let overlay = {
                     let pending = self.inner.pending.lock().expect("pending lock");
-                    if pending.tombstones.contains(path) {
+                    if pending.orphans.contains(&node.0) {
+                        None
+                    } else if pending.tombstones.contains(path) {
                         Some(Overlay::Gone)
                     } else if let Some(other_id) = pending.hot_by_path.get(path).copied()
                         && let Some(hot) = pending.hot.get(&other_id)
@@ -2878,10 +2979,19 @@ impl PlatformShell for ContentAddressedMount {
                 // (so `WORLD` shadows `world`), and a stale `attrs`
                 // that still reports the captured size would clip the
                 // returned bytes in the kernel's read buffer.
+                //
+                // Orphan exception: same as `read`. An open-unlinked
+                // or rename-displaced inode skips the path overlay
+                // and reports the captured blob's size (or the
+                // per-NodeId hot buffer's length, checked first).
                 let overlay_size = {
                     let pending = self.inner.pending.lock().expect("pending lock");
                     if let Some(buf) = pending.hot.get(&node.0) {
                         Some(Some(buf.bytes.len() as u64))
+                    } else if pending.orphans.contains(&node.0) {
+                        // Fall through to `blob_size(blob)` — the
+                        // captured size is the orphan's own.
+                        None
                     } else if pending.tombstones.contains(path) {
                         // Tombstoned via the mount: treat as
                         // not-yet-collected. The path is gone but the
@@ -2908,15 +3018,38 @@ impl PlatformShell for ContentAddressedMount {
             }
             NodeRecord::Symlink { blob } => (self.blob_size(blob)?, 1),
             NodeRecord::PendingFile { path, .. } => {
-                let hit = self
-                    .pending_lookup(path)
-                    .ok_or_else(|| MountError::Stale(format!("pending file {}", path.display())))?;
-                let size = match hit {
-                    PendingHit::Hot { size, .. } | PendingHit::Warm { size, .. } => size,
-                    PendingHit::Symlink { target_len } => target_len,
-                    PendingHit::Tombstone => 0,
+                // Orphan branch: a rename-displaced or
+                // unlinked-but-still-open PendingFile only has its
+                // per-NodeId buffer to report — `pending_lookup`
+                // would consult the rebound path overlay and serve
+                // the sibling's size.
+                let orphan_size = {
+                    let pending = self.inner.pending.lock().expect("pending lock");
+                    if pending.orphans.contains(&node.0) {
+                        Some(pending.hot.get(&node.0).map(|buf| buf.bytes.len() as u64))
+                    } else {
+                        None
+                    }
                 };
-                (size, 1)
+                if let Some(opt) = orphan_size {
+                    let size = opt.ok_or_else(|| {
+                        MountError::Stale(format!(
+                            "orphan pending file {} has no buffered bytes",
+                            path.display()
+                        ))
+                    })?;
+                    (size, 1)
+                } else {
+                    let hit = self.pending_lookup(path).ok_or_else(|| {
+                        MountError::Stale(format!("pending file {}", path.display()))
+                    })?;
+                    let size = match hit {
+                        PendingHit::Hot { size, .. } | PendingHit::Warm { size, .. } => size,
+                        PendingHit::Symlink { target_len } => target_len,
+                        PendingHit::Tombstone => 0,
+                    };
+                    (size, 1)
+                }
             }
             NodeRecord::PendingSymlink { path } => {
                 let pending = self.inner.pending.lock().expect("pending lock");
