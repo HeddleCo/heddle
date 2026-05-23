@@ -648,8 +648,7 @@ fn classify_c_node<'a>(
         // anonymous types — their methods are rare and any disambiguation
         // we'd invent would diverge between sides.
         "class_specifier" | "struct_specifier" | "union_specifier" => {
-            let name = name_from_field(source, node, "name")
-                .map(|n| strip_whitespace(&n))?;
+            let name = stripped_name(source, node, "name")?;
             let container_body = node.child_by_field_name("body");
             Some(Classified {
                 kind: ItemKind::Module,
@@ -665,8 +664,7 @@ fn classify_c_node<'a>(
             // at file scope (consistent with C++ semantics where
             // anonymous-namespace symbols have internal linkage at
             // translation-unit scope).
-            let name = name_from_field(source, node, "name")
-                .map(|n| strip_whitespace(&n))?;
+            let name = stripped_name(source, node, "name")?;
             let container_body = node.child_by_field_name("body");
             Some(Classified {
                 kind: ItemKind::Module,
@@ -1000,6 +998,10 @@ fn emit_c_declarator_shape(node: Node<'_>, out: &mut String) {
 fn name_from_field(source: &str, node: Node<'_>, field: &str) -> Option<String> {
     let name_node = node.child_by_field_name(field)?;
     Some(source[name_node.byte_range()].to_string())
+}
+
+fn stripped_name(source: &str, node: Node<'_>, field: &str) -> Option<String> {
+    name_from_field(source, node, field).map(|n| strip_whitespace(&n))
 }
 
 /// Resolve the actual function name from a C/C++ `function_declarator`.
