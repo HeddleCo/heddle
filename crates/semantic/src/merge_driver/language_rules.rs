@@ -802,23 +802,65 @@ impl LanguageRules for CppRules {
     }
 }
 
-/// Resolve the actual function name from a C/C++ `function_declarator`.
-/// `identifier_in_subtree` over the declarator subtree picks up the
-/// FIRST matching identifier in DFS order — for a templated qualified
-/// name like `Foo<U>::bar()` the scope's inner `type_identifier`
-/// ("Foo") wins and all methods on the same scope collide on
-/// name="Foo" (Codex r5 P1 #2).
+/// Event surfaced by [`walk_c_declarator`] for each node along the
+/// C/C++ declarator chain that carries function-identity signal. The
+/// walker hides the chain mechanics (pointer / reference /
+/// parenthesized / nested `function_declarator` wrappers, descent
+/// through `qualified_identifier.name` and `template_function.name`)
+/// and emits only the structural events consumers act on: scope
+/// components and the terminal name leaf.
+enum DeclaratorEvent<'a> {
+    /// A `qualified_identifier`'s `scope` sub-node — one component of
+    /// the qualified-name chain. Emitted outermost-first as the walker
+    /// descends through nested qualifications.
+    Scope(Node<'a>),
+    /// The identifier-ish leaf at the bottom of the declarator chain
+    /// — the function's plain name (`identifier`, `field_identifier`,
+    /// `type_identifier`, `property_identifier`, `operator_name`, or
+    /// `destructor_name`). Always the last event emitted on a given
+    /// walk.
+    Name(Node<'a>),
+}
+
+/// Walk a C/C++ `function_declarator`'s declarator chain and invoke
+/// `callback` for each structural event affecting function identity.
 ///
-/// Instead, walk the declarator's `declarator` field, stripping layers
-/// (`pointer_declarator`, `reference_declarator`, nested
-/// `function_declarator`) and recursing into `qualified_identifier`'s
-/// `name` field until a plain identifier-ish leaf is reached. That
-/// yields the actual method name regardless of how complex the scope
-/// prefix is (`Foo::Bar::baz` → "baz"; `Foo<U>::bar` → "bar";
-/// `ns::operator+` → "operator+"; `Foo::~Foo` → "~Foo").
-fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String> {
-    let mut current = function_declarator.child_by_field_name("declarator")?;
-    // Cap traversal so a pathological wrapper chain doesn't loop.
+/// Centralises the chain-traversal rules that
+/// [`c_function_name`] and [`c_function_scope`] previously duplicated.
+/// The two consumers had to keep their `match` arms in lockstep — the
+/// r11 finding on PR #114 was exactly a `template_function` arm
+/// present on the name side but forgotten on the scope side — so the
+/// walker turns that mirror-or-diverge tax into symmetry by
+/// construction.
+///
+/// Traversal rules:
+/// * `pointer_declarator`, `reference_declarator`,
+///   `parenthesized_declarator`, and nested `function_declarator`
+///   wrappers are stripped via their `declarator` field. No event.
+/// * `qualified_identifier` emits a [`DeclaratorEvent::Scope`] for its
+///   `scope` field (when present) and descends into its `name` field.
+/// * `template_function` emits nothing of its own and descends into
+///   its `name` field. The grammar can place a `qualified_identifier`
+///   underneath `template_function.name` in some shapes, so descending
+///   here is required to surface nested qualification (Codex r10 P2,
+///   cid 3256487046).
+/// * An identifier-ish leaf (`identifier`, `field_identifier`,
+///   `type_identifier`, `property_identifier`, `operator_name`,
+///   `destructor_name`) emits a single [`DeclaratorEvent::Name`] and
+///   terminates the walk.
+///
+/// Bounded at [`WALK_LIMIT`] iterations so a pathological declarator
+/// chain cannot loop. Any unrecognised node kind, missing required
+/// field, or walk-limit exhaustion ends the walk silently without
+/// emitting a Name event — matching the legacy behaviour of returning
+/// `None`/`Vec::new()` on those conditions.
+fn walk_c_declarator<'tree, F>(function_declarator: Node<'tree>, mut callback: F)
+where
+    F: FnMut(DeclaratorEvent<'tree>),
+{
+    let Some(mut current) = function_declarator.child_by_field_name("declarator") else {
+        return;
+    };
     for _ in 0..WALK_LIMIT {
         match current.kind() {
             "identifier"
@@ -827,25 +869,61 @@ fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String
             | "property_identifier"
             | "operator_name"
             | "destructor_name" => {
-                return Some(source[current.byte_range()].to_string());
+                callback(DeclaratorEvent::Name(current));
+                return;
             }
-            // Scope-qualified names: descend to the name field so the
-            // scope's identifier never wins.
-            "qualified_identifier" | "template_function" => {
-                current = current.child_by_field_name("name")?;
+            "qualified_identifier" => {
+                if let Some(scope_node) = current.child_by_field_name("scope") {
+                    callback(DeclaratorEvent::Scope(scope_node));
+                }
+                let Some(next) = current.child_by_field_name("name") else {
+                    return;
+                };
+                current = next;
             }
-            // Wrappers that don't bear the name themselves; the name
-            // sits one level deeper in `declarator`.
+            "template_function" => {
+                let Some(next) = current.child_by_field_name("name") else {
+                    return;
+                };
+                current = next;
+            }
             "pointer_declarator"
             | "reference_declarator"
             | "function_declarator"
             | "parenthesized_declarator" => {
-                current = current.child_by_field_name("declarator")?;
+                let Some(next) = current.child_by_field_name("declarator") else {
+                    return;
+                };
+                current = next;
             }
-            _ => return None,
+            _ => return,
         }
     }
-    None
+}
+
+/// Resolve the actual function name from a C/C++ `function_declarator`
+/// by running [`walk_c_declarator`] and capturing the terminal
+/// [`DeclaratorEvent::Name`]. The walker owns the chain mechanics —
+/// wrapper stripping and descent through `qualified_identifier` /
+/// `template_function` — so this consumer only converts the leaf node
+/// to a `String`.
+///
+/// Returning the FIRST identifier-ish leaf reached (rather than e.g.
+/// `identifier_in_subtree`'s DFS-first match over the whole declarator
+/// subtree) avoids the hazard where, for a templated qualified name
+/// like `Foo<U>::bar()`, the scope's inner `type_identifier` ("Foo")
+/// wins and collapses all methods on the same scope onto `name="Foo"`
+/// (Codex r5 P1 #2). The walker yields names regardless of how complex
+/// the scope prefix is (`Foo::Bar::baz` → "baz"; `Foo<U>::bar` →
+/// "bar"; `ns::operator+` → "operator+"; `Foo::~Foo` → "~Foo").
+fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String> {
+    let mut name = None;
+    walk_c_declarator(function_declarator, |event| {
+        if let DeclaratorEvent::Name(node) = event {
+            name = Some(source[node.byte_range()].to_string());
+        }
+    });
+    name
 }
 
 /// Extract the qualified scope chain from a C/C++ `function_declarator`,
@@ -877,13 +955,16 @@ fn c_function_name(source: &str, function_declarator: Node<'_>) -> Option<String
 ///     `["A<T*>"]` distinct from `template<class T> void A<T&>::foo()`'s
 ///     `["A<T&>"]` (Codex r11 P1 #3, cid 3256623807).
 ///
-/// The walk mirrors `c_function_name`: strip pointer/reference/
-/// parenthesized wrappers via the `declarator` field, and at each
-/// `qualified_identifier` record its `scope` field and descend into
-/// its `name` field. `template_function` doesn't bear scope but its
-/// `name` field can be a qualified_identifier in some grammar shapes —
-/// descend through it (parity with `c_function_name`) so we never miss
-/// nested qualification (Codex r10 P2, cid 3256487046).
+/// Traversal is shared with [`c_function_name`] via
+/// [`walk_c_declarator`]: pointer / reference / parenthesized / nested
+/// `function_declarator` wrappers are stripped, `template_function` is
+/// descended through its `name` field (the walker may surface a
+/// `qualified_identifier` underneath — Codex r10 P2, cid 3256487046),
+/// and each `qualified_identifier`'s `scope` sub-node is surfaced as a
+/// [`DeclaratorEvent::Scope`] for this consumer to collect. Sharing
+/// the walker eliminates the "forgot to mirror `template_function`"
+/// class of bug that previously required this function and
+/// [`c_function_name`] to be kept in lockstep (Codex r11 finding).
 fn c_function_scope(
     source: &str,
     function_definition: Node<'_>,
@@ -891,38 +972,11 @@ fn c_function_scope(
 ) -> Vec<String> {
     let mut scope = Vec::new();
     let param_lists = enclosing_template_param_lists(function_definition, source);
-    let Some(mut current) = function_declarator.child_by_field_name("declarator") else {
-        return scope;
-    };
-    for _ in 0..WALK_LIMIT {
-        match current.kind() {
-            "qualified_identifier" => {
-                if let Some(s) = current.child_by_field_name("scope") {
-                    scope.push(scope_component_text(source, s, &param_lists));
-                }
-                let Some(next) = current.child_by_field_name("name") else {
-                    return scope;
-                };
-                current = next;
-            }
-            "template_function" => {
-                let Some(next) = current.child_by_field_name("name") else {
-                    return scope;
-                };
-                current = next;
-            }
-            "pointer_declarator"
-            | "reference_declarator"
-            | "function_declarator"
-            | "parenthesized_declarator" => {
-                let Some(next) = current.child_by_field_name("declarator") else {
-                    return scope;
-                };
-                current = next;
-            }
-            _ => return scope,
+    walk_c_declarator(function_declarator, |event| {
+        if let DeclaratorEvent::Scope(node) = event {
+            scope.push(scope_component_text(source, node, &param_lists));
         }
-    }
+    });
     scope
 }
 
