@@ -86,12 +86,13 @@ pub(crate) fn reconstruct_merged_file(
     let mut total_conflicts = 0usize;
 
     // Whole-file source bundle: lets `resolve_item` slice per-item
-    // bytes AND carries a single `EolPolicy` shared by every EOL-
-    // sensitive emission path (marker lines in `emit_addadd_conflict`,
-    // trailing newline in `reconcile_trailing_newline`). One instance,
-    // one policy — by construction the marker path can no longer
-    // diverge from the body-bytes path the way it did before Codex r8
-    // (cid 3256283857).
+    // bytes AND carries a whole-file `EolPolicy` used by the trailing
+    // newline path (`reconcile_trailing_newline`) and as a fallback by
+    // the marker path (`emit_addadd_conflict`) when the conflicting
+    // item bodies carry zero EOL observations (Codex r8, cid
+    // 3256283857). The marker path otherwise weights its policy on
+    // the items' own bytes so a CRLF item in a majority-LF file gets
+    // CRLF markers (Codex r2 P2 on PR #193, cid 3291860840).
     let sides = SideSources::new(base, ours, theirs);
 
     for key in &all_keys {
@@ -316,12 +317,12 @@ fn materialize_segment(outcome: MergeOutcome, fallback: &str) -> (Vec<u8>, usize
 
 /// Whole-file source bundle threaded through item resolution. Lets
 /// `resolve_item` slice item bytes per side AND carries the
-/// whole-file `EolPolicy` consumed by every EOL-sensitive emission
-/// path (`reconcile_trailing_newline`, `emit_addadd_conflict`). One
-/// shared policy means the marker lines and the body bytes cannot
-/// disagree about the file's EOL discipline — the symmetry break
-/// that motivated Codex r8 (cid 3256283857) is impossible by
-/// construction.
+/// whole-file `EolPolicy` used by `reconcile_trailing_newline` and as
+/// the zero-observation fallback by `emit_addadd_conflict`. The
+/// marker path's primary policy is per-item — see
+/// `emit_addadd_conflict` — but reuses this whole-file policy when
+/// the conflicting items contribute no `\n` of their own
+/// (single-line items, Codex r8 cid 3256283857).
 #[derive(Clone, Copy)]
 struct SideSources<'a> {
     base: &'a str,
@@ -615,22 +616,35 @@ fn majority_ends_with_newline(base: &str, ours: &str, theirs: &str) -> bool {
 /// produces so external validators (heddle#78) and IDE conflict tools
 /// parse it identically.
 ///
-/// Line endings on the marker lines come from the shared whole-file
-/// [`EolPolicy`] carried by `sides`, the same instance the body path
-/// uses in `reconcile_trailing_newline`. A CRLF file gets CRLF
-/// markers and an LF file gets LF markers, and the two paths cannot
-/// disagree by construction (the divergence behind Codex r6 P2 #1 and
-/// Codex r8 P2 cid 3256283857). The item bytes don't need to enter
-/// the policy: they're slices of the side files, so the file-level
-/// CRLF/LF counts already reflect them — single-line items in a CRLF
-/// file still resolve to CRLF because the surrounding file does.
+/// Line endings on the marker lines come from a per-item [`EolPolicy`]
+/// computed over the two conflicting item bodies, NOT the whole-file
+/// policy carried by `sides`. The markers and the body they bracket
+/// are derived from the same sample, so the r8 invariant (markers +
+/// body cannot disagree) holds — but they now reflect the item's own
+/// EOL discipline rather than the surrounding file. In a mixed-EOL
+/// file where the LF context outnumbers a CRLF item, the whole-file
+/// policy would vote LF and wrap a CRLF body with bare-LF markers,
+/// reintroducing the mixed-EOL hunk shape (Codex r2 P2, PR #193 cid
+/// 3291860840).
+///
+/// When both items carry zero EOL observations — single-line bodies
+/// in a CRLF file — the per-item policy ties to LF by default, which
+/// reintroduces Codex r8 P2 (cid 3256283857). The whole-file
+/// `sides.eol_policy` fills that case: it counts the surrounding
+/// file context, so a CRLF file resolves to CRLF markers even when
+/// the items contribute no observations of their own.
 fn emit_addadd_conflict(
     ours: &[u8],
     theirs: &[u8],
     markers: ConflictMarkers<'_>,
     sides: SideSources<'_>,
 ) -> Vec<u8> {
-    let eol = sides.eol_policy.eol();
+    let items_policy = EolPolicy::detect(&[ours, theirs]);
+    let eol = if items_policy.crlf + items_policy.lf > 0 {
+        items_policy.eol()
+    } else {
+        sides.eol_policy.eol()
+    };
     let mut out = Vec::with_capacity(ours.len() + theirs.len() + 64);
     out.extend_from_slice(b"<<<<<<< ");
     out.extend_from_slice(markers.ours.as_bytes());
