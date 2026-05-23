@@ -180,12 +180,12 @@ fn cmd_stack_snapshot(cli: &Cli, repo: &Repository, thread: Option<String>) -> R
     // snapshots cover the whole corpus, but a future per-stack subview
     // would slice on this. Reject unknown threads up-front so the CLI is
     // honest about what we know.
-    if let Some(name) = thread.as_deref() {
-        if snapshot.stack_containing(name).is_none() {
-            return Err(anyhow!(
-                "thread '{name}' is not part of any known stack in this repo"
-            ));
-        }
+    if let Some(name) = thread.as_deref()
+        && snapshot.stack_containing(name).is_none()
+    {
+        return Err(anyhow!(
+            "thread '{name}' is not part of any known stack in this repo"
+        ));
     }
 
     if should_output_json(cli, Some(repo.config())) {

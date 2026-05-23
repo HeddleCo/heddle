@@ -213,11 +213,8 @@ impl RepositorySnapshot {
         // root-first DFS and pick the deepest still-in-flight thread.
         let mut bottleneck: Option<String> = None;
         for name in &members {
-            match state_of(name) {
-                Some(ThreadState::Active | ThreadState::Draft) => {
-                    bottleneck = Some(name.clone());
-                }
-                _ => {}
+            if let Some(ThreadState::Active | ThreadState::Draft) = state_of(name) {
+                bottleneck = Some(name.clone());
             }
         }
         match bottleneck {
