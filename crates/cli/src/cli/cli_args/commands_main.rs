@@ -18,8 +18,8 @@ use super::{
     },
     AgentCommands, BisectCommands, CheckpointArgs, ConflictCommands, ContextCommands,
     DiscussCommands, HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs,
-    RedactCommands, RemoteCommands, ReviewCommands, ShellCommands, StashCommands, ThreadCommands,
-    TransactionCommands, WorkspaceCommands,
+    RedactCommands, RemoteCommands, ReviewCommands, ShellCommands, StackArgs, StashCommands,
+    ThreadCommands, TransactionCommands, WorkspaceCommands,
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, SupportCommands};
@@ -409,6 +409,23 @@ Examples:
         #[command(subcommand)]
         command: WorkspaceCommands,
     },
+
+    /// Describe, ready-check, or snapshot the stack of related threads
+    /// that the current thread participates in.
+    ///
+    /// `heddle stack` (no subcommand) renders the stack containing the
+    /// current thread. `heddle stack ready` surfaces the next-action
+    /// verdict (`ready` / `blocked` / `waiting-on-review`). `heddle
+    /// stack snapshot` emits the JSON `RepositorySnapshot` projection
+    /// for agentic tooling.
+    #[command(after_help = "\
+Examples:
+  heddle stack                                   # describe the current thread's stack
+  heddle stack --thread feature-b                # describe the stack containing feature-b
+  heddle stack ready                             # next-action verdict for the current stack
+  heddle stack snapshot --output json            # serialize the stack as RepositorySnapshot
+")]
+    Stack(StackArgs),
 
     /// Merge a thread into current thread.
     Merge(MergeArgs),

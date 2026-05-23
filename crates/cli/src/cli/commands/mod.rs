@@ -66,6 +66,7 @@ mod session;
 mod shell;
 mod show;
 pub(crate) mod snapshot;
+mod stack;
 mod stash;
 mod stash_ops;
 mod status;
@@ -172,6 +173,7 @@ pub use session::{
 pub use shell::cmd_shell;
 pub use show::cmd_show;
 pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
+pub use stack::cmd_stack;
 pub use stash::cmd_stash;
 pub use status::cmd_status;
 pub use store_cmd::cmd_store;

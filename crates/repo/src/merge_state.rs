@@ -149,6 +149,22 @@ impl MergeStateManager {
         self.read_lock().is_ok() && self.merge_state_path.exists()
     }
 
+    /// Re-point `ours` at a new state without ending the merge. Used by
+    /// stack-aware workflows that checkpoint mid-merge: the merge stays
+    /// alive, but its "our" side now reflects the just-committed
+    /// checkpoint so subsequent `--ours` resolves pull from the latest
+    /// WIP rather than the pre-merge baseline. `theirs`, `base`,
+    /// `conflicts`, and `resolved` are preserved untouched.
+    pub fn carry_forward(&self, new_ours: ChangeId) -> Result<MergeState> {
+        let _lock = self.write_lock()?;
+        let mut state = self
+            .load_unlocked()?
+            .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
+        state.ours = new_ours;
+        self.write_state(&state)?;
+        Ok(state)
+    }
+
     fn load_unlocked(&self) -> Result<Option<MergeState>> {
         if !self.merge_state_path.exists() {
             return Ok(None);
