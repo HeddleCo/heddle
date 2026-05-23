@@ -85,7 +85,7 @@ use tracing::{debug, warn};
 use crate::{
     core::ContentAddressedMount,
     error::Result,
-    shell::{AttrUpdate, Attrs, Entry, NodeId, NodeKind, PlatformShell},
+    shell::{AttrUpdate, Attrs, Entry, NodeId, NodeKind, PlatformShell, RenameOptions},
 };
 
 /// FUSE attribute timeout. Heddle's mount is content-addressed —
@@ -353,7 +353,18 @@ impl Filesystem for FuseShell {
         Ok(())
     }
 
-    fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        // R8 (Codex Thread 3293235165): notify the core that an open
+        // handle was minted. The core's open-handle refcount times
+        // the orphan cleanup against the final `release` rather than
+        // the first `flush` — without this hook, a kernel that opens
+        // an inode twice (rather than dup'ing) clears the marker on
+        // the first close. Errors here can only come from the panic
+        // guard; the cost of skipping the bookkeeping is correctness
+        // under that pathological case, so we log and fail open.
+        if let Err(err) = guard_call("open", || self.inner.on_open(NodeId(ino.0))) {
+            warn!(?err, "on_open bookkeeping failed; orphan cleanup may misfire");
+        }
         // Open every file in `direct_io` mode so the kernel never
         // serves bytes from its page cache. The content-addressed
         // mount maintains its own blob cache ([`BlobCachePool`]),
@@ -562,6 +573,15 @@ impl Filesystem for FuseShell {
         });
         match result {
             Ok(entry) => {
+                // R8: bump the open-handle refcount the same as
+                // `Self::open` does. The kernel won't issue a
+                // separate `open` callback after `create`.
+                if let Err(err) = guard_call("create", || self.inner.on_open(entry.node)) {
+                    warn!(
+                        ?err,
+                        "on_open bookkeeping failed; orphan cleanup may misfire"
+                    );
+                }
                 // Mirror the `open` callback: opt the new fd into
                 // FOPEN_DIRECT_IO so kernel page-cache reads don't
                 // shadow hot-tier writes (see `Self::open` for the
@@ -672,9 +692,13 @@ impl Filesystem for FuseShell {
         //     overlay would have to journal both halves.
         //   * RENAME_WHITEOUT — overlayfs-specific, not meaningful
         //     for a CAS-backed mount.
-        // `RENAME_NOREPLACE` we honour the easy way: if the
-        // destination exists, refuse with EEXIST before invoking
-        // the overlay rename.
+        // R8 (Codex Thread 3293235163): `RENAME_NOREPLACE` is plumbed
+        // through the core's `rename_entry_with_options` so the
+        // existence-check + the directory-entry mutation land under
+        // the same write-side critical section. The old shell-side
+        // pre-check left a TOCTOU window between the lookup and the
+        // rename — a concurrent writer could install the
+        // destination in between and the rename would clobber it.
         #[cfg(target_os = "linux")]
         if flags.contains(RenameFlags::RENAME_EXCHANGE)
             || flags.contains(RenameFlags::RENAME_WHITEOUT)
@@ -683,30 +707,20 @@ impl Filesystem for FuseShell {
             return;
         }
         #[cfg(target_os = "linux")]
-        if flags.contains(RenameFlags::RENAME_NOREPLACE) {
-            let probe = guard_call("rename", || {
-                self.inner.lookup(NodeId(newparent.0), newname)
-            });
-            match probe {
-                Ok(Some(_)) => {
-                    reply.error(Errno::from_i32(libc::EEXIST));
-                    return;
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    reply.error(errno_from_mount_error(err));
-                    return;
-                }
-            }
-        }
+        let no_replace = flags.contains(RenameFlags::RENAME_NOREPLACE);
         #[cfg(not(target_os = "linux"))]
-        let _ = flags;
+        let no_replace = {
+            let _ = flags;
+            false
+        };
+        let options = RenameOptions { no_replace };
         match guard_call("rename", || {
-            self.inner.rename_entry(
+            self.inner.rename_entry_with_options(
                 NodeId(parent.0),
                 name,
                 NodeId(newparent.0),
                 newname,
+                options,
             )
         }) {
             Ok(()) => reply.ok(),

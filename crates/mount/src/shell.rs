@@ -142,16 +142,38 @@ pub trait PlatformShell {
     /// Promote any hot-tier buffer for `node` into a CAS blob. The
     /// FUSE `flush` callback dispatches here (fires on `close(2)`
     /// and explicit fsync). Default: no-op for read-only mounts.
+    ///
+    /// Lifecycle note: FUSE `flush` fires on *every* descriptor close
+    /// — including the close of a `dup`-derived fd — so it can be
+    /// invoked multiple times before the last open handle is gone.
+    /// Implementations that maintain per-inode "is the directory
+    /// entry still gone?" state (orphan tracking) MUST defer the
+    /// final clear to [`Self::release`]; touching it here would let a
+    /// surviving fd's next write republish the unlinked pathname.
     fn flush(&self, _node: NodeId) -> Result<()> {
         Ok(())
     }
 
-    /// Final close of `node`. Adapters call this on FUSE `release`
-    /// so a buffer that survived a missed `flush` still gets
-    /// promoted before the inode handle is retired. Default:
-    /// identical to flush.
+    /// Final close of `node`. The FUSE `release` callback dispatches
+    /// here; it fires once per `open(2)` after the last fd derived
+    /// from that open is closed. This is the canonical "last close of
+    /// the inode" signal — it is the right hook (NOT [`Self::flush`])
+    /// for retiring per-inode lifecycle state like orphan-tracking
+    /// markers or open-handle refcounts. Default: identical to flush
+    /// so shells that do not maintain per-inode lifecycle state
+    /// inherit a uniform contract.
     fn release(&self, node: NodeId) -> Result<()> {
         self.flush(node)
+    }
+
+    /// Notify the shell that a new open file handle for `node` has
+    /// been minted. FUSE adapters call this on the `open` / `create`
+    /// callbacks so the shell can maintain a per-inode open-handle
+    /// refcount — used to time the [`Self::release`] cleanup against
+    /// the *final* close instead of the first one. Default: no-op so
+    /// shells without lifecycle state are unaffected.
+    fn on_open(&self, _node: NodeId) -> Result<()> {
+        Ok(())
     }
 
     /// Create a fresh regular file under `parent`. Mints a [`NodeId`]
@@ -218,6 +240,25 @@ pub trait PlatformShell {
         _new_name: &OsStr,
     ) -> Result<()> {
         Err(MountError::ReadOnly)
+    }
+
+    /// Same as [`Self::rename_entry`] but honours [`RenameOptions`] —
+    /// in particular `no_replace`, which atomically refuses the rename
+    /// when the destination already resolves. The check + the
+    /// directory-entry mutation MUST happen under a single critical
+    /// section to avoid a TOCTOU window between the existence check
+    /// and the rename itself. Default: ignore options and dispatch to
+    /// `rename_entry` (preserving the existing trait surface for
+    /// shells that do not yet support flags).
+    fn rename_entry_with_options(
+        &self,
+        old_parent: NodeId,
+        old_name: &OsStr,
+        new_parent: NodeId,
+        new_name: &OsStr,
+        _options: RenameOptions,
+    ) -> Result<()> {
+        self.rename_entry(old_parent, old_name, new_parent, new_name)
     }
 
     /// Apply attribute updates to `node`. Returns the post-update
@@ -294,3 +335,17 @@ pub(crate) fn kind_for_mode(mode: FileMode) -> NodeKind {
 /// their own — they're synthesised at materialization time — so we
 /// keep one canonical value here.
 pub(crate) const DIR_UNIX_MODE: u32 = 0o040755;
+
+/// Optional flags for [`PlatformShell::rename_entry_with_options`].
+/// Mirrors the subset of Linux `renameat2(2)` flags the mount
+/// supports; non-applicable flags on non-Linux adapters can be left
+/// as their defaults.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenameOptions {
+    /// `RENAME_NOREPLACE`: refuse the rename with [`MountError::AlreadyExists`]
+    /// when the destination already resolves. Must be enforced inside
+    /// the same critical section as the rename so a concurrent writer
+    /// cannot install the destination between the check and the
+    /// mutation.
+    pub no_replace: bool,
+}
