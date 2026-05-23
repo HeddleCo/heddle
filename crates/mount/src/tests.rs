@@ -1737,6 +1737,110 @@ mod write_ops {
         );
     }
 
+    /// POSIX `unlink(2)` semantics: if a file is open when it's
+    /// unlinked, the kernel keeps the inode alive behind the open
+    /// fd, but the *directory entry* is gone — `lookup` returns
+    /// `ENOENT` and `readdir` skips the name. A subsequent write
+    /// through the open fd updates the orphaned inode's data, but
+    /// it must NOT republish the name. Tools that depend on this:
+    /// `mkstemp` + `unlink` for private scratch space, sqlite's WAL
+    /// shadow files, cargo's atomic-replace pattern. Without the
+    /// guard, the unlinked pathname unexpectedly reappears once a
+    /// late write hits the open fd.
+    #[test]
+    fn write_to_unlinked_open_inode_does_not_resurrect_path() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("temp", O_CREAT|O_RDWR)` — fresh pending file.
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("temp"), FileMode::Normal, false)
+            .expect("create");
+        mount.write(entry.node, 0, b"v1").expect("first write");
+        // `unlink("temp")` while the handle is still in use.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("temp"))
+            .expect("unlink");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("temp"))
+                .unwrap()
+                .is_none(),
+            "post-unlink lookup must return None"
+        );
+
+        // Write through the original handle. POSIX says this is
+        // legal — the inode survives behind the fd — but the
+        // pathname must not come back.
+        mount
+            .write(entry.node, 0, b"v2-after-unlink")
+            .expect("write through unlinked-open fd");
+
+        // The data is accessible through the open handle.
+        let mut buf = vec![0u8; 64];
+        let n = mount
+            .read(entry.node, 0, &mut buf)
+            .expect("read via unlinked-open fd");
+        assert_eq!(&buf[..n], b"v2-after-unlink");
+
+        // The decisive check: the path must still be gone.
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("temp"))
+                .unwrap()
+                .is_none(),
+            "write after unlink must not resurrect the path"
+        );
+        let entries = mount.enumerate(NodeId::ROOT).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.name == "temp"),
+            "enumerate must not surface the unlinked path: {entries:?}"
+        );
+        // Flushing the orphan must not promote it to the warm tier
+        // (a subsequent capture would resurrect the path in the
+        // captured tree otherwise). Drive the flush explicitly so
+        // the test pins the contract; orphaned buffers must drop.
+        mount.flush(entry.node).expect("flush orphan");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("temp"))
+                .unwrap()
+                .is_none(),
+            "post-flush lookup must still be gone (orphan must not warm-promote)"
+        );
+    }
+
+    /// Companion to the orphan-write test: after an unlink, if a
+    /// fresh `create_file` mints a new inode at the same name,
+    /// writes through the *new* fd must surface normally. The
+    /// orphan-write fix must not regress the unlink-then-recreate
+    /// path the kernel actually emits for `open(O_CREAT)`.
+    #[test]
+    fn write_to_recreated_inode_after_unlink_still_publishes_path() {
+        let (_temp, mount) = open_mount();
+        let original = mount
+            .create_file(NodeId::ROOT, OsStr::new("temp"), FileMode::Normal, false)
+            .expect("create v1");
+        mount.write(original.node, 0, b"v1").expect("write v1");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("temp"))
+            .expect("unlink");
+
+        let recreated = mount
+            .create_file(NodeId::ROOT, OsStr::new("temp"), FileMode::Normal, false)
+            .expect("recreate");
+        assert_ne!(original.node, recreated.node);
+        mount.write(recreated.node, 0, b"v2-fresh").expect("write v2");
+
+        // The new inode is the one that owns the path now.
+        let hit = mount
+            .lookup(NodeId::ROOT, OsStr::new("temp"))
+            .unwrap()
+            .expect("recreated path must resolve");
+        assert_eq!(hit.node, recreated.node);
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(recreated.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"v2-fresh");
+    }
+
     /// Rename-over must keep the replaced destination's inode record
     /// resolvable — only the path→inode link is detached. Without this
     /// any FD still holding the dest inode surfaces as ESTALE on the
