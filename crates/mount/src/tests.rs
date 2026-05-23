@@ -2509,6 +2509,328 @@ mod write_ops {
             entry.mode,
         );
     }
+
+    // --- Codex round 8 findings: 3-axis sweep (warm tier + lifecycle + atomicity)
+    //
+    // r7 made the write-side ops orphan-aware against `pending.hot` /
+    // `hot_by_path` / `tombstones` / `inodes.by_path`. r8 closes the
+    // remaining three same-shape misses:
+    //
+    //   1. `pending.warm` was dropped unconditionally on unlink and
+    //      rename-over, even when the inode had surviving open fds. The
+    //      bytes those fds want to read disappeared with the path.
+    //   2. The orphan marker cleared on the FIRST `flush`. FUSE `flush`
+    //      fires on EACH descriptor close (incl. `dup`-derived fds);
+    //      only `release` is the last-close-per-inode signal. A
+    //      premature clear lets a surviving fd's next write republish
+    //      the unlinked path.
+    //   3. `RENAME_NOREPLACE` did the existence-check in the FUSE shell
+    //      and the rename in the core — separate locks, classic TOCTOU.
+    //      Concurrent writers could create the destination between the
+    //      two operations and the rename would clobber it.
+
+    /// An open fd to a captured file whose warm-tier bytes are present
+    /// must still serve those bytes after the path is unlinked. POSIX
+    /// open-unlinked semantics: the inode survives behind the fd, and
+    /// `pending.warm[path]` is the most-recently-promoted bytes the fd
+    /// owns. r7's `unlink_entry` dropped `pending.warm[path]`
+    /// unconditionally — orphan reads through the surviving fd lost
+    /// the latest writes.
+    #[test]
+    fn unlink_then_read_warm_via_open_fd() {
+        let (_temp, mount) = open_mount();
+        // Open hello.txt and write through it. Flush promotes to warm
+        // so the bytes are at `pending.warm["hello.txt"]`, not in any
+        // hot buffer.
+        let node = mount.lookup_path("hello.txt").unwrap();
+        mount.write(node, 0, b"WARM-BYTES").expect("write");
+        mount.flush(node).expect("flush — promote to warm");
+        // Sanity: warm tier holds the bytes.
+        assert!(
+            mount.warm_blob("hello.txt").is_some(),
+            "warm should hold the flushed bytes"
+        );
+        // `unlink("hello.txt")` while the fd lives on. POSIX: the
+        // inode survives; the directory entry is gone.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        // Read via the orphaned fd. The most recent durable bytes for
+        // this inode are the warm-tier bytes; they must still be
+        // reachable.
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(node, 0, &mut buf)
+            .expect("read via orphan fd after warm-promoted unlink");
+        assert_eq!(
+            &buf[..n],
+            b"WARM-BYTES",
+            "orphan read must serve preserved warm bytes, not captured fallback"
+        );
+        // attrs must report the warm size too — a stale captured size
+        // would clip the kernel's read buffer.
+        let attrs = mount.attrs(node).expect("attrs via orphan fd");
+        assert_eq!(
+            attrs.size, 10,
+            "attrs on orphan must report warm size, not captured"
+        );
+    }
+
+    /// `ftruncate` through an unlinked-but-still-open fd whose only
+    /// durable bytes are warm-tier (no captured-tree predecessor) must
+    /// seed the truncated buffer from those warm bytes. Without the
+    /// warm-preservation fix, the seed lookup falls through to "empty"
+    /// and the surviving fd's `ftruncate` followed by `read` returns
+    /// zeros — POSIX requires the truncate to start from the inode's
+    /// current bytes.
+    #[test]
+    fn truncate_unlinked_open_keeps_warm_bytes() {
+        let (_temp, mount) = open_mount();
+        // Pending file (no captured-tree backing) so the orphan has
+        // nothing but warm bytes to fall back on.
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .expect("create");
+        mount.write(entry.node, 0, b"hello-world").expect("write");
+        mount.flush(entry.node).expect("flush — promote to warm");
+        assert!(
+            mount.warm_blob("scratch").is_some(),
+            "warm should hold the flushed bytes"
+        );
+        // Unlink while the fd lives on.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("unlink");
+        // ftruncate(fd, 5) through the orphaned NodeId.
+        mount
+            .set_attrs(
+                entry.node,
+                AttrUpdate {
+                    size: Some(5),
+                    ..Default::default()
+                },
+            )
+            .expect("ftruncate orphan");
+        // Read the truncated bytes. Without the warm-preservation
+        // fix, this returns "\0\0\0\0\0" instead of "hello".
+        let mut buf = vec![0u8; 16];
+        let n = mount
+            .read(entry.node, 0, &mut buf)
+            .expect("read truncated orphan");
+        assert_eq!(
+            &buf[..n],
+            b"hello",
+            "truncate-then-read on orphan must seed from preserved warm bytes"
+        );
+        // Path stays gone.
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("scratch"))
+                .unwrap()
+                .is_none(),
+            "truncate after unlink must not resurrect the path"
+        );
+    }
+
+    /// Rename-over when the displaced destination has warm-tier bytes
+    /// (no in-flight hot buffer) must preserve those bytes for the
+    /// still-open fd. Without the fix, `move_file`'s blind
+    /// `pending.warm.remove(new_path)` dropped them; the surviving fd
+    /// either sees the source's replacement bytes or an empty file.
+    #[test]
+    fn rename_over_preserves_warm_for_open_fd() {
+        let (_temp, mount) = open_mount();
+        // Open hello.txt and write+flush so its bytes live in warm,
+        // not hot. r7's existing rename-over preservation fix is for
+        // hot buffers; this one exercises the warm-tier preservation.
+        let dest_id = mount.lookup_path("hello.txt").unwrap();
+        mount.write(dest_id, 0, b"DEST-WARM-BYTES").expect("write dest");
+        mount.flush(dest_id).expect("flush dest — promote to warm");
+        assert!(
+            mount.warm_blob("hello.txt").is_some(),
+            "dest must be warm-promoted at rename time"
+        );
+        // Build a source file with replacement payload and flush.
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .expect("create src");
+        mount.write(src.node, 0, b"REPLACE-DATA").expect("write src");
+        mount.flush(src.node).expect("flush src");
+        // Rename src over dest. dest's pathname is rebound to src.
+        // dest's open fd must keep seeing the displaced WARM bytes.
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        // Read via the displaced inode id. Without the fix, this
+        // returns "REPLACE-DATA" (source's bytes via `warm[new_path]`)
+        // or captured "world" (fallback after warm drop).
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(dest_id, 0, &mut buf)
+            .expect("read via replaced dest fd");
+        assert_eq!(
+            &buf[..n],
+            b"DEST-WARM-BYTES",
+            "open fd on replaced dest must see pre-rename WARM bytes"
+        );
+        // attrs must match.
+        let attrs = mount.attrs(dest_id).expect("attrs via replaced dest fd");
+        assert_eq!(
+            attrs.size, 15,
+            "attrs must report preserved warm size, not replacement or captured"
+        );
+    }
+
+    /// FUSE `flush` fires on every descriptor close (including dup'd
+    /// fds); only `release` is the last-close-per-inode signal. r7
+    /// cleared the orphan marker in `flush_node`, so the FIRST close of
+    /// a dup'd unlinked fd cleared the marker prematurely. A subsequent
+    /// write through the surviving dup would then take the non-orphan
+    /// branch and republish the unlinked path.
+    ///
+    /// We exercise the contract by simulating the two-open lifecycle:
+    /// `on_open` twice (representing 2 fds), `unlink`, `flush` (orphan
+    /// marker must stay), `release` once (one fd closed; marker stays),
+    /// `release` again (last close; marker clears).
+    #[test]
+    fn flush_keeps_orphan_marker_until_release() {
+        let (_temp, mount) = open_mount();
+        // Capture-backed file, opened twice (e.g. one fd then dup —
+        // FUSE would track these as a single open + multiple flushes
+        // + one release; or two opens + two releases. Either way the
+        // marker must persist across the non-final close.)
+        let node = mount.lookup_path("hello.txt").unwrap();
+        // Two opens → refcount 2.
+        mount.on_open(node).expect("open 1");
+        mount.on_open(node).expect("open 2");
+        // Unlink while both fds live on.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        assert!(
+            mount.orphans_contains(node),
+            "unlink-while-open must set the orphan marker"
+        );
+        // `flush` fires on each close (per FUSE protocol). It MUST NOT
+        // clear the orphan marker — the surviving fd needs to keep
+        // taking the orphan branch on writes.
+        mount.flush(node).expect("flush #1");
+        assert!(
+            mount.orphans_contains(node),
+            "flush must not clear the orphan marker"
+        );
+        // First `release` — represents one of the two fds closing.
+        // Marker still present because the other fd holds the inode.
+        mount.release(node).expect("release #1");
+        assert!(
+            mount.orphans_contains(node),
+            "non-final release must not clear orphan marker"
+        );
+        // Second `release` — the last close. Now the marker must
+        // clear, the orphan buffer (if any) drops, and the inode's
+        // bookkeeping is freed.
+        mount.release(node).expect("release #2");
+        assert!(
+            !mount.orphans_contains(node),
+            "final release must clear the orphan marker"
+        );
+    }
+
+    /// `RENAME_NOREPLACE` must be honoured atomically by the core. r6/r7
+    /// did the existence-check in the FUSE shell and the rename in the
+    /// core under separate locks — between the two, a concurrent writer
+    /// could create the destination and the rename would silently
+    /// clobber it. r8 plumbs the flag into the core's mutation
+    /// critical section so the check + rename land under the same
+    /// write-side lock.
+    ///
+    /// Deterministic shape: with the flag set, `rename_entry_with_options`
+    /// must return `AlreadyExists` when the destination resolves. The
+    /// caller is responsible for not racing — but with the core
+    /// honouring the flag inside its own critical section, sequential
+    /// callers (FUSE serializes write callbacks per inode anyway) get
+    /// strict NOREPLACE semantics.
+    #[test]
+    fn rename_noreplace_is_atomic() {
+        use crate::shell::RenameOptions;
+        let (_temp, mount) = open_mount();
+        // Build a source file with bytes; flush so the rename works
+        // entirely from warm tier.
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .expect("create src");
+        mount.write(src.node, 0, b"draft-bytes").expect("write src");
+        mount.flush(src.node).expect("flush src");
+        // Destination already exists in the captured tree. With
+        // NOREPLACE the rename must refuse with `EEXIST`/`AlreadyExists`
+        // BEFORE making any mutation.
+        let err = mount
+            .rename_entry_with_options(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                RenameOptions { no_replace: true },
+            )
+            .expect_err("NOREPLACE over existing dest must fail");
+        assert!(
+            matches!(err, MountError::AlreadyExists(_)),
+            "got unexpected error: {err:?}"
+        );
+        assert_eq!(err.to_errno(), libc::EEXIST);
+        // The source must still be intact — NOREPLACE failure must not
+        // leave the source in a half-renamed state.
+        let src_after = mount
+            .lookup(NodeId::ROOT, OsStr::new("draft"))
+            .unwrap()
+            .expect("source intact after NOREPLACE rejection");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(src_after.node, 0, &mut buf).unwrap();
+        assert_eq!(
+            &buf[..n],
+            b"draft-bytes",
+            "source bytes intact after NOREPLACE rejection"
+        );
+        // And the destination must still be the captured "world".
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("dest still resolves");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(dst.node, 0, &mut buf).unwrap();
+        assert_eq!(
+            &buf[..n],
+            b"world",
+            "dest bytes unchanged after NOREPLACE rejection"
+        );
+
+        // Same call WITHOUT the flag must succeed (and replace).
+        mount
+            .rename_entry_with_options(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                RenameOptions::default(),
+            )
+            .expect("rename without NOREPLACE replaces");
+        let dst2 = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("dst still resolves");
+        let mut buf = vec![0u8; 32];
+        let n = mount.read(dst2.node, 0, &mut buf).unwrap();
+        assert_eq!(
+            &buf[..n],
+            b"draft-bytes",
+            "non-NOREPLACE rename replaces dest"
+        );
+    }
 }
 
 // D1. Property test for two-tier semantics.
