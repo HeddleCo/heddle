@@ -36,8 +36,15 @@ latency cost (vs ~50µs raw framing) is accepted.
 
 `heddle-fuse-worker` is its own long-lived process. It owns:
 - The `Pending` overlay (`crates/mount/src/core.rs:357-372`).
-- The FUSE device fd (the `/dev/fuse` handle backing the `fuser::Session`).
 - The gRPC server on its private UDS.
+
+It **holds** the FUSE device fd (the `/dev/fuse` handle backing the
+`fuser::Session`) — received via SCM_RIGHTS from the supervisor on spawn —
+but does NOT own its lifetime. The **supervisor (CLI) is the lifetime owner**
+of `/dev/fuse`: it opens the fd at mount time and retains its copy across
+worker respawns. On worker crash, the supervisor still holds the fd and
+hands a fresh dup to the next worker via SCM_RIGHTS. See §4 spawn sequence
+and §5 SCM_RIGHTS handshake.
 
 It is NOT the same process as `heddle-daemon`. Two long-lived processes per repo:
 - `heddle-daemon` (existing — `crates/daemon/`) — agent-loop gRPC services.
@@ -55,13 +62,21 @@ worker's gRPC socket for EOF and applies a 3-strikes-in-5-minutes budget:
 
 | Crash # in 5-min window | Action |
 |---|---|
-| 1 | log + respawn + SCM_RIGHTS the FUSE fd to the new worker + reply EIO to in-flight callbacks + warning banner on next `heddle` command |
+| 1 | log + respawn + SCM_RIGHTS the FUSE fd to the new worker + supervisor stops accepting output from the dead worker (outstanding kernel requests time out naturally — see §7 respawn budget) + warning banner on next `heddle` command |
 | 2 | same as 1 |
 | 3 | log full context + `fusermount3 -u <mountpoint>` + supervisor exits + persistent-crash banner: "please file a bug at github.com/HeddleCo/heddle/issues" |
 
 **Rationale:** tolerates transient bugs (single bad input the new worker
 won't see), surfaces persistent bugs cleanly, no false-positive auto-recovery
 loops.
+
+**Hard requirement: respawn budget.** The supervisor MUST respawn the worker
+within **500ms** (target; impl PR will benchmark + verify). Slower respawns
+risk kernel-side request timeouts on systems with strict `request_timeout`
+configuration. The kernel times out in-flight requests naturally during the
+respawn gap (the supervisor does not track or replay individual requests —
+see §5), so the entire crash-recovery design depends on the gap staying
+short. Detail + benchmark plan in §7.
 
 ## 2. Architecture diagram
 
@@ -76,8 +91,8 @@ loops.
         │                CLI SUPERVISOR  (heddle binary)               │
         │  - owns lifetime of both subprocesses                        │
         │  - holds RestartBudget for the worker                        │
-        │  - opens /dev/fuse, holds the fd                             │
-        │  - tracks in-flight callbacks for EIO-on-death replay        │
+        │  - opens /dev/fuse, owns its lifetime across worker respawns │
+        │  - hands a duped fd to each worker via SCM_RIGHTS            │
         └────────┬────────────────────────────────────────────┬───────┘
                  │ spawn                                       │ spawn
                  │  + UDS connect                              │  + UDS connect
@@ -155,11 +170,19 @@ action) and the gRPC latency is invisible.
 
 | RPC | Purpose | Errors |
 |---|---|---|
-| `Capture(CaptureRequest) -> CaptureResponse` | Fold pending overlay into a fresh state. Wraps `ContentAddressedMount::capture`. | `INTERNAL` on store I/O. |
-| `Ship(ShipRequest) -> ShipResponse` | Push the captured state. | `FAILED_PRECONDITION` if uncaptured writes remain. |
+| `Capture(CaptureRequest) -> CaptureResponse` | Fold pending overlay into a fresh CAS object; returns its hash. Wraps `ContentAddressedMount::capture`. | `INTERNAL` on store I/O. |
 | `Status(StatusRequest) -> StatusResponse` | Mount thread name, pending byte counts, open-handle count. | none. |
 | `Stop(StopRequest) -> StopResponse` | Graceful shutdown. Worker flushes hot tier, unmounts, exits. | none. |
 | `Invalidate(InvalidateRequest) -> InvalidateResponse` | Tell the worker the underlying state moved — drop the relevant inode cache (mirrors `PlatformShell::invalidate` in `crates/mount/src/shell.rs:139`). | `NOT_FOUND` for unknown node. |
+
+**Why `Ship` is not here.** The worker is the state-owner (it captures
+pending overlay → CAS object). The daemon is the network-talker (it takes
+a CAS hash and pushes to the remote). `heddle ship` is therefore a
+two-step CLI flow: (1) CLI → `FuseWorkerService.Capture` returning a CAS
+hash; (2) CLI → daemon's ship RPC with that hash. The daemon side does
+not currently expose a `Ship` RPC — `grep -r "Ship" crates/daemon/` is
+empty as of this spike — so the impl PR (or a follow-up) will need to add
+one. Filed as a follow-up sub-issue alongside this spike's impl issue.
 
 **Category B — FUSE-callback shadow surface (planned, deferred to impl).**
 The brief asked for "~15-20 RPCs covering the FUSE callback surface". After
@@ -211,10 +234,11 @@ Same posture as the daemon (`crates/daemon/src/local_daemon.rs:355-382`):
 The CLI is the supervisor. On a `heddle start --workspace virtualized` (or
 the equivalent mount entry point) the CLI:
 
-1. Acquires the FUSE device fd by opening `/dev/fuse` itself, so the fd's
-   lifetime is tied to the supervisor, not the worker. (Without this, a
-   worker crash drops the fd and the kernel tears the mount down before
-   we get a chance to retry.)
+1. Acquires the FUSE device fd by opening `/dev/fuse` itself. The
+   supervisor is the **lifetime owner** of this fd — it retains its own
+   copy across every worker respawn so the kernel never sees the mount go
+   away when a worker dies. (Without this, a worker crash drops the fd
+   and the kernel tears the mount down before we get a chance to retry.)
 2. Forks/execs the `heddle-fuse-worker` binary.
 3. Hands the FUSE fd to the new worker via an SCM_RIGHTS message on a
    short-lived bootstrap UDS (separate from the worker's main gRPC
@@ -233,7 +257,7 @@ collapse the mount.
 | CLI command | Talks to |
 |---|---|
 | `heddle capture` (mount-bound) | fuse-worker |
-| `heddle ship` (after capture) | fuse-worker for the pre-flight; daemon for the actual ship |
+| `heddle ship` | two-step: (1) `FuseWorkerService.Capture` on fuse-worker → CAS hash; (2) daemon's Ship RPC with that hash for the network push |
 | Mount status (`heddle status` mount fields) | fuse-worker |
 | `heddle agent serve` and any agent-loop RPC | daemon |
 | `heddle log` / `heddle review` / state-review RPCs | daemon |
@@ -330,32 +354,32 @@ On respawn the same dance runs against the *same* `/dev/fuse` fd —
 critically, the supervisor never closes it across the worker death, so
 the kernel keeps the mount alive across the supervisor-observed gap.
 
-### In-flight callback bookkeeping
+### In-flight callbacks (no supervisor bookkeeping)
 
 When the worker dies mid-call, the kernel still expects replies on each
-FUSE request that was outstanding. The supervisor does NOT have visibility
-into kernel-side request IDs (those are managed inside `fuser` in the
-worker process), so a naive "reply EIO to every pending request" from the
-supervisor is not possible.
+FUSE request that was outstanding. The supervisor does NOT track request
+IDs and does NOT replay EIO for them — kernel-side request IDs live
+inside `fuser` in the worker process and never cross the supervisor
+boundary. The respawn handoff is at the **FUSE fd level**, not the
+**request level**.
 
 The recovery strategy:
-- The supervisor's only role in EIO-replay is **closing the `/dev/fuse`
-  fd if we exhaust the budget**. While respawning, the kernel observes a
-  brief gap; in-flight syscalls block on the kernel-side wait, then the
-  new worker's `fuser::Session` picks up and replies fresh. Kernel-side
-  reply timeouts are large enough that ~hundreds of ms of supervisor
-  overhead (fork/exec/SCM_RIGHTS/listener-up) doesn't trip them.
-- Inside the new worker, `fuser` may observe one of two states for a
-  request that was already partially processed by the dead worker: (a)
-  the kernel never saw a reply and re-presents the request — fine; (b)
-  the kernel did see a reply (unlikely, since process death is what
-  triggered our recovery) — also fine; the reply succeeded before the
-  crash. We don't need a separate "replay EIO" path in this design.
+- During a respawn the kernel observes a brief gap on the FUSE fd. The
+  supervisor stops accepting any output from the dead worker, opens the
+  new worker, and SCM_RIGHTS-hands it the same `/dev/fuse` fd.
+  Outstanding kernel requests **time out naturally** on the kernel side
+  if the gap exceeds the kernel's `request_timeout`; otherwise the new
+  worker's `fuser::Session` picks them up and replies fresh. Either
+  outcome is acceptable — there is no per-request supervisor recovery.
+- This makes the respawn-budget contract load-bearing: the supervisor
+  must complete fork+exec+SCM_RIGHTS+listener-up within the **<500ms
+  target** (see §7 respawn performance budget) so the kernel does not
+  time out the in-flight set on conservatively-configured systems.
 - The original "supervisor tracks in-flight callbacks" path in the
   brief was based on the rejected thin-worker shape (where every
   callback hops through the supervisor). Under Decision B's stateful-
   worker shape, the supervisor never sees individual callbacks, so it
-  cannot track them. The kernel-side replay above takes its place.
+  cannot — and does not — track them.
 
 If respawn fails (budget exhausted), the supervisor:
 1. Closes `/dev/fuse` (kernel sees EIO on every pending request).
@@ -404,9 +428,11 @@ this spike's PR merges.
 > - [ ] New crate `crates/fuse-worker/` with `bin/heddle-fuse-worker`
 >       entrypoint. Linux-only build (`#[cfg(target_os = "linux")]`).
 > - [ ] gRPC service per Decision A: `FuseWorkerService` with RPCs
->       `Capture`, `Ship`, `Status`, `Stop`, `Invalidate`. Proto at
+>       `Capture`, `Status`, `Stop`, `Invalidate`. Proto at
 >       `crates/grpc/proto/heddle/v1/fuse_worker.proto`, feature-gated
->       behind `fuse-worker` in `heddle-grpc`.
+>       behind `fuse-worker` in `heddle-grpc`. (No `Ship` — the worker
+>       captures to a CAS hash and the daemon handles the network push;
+>       follow-up sub-issue adds the daemon-side `Ship` RPC.)
 > - [ ] Supervisor logic in `crates/cli/src/cli/commands/mount_lifecycle.rs`
 >       (or a new sibling module under `crates/cli/src/cli/commands/`)
 >       implementing Decision C's `RestartBudget` + SCM_RIGHTS handoff.
@@ -462,3 +488,30 @@ gate the merge on `< 1 ms` round-trip for `Status` (a tight upper bound
 on the 100–300 µs estimate that catches accidental regressions like
 "forgot to set TCP_NODELAY equivalent" — though UDS has no such knob,
 the gate guards against similar foot-guns).
+
+### Respawn performance budget
+
+Crash recovery (§5) depends on in-flight kernel requests *not* timing out
+during the supervisor-observed gap between worker death and the new
+worker's first reply. The supervisor does not change kernel settings
+(no `request_timeout` tuning, no probe at mount time), so the design
+takes a tight respawn budget instead.
+
+**Hard target: respawn within 500ms** (worker exit observed → new
+worker has SCM_RIGHTS-received the fd and is reading from `/dev/fuse`).
+The impl PR's benchmark suite MUST measure actual respawn time and the
+merge gate MUST fail if median > 500ms.
+
+What could blow the budget, and the mitigations the impl carries:
+
+| Risk | Mitigation |
+|---|---|
+| Cold `cargo` rebuild | N/A — production release builds; the worker binary is on disk before any crash. |
+| Large initial state hydration in the new worker | Lazy load — the worker re-attaches to the existing `/dev/fuse` fd and pulls `Pending` state from disk on demand, not at startup. |
+| `fork`/`exec` cost | Typically <50ms on Linux; not a real risk at the 500ms budget. |
+| Listener-up race (CLI connects before worker `listen()`) | Bootstrap socket completes the SCM_RIGHTS handshake before the worker advertises its gRPC listener; the supervisor only re-routes traffic after the worker pidfile + socket are visible. |
+
+This budget is the coupling point with §5's "in-flight requests time out
+naturally" recovery model: the kernel can only tolerate the recovery gap
+if it is short. The two sections must move together — relaxing the
+budget here requires re-opening the §5 recovery story.
