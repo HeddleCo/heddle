@@ -15,7 +15,7 @@ chrono.workspace = true
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.2" }
 fs2.workspace = true
 futures.workspace = true
-grpc = { path = "../grpc", package = "heddle-grpc", version = "0.3" }
+grpc = { path = "../grpc", package = "heddle-grpc", version = "0.4" }
 hex.workspace = true
 libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
