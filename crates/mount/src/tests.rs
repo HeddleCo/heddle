@@ -2831,6 +2831,68 @@ mod write_ops {
             "non-NOREPLACE rename replaces dest"
         );
     }
+
+    // --- Codex round 9 finding: hot bytes lost on unlink-of-open ------------
+    //
+    // r8 closed the warm-tier / lifecycle / atomicity sweep. r9 surfaced a
+    // remaining same-shape regression: `unlink_entry` removes
+    // `pending.hot[node_id]` for the orphan branch, so an open fd whose only
+    // bytes lived in the hot buffer (write then unlink, no flush in between)
+    // loses them. Codex thread 3293307302.
+    //
+    // Under the post-spike unified NodeId-keyed model, hot[node_id] survives
+    // the Live → Orphan transition by construction — bytes follow the NodeId,
+    // not the path. This test pins the contract: write to an open fd, unlink
+    // the path, read through the surviving fd → original bytes.
+
+    /// `open(path) → write(fd, "DIRTY") → unlink(path) → read(fd)` must
+    /// return `"DIRTY"`. POSIX open-unlinked semantics: the inode lives
+    /// behind the fd until the last close. The pre-spike code dropped
+    /// `pending.hot[node_id]` inside `unlink_entry`, so the read fell
+    /// through to the captured blob (`"world"`) instead of the dirty hot
+    /// bytes the fd had written.
+    #[test]
+    fn unlink_open_fd_preserves_unflushed_hot_bytes() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("hello.txt")` — captured file with bytes "world".
+        let node = mount.lookup_path("hello.txt").unwrap();
+        mount.on_open(node).expect("on_open");
+        // Write through the fd, do NOT flush. The bytes live only in
+        // `pending.hot[node]`.
+        mount
+            .write(node, 0, b"DIRTY-BYTES")
+            .expect("write through open fd");
+        // `unlink("hello.txt")` while the fd lives on.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink while open");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "post-unlink lookup must be gone"
+        );
+        // Read via the orphaned fd. The bytes the fd wrote must survive
+        // the unlink — POSIX open-unlinked. Pre-fix, hot[node] was
+        // dropped at unlink and this returned "world" (captured blob).
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(node, 0, &mut buf)
+            .expect("read via orphan fd");
+        assert_eq!(
+            &buf[..n],
+            b"DIRTY-BYTES",
+            "open fd → write → unlink → read must return the unflushed bytes \
+             (regression: pre-spike code dropped hot[node_id] in unlink_entry)"
+        );
+        // attrs must report the dirty-buffer size, not the captured size.
+        let attrs = mount.attrs(node).expect("attrs via orphan fd");
+        assert_eq!(
+            attrs.size, 11,
+            "attrs on orphan must report hot-buffer size, not captured"
+        );
+    }
 }
 
 // D1. Property test for two-tier semantics.
