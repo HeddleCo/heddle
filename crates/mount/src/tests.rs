@@ -3037,6 +3037,58 @@ mod write_ops {
         );
     }
 
+    /// Codex thread 3293484633 cont. (r11 #2, P1) — heddle#210 retrofit.
+    /// `drain_for_capture` used to drop every `Live` entry, including
+    /// `Live { open_count >= 1 }`. The open fd's lifecycle row + hot/warm
+    /// bytes disappeared, so a subsequent write through that fd
+    /// recreated an empty hot buffer — POSIX last-close-wins requires
+    /// the fd to keep seeing the bytes it already buffered. The fix
+    /// preserves `LiveNonZero` entries + their per-NodeId byte storage.
+    #[test]
+    fn capture_preserves_live_state_for_open_inodes() {
+        let (_temp, mount) = open_mount();
+        // Create a fresh file, open it (refcount = 1), write through
+        // the fd. NO unlink — the directory entry remains, so the
+        // inode stays `Live { open_count: 1 }`.
+        let entry = mount
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("live-and-open"),
+                FileMode::Normal,
+                false,
+            )
+            .expect("create");
+        mount.on_open(entry.node).expect("on_open");
+        mount.write(entry.node, 0, b"BEFORE").expect("write");
+
+        // Capture. Pre-fix this wipes `state` for the Live entry
+        // (and its `hot[id]` / `warm[id]`), stranding the kernel fd.
+        mount
+            .capture(Some("capture with live-and-open fd".into()))
+            .expect("capture");
+
+        // Through the surviving fd: a 5-byte overwrite at offset 0
+        // must lay over the 6-byte "BEFORE" buffer, NOT a fresh
+        // empty one. Pre-fix the drain dropped `hot[node]`, so the
+        // post-capture write recreated an empty buffer and the read
+        // returned just "AFTER" (5 bytes) — losing the trailing 'E'
+        // that POSIX last-close-wins requires the fd to still see.
+        // Post-fix the hot buffer survives, the 5-byte overwrite
+        // leaves the 6th byte alone, and the read returns "AFTERE".
+        mount
+            .write(entry.node, 0, b"AFTER")
+            .expect("write through live fd survives capture");
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(entry.node, 0, &mut buf)
+            .expect("read via live fd after capture");
+        assert_eq!(
+            &buf[..n],
+            b"AFTERE",
+            "live hot bytes must survive capture so a partial overwrite via the open fd preserves the trailing pre-capture byte (POSIX last-close-wins; r11 #2)"
+        );
+    }
+
     /// Codex threads 3293484634 + 3293510311 (P1). `invalidate` (FUSE
     /// `forget`) drops `pending.warm[node]` unconditionally, but `forget`
     /// only signals that the kernel released its cached inode reference —

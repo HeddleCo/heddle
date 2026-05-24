@@ -528,6 +528,43 @@ impl<'brand> Pending<'brand> {
         self.state.insert(id, NodeState::Orphan { open_count });
     }
 
+    /// Read-only iterator over the per-NodeId lifecycle map. Sole
+    /// enumeration point for [`crate::pending::Pending::drain_for_capture`]'s
+    /// typed-match classification pass — keeps the underlying `state`
+    /// field private to this module while letting the retrofitted drain
+    /// classify every resident entry by [`crate::pending::ResidentLifecycle`].
+    /// Returns owned `(u64, NodeState)` pairs (both are `Copy`) so the
+    /// iterator does not borrow `self` past the classify pass; the drain
+    /// then takes its own `&mut self` borrow to apply the retention.
+    pub(crate) fn lifecycle_iter(&self) -> impl Iterator<Item = (u64, NodeState)> + '_ {
+        self.state.iter().map(|(&id, &s)| (id, s))
+    }
+
+    /// Apply the retention/clear pass of [`crate::pending::Pending::drain_for_capture`].
+    /// `surviving` is the set of NodeIds whose `state` / `hot[id]` /
+    /// `warm[id]` entries must outlive the capture — produced by the
+    /// typed-match classifier in [`crate::pending`]; every NodeId in
+    /// the set was classified as [`crate::pending::ResidentLifecycle::LiveNonZero`]
+    /// (open fds still hold the bytes — POSIX last-close-wins) or
+    /// [`crate::pending::ResidentLifecycle::Orphan`] (directory entry
+    /// gone but the bytes outlive it).
+    ///
+    /// The path-keyed overlays are unconditionally cleared: every path
+    /// they covered is now folded into the new captured tree, and the
+    /// unlink/rename T1/T3 transitions already removed `hot_by_path` /
+    /// `symlinks` / `inodes.by_path` bindings for any orphan branch,
+    /// so nothing here references a surviving NodeId by path.
+    pub(crate) fn apply_drain_for_capture(&mut self, surviving: &BTreeSet<u64>) {
+        self.hot.retain(|id, _| surviving.contains(id));
+        self.warm.retain(|id, _| surviving.contains(id));
+        self.state.retain(|id, _| surviving.contains(id));
+        self.hot_by_path.clear();
+        self.tombstones.clear();
+        self.dir_tombstones.clear();
+        self.explicit_dirs.clear();
+        self.symlinks.clear();
+    }
+
     /// Test-only: insert a per-NodeId lifecycle entry directly,
     /// bypassing the FSM entry points. Used by the
     /// [`crate::pending`] substrate tests to set up `Pending` states
@@ -536,6 +573,31 @@ impl<'brand> Pending<'brand> {
     #[cfg(test)]
     pub(crate) fn test_insert_state(&mut self, id: u64, state: NodeState) {
         self.state.insert(id, state);
+    }
+
+    /// Test-only: insert a hot-tier buffer for `id` with the given
+    /// `path` and `bytes`. Used by the [`crate::pending`] tests to set
+    /// up scenarios where `drain_for_capture` must preserve the
+    /// per-NodeId byte storage alongside the lifecycle entry.
+    #[cfg(test)]
+    pub(crate) fn test_insert_hot(&mut self, id: u64, path: PathBuf, bytes: Vec<u8>) {
+        self.hot.insert(
+            id,
+            HotBuffer {
+                path,
+                mode: FileMode::Normal,
+                bytes,
+                last_touched: Instant::now(),
+            },
+        );
+    }
+
+    /// Test-only: true iff `hot[id]` is currently populated. Mirror
+    /// of [`Self::test_insert_hot`] for assertion in
+    /// `drain_for_capture` tests.
+    #[cfg(test)]
+    pub(crate) fn test_has_hot(&self, id: u64) -> bool {
+        self.hot.contains_key(&id)
     }
 }
 
@@ -3935,46 +3997,16 @@ impl ContentAddressedMount {
             warn!(?err, "thread metadata refresh from mount capture failed");
         }
 
-        // Step 4: drain the pending tier. Codex r12 thread 3293484633
-        // (P1): the prior wholesale `state.clear()` here dropped
-        // Orphan entries for inodes with still-open fds; the next
-        // write through those fds would then take the Live branch
-        // (`is_orphan` returns false → republish path / clear
-        // tombstone / coalesce hot_by_path), republishing a pathname
-        // that POSIX says must remain detached until final close.
-        // It also dropped `hot[id]` / `warm[id]` for those Orphan
-        // entries, losing the surviving fd's own bytes.
-        //
-        // The correct drain retires only Live entries plus all of
-        // the path-keyed bookkeeping (the new tree owns those paths
-        // now). Orphan entries — and their per-NodeId `hot[id]` /
-        // `warm[id]` bytes — survive so the orphan branches in
-        // `read` / `write` / `attrs` / `apply_truncate` keep serving
-        // the surviving fd, and `unlink_entry` / `rename`'s T1/T3
-        // transition stays in effect across capture.
+        // Step 4: drain the pending tier. See
+        // [`crate::pending::Pending::drain_for_capture`] for the
+        // contract: `LiveZero` retires; `LiveNonZero` (open fds still
+        // hold bytes — POSIX last-close-wins) and `Orphan`
+        // (open-but-unlinked) survive with their `hot[id]`/`warm[id]`
+        // bytes; the path-keyed overlays clear because every path they
+        // covered is now folded into the new tree.
         {
             let mut pending = self.inner.pending.lock().expect("pending lock");
-            let orphan_ids: BTreeSet<u64> = pending
-                .state
-                .iter()
-                .filter_map(|(id, s)| match s {
-                    NodeState::Orphan { .. } => Some(*id),
-                    NodeState::Live { .. } => None,
-                })
-                .collect();
-            pending.hot.retain(|id, _| orphan_ids.contains(id));
-            pending.warm.retain(|id, _| orphan_ids.contains(id));
-            pending.state.retain(|id, _| orphan_ids.contains(id));
-            // Path-keyed bookkeeping is for the Live tree, which is
-            // now folded into the captured state; the orphan path
-            // overlays are gone by definition (T1/T3 already removed
-            // their `hot_by_path` / `symlinks` / `inodes.by_path`
-            // bindings) so wholesale clear is safe.
-            pending.hot_by_path.clear();
-            pending.tombstones.clear();
-            pending.dir_tombstones.clear();
-            pending.explicit_dirs.clear();
-            pending.symlinks.clear();
+            pending.drain_for_capture();
         }
         let mut state_lock = self.inner.state.write().expect("mount state lock");
         *state_lock = MountState {
