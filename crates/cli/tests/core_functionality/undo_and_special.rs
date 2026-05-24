@@ -2669,6 +2669,91 @@ fn test_undo_rebase_continue_preserves_pre_conflict_advances() {
     );
 }
 
+/// Redo symmetry after a conflict-paused rebase: the manual-resolution
+/// step (the user's `capture -m "Manual resolution"` between the pause
+/// and the `--continue`) must be folded into the rebase batch so that
+/// `undo` → `redo` lands the thread back on the manual-resolution
+/// tip — not on the last cleanly replayed pre-conflict commit.
+///
+/// Pre-fix (Codex PR #218 P1): `resume_manual_resolution_if_present`
+/// advances `current_index` after accepting the captured resolution
+/// state but never appends an `OpRecord` to `pending_advances`, so the
+/// rebase batch's last FF target is the pre-conflict commit's rebased
+/// tip, not the manual-resolution tip. Undo of the batch *appears* to
+/// work (the first FF's `pre_target_id` is still the pre-rebase tip),
+/// but redo replays only the recorded FFs and lands one commit short.
+#[test]
+fn test_redo_rebase_continue_restores_manual_resolution_tip() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("conflict.txt"), "feature version\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature edit"], temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    std::fs::write(temp.path().join("conflict.txt"), "main version\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    let rebase_output =
+        heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
+    assert!(
+        rebase_output.contains("Conflict applying")
+            || rebase_output.contains("\"status\": \"conflict\""),
+        "expected rebase to pause on conflict; got: {rebase_output}"
+    );
+
+    std::fs::write(
+        temp.path().join("conflict.txt"),
+        "feature version\nmain version\n",
+    )
+    .unwrap();
+    heddle_must_succeed(&["capture", "-m", "Manual rebase resolution"], temp.path());
+    let _ = heddle(&["thread", "resolve", "main", "--json"], Some(temp.path()));
+    heddle_must_succeed(&["rebase", "--continue"], temp.path());
+
+    let after_rebase = head_short(temp.path());
+    assert_ne!(
+        after_rebase, main_tip_before,
+        "rebase must produce a fresh tip distinct from pre-rebase main"
+    );
+
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        main_tip_before,
+        "single undo of a conflict-paused rebase must restore HEAD to pre-rebase tip"
+    );
+
+    heddle_must_succeed(&["redo"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        after_rebase,
+        "single redo must restore HEAD to the manual-resolution tip, \
+         not the pre-conflict FF target"
+    );
+
+    let repo = Repository::open(temp.path()).unwrap();
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, after_rebase,
+        "single redo must restore main thread ref to the manual-resolution tip \
+         across a --continue"
+    );
+}
+
 /// A rebase batch must show up in `heddle undo --list` as a SINGLE
 /// batch with N entries (one per replayed commit), not N separate
 /// batches with one entry each. The JSON contract is the structured
