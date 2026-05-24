@@ -2087,6 +2087,47 @@ mod write_ops {
         assert_eq!(target.as_os_str(), OsStr::new("hello.txt"));
     }
 
+    /// r11 #4 regression: renaming a regular file over a symlink must
+    /// not push an `Orphan { open_count: 0 }` state entry for the
+    /// displaced symlink's NodeId. Symlinks have no `open`/`release`
+    /// lifecycle, so a state entry there is dead bookkeeping that
+    /// nothing will ever reap — it just grows under symlink churn.
+    ///
+    /// Pre-retrofit (heddle#209) `rename_entry_with_options`'s displaced-
+    /// destination branch unconditionally did
+    /// `pending.state.insert(displaced_dest, Orphan{ open_count })` even
+    /// for non-`Live` nodes (Codex PR #182 r11 finding 3293575541). The
+    /// witness-gated retrofit replaces that with a
+    /// `BrandedPending::witness_live_nonzero` check whose `None` result
+    /// IS the short-circuit — a symlink never enters `state`, so the
+    /// witness constructor returns `None` and no transition fires.
+    #[test]
+    fn rename_over_symlink_does_not_orphan_state() {
+        let (_temp, mount) = open_mount();
+        let link = mount
+            .create_symlink(NodeId::ROOT, OsStr::new("link"), Path::new("hello.txt"))
+            .expect("create symlink");
+        assert!(
+            !mount.orphans_contains(link.node),
+            "newly-created symlink must have no Pending state entry",
+        );
+        mount
+            .create_file(NodeId::ROOT, OsStr::new("source"), FileMode::Normal, false)
+            .expect("create source file");
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("source"),
+                NodeId::ROOT,
+                OsStr::new("link"),
+            )
+            .expect("rename file over symlink");
+        assert!(
+            !mount.orphans_contains(link.node),
+            "displaced symlink must not acquire a Pending state entry (r11 #4)",
+        );
+    }
+
     /// Cross-tree directory rename — i.e. renaming a captured-tree
     /// directory — is intentionally refused by `move_overlay_dir`;
     /// the overlay would otherwise need to rewrite every descendant
