@@ -141,7 +141,7 @@ pub(crate) fn load_rebase_state_for_abort(path: &std::path::Path) -> Result<Reba
 
 fn load_rebase_state_internal(
     path: &std::path::Path,
-    _lenient_pending_advances: bool,
+    lenient_pending_advances: bool,
 ) -> Result<RebaseState> {
     let content = fs::read_to_string(path)?;
 
@@ -174,11 +174,24 @@ fn load_rebase_state_internal(
                 }
             }
         } else if let Some(value) = line.strip_prefix("pending_advance=") {
-            let bytes =
-                hex::decode(value).map_err(|e| anyhow!("decode pending_advance: {}", e))?;
-            let advance: OpRecord = rmp_serde::from_slice(&bytes)
-                .map_err(|e| anyhow!("decode pending_advance OpRecord: {}", e))?;
-            pending_advances.push(advance);
+            // The two-stage decode (hex then msgpack) can fail on a
+            // truncated mid-write or a hand-edit. On the abort path
+            // (heddle#198 r2 / Codex PR #218 P2) skip silently — abort
+            // only needs `original_head` to rewind; the buffered FF
+            // history is discarded. The continue path keeps the
+            // hard-fail so a silently-truncated batch never lands in
+            // the oplog.
+            match hex::decode(value).map_err(|e| anyhow!("decode pending_advance: {}", e)) {
+                Err(_) if lenient_pending_advances => continue,
+                Err(e) => return Err(e),
+                Ok(bytes) => match rmp_serde::from_slice::<OpRecord>(&bytes)
+                    .map_err(|e| anyhow!("decode pending_advance OpRecord: {}", e))
+                {
+                    Err(_) if lenient_pending_advances => continue,
+                    Err(e) => return Err(e),
+                    Ok(advance) => pending_advances.push(advance),
+                },
+            }
         }
     }
 
