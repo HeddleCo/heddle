@@ -540,6 +540,44 @@ impl<'brand> Pending<'brand> {
         self.state.iter().map(|(&id, &s)| (id, s))
     }
 
+    /// Witness-gated FUSE-forget discharge. The
+    /// `&KernelForgetWitness<'_, 'brand>` parameter is the type-level
+    /// proof that the caller has already gone through the discharge-
+    /// safety FSM check: the witness is constructed only inside
+    /// [`crate::pending::BrandedPending::kernel_forget_inode`], whose
+    /// body matches the same `None | Some(Live { open_count: 0 })`
+    /// pattern as [`crate::pending::BrandedPending::witness_kernel_forget`].
+    /// [`crate::pending::KernelForgetWitness::new`] is module-private
+    /// to [`crate::pending`], so the only callers that can name this
+    /// method's argument type are that one entry point (and code that
+    /// already held a witness — same brand-gating chain as
+    /// [`Self::apply_transition_to_orphan`]).
+    ///
+    /// Removes `hot[id]` (with its `hot_by_path` reverse-index
+    /// cleanup) and `state[id]`, then returns `true` iff `warm[id]`
+    /// is still populated — the caller in `MountInner::invalidate`
+    /// uses that bool to decide whether the inode-side `forget` is
+    /// safe to fire (warm is the durable pre-capture copy; if it's
+    /// there, capture still needs the NodeId → path chain).
+    ///
+    /// `warm` is intentionally preserved here per Codex r12 threads
+    /// 3293484634 / 3293510311 (P1): FUSE `forget` is a kernel-side
+    /// dcache eviction, not a close — dropping warm bytes silently
+    /// loses the user's committed-in-session data.
+    pub(crate) fn apply_kernel_forget(
+        &mut self,
+        w: &crate::pending::KernelForgetWitness<'_, 'brand>,
+    ) -> bool {
+        let id = w.id();
+        if let Some(buf) = self.hot.remove(&id)
+            && self.hot_by_path.get(&buf.path) == Some(&id)
+        {
+            self.hot_by_path.remove(&buf.path);
+        }
+        self.state.remove(&id);
+        self.warm.contains_key(&id)
+    }
+
     /// Apply the retention/clear pass of [`crate::pending::Pending::drain_for_capture`].
     /// `surviving` is the set of NodeIds whose `state` / `hot[id]` /
     /// `warm[id]` entries must outlive the capture — produced by the
@@ -3742,41 +3780,45 @@ impl PlatformShell for ContentAddressedMount {
     }
 
     fn invalidate(&self, node: NodeId) -> Result<()> {
-        // Drop any hot buffer attached to this NodeId — the kernel
-        // is telling us our cached identity is no longer valid, and
-        // we don't want a stale buffer surviving the inode flip.
-        // Only retract the path → inode mapping if it still points
-        // at us; an unlink-then-recreate sequence may have moved
-        // the live mapping to a fresh inode at the same name, and
-        // a blind `remove` would yank that fresh inode's entry.
+        // Witness-gated discharge: `bp.kernel_forget_inode(node.0)`
+        // returns:
         //
-        // Codex r12 threads 3293484634 / 3293510311 (P1): FUSE
-        // `forget` only signals that the kernel released its cached
-        // identity for this inode — it does NOT say the file's
-        // pending overlay data is stale. Warm is the only durable
-        // pre-capture copy of flushed writes; dropping it silently
-        // loses the user's committed-in-session data. Preserve
-        // `warm[node]` here, and only retire the inode record when
-        // nothing in the overlay still references the NodeId —
-        // otherwise capture loses the NodeId → path chain it needs
-        // to plant the warm bytes back into the new tree.
-        let still_referenced = {
+        // * `Some(warm_still_references)` — the FSM check passed
+        //   (state is `Released` or `Live { open_count == 0 }`);
+        //   `hot[node]` (with its `hot_by_path` reverse-index
+        //   cleanup) and `state[node]` have been dropped, and the
+        //   bool tells us whether `warm[node]` is still populated.
+        //   Retire the inode-side record iff warm doesn't reference
+        //   — otherwise capture still needs the NodeId → path chain
+        //   to plant the warm bytes back into the new tree.
+        // * `None` — the FSM check failed (state is
+        //   `Live { open_count >= 1 }` or any `Orphan`); the bytes
+        //   are still referenced. The witness-gated retrofit
+        //   (heddle#211) makes the entire forget path short-circuit
+        //   here: `hot[node]` / `state[node]` are preserved and the
+        //   inode-side `forget` is skipped. The kernel will re-issue
+        //   `forget` once the surviving fd closes (or never, and the
+        //   next `release_node` retires the record). Closes Codex
+        //   r11 finding #3 — the pre-retrofit path removed
+        //   `hot[node]` before any FSM check, stranding an open
+        //   Orphan fd with no readable bytes.
+        //
+        // Warm preservation (Codex r12 threads 3293484634 /
+        // 3293510311, P1): `apply_kernel_forget` intentionally
+        // leaves `warm[node]` alone — warm is the only durable
+        // pre-capture copy of flushed writes, and FUSE `forget` is
+        // a kernel-side dcache eviction (not a close), so dropping
+        // warm would silently lose the user's committed-in-session
+        // data.
+        let retire_inode_record = {
             let mut pending = self.inner.pending.lock().expect("pending lock");
-            if let Some(buf) = pending.hot.remove(&node.0)
-                && pending.hot_by_path.get(&buf.path) == Some(&node.0)
-            {
-                pending.hot_by_path.remove(&buf.path);
-            }
-            // State tracks the per-inode open-handle refcount; FUSE
-            // `forget` is a kernel-side cache eviction (not a close),
-            // so the refcount is already at 0 by the time we see it.
-            // Drop the state entry so a long-running mount doesn't
-            // accumulate dead lifecycle records. Warm preservation
-            // (above) is the load-bearing change here.
-            pending.state.remove(&node.0);
-            pending.warm.contains_key(&node.0)
+            pending.with_brand(|bp| {
+                bp.kernel_forget_inode(node.0)
+                    .map(|warm_still_references| !warm_still_references)
+                    .unwrap_or(false)
+            })
         };
-        if !still_referenced {
+        if retire_inode_record {
             self.inner.inodes.lock().expect("inode lock").forget(node);
         }
         Ok(())
