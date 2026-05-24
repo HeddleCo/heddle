@@ -448,6 +448,76 @@ mod tests {
         assert!(err.contains("Missing 'original_head'"), "got: {err}");
     }
 
+    /// heddle#198 r3 (Codex PR #218 P1): `save_rebase_state` truncates
+    /// and rewrites REBASE_STATE on every advance, so a crash mid-write
+    /// can leave the file with the first couple lines (`onto=`,
+    /// `original_head=`) intact but the `transaction_id=` line (and
+    /// everything after) gone. Abort only needs `original_head` to
+    /// rewind, so refusing it for a missing `transaction_id` strands the
+    /// operator with neither `--abort` nor `--continue` available. The
+    /// lenient loader must accept the partial file and produce a usable
+    /// state for the rewind.
+    #[test]
+    fn load_for_abort_tolerates_missing_transaction_id() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let loaded = load_rebase_state_for_abort(&path)
+            .expect("abort loader must tolerate a missing transaction_id");
+        assert!(loaded.pending_advances.is_empty());
+        assert!(loaded.commits_to_replay.is_empty());
+    }
+
+    /// Companion to the above: a partial write that also dropped its
+    /// `transaction_id=` line AND has a torn-off `pending_advance=`
+    /// record (the realistic crash shape — `pending_advance=` lines are
+    /// appended after `transaction_id=` in `save_rebase_state`) must
+    /// still load through the abort path. Pins the worst-case partial
+    /// file an operator can encounter.
+    #[test]
+    fn load_for_abort_tolerates_missing_transaction_id_with_garbage_tail() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\npending_advance=not-hex!!\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let loaded = load_rebase_state_for_abort(&path)
+            .expect("abort loader must tolerate a missing transaction_id + torn tail");
+        assert!(loaded.pending_advances.is_empty());
+    }
+
+    /// The strict `load_rebase_state` (used by `--continue`) must still
+    /// reject a missing `transaction_id=` — the dedup check in
+    /// `flush_rebase_batch` keys on this id, and a continue without it
+    /// would produce a batch the crash-recovery scan can't recognise.
+    /// Pins that the r3 leniency is narrowly scoped to the abort loader.
+    #[test]
+    fn load_strict_still_requires_transaction_id() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        std::fs::write(
+            &path,
+            format!(
+                "onto={onto}\noriginal_head={oh}\ncurrent_index=0\ncommits=\n",
+                onto = ChangeId::generate().to_string_full(),
+                oh = ChangeId::generate().to_string_full(),
+            ),
+        )
+        .unwrap();
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(err.contains("Missing 'transaction_id'"), "got: {err}");
+    }
+
     /// A clean state file (no malformed lines) must load identically
     /// through both paths — leniency is invisible when there's nothing
     /// to forgive.
