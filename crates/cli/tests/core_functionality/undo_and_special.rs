@@ -2453,6 +2453,134 @@ fn test_redo_rebase_replay_multi_commit_restores_post_rebase_tip() {
     );
 }
 
+/// AC #4: `heddle undo` must refuse to roll back a rebase batch if
+/// the worktree is dirty (uncommitted edits to tracked files or
+/// untracked content). The general undo guard already covers this;
+/// the test pins that rebase batches go through the same path so a
+/// future refactor doesn't accidentally bypass it.
+#[test]
+fn test_undo_rebase_refuses_when_worktree_dirty() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    std::fs::write(temp.path().join("b.txt"), "b").unwrap();
+    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["rebase", "feature"], temp.path());
+    let after_rebase = head_short(temp.path());
+    assert_ne!(after_rebase, main_tip_before);
+
+    // Modify a tracked file post-rebase to put the worktree out of
+    // sync with HEAD. The rebase batch must NOT be undone while this
+    // edit could be silently destroyed by the rewind.
+    std::fs::write(temp.path().join("a.txt"), "uncommitted change").unwrap();
+    let err = heddle(&["undo"], Some(temp.path()))
+        .expect_err("undo of rebase must refuse on dirty worktree");
+    assert!(
+        err.contains("modified") || err.contains("dirty") || err.contains("untracked"),
+        "refusal must name the dirty-worktree concern: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
+        "uncommitted change",
+        "uncommitted edit must survive the refusal"
+    );
+    // Tip stays at the post-rebase state — no half-undo.
+    assert_eq!(head_short(temp.path()), after_rebase);
+}
+
+/// AC #5: `heddle undo` must refuse to roll back a rebase batch when
+/// a blob reachable from the pre-rebase tree has been purged since
+/// (`Redact apply` + `Purge`). The rewind would land HEAD on a tip
+/// whose materialize would fail with a missing-blob error; refusing
+/// pre-mutation gives operators a single clear message instead.
+/// Mirrors the `Redact` inverse's "Refused regardless of the flag
+/// when the underlying bytes have since been purged" rule.
+#[test]
+fn test_undo_rebase_refuses_when_pre_rebase_blob_purged() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    // `secrets.toml` is captured into a blob that the rebase leaves
+    // unchanged (only `a.txt` / `b.txt` move on the main side), so
+    // the same blob is reachable from both the pre- and post-rebase
+    // trees. Purging it then invalidates the pre-rebase rewind.
+    std::fs::create_dir_all(temp.path().join("config")).unwrap();
+    std::fs::write(
+        temp.path().join("config/secrets.toml"),
+        b"api_token = \"will-be-purged\"\n",
+    )
+    .unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    std::fs::write(temp.path().join("b.txt"), "b").unwrap();
+    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
+
+    heddle_must_succeed(&["rebase", "feature"], temp.path());
+
+    // Need a state id for `redact apply <state> --path …`. After the
+    // rebase, the current state contains config/secrets.toml at the
+    // same blob hash as the pre-rebase tree.
+    let log_json = heddle_must_succeed(
+        &["--output", "json", "log", "--limit", "1"],
+        temp.path(),
+    );
+    let log: Value = serde_json::from_str(&log_json).unwrap();
+    let current_state = log["states"][0]["change_id"].as_str().unwrap().to_string();
+
+    heddle_must_succeed(
+        &[
+            "redact",
+            "apply",
+            &current_state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "rebase-undo-safety test",
+        ],
+        temp.path(),
+    );
+    heddle_must_succeed(
+        &[
+            "purge",
+            "apply",
+            &current_state,
+            "--path",
+            "config/secrets.toml",
+            "--force",
+        ],
+        temp.path(),
+    );
+
+    let err = heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
+        .expect_err("undo of rebase must refuse when a pre-rebase blob has been purged");
+    assert!(
+        err.to_lowercase().contains("purge")
+            || err.to_lowercase().contains("purged"),
+        "refusal must name the purge concern: {err}"
+    );
+}
+
 /// A rebase batch must show up in `heddle undo --list` as a SINGLE
 /// batch with N entries (one per replayed commit), not N separate
 /// batches with one entry each. The JSON contract is the structured

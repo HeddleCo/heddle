@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Undo and redo commands.
 
+use std::collections::HashSet;
+
 use anyhow::{Result, anyhow};
-use objects::object::{ChangeId, ContentHash};
+use objects::object::{ChangeId, ContentHash, Tree};
 use oplog::{OpBatch, OpRecord};
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
@@ -101,6 +103,14 @@ pub fn cmd_undo(
     // and a phantom ThreadManager record. Pre-preview for the same
     // honesty reason as the redaction gate.
     ensure_thread_worktree_undo_safe(&repo, &batches)?;
+    // heddle#198: a rebase batch's inverse restores the thread tip to
+    // its pre-rebase state. If any blob reachable from that tree has
+    // been purged since (Redact + Purge), the rewind would land the
+    // worktree on a tip whose next `materialize` fails with a
+    // missing-blob error. Refuse pre-mutation with a message naming
+    // the affected blob — same fail-loud discipline as the Redact
+    // path's purge gate in `ensure_redaction_undo_safe`.
+    ensure_rebase_undo_safe(&repo, &batches)?;
 
     if preview {
         let output = UndoRedoOutput {
@@ -554,6 +564,132 @@ fn ensure_redaction_redo_supported(batches: &[OpBatch]) -> Result<()> {
          (or `heddle purge apply`) to re-establish the operation. Affected op(s): {}.",
         shorts.join(", "),
     ))
+}
+
+/// heddle#198 — Rebase-undo safety against a purge that crossed the
+/// rebase batch. The rebase inverse rewinds the attached thread to
+/// the earliest recorded `pre_target_id`. Materializing that tip
+/// requires every blob in its tree; if `Redact apply` + `Purge` have
+/// run on any of those blobs since the rebase, the bytes are gone
+/// and the rewind would surface a raw `missing blob` from inside
+/// `goto`. Refuse pre-mutation with a single message naming the
+/// blob and the rebase batch — mirrors the "Refused regardless of
+/// the flag when the underlying bytes have since been purged" rule
+/// the Redact inverse already enforces (docs/undo.md "Safety
+/// contracts").
+///
+/// Identification: a rebase batch is the one written by
+/// `rebase_ops::flush_rebase_batch` — its `TransactionCommit`
+/// envelope marker carries an id with prefix `"rebase-"`. Both the
+/// replay path and the FF arms (is_ancestor / empty-commits) flush
+/// through the same helper so the marker is uniform.
+fn ensure_rebase_undo_safe(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
+    let mut blocking: Vec<(u64, ChangeId, ContentHash)> = Vec::new();
+
+    for batch in batches {
+        if !is_rebase_batch(batch) {
+            continue;
+        }
+        // The earliest FF in the batch carries the pre-rebase tip
+        // (batch_index is monotonic; the replay loop appends in
+        // order). Materializing that tip needs every blob in its
+        // tree — that's the surface a purge can invalidate.
+        let Some(pre_target) = earliest_rebase_pre_target_id(batch) else {
+            continue;
+        };
+        let Some(tree) = load_tree_for_state(repo, &pre_target)? else {
+            // Pre-tip state already missing — `ensure_undo_states_reachable`
+            // surfaces that with the destructive-boundary message;
+            // don't double-report here.
+            continue;
+        };
+        let mut blobs: HashSet<ContentHash> = HashSet::new();
+        collect_tree_blobs(repo, &tree, &mut blobs)?;
+        for blob in &blobs {
+            let redactions = repo.get_redactions_for_blob(blob)?;
+            if redactions.redactions.iter().any(|r| r.is_purged()) {
+                blocking.push((batch.id, pre_target, *blob));
+                break; // one purged blob per batch is sufficient to refuse
+            }
+        }
+    }
+
+    if blocking.is_empty() {
+        return Ok(());
+    }
+
+    let shorts: Vec<String> = blocking
+        .iter()
+        .map(|(batch_id, pre_target, blob)| {
+            format!(
+                "rebase batch {} (pre-rebase tip {}, purged blob {})",
+                batch_id,
+                pre_target.short(),
+                blob.short()
+            )
+        })
+        .collect();
+    Err(anyhow!(
+        "Refusing to undo: at least one rebase in this chain rewinds to a tip whose tree \
+         references blobs that have since been purged ({}). The rewind would land the worktree \
+         on a state whose next `materialize` would fail with a missing-blob error rather than \
+         restore content. Purge is irreversible — restore the bytes from a backup or run \
+         `heddle undo --list` and target an op past the rebase.",
+        shorts.join(", "),
+    ))
+}
+
+/// A rebase batch is identified by its `TransactionCommit` marker
+/// (id prefix `"rebase-"`) — see `rebase_ops::flush_rebase_batch`.
+/// Pre-198 oplog entries did not flush a marker; they age out as the
+/// undo window slides forward. The check tolerates batches without
+/// the marker (treats them as non-rebase, no rebase-specific
+/// refusal applies).
+fn is_rebase_batch(batch: &OpBatch) -> bool {
+    batch.entries.iter().any(|entry| {
+        matches!(
+            &entry.operation,
+            OpRecord::TransactionCommit { transaction_id, .. }
+                if transaction_id.starts_with("rebase-")
+        )
+    })
+}
+
+fn earliest_rebase_pre_target_id(batch: &OpBatch) -> Option<ChangeId> {
+    // Entries are sorted by `batch_index` (see
+    // `PackedOpLog::collect_batches_scoped`), so the first FF arm
+    // we encounter carries the pre-rebase tip.
+    batch.entries.iter().find_map(|entry| match &entry.operation {
+        OpRecord::FastForwardV2 { pre_target_id, .. } => Some(*pre_target_id),
+        OpRecord::FastForward { pre_target_id, .. } => Some(*pre_target_id),
+        _ => None,
+    })
+}
+
+fn load_tree_for_state(repo: &Repository, state: &ChangeId) -> Result<Option<Tree>> {
+    let Some(state_obj) = repo.store().get_state(state)? else {
+        return Ok(None);
+    };
+    Ok(repo.store().get_tree(&state_obj.tree)?)
+}
+
+fn collect_tree_blobs(
+    repo: &Repository,
+    tree: &Tree,
+    out: &mut HashSet<ContentHash>,
+) -> Result<()> {
+    for entry in tree.iter() {
+        if entry.is_blob() {
+            out.insert(entry.hash);
+            continue;
+        }
+        if entry.is_tree()
+            && let Some(subtree) = repo.store().get_tree(&entry.hash)?
+        {
+            collect_tree_blobs(repo, &subtree, out)?;
+        }
+    }
+    Ok(())
 }
 
 /// Cross-thread undo safety: refuse to undo any `ThreadCreate` whose

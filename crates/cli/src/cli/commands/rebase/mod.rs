@@ -8,7 +8,7 @@ use refs::Head;
 use repo::Repository;
 
 use super::{
-    ff_record::record_ff_advance, snapshot::ensure_current_state,
+    ff_record::ff_advance_deferred, snapshot::ensure_current_state,
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
 mod rebase_ops;
 mod rebase_state;
 
-use rebase_ops::{replay_commits, replay_commits_silent};
+use rebase_ops::{flush_rebase_batch, replay_commits, replay_commits_silent};
 pub(crate) use rebase_state::load_rebase_state as load_persisted_rebase_state;
 use rebase_state::{
     RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state, save_rebase_state,
@@ -177,7 +177,14 @@ fn run_rebase(
     let is_ancestor = is_ancestor_of(repo, &current_state.change_id, &target_change_id)?;
 
     if is_ancestor {
-        record_ff_advance(repo, target_thread, &target_change_id)?;
+        // heddle#198: even the single-FF rebase paths surface as a
+        // rebase batch ([FF, TransactionCommit]) so `undo --list`,
+        // `heddle log`, and downstream tooling can identify a rebase
+        // by its envelope shape uniformly across the replay and FF
+        // arms. The undo behavior is unchanged — single-entry vs
+        // multi-entry batches both rewind in one step.
+        let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
+        flush_rebase_batch(repo, &[advance])?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -206,7 +213,10 @@ fn run_rebase(
         collect_commits_to_rebase(repo, &current_state.change_id, &target_change_id)?;
 
     if commits_to_replay.is_empty() {
-        record_ff_advance(repo, target_thread, &target_change_id)?;
+        // Same single-FF-as-rebase-batch wrap as the is_ancestor arm
+        // above (heddle#198).
+        let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
+        flush_rebase_batch(repo, &[advance])?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -225,6 +235,7 @@ fn run_rebase(
         original_head: current_state.change_id,
         pending_manual_resolution: None,
         pre_conflict_head: None,
+        pending_advances: Vec::new(),
     };
 
     save_rebase_state(&rebase_state_path, &rebase_state)?;

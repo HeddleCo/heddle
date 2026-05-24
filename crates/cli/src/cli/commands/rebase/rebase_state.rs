@@ -5,6 +5,7 @@ use std::{fs, io::Write};
 
 use anyhow::{Result, anyhow};
 use objects::object::ChangeId;
+use oplog::OpRecord;
 use repo::Repository;
 
 #[derive(Debug, Clone)]
@@ -15,6 +16,13 @@ pub(crate) struct RebaseState {
     pub(crate) original_head: ChangeId,
     pub(crate) pending_manual_resolution: Option<ChangeId>,
     pub(crate) pre_conflict_head: Option<ChangeId>,
+    /// FastForward (or, on detached HEAD, Goto) records buffered from
+    /// the per-commit replay loop. Flushed as a single oplog batch
+    /// when the rebase completes so `heddle undo` rewinds the whole
+    /// transaction atomically (heddle#198). Persisted across
+    /// `--continue` invocations so a conflict pause doesn't drop the
+    /// in-flight records.
+    pub(crate) pending_advances: Vec<OpRecord>,
 }
 
 pub(crate) fn collect_commits_to_rebase(
@@ -89,6 +97,16 @@ pub(crate) fn save_rebase_state(path: &std::path::Path, state: &RebaseState) -> 
         content.push_str(&commit.to_string_full());
     }
     content.push('\n');
+    // Each pending oplog record is rmp-serde encoded then hex-escaped
+    // so it round-trips through the existing line-based REBASE_STATE
+    // file without disturbing the key=value shape. Order matters —
+    // these get re-emitted into the oplog in the same order at the
+    // end of the rebase.
+    for advance in &state.pending_advances {
+        let bytes = rmp_serde::to_vec(advance)
+            .map_err(|e| anyhow!("encode pending_advance: {}", e))?;
+        content.push_str(&format!("pending_advance={}\n", hex::encode(&bytes)));
+    }
 
     let mut file = fs::File::create(path)?;
     file.write_all(content.as_bytes())?;
@@ -105,6 +123,7 @@ pub(crate) fn load_rebase_state(path: &std::path::Path) -> Result<RebaseState> {
     let mut commits_to_replay = Vec::new();
     let mut pending_manual_resolution = None;
     let mut pre_conflict_head = None;
+    let mut pending_advances = Vec::new();
 
     for line in content.lines() {
         if let Some(value) = line.strip_prefix("onto=") {
@@ -123,6 +142,12 @@ pub(crate) fn load_rebase_state(path: &std::path::Path) -> Result<RebaseState> {
                     commits_to_replay.push(ChangeId::parse(commit_str)?);
                 }
             }
+        } else if let Some(value) = line.strip_prefix("pending_advance=") {
+            let bytes =
+                hex::decode(value).map_err(|e| anyhow!("decode pending_advance: {}", e))?;
+            let advance: OpRecord = rmp_serde::from_slice(&bytes)
+                .map_err(|e| anyhow!("decode pending_advance OpRecord: {}", e))?;
+            pending_advances.push(advance);
         }
     }
 
@@ -134,5 +159,6 @@ pub(crate) fn load_rebase_state(path: &std::path::Path) -> Result<RebaseState> {
         commits_to_replay,
         pending_manual_resolution,
         pre_conflict_head,
+        pending_advances,
     })
 }
