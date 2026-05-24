@@ -162,3 +162,175 @@ pub(crate) fn load_rebase_state(path: &std::path::Path) -> Result<RebaseState> {
         pending_advances,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use objects::object::ChangeId;
+    use oplog::OpRecord;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn sample_state(pending: Vec<OpRecord>) -> RebaseState {
+        RebaseState {
+            onto: ChangeId::generate(),
+            commits_to_replay: vec![ChangeId::generate(), ChangeId::generate()],
+            current_index: 1,
+            original_head: ChangeId::generate(),
+            pending_manual_resolution: Some(ChangeId::generate()),
+            pre_conflict_head: Some(ChangeId::generate()),
+            pending_advances: pending,
+        }
+    }
+
+    fn ff_record() -> OpRecord {
+        OpRecord::FastForwardV2 {
+            source_thread: "<rebase>".to_string(),
+            target_thread: "main".to_string(),
+            pre_target_id: ChangeId::generate(),
+            post_target_id: ChangeId::generate(),
+        }
+    }
+
+    /// Round-trip cover: the `pending_advances` vec must survive a
+    /// save+load through the line-based REBASE_STATE file. This is the
+    /// load-bearing guarantee for `heddle rebase --continue` after a
+    /// conflict pause — the buffered FFs from before the pause need
+    /// to come back byte-identical so the eventual `flush_rebase_batch`
+    /// emits the same oplog batch as a no-pause rebase would have.
+    #[test]
+    fn save_then_load_round_trips_pending_advances() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let advances = vec![ff_record(), ff_record(), ff_record()];
+        let original = sample_state(advances.clone());
+
+        save_rebase_state(&path, &original).unwrap();
+        let loaded = load_rebase_state(&path).unwrap();
+
+        assert_eq!(loaded.onto, original.onto);
+        assert_eq!(loaded.original_head, original.original_head);
+        assert_eq!(loaded.current_index, 1);
+        assert_eq!(loaded.commits_to_replay, original.commits_to_replay);
+        assert_eq!(loaded.pending_manual_resolution, original.pending_manual_resolution);
+        assert_eq!(loaded.pre_conflict_head, original.pre_conflict_head);
+        assert_eq!(loaded.pending_advances.len(), 3);
+        for (got, want) in loaded.pending_advances.iter().zip(advances.iter()) {
+            // OpRecord doesn't implement PartialEq across all variants
+            // we care about — compare via the canonical serialization.
+            let got_bytes = rmp_serde::to_vec(got).unwrap();
+            let want_bytes = rmp_serde::to_vec(want).unwrap();
+            assert_eq!(got_bytes, want_bytes);
+        }
+    }
+
+    /// Even with no buffered FFs (the conflict-on-first-commit case),
+    /// the round-trip must work — the file simply contains no
+    /// `pending_advance=` lines and load returns an empty vec.
+    #[test]
+    fn save_then_load_round_trips_empty_pending_advances() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let original = sample_state(Vec::new());
+
+        save_rebase_state(&path, &original).unwrap();
+        let loaded = load_rebase_state(&path).unwrap();
+        assert!(loaded.pending_advances.is_empty());
+    }
+
+    /// A corrupt `pending_advance=` line (non-hex) must surface as a
+    /// clear `decode pending_advance` error rather than a panic — the
+    /// REBASE_STATE file is operator-visible and could be hand-edited.
+    #[test]
+    fn load_rejects_invalid_hex_pending_advance() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ncurrent_index=0\ncommits=\npending_advance=not-hex!!\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("decode pending_advance"),
+            "expected hex-decode error to surface, got: {err}"
+        );
+    }
+
+    /// Hex-valid but msgpack-garbage `pending_advance=` must surface as
+    /// the OpRecord-decode error arm (distinct from the hex arm). Keeps
+    /// the two failure modes diagnosable.
+    #[test]
+    fn load_rejects_invalid_msgpack_pending_advance() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ncurrent_index=0\ncommits=\npending_advance=deadbeef\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("decode pending_advance OpRecord"),
+            "expected rmp-decode error to surface, got: {err}"
+        );
+    }
+
+    /// A garbage `current_index=` must not refuse the whole file —
+    /// `unwrap_or(0)` falls back so a continue can still attempt to
+    /// resume from the start rather than stranding the operator with
+    /// an unrecoverable state file.
+    #[test]
+    fn load_falls_back_to_index_zero_on_garbage_current_index() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ncurrent_index=not-a-number\ncommits=\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let loaded = load_rebase_state(&path).unwrap();
+        assert_eq!(loaded.current_index, 0);
+    }
+
+    /// Missing `onto=` and `original_head=` are not recoverable —
+    /// load must reject them with a clear "Missing 'X'" message so
+    /// operators don't end up resuming against an empty rebase target.
+    #[test]
+    fn load_errors_when_onto_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        std::fs::write(
+            &path,
+            format!(
+                "original_head={oh}\ncurrent_index=0\ncommits=\n",
+                oh = ChangeId::generate().to_string_full()
+            ),
+        )
+        .unwrap();
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(err.contains("Missing 'onto'"), "got: {err}");
+    }
+
+    #[test]
+    fn load_errors_when_original_head_missing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        std::fs::write(
+            &path,
+            format!(
+                "onto={onto}\ncurrent_index=0\ncommits=\n",
+                onto = ChangeId::generate().to_string_full()
+            ),
+        )
+        .unwrap();
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(err.contains("Missing 'original_head'"), "got: {err}");
+    }
+}

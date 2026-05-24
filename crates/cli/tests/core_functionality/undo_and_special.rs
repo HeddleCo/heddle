@@ -2731,3 +2731,203 @@ fn test_undo_list_shows_multi_commit_rebase_as_single_batch() {
         );
     }
 }
+
+/// `heddle rebase <thread>` against the current thread's own tip is a
+/// no-op short-circuit. The JSON output path emits `up_to_date` and
+/// must not write a rebase batch to the oplog — pre-#198 a stray
+/// `record_ff_advance` on an identical tip would have written a
+/// zero-delta FF; the deferred-flush refactor preserves the original
+/// short-circuit shape (no batch).
+#[test]
+fn test_rebase_up_to_date_when_already_at_target_emits_json_and_records_nothing() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+
+    let batches_before = heddle_must_succeed(
+        &["--output", "json", "undo", "--list", "--depth", "20"],
+        temp.path(),
+    );
+    let parsed_before: Value = serde_json::from_str(&batches_before).unwrap();
+    let count_before = parsed_before["batches"].as_array().unwrap().len();
+
+    let out = heddle_must_succeed(&["--output", "json", "rebase", "main"], temp.path());
+    let parsed: Value = serde_json::from_str(out.trim()).expect("up_to_date json");
+    assert_eq!(parsed["status"].as_str(), Some("up_to_date"));
+
+    let batches_after = heddle_must_succeed(
+        &["--output", "json", "undo", "--list", "--depth", "20"],
+        temp.path(),
+    );
+    let parsed_after: Value = serde_json::from_str(&batches_after).unwrap();
+    let count_after = parsed_after["batches"].as_array().unwrap().len();
+    assert_eq!(
+        count_before, count_after,
+        "no-op rebase must not append a batch to the oplog"
+    );
+}
+
+/// JSON output for the is_ancestor fast-forward arm. Distinct shape
+/// from `up_to_date` — must surface `fast_forwarded` with the target
+/// SHA so scripted callers can detect "this rebase materialized as a
+/// pure FF" vs the multi-commit replay flow. Also exercises the
+/// `flush_rebase_batch(&[advance])` single-FF wrap so `undo --list`
+/// shows the FF inside a transaction envelope.
+#[test]
+fn test_rebase_fast_forwarded_json_lists_target_and_creates_batch() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    // Create feature off main, advance it. main is now a strict ancestor
+    // of feature → rebasing main onto feature is a pure FF.
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("f.txt"), "feature").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+
+    let out = heddle_must_succeed(&["--output", "json", "rebase", "feature"], temp.path());
+    let parsed: Value = serde_json::from_str(out.trim()).expect("fast_forwarded json");
+    assert_eq!(parsed["status"].as_str(), Some("fast_forwarded"));
+    let to = parsed["to"].as_str().expect("to field present");
+    assert!(!to.is_empty());
+
+    // The single-FF arm must still wrap in a rebase batch — i.e.
+    // [FF, TransactionCommit] — so undo treats it like any other
+    // rebase. Verify via undo --list shape.
+    let list = heddle_must_succeed(
+        &["--output", "json", "undo", "--list", "--depth", "5"],
+        temp.path(),
+    );
+    let parsed_list: Value = serde_json::from_str(&list).unwrap();
+    let top = &parsed_list["batches"][0];
+    let ops = top["operations"].as_array().unwrap();
+    let has_tc = ops.iter().any(|op| {
+        op["description"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("transaction commit"))
+    });
+    assert!(has_tc, "single-FF rebase batch must carry TransactionCommit marker");
+}
+
+/// JSON output for the multi-commit replay entry path. Must emit
+/// `started` with the commits count *before* the per-commit
+/// `applying` lines. Pairs with the `completed` event at the end of
+/// `replay_commits_internal`.
+#[test]
+fn test_rebase_started_json_announces_commit_count() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("f.txt"), "feature").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    std::fs::write(temp.path().join("b.txt"), "b").unwrap();
+    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
+
+    let out = heddle_must_succeed(&["--output", "json", "rebase", "feature"], temp.path());
+    // Output is multi-line JSON ND-stream: started, then per-commit
+    // applying, then completed. Pull the first line.
+    let first = out.lines().next().expect("at least one json line");
+    let parsed: Value = serde_json::from_str(first).expect("started json");
+    assert_eq!(parsed["status"].as_str(), Some("started"));
+    assert_eq!(parsed["commits"].as_u64(), Some(2));
+}
+
+/// `heddle rebase --abort` cleans the REBASE_STATE file and rewinds
+/// HEAD to `original_head`. Must emit the `aborted` JSON status and
+/// must NOT write a rebase batch to the oplog (the abort is a
+/// worktree-only rollback — `handle_abort` doesn't go through
+/// `flush_rebase_batch`).
+#[test]
+fn test_rebase_abort_json_clears_state_without_oplog_batch() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("conflict.txt"), "feature\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature edit"], temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("conflict.txt"), "main\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "main edit"], temp.path());
+    let head_before = head_short(temp.path());
+
+    // Force the rebase into a conflict pause so we have a
+    // REBASE_STATE file to abort.
+    let _ = heddle(&["rebase", "feature"], Some(temp.path()));
+    assert!(
+        temp.path().join(".heddle/REBASE_STATE").exists(),
+        "rebase should pause and leave REBASE_STATE on disk"
+    );
+
+    let batches_before_abort = heddle_must_succeed(
+        &["--output", "json", "undo", "--list", "--depth", "20"],
+        temp.path(),
+    );
+    let count_before = serde_json::from_str::<Value>(&batches_before_abort).unwrap()
+        ["batches"]
+        .as_array()
+        .unwrap()
+        .len();
+
+    let out = heddle_must_succeed(&["--output", "json", "rebase", "--abort"], temp.path());
+    let parsed: Value = serde_json::from_str(out.trim()).expect("aborted json");
+    assert_eq!(parsed["status"].as_str(), Some("aborted"));
+    assert!(
+        !temp.path().join(".heddle/REBASE_STATE").exists(),
+        "abort must remove REBASE_STATE"
+    );
+    assert_eq!(
+        head_short(temp.path()),
+        head_before,
+        "abort must rewind HEAD to original_head"
+    );
+
+    let batches_after = heddle_must_succeed(
+        &["--output", "json", "undo", "--list", "--depth", "20"],
+        temp.path(),
+    );
+    let count_after = serde_json::from_str::<Value>(&batches_after).unwrap()["batches"]
+        .as_array()
+        .unwrap()
+        .len();
+    assert_eq!(
+        count_before, count_after,
+        "abort is worktree-only — no oplog batch should appear"
+    );
+}
+
+/// `heddle rebase --abort` / `--continue` against a repo with no
+/// in-progress rebase must error rather than no-op. Covers the
+/// "No rebase in progress" arms in both `handle_abort` and
+/// `handle_continue`.
+#[test]
+fn test_rebase_abort_and_continue_without_state_error() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+
+    let abort_err = heddle(&["rebase", "--abort"], Some(temp.path()))
+        .expect_err("abort with no rebase must error");
+    assert!(abort_err.contains("No rebase in progress"), "got: {abort_err}");
+
+    let cont_err = heddle(&["rebase", "--continue"], Some(temp.path()))
+        .expect_err("continue with no rebase must error");
+    assert!(cont_err.contains("No rebase in progress"), "got: {cont_err}");
+}

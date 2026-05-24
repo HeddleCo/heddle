@@ -572,3 +572,37 @@ fn apply_changes_to_tree(
 
     Ok(objects::object::Tree::from_entries(entries))
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// `flush_rebase_batch(&[])` must short-circuit without writing
+    /// anything to the oplog. The is_ancestor / empty-replay arms
+    /// always pass at least one advance, but the replay loop can
+    /// reach this with zero buffered records if it never entered the
+    /// per-commit loop body (defensive — keeps the helper safe to
+    /// call unconditionally at the loop tail).
+    #[test]
+    fn flush_rebase_batch_with_no_advances_is_a_noop() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        let before = repo
+            .oplog()
+            .recent_batches_scoped(10, Some(&repo.op_scope()))
+            .unwrap()
+            .len();
+
+        flush_rebase_batch(&repo, &[]).unwrap();
+
+        let after = repo
+            .oplog()
+            .recent_batches_scoped(10, Some(&repo.op_scope()))
+            .unwrap()
+            .len();
+        assert_eq!(before, after, "empty flush must not record a batch");
+    }
+}
