@@ -2754,6 +2754,87 @@ fn test_redo_rebase_continue_restores_manual_resolution_tip() {
     );
 }
 
+/// heddle#198 r2 (Codex PR #218 P2): `rebase --abort` must survive a
+/// corrupted `pending_advance=` line in REBASE_STATE. Pre-fix the
+/// strict loader's hard-fail on the first decode error blocked both
+/// abort and continue, leaving the operator stuck in an in-progress
+/// rebase with no CLI recovery path. Abort only needs `original_head`
+/// to rewind; the buffered FF history is discarded either way.
+#[test]
+fn test_rebase_abort_tolerates_corrupted_pending_advance_line() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("conflict.txt"), "feature\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature edit"], temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    // First commit (clean) — buffered as a pending_advance.
+    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    // Second commit conflicts so the rebase pauses with REBASE_STATE
+    // persisting at least one `pending_advance=` line on disk.
+    std::fs::write(temp.path().join("conflict.txt"), "main\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    let rebase_output =
+        heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
+    assert!(
+        rebase_output.contains("Conflict applying")
+            || rebase_output.contains("\"status\": \"conflict\""),
+        "expected rebase to pause on conflict; got: {rebase_output}"
+    );
+
+    // Simulate a crash mid-write / hand-edit by mangling the first
+    // `pending_advance=` line in place. The strict loader rejects this
+    // file outright; the abort loader must skip past it.
+    let state_path = temp.path().join(".heddle/REBASE_STATE");
+    let body = std::fs::read_to_string(&state_path).unwrap();
+    assert!(
+        body.contains("pending_advance="),
+        "fixture precondition: REBASE_STATE must carry at least one pending_advance entry; got:\n{body}"
+    );
+    let corrupted: String = body
+        .lines()
+        .map(|line| {
+            if line.starts_with("pending_advance=") {
+                "pending_advance=not-hex!!".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&state_path, format!("{corrupted}\n")).unwrap();
+
+    // Continue must still refuse loudly — the strict loader is what
+    // protects `--continue` from silently flushing a truncated batch.
+    let cont_err = heddle(&["rebase", "--continue"], Some(temp.path()))
+        .expect_err("continue must hard-fail on corrupted pending_advance");
+    assert!(
+        cont_err.contains("pending_advance"),
+        "continue refusal must name the corrupted record; got: {cont_err}"
+    );
+
+    // Abort must succeed: rewind HEAD to original_head and clear state.
+    heddle_must_succeed(&["rebase", "--abort"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        main_tip_before,
+        "abort must rewind HEAD to original_head even with a corrupted pending_advance line"
+    );
+    assert!(
+        !temp.path().join(".heddle/REBASE_STATE").exists(),
+        "REBASE_STATE must be cleared after a successful abort"
+    );
+}
+
 /// A rebase batch must show up in `heddle undo --list` as a SINGLE
 /// batch with N entries (one per replayed commit), not N separate
 /// batches with one entry each. The JSON contract is the structured

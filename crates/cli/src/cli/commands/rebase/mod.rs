@@ -24,7 +24,8 @@ use rebase_ops::{
 };
 pub(crate) use rebase_state::load_rebase_state as load_persisted_rebase_state;
 use rebase_state::{
-    RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state, save_rebase_state,
+    RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state,
+    load_rebase_state_for_abort, save_rebase_state,
 };
 
 const REBASE_STATE_FILE: &str = "REBASE_STATE";
@@ -278,7 +279,12 @@ fn handle_abort(
         return Err(anyhow!("No rebase in progress"));
     }
 
-    let state = load_rebase_state(rebase_state_path)?;
+    // heddle#198 r2 (Codex PR #218 P2): abort uses the lenient loader
+    // so a single corrupted `pending_advance=` line — crash mid-write
+    // or a hand-edit — doesn't strand the operator with neither abort
+    // nor continue available. Abort only needs `original_head` to
+    // rewind; the buffered FF history is discarded.
+    let state = load_rebase_state_for_abort(rebase_state_path)?;
     repo.goto_without_record(&state.original_head)?;
 
     fs::remove_file(rebase_state_path)?;

@@ -124,6 +124,25 @@ pub(crate) fn save_rebase_state(path: &std::path::Path, state: &RebaseState) -> 
 }
 
 pub(crate) fn load_rebase_state(path: &std::path::Path) -> Result<RebaseState> {
+    load_rebase_state_internal(path, /* lenient_pending_advances= */ false)
+}
+
+/// Lenient loader for the `rebase --abort` path. Tolerates malformed
+/// `pending_advance=` records (skips them silently) because abort only
+/// needs `original_head` to rewind — the buffered FF history is
+/// discarded either way. The strict `load_rebase_state` is still used
+/// by `--continue`, which has to flush the full batch and so cannot
+/// afford a silently-truncated vector (heddle#198 r2 / Codex PR #218
+/// P2: pre-fix, a single corrupted line stranded the operator with
+/// neither abort nor continue available).
+pub(crate) fn load_rebase_state_for_abort(path: &std::path::Path) -> Result<RebaseState> {
+    load_rebase_state_internal(path, /* lenient_pending_advances= */ true)
+}
+
+fn load_rebase_state_internal(
+    path: &std::path::Path,
+    _lenient_pending_advances: bool,
+) -> Result<RebaseState> {
     let content = fs::read_to_string(path)?;
 
     let mut onto = None;
@@ -347,5 +366,93 @@ mod tests {
         .unwrap();
         let err = load_rebase_state(&path).unwrap_err().to_string();
         assert!(err.contains("Missing 'original_head'"), "got: {err}");
+    }
+
+    /// heddle#198 r2 (Codex PR #218 P2): `load_rebase_state_for_abort`
+    /// must skip past a non-hex `pending_advance=` line and return a
+    /// usable state — abort only needs `original_head` to rewind, so a
+    /// crash mid-write to REBASE_STATE shouldn't lock the operator out
+    /// of both abort and continue. The strict loader still rejects the
+    /// same file (covered by `load_rejects_invalid_hex_pending_advance`
+    /// above), so the continue path remains unambiguous.
+    #[test]
+    fn load_for_abort_skips_invalid_hex_pending_advance() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance=not-hex!!\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let loaded = load_rebase_state_for_abort(&path)
+            .expect("abort loader must tolerate a malformed pending_advance line");
+        assert!(
+            loaded.pending_advances.is_empty(),
+            "malformed entries must be dropped from the abort-loaded vec"
+        );
+    }
+
+    /// Same contract for the OpRecord-decode arm: a hex-valid but
+    /// msgpack-garbage entry must be skipped on the abort path. Covers
+    /// the second failure mode of pending_advance — the strict loader
+    /// surfaces this as a distinct `decode pending_advance OpRecord`
+    /// error, which would otherwise block the abort.
+    #[test]
+    fn load_for_abort_skips_invalid_msgpack_pending_advance() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance=deadbeef\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let loaded = load_rebase_state_for_abort(&path)
+            .expect("abort loader must tolerate a msgpack-garbage pending_advance line");
+        assert!(loaded.pending_advances.is_empty());
+    }
+
+    /// Even on the abort path, missing `onto=` / `original_head=` are
+    /// not recoverable — without `original_head` there's nothing to
+    /// rewind to. Pins that leniency is narrowly scoped to the
+    /// pending-advance vec.
+    #[test]
+    fn load_for_abort_still_requires_original_head() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        std::fs::write(
+            &path,
+            format!(
+                "onto={onto}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\n",
+                onto = ChangeId::generate().to_string_full()
+            ),
+        )
+        .unwrap();
+        let err = load_rebase_state_for_abort(&path).unwrap_err().to_string();
+        assert!(err.contains("Missing 'original_head'"), "got: {err}");
+    }
+
+    /// A clean state file (no malformed lines) must load identically
+    /// through both paths — leniency is invisible when there's nothing
+    /// to forgive.
+    #[test]
+    fn load_for_abort_matches_strict_on_clean_state() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let original = sample_state(vec![ff_record(), ff_record()]);
+        save_rebase_state(&path, &original).unwrap();
+
+        let strict = load_rebase_state(&path).unwrap();
+        let lenient = load_rebase_state_for_abort(&path).unwrap();
+        assert_eq!(strict.original_head, lenient.original_head);
+        assert_eq!(strict.onto, lenient.onto);
+        assert_eq!(strict.transaction_id, lenient.transaction_id);
+        assert_eq!(
+            strict.pending_advances.len(),
+            lenient.pending_advances.len()
+        );
     }
 }
