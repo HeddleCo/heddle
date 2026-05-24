@@ -116,6 +116,45 @@ mod tests;
 ///     });
 /// });
 /// ```
+///
+/// # Constructor bypass (post heddle#208 r3)
+///
+/// r2 brand-isolated `Witness` cross-instance use *inside* `with_brand`,
+/// but the `witness_*` constructors were still callable directly on
+/// `&mut Pending<'brand>`. Because `MountInner` stores
+/// `Pending<'static>`, an internal caller could mint
+/// `Witness<..., 'static, _>` without going through `with_brand` at all
+/// — and two distinct `Pending<'static>` values share the `'static`
+/// brand, so witnesses crossed between them (Codex PR #217 r2 finding
+/// `3293898540`).
+///
+/// r3 closes that hole by moving every `witness_*` (and `peek_witness`)
+/// onto a sealed `BrandedPending<'p, 'brand>` wrapper whose only
+/// constructor is `Pending::with_brand`. The doctest below is the
+/// executable proof. It compiles against r2 (constructors live on
+/// `Pending<'brand>`; direct mint succeeds → THE BUG) and fails to
+/// compile against r3 (constructors are unreachable outside
+/// `with_brand` → THE FIX).
+///
+/// ```compile_fail
+/// use mount::__pending_substrate_for_doctest::*;
+/// let mut p1 = Pending::default();
+/// let mut p2 = Pending::default();
+/// // Pre-r3: `Pending::witness_live_nonzero` exists on `Pending<'brand>`
+/// //         so this compiles; `w` ends up `Witness<'_, 'static, _>`.
+/// // Post-r3: `Pending` no longer has any `witness_*` method — this
+/// //         call refers to a non-existent name and fails to compile.
+/// let w = p1
+///     .witness_live_nonzero(0)
+///     .expect("doctest never runs — compile_fail");
+/// // Pre-r3: `Pending::peek_witness` accepts `&Witness<'_, 'static, _>`
+/// //         (both `p2` and `w` carry the `'static` brand). Compiles →
+/// //         the cross-instance bypass exists → `compile_fail`
+/// //         assertion fails → RED.
+/// // Post-r3: even if you somehow had a witness in scope, `peek_witness`
+/// //         is on `BrandedPending` now, so this also fails to compile.
+/// let _ = p2.peek_witness(&w);
+/// ```
 #[doc(hidden)]
 pub mod __pending_substrate_for_doctest {
     pub use crate::core::Pending;
