@@ -182,6 +182,29 @@ mod tests;
 /// // `Pending`), so the `compile_fail` assertion holds → GREEN.
 /// let _ = p.transition_to_orphan(0);
 /// ```
+///
+/// The same entry-point discipline applies to the witness-gated
+/// kernel-forget retrofit (heddle#211): `kernel_forget_inode` lives
+/// on [`crate::pending::BrandedPending`], not on [`core::Pending`].
+/// A direct call on `Pending` is the bypass shape — pre-retrofit
+/// the forget logic was inlined in `MountInner::invalidate` with no
+/// FSM gate, and the natural drive-by "add a method on `Pending`"
+/// would re-open the same r11 #3 race. The doctest below pins the
+/// post-retrofit discipline: `Pending::kernel_forget_inode` does not
+/// exist as a directly-callable method, so this fails to compile
+/// and the `compile_fail` assertion holds (GREEN).
+///
+/// ```compile_fail
+/// use mount::__pending_substrate_for_doctest::*;
+/// let mut p = Pending::default();
+/// // `kernel_forget_inode` lives on `BrandedPending`, not on
+/// // `Pending`. A direct un-witnessed call on `Pending` is the
+/// // bypass shape that would re-introduce r11 #3 (drop hot[id]
+/// // without first checking the FSM). Post-retrofit the method
+/// // doesn't exist on `Pending`, so the call fails to compile and
+/// // the `compile_fail` assertion holds → GREEN.
+/// let _ = p.kernel_forget_inode(0);
+/// ```
 #[doc(hidden)]
 pub mod __pending_substrate_for_doctest {
     pub use crate::core::Pending;

@@ -620,6 +620,77 @@ impl<'p, 'brand> BrandedPending<'p, 'brand> {
             _ => None,
         }
     }
+
+    /// Witness-gated FUSE-forget discharge. Returns:
+    ///
+    /// * `Some(warm_still_references)` — the lifecycle check passed
+    ///   (`Released` or `Live { open_count == 0 }`); `hot[id]` and
+    ///   `state[id]` have been dropped, and the bool tells the caller
+    ///   whether `warm[id]` is still populated (i.e., whether the
+    ///   inode record is still load-bearing for capture's
+    ///   NodeId → path chain). `MountInner::invalidate` retires the
+    ///   inode-side record iff this bool is `false`.
+    /// * `None` — the lifecycle check failed (`Live { open_count >= 1 }`
+    ///   or any `Orphan`); the bytes are still referenced. **The
+    ///   entire forget path short-circuits** at the call site:
+    ///   `hot[id]` / `state[id]` are preserved and the inode-side
+    ///   `forget` is skipped. The kernel will re-issue `forget` once
+    ///   the surviving fd closes (or never — the next `release_node`
+    ///   retires the record).
+    ///
+    /// # Why `id` and not a [`KernelForgetWitness`] input?
+    ///
+    /// The spike doc ([§2.3][doc]) sketched the API as
+    /// `kernel_forget_inode(&mut self, w: KernelForgetWitness<'_, 'brand>) -> ...`,
+    /// with the caller pre-minting `w` via
+    /// [`Self::witness_kernel_forget`] and threading it in. heddle#209
+    /// (the analogous `transition_to_orphan` retrofit) found — and
+    /// this issue confirms — that the two-step shape does not compile
+    /// against the substrate: [`KernelForgetWitness`]'s
+    /// `_borrow: PhantomData<&'p mut ()>` field is invariant over
+    /// `'p`, so the prior `&mut BrandedPending` reborrow that minted
+    /// `w` cannot shrink to admit the second `&mut self` call that
+    /// would consume `w` (rustc `E0499`). Relaxing the substrate's
+    /// `'p` variance to admit the two-step shape would weaken its
+    /// stale-witness protection and is out of scope.
+    ///
+    /// Folding the FSM check and the mutation into one call preserves
+    /// the spike doc's invariant — *the discharge can only fire on a
+    /// state where it's safe to drop `hot[id]`* — by construction:
+    ///
+    /// * The body's `match` IS the [`Self::witness_kernel_forget`]
+    ///   FSM check; both refer to the same
+    ///   `None | Some(Live { open_count: 0 })` pattern.
+    /// * Any non-discharge-safe path returns `None` before touching
+    ///   [`crate::core::Pending::apply_kernel_forget`]. The call site
+    ///   in `core.rs`'s `MountInner::invalidate` propagates the
+    ///   `None` through to the inode-side decision — the missing
+    ///   witness IS the short-circuit at the call site.
+    /// * The mutation hook
+    ///   [`crate::core::Pending::apply_kernel_forget`] takes
+    ///   `&KernelForgetWitness` as proof; [`KernelForgetWitness::new`]
+    ///   is module-private to this file, so no code outside this
+    ///   module's `BrandedPending` impl can synthesize a witness or
+    ///   bypass the discharge-safety check.
+    ///
+    /// Closes [r11 #3][doc] — the pre-retrofit `MountInner::invalidate`
+    /// inlined `pending.hot.remove(&node.0)` before any FSM check, so
+    /// a kernel `forget` racing an open Orphan fd lost the bytes the
+    /// surviving fd needed. Now impossible by construction: the
+    /// `Orphan { .. }` branch returns `None`, the call site
+    /// short-circuits, and `hot[node.0]` survives.
+    ///
+    /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
+    #[doc(hidden)]
+    pub(crate) fn kernel_forget_inode(&mut self, id: u64) -> Option<bool> {
+        match self.inner.lookup_state(id) {
+            None | Some(NodeState::Live { open_count: 0 }) => {
+                let w = KernelForgetWitness::<'_, 'brand>::new(id);
+                Some(self.inner.apply_kernel_forget(&w))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1118,6 +1189,157 @@ mod tests {
             p.lookup_state(104),
             Some(NodeState::Live { open_count: 7 })
         );
+    }
+
+    // ------- kernel_forget_inode (heddle#211 — r11 #3 retrofit) ---------------
+    //
+    // Pin the witness-gated contract of
+    // [`BrandedPending::kernel_forget_inode`]:
+    //
+    // * `Released` (no entry) → `Some(false)` — discharge ran, warm
+    //   doesn't reference, caller retires the inode record.
+    // * `Live { open_count == 0 }` → `Some(false)` — discharge ran,
+    //   state row + hot bytes dropped, warm doesn't reference, caller
+    //   retires the inode record.
+    // * `Live { open_count == 0 }` with warm populated →
+    //   `Some(true)` — discharge ran but warm still references; the
+    //   inode record must outlive the kernel-side forget so capture
+    //   can plant the warm bytes.
+    // * `Live { open_count >= 1 }` → `None` — discharge rejected;
+    //   `hot[id]`, `state[id]` preserved, caller skips the
+    //   inode-side forget.
+    // * `Orphan { .. }` (any refcount) → `None` — discharge rejected
+    //   (open-but-unlinked POSIX needs the bytes to live as long as
+    //   any fd holds the NodeId, which the dentry-side forget
+    //   doesn't track).
+    //
+    // Pre-retrofit the discharge ran unconditionally inline in
+    // `MountInner::invalidate`; the `Orphan` tests below would have
+    // failed (hot[id] dropped, state[id] dropped) — that's the
+    // exact r11 #3 race the retrofit closes.
+
+    #[test]
+    fn kernel_forget_inode_some_for_released_no_warm() {
+        let mut p = Pending::default();
+        let outcome = p.with_brand(|bp| bp.kernel_forget_inode(31));
+        assert_eq!(
+            outcome,
+            Some(false),
+            "Released + no warm → discharge ran, inode record retires"
+        );
+    }
+
+    #[test]
+    fn kernel_forget_inode_some_for_live_zero_no_warm() {
+        let mut p = Pending::default();
+        p.test_insert_state(31, NodeState::Live { open_count: 0 });
+        let outcome = p.with_brand(|bp| bp.kernel_forget_inode(31));
+        assert_eq!(
+            outcome,
+            Some(false),
+            "LiveZero + no warm → discharge ran, inode record retires"
+        );
+        assert!(
+            p.lookup_state(31).is_none(),
+            "discharge must drop state[id] for LiveZero"
+        );
+    }
+
+    #[test]
+    fn kernel_forget_inode_drops_hot_bytes_for_live_zero() {
+        let mut p = Pending::default();
+        p.test_insert_state(31, NodeState::Live { open_count: 0 });
+        p.test_insert_hot(31, std::path::PathBuf::from("x.txt"), b"X".to_vec());
+        let outcome = p.with_brand(|bp| bp.kernel_forget_inode(31));
+        assert_eq!(outcome, Some(false));
+        assert!(
+            !p.test_has_hot(31),
+            "hot[id] for a LiveZero entry must be dropped by the discharge"
+        );
+    }
+
+    #[test]
+    fn kernel_forget_inode_none_for_live_nonzero() {
+        // The r11 #3 race shape: open fds still hold the NodeId. The
+        // pre-retrofit inline path removed hot[id] regardless; the
+        // retrofit rejects the discharge.
+        let mut p = Pending::default();
+        p.test_insert_state(31, NodeState::Live { open_count: 1 });
+        p.test_insert_hot(31, std::path::PathBuf::from("x.txt"), b"X".to_vec());
+        let outcome = p.with_brand(|bp| bp.kernel_forget_inode(31));
+        assert_eq!(outcome, None, "LiveNonZero must reject the discharge");
+        assert_eq!(
+            p.lookup_state(31),
+            Some(NodeState::Live { open_count: 1 }),
+            "state[id] must be preserved when the witness rejects"
+        );
+        assert!(
+            p.test_has_hot(31),
+            "hot[id] must be preserved when the witness rejects \
+             (otherwise the open fd loses its bytes)"
+        );
+    }
+
+    #[test]
+    fn kernel_forget_inode_none_for_orphan_nonzero() {
+        // The headline r11 #3 case: kernel forget racing an open
+        // Orphan fd. Pre-retrofit hot[id] was dropped — the surviving
+        // fd then had no readable bytes. Post-retrofit the discharge
+        // is rejected and hot[id] survives.
+        let mut p = Pending::default();
+        p.test_insert_state(31, NodeState::Orphan { open_count: 1 });
+        p.test_insert_hot(31, std::path::PathBuf::from("gone.txt"), b"BYTES".to_vec());
+        let outcome = p.with_brand(|bp| bp.kernel_forget_inode(31));
+        assert_eq!(outcome, None, "Orphan with open fds must reject");
+        assert_eq!(
+            p.lookup_state(31),
+            Some(NodeState::Orphan { open_count: 1 }),
+            "Orphan state must be preserved when the witness rejects"
+        );
+        assert!(
+            p.test_has_hot(31),
+            "hot[id] for an Orphan with open fds must outlive a kernel \
+             forget — the surviving fd needs the bytes (r11 #3)"
+        );
+    }
+
+    #[test]
+    fn kernel_forget_inode_none_for_orphan_zero() {
+        // Even with zero open count, `Orphan` signals "directory entry
+        // gone, bytes outlive it" — the discharge must reject because
+        // the FSM may not have observed a racing open handle yet
+        // (matches the substrate's `witness_kernel_forget` contract).
+        let mut p = Pending::default();
+        p.test_insert_state(31, NodeState::Orphan { open_count: 0 });
+        let outcome = p.with_brand(|bp| bp.kernel_forget_inode(31));
+        assert_eq!(
+            outcome, None,
+            "Orphan with zero refcount must still reject the discharge"
+        );
+        assert_eq!(
+            p.lookup_state(31),
+            Some(NodeState::Orphan { open_count: 0 }),
+            "Orphan state must be preserved when the witness rejects"
+        );
+    }
+
+    #[test]
+    fn kernel_forget_inode_short_circuits_state_and_hot_when_none() {
+        // Composite assertion: when the witness rejects, NONE of
+        // state[id], hot[id], or hot_by_path is touched. This is the
+        // "entire forget path short-circuits" contract from the
+        // doc-comment.
+        let mut p = Pending::default();
+        p.test_insert_state(42, NodeState::Live { open_count: 3 });
+        p.test_insert_hot(42, std::path::PathBuf::from("live.txt"), b"L".to_vec());
+        let outcome = p.with_brand(|bp| bp.kernel_forget_inode(42));
+        assert_eq!(outcome, None);
+        assert_eq!(
+            p.lookup_state(42),
+            Some(NodeState::Live { open_count: 3 }),
+            "state[id] untouched on short-circuit"
+        );
+        assert!(p.test_has_hot(42), "hot[id] untouched on short-circuit");
     }
 
     // ------- ResidentLifecycle classifier ------------------------------------
