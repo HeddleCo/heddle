@@ -725,6 +725,86 @@ mod tests {
         );
     }
 
+    /// heddle#198 r3 (Codex PR #218 P2): `mint_rebase_transaction_id`
+    /// must produce a fresh id on every call. The dedup helper
+    /// [`rebase_batch_already_committed`] keys on this id verbatim, so a
+    /// collision between two rebases (rapid back-to-back, or concurrent
+    /// invocations on a coarse-clock host) would silently drop the
+    /// later rebase's batch — undo/redo history vanishes for that
+    /// rebase. Pre-r3 the id was just a nanosecond timestamp; this test
+    /// pins that uniqueness is now an unconditional guarantee, not a
+    /// happens-to-work-on-this-clock side-effect.
+    #[test]
+    fn mint_rebase_transaction_id_is_unique_across_serial_calls() {
+        use std::collections::HashSet;
+        const N: usize = 1000;
+        let mut seen: HashSet<String> = HashSet::with_capacity(N);
+        for _ in 0..N {
+            let id = mint_rebase_transaction_id();
+            assert!(
+                seen.insert(id.clone()),
+                "duplicate mint id {id} after {} unique",
+                seen.len()
+            );
+        }
+    }
+
+    /// Stronger variant: under thread contention each thread's
+    /// `chrono::Utc::now()` reads can land in the same nanosecond bucket
+    /// on different cores. Pre-r3 these would mint identical ids; with
+    /// the UUID-v4 suffix even simultaneous reads diverge. Uses a
+    /// barrier to maximise the chance of concurrent clock reads.
+    #[test]
+    fn mint_rebase_transaction_id_is_unique_under_thread_contention() {
+        use std::collections::HashSet;
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        const N_THREADS: usize = 32;
+        const N_PER_THREAD: usize = 64;
+
+        let barrier = Arc::new(Barrier::new(N_THREADS));
+        let handles: Vec<_> = (0..N_THREADS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    let mut local = Vec::with_capacity(N_PER_THREAD);
+                    for _ in 0..N_PER_THREAD {
+                        local.push(mint_rebase_transaction_id());
+                    }
+                    local
+                })
+            })
+            .collect();
+
+        let mut all = Vec::with_capacity(N_THREADS * N_PER_THREAD);
+        for h in handles {
+            all.extend(h.join().unwrap());
+        }
+        let unique: HashSet<&String> = all.iter().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "{}/{} mints collided across {} threads",
+            all.len() - unique.len(),
+            all.len(),
+            N_THREADS,
+        );
+    }
+
+    /// The id must keep the `rebase-` prefix so [`is_rebase_batch`] in
+    /// `undo.rs` continues to recognise the batch envelope. Pins that
+    /// adding the uniqueness suffix doesn't break the prefix tag.
+    #[test]
+    fn mint_rebase_transaction_id_keeps_rebase_prefix() {
+        let id = mint_rebase_transaction_id();
+        assert!(
+            id.starts_with("rebase-"),
+            "mint id {id} must keep the 'rebase-' prefix for is_rebase_batch"
+        );
+    }
+
     /// Distinct transaction ids — separate rebases or a fresh mint —
     /// must each produce their own batch. Pins that the dedup check
     /// keys strictly on the supplied id and doesn't accidentally
