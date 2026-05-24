@@ -402,6 +402,77 @@ impl<'p, 'brand> BrandedPending<'p, 'brand> {
         }
     }
 
+    /// Witness-gated FSM transition: `LiveNonZero` → `Orphan`,
+    /// carrying the current `open_count` over to the orphan record.
+    /// Returns `Some(Witness<Orphan>)` iff `id` was in
+    /// `Live { open_count >= 1 }` at the moment of the call; returns
+    /// `None` (without touching `state`) for any other lifecycle
+    /// state, including `Live { open_count == 0 }`, any `Orphan`, and
+    /// `Released` (no entry).
+    ///
+    /// # Why `id` and not a [`Witness<LiveNonZero>`] input?
+    ///
+    /// The spike doc ([§2.2.1][doc]) sketched the API as
+    /// `transition_to_orphan(&mut self, w: Witness<LiveNonZero>) -> Witness<Orphan>`,
+    /// with the caller pre-minting `w` via
+    /// [`Self::witness_live_nonzero`] and threading it in. The
+    /// heddle#208 r3 self-audit flagged — and an attempted retrofit at
+    /// this issue confirmed — that the literal shape does not compile
+    /// against the substrate: [`Witness`]'s
+    /// `_borrow: PhantomData<&'p mut ()>` field is invariant over
+    /// `'p`, so the prior `&mut BrandedPending` reborrow that minted
+    /// `w` cannot shrink to admit the second `&mut self` call that
+    /// would consume `w` (rustc `E0499`). The fix the brief proposed
+    /// in [Option B][option-b] — relax `'p`'s variance — would weaken
+    /// the substrate's stale-witness protection and is out of scope
+    /// for this retrofit.
+    ///
+    /// Folding the FSM check and the mutation into one call preserves
+    /// the spike doc's invariant — *the transition can only fire on
+    /// a [`LiveNonZero`] state* — by construction:
+    ///
+    /// * The body's `match` IS the
+    ///   [`Self::witness_live_nonzero`] FSM check; both refer to the
+    ///   same `Live { open_count >= 1 }` discriminant.
+    /// * Any non-`LiveNonZero` state path returns `None` before
+    ///   touching [`crate::core::Pending::apply_transition_to_orphan`].
+    ///   Callers in `core.rs` propagate the `None` with `if let
+    ///   Some(_) = bp.transition_to_orphan(id) { … }` — the missing
+    ///   witness IS the short-circuit at the call site.
+    /// * The returned `Witness<Orphan>` is the only path to evidence
+    ///   that the transition fired; [`Witness::new`] is
+    ///   module-private to this file and the
+    ///   [`crate::core::Pending::apply_transition_to_orphan`]
+    ///   accessor takes `&Witness<Orphan>` as proof — together they
+    ///   keep the discipline that no code outside this module's
+    ///   `BrandedPending` impl can synthesize an orphan witness or
+    ///   record a transition.
+    ///
+    /// Closes [r11 #1][doc] (`transition_to_orphan` records
+    /// `Orphan { open_count: 0 }` for nodes with no live fds — now
+    /// impossible because the `Live { open_count: 0 }` branch returns
+    /// `None`) and [r11 #4][doc] (`rename_entry_with_options` calls
+    /// the transition for symlinks/dirs that have no `open`/`release`
+    /// lifecycle — symlinks never enter `state`, so the lookup
+    /// returns `None` and the transition never fires).
+    ///
+    /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
+    /// [option-b]: ../../../docs/design/mount-pending-api-contracts.md
+    #[doc(hidden)]
+    pub(crate) fn transition_to_orphan<'a>(
+        &'a mut self,
+        id: u64,
+    ) -> Option<Witness<'a, 'brand, Orphan>> {
+        match self.inner.lookup_state(id) {
+            Some(NodeState::Live { open_count }) if open_count >= 1 => {
+                let w = Witness::<'a, 'brand, Orphan>::new(id);
+                self.inner.apply_transition_to_orphan(&w);
+                Some(w)
+            }
+            _ => None,
+        }
+    }
+
     /// Witness that the kernel `forget` callback may safely drop
     /// `hot[id]` for this NodeId. Returns `Some` iff one of:
     ///
