@@ -1382,6 +1382,1992 @@ fn cross_thread_blob_dedup_at_scale() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Part 5: write-side overlay ops — create / mkdir / unlink / rmdir / rename /
+// setattr / symlink. Each op exercises the PlatformShell trait method on a
+// real ContentAddressedMount, so the test catches both the core implementation
+// and the trait dispatch (it's the same path FUSE / FSKit / ProjFS callbacks
+// take). Issue: heddle#180 — unblocks `open(O_CREAT)` and friends on the
+// Linux FUSE shell.
+// ---------------------------------------------------------------------------
+mod write_ops {
+    use super::*;
+    use crate::shell::AttrUpdate;
+    use objects::object::FileMode;
+    use std::path::Path;
+
+    /// `create_file` mints a fresh PendingFile under root, visible to
+    /// subsequent `lookup` / `read` calls. The first `write` against
+    /// the returned NodeId seeds an empty buffer; the byte stream
+    /// flows through the existing two-tier write model.
+    #[test]
+    fn create_file_in_root_then_write_and_read_back() {
+        let (_temp, mount) = open_mount();
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("Cargo.lock"), FileMode::Normal, false)
+            .expect("create_file");
+        assert_eq!(entry.kind, NodeKind::File);
+        assert_eq!(entry.name, "Cargo.lock");
+
+        // Lookup must now resolve the same path.
+        let looked_up = mount
+            .lookup(NodeId::ROOT, OsStr::new("Cargo.lock"))
+            .expect("lookup ok")
+            .expect("lookup hit");
+        assert_eq!(looked_up.node, entry.node);
+
+        // Write + read-back through the freshly minted NodeId.
+        mount.write(entry.node, 0, b"[package]\n").expect("write");
+        let mut buf = vec![0u8; 32];
+        let n = mount.read(entry.node, 0, &mut buf).expect("read");
+        assert_eq!(&buf[..n], b"[package]\n");
+    }
+
+    /// `create_file` with `exclusive=true` (`O_CREAT|O_EXCL`) against
+    /// an already-existing captured path must fail with
+    /// `AlreadyExists` (errno `EEXIST`).
+    #[test]
+    fn create_file_exclusive_against_existing_returns_eexist() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, true)
+            .expect_err("exclusive create on existing must fail");
+        assert!(matches!(err, MountError::AlreadyExists(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::EEXIST);
+    }
+
+    /// `create_file` with `exclusive=false` (`O_CREAT` without
+    /// `O_EXCL`) against an existing captured path returns the
+    /// existing entry — that's the POSIX `open(O_CREAT)` shape, and
+    /// what cargo / rustc rely on when re-opening an artifact for
+    /// rewrite.
+    #[test]
+    fn create_file_non_exclusive_returns_existing_entry() {
+        let (_temp, mount) = open_mount();
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .expect("non-exclusive create on existing returns entry");
+        assert_eq!(entry.name, "hello.txt");
+        let captured = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured.node, entry.node);
+    }
+
+    /// Names containing `/` or `\0`, or the reserved `.` / `..`
+    /// pseudo-entries, must be rejected at the create boundary with
+    /// `EINVAL` — not silently shoved into the overlay.
+    #[test]
+    fn create_file_rejects_invalid_names() {
+        let (_temp, mount) = open_mount();
+        for bad in ["", ".", "..", "a/b", "with\0nul"] {
+            let err = mount
+                .create_file(NodeId::ROOT, OsStr::new(bad), FileMode::Normal, false)
+                .expect_err(&format!("name {bad:?} must be rejected"));
+            assert!(matches!(err, MountError::InvalidArgument(_)), "{bad}: {err:?}");
+            assert_eq!(err.to_errno(), libc::EINVAL);
+        }
+    }
+
+    /// `make_dir` creates an empty pending directory under root that
+    /// shows up in lookup + enumerate immediately. Subsequent
+    /// `create_file` calls under it must work.
+    #[test]
+    fn make_dir_creates_empty_visible_dir() {
+        let (_temp, mount) = open_mount();
+        let dir_entry = mount
+            .make_dir(NodeId::ROOT, OsStr::new("target"))
+            .expect("make_dir");
+        assert_eq!(dir_entry.kind, NodeKind::Directory);
+
+        // Visible via lookup.
+        let looked = mount
+            .lookup(NodeId::ROOT, OsStr::new("target"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(looked.node, dir_entry.node);
+
+        // Root enumerate must include the new directory.
+        let root_entries = mount.enumerate(NodeId::ROOT).unwrap();
+        assert!(
+            root_entries.iter().any(|e| e.name == "target"
+                && e.kind == NodeKind::Directory),
+            "root enumerate did not include the new dir: {root_entries:?}"
+        );
+
+        // Create a file inside it; visible via lookup under the dir.
+        let file = mount
+            .create_file(dir_entry.node, OsStr::new("out.bin"), FileMode::Normal, false)
+            .expect("create_file under new dir");
+        let from_lookup = mount
+            .lookup(dir_entry.node, OsStr::new("out.bin"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(from_lookup.node, file.node);
+    }
+
+    /// `make_dir` against an existing path (captured or pending) is
+    /// `EEXIST`. POSIX `mkdir(2)` shape.
+    #[test]
+    fn make_dir_existing_returns_eexist() {
+        let (_temp, mount) = open_mount();
+        // `nested/` already exists in the fixture's captured tree.
+        let err = mount
+            .make_dir(NodeId::ROOT, OsStr::new("nested"))
+            .expect_err("mkdir on existing must fail");
+        assert_eq!(err.to_errno(), libc::EEXIST);
+    }
+
+    /// `unlink_entry` against a captured file tombstones it: post-
+    /// unlink lookup returns `None`, enumerate skips it, and a
+    /// subsequent `create_file` (POSIX `unlink+open(O_CREAT)`) mints
+    /// a fresh empty inode at the same path.
+    #[test]
+    fn unlink_entry_removes_captured_file_and_allows_recreate() {
+        let (_temp, mount) = open_mount();
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "post-unlink lookup must return None"
+        );
+        let entries = mount.enumerate(NodeId::ROOT).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.name == "hello.txt"),
+            "enumerate still surfaces unlinked file"
+        );
+
+        // Recreate.
+        let recreated = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .expect("recreate after unlink");
+        mount.write(recreated.node, 0, b"REBORN").unwrap();
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(recreated.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"REBORN");
+    }
+
+    /// `unlink_entry` on a directory is `EISDIR` (POSIX `unlink(2)`).
+    #[test]
+    fn unlink_entry_on_directory_returns_eisdir() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("nested"))
+            .expect_err("unlink on dir must fail");
+        assert_eq!(err.to_errno(), libc::EISDIR);
+    }
+
+    /// `unlink_entry` on a name that doesn't exist is `ENOENT`.
+    #[test]
+    fn unlink_entry_missing_returns_enoent() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("nonexistent"))
+            .expect_err("unlink missing must fail");
+        assert_eq!(err.to_errno(), libc::ENOENT);
+    }
+
+    /// `rmdir_entry` removes an empty pending directory. Subsequent
+    /// lookup returns `None`.
+    #[test]
+    fn rmdir_entry_removes_empty_pending_dir() {
+        let (_temp, mount) = open_mount();
+        let dir = mount.make_dir(NodeId::ROOT, OsStr::new("scratch")).unwrap();
+        let _ = dir; // keep alive
+        mount
+            .rmdir_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("rmdir");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("scratch"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// `rmdir_entry` on a directory that has any visible child (pending
+    /// or captured) must fail with `ENOTEMPTY`.
+    #[test]
+    fn rmdir_entry_non_empty_returns_enotempty() {
+        let (_temp, mount) = open_mount();
+        // The fixture's `nested/` has captured children.
+        let err = mount
+            .rmdir_entry(NodeId::ROOT, OsStr::new("nested"))
+            .expect_err("rmdir on non-empty must fail");
+        assert_eq!(err.to_errno(), libc::ENOTEMPTY);
+    }
+
+    /// `rmdir_entry` on a regular file is `ENOTDIR`.
+    #[test]
+    fn rmdir_entry_on_file_returns_enotdir() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .rmdir_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect_err("rmdir on file must fail");
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    /// File rename within the same directory: source disappears,
+    /// destination resolves to the renamed file with the same bytes.
+    /// This is the cargo / git path: write `foo.tmp` then rename to
+    /// `foo`.
+    #[test]
+    fn rename_entry_file_same_dir() {
+        let (_temp, mount) = open_mount();
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("Cargo.lock.tmp"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(src.node, 0, b"[atomic]\n").unwrap();
+        mount.flush(src.node).unwrap();
+
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("Cargo.lock.tmp"),
+                NodeId::ROOT,
+                OsStr::new("Cargo.lock"),
+            )
+            .expect("rename");
+
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("Cargo.lock.tmp"))
+                .unwrap()
+                .is_none(),
+            "source path must be gone after rename"
+        );
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("Cargo.lock"))
+            .unwrap()
+            .expect("dst resolves");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(dst.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"[atomic]\n");
+    }
+
+    /// Rename across directories: src in `nested/`, dst in root.
+    #[test]
+    fn rename_entry_cross_dir() {
+        let (_temp, mount) = open_mount();
+        // Source lives in the captured tree at `nested/inner.txt`.
+        let nested = mount
+            .lookup(NodeId::ROOT, OsStr::new("nested"))
+            .unwrap()
+            .unwrap();
+        mount
+            .rename_entry(
+                nested.node,
+                OsStr::new("inner.txt"),
+                NodeId::ROOT,
+                OsStr::new("moved.txt"),
+            )
+            .expect("cross-dir rename");
+
+        assert!(
+            mount
+                .lookup(nested.node, OsStr::new("inner.txt"))
+                .unwrap()
+                .is_none(),
+            "source path must be gone after rename"
+        );
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("moved.txt"))
+            .unwrap()
+            .expect("dst resolves");
+        let mut buf = vec![0u8; 32];
+        let n = mount.read(dst.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"deep");
+    }
+
+    /// Rename onto an existing file of the same kind: POSIX allows it
+    /// (atomic replace). The destination's prior content is gone.
+    #[test]
+    fn rename_entry_replaces_existing_file() {
+        let (_temp, mount) = open_mount();
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(src.node, 0, b"draft body").unwrap();
+        mount.flush(src.node).unwrap();
+        // hello.txt exists in the fixture; rename overwrites it.
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .unwrap();
+        let mut buf = vec![0u8; 32];
+        let n = mount.read(dst.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"draft body");
+    }
+
+    /// After `unlink_entry` the path→inode mapping must be retired so
+    /// a subsequent `create_file` at the same name mints a *fresh*
+    /// inode. Otherwise a still-open handle to the unlinked file would
+    /// silently start resolving to the freshly created replacement —
+    /// breaks unlink-then-recreate isolation (POSIX open-unlinked temp
+    /// files).
+    #[test]
+    fn unlink_then_recreate_mints_fresh_inode() {
+        let (_temp, mount) = open_mount();
+        let original = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("captured hello.txt");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        let recreated = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .expect("recreate");
+        assert_ne!(
+            original.node, recreated.node,
+            "recreated inode must be distinct from the unlinked one"
+        );
+    }
+
+    /// POSIX `unlink(2)` semantics: if a file is open when it's
+    /// unlinked, the kernel keeps the inode alive behind the open
+    /// fd, but the *directory entry* is gone — `lookup` returns
+    /// `ENOENT` and `readdir` skips the name. A subsequent write
+    /// through the open fd updates the orphaned inode's data, but
+    /// it must NOT republish the name. Tools that depend on this:
+    /// `mkstemp` + `unlink` for private scratch space, sqlite's WAL
+    /// shadow files, cargo's atomic-replace pattern. Without the
+    /// guard, the unlinked pathname unexpectedly reappears once a
+    /// late write hits the open fd.
+    #[test]
+    fn write_to_unlinked_open_inode_does_not_resurrect_path() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("temp", O_CREAT|O_RDWR)` — fresh pending file.
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("temp"), FileMode::Normal, false)
+            .expect("create");
+        mount.write(entry.node, 0, b"v1").expect("first write");
+        // `unlink("temp")` while the handle is still in use.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("temp"))
+            .expect("unlink");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("temp"))
+                .unwrap()
+                .is_none(),
+            "post-unlink lookup must return None"
+        );
+
+        // Write through the original handle. POSIX says this is
+        // legal — the inode survives behind the fd — but the
+        // pathname must not come back.
+        mount
+            .write(entry.node, 0, b"v2-after-unlink")
+            .expect("write through unlinked-open fd");
+
+        // The data is accessible through the open handle.
+        let mut buf = vec![0u8; 64];
+        let n = mount
+            .read(entry.node, 0, &mut buf)
+            .expect("read via unlinked-open fd");
+        assert_eq!(&buf[..n], b"v2-after-unlink");
+
+        // The decisive check: the path must still be gone.
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("temp"))
+                .unwrap()
+                .is_none(),
+            "write after unlink must not resurrect the path"
+        );
+        let entries = mount.enumerate(NodeId::ROOT).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.name == "temp"),
+            "enumerate must not surface the unlinked path: {entries:?}"
+        );
+        // Flushing the orphan must not promote it to the warm tier
+        // (a subsequent capture would resurrect the path in the
+        // captured tree otherwise). Drive the flush explicitly so
+        // the test pins the contract; orphaned buffers must drop.
+        mount.flush(entry.node).expect("flush orphan");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("temp"))
+                .unwrap()
+                .is_none(),
+            "post-flush lookup must still be gone (orphan must not warm-promote)"
+        );
+    }
+
+    /// Companion to the orphan-write test: after an unlink, if a
+    /// fresh `create_file` mints a new inode at the same name,
+    /// writes through the *new* fd must surface normally. The
+    /// orphan-write fix must not regress the unlink-then-recreate
+    /// path the kernel actually emits for `open(O_CREAT)`.
+    #[test]
+    fn write_to_recreated_inode_after_unlink_still_publishes_path() {
+        let (_temp, mount) = open_mount();
+        let original = mount
+            .create_file(NodeId::ROOT, OsStr::new("temp"), FileMode::Normal, false)
+            .expect("create v1");
+        mount.write(original.node, 0, b"v1").expect("write v1");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("temp"))
+            .expect("unlink");
+
+        let recreated = mount
+            .create_file(NodeId::ROOT, OsStr::new("temp"), FileMode::Normal, false)
+            .expect("recreate");
+        assert_ne!(original.node, recreated.node);
+        mount.write(recreated.node, 0, b"v2-fresh").expect("write v2");
+
+        // The new inode is the one that owns the path now.
+        let hit = mount
+            .lookup(NodeId::ROOT, OsStr::new("temp"))
+            .unwrap()
+            .expect("recreated path must resolve");
+        assert_eq!(hit.node, recreated.node);
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(recreated.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"v2-fresh");
+    }
+
+    /// Rename-over must keep the replaced destination's inode record
+    /// resolvable — only the path→inode link is detached. Without this
+    /// any FD still holding the dest inode surfaces as ESTALE on the
+    /// next callback. POSIX requires open handles to the replaced file
+    /// to remain valid.
+    #[test]
+    fn rename_over_preserves_replaced_destination_inode() {
+        let (_temp, mount) = open_mount();
+        let dest_orig = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("captured hello.txt");
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(src.node, 0, b"replacement").unwrap();
+        mount.flush(src.node).unwrap();
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        // The old destination inode must still resolve — not ESTALE.
+        let attrs = mount
+            .attrs(dest_orig.node)
+            .expect("orphaned dest inode must remain valid");
+        assert_eq!(attrs.kind, NodeKind::File);
+    }
+
+    /// A directory rename must rebase the `by_path` mapping for every
+    /// already-cached descendant inode (not just the directory's own
+    /// record). Otherwise an open handle to `old_dir/leaf` still
+    /// references the stale path and post-rename reads return ESTALE
+    /// — even though the leaf is reachable through the new directory.
+    #[test]
+    fn directory_rename_rebases_descendant_inode_paths() {
+        let (_temp, mount) = open_mount();
+        // Build an overlay-only directory with a leaf so the rename
+        // exercises `move_overlay_dir` + the inode rebase pass.
+        mount.make_dir(NodeId::ROOT, OsStr::new("from_dir")).unwrap();
+        let from = mount
+            .lookup(NodeId::ROOT, OsStr::new("from_dir"))
+            .unwrap()
+            .unwrap();
+        let leaf = mount
+            .create_file(from.node, OsStr::new("leaf.txt"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(leaf.node, 0, b"payload").unwrap();
+        mount.flush(leaf.node).unwrap();
+        // Cache the leaf inode by looking it up explicitly — this is
+        // what the kernel does for any FD-holding lookup.
+        let cached = mount
+            .lookup(from.node, OsStr::new("leaf.txt"))
+            .unwrap()
+            .expect("leaf resolves pre-rename");
+        assert_eq!(cached.node, leaf.node);
+
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("from_dir"),
+                NodeId::ROOT,
+                OsStr::new("to_dir"),
+            )
+            .expect("dir rename");
+
+        // The cached leaf inode must still resolve — its stored path
+        // should now be `to_dir/leaf.txt`.
+        let mut buf = vec![0u8; 16];
+        let n = mount
+            .read(cached.node, 0, &mut buf)
+            .expect("read via descendant inode after dir rename");
+        assert_eq!(&buf[..n], b"payload");
+        // And the new path resolves to the same inode.
+        let to_dir = mount
+            .lookup(NodeId::ROOT, OsStr::new("to_dir"))
+            .unwrap()
+            .unwrap();
+        let via_new = mount
+            .lookup(to_dir.node, OsStr::new("leaf.txt"))
+            .unwrap()
+            .expect("leaf resolves via new dir");
+        assert_eq!(via_new.node, cached.node);
+    }
+
+    /// `set_attrs(size=0)` truncates the file's hot buffer to zero,
+    /// which is what the kernel issues for `O_TRUNC` before any
+    /// `write`. cargo writes use `O_CREAT|O_WRONLY|O_TRUNC`; without
+    /// this the second build cycle overlays bytes on top of the
+    /// previous artifact.
+    #[test]
+    fn set_attrs_truncate_zero_clears_buffer() {
+        let (_temp, mount) = open_mount();
+        let node = mount.lookup_path("hello.txt").unwrap();
+        // Seed a buffer first.
+        mount.write(node, 0, b"world-plus").unwrap();
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    size: Some(0),
+                    ..Default::default()
+                },
+            )
+            .expect("setattr size=0");
+        assert_eq!(attrs.size, 0);
+        // Subsequent read returns nothing.
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(node, 0, &mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// `set_attrs(size=N)` larger than the current buffer zero-fills
+    /// the gap (POSIX `ftruncate(2)`).
+    #[test]
+    fn set_attrs_truncate_grow_zero_fills() {
+        let (_temp, mount) = open_mount();
+        let node = mount.lookup_path("hello.txt").unwrap(); // "world", 5 bytes
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    size: Some(8),
+                    ..Default::default()
+                },
+            )
+            .expect("setattr grow");
+        assert_eq!(attrs.size, 8);
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"world\0\0\0");
+    }
+
+    /// `set_attrs(mode=0o755)` flips a Normal file to Executable in
+    /// the overlay; the change is visible on `attrs` immediately and
+    /// surfaces in `capture` output (so a freshly-built binary keeps
+    /// its `+x` bit).
+    #[test]
+    fn set_attrs_mode_sets_executable_bit() {
+        let (_temp, mount) = open_mount();
+        let node = mount.lookup_path("hello.txt").unwrap();
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    mode: Some(0o100755),
+                    ..Default::default()
+                },
+            )
+            .expect("setattr chmod");
+        assert_eq!(attrs.unix_mode & 0o111, 0o111);
+
+        // Refetched attrs preserve the override.
+        let again = mount.attrs(node).unwrap();
+        assert_eq!(again.unix_mode & 0o111, 0o111);
+    }
+
+    /// `enumerate` surfaces overlay symlinks both as standalone
+    /// pending-only children (pass-2 `PendingChildKind::Symlink`)
+    /// and as overrides on captured-tree entries (pass-1 hit on
+    /// `PendingHit::Symlink`). One enumerate exercises both arms.
+    #[test]
+    fn enumerate_surfaces_overlay_symlinks_in_both_passes() {
+        let (_temp, mount) = open_mount();
+        // Pass-2 path: brand-new symlink at a name with no captured
+        // counterpart.
+        mount
+            .create_symlink(NodeId::ROOT, OsStr::new("alias"), Path::new("hello.txt"))
+            .expect("fresh symlink");
+        // Pass-1 path: overlay symlink replaces a captured file.
+        // (`run.sh` is in the fixture as an executable file.)
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("run.sh"))
+            .expect("clear captured run.sh");
+        mount
+            .create_symlink(NodeId::ROOT, OsStr::new("run.sh"), Path::new("hello.txt"))
+            .expect("symlink overrides captured file");
+
+        let entries = mount.enumerate(NodeId::ROOT).unwrap();
+        let alias = entries
+            .iter()
+            .find(|e| e.name == "alias")
+            .expect("fresh symlink missing from enumerate");
+        assert_eq!(alias.kind, NodeKind::Symlink);
+        let run = entries
+            .iter()
+            .find(|e| e.name == "run.sh")
+            .expect("overlay symlink override missing from enumerate");
+        assert_eq!(run.kind, NodeKind::Symlink);
+    }
+
+    /// `create_symlink` records a link in the overlay; `read_link`
+    /// returns its target bytes.
+    #[test]
+    fn create_and_read_symlink() {
+        let (_temp, mount) = open_mount();
+        let entry = mount
+            .create_symlink(
+                NodeId::ROOT,
+                OsStr::new("alias.txt"),
+                Path::new("hello.txt"),
+            )
+            .expect("symlink");
+        assert_eq!(entry.kind, NodeKind::Symlink);
+        let target = mount.read_link(entry.node).expect("read_link");
+        assert_eq!(target.as_os_str(), OsStr::new("hello.txt"));
+    }
+
+    /// `rename_entry` over a symlink in the overlay moves the target
+    /// bytes and tombstones the source — `move_symlink`'s overlay-only
+    /// path. Existing capture/diff tests don't reach this branch, so
+    /// it's the main contributor to uncovered patch lines.
+    #[test]
+    fn rename_entry_moves_overlay_symlink() {
+        let (_temp, mount) = open_mount();
+        mount
+            .create_symlink(
+                NodeId::ROOT,
+                OsStr::new("alias"),
+                Path::new("hello.txt"),
+            )
+            .expect("create symlink");
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("alias"),
+                NodeId::ROOT,
+                OsStr::new("alias2"),
+            )
+            .expect("rename symlink");
+        assert!(
+            mount.lookup(NodeId::ROOT, OsStr::new("alias")).unwrap().is_none(),
+            "source symlink path must be gone after rename",
+        );
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("alias2"))
+            .unwrap()
+            .expect("renamed symlink resolves");
+        assert_eq!(dst.kind, NodeKind::Symlink);
+        let target = mount.read_link(dst.node).expect("read_link via new path");
+        assert_eq!(target.as_os_str(), OsStr::new("hello.txt"));
+    }
+
+    /// Cross-tree directory rename — i.e. renaming a captured-tree
+    /// directory — is intentionally refused by `move_overlay_dir`;
+    /// the overlay would otherwise need to rewrite every descendant
+    /// tombstone/warm key. Exercises the error path explicitly so
+    /// the refusal isn't accidentally relaxed by a later change.
+    #[test]
+    fn rename_entry_refuses_captured_directory_rename() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("nested"),
+                NodeId::ROOT,
+                OsStr::new("nested2"),
+            )
+            .expect_err("captured-dir rename must be refused");
+        assert!(matches!(err, MountError::InvalidArgument(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::EINVAL);
+    }
+
+    /// `move_overlay_dir` rebases every overlay slot under the source
+    /// dir, but slots OUTSIDE the source must survive unchanged. This
+    /// hits the `None` arms of each `rebase` match — the largest
+    /// untouched cluster of patch-uncovered lines in this PR.
+    #[test]
+    fn rename_overlay_dir_preserves_sibling_overlay_state() {
+        let (_temp, mount) = open_mount();
+        // Two overlay dirs side by side; rename one. The other's
+        // children/state — explicit_dirs, warm (via flushed write),
+        // a symlink, and a tombstone — must all stay put.
+        mount.make_dir(NodeId::ROOT, OsStr::new("from_dir")).unwrap();
+        mount.make_dir(NodeId::ROOT, OsStr::new("keep_dir")).unwrap();
+        let keep = mount.lookup(NodeId::ROOT, OsStr::new("keep_dir")).unwrap().unwrap();
+        // Warm (flushed) leaf under `keep_dir/`.
+        let kept_file = mount
+            .create_file(keep.node, OsStr::new("warm.txt"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(kept_file.node, 0, b"persist").unwrap();
+        mount.flush(kept_file.node).unwrap();
+        // Symlink under `keep_dir/`.
+        mount
+            .create_symlink(keep.node, OsStr::new("alias"), Path::new("warm.txt"))
+            .unwrap();
+        // Tombstone the captured `hello.txt` so the tombstone-rebase
+        // branch is exercised against a non-prefixed path.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink captured file");
+
+        // The actual rename.
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("from_dir"),
+                NodeId::ROOT,
+                OsStr::new("to_dir"),
+            )
+            .expect("dir rename");
+
+        // The sibling's children survive.
+        let keep_after = mount.lookup(NodeId::ROOT, OsStr::new("keep_dir")).unwrap().unwrap();
+        assert_eq!(keep_after.node, keep.node);
+        let warm_after = mount
+            .lookup(keep_after.node, OsStr::new("warm.txt"))
+            .unwrap()
+            .expect("warm leaf must remain at sibling dir");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(warm_after.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"persist");
+        let alias_after = mount
+            .lookup(keep_after.node, OsStr::new("alias"))
+            .unwrap()
+            .expect("sibling symlink must remain");
+        assert_eq!(alias_after.kind, NodeKind::Symlink);
+        // The unrelated tombstone survives.
+        assert!(
+            mount.lookup(NodeId::ROOT, OsStr::new("hello.txt")).unwrap().is_none(),
+            "unrelated tombstone must survive the rename pass",
+        );
+        // And the rename itself landed.
+        assert!(
+            mount.lookup(NodeId::ROOT, OsStr::new("from_dir")).unwrap().is_none(),
+            "source dir must be gone",
+        );
+        assert!(
+            mount.lookup(NodeId::ROOT, OsStr::new("to_dir")).unwrap().is_some(),
+            "destination dir must be present",
+        );
+    }
+
+    /// Self-rename (same source and destination) is a POSIX no-op:
+    /// returns success without touching any state. Without the early
+    /// return, the move + tombstone-source path would actually delete
+    /// the file.
+    #[test]
+    fn rename_entry_self_rename_is_noop() {
+        let (_temp, mount) = open_mount();
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("self-rename succeeds");
+        // The file remains addressable + readable.
+        let hit = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("self-rename did not delete the file");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(hit.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"world");
+    }
+
+    /// POSIX: renaming a directory over a regular file is `ENOTDIR`
+    /// (the destination must also be a directory). Catches the
+    /// `(Directory, _)` arm of the kind-mismatch guard.
+    #[test]
+    fn rename_entry_directory_over_file_returns_enotdir() {
+        let (_temp, mount) = open_mount();
+        mount.make_dir(NodeId::ROOT, OsStr::new("srcdir")).unwrap();
+        let err = mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("srcdir"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect_err("dir-over-file must fail");
+        assert!(matches!(err, MountError::NotADirectory(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::ENOTDIR);
+    }
+
+    /// POSIX: renaming a regular file over a directory is `EISDIR`.
+    /// Catches the `(_, Directory)` arm of the kind-mismatch guard.
+    #[test]
+    fn rename_entry_file_over_directory_returns_eisdir() {
+        let (_temp, mount) = open_mount();
+        let err = mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                NodeId::ROOT,
+                OsStr::new("nested"),
+            )
+            .expect_err("file-over-dir must fail");
+        assert!(matches!(err, MountError::IsADirectory(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::EISDIR);
+    }
+
+    /// POSIX: directory-over-directory rename only succeeds if the
+    /// destination is empty; a non-empty destination is `ENOTEMPTY`.
+    /// Catches the inner branch of the (Directory, Directory) arm.
+    #[test]
+    fn rename_entry_directory_over_nonempty_directory_returns_enotempty() {
+        let (_temp, mount) = open_mount();
+        mount.make_dir(NodeId::ROOT, OsStr::new("srcdir")).unwrap();
+        mount.make_dir(NodeId::ROOT, OsStr::new("dstdir")).unwrap();
+        let dstdir = mount.lookup(NodeId::ROOT, OsStr::new("dstdir")).unwrap().unwrap();
+        mount
+            .create_file(dstdir.node, OsStr::new("child.txt"), FileMode::Normal, false)
+            .unwrap();
+        let err = mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("srcdir"),
+                NodeId::ROOT,
+                OsStr::new("dstdir"),
+            )
+            .expect_err("non-empty dest must fail");
+        assert!(matches!(err, MountError::NotEmpty(_)), "got {err:?}");
+        assert_eq!(err.to_errno(), libc::ENOTEMPTY);
+    }
+
+    /// `invalidate` on an orphaned NodeId (an inode the kernel forgets
+    /// after `unlink + release`) must retire the orphan tracking entry
+    /// — otherwise the `orphans` set accumulates dead IDs across the
+    /// session. Indirectly observed via a follow-up unlink+write cycle
+    /// on a new NodeId at the same name: that write must take the
+    /// normal (republishing) branch, not the orphan branch.
+    #[test]
+    fn invalidate_clears_orphan_tracking_for_forgotten_inode() {
+        let (_temp, mount) = open_mount();
+        // Round 1: create, write, unlink — orphans the inode.
+        let v1 = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(v1.node, 0, b"v1").unwrap();
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .unwrap();
+        // The kernel issues `release` then `forget`; both flow
+        // through `invalidate` in our trait surface.
+        mount.invalidate(v1.node).expect("invalidate orphan");
+
+        // Round 2: a fresh inode at the same name. Its writes must
+        // republish the path normally — the orphan-cleanup pass in
+        // `invalidate` is what keeps the orphan set from making this
+        // node mistakenly take the orphan branch.
+        let v2 = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .unwrap();
+        assert_ne!(v1.node, v2.node);
+        mount.write(v2.node, 0, b"v2-fresh").expect("normal write");
+        let hit = mount
+            .lookup(NodeId::ROOT, OsStr::new("scratch"))
+            .unwrap()
+            .expect("recreated path resolves");
+        assert_eq!(hit.node, v2.node);
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(v2.node, 0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"v2-fresh");
+    }
+
+    // --- Codex round 7 findings: orphan-aware write-side ops ----------------
+    //
+    // r6 fixed `write` so a write through an unlinked-but-still-open fd
+    // does not republish the path. Codex r7 surfaced four more write-side
+    // ops with the same shape — operations that touch `hot_by_path`,
+    // `tombstones`, or path-keyed `warm` entries without consulting the
+    // orphan set. Each test below pins one contract from the brief.
+
+    /// `ftruncate` through an unlinked-but-still-open captured fd must
+    /// affect only the anonymous open inode. POSIX unlink semantics:
+    /// the directory entry stays gone until the last close, and a
+    /// flush of the orphan must not warm-promote its buffer. Without
+    /// the fix, `apply_truncate`'s tombstone-clear + `hot_by_path`
+    /// rebind republished the name to every other observer.
+    #[test]
+    fn truncate_unlinked_open_doesnt_resurrect_path() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("hello.txt")` — captured file, no overlay yet.
+        let node = mount.lookup_path("hello.txt").unwrap();
+        // `unlink("hello.txt")` while the handle is still in use.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "post-unlink lookup must return None"
+        );
+        // `ftruncate(fd, 2)` through the now-orphaned NodeId.
+        mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    size: Some(2),
+                    ..Default::default()
+                },
+            )
+            .expect("ftruncate through unlinked-open fd");
+        // Decisive check: the path must still be gone.
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "truncate after unlink must not resurrect the path"
+        );
+        let entries = mount.enumerate(NodeId::ROOT).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.name == "hello.txt"),
+            "enumerate must not surface the unlinked path: {entries:?}"
+        );
+        // Flushing the orphan must not warm-promote it — a subsequent
+        // capture would otherwise resurrect the path in the captured
+        // tree.
+        mount.flush(node).expect("flush orphan");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "post-flush lookup must still be gone (orphan must not warm-promote)"
+        );
+    }
+
+    /// Rename-over with the destination still open + holding a hot
+    /// buffer must preserve the buffer. Reads through the original
+    /// NodeId must continue to see the pre-rename bytes. Without the
+    /// fix, `move_file`'s blind `pending.hot.remove(&dest_id)` dropped
+    /// the buffer, and reads through the still-open fd then routed
+    /// through the rebased path overlay and observed the replacement.
+    #[test]
+    fn rename_over_preserves_replaced_open_fd() {
+        let (_temp, mount) = open_mount();
+        // Open the captured "hello.txt", write through it, do NOT
+        // flush. The hot buffer keyed by dest_id holds "ORIG-DATA".
+        let dest_id = mount.lookup_path("hello.txt").unwrap();
+        mount.write(dest_id, 0, b"ORIG-DATA").expect("write to dest");
+        // Build a source file with replacement bytes; flush so the
+        // rename's start-of-move flush_node is a no-op.
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .expect("create src");
+        mount.write(src.node, 0, b"REPLACE-DATA").expect("write src");
+        mount.flush(src.node).expect("flush src");
+        // Rename src over dest. dest's pathname is rebound to src;
+        // dest's open fd must continue to see "ORIG-DATA".
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(dest_id, 0, &mut buf)
+            .expect("read via replaced dest fd");
+        assert_eq!(
+            &buf[..n],
+            b"ORIG-DATA",
+            "open fd on replaced dest must see pre-rename bytes",
+        );
+    }
+
+    /// Captured-file rename-over: dest has no hot buffer at the time
+    /// of the rename, only the captured-tree blob. Reads/attrs through
+    /// the still-open fd must serve the captured bytes, not the
+    /// source's replacement. Without the fix, the captured-file branch
+    /// of `read` consulted `warm[new_path]` (now the source's data)
+    /// before falling through to the captured blob.
+    #[test]
+    fn rename_over_destination_data_via_old_fd() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("hello.txt")` — captured file, no overlay.
+        let dest_id = mount.lookup_path("hello.txt").unwrap();
+        // Source file with replacement payload; flush so move_file's
+        // flush_node returns immediately.
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .expect("create src");
+        mount.write(src.node, 0, b"REPLACE-DATA").expect("write src");
+        mount.flush(src.node).expect("flush src");
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        // Read via the displaced inode id must serve the original
+        // captured bytes ("world", 5 bytes) — not the source's
+        // "REPLACE-DATA" (12 bytes).
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(dest_id, 0, &mut buf)
+            .expect("read via replaced dest fd");
+        assert_eq!(
+            &buf[..n],
+            b"world",
+            "open fd on replaced captured dest must see captured bytes, not replacement",
+        );
+        // attrs must report the captured size too — a stale size from
+        // the path overlay would clip the kernel's read buffer.
+        let attrs = mount.attrs(dest_id).expect("attrs via replaced dest fd");
+        assert_eq!(
+            attrs.size, 5,
+            "attrs on replaced captured dest must report captured size, not replacement",
+        );
+    }
+
+    /// `fchmod` on an unlinked-but-still-open fd must affect only the
+    /// inode behind that fd. The brief's threat model:
+    /// `open(old) → unlink(old) → create(old) → fchmod(orphan_fd, +x)`.
+    /// Without the fix, `set_attrs`'s mode mutation updated
+    /// `hot_by_path[path]` and `warm[path]` too, flipping the
+    /// newly-created file's mode at the same pathname.
+    #[test]
+    fn fchmod_on_unlinked_open_doesnt_leak_to_recreated() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("hello.txt")` — captured Normal-mode file.
+        let orphan_id = mount.lookup_path("hello.txt").unwrap();
+        // `unlink("hello.txt")` while the fd lives on.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        // `create("hello.txt")` mints a fresh inode at the same
+        // pathname. Writing some bytes guarantees the hot buffer
+        // exists so a leak via `hot_by_path[path]` is visible.
+        let fresh = mount
+            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .expect("recreate at same name");
+        assert_ne!(orphan_id, fresh.node);
+        mount
+            .write(fresh.node, 0, b"REBORN")
+            .expect("write to recreated file");
+        // `fchmod(orphan_fd, 0o755)` — the orphan inode's mode flip
+        // must not propagate to the fresh inode at the same pathname.
+        mount
+            .set_attrs(
+                orphan_id,
+                AttrUpdate {
+                    mode: Some(0o100755),
+                    ..Default::default()
+                },
+            )
+            .expect("chmod on orphan");
+        // Drive the recreated file through flush + capture so the
+        // buffer's `mode` field — which gets persisted into the
+        // warm-tier entry and ultimately the captured tree — is
+        // observable. A leak shows up as Executable at the new
+        // path; the contract says Normal.
+        mount.flush(fresh.node).expect("flush fresh");
+        let change_id = mount.capture(Some("orphan chmod".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&change_id).unwrap().unwrap();
+        let root_tree = store.get_tree(&state.tree).unwrap().unwrap();
+        let entry = root_tree.get("hello.txt").expect("recreated file in tree");
+        assert!(
+            matches!(entry.mode, objects::object::FileMode::Normal),
+            "chmod on orphan must not leak to recreated file: got mode {:?}",
+            entry.mode,
+        );
+    }
+
+    // --- Codex round 8 findings: 3-axis sweep (warm tier + lifecycle + atomicity)
+    //
+    // r7 made the write-side ops orphan-aware against `pending.hot` /
+    // `hot_by_path` / `tombstones` / `inodes.by_path`. r8 closes the
+    // remaining three same-shape misses:
+    //
+    //   1. `pending.warm` was dropped unconditionally on unlink and
+    //      rename-over, even when the inode had surviving open fds. The
+    //      bytes those fds want to read disappeared with the path.
+    //   2. The orphan marker cleared on the FIRST `flush`. FUSE `flush`
+    //      fires on EACH descriptor close (incl. `dup`-derived fds);
+    //      only `release` is the last-close-per-inode signal. A
+    //      premature clear lets a surviving fd's next write republish
+    //      the unlinked path.
+    //   3. `RENAME_NOREPLACE` did the existence-check in the FUSE shell
+    //      and the rename in the core — separate locks, classic TOCTOU.
+    //      Concurrent writers could create the destination between the
+    //      two operations and the rename would clobber it.
+
+    /// An open fd to a captured file whose warm-tier bytes are present
+    /// must still serve those bytes after the path is unlinked. POSIX
+    /// open-unlinked semantics: the inode survives behind the fd, and
+    /// `pending.warm[path]` is the most-recently-promoted bytes the fd
+    /// owns. r7's `unlink_entry` dropped `pending.warm[path]`
+    /// unconditionally — orphan reads through the surviving fd lost
+    /// the latest writes.
+    #[test]
+    fn unlink_then_read_warm_via_open_fd() {
+        let (_temp, mount) = open_mount();
+        // Open hello.txt and write through it. Flush promotes to warm
+        // so the bytes are at `pending.warm["hello.txt"]`, not in any
+        // hot buffer.
+        let node = mount.lookup_path("hello.txt").unwrap();
+        mount.write(node, 0, b"WARM-BYTES").expect("write");
+        mount.flush(node).expect("flush — promote to warm");
+        // Sanity: warm tier holds the bytes.
+        assert!(
+            mount.warm_blob("hello.txt").is_some(),
+            "warm should hold the flushed bytes"
+        );
+        // `unlink("hello.txt")` while the fd lives on. POSIX: the
+        // inode survives; the directory entry is gone.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        // Read via the orphaned fd. The most recent durable bytes for
+        // this inode are the warm-tier bytes; they must still be
+        // reachable.
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(node, 0, &mut buf)
+            .expect("read via orphan fd after warm-promoted unlink");
+        assert_eq!(
+            &buf[..n],
+            b"WARM-BYTES",
+            "orphan read must serve preserved warm bytes, not captured fallback"
+        );
+        // attrs must report the warm size too — a stale captured size
+        // would clip the kernel's read buffer.
+        let attrs = mount.attrs(node).expect("attrs via orphan fd");
+        assert_eq!(
+            attrs.size, 10,
+            "attrs on orphan must report warm size, not captured"
+        );
+    }
+
+    /// `ftruncate` through an unlinked-but-still-open fd whose only
+    /// durable bytes are warm-tier (no captured-tree predecessor) must
+    /// seed the truncated buffer from those warm bytes. Without the
+    /// warm-preservation fix, the seed lookup falls through to "empty"
+    /// and the surviving fd's `ftruncate` followed by `read` returns
+    /// zeros — POSIX requires the truncate to start from the inode's
+    /// current bytes.
+    #[test]
+    fn truncate_unlinked_open_keeps_warm_bytes() {
+        let (_temp, mount) = open_mount();
+        // Pending file (no captured-tree backing) so the orphan has
+        // nothing but warm bytes to fall back on.
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .expect("create");
+        mount.write(entry.node, 0, b"hello-world").expect("write");
+        mount.flush(entry.node).expect("flush — promote to warm");
+        assert!(
+            mount.warm_blob("scratch").is_some(),
+            "warm should hold the flushed bytes"
+        );
+        // Unlink while the fd lives on.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("unlink");
+        // ftruncate(fd, 5) through the orphaned NodeId.
+        mount
+            .set_attrs(
+                entry.node,
+                AttrUpdate {
+                    size: Some(5),
+                    ..Default::default()
+                },
+            )
+            .expect("ftruncate orphan");
+        // Read the truncated bytes. Without the warm-preservation
+        // fix, this returns "\0\0\0\0\0" instead of "hello".
+        let mut buf = vec![0u8; 16];
+        let n = mount
+            .read(entry.node, 0, &mut buf)
+            .expect("read truncated orphan");
+        assert_eq!(
+            &buf[..n],
+            b"hello",
+            "truncate-then-read on orphan must seed from preserved warm bytes"
+        );
+        // Path stays gone.
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("scratch"))
+                .unwrap()
+                .is_none(),
+            "truncate after unlink must not resurrect the path"
+        );
+    }
+
+    /// Rename-over when the displaced destination has warm-tier bytes
+    /// (no in-flight hot buffer) must preserve those bytes for the
+    /// still-open fd. Without the fix, `move_file`'s blind
+    /// `pending.warm.remove(new_path)` dropped them; the surviving fd
+    /// either sees the source's replacement bytes or an empty file.
+    #[test]
+    fn rename_over_preserves_warm_for_open_fd() {
+        let (_temp, mount) = open_mount();
+        // Open hello.txt and write+flush so its bytes live in warm,
+        // not hot. r7's existing rename-over preservation fix is for
+        // hot buffers; this one exercises the warm-tier preservation.
+        let dest_id = mount.lookup_path("hello.txt").unwrap();
+        mount.write(dest_id, 0, b"DEST-WARM-BYTES").expect("write dest");
+        mount.flush(dest_id).expect("flush dest — promote to warm");
+        assert!(
+            mount.warm_blob("hello.txt").is_some(),
+            "dest must be warm-promoted at rename time"
+        );
+        // Build a source file with replacement payload and flush.
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .expect("create src");
+        mount.write(src.node, 0, b"REPLACE-DATA").expect("write src");
+        mount.flush(src.node).expect("flush src");
+        // Rename src over dest. dest's pathname is rebound to src.
+        // dest's open fd must keep seeing the displaced WARM bytes.
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+            )
+            .expect("rename-over");
+        // Read via the displaced inode id. Without the fix, this
+        // returns "REPLACE-DATA" (source's bytes via `warm[new_path]`)
+        // or captured "world" (fallback after warm drop).
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(dest_id, 0, &mut buf)
+            .expect("read via replaced dest fd");
+        assert_eq!(
+            &buf[..n],
+            b"DEST-WARM-BYTES",
+            "open fd on replaced dest must see pre-rename WARM bytes"
+        );
+        // attrs must match.
+        let attrs = mount.attrs(dest_id).expect("attrs via replaced dest fd");
+        assert_eq!(
+            attrs.size, 15,
+            "attrs must report preserved warm size, not replacement or captured"
+        );
+    }
+
+    /// FUSE `flush` fires on every descriptor close (including dup'd
+    /// fds); only `release` is the last-close-per-inode signal. r7
+    /// cleared the orphan marker in `flush_node`, so the FIRST close of
+    /// a dup'd unlinked fd cleared the marker prematurely. A subsequent
+    /// write through the surviving dup would then take the non-orphan
+    /// branch and republish the unlinked path.
+    ///
+    /// We exercise the contract by simulating the two-open lifecycle:
+    /// `on_open` twice (representing 2 fds), `unlink`, `flush` (orphan
+    /// marker must stay), `release` once (one fd closed; marker stays),
+    /// `release` again (last close; marker clears).
+    #[test]
+    fn flush_keeps_orphan_marker_until_release() {
+        let (_temp, mount) = open_mount();
+        // Capture-backed file, opened twice (e.g. one fd then dup —
+        // FUSE would track these as a single open + multiple flushes
+        // + one release; or two opens + two releases. Either way the
+        // marker must persist across the non-final close.)
+        let node = mount.lookup_path("hello.txt").unwrap();
+        // Two opens → refcount 2.
+        mount.on_open(node).expect("open 1");
+        mount.on_open(node).expect("open 2");
+        // Unlink while both fds live on.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink");
+        assert!(
+            mount.orphans_contains(node),
+            "unlink-while-open must set the orphan marker"
+        );
+        // `flush` fires on each close (per FUSE protocol). It MUST NOT
+        // clear the orphan marker — the surviving fd needs to keep
+        // taking the orphan branch on writes.
+        mount.flush(node).expect("flush #1");
+        assert!(
+            mount.orphans_contains(node),
+            "flush must not clear the orphan marker"
+        );
+        // First `release` — represents one of the two fds closing.
+        // Marker still present because the other fd holds the inode.
+        mount.release(node).expect("release #1");
+        assert!(
+            mount.orphans_contains(node),
+            "non-final release must not clear orphan marker"
+        );
+        // Second `release` — the last close. Now the marker must
+        // clear, the orphan buffer (if any) drops, and the inode's
+        // bookkeeping is freed.
+        mount.release(node).expect("release #2");
+        assert!(
+            !mount.orphans_contains(node),
+            "final release must clear the orphan marker"
+        );
+    }
+
+    /// `RENAME_NOREPLACE` must be honoured atomically by the core. r6/r7
+    /// did the existence-check in the FUSE shell and the rename in the
+    /// core under separate locks — between the two, a concurrent writer
+    /// could create the destination and the rename would silently
+    /// clobber it. r8 plumbs the flag into the core's mutation
+    /// critical section so the check + rename land under the same
+    /// write-side lock.
+    ///
+    /// Deterministic shape: with the flag set, `rename_entry_with_options`
+    /// must return `AlreadyExists` when the destination resolves. The
+    /// caller is responsible for not racing — but with the core
+    /// honouring the flag inside its own critical section, sequential
+    /// callers (FUSE serializes write callbacks per inode anyway) get
+    /// strict NOREPLACE semantics.
+    #[test]
+    fn rename_noreplace_is_atomic() {
+        use crate::shell::RenameOptions;
+        let (_temp, mount) = open_mount();
+        // Build a source file with bytes; flush so the rename works
+        // entirely from warm tier.
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .expect("create src");
+        mount.write(src.node, 0, b"draft-bytes").expect("write src");
+        mount.flush(src.node).expect("flush src");
+        // Destination already exists in the captured tree. With
+        // NOREPLACE the rename must refuse with `EEXIST`/`AlreadyExists`
+        // BEFORE making any mutation.
+        let err = mount
+            .rename_entry_with_options(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                RenameOptions { no_replace: true },
+            )
+            .expect_err("NOREPLACE over existing dest must fail");
+        assert!(
+            matches!(err, MountError::AlreadyExists(_)),
+            "got unexpected error: {err:?}"
+        );
+        assert_eq!(err.to_errno(), libc::EEXIST);
+        // The source must still be intact — NOREPLACE failure must not
+        // leave the source in a half-renamed state.
+        let src_after = mount
+            .lookup(NodeId::ROOT, OsStr::new("draft"))
+            .unwrap()
+            .expect("source intact after NOREPLACE rejection");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(src_after.node, 0, &mut buf).unwrap();
+        assert_eq!(
+            &buf[..n],
+            b"draft-bytes",
+            "source bytes intact after NOREPLACE rejection"
+        );
+        // And the destination must still be the captured "world".
+        let dst = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("dest still resolves");
+        let mut buf = vec![0u8; 16];
+        let n = mount.read(dst.node, 0, &mut buf).unwrap();
+        assert_eq!(
+            &buf[..n],
+            b"world",
+            "dest bytes unchanged after NOREPLACE rejection"
+        );
+
+        // Same call WITHOUT the flag must succeed (and replace).
+        mount
+            .rename_entry_with_options(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                RenameOptions::default(),
+            )
+            .expect("rename without NOREPLACE replaces");
+        let dst2 = mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .expect("dst still resolves");
+        let mut buf = vec![0u8; 32];
+        let n = mount.read(dst2.node, 0, &mut buf).unwrap();
+        assert_eq!(
+            &buf[..n],
+            b"draft-bytes",
+            "non-NOREPLACE rename replaces dest"
+        );
+    }
+
+    // --- Codex round 9 finding: hot bytes lost on unlink-of-open ------------
+    //
+    // r8 closed the warm-tier / lifecycle / atomicity sweep. r9 surfaced a
+    // remaining same-shape regression: `unlink_entry` removes
+    // `pending.hot[node_id]` for the orphan branch, so an open fd whose only
+    // bytes lived in the hot buffer (write then unlink, no flush in between)
+    // loses them. Codex thread 3293307302.
+    //
+    // Under the post-spike unified NodeId-keyed model, hot[node_id] survives
+    // the Live → Orphan transition by construction — bytes follow the NodeId,
+    // not the path. This test pins the contract: write to an open fd, unlink
+    // the path, read through the surviving fd → original bytes.
+
+    /// `open(path) → write(fd, "DIRTY") → unlink(path) → read(fd)` must
+    /// return `"DIRTY"`. POSIX open-unlinked semantics: the inode lives
+    /// behind the fd until the last close. The pre-spike code dropped
+    /// `pending.hot[node_id]` inside `unlink_entry`, so the read fell
+    /// through to the captured blob (`"world"`) instead of the dirty hot
+    /// bytes the fd had written.
+    #[test]
+    fn unlink_open_fd_preserves_unflushed_hot_bytes() {
+        let (_temp, mount) = open_mount();
+        // `fd = open("hello.txt")` — captured file with bytes "world".
+        let node = mount.lookup_path("hello.txt").unwrap();
+        mount.on_open(node).expect("on_open");
+        // Write through the fd, do NOT flush. The bytes live only in
+        // `pending.hot[node]`.
+        mount
+            .write(node, 0, b"DIRTY-BYTES")
+            .expect("write through open fd");
+        // `unlink("hello.txt")` while the fd lives on.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+            .expect("unlink while open");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
+            "post-unlink lookup must be gone"
+        );
+        // Read via the orphaned fd. The bytes the fd wrote must survive
+        // the unlink — POSIX open-unlinked. Pre-fix, hot[node] was
+        // dropped at unlink and this returned "world" (captured blob).
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(node, 0, &mut buf)
+            .expect("read via orphan fd");
+        assert_eq!(
+            &buf[..n],
+            b"DIRTY-BYTES",
+            "open fd → write → unlink → read must return the unflushed bytes \
+             (regression: pre-spike code dropped hot[node_id] in unlink_entry)"
+        );
+        // attrs must report the dirty-buffer size, not the captured size.
+        let attrs = mount.attrs(node).expect("attrs via orphan fd");
+        assert_eq!(
+            attrs.size, 11,
+            "attrs on orphan must report hot-buffer size, not captured"
+        );
+    }
+
+    // --- Codex round 12 findings: capture / invalidate / forget / rmdir / -----
+    // --- symlinks / read_link ------------------------------------------------
+    //
+    // Six P1 + one P3 findings on the post-spike base (`58a30b2`). Each test
+    // pins the contract from one Codex review thread on PR #182.
+
+    /// Codex thread 3293484633 (P1). `capture_with_attribution` clears
+    /// `pending.state` unconditionally → drops Orphan tracking for inodes
+    /// with still-open fds. Post-capture writes through such an fd then take
+    /// the non-orphan branch and republish the (tombstoned) pathname. The
+    /// fix retains Orphan entries (and their per-NodeId hot/warm bytes) and
+    /// only retires Live entries.
+    #[test]
+    fn capture_preserves_orphan_state_for_open_inodes() {
+        let (_temp, mount) = open_mount();
+        // Create a fresh file, open it (refcount = 1), write through the
+        // fd, then unlink. The directory entry goes; the inode lives on
+        // behind the fd as an Orphan with open_count = 1.
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .expect("create");
+        mount.on_open(entry.node).expect("on_open");
+        mount.write(entry.node, 0, b"BYTES").expect("write");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("unlink");
+        assert!(
+            mount.orphans_contains(entry.node),
+            "pre-capture sanity: unlink-while-open must orphan the inode"
+        );
+
+        // Capture. Pre-fix, this wipes `state` (and `hot` + `warm`),
+        // losing the orphan tracking + the surviving fd's bytes.
+        mount
+            .capture(Some("capture with orphan open".into()))
+            .expect("capture");
+
+        // The fd is still in the kernel's hands; the inode must remain
+        // Orphan so a subsequent write through the fd takes the orphan
+        // branch and does not republish the deleted pathname.
+        assert!(
+            mount.orphans_contains(entry.node),
+            "capture must preserve Orphan state for inodes with surviving fds"
+        );
+        mount
+            .write(entry.node, 0, b"AFTER")
+            .expect("write through orphan fd survives capture");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("scratch"))
+                .unwrap()
+                .is_none(),
+            "post-capture write through orphan fd must not republish the path"
+        );
+        // The per-NodeId hot bytes must also survive capture so reads via
+        // the orphan fd serve the inode's own data (POSIX open-unlinked).
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(entry.node, 0, &mut buf)
+            .expect("read via orphan fd after capture");
+        assert_eq!(
+            &buf[..n],
+            b"AFTER",
+            "orphan hot bytes must survive capture so the fd's own writes are readable"
+        );
+    }
+
+    /// Codex threads 3293484634 + 3293510311 (P1). `invalidate` (FUSE
+    /// `forget`) drops `pending.warm[node]` unconditionally, but `forget`
+    /// only signals that the kernel released its cached inode reference —
+    /// not that the file's pending overlay data can be discarded. Warm is
+    /// the only durable pre-capture copy of flushed writes; dropping it
+    /// silently loses the user's committed-in-session data.
+    #[test]
+    fn invalidate_preserves_warm_bytes_for_live_inode() {
+        let (_temp, mount) = open_mount();
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("durable"), FileMode::Normal, false)
+            .expect("create");
+        mount.write(entry.node, 0, b"DURABLE-WARM").expect("write");
+        mount
+            .flush(entry.node)
+            .expect("flush — promote bytes to warm tier");
+        assert!(
+            mount.warm_blob("durable").is_some(),
+            "pre-invalidate: warm tier holds the flushed bytes"
+        );
+
+        // Kernel drops its cached inode reference. The file's path still
+        // exists from the user's POV; capture must still plant its bytes.
+        mount.invalidate(entry.node).expect("invalidate (kernel forget)");
+
+        let change_id = mount
+            .capture(Some("post-invalidate capture".into()))
+            .expect("capture");
+        let bytes = read_captured_blob(&mount, &change_id, "durable");
+        assert_eq!(
+            &bytes[..],
+            b"DURABLE-WARM",
+            "warm bytes must survive invalidate so capture can plant them"
+        );
+    }
+
+    /// Codex thread 3293510310 (P1). `rmdir_entry` plants a
+    /// `dir_tombstones` entry but leaves `inodes.by_path[child_path]`
+    /// intact. A subsequent `create_file` / `make_dir` at the same path
+    /// then coalesces onto the removed directory's NodeId via
+    /// `Inodes::intern`'s path-keyed reverse index — that's a stale-handle
+    /// class identical to the one `unlink_entry` already guards against
+    /// by retiring `by_path`.
+    #[test]
+    fn rmdir_retires_path_to_inode_binding() {
+        let (_temp, mount) = open_mount();
+        let dir = mount
+            .make_dir(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("mkdir");
+        mount
+            .rmdir_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("rmdir");
+        // Recreate the name as a regular file. The fresh inode must NOT
+        // be the removed directory's NodeId — POSIX remove-and-recreate
+        // isolation forbids rebinding a cached dir inode to a different
+        // object type.
+        let file = mount
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("scratch"),
+                FileMode::Normal,
+                false,
+            )
+            .expect("recreate as file");
+        assert_ne!(
+            file.node, dir.node,
+            "remove-and-recreate at same path must mint a fresh inode \
+             (rmdir must retire inodes.by_path so intern does not coalesce)"
+        );
+    }
+
+    /// Codex thread 3293510316 (P1). `read_link` on a captured `Symlink`
+    /// record reconstructs an `OsStr` with `OsStr::from_encoded_bytes_unchecked`
+    /// from blob bytes loaded from the store. That call's safety contract
+    /// requires bytes minted by `OsStr::as_encoded_bytes` in *this*
+    /// process and Rust version — captured-tree bytes can come from any
+    /// process and any version, so the call is unsound.
+    ///
+    /// On Unix, the platform-safe replacement is `OsStrExt::from_bytes`
+    /// (sound for any byte sequence); on Windows, the bytes must be UTF-8
+    /// validated and rejected otherwise (the encoding contract for `OsStr`
+    /// is process-internal). This test pins the round-trip contract: a
+    /// captured symlink's target is recoverable byte-for-byte.
+    #[test]
+    fn read_link_safe_for_captured_symlink_bytes() {
+        let (_temp, mount) = open_mount();
+        // Create + capture a symlink so the next read_link goes through
+        // the captured-blob branch (the unsound site).
+        mount
+            .create_symlink(NodeId::ROOT, OsStr::new("link"), Path::new("hello.txt"))
+            .expect("create_symlink");
+        let _ = mount
+            .capture(Some("plant link".into()))
+            .expect("capture");
+        let entry = mount
+            .lookup(NodeId::ROOT, OsStr::new("link"))
+            .unwrap()
+            .expect("captured symlink resolves");
+        let resolved = mount.read_link(entry.node).expect("read_link");
+        assert_eq!(
+            resolved,
+            std::ffi::OsString::from("hello.txt"),
+            "captured symlink must decode via a sound platform-safe path"
+        );
+    }
+
+    /// Codex thread 3293510317 (P3). `unlink_entry` always transitions
+    /// the removed node into `NodeState::Orphan`, but symlinks are not
+    /// openable for IO — they never receive `open`/`release` lifecycle
+    /// events to clear the state. The entry accumulates in `pending.state`
+    /// until capture/invalidate. The fix gates the orphan transition on
+    /// `entry.kind != Symlink`.
+    #[test]
+    fn unlink_of_symlink_does_not_create_orphan_state() {
+        let (_temp, mount) = open_mount();
+        let link = mount
+            .create_symlink(NodeId::ROOT, OsStr::new("link"), Path::new("hello.txt"))
+            .expect("create_symlink");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("link"))
+            .expect("unlink symlink");
+        assert!(
+            !mount.orphans_contains(link.node),
+            "symlinks have no open/release lifecycle; unlink must not orphan them"
+        );
+    }
+
+    /// Codex thread 3293680448 (P1). `Inodes::forget` unconditionally
+    /// removes `by_path[path]` for the retired record. After an
+    /// unlink-then-recreate cycle, the stored `path` may be rebound to
+    /// a *different* live inode. A late kernel `forget` for the old
+    /// inode then deletes the live inode's path binding — capture's
+    /// warm-entry path check skips the entry, breaking lookup/read/write
+    /// routing for the replacement.
+    #[test]
+    fn forget_after_unlink_recreate_preserves_new_path_binding() {
+        let (_temp, mount) = open_mount();
+        // v1 minted and opened. unlink while open → v1 orphans; by_path
+        // is detached. v2 created at the same name → mints fresh inode.
+        let v1 = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .expect("create v1");
+        mount.on_open(v1.node).expect("on_open v1");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("unlink v1");
+        let v2 = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .expect("recreate as v2");
+        assert_ne!(v1.node, v2.node, "recreate must mint a fresh inode");
+        mount.write(v2.node, 0, b"v2-bytes").expect("write v2");
+        mount.flush(v2.node).expect("flush v2 to warm");
+
+        // Kernel forgets v1 (the orphan). Pre-fix, `Inodes::forget`'s
+        // blind `by_path.remove("scratch")` wipes v2's binding.
+        mount.invalidate(v1.node).expect("forget v1");
+
+        // Lookup via warm must still resolve via v2.
+        let hit = mount
+            .lookup(NodeId::ROOT, OsStr::new("scratch"))
+            .unwrap()
+            .expect("scratch still resolves after old-inode forget");
+        assert_eq!(hit.node, v2.node, "lookup must return v2's NodeId");
+
+        // Capture must plant v2's bytes. Pre-fix the by_path binding is
+        // wiped → apply_pending_to_tree's path check skips v2 → captured
+        // tree is missing scratch.
+        let change_id = mount
+            .capture(Some("post-forget capture".into()))
+            .expect("capture");
+        let captured = read_captured_blob(&mount, &change_id, "scratch");
+        assert_eq!(
+            &captured[..],
+            b"v2-bytes",
+            "captured tree must contain v2's bytes — forget of the old \
+             inode must not wipe the new inode's path binding"
+        );
+    }
+
+    // --- Codex round 13 findings: setattr lock discipline + name/mode pickiness
+    //
+    // r12 closed the post-spike NodeId-keyed refactor's residual surgical
+    // gaps. r13 surfaces three more same-class issues that all live in the
+    // write-side `set_attrs` / `validate_entry_name` surface:
+    //
+    //   1. `set_attrs(size=...)` routes into `apply_truncate` without taking
+    //      `write_mu`. Concurrent with `rename`, the truncate's final
+    //      bookkeeping uses the pre-rename pathname — republishing
+    //      `hot_by_path[old]` and clearing the rename's tombstone, so the
+    //      old name resurrects. (Codex thread 3293733165, P1.)
+    //   2. `validate_entry_name` rejects only NUL and `/`, but the tree
+    //      serializer additionally rejects `\` and control bytes
+    //      (0x01..=0x1F, 0x7F). Names that pass the FUSE-side check then
+    //      fail at capture with a confusing "invalid object" error rather
+    //      than a clean EINVAL at write time. (Codex thread 3293733163, P2.)
+    //   3. `set_attrs`'s Normal↔Executable fold treats any of the three
+    //      execute bits as executable (`mode & 0o111 != 0`). The contract
+    //      is "user execute only" — a `chmod 0o010` (group execute) must
+    //      stay Normal. (Codex thread 3293733164, P2.)
+
+    /// Codex r13 thread 3293733165 (P1). `set_attrs(size=...)` racing
+    /// with `rename_entry` must not republish the pre-rename pathname.
+    ///
+    /// Mechanism without `write_mu` in `set_attrs`: `apply_truncate`
+    /// captures `path` at the top via `record_for`, then drops every
+    /// lock for the seed `load_blob_bytes` call. A concurrent rename
+    /// fits entirely in that lock-free window — it inserts
+    /// `tombstones[old]`, removes `hot_by_path[old]`, and rebases the
+    /// inode's stored path. When `apply_truncate`'s phase-2 mutation
+    /// re-acquires the pending lock and runs
+    /// `tombstones.remove(&path) + hot_by_path.insert(path, node)`
+    /// with the stale `path = old`, the rename's tombstone is wiped
+    /// and `lookup(old)` resurrects the file.
+    ///
+    /// Stress shape: 200 trials, two threads sync on a barrier and
+    /// then run their op concurrently. Even a single observation of
+    /// `lookup(old).is_some()` after both complete fails the test.
+    /// With the fix (`write_mu` held around the mutating `set_attrs`
+    /// paths), the race is structurally impossible.
+    #[test]
+    fn setattr_truncate_serializes_against_rename() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        const TRIALS: usize = 200;
+        let mut resurrected: Vec<usize> = Vec::new();
+        for trial in 0..TRIALS {
+            let (_temp, mount) = open_mount();
+            let mount = Arc::new(mount);
+            // `hello.txt` is a captured 5-byte file; `apply_truncate`'s
+            // NeedSeed branch will fetch the blob and widen the
+            // lock-free window during the race.
+            let node = mount.lookup_path("hello.txt").unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+
+            let b_a = barrier.clone();
+            let m_a = mount.clone();
+            let h_a = thread::spawn(move || {
+                b_a.wait();
+                m_a.set_attrs(
+                    node,
+                    AttrUpdate {
+                        size: Some(2),
+                        ..Default::default()
+                    },
+                )
+                .expect("setattr(size=2)");
+            });
+            let b_b = barrier.clone();
+            let m_b = mount.clone();
+            let h_b = thread::spawn(move || {
+                b_b.wait();
+                m_b.rename_entry(
+                    NodeId::ROOT,
+                    OsStr::new("hello.txt"),
+                    NodeId::ROOT,
+                    OsStr::new("renamed.txt"),
+                )
+                .expect("rename");
+            });
+            h_a.join().unwrap();
+            h_b.join().unwrap();
+
+            // Invariant: regardless of interleaving, the pre-rename
+            // path must not resolve after both ops complete.
+            if mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_some()
+            {
+                resurrected.push(trial);
+            }
+        }
+        assert!(
+            resurrected.is_empty(),
+            "setattr(size)+rename race resurrected pre-rename path \
+             in {} of {} trials (trials: {:?})",
+            resurrected.len(),
+            TRIALS,
+            resurrected,
+        );
+    }
+
+    /// Codex r13 thread 3293733163 (P2). `validate_entry_name` must
+    /// reject every name the tree serializer would reject — otherwise
+    /// the overlay accepts a create/rename that later blows up at
+    /// `capture` with a confusing "invalid object" error.
+    ///
+    /// The tree serializer's rule (objects::object::tree_entry::
+    /// validate_name) rejects: empty, `.`, `..`, anything containing
+    /// `/` or `\`, anything with a byte < 0x20 or == 0x7F. The mount's
+    /// `validate_entry_name` previously rejected only NUL + `/`.
+    ///
+    /// Each name in this list pins one rule the mount must enforce up
+    /// front. Without the fix, `create_file` / `rename` accept these
+    /// and the failure surfaces later (or not at all, leaking a stale
+    /// pending entry).
+    #[test]
+    fn create_rejects_names_tree_cannot_serialize() {
+        let (_temp, mount) = open_mount();
+        // Each (name, why) tuple is rejected by the tree serializer.
+        let cases: &[(&[u8], &str)] = &[
+            (b"with\\backslash", "backslash (path separator on Windows)"),
+            (b"bel\x07", "BEL (0x07) is a control char"),
+            (b"esc\x1b", "ESC (0x1B) is a control char"),
+            (b"tab\there", "TAB (0x09) is a control char"),
+            (b"newline\nhere", "LF (0x0A) is a control char"),
+            (b"cr\rhere", "CR (0x0D) is a control char"),
+            (b"del\x7f", "DEL (0x7F) is the upper control char"),
+        ];
+        for (bytes, why) in cases {
+            // Build the OsStr from raw bytes so we can include non-UTF-8
+            // tricks (the safe path here is all-ASCII, but the helper
+            // is byte-oriented to match the tree serializer's reject
+            // set).
+            #[cfg(unix)]
+            let name = {
+                use std::os::unix::ffi::OsStrExt;
+                std::ffi::OsString::from(OsStr::from_bytes(bytes))
+            };
+            #[cfg(not(unix))]
+            let name = std::ffi::OsString::from(
+                std::str::from_utf8(bytes).expect("ascii test inputs"),
+            );
+
+            let err = mount
+                .create_file(NodeId::ROOT, &name, FileMode::Normal, false)
+                .expect_err(&format!(
+                    "create_file must reject {name:?} ({why}) up front"
+                ));
+            assert!(
+                matches!(err, MountError::InvalidArgument(_)),
+                "expected InvalidArgument for {name:?} ({why}), got {err:?}"
+            );
+        }
+    }
+
+    /// Codex r13 thread 3293733164 (P2). The Normal↔Executable mode
+    /// fold must trigger on the user execute bit (S_IXUSR = 0o100)
+    /// only, not on any of the three execute bits (0o111). A
+    /// `chmod 0o010` (group execute only) must NOT promote a Normal
+    /// file to Executable — that would unexpectedly grant owner
+    /// execute at capture time.
+    #[test]
+    fn chmod_group_execute_alone_doesnt_promote_to_executable() {
+        let (_temp, mount) = open_mount();
+        let node = mount.lookup_path("hello.txt").unwrap();
+        // chmod 0o010: group execute only. Per the contract, this
+        // must NOT promote to Executable.
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    mode: Some(0o100_010),
+                    ..Default::default()
+                },
+            )
+            .expect("chmod 0o010");
+        // FileMode::Normal serializes to 0o644 (no execute anywhere);
+        // FileMode::Executable serializes to 0o755 (all execute bits).
+        // The fix gates the fold on S_IXUSR (0o100), so 0o010 leaves
+        // the record as Normal → unix_mode has no execute bits at all.
+        assert_eq!(
+            attrs.unix_mode & 0o111,
+            0,
+            "chmod 0o010 must NOT promote to Executable (got unix_mode={:o})",
+            attrs.unix_mode
+        );
+
+        // Companion assertion (anti-regression): chmod 0o100 (user
+        // execute only) DOES promote to Executable.
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    mode: Some(0o100_100),
+                    ..Default::default()
+                },
+            )
+            .expect("chmod 0o100");
+        assert_eq!(
+            attrs.unix_mode & 0o111,
+            0o111,
+            "chmod 0o100 must promote to Executable (got unix_mode={:o})",
+            attrs.unix_mode
+        );
+
+        // And chmod 0o755 (the canonical Executable path) still
+        // works — this is the path the r12 baseline already covers
+        // and we don't want to regress.
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    mode: Some(0o100_755),
+                    ..Default::default()
+                },
+            )
+            .expect("chmod 0o755");
+        assert_eq!(
+            attrs.unix_mode & 0o111,
+            0o111,
+            "chmod 0o755 must keep Executable (got unix_mode={:o})",
+            attrs.unix_mode
+        );
+    }
+}
+
 // D1. Property test for two-tier semantics.
 mod proptests {
     use std::collections::BTreeMap;
@@ -1685,5 +3671,244 @@ mod fuse_smoke {
         let read = std::fs::read_to_string(mountpoint.path().join("seed.txt")).unwrap();
         assert_eq!(read, "hello");
         drop(session);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PlatformShell default-impl coverage.
+//
+// Every write-side method on the trait has a default body that returns
+// `MountError::ReadOnly`. A read-only adapter (e.g. a future "snapshot
+// browser" shell that only implements the six required methods) inherits
+// those defaults. These tests exercise the default bodies so the contract
+// stays observable: read-only shells uniformly surface `ReadOnly` rather
+// than panicking or silently succeeding.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod platform_shell_defaults {
+    use std::{
+        ffi::{OsStr, OsString},
+        path::Path,
+        time::SystemTime,
+    };
+
+    use objects::object::FileMode;
+
+    use crate::{
+        error::{MountError, Result},
+        shell::{AttrUpdate, Attrs, Entry, NodeId, NodeKind, PlatformShell},
+    };
+
+    /// Minimal read-only shell that implements only the required
+    /// methods. Every write-side default kicks in.
+    struct ReadOnlyStub;
+
+    impl PlatformShell for ReadOnlyStub {
+        fn lookup(&self, _parent: NodeId, _name: &OsStr) -> Result<Option<Entry>> {
+            Ok(None)
+        }
+        fn read(&self, _node: NodeId, _offset: u64, _buf: &mut [u8]) -> Result<usize> {
+            Ok(0)
+        }
+        fn write(&self, _node: NodeId, _offset: u64, _data: &[u8]) -> Result<usize> {
+            Err(MountError::ReadOnly)
+        }
+        fn enumerate(&self, _dir: NodeId) -> Result<Vec<Entry>> {
+            Ok(vec![])
+        }
+        fn attrs(&self, _node: NodeId) -> Result<Attrs> {
+            Ok(Attrs {
+                node: NodeId::ROOT,
+                kind: NodeKind::Directory,
+                size: 0,
+                unix_mode: 0o040755,
+                nlink: 1,
+                mtime: SystemTime::UNIX_EPOCH,
+            })
+        }
+        fn invalidate(&self, _node: NodeId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn is_readonly<T>(r: Result<T>) -> bool {
+        matches!(r, Err(MountError::ReadOnly))
+    }
+
+    #[test]
+    fn defaults_uniformly_surface_readonly() {
+        let s = ReadOnlyStub;
+        assert!(is_readonly(s.create_file(
+            NodeId::ROOT,
+            OsStr::new("x"),
+            FileMode::Normal,
+            false,
+        )));
+        assert!(is_readonly(s.make_dir(NodeId::ROOT, OsStr::new("d"))));
+        assert!(is_readonly(s.unlink_entry(NodeId::ROOT, OsStr::new("x"))));
+        assert!(is_readonly(s.rmdir_entry(NodeId::ROOT, OsStr::new("d"))));
+        assert!(is_readonly(s.rename_entry(
+            NodeId::ROOT,
+            OsStr::new("a"),
+            NodeId::ROOT,
+            OsStr::new("b"),
+        )));
+        assert!(is_readonly(s.set_attrs(NodeId::ROOT, AttrUpdate::default())));
+        assert!(is_readonly(s.create_symlink(
+            NodeId::ROOT,
+            OsStr::new("ln"),
+            Path::new("target"),
+        )));
+        let read_link_result: Result<OsString> = s.read_link(NodeId::ROOT);
+        assert!(is_readonly(read_link_result));
+    }
+
+    /// The default `release` body delegates to `flush`. A shell that
+    /// overrides only `flush` should see `release` follow through.
+    #[test]
+    fn release_default_delegates_to_flush() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct CountFlush(AtomicUsize);
+        impl PlatformShell for CountFlush {
+            fn lookup(&self, _p: NodeId, _n: &OsStr) -> Result<Option<Entry>> {
+                Ok(None)
+            }
+            fn read(&self, _n: NodeId, _o: u64, _b: &mut [u8]) -> Result<usize> {
+                Ok(0)
+            }
+            fn write(&self, _n: NodeId, _o: u64, _b: &[u8]) -> Result<usize> {
+                Ok(0)
+            }
+            fn enumerate(&self, _d: NodeId) -> Result<Vec<Entry>> {
+                Ok(vec![])
+            }
+            fn attrs(&self, _n: NodeId) -> Result<Attrs> {
+                Ok(Attrs {
+                    node: NodeId::ROOT,
+                    kind: NodeKind::Directory,
+                    size: 0,
+                    unix_mode: 0o040755,
+                    nlink: 1,
+                    mtime: SystemTime::UNIX_EPOCH,
+                })
+            }
+            fn invalidate(&self, _n: NodeId) -> Result<()> {
+                Ok(())
+            }
+            fn flush(&self, _n: NodeId) -> Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let s = CountFlush(AtomicUsize::new(0));
+        s.release(NodeId::ROOT).unwrap();
+        assert_eq!(s.0.load(Ordering::SeqCst), 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capture-after-write-op coverage.
+//
+// The materialize pass in `core::capture` has distinct branches for
+// pending file overrides, symlink overrides, dir tombstones, explicit
+// empty dirs, and the captured-counterpart-load path. The unit-level
+// write-op tests in `mod write_ops` exercise the pre-capture state;
+// these add coverage for what the captured tree actually looks like
+// once those overlay actions flow through capture.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod capture_write_ops {
+    use super::*;
+    use objects::object::FileMode;
+    use std::path::Path;
+
+    fn dump_tree(store: &dyn ObjectStore, hash: &ContentHash) -> Tree {
+        store.get_tree(hash).unwrap().unwrap()
+    }
+
+    /// `make_dir` followed by `capture` must materialize the empty
+    /// directory as a zero-entry tree under the parent (the
+    /// `force_empty` arm of `materialize`).
+    #[test]
+    fn capture_after_make_dir_materializes_empty_subtree() {
+        let (_temp, mount) = open_mount();
+        mount.make_dir(NodeId::ROOT, OsStr::new("blank")).unwrap();
+        let id = mount.capture(Some("empty dir".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&id).unwrap().unwrap();
+        let root = dump_tree(store, &state.tree);
+        let blank = root.get("blank").expect("blank dir survives capture");
+        assert!(blank.is_tree());
+        let blank_tree = dump_tree(store, &blank.hash);
+        assert_eq!(blank_tree.entries().len(), 0);
+    }
+
+    /// `create_symlink` then `capture` writes the target as a CAS blob
+    /// and emits a Symlink tree entry referring to it.
+    #[test]
+    fn capture_after_create_symlink_emits_symlink_entry() {
+        let (_temp, mount) = open_mount();
+        mount
+            .create_symlink(
+                NodeId::ROOT,
+                OsStr::new("alias.txt"),
+                Path::new("hello.txt"),
+            )
+            .unwrap();
+        let id = mount.capture(Some("symlink".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&id).unwrap().unwrap();
+        let root = dump_tree(store, &state.tree);
+        let alias = root.get("alias.txt").expect("symlink lands in tree");
+        assert!(matches!(
+            alias.mode,
+            objects::object::FileMode::Symlink
+        ));
+    }
+
+    /// A rmdir tombstone for a captured dir must drop the whole subtree
+    /// from the next capture (the `dir_deletions` branch).
+    #[test]
+    fn capture_after_rmdir_drops_subtree() {
+        // Build a fresh repo with a `dir/` containing one file; capture
+        // it; remount; rmdir+capture should produce a root without `dir/`.
+        let (_temp, mount) = fresh_mount();
+        let node = create_pending_file(&mount, "dir/only.rs", FileMode::Normal);
+        mount.write(node, 0, b"x").unwrap();
+        mount.flush_all().unwrap();
+        mount.capture(Some("plant".into())).unwrap();
+        // Unlink the file then rmdir the now-empty dir.
+        mount.unlink_path("dir/only.rs").unwrap();
+        let id = mount.capture(Some("delete".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&id).unwrap().unwrap();
+        let root = dump_tree(store, &state.tree);
+        assert!(root.get("dir").is_none(), "dir/ should be pruned");
+    }
+
+    /// `rename_entry` across an overlay-only file followed by capture
+    /// materializes the renamed name (and not the old name).
+    #[test]
+    fn capture_after_rename_overlay_file_uses_new_name() {
+        let (_temp, mount) = open_mount();
+        let src = mount
+            .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
+            .unwrap();
+        mount.write(src.node, 0, b"body").unwrap();
+        mount.flush(src.node).unwrap();
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("draft"),
+                NodeId::ROOT,
+                OsStr::new("final.txt"),
+            )
+            .unwrap();
+        let id = mount.capture(Some("rename".into())).unwrap();
+        let store = mount.repo_handle().store();
+        let state = store.get_state(&id).unwrap().unwrap();
+        let root = dump_tree(store, &state.tree);
+        assert!(root.get("draft").is_none(), "old name must be gone");
+        assert!(root.get("final.txt").is_some(), "new name must exist");
     }
 }

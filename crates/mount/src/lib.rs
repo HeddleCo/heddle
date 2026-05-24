@@ -62,7 +62,7 @@ pub use crate::{
     cache::{BlobCachePool, BlobCacheStats, DEFAULT_BLOB_CACHE_BYTES},
     core::{ContentAddressedMount, MountOptions, PrewarmHandle, PrewarmStats, PromotionPolicy},
     error::{MountError, Result},
-    shell::{Attrs, Entry, NodeId, NodeKind, PlatformShell},
+    shell::{AttrUpdate, Attrs, Entry, NodeId, NodeKind, PlatformShell},
 };
 
 #[cfg(test)]

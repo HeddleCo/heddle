@@ -14,12 +14,13 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    path::Path,
     time::SystemTime,
 };
 
 use objects::object::FileMode;
 
-use crate::error::Result;
+use crate::error::{MountError, Result};
 
 /// Identifier for a filesystem node within a single mount session.
 ///
@@ -141,17 +142,185 @@ pub trait PlatformShell {
     /// Promote any hot-tier buffer for `node` into a CAS blob. The
     /// FUSE `flush` callback dispatches here (fires on `close(2)`
     /// and explicit fsync). Default: no-op for read-only mounts.
+    ///
+    /// Lifecycle note: FUSE `flush` fires on *every* descriptor close
+    /// — including the close of a `dup`-derived fd — so it can be
+    /// invoked multiple times before the last open handle is gone.
+    /// Implementations that maintain per-inode "is the directory
+    /// entry still gone?" state (orphan tracking) MUST defer the
+    /// final clear to [`Self::release`]; touching it here would let a
+    /// surviving fd's next write republish the unlinked pathname.
     fn flush(&self, _node: NodeId) -> Result<()> {
         Ok(())
     }
 
-    /// Final close of `node`. Adapters call this on FUSE `release`
-    /// so a buffer that survived a missed `flush` still gets
-    /// promoted before the inode handle is retired. Default:
-    /// identical to flush.
+    /// Final close of `node`. The FUSE `release` callback dispatches
+    /// here; it fires once per `open(2)` after the last fd derived
+    /// from that open is closed. This is the canonical "last close of
+    /// the inode" signal — it is the right hook (NOT [`Self::flush`])
+    /// for retiring per-inode lifecycle state like orphan-tracking
+    /// markers or open-handle refcounts. Default: identical to flush
+    /// so shells that do not maintain per-inode lifecycle state
+    /// inherit a uniform contract.
     fn release(&self, node: NodeId) -> Result<()> {
         self.flush(node)
     }
+
+    /// Notify the shell that a new open file handle for `node` has
+    /// been minted. FUSE adapters call this on the `open` / `create`
+    /// callbacks so the shell can maintain a per-inode open-handle
+    /// refcount — used to time the [`Self::release`] cleanup against
+    /// the *final* close instead of the first one. Default: no-op so
+    /// shells without lifecycle state are unaffected.
+    fn on_open(&self, _node: NodeId) -> Result<()> {
+        Ok(())
+    }
+
+    /// Create a fresh regular file under `parent`. Mints a [`NodeId`]
+    /// for the new file in the writable overlay and returns its
+    /// [`Entry`]; subsequent [`write`](PlatformShell::write) calls
+    /// land in the per-thread hot tier.
+    ///
+    /// When `exclusive` is true (`O_CREAT|O_EXCL`), the call must
+    /// fail with [`MountError::AlreadyExists`] if `name` already
+    /// resolves under `parent` (either in the captured tree or the
+    /// pending tier). When `exclusive` is false, a hit on an
+    /// existing entry is returned as-is (same shape as `lookup`).
+    ///
+    /// Default: [`MountError::ReadOnly`] — implementations that
+    /// don't support mutation inherit a uniform errno.
+    fn create_file(
+        &self,
+        _parent: NodeId,
+        _name: &OsStr,
+        _mode: FileMode,
+        _exclusive: bool,
+    ) -> Result<Entry> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Create an empty directory under `parent` in the overlay.
+    /// Returns the new directory's [`Entry`]. Fails with
+    /// [`MountError::AlreadyExists`] when `name` already resolves.
+    fn make_dir(&self, _parent: NodeId, _name: &OsStr) -> Result<Entry> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Delete the file named `name` under `parent`. The captured-tree
+    /// entry (if any) is tombstoned so [`lookup`](Self::lookup) /
+    /// [`enumerate`](Self::enumerate) skip it; any pending-tier hot
+    /// buffer or warm blob for the path is dropped.
+    ///
+    /// Fails with [`MountError::NotFound`] if `name` doesn't resolve,
+    /// or [`MountError::IsADirectory`] if it resolves to a directory.
+    fn unlink_entry(&self, _parent: NodeId, _name: &OsStr) -> Result<()> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Remove the empty directory named `name` under `parent`. Fails
+    /// with [`MountError::NotADirectory`] for a file, with
+    /// [`MountError::NotEmpty`] when the directory still has visible
+    /// children (across captured tree + pending tier), or
+    /// [`MountError::NotFound`] when nothing resolves.
+    fn rmdir_entry(&self, _parent: NodeId, _name: &OsStr) -> Result<()> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Atomically rename `(old_parent, old_name)` to
+    /// `(new_parent, new_name)`. Handles both same-directory and
+    /// cross-directory cases. Replacing an existing entry of the
+    /// same kind is allowed (POSIX semantics); replacing a directory
+    /// with a file (or vice-versa) fails with
+    /// [`MountError::IsADirectory`] / [`MountError::NotADirectory`].
+    fn rename_entry(
+        &self,
+        _old_parent: NodeId,
+        _old_name: &OsStr,
+        _new_parent: NodeId,
+        _new_name: &OsStr,
+    ) -> Result<()> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Same as [`Self::rename_entry`] but honours [`RenameOptions`] —
+    /// in particular `no_replace`, which atomically refuses the rename
+    /// when the destination already resolves. The check + the
+    /// directory-entry mutation MUST happen under a single critical
+    /// section to avoid a TOCTOU window between the existence check
+    /// and the rename itself. Default: ignore options and dispatch to
+    /// `rename_entry` (preserving the existing trait surface for
+    /// shells that do not yet support flags).
+    fn rename_entry_with_options(
+        &self,
+        old_parent: NodeId,
+        old_name: &OsStr,
+        new_parent: NodeId,
+        new_name: &OsStr,
+        _options: RenameOptions,
+    ) -> Result<()> {
+        self.rename_entry(old_parent, old_name, new_parent, new_name)
+    }
+
+    /// Apply attribute updates to `node`. Returns the post-update
+    /// [`Attrs`] so callers can reply without a second `getattr`
+    /// round trip. See [`AttrUpdate`] for which fields the overlay
+    /// actually persists; unsupported fields are no-ops.
+    fn set_attrs(&self, _node: NodeId, _update: AttrUpdate) -> Result<Attrs> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Create a symbolic link named `name` under `parent` whose
+    /// target is the byte-equivalent of `target`. Returns the new
+    /// link's [`Entry`].
+    fn create_symlink(
+        &self,
+        _parent: NodeId,
+        _name: &OsStr,
+        _target: &Path,
+    ) -> Result<Entry> {
+        Err(MountError::ReadOnly)
+    }
+
+    /// Read the target of a symbolic link `node`. Returns the raw
+    /// bytes of the link target (which may not be valid UTF-8 on
+    /// some systems, hence [`OsString`]).
+    fn read_link(&self, _node: NodeId) -> Result<OsString> {
+        Err(MountError::ReadOnly)
+    }
+}
+
+/// Optional fields a caller may update via
+/// [`PlatformShell::set_attrs`]. Every field is `Option<_>`; `None`
+/// means "leave alone" (the kernel passes `None` for slots the
+/// `chmod`/`chown`/`truncate`/`utimensat` call didn't touch).
+///
+/// Heddle's tree model only carries three modes ([`FileMode::Normal`],
+/// [`FileMode::Executable`], [`FileMode::Symlink`]) — see
+/// `crates/objects/src/object/tree_types.rs`. A `chmod` that flips
+/// the user-executable bit (`0o100`) maps to the closest mode; bits
+/// outside that don't persist across `capture`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AttrUpdate {
+    /// New unix mode bits (including the type bits). When set, the
+    /// shell folds the user-executable bit into the captured
+    /// [`FileMode`]; other bits don't persist.
+    pub mode: Option<u32>,
+    /// New uid. The mount has no per-node uid storage (every node
+    /// reports the mount-owner's uid); shells may accept this as a
+    /// no-op so `chown` doesn't return an error to callers that
+    /// don't actually need ownership tracking.
+    pub uid: Option<u32>,
+    /// New gid. Same no-op contract as `uid`.
+    pub gid: Option<u32>,
+    /// New size. Truncates the hot-tier buffer (or seeds one from
+    /// the durable predecessor and truncates) when set. `O_TRUNC`
+    /// on the kernel side delivers `setattr(size=0)` before the
+    /// first `write`.
+    pub size: Option<u64>,
+    /// New mtime in seconds since the UNIX epoch. The overlay has
+    /// no per-node mtime storage today; shells accept this as a
+    /// no-op so the kernel's `utimensat` doesn't return an error.
+    pub mtime_sec: Option<i64>,
 }
 
 /// Convert a Heddle [`FileMode`] into a node kind.
@@ -166,3 +335,150 @@ pub(crate) fn kind_for_mode(mode: FileMode) -> NodeKind {
 /// their own — they're synthesised at materialization time — so we
 /// keep one canonical value here.
 pub(crate) const DIR_UNIX_MODE: u32 = 0o040755;
+
+/// Optional flags for [`PlatformShell::rename_entry_with_options`].
+/// Mirrors the subset of Linux `renameat2(2)` flags the mount
+/// supports; non-applicable flags on non-Linux adapters can be left
+/// as their defaults.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenameOptions {
+    /// `RENAME_NOREPLACE`: refuse the rename with [`MountError::AlreadyExists`]
+    /// when the destination already resolves. Must be enforced inside
+    /// the same critical section as the rename so a concurrent writer
+    /// cannot install the destination between the check and the
+    /// mutation.
+    pub no_replace: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::ffi::OsStr;
+    use std::time::UNIX_EPOCH;
+
+    /// Minimal `PlatformShell` impl that supplies only the required
+    /// methods, so the test pins the *default* trait bodies for
+    /// every optional write-side hook. Tracks how often `flush` and
+    /// `rename_entry` are invoked so the delegation defaults
+    /// (`release` → `flush`, `rename_entry_with_options` →
+    /// `rename_entry`) can be observed.
+    #[derive(Default)]
+    struct StubShell {
+        flush_calls: Cell<u32>,
+        rename_calls: Cell<u32>,
+    }
+
+    impl PlatformShell for StubShell {
+        fn lookup(&self, _parent: NodeId, _name: &OsStr) -> Result<Option<Entry>> {
+            Ok(None)
+        }
+        fn read(&self, _node: NodeId, _offset: u64, _buf: &mut [u8]) -> Result<usize> {
+            Ok(0)
+        }
+        fn write(&self, _node: NodeId, _offset: u64, data: &[u8]) -> Result<usize> {
+            Ok(data.len())
+        }
+        fn enumerate(&self, _dir: NodeId) -> Result<Vec<Entry>> {
+            Ok(Vec::new())
+        }
+        fn attrs(&self, node: NodeId) -> Result<Attrs> {
+            Ok(Attrs {
+                node,
+                kind: NodeKind::File,
+                size: 0,
+                unix_mode: 0o100644,
+                nlink: 1,
+                mtime: UNIX_EPOCH,
+            })
+        }
+        fn invalidate(&self, _node: NodeId) -> Result<()> {
+            Ok(())
+        }
+        // Override flush so we can observe that `release`'s default
+        // delegates here. Everything else stays on the trait default.
+        fn flush(&self, _node: NodeId) -> Result<()> {
+            self.flush_calls.set(self.flush_calls.get() + 1);
+            Ok(())
+        }
+        // Override rename_entry so we can observe that
+        // `rename_entry_with_options`'s default delegates here.
+        fn rename_entry(
+            &self,
+            _op: NodeId,
+            _on: &OsStr,
+            _np: NodeId,
+            _nn: &OsStr,
+        ) -> Result<()> {
+            self.rename_calls.set(self.rename_calls.get() + 1);
+            Ok(())
+        }
+    }
+
+    fn is_read_only<T>(r: Result<T>) -> bool {
+        matches!(r, Err(MountError::ReadOnly))
+    }
+
+    #[test]
+    fn write_side_defaults_return_read_only() {
+        let s = StubShell::default();
+        let p = NodeId::ROOT;
+        let name = OsStr::new("x");
+
+        assert!(is_read_only(
+            s.create_file(p, name, FileMode::Normal, false),
+        ));
+        assert!(is_read_only(s.make_dir(p, name)));
+        assert!(is_read_only(s.unlink_entry(p, name)));
+        assert!(is_read_only(s.rmdir_entry(p, name)));
+        assert!(is_read_only(s.set_attrs(NodeId(2), AttrUpdate::default())));
+        assert!(is_read_only(
+            s.create_symlink(p, name, Path::new("target")),
+        ));
+        assert!(is_read_only(s.read_link(NodeId(2))));
+    }
+
+    #[test]
+    fn on_open_default_is_noop() {
+        let s = StubShell::default();
+        assert!(s.on_open(NodeId(7)).is_ok());
+    }
+
+    #[test]
+    fn release_default_delegates_to_flush() {
+        let s = StubShell::default();
+        assert_eq!(s.flush_calls.get(), 0);
+        s.release(NodeId(3)).expect("release");
+        assert_eq!(
+            s.flush_calls.get(),
+            1,
+            "release default must invoke flush exactly once",
+        );
+    }
+
+    #[test]
+    fn rename_with_options_default_delegates_to_rename_entry() {
+        let s = StubShell::default();
+        let opts = RenameOptions { no_replace: true };
+        // Default impl ignores the options and forwards to
+        // `rename_entry` — observe the delegation via the call count.
+        s.rename_entry_with_options(
+            NodeId(1),
+            OsStr::new("a"),
+            NodeId(1),
+            OsStr::new("b"),
+            opts,
+        )
+        .expect("rename");
+        assert_eq!(s.rename_calls.get(), 1);
+        assert!(opts.no_replace, "RenameOptions field survives copy");
+        assert_eq!(RenameOptions::default(), RenameOptions { no_replace: false });
+    }
+
+    #[test]
+    fn kind_for_mode_maps_each_file_mode() {
+        assert_eq!(kind_for_mode(FileMode::Normal), NodeKind::File);
+        assert_eq!(kind_for_mode(FileMode::Executable), NodeKind::File);
+        assert_eq!(kind_for_mode(FileMode::Symlink), NodeKind::Symlink);
+    }
+}

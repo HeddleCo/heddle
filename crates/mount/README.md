@@ -300,6 +300,98 @@ The smoke tests will skip themselves unless
 `HEDDLE_PROJFS_AVAILABLE=1` is set, so a Windows host without the
 optional feature won't fail them accidentally.
 
+## Per-thread overlay semantics (write path)
+
+Every mount is bound to exactly one thread (`mount.thread`). All
+writes the kernel issues against the mountpoint land in a
+**per-thread overlay** layered on top of the underlying CAS; the
+captured tree is never mutated in place. The overlay is the diff
+between "what the thread looked like at mount time" and "what the
+agent has written since".
+
+The overlay has six pieces, all in process memory until
+[`ContentAddressedMount::capture`] folds them into a new heddle
+state:
+
+| Piece                  | What it holds                                       | Promoted on `capture` as                              |
+|------------------------|-----------------------------------------------------|-------------------------------------------------------|
+| `hot` buffer           | In-flight `pwrite` bytes per open NodeId            | Drained to `warm` first, then folded as a file blob   |
+| `warm` tier            | Path → CAS-promoted blob (post-`flush`/`close`)     | File blob in the destination tree                     |
+| `tombstones`           | Paths the mount has `unlink`'d                      | Removes the captured entry; prunes empty parent dirs  |
+| `dir_tombstones`       | Captured-tree directories the mount has `rmdir`'d   | Drops the whole subtree from the destination tree     |
+| `explicit_dirs`        | Empty `mkdir`s with no children yet                 | Materialized as 0-entry subtree                       |
+| `symlinks`             | Path → link target bytes                            | Hashed once, planted as a `Symlink` tree entry        |
+
+Lock ordering inside the mount is **state → pending → inodes**;
+every write-side op holds them in that order to avoid the deadlock
+shapes Codex caught early in development. See the `MountInner`
+docstring in `src/core.rs`.
+
+### What `capture` does
+
+When the agent runs `heddle capture`, the orchestrator calls
+[`ContentAddressedMount::capture`] which:
+
+1. Drains every open hot buffer to the warm tier (no agent ever
+   "loses" an in-flight write — the close handshake is the only
+   point of fragility, and the safety-sweep thread covers the
+   process-killed-without-close case via the `idle_after` window).
+2. Folds the warm tier + tombstones + dir_tombstones +
+   explicit_dirs + symlinks into a fresh root tree, descending into
+   each pending sub-path and merging against the captured
+   counterpart. Empty captured-dir entries prune naturally.
+3. Records a new `State` referencing that root tree and advances
+   the thread's HEAD. Attribution comes from the repo's default
+   path (`HEDDLE_AGENT_*` env + repo config + principal).
+4. Clears the entire pending tier. The next write starts with a
+   fresh overlay.
+
+The whole pass is one walk of the pending map — no worktree-scan,
+no re-hash of any blob the agent already wrote through `flush`.
+The result is content-addressed: two agents that wrote identical
+bytes to different paths produce **one** CAS blob, not two.
+
+### What does NOT persist across capture
+
+The overlay is intentionally lightweight; some kernel-side concepts
+don't have a tree-level home and surface as no-ops or
+approximations:
+
+- **`chmod` other than `+x`.** Heddle's [`FileMode`] is a three-way
+  enum (`Normal` / `Executable` / `Symlink`); arbitrary 9-bit perm
+  masks fold into the closest mode at capture time. The
+  user-executable bit (`0o100`) flips Normal ↔ Executable; the
+  rest of the bits (group/other read/write, setuid, sticky) are
+  not modelled and don't survive `capture`.
+- **`chown` / uid / gid.** The mount reports every node as owned by
+  the mount-owner's uid + primary gid. `setattr(uid)` /
+  `setattr(gid)` are accepted as no-ops so callers don't get
+  `EPERM` from a chown that wouldn't have had a visible effect
+  anyway.
+- **Per-node mtime / atime / ctime.** Every node reports the
+  mount's `mounted_at` timestamp. `setattr(mtime)` / `utimensat`
+  are accepted as no-ops.
+- **Hard links.** `link(2)` returns `EPERM`. The CAS already
+  de-duplicates by content hash, so two paths with the same bytes
+  share one blob — but they're independent tree entries, not
+  aliased inodes.
+- **`mknod` for device / FIFO / socket nodes.** Only regular files
+  (`S_IFREG`) are accepted; everything else returns `EPERM`.
+  Heddle's tree doesn't model device files.
+- **Captured-directory rename.** Renaming an entirely overlay-only
+  directory (one that the agent `mkdir`'d in this session) works;
+  renaming a captured directory returns `EINVAL`. Cross-tree
+  directory renames would need a recursive tombstone + warm-tier
+  rewrite pass that's out of scope for the cargo / git / npm
+  daily-use path.
+
+### What about `inotify` / `fanotify`?
+
+Not delivered. The mount doesn't emit filesystem-change events
+for editors / file-watchers / `cargo watch`-style tooling. This
+is a separate substrate decision tracked in a follow-up issue;
+the cargo / git path doesn't need it.
+
 ## Status
 
 - Linux FUSE shell: production. Used by the heddle CLI when

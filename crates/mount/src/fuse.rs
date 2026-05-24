@@ -8,6 +8,36 @@
 //! /`release`, and folded into a real heddle state by
 //! [`ContentAddressedMount::capture`].
 //!
+//! ## Implemented kernel callbacks
+//!
+//! Read path:
+//! * `init` — opts into `FUSE_DIRECT_IO_ALLOW_MMAP` so mmap works
+//!   alongside `FOPEN_DIRECT_IO`.
+//! * `lookup` / `getattr` / `open` / `read` / `readdir` / `flush` /
+//!   `release` / `opendir` / `releasedir` / `destroy`.
+//!
+//! Write path (heddle#180):
+//! * `create` — `open(O_CREAT[|O_EXCL|O_TRUNC])`. EEXIST on O_EXCL
+//!   clash. Returns `FOPEN_DIRECT_IO`.
+//! * `mkdir` — empty directory in the overlay.
+//! * `mknod` — regular files only; non-`S_IFREG` returns EPERM.
+//! * `unlink` / `rmdir`.
+//! * `rename` — overlay+captured file/symlink + overlay-only dir.
+//!   RENAME_NOREPLACE honoured; EXCHANGE and WHITEOUT return EINVAL.
+//! * `setattr` — chmod (folded to FileMode), ftruncate / O_TRUNC,
+//!   mtime / uid / gid accepted as no-ops.
+//! * `symlink` / `readlink`.
+//! * `link` — returns EPERM (no nlink in heddle's tree model).
+//! * `write` — already implemented; the freshly created file inherits
+//!   the same hot-tier behaviour as a write to a captured file.
+//!
+//! Anything not listed (xattrs, locks, statfs, ioctl, fsync,
+//! fsyncdir, copy_file_range, lseek, fallocate, etc.) inherits
+//! fuser's default reply (ENOSYS / OK depending on the op) and is
+//! out of scope until a real workload needs it. See
+//! `crates/mount/README.md` ("Per-thread overlay semantics") for
+//! the matching write-side state model.
+//!
 //! ## Panic safety
 //!
 //! Every callback body runs inside [`std::panic::catch_unwind`] via
@@ -40,21 +70,22 @@ use std::{
     panic::AssertUnwindSafe,
     path::Path,
     sync::Arc,
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use fuser::{
-    BackgroundSession, Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags,
-    Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags, ReplyAttr,
-    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request, Session,
-    WriteFlags,
+    BackgroundSession, BsdFileFlags, Config, Errno, FileAttr, FileHandle, FileType, Filesystem,
+    FopenFlags, Generation, INodeNo, InitFlags, KernelConfig, LockOwner, MountOption, OpenFlags,
+    RenameFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyWrite, Request, Session, TimeOrNow, WriteFlags,
 };
+use objects::object::FileMode;
 use tracing::{debug, warn};
 
 use crate::{
     core::ContentAddressedMount,
     error::Result,
-    shell::{Attrs, Entry, NodeId, NodeKind, PlatformShell},
+    shell::{AttrUpdate, Attrs, Entry, NodeId, NodeKind, PlatformShell, RenameOptions},
 };
 
 /// FUSE attribute timeout. Heddle's mount is content-addressed —
@@ -81,6 +112,19 @@ impl FuseShell {
         Self {
             inner: Arc::new(mount),
         }
+    }
+
+    /// Best-effort mtime to attach to entry replies for newly
+    /// created paths. The core hands out a fixed `mounted_at`
+    /// timestamp for every attrs call, but ReplyEntry needs one
+    /// inline before the kernel has issued any followup `getattr`.
+    /// We approximate by reading the root's attrs (a hash-table
+    /// hit) and falling back to UNIX_EPOCH on any error.
+    fn inner_mtime(&self) -> std::time::SystemTime {
+        self.inner
+            .attrs(NodeId::ROOT)
+            .map(|a| a.mtime)
+            .unwrap_or(UNIX_EPOCH)
     }
 
     /// Hand out a shared handle to the underlying mount.
@@ -170,6 +214,20 @@ fn process_uid() -> u32 {
 fn process_gid() -> u32 {
     // SAFETY: `getgid` is async-signal-safe and has no preconditions.
     unsafe { libc::getgid() }
+}
+
+/// Fold the unix mode bits the kernel passes to `create` / `mknod`
+/// into the closest [`FileMode`] heddle tracks. Only the `+x` bit
+/// is preserved across capture; the rest of the permission bits
+/// don't survive (see `crates/objects/src/object/tree_types.rs` —
+/// FileMode is a three-way enum, not a u16). Document this in the
+/// README's "what writes persist" section.
+fn file_mode_from_unix(mode: u32) -> FileMode {
+    if (mode & 0o111) != 0 {
+        FileMode::Executable
+    } else {
+        FileMode::Normal
+    }
 }
 
 fn file_type_for_kind(kind: NodeKind) -> FileType {
@@ -295,7 +353,18 @@ impl Filesystem for FuseShell {
         Ok(())
     }
 
-    fn open(&self, _req: &Request, _ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        // R8 (Codex Thread 3293235165): notify the core that an open
+        // handle was minted. The core's open-handle refcount times
+        // the orphan cleanup against the final `release` rather than
+        // the first `flush` — without this hook, a kernel that opens
+        // an inode twice (rather than dup'ing) clears the marker on
+        // the first close. Errors here can only come from the panic
+        // guard; the cost of skipping the bookkeeping is correctness
+        // under that pathological case, so we log and fail open.
+        if let Err(err) = guard_call("open", || self.inner.on_open(NodeId(ino.0))) {
+            warn!(?err, "on_open bookkeeping failed; orphan cleanup may misfire");
+        }
         // Open every file in `direct_io` mode so the kernel never
         // serves bytes from its page cache. The content-addressed
         // mount maintains its own blob cache ([`BlobCachePool`]),
@@ -481,6 +550,271 @@ impl Filesystem for FuseShell {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno_from_mount_error(err)),
         }
+    }
+
+    fn create(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        // The kernel calls `create` for `open(O_CREAT)`. `O_EXCL`
+        // requires us to fail with EEXIST when the entry already
+        // exists; without it we return-or-create.
+        let exclusive = (flags & libc::O_EXCL) != 0;
+        let file_mode = file_mode_from_unix(mode);
+        let result = guard_call("create", || {
+            self.inner
+                .create_file(NodeId(parent.0), name, file_mode, exclusive)
+        });
+        match result {
+            Ok(entry) => {
+                // R8: bump the open-handle refcount the same as
+                // `Self::open` does. The kernel won't issue a
+                // separate `open` callback after `create`.
+                if let Err(err) = guard_call("create", || self.inner.on_open(entry.node)) {
+                    warn!(
+                        ?err,
+                        "on_open bookkeeping failed; orphan cleanup may misfire"
+                    );
+                }
+                // Mirror the `open` callback: opt the new fd into
+                // FOPEN_DIRECT_IO so kernel page-cache reads don't
+                // shadow hot-tier writes (see `Self::open` for the
+                // full reasoning).
+                let attr = match guard_call("create", || self.inner.attrs(entry.node)) {
+                    Ok(attrs) => file_attr_from(attrs),
+                    Err(err) => {
+                        reply.error(errno_from_mount_error(err));
+                        return;
+                    }
+                };
+                reply.created(
+                    &TTL,
+                    &attr,
+                    GENERATION,
+                    FileHandle(0),
+                    FopenFlags::FOPEN_DIRECT_IO,
+                );
+            }
+            Err(err) => reply.error(errno_from_mount_error(err)),
+        }
+    }
+
+    fn mkdir(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let result = guard_call("mkdir", || self.inner.make_dir(NodeId(parent.0), name));
+        match result {
+            Ok(entry) => {
+                let attr = entry_attr_from(&entry, self.inner_mtime());
+                reply.entry(&TTL, &attr, GENERATION);
+            }
+            Err(err) => reply.error(errno_from_mount_error(err)),
+        }
+    }
+
+    /// `mknod` for regular files routes through `create_file`. Heddle
+    /// doesn't model device / FIFO / socket nodes — those return
+    /// `EPERM`, which is what fuse's default mknod handler also does
+    /// for the unsupported types. cargo / git / npm only ever issue
+    /// `mknod` with `S_IFREG`, so the supported subset is enough for
+    /// the issue's acceptance criteria. See README ("per-thread
+    /// overlay semantics") for the full enumeration.
+    fn mknod(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        let kind = mode & libc::S_IFMT;
+        if kind != libc::S_IFREG && kind != 0 {
+            reply.error(Errno::from_i32(libc::EPERM));
+            return;
+        }
+        let file_mode = file_mode_from_unix(mode);
+        let result = guard_call("mknod", || {
+            self.inner.create_file(NodeId(parent.0), name, file_mode, true)
+        });
+        match result {
+            Ok(entry) => {
+                let attr = entry_attr_from(&entry, self.inner_mtime());
+                reply.entry(&TTL, &attr, GENERATION);
+            }
+            Err(err) => reply.error(errno_from_mount_error(err)),
+        }
+    }
+
+    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        match guard_call("unlink", || {
+            self.inner.unlink_entry(NodeId(parent.0), name)
+        }) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(errno_from_mount_error(err)),
+        }
+    }
+
+    fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        match guard_call("rmdir", || {
+            self.inner.rmdir_entry(NodeId(parent.0), name)
+        }) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(errno_from_mount_error(err)),
+        }
+    }
+
+    fn rename(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        name: &OsStr,
+        newparent: INodeNo,
+        newname: &OsStr,
+        flags: RenameFlags,
+        reply: ReplyEmpty,
+    ) {
+        // `renameat2` flags we don't support yet:
+        //   * RENAME_EXCHANGE — needs an atomic swap primitive; the
+        //     overlay would have to journal both halves.
+        //   * RENAME_WHITEOUT — overlayfs-specific, not meaningful
+        //     for a CAS-backed mount.
+        // R8 (Codex Thread 3293235163): `RENAME_NOREPLACE` is plumbed
+        // through the core's `rename_entry_with_options` so the
+        // existence-check + the directory-entry mutation land under
+        // the same write-side critical section. The old shell-side
+        // pre-check left a TOCTOU window between the lookup and the
+        // rename — a concurrent writer could install the
+        // destination in between and the rename would clobber it.
+        #[cfg(target_os = "linux")]
+        if flags.contains(RenameFlags::RENAME_EXCHANGE)
+            || flags.contains(RenameFlags::RENAME_WHITEOUT)
+        {
+            reply.error(Errno::from_i32(libc::EINVAL));
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        let no_replace = flags.contains(RenameFlags::RENAME_NOREPLACE);
+        #[cfg(not(target_os = "linux"))]
+        let no_replace = {
+            let _ = flags;
+            false
+        };
+        let options = RenameOptions { no_replace };
+        match guard_call("rename", || {
+            self.inner.rename_entry_with_options(
+                NodeId(parent.0),
+                name,
+                NodeId(newparent.0),
+                newname,
+                options,
+            )
+        }) {
+            Ok(()) => reply.ok(),
+            Err(err) => reply.error(errno_from_mount_error(err)),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn setattr(
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        mode: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<FileHandle>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<BsdFileFlags>,
+        reply: ReplyAttr,
+    ) {
+        let mtime_sec = mtime.and_then(|t| match t {
+            TimeOrNow::SpecificTime(st) => st
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .ok(),
+            TimeOrNow::Now => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .ok(),
+        });
+        let update = AttrUpdate {
+            mode,
+            uid,
+            gid,
+            size,
+            mtime_sec,
+        };
+        match guard_call("setattr", || self.inner.set_attrs(NodeId(ino.0), update)) {
+            Ok(attrs) => reply.attr(&TTL, &file_attr_from(attrs)),
+            Err(err) => reply.error(errno_from_mount_error(err)),
+        }
+    }
+
+    fn symlink(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        link_name: &OsStr,
+        target: &Path,
+        reply: ReplyEntry,
+    ) {
+        let result = guard_call("symlink", || {
+            self.inner.create_symlink(NodeId(parent.0), link_name, target)
+        });
+        match result {
+            Ok(entry) => {
+                let attr = entry_attr_from(&entry, self.inner_mtime());
+                reply.entry(&TTL, &attr, GENERATION);
+            }
+            Err(err) => reply.error(errno_from_mount_error(err)),
+        }
+    }
+
+    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        use std::os::unix::ffi::OsStrExt;
+        match guard_call("readlink", || self.inner.read_link(NodeId(ino.0))) {
+            Ok(target) => reply.data(target.as_os_str().as_bytes()),
+            Err(err) => reply.error(errno_from_mount_error(err)),
+        }
+    }
+
+    /// Hard links would alias two paths onto the same inode; the
+    /// per-thread CAS overlay (and heddle's tree model) addresses
+    /// blobs by content-hash but identifies *entries* by path, with
+    /// no nlink fan-out. Refuse with `EPERM` to match POSIX's
+    /// behaviour for filesystems that don't support hard links. The
+    /// fuser default already returns `EPERM`; we override only to
+    /// route through the same panic-guard wrapper for consistency
+    /// with the other write-side callbacks.
+    fn link(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _newparent: INodeNo,
+        _newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        reply.error(Errno::from_i32(libc::EPERM));
     }
 
     fn destroy(&mut self) {
