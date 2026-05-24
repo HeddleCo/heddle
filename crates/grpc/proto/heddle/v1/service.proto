@@ -1920,12 +1920,32 @@ message ThreadEvent {
 // ── OAuth identity linking ──────────────────────────────────────────────────
 
 message LinkOAuthIdentityRequest {
-  string provider = 1; // "github" | "gitlab"
-  string provider_user_id = 2; // numeric ID as string
-  string username = 3;
-  string email = 4;
-  string display_name = 5;
-  string avatar_url = 6;
+  // Which OAuth provider this proof is from. Used by the server to
+  // pick the correct ID-token verifier (JWKS for Google/Apple,
+  // /user + /user/emails API path for GitHub).
+  string provider = 1; // "google" | "apple" | "github"
+
+  // The provider's cryptographic proof of identity.
+  //   - Google / Apple: OIDC `id_token` (provider-signed JWT).
+  //   - GitHub: OAuth2 access token (server validates via /user +
+  //     /user/emails).
+  // Server validates this proof and extracts
+  // `(sub, email, email_verified)` from the verified result; the
+  // request itself carries NO user-identity claims the caller can
+  // forge. Closes the OAuth-link forge bypass surfaced on
+  // HeddleCo/weft#193 r2 (Codex cid 3294026240); design rationale
+  // in the HeddleCo/weft#195 spike amendment.
+  oneof oauth_proof {
+    string id_token = 2;
+    string access_token = 3;
+  }
+
+  // OPTIONAL: a fresh WebAuthn assertion proving ownership of the
+  // existing user account that this OAuth identity is being
+  // attached to. Required only when the OAuth-validated email
+  // collides with an existing user (per the email-collision passkey
+  // gate, weft spike §4.6); otherwise empty.
+  optional bytes webauthn_assertion = 4;
 }
 
 message StoreProviderTokenRequest {
