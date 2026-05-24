@@ -161,6 +161,19 @@ pub(super) fn flush_rebase_batch(
     if advances.is_empty() {
         return Ok(());
     }
+    // heddle#198 r2 (Codex PR #218 P2): if a prior call appended the
+    // batch but the subsequent `fs::remove_file(REBASE_STATE)` failed
+    // (or the process crashed in between), `rebase --continue` will
+    // re-enter this helper with the same persisted `transaction_id`.
+    // Scan recent batches for that id and skip the append so the
+    // rebase's undo/redo history doesn't get duplicated. 64 batches is
+    // more than enough headroom for the realistic recovery window
+    // (immediate retry); ageing past it is acceptable because the worst
+    // case is a duplicate batch the operator can collapse with a
+    // second `heddle undo`.
+    if rebase_batch_already_committed(repo, transaction_id)? {
+        return Ok(());
+    }
     let mut batch: Vec<OpRecord> = advances.to_vec();
     batch.push(OpRecord::TransactionCommit {
         transaction_id: transaction_id.to_string(),
@@ -169,6 +182,21 @@ pub(super) fn flush_rebase_batch(
     repo.oplog()
         .record_batch_scoped(batch, Some(&repo.op_scope()))?;
     Ok(())
+}
+
+fn rebase_batch_already_committed(repo: &Repository, transaction_id: &str) -> Result<bool> {
+    let recent = repo
+        .oplog()
+        .recent_batches_scoped(64, Some(&repo.op_scope()))?;
+    Ok(recent.iter().any(|batch| {
+        batch.entries.iter().any(|entry| {
+            matches!(
+                &entry.operation,
+                OpRecord::TransactionCommit { transaction_id: id, .. }
+                    if id == transaction_id
+            )
+        })
+    }))
 }
 
 fn resume_manual_resolution_if_present(
