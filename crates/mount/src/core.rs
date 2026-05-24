@@ -330,12 +330,22 @@ impl Inodes {
                     });
                 }
                 NodeRecord::Dir { path, .. } | NodeRecord::PendingDir { path } => {
-                    self.by_path.remove(&path);
+                    // Codex r12 thread 3293680448 (P1): only drop the
+                    // path mapping if it still points at *this* inode.
+                    // After unlink-then-recreate or rename-over, `path`
+                    // may already be rebound to a live inode at a
+                    // different NodeId; a blind `remove` would yank
+                    // that fresh inode's binding too.
+                    if self.by_path.get(&path) == Some(&id.0) {
+                        self.by_path.remove(&path);
+                    }
                 }
                 NodeRecord::File { path, .. }
                 | NodeRecord::PendingFile { path, .. }
                 | NodeRecord::PendingSymlink { path } => {
-                    self.by_path.remove(&path);
+                    if self.by_path.get(&path) == Some(&id.0) {
+                        self.by_path.remove(&path);
+                    }
                 }
                 NodeRecord::Symlink { blob } => {
                     self.by_hash.remove(&HashKey {
@@ -1434,11 +1444,22 @@ impl ContentAddressedMount {
             // tracked until `release` / `invalidate` / `capture`
             // drops it (matching pre-spike orphan-set semantics for
             // tests that skip the explicit `on_open`).
-            let open_count = pending.open_count(node_id);
-            pending
-                .state
-                .insert(node_id, NodeState::Orphan { open_count });
-            // Symlinks are not openable; no orphan story applies.
+            //
+            // Codex r12 thread 3293510317 (P3): symlinks have no
+            // `open`/`release` lifecycle (they're not openable for
+            // IO), so we MUST NOT orphan them — no event would ever
+            // clear the state entry, and `pending.state` would grow
+            // under symlink churn until capture/invalidate. Files
+            // (regular + executable) do receive open/release events
+            // and take the Orphan branch.
+            if entry.kind != NodeKind::Symlink {
+                let open_count = pending.open_count(node_id);
+                pending
+                    .state
+                    .insert(node_id, NodeState::Orphan { open_count });
+            }
+            // Symlinks are path-keyed; their overlay goes when the
+            // directory entry goes.
             pending.symlinks.remove(&child_path);
             pending.tombstones.insert(child_path.clone());
         }
@@ -1478,9 +1499,23 @@ impl ContentAddressedMount {
             .ok_or_else(|| MountError::NotADirectory(format!("{parent_record:?}")))?;
         let child_path = join_child(&parent_path, name_str);
 
-        let mut pending = self.inner.pending.lock().expect("pending lock");
-        pending.explicit_dirs.remove(&child_path);
-        pending.dir_tombstones.insert(child_path);
+        {
+            let mut pending = self.inner.pending.lock().expect("pending lock");
+            pending.explicit_dirs.remove(&child_path);
+            pending.dir_tombstones.insert(child_path.clone());
+        }
+        // Codex r12 thread 3293510310 (P1): retire the path → inode
+        // mapping. Otherwise `Inodes::intern` would coalesce a
+        // subsequent `create_file` / `make_dir` at this path onto the
+        // removed directory's NodeId, rebinding a cached directory
+        // inode to a different object type — the same stale-handle
+        // class `unlink_entry` already guards against. The `by_id`
+        // record stays so any kernel handle the FS still holds keeps
+        // resolving until `forget`.
+        {
+            let mut inodes = self.inner.inodes.lock().expect("inode lock");
+            inodes.by_path.remove(&child_path);
+        }
         Ok(())
     }
 
@@ -2213,6 +2248,16 @@ impl ContentAddressedMount {
 
     /// Read the target of a symlink `node`. Works for both overlay
     /// (`PendingSymlink`) and captured (`Symlink`) records.
+    ///
+    /// Codex r12 thread 3293510316 (P1): the prior implementation
+    /// used `OsStr::from_encoded_bytes_unchecked` on bytes loaded
+    /// from the object store, which is unsound — that API's safety
+    /// contract requires bytes minted by `OsStr::as_encoded_bytes`
+    /// in *this* process and Rust version, but captured-tree blobs
+    /// can come from any process and version. The corrected path
+    /// delegates to [`symlink_target_from_bytes`], which uses
+    /// platform-safe APIs (`OsStrExt::from_bytes` on Unix, UTF-8
+    /// validation on Windows).
     pub fn read_link(&self, node: NodeId) -> Result<OsString> {
         let record = self.record_for(node)?;
         match record {
@@ -2222,16 +2267,11 @@ impl ContentAddressedMount {
                     .symlinks
                     .get(&path)
                     .ok_or_else(|| MountError::Stale(format!("symlink {}", path.display())))?;
-                // SAFETY: bytes were written via `OsStr::as_encoded_bytes()` in
-                // `create_symlink`, which is the documented inverse of
-                // `from_encoded_bytes_unchecked`.
-                Ok(unsafe { OsStr::from_encoded_bytes_unchecked(bytes) }.to_os_string())
+                symlink_target_from_bytes(bytes)
             }
             NodeRecord::Symlink { blob } => {
                 let bytes = self.load_blob_bytes(&blob)?;
-                // SAFETY: same provenance as above — the blob was minted from
-                // `as_encoded_bytes()` at capture time.
-                Ok(unsafe { OsStr::from_encoded_bytes_unchecked(&bytes) }.to_os_string())
+                symlink_target_from_bytes(&bytes)
             }
             other => Err(MountError::InvalidArgument(format!(
                 "read_link on non-symlink record: {other:?}"
@@ -2497,6 +2537,32 @@ fn warm_path_of_record(record: &NodeRecord) -> Option<PathBuf> {
     match record {
         NodeRecord::File { path, .. } | NodeRecord::PendingFile { path, .. } => Some(path.clone()),
         _ => None,
+    }
+}
+
+/// Decode symlink target bytes back into an `OsString`. The Unix
+/// branch uses `OsStrExt::from_bytes`, which is sound for any byte
+/// sequence (the inverse of `OsStrExt::as_bytes`). The Windows branch
+/// validates as UTF-8 and returns [`MountError::InvalidArgument`]
+/// otherwise — `OsStr` on Windows is a process-internal encoding
+/// (WTF-8 today, but not promised), so accepting arbitrary captured
+/// bytes is unsound. Replaces a prior
+/// `unsafe { OsStr::from_encoded_bytes_unchecked(bytes) }` call site
+/// (Codex r12 thread 3293510316).
+fn symlink_target_from_bytes(bytes: &[u8]) -> Result<OsString> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(OsStr::from_bytes(bytes).to_os_string())
+    }
+    #[cfg(not(unix))]
+    {
+        match std::str::from_utf8(bytes) {
+            Ok(s) => Ok(OsString::from(s)),
+            Err(_) => Err(MountError::InvalidArgument(
+                "captured symlink target bytes are not valid UTF-8".into(),
+            )),
+        }
     }
 }
 
@@ -3528,21 +3594,36 @@ impl PlatformShell for ContentAddressedMount {
         // at us; an unlink-then-recreate sequence may have moved
         // the live mapping to a fresh inode at the same name, and
         // a blind `remove` would yank that fresh inode's entry.
-        {
+        //
+        // Codex r12 threads 3293484634 / 3293510311 (P1): FUSE
+        // `forget` only signals that the kernel released its cached
+        // identity for this inode — it does NOT say the file's
+        // pending overlay data is stale. Warm is the only durable
+        // pre-capture copy of flushed writes; dropping it silently
+        // loses the user's committed-in-session data. Preserve
+        // `warm[node]` here, and only retire the inode record when
+        // nothing in the overlay still references the NodeId —
+        // otherwise capture loses the NodeId → path chain it needs
+        // to plant the warm bytes back into the new tree.
+        let still_referenced = {
             let mut pending = self.inner.pending.lock().expect("pending lock");
             if let Some(buf) = pending.hot.remove(&node.0)
                 && pending.hot_by_path.get(&buf.path) == Some(&node.0)
             {
                 pending.hot_by_path.remove(&buf.path);
             }
-            // The kernel is forgetting this inode; any lifecycle
-            // tracking we kept for it is now dead weight. Drop the
-            // state entry and any NodeId-keyed warm bytes so a
-            // long-running mount doesn't accumulate dead entries.
+            // State tracks the per-inode open-handle refcount; FUSE
+            // `forget` is a kernel-side cache eviction (not a close),
+            // so the refcount is already at 0 by the time we see it.
+            // Drop the state entry so a long-running mount doesn't
+            // accumulate dead lifecycle records. Warm preservation
+            // (above) is the load-bearing change here.
             pending.state.remove(&node.0);
-            pending.warm.remove(&node.0);
+            pending.warm.contains_key(&node.0)
+        };
+        if !still_referenced {
+            self.inner.inodes.lock().expect("inode lock").forget(node);
         }
-        self.inner.inodes.lock().expect("inode lock").forget(node);
         Ok(())
     }
 
@@ -3761,20 +3842,46 @@ impl ContentAddressedMount {
             warn!(?err, "thread metadata refresh from mount capture failed");
         }
 
-        // Step 4: clear the pending tier and refresh state. The new
-        // state's tree is canonical, so any open fds the kernel still
-        // holds against pre-capture inodes will get refreshed via
-        // `forget` / re-lookup as normal.
+        // Step 4: drain the pending tier. Codex r12 thread 3293484633
+        // (P1): the prior wholesale `state.clear()` here dropped
+        // Orphan entries for inodes with still-open fds; the next
+        // write through those fds would then take the Live branch
+        // (`is_orphan` returns false → republish path / clear
+        // tombstone / coalesce hot_by_path), republishing a pathname
+        // that POSIX says must remain detached until final close.
+        // It also dropped `hot[id]` / `warm[id]` for those Orphan
+        // entries, losing the surviving fd's own bytes.
+        //
+        // The correct drain retires only Live entries plus all of
+        // the path-keyed bookkeeping (the new tree owns those paths
+        // now). Orphan entries — and their per-NodeId `hot[id]` /
+        // `warm[id]` bytes — survive so the orphan branches in
+        // `read` / `write` / `attrs` / `apply_truncate` keep serving
+        // the surviving fd, and `unlink_entry` / `rename`'s T1/T3
+        // transition stays in effect across capture.
         {
             let mut pending = self.inner.pending.lock().expect("pending lock");
-            pending.hot.clear();
+            let orphan_ids: BTreeSet<u64> = pending
+                .state
+                .iter()
+                .filter_map(|(id, s)| match s {
+                    NodeState::Orphan { .. } => Some(*id),
+                    NodeState::Live { .. } => None,
+                })
+                .collect();
+            pending.hot.retain(|id, _| orphan_ids.contains(id));
+            pending.warm.retain(|id, _| orphan_ids.contains(id));
+            pending.state.retain(|id, _| orphan_ids.contains(id));
+            // Path-keyed bookkeeping is for the Live tree, which is
+            // now folded into the captured state; the orphan path
+            // overlays are gone by definition (T1/T3 already removed
+            // their `hot_by_path` / `symlinks` / `inodes.by_path`
+            // bindings) so wholesale clear is safe.
             pending.hot_by_path.clear();
-            pending.warm.clear();
             pending.tombstones.clear();
             pending.dir_tombstones.clear();
             pending.explicit_dirs.clear();
             pending.symlinks.clear();
-            pending.state.clear();
         }
         let mut state_lock = self.inner.state.write().expect("mount state lock");
         *state_lock = MountState {
