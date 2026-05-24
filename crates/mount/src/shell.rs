@@ -349,3 +349,136 @@ pub struct RenameOptions {
     /// mutation.
     pub no_replace: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::ffi::OsStr;
+    use std::time::UNIX_EPOCH;
+
+    /// Minimal `PlatformShell` impl that supplies only the required
+    /// methods, so the test pins the *default* trait bodies for
+    /// every optional write-side hook. Tracks how often `flush` and
+    /// `rename_entry` are invoked so the delegation defaults
+    /// (`release` → `flush`, `rename_entry_with_options` →
+    /// `rename_entry`) can be observed.
+    #[derive(Default)]
+    struct StubShell {
+        flush_calls: Cell<u32>,
+        rename_calls: Cell<u32>,
+    }
+
+    impl PlatformShell for StubShell {
+        fn lookup(&self, _parent: NodeId, _name: &OsStr) -> Result<Option<Entry>> {
+            Ok(None)
+        }
+        fn read(&self, _node: NodeId, _offset: u64, _buf: &mut [u8]) -> Result<usize> {
+            Ok(0)
+        }
+        fn write(&self, _node: NodeId, _offset: u64, data: &[u8]) -> Result<usize> {
+            Ok(data.len())
+        }
+        fn enumerate(&self, _dir: NodeId) -> Result<Vec<Entry>> {
+            Ok(Vec::new())
+        }
+        fn attrs(&self, node: NodeId) -> Result<Attrs> {
+            Ok(Attrs {
+                node,
+                kind: NodeKind::File,
+                size: 0,
+                unix_mode: 0o100644,
+                nlink: 1,
+                mtime: UNIX_EPOCH,
+            })
+        }
+        fn invalidate(&self, _node: NodeId) -> Result<()> {
+            Ok(())
+        }
+        // Override flush so we can observe that `release`'s default
+        // delegates here. Everything else stays on the trait default.
+        fn flush(&self, _node: NodeId) -> Result<()> {
+            self.flush_calls.set(self.flush_calls.get() + 1);
+            Ok(())
+        }
+        // Override rename_entry so we can observe that
+        // `rename_entry_with_options`'s default delegates here.
+        fn rename_entry(
+            &self,
+            _op: NodeId,
+            _on: &OsStr,
+            _np: NodeId,
+            _nn: &OsStr,
+        ) -> Result<()> {
+            self.rename_calls.set(self.rename_calls.get() + 1);
+            Ok(())
+        }
+    }
+
+    fn is_read_only<T>(r: Result<T>) -> bool {
+        matches!(r, Err(MountError::ReadOnly))
+    }
+
+    #[test]
+    fn write_side_defaults_return_read_only() {
+        let s = StubShell::default();
+        let p = NodeId::ROOT;
+        let name = OsStr::new("x");
+
+        assert!(is_read_only(
+            s.create_file(p, name, FileMode::Normal, false),
+        ));
+        assert!(is_read_only(s.make_dir(p, name)));
+        assert!(is_read_only(s.unlink_entry(p, name)));
+        assert!(is_read_only(s.rmdir_entry(p, name)));
+        assert!(is_read_only(s.set_attrs(NodeId(2), AttrUpdate::default())));
+        assert!(is_read_only(
+            s.create_symlink(p, name, Path::new("target")),
+        ));
+        assert!(is_read_only(s.read_link(NodeId(2))));
+    }
+
+    #[test]
+    fn on_open_default_is_noop() {
+        let s = StubShell::default();
+        assert!(s.on_open(NodeId(7)).is_ok());
+    }
+
+    #[test]
+    fn release_default_delegates_to_flush() {
+        let s = StubShell::default();
+        assert_eq!(s.flush_calls.get(), 0);
+        s.release(NodeId(3)).expect("release");
+        assert_eq!(
+            s.flush_calls.get(),
+            1,
+            "release default must invoke flush exactly once",
+        );
+    }
+
+    #[test]
+    fn rename_with_options_default_delegates_to_rename_entry() {
+        let s = StubShell::default();
+        let opts = RenameOptions { no_replace: true };
+        // Default impl ignores the options and forwards to
+        // `rename_entry` — observe the delegation via the call count.
+        s.rename_entry_with_options(
+            NodeId(1),
+            OsStr::new("a"),
+            NodeId(1),
+            OsStr::new("b"),
+            opts,
+        )
+        .expect("rename");
+        assert_eq!(s.rename_calls.get(), 1);
+        assert!(opts.no_replace, "RenameOptions field survives copy");
+        assert_eq!(RenameOptions::default(), RenameOptions { no_replace: false });
+    }
+
+    #[test]
+    fn kind_for_mode_maps_each_file_mode() {
+        assert_eq!(kind_for_mode(FileMode::Normal), NodeKind::File);
+        assert_eq!(kind_for_mode(FileMode::Executable), NodeKind::File);
+        assert_eq!(kind_for_mode(FileMode::Symlink), NodeKind::Symlink);
+    }
+}
