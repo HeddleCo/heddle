@@ -199,7 +199,31 @@ fn load_rebase_state_internal(
                 {
                     Err(_) if for_abort => continue,
                     Err(e) => return Err(e),
-                    Ok(advance) => pending_advances.push(advance),
+                    Ok(advance) => match advance {
+                        // heddle#198 r4 (Codex PR #218 P2): only the
+                        // variants `ff_advance_deferred` emits (FFV2,
+                        // Goto) plus the legacy V1 FastForward read-back
+                        // path can legitimately appear in a rebase
+                        // batch. Anything else — MarkerCreate, ThreadX,
+                        // Snapshot — would land in the committed batch
+                        // verbatim and pollute undo/redo with records
+                        // the rebase never produced. Strict loader
+                        // rejects; abort silently drops them since the
+                        // buffered FF history is discarded on rewind.
+                        OpRecord::FastForward { .. }
+                        | OpRecord::FastForwardV2 { .. }
+                        | OpRecord::Goto { .. } => pending_advances.push(advance),
+                        other if for_abort => {
+                            let _ = other;
+                            continue;
+                        }
+                        other => {
+                            return Err(anyhow!(
+                                "Unexpected pending_advance variant {} in rebase state — only FastForward/FastForwardV2/Goto are accepted",
+                                other.description(),
+                            ));
+                        }
+                    },
                 },
             }
         }
@@ -686,6 +710,37 @@ mod tests {
         assert!(
             err.contains("Blank 'transaction_id'"),
             "expected blank-transaction_id error, got: {err}"
+        );
+    }
+
+    /// Companion to the variant-rejection pin (heddle#198 r4 / Codex
+    /// PR #218 P2): abort discards the buffered FF history when
+    /// rewinding to `original_head`, so a non-rebase variant in the
+    /// pending vec is harmless. Refusing to load would strand the
+    /// operator the same way the missing-transaction_id case did
+    /// before r3 — keep abort lenient.
+    #[test]
+    fn load_for_abort_tolerates_non_advance_pending_record() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let bad = OpRecord::MarkerCreate {
+            name: "junk".to_string(),
+            state: ChangeId::generate(),
+        };
+        let bytes = rmp_serde::to_vec(&bad).unwrap();
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance={pa}\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+            pa = hex::encode(&bytes),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let loaded = load_rebase_state_for_abort(&path)
+            .expect("abort loader must tolerate a non-rebase pending_advance variant");
+        assert!(
+            loaded.pending_advances.is_empty(),
+            "non-advance variants must be silently dropped on the abort path"
         );
     }
 
