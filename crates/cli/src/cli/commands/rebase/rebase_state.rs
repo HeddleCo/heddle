@@ -124,24 +124,34 @@ pub(crate) fn save_rebase_state(path: &std::path::Path, state: &RebaseState) -> 
 }
 
 pub(crate) fn load_rebase_state(path: &std::path::Path) -> Result<RebaseState> {
-    load_rebase_state_internal(path, /* lenient_pending_advances= */ false)
+    load_rebase_state_internal(path, /* for_abort= */ false)
 }
 
-/// Lenient loader for the `rebase --abort` path. Tolerates malformed
-/// `pending_advance=` records (skips them silently) because abort only
-/// needs `original_head` to rewind — the buffered FF history is
-/// discarded either way. The strict `load_rebase_state` is still used
-/// by `--continue`, which has to flush the full batch and so cannot
-/// afford a silently-truncated vector (heddle#198 r2 / Codex PR #218
-/// P2: pre-fix, a single corrupted line stranded the operator with
-/// neither abort nor continue available).
+/// Lenient loader for the `rebase --abort` path. Forgives two
+/// otherwise-fatal forms of partial-write damage that abort doesn't
+/// actually care about:
+///
+/// * malformed `pending_advance=` records — skipped silently; abort
+///   discards the buffered FF history when it rewinds to
+///   `original_head`.
+/// * a missing `transaction_id=` line — defaulted to an empty string;
+///   the id only matters for `flush_rebase_batch`'s crash-recovery
+///   dedup, which abort never reaches.
+///
+/// The strict [`load_rebase_state`] is still used by `--continue`,
+/// which has to flush the full batch and so cannot afford a
+/// silently-truncated vector or a blank transaction id (heddle#198
+/// r2 P2 + r3 P1 / Codex PR #218: pre-fix, a single corrupted line
+/// or a short crash window before the `transaction_id=` line was
+/// written stranded the operator with neither abort nor continue
+/// available).
 pub(crate) fn load_rebase_state_for_abort(path: &std::path::Path) -> Result<RebaseState> {
-    load_rebase_state_internal(path, /* lenient_pending_advances= */ true)
+    load_rebase_state_internal(path, /* for_abort= */ true)
 }
 
 fn load_rebase_state_internal(
     path: &std::path::Path,
-    lenient_pending_advances: bool,
+    for_abort: bool,
 ) -> Result<RebaseState> {
     let content = fs::read_to_string(path)?;
 
@@ -182,12 +192,12 @@ fn load_rebase_state_internal(
             // hard-fail so a silently-truncated batch never lands in
             // the oplog.
             match hex::decode(value).map_err(|e| anyhow!("decode pending_advance: {}", e)) {
-                Err(_) if lenient_pending_advances => continue,
+                Err(_) if for_abort => continue,
                 Err(e) => return Err(e),
                 Ok(bytes) => match rmp_serde::from_slice::<OpRecord>(&bytes)
                     .map_err(|e| anyhow!("decode pending_advance OpRecord: {}", e))
                 {
-                    Err(_) if lenient_pending_advances => continue,
+                    Err(_) if for_abort => continue,
                     Err(e) => return Err(e),
                     Ok(advance) => pending_advances.push(advance),
                 },
@@ -195,12 +205,25 @@ fn load_rebase_state_internal(
         }
     }
 
+    let onto = onto.ok_or_else(|| anyhow!("Missing 'onto' in rebase state"))?;
+    let original_head =
+        original_head.ok_or_else(|| anyhow!("Missing 'original_head' in rebase state"))?;
+    // heddle#198 r3 (Codex PR #218 P1): on the abort path a missing
+    // `transaction_id=` collapses to an empty string — the abort
+    // rewind never reaches `flush_rebase_batch` so the id's
+    // crash-recovery dedup is dead code. The strict loader still
+    // demands the line because `--continue` does flush, and a blank
+    // id would key the dedup against every prior empty-id batch.
+    let transaction_id = match (transaction_id, for_abort) {
+        (Some(id), _) => id,
+        (None, true) => String::new(),
+        (None, false) => return Err(anyhow!("Missing 'transaction_id' in rebase state")),
+    };
+
     Ok(RebaseState {
-        onto: onto.ok_or_else(|| anyhow!("Missing 'onto' in rebase state"))?,
-        original_head: original_head
-            .ok_or_else(|| anyhow!("Missing 'original_head' in rebase state"))?,
-        transaction_id: transaction_id
-            .ok_or_else(|| anyhow!("Missing 'transaction_id' in rebase state"))?,
+        onto,
+        original_head,
+        transaction_id,
         current_index,
         commits_to_replay,
         pending_manual_resolution,
