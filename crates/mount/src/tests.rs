@@ -3037,16 +3037,13 @@ mod write_ops {
         );
     }
 
-    /// Codex thread 3293484633 cont. (r11 #2, P1) — heddle#210
-    /// retrofit. `drain_for_capture` used to drop every `Live` entry,
-    /// including `Live { open_count >= 1 }`. The open fd's lifecycle
-    /// row + hot/warm bytes disappeared, so a subsequent write through
-    /// that fd took the `Released` branch (no `state[node]`) and
-    /// republished the file under its original path with empty
-    /// content — breaking POSIX last-close-wins for live-and-open
-    /// files across capture. The fix preserves `LiveNonZero` entries
-    /// + their per-NodeId byte storage so reads/writes via the open
-    /// fd keep serving the buffered content.
+    /// Codex thread 3293484633 cont. (r11 #2, P1) — heddle#210 retrofit.
+    /// `drain_for_capture` used to drop every `Live` entry, including
+    /// `Live { open_count >= 1 }`. The open fd's lifecycle row + hot/warm
+    /// bytes disappeared, so a subsequent write through that fd
+    /// recreated an empty hot buffer — POSIX last-close-wins requires
+    /// the fd to keep seeing the bytes it already buffered. The fix
+    /// preserves `LiveNonZero` entries + their per-NodeId byte storage.
     #[test]
     fn capture_preserves_live_state_for_open_inodes() {
         let (_temp, mount) = open_mount();
@@ -3070,11 +3067,14 @@ mod write_ops {
             .capture(Some("capture with live-and-open fd".into()))
             .expect("capture");
 
-        // Through the surviving fd: write replaces bytes, read serves
-        // them. Pre-fix: the post-capture write republishes the path
-        // under the (now-captured) name, and the read returns whatever
-        // the captured state held. Post-fix: the fd's view of the
-        // inode is independent of the capture's path-level fold-in.
+        // Through the surviving fd: a 5-byte overwrite at offset 0
+        // must lay over the 6-byte "BEFORE" buffer, NOT a fresh
+        // empty one. Pre-fix the drain dropped `hot[node]`, so the
+        // post-capture write recreated an empty buffer and the read
+        // returned just "AFTER" (5 bytes) — losing the trailing 'E'
+        // that POSIX last-close-wins requires the fd to still see.
+        // Post-fix the hot buffer survives, the 5-byte overwrite
+        // leaves the 6th byte alone, and the read returns "AFTERE".
         mount
             .write(entry.node, 0, b"AFTER")
             .expect("write through live fd survives capture");
@@ -3084,8 +3084,8 @@ mod write_ops {
             .expect("read via live fd after capture");
         assert_eq!(
             &buf[..n],
-            b"AFTER",
-            "live hot bytes must survive capture so subsequent writes via the open fd are readable (POSIX last-close-wins; r11 #2)"
+            b"AFTERE",
+            "live hot bytes must survive capture so a partial overwrite via the open fd preserves the trailing pre-capture byte (POSIX last-close-wins; r11 #2)"
         );
     }
 

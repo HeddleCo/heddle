@@ -113,6 +113,67 @@ impl Lifecycle for LiveZero {}
 impl Lifecycle for Orphan {}
 impl Lifecycle for Released {}
 
+/// Runtime discriminator for the three *resident* [`Lifecycle`]
+/// markers — the ones that can ever appear in [`crate::core::Pending`]'s
+/// `state` map. [`Released`] is the absence-of-entry state and is
+/// never returned: the classifier runs only after a successful
+/// [`crate::core::Pending::lookup_state`] (the `Option<NodeState>`
+/// has already been unwrapped to a `NodeState`), so a `Released` arm
+/// would be unreachable. The doc-comment on
+/// [`Pending::drain_for_capture`] documents why the match has no
+/// fourth arm.
+///
+/// The variants intentionally mirror the substrate's [`LiveNonZero`]
+/// / [`LiveZero`] / [`Orphan`] type-state ZSTs at the value layer.
+/// Code that wants to drop `LiveNonZero` (the r11 #2 bug) cannot
+/// collapse the discriminant by accident: the variant must be named
+/// explicitly in any match against `ResidentLifecycle`, which makes
+/// the bug unwritable without an obvious diff
+/// ([`docs/design/mount-pending-api-contracts.md`][doc] §3 row 2).
+///
+/// [doc]: ../../../docs/design/mount-pending-api-contracts.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub(crate) enum ResidentLifecycle {
+    /// `Live { open_count >= 1 }`. POSIX last-close-wins applies — at
+    /// least one kernel fd holds the NodeId, so the lifecycle row and
+    /// per-NodeId byte storage must outlive any path-level operation,
+    /// including capture, until the final close.
+    LiveNonZero,
+    /// `Live { open_count == 0 }`. The path is still resolvable but
+    /// no fd references the inode; the per-NodeId byte storage can be
+    /// retired alongside the lifecycle row on capture without
+    /// breaking POSIX.
+    LiveZero,
+    /// `Orphan { open_count >= 0 }`. Directory entry already retired
+    /// (post-unlink / post-rename-over T1/T3); the per-NodeId bytes
+    /// must outlive the entry as long as any fd holds the NodeId.
+    /// Refcount-irrelevant — the discriminant is what gates the
+    /// drain decision, mirroring the substrate's [`BrandedPending::witness_orphan`]
+    /// constructor.
+    Orphan,
+}
+
+impl ResidentLifecycle {
+    /// Project a runtime [`NodeState`] onto its [`ResidentLifecycle`]
+    /// discriminator. The match is exhaustive over [`NodeState`]'s
+    /// two variants (`Live` / `Orphan`) by language rule, and
+    /// exhaustive over the three resident [`Lifecycle`] markers by
+    /// codomain.
+    pub(crate) fn classify(s: &NodeState) -> Self {
+        match s {
+            // `LiveZero` is split out from `LiveNonZero` so the drain
+            // contract can name the two discriminants separately.
+            // Without this split, "drop every Live entry" would be
+            // one line; with it, the diff has to say `LiveNonZero`
+            // explicitly — the r11 #2 type-system rejection.
+            NodeState::Live { open_count: 0 } => Self::LiveZero,
+            NodeState::Live { .. } => Self::LiveNonZero,
+            NodeState::Orphan { .. } => Self::Orphan,
+        }
+    }
+}
+
 /// Type-level proof that `id` was in lifecycle state `S` under the
 /// `&mut Pending<'brand>` borrow `'p` that minted it.
 ///
@@ -248,21 +309,59 @@ impl<'a> Pending<'a> {
     /// Retire per-NodeId entries that the just-completed capture has
     /// folded into the new state, and clear all path-keyed overlays.
     ///
-    /// **NOTE — heddle#210 in progress.** This commit extracts the
-    /// previously-inline drain in `core::ContentAddressedMount::capture_with_attribution`
-    /// into a method but **preserves the pre-retrofit (buggy) behaviour**:
-    /// every `Live` entry is dropped, including `Live { open_count >= 1 }`.
-    /// That's r11 #2 — POSIX last-close-wins is broken across capture
-    /// because the open fd's lifecycle entry + hot/warm bytes disappear.
-    /// The green commit replaces this body with a [`ResidentLifecycle`]-
-    /// typed exhaustive match so the "drop `LiveNonZero`" line cannot be
-    /// written without naming the discriminant explicitly.
+    /// The classifier match is exhaustive over the three *resident*
+    /// [`Lifecycle`] markers — [`LiveNonZero`], [`LiveZero`], [`Orphan`]:
+    ///
+    /// * [`ResidentLifecycle::LiveNonZero`] — survives. At least one
+    ///   kernel fd holds the NodeId; POSIX last-close-wins says the
+    ///   fd's view of the inode must outlive any path-level operation
+    ///   until the final close. The lifecycle row, `hot[id]`, and
+    ///   `warm[id]` are all preserved so the open fd keeps seeing its
+    ///   own bytes after the capture folds the path into the new tree.
+    /// * [`ResidentLifecycle::LiveZero`] — retires. The path is now
+    ///   in the captured tree and no fd references the inode, so the
+    ///   lifecycle row + per-NodeId bytes are safe to drop.
+    /// * [`ResidentLifecycle::Orphan`] — survives. The directory
+    ///   entry is already gone (post T1/T3); the bytes must outlive
+    ///   the entry as long as any fd holds the NodeId. Refcount-
+    ///   irrelevant — `Orphan { open_count: 0 }` is a transient state
+    ///   the FSM clears on the next `release_node`, not here.
+    ///
+    /// [`Released`] is intentionally absent from the match.
+    /// [`crate::core::Pending::lifecycle_iter`] only yields entries
+    /// that exist in `state`, and the `state` map never stores the
+    /// absence-of-entry state by construction — adding a `Released`
+    /// arm would be unreachable (and incorrect). See
+    /// [`docs/design/mount-pending-api-contracts.md`][doc] §3 row 2
+    /// for the bug-by-bug analysis.
+    ///
+    /// The path-keyed overlays (`hot_by_path`, `tombstones`,
+    /// `dir_tombstones`, `explicit_dirs`, `symlinks`) clear
+    /// unconditionally: every path they covered is now folded into
+    /// the new tree, and the orphan branches in
+    /// `unlink_entry` / `rename_entry`'s T1/T3 already retired their
+    /// path-side bindings, so no surviving NodeId is reachable through
+    /// them.
+    ///
+    /// # Why the match makes r11 #2 unwritable
+    ///
+    /// The pre-retrofit drain matched directly on `NodeState`'s
+    /// `Live` / `Orphan` discriminants, so collapsing both Live
+    /// refcount states into one `=> None` arm was one line. The
+    /// retrofitted match goes through [`ResidentLifecycle`], which
+    /// splits `LiveZero` and `LiveNonZero` into separate variants —
+    /// a future drive-by that wanted to drop Live-with-fds (the r11
+    /// #2 bug) has to write `ResidentLifecycle::LiveNonZero => None`
+    /// explicitly, which is loud in code review.
+    ///
+    /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
     pub(crate) fn drain_for_capture(&mut self) {
         let surviving: std::collections::BTreeSet<u64> = self
             .lifecycle_iter()
-            .filter_map(|(id, s)| match s {
-                NodeState::Orphan { .. } => Some(id),
-                NodeState::Live { .. } => None,
+            .filter_map(|(id, s)| match ResidentLifecycle::classify(&s) {
+                ResidentLifecycle::LiveNonZero => Some(id), // POSIX last-close-wins
+                ResidentLifecycle::Orphan => Some(id),      // open-but-unlinked
+                ResidentLifecycle::LiveZero => None,        // safe to retire
             })
             .collect();
         self.apply_drain_for_capture(&surviving);
@@ -1019,5 +1118,109 @@ mod tests {
             p.lookup_state(104),
             Some(NodeState::Live { open_count: 7 })
         );
+    }
+
+    // ------- ResidentLifecycle classifier ------------------------------------
+
+    #[test]
+    fn resident_lifecycle_classify_live_zero() {
+        assert_eq!(
+            ResidentLifecycle::classify(&NodeState::Live { open_count: 0 }),
+            ResidentLifecycle::LiveZero,
+        );
+    }
+
+    #[test]
+    fn resident_lifecycle_classify_live_nonzero_at_one() {
+        assert_eq!(
+            ResidentLifecycle::classify(&NodeState::Live { open_count: 1 }),
+            ResidentLifecycle::LiveNonZero,
+        );
+    }
+
+    #[test]
+    fn resident_lifecycle_classify_live_nonzero_at_max() {
+        assert_eq!(
+            ResidentLifecycle::classify(&NodeState::Live {
+                open_count: u32::MAX
+            }),
+            ResidentLifecycle::LiveNonZero,
+        );
+    }
+
+    #[test]
+    fn resident_lifecycle_classify_orphan_any_refcount() {
+        // The classifier collapses both `Orphan { 0 }` and
+        // `Orphan { n }` onto the same discriminant — the substrate
+        // contract is "discriminant gates the drain decision", not
+        // refcount.
+        assert_eq!(
+            ResidentLifecycle::classify(&NodeState::Orphan { open_count: 0 }),
+            ResidentLifecycle::Orphan,
+        );
+        assert_eq!(
+            ResidentLifecycle::classify(&NodeState::Orphan { open_count: 5 }),
+            ResidentLifecycle::Orphan,
+        );
+        assert_eq!(
+            ResidentLifecycle::classify(&NodeState::Orphan {
+                open_count: u32::MAX
+            }),
+            ResidentLifecycle::Orphan,
+        );
+    }
+
+    // ------- proptest: FSM-trace-ending-in-capture -----------------------------
+    //
+    // Generates a random sequence of `(NodeId, NodeState)` writes
+    // (last-write-wins per id), replays them into a fresh `Pending`,
+    // runs `drain_for_capture`, and asserts the post-capture map is
+    // exactly the input collapse minus the `LiveZero` entries — i.e.
+    // every `LiveNonZero` / `Orphan` survivor carries its `open_count`
+    // intact, and every `LiveZero` retires. The NodeId range is kept
+    // small (0..16) to maximise collisions, and the trace length is
+    // capped at 32 to keep shrunken counterexamples readable. Covers
+    // the heddle#210 AC: "random FSM trace ending in a capture
+    // preserves all open-fd refcounts".
+
+    use proptest::prelude::*;
+
+    proptest::proptest! {
+        #[test]
+        fn drain_for_capture_proptest_preserves_open_counts(
+            entries in proptest::collection::vec(
+                (
+                    0u64..16,
+                    proptest::prop_oneof![
+                        proptest::num::u32::ANY
+                            .prop_map(|n| NodeState::Live { open_count: n }),
+                        proptest::num::u32::ANY
+                            .prop_map(|n| NodeState::Orphan { open_count: n }),
+                    ],
+                ),
+                0..32usize,
+            ),
+        ) {
+            // Replay the trace; last write wins per NodeId. Build the
+            // expected post-drain map alongside.
+            let mut p = Pending::default();
+            let mut expected: std::collections::BTreeMap<u64, NodeState> =
+                std::collections::BTreeMap::new();
+            for (id, state) in &entries {
+                p.test_insert_state(*id, *state);
+                expected.insert(*id, *state);
+            }
+            // LiveZero retires by contract.
+            expected.retain(|_, s| !matches!(s, NodeState::Live { open_count: 0 }));
+
+            p.drain_for_capture();
+
+            // Post-drain state must equal the expected map exactly:
+            // every `LiveNonZero` / `Orphan` entry (with its
+            // `open_count` intact) is present, and nothing else is.
+            let after: std::collections::BTreeMap<u64, NodeState> =
+                p.lifecycle_iter().collect();
+            proptest::prop_assert_eq!(after, expected);
+        }
     }
 }
