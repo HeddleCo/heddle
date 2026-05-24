@@ -575,6 +575,69 @@ mod tests {
         assert!(err.contains("Missing 'transaction_id'"), "got: {err}");
     }
 
+    /// heddle#198 r4 (Codex PR #218 P2): `pending_advance=` records
+    /// deserialize as arbitrary `OpRecord` and get pushed without any
+    /// variant check, then written verbatim into the committed batch.
+    /// A hand-edited or partially-corrupted state file that still
+    /// decodes can inject non-rebase operations (e.g. `MarkerCreate`,
+    /// `ThreadDelete`) into the rebase's undo/redo history — undo would
+    /// replay records the rebase never produced. The strict loader
+    /// must whitelist only the variants `ff_advance_deferred` emits
+    /// (`FastForwardV2` / `Goto`) plus the legacy V1 `FastForward` read-
+    /// back path, and reject anything else.
+    #[test]
+    fn load_strict_rejects_non_advance_pending_record() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        // MarkerCreate is a real OpRecord variant that decodes cleanly
+        // but is never legitimately emitted into a rebase batch.
+        let bad = OpRecord::MarkerCreate {
+            name: "junk".to_string(),
+            state: ChangeId::generate(),
+        };
+        let bytes = rmp_serde::to_vec(&bad).unwrap();
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=1\ncommits=\npending_advance={pa}\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+            pa = hex::encode(&bytes),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("pending_advance") && err.contains("variant"),
+            "expected variant-rejection error, got: {err}"
+        );
+    }
+
+    /// Multiple non-advance records must each be flagged. Pins that the
+    /// reject arm fires on the first bad record rather than silently
+    /// accepting later ones.
+    #[test]
+    fn load_strict_rejects_thread_delete_in_pending_advances() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let bad = OpRecord::ThreadDelete {
+            name: "junk".to_string(),
+            state: ChangeId::generate(),
+        };
+        let bytes = rmp_serde::to_vec(&bad).unwrap();
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=1\ncommits=\npending_advance={pa}\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+            pa = hex::encode(&bytes),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("pending_advance") && err.contains("variant"),
+            "expected variant-rejection error, got: {err}"
+        );
+    }
+
     /// heddle#198 r4 (Codex PR #218 P2): the strict loader checks only
     /// key presence of `transaction_id=`, not the value. A torn write
     /// can leave the line emitted with an empty value
