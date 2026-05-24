@@ -541,6 +541,43 @@ mod tests {
         assert!(err.contains("Missing 'transaction_id'"), "got: {err}");
     }
 
+    /// heddle#198 r4 (Codex PR #218 P1): the persisted invariant in
+    /// REBASE_STATE is `pending_advances.len() == current_index` — each
+    /// successful per-commit replay bumps both in lockstep (see
+    /// `replay_commits_internal` Success arm and
+    /// `resume_manual_resolution_if_present`). A crash mid-write to
+    /// REBASE_STATE that preserves the `current_index=` line but
+    /// truncates one or more trailing `pending_advance=` lines lands the
+    /// file in an inconsistent state: the strict `--continue` loader
+    /// would treat it as clean, re-enter `replay_commits_internal` with
+    /// `current_index == commits_to_replay.len()`, skip the loop body
+    /// entirely, and flush an incomplete batch — silently losing part
+    /// of the rebase's undo history. Pin that strict load hard-fails.
+    #[test]
+    fn load_strict_rejects_truncated_pending_advances() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        // current_index=3 claims three advances completed, but only one
+        // `pending_advance=` line is present. Encode a real FF record so
+        // the line itself decodes cleanly — the inconsistency is purely
+        // between the counter and the vec length, not a malformed entry.
+        let advance = ff_record();
+        let bytes = rmp_serde::to_vec(&advance).unwrap();
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=3\ncommits=\npending_advance={pa}\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+            pa = hex::encode(&bytes),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("pending_advance") && err.contains("current_index"),
+            "expected count-mismatch error naming both counters, got: {err}"
+        );
+    }
+
     /// A clean state file (no malformed lines) must load identically
     /// through both paths — leniency is invisible when there's nothing
     /// to forgive.
