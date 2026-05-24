@@ -3125,6 +3125,66 @@ mod write_ops {
         );
     }
 
+    /// Codex PR #182 r11 finding #3 (P1; heddle#211). `invalidate`
+    /// (FUSE `forget`) drops `pending.hot[node]` unconditionally,
+    /// without first checking whether the inode is still referenced.
+    /// For an `Orphan { open_count >= 1 }` node (open-unlinked POSIX
+    /// flow), the kernel can issue `forget` for the dentry-side
+    /// reference while a userspace fd still holds the inode; dropping
+    /// `hot[node]` strands the surviving fd with no readable bytes.
+    /// Post-retrofit (heddle#211) the witness-gated
+    /// `BrandedPending::kernel_forget_inode` rejects any `Orphan`
+    /// state, and the missing witness short-circuits the entire
+    /// forget path in `MountInner::invalidate` — leaving `hot[node]`,
+    /// `state[node]`, and the inode record intact until the final
+    /// `release` retires them.
+    #[test]
+    fn invalidate_preserves_hot_bytes_for_orphan_with_open_fd() {
+        let (_temp, mount) = open_mount();
+        // Create + open a fresh file, write through the fd. Bytes
+        // stay in `hot[node]` — no flush, so warm is untouched.
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .expect("create");
+        mount.on_open(entry.node).expect("on_open");
+        mount
+            .write(entry.node, 0, b"HOT-BYTES")
+            .expect("write through live fd populates hot");
+        // Unlink while the fd lives on. POSIX: dentry gone, inode
+        // survives behind the fd; FSM transitions to
+        // `Orphan { open_count: 1 }`.
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("unlink");
+        assert!(
+            mount.orphans_contains(entry.node),
+            "pre-invalidate sanity: unlink-while-open must orphan the inode"
+        );
+
+        // Kernel forget arrives for the dentry-side reference while
+        // the fd is still in userspace's hands. Pre-retrofit
+        // `invalidate` blindly removed `hot[node]`; post-retrofit
+        // the witness rejects `Orphan` and the forget path
+        // short-circuits.
+        mount
+            .invalidate(entry.node)
+            .expect("invalidate (kernel forget) on orphan with open fd");
+
+        // Read via the surviving fd. The hot-tier bytes must still
+        // be served — the open-unlinked POSIX contract demands that
+        // the fd's view of the inode outlives the dentry.
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(entry.node, 0, &mut buf)
+            .expect("read via orphan fd after kernel forget");
+        assert_eq!(
+            &buf[..n],
+            b"HOT-BYTES",
+            "kernel forget racing an open Orphan fd must not drop \
+             hot[node] — the surviving fd needs the bytes (r11 #3)"
+        );
+    }
+
     /// Codex thread 3293510310 (P1). `rmdir_entry` plants a
     /// `dir_tombstones` entry but leaves `inodes.by_path[child_path]`
     /// intact. A subsequent `create_file` / `make_dir` at the same path
