@@ -101,12 +101,18 @@ mod tests;
 ///         let w = p1_branded
 ///             .witness_live_nonzero(0)
 ///             .expect("doctest never runs — compile_fail");
-///         // Pre-fix: `discharge_witness` accepts any `Witness<'_, S>`.
+///         // Pre-fix: `peek_witness` accepts any `&Witness<'_, S>`.
 ///         //          Compiles → `compile_fail` assertion fails → RED.
-///         // Post-fix: `discharge_witness` on `Pending<'brand_of_p2>`
-///         //           wants `Witness<'_, 'brand_of_p2, S>`. Brand
+///         // Post-fix: `peek_witness` on `Pending<'brand_of_p2>`
+///         //           wants `&Witness<'_, 'brand_of_p2, S>`. Brand
 ///         //           mismatch → fails to compile → assertion holds → GREEN.
-///         let _ = p2_branded.discharge_witness(w);
+///         //
+///         // `peek_witness` takes `&self` + `&Witness` (not consuming)
+///         // so the proof stays orthogonal to the borrow-checker
+///         // constraint introduced by `_borrow: PhantomData<&'p mut ()>`
+///         // on the witness — that's a separate spike-doc question
+///         // the retrofit issues will address, not this PR.
+///         let _ = p2_branded.peek_witness(&w);
 ///     });
 /// });
 /// ```

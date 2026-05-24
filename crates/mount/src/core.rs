@@ -421,7 +421,7 @@ pub(crate) enum NodeState {
 /// finding r6 → r9 on PR #182.
 #[derive(Default)]
 #[doc(hidden)]
-pub struct Pending {
+pub struct Pending<'brand> {
     /// Hot tier: per-`NodeId` open-file buffers.
     hot: BTreeMap<u64, HotBuffer>,
     /// Reverse-index for the hot tier: which NodeId currently owns a
@@ -465,9 +465,18 @@ pub struct Pending {
     /// state (Released) — entries are removed on final `release`,
     /// `invalidate`, and `capture`.
     state: BTreeMap<u64, NodeState>,
+    /// Invariant phantom: ties this `Pending` to a unique `'brand`
+    /// introduced by [`Pending::with_brand`]. Witnesses minted under
+    /// one `'brand` cannot be passed to methods on a `Pending`
+    /// carrying a different `'brand` — closes Codex PR #217 r2
+    /// finding `3293832936`. The `fn(&'brand ()) -> &'brand ()`
+    /// shape makes `'brand` invariant (neither covariant nor
+    /// contravariant), so the borrow checker refuses to unify two
+    /// fresh brands handed out by separate `with_brand` calls.
+    _brand: std::marker::PhantomData<fn(&'brand ()) -> &'brand ()>,
 }
 
-impl Pending {
+impl<'brand> Pending<'brand> {
     /// True iff the NodeId is currently Orphan (directory entry gone
     /// but `open_count >= 0` fds still reference the inode). Every
     /// callback that branches on lifecycle goes through this helper
@@ -567,7 +576,16 @@ pub(crate) struct MountInner {
     thread: String,
     state: RwLock<MountState>,
     inodes: Mutex<Inodes>,
-    pending: Mutex<Pending>,
+    // Storage carries `Pending<'static>` as the long-lived shape;
+    // every actual witness-minting access goes through
+    // [`Pending::with_brand`], which re-borrows under a fresh
+    // invariant `'brand` introduced by HRTB. The `'static` slot is
+    // never exposed as a witness brand — `with_brand` is the only
+    // entry point that mints `Witness`/`KernelForgetWitness`, and
+    // its HRTB closure makes the inner brand opaque so witnesses
+    // from one access cannot leak to another (Codex PR #217 r2
+    // finding `3293832936`).
+    pending: Mutex<Pending<'static>>,
     promotion: RwLock<PromotionPolicy>,
     mounted_at: SystemTime,
     /// Write-side serialization. Acquired by structural-mutation

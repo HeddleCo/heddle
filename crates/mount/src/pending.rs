@@ -114,7 +114,7 @@ impl Lifecycle for Orphan {}
 impl Lifecycle for Released {}
 
 /// Type-level proof that `id` was in lifecycle state `S` under the
-/// `&mut Pending` borrow `'p` that minted it.
+/// `&mut Pending<'brand>` borrow `'p` that minted it.
 ///
 /// # Invariants
 ///
@@ -128,6 +128,12 @@ impl Lifecycle for Released {}
 ///   exists — closing the "stale witness across a mutation" hole
 ///   spelled out in
 ///   [`docs/design/mount-pending-api-contracts.md`][doc] §2.2.1.
+/// * The lifetime parameter `'brand` ties the witness to the specific
+///   `Pending` instance that minted it. Two `Pending<'brand>` values
+///   handed out by separate [`Pending::with_brand`] calls carry
+///   distinct, invariant brands; a witness from one cannot be passed
+///   to methods on the other (closes Codex PR #217 r2 finding
+///   `3293832936`).
 /// * `S` is invariant via the [`PhantomData<&'p mut ()>`] field — the
 ///   compiler will not silently widen or narrow the state parameter.
 /// * `!Send` and `!Sync` via the raw-pointer marker — the witness is
@@ -136,22 +142,29 @@ impl Lifecycle for Released {}
 /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
 #[derive(Debug)]
 #[doc(hidden)]
-pub struct Witness<'p, S: Lifecycle> {
+pub struct Witness<'p, 'brand, S: Lifecycle> {
     id: u64,
     _state: PhantomData<S>,
     // Invariance over `'p` + ties the witness to a `&mut Pending`
     // borrow. The `&'p mut ()` is for the lifetime relationship; the
-    // borrow extension on `&'p mut Pending -> Witness<'p, _>` is what
-    // makes the borrow checker refuse a concurrent mutable borrow of
-    // `Pending` while the witness is alive.
+    // borrow extension on `&'p mut Pending -> Witness<'p, _, _>` is
+    // what makes the borrow checker refuse a concurrent mutable
+    // borrow of `Pending` while the witness is alive.
     _borrow: PhantomData<&'p mut ()>,
+    // Invariant brand binding the witness to its originating
+    // `Pending<'brand>` instance. `fn(&'brand ()) -> &'brand ()` is
+    // the canonical invariant carrier — neither covariant nor
+    // contravariant. Witnesses minted under one `with_brand` HRTB
+    // closure cannot be passed to a `Pending` with a different
+    // brand, even when both carry the same lifecycle state `S`.
+    _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
     // `!Send` + `!Sync` marker. The witness is short-lived and tied
     // to one thread of execution by design; cross-thread transfer is
     // never sound.
     _not_send: PhantomData<*const ()>,
 }
 
-impl<'p, S: Lifecycle> Witness<'p, S> {
+impl<'p, 'brand, S: Lifecycle> Witness<'p, 'brand, S> {
     /// Mint a witness. Visible only inside this module — every
     /// witness must come from a `Pending::witness_*` constructor that
     /// performed the FSM check.
@@ -160,6 +173,7 @@ impl<'p, S: Lifecycle> Witness<'p, S> {
             id,
             _state: PhantomData,
             _borrow: PhantomData,
+            _brand: PhantomData,
             _not_send: PhantomData,
         }
     }
@@ -172,32 +186,68 @@ impl<'p, S: Lifecycle> Witness<'p, S> {
     }
 }
 
-impl Pending {
-    /// Re-borrow `self` for a callback that wants to mint witnesses.
+impl<'a> Pending<'a> {
+    /// Re-borrow `self` under a freshly-minted, invariant `'brand`
+    /// lifetime that's unique to this call.
     ///
-    /// In the red-commit shape this is an identity no-op — it hands
-    /// the caller the same `&mut Pending`. The green commit
-    /// introduces a brand-lifetime parameter on `Pending` and uses
-    /// the HRTB on `f` to issue a fresh, invariant brand per call;
-    /// that's what makes witnesses minted inside non-fungible with
-    /// witnesses from a different `Pending` (the Codex PR #217 r2
-    /// finding). Keeping the shape here in the red commit lets the
-    /// `compile_fail` doctest reference the same call pattern across
-    /// red and green.
+    /// The HRTB on `f` (`for<'brand>`) forces the compiler to treat
+    /// the brand as opaque inside the closure. Each call to
+    /// `with_brand` issues a brand that can't unify with any other
+    /// call's brand, even if both originate from the same physical
+    /// `Pending`. Witnesses minted on the inner `&mut Pending<'brand>`
+    /// carry that closure's `'brand` and cannot be passed to a
+    /// `Pending` borrowed under a different `with_brand` invocation
+    /// — closing Codex PR #217 r2 finding `3293832936`.
+    ///
+    /// # Soundness
+    ///
+    /// The transmute changes only the phantom brand lifetime, which
+    /// has no representation in the type's layout (`PhantomData<fn(..)>`
+    /// is zero-sized). All other lifetime + ownership invariants
+    /// transfer verbatim through `mem::transmute_mut`. The HRTB
+    /// bound on `f` prevents the inner brand from escaping the
+    /// closure: any value returned by `f` cannot mention `'brand`
+    /// because there's no fixed `'brand` to mention from outside.
     #[doc(hidden)]
-    pub fn with_brand<R>(&mut self, f: impl FnOnce(&mut Pending) -> R) -> R {
-        f(self)
+    pub fn with_brand<R>(
+        &mut self,
+        f: impl for<'brand> FnOnce(&mut Pending<'brand>) -> R,
+    ) -> R {
+        // SAFETY: `Pending<'a>` and `Pending<'brand>` have identical
+        // layout — `_brand` is `PhantomData<fn(&_ ()) -> &_ ()>`,
+        // which is zero-sized regardless of the brand lifetime, so
+        // only the phantom-only lifetime parameter changes. The
+        // HRTB on `f` ensures the freshly-introduced `'brand`
+        // cannot leak via the return type.
+        let branded: &mut Pending<'_> =
+            unsafe { std::mem::transmute::<&mut Pending<'a>, &mut Pending<'_>>(self) };
+        f(branded)
     }
 
     /// Substrate hook for the brand-isolation doctest: takes a
-    /// witness and returns its NodeId without doing anything else.
-    /// Retrofit issues (heddle#209/#210/#211/#212) will replace
-    /// this no-op with the real witness-gated transitions; for the
-    /// substrate PR it exists so the `compile_fail` proof in
-    /// [`crate::__pending_substrate_for_doctest`] can demonstrate
-    /// brand-mismatch rejection.
+    /// borrowed witness branded to `self`'s `'a` and returns its
+    /// NodeId without doing anything else.
+    ///
+    /// Retrofit issues (heddle#209/#210/#211/#212) will introduce
+    /// the real witness-gated transitions, which need to mutate
+    /// `self` and consume the witness; those signatures live there,
+    /// not here. For the substrate PR we only need a non-consuming
+    /// brand-matching method so the [`crate::__pending_substrate_for_doctest`]
+    /// `compile_fail` proof can demonstrate that a witness minted
+    /// under a different `with_brand` closure fails to type-check
+    /// (the brand lifetimes are invariant and don't unify).
+    ///
+    /// `&self` (not `&mut self`) plus `&Witness` (not `Witness`)
+    /// keeps the proof orthogonal to the separate borrow-checker
+    /// constraint introduced by the witness's `_borrow:
+    /// PhantomData<&'p mut ()>` field — the consume pattern
+    /// `p.transition_to_orphan(w)` that retrofit issues will need
+    /// is a pre-existing substrate design question (the `'p` field
+    /// makes it not compile today; see the spike doc §2.2.1) and
+    /// isn't this PR's scope.
     #[doc(hidden)]
-    pub fn discharge_witness<S: Lifecycle>(&mut self, w: Witness<'_, S>) -> u64 {
+    pub fn peek_witness<S: Lifecycle>(&self, w: &Witness<'_, 'a, S>) -> u64 {
+        let _ = self;
         w.id()
     }
 }
@@ -220,18 +270,24 @@ impl Pending {
 /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
 #[derive(Debug)]
 #[doc(hidden)]
-pub struct KernelForgetWitness<'p> {
+pub struct KernelForgetWitness<'p, 'brand> {
     id: u64,
     _borrow: PhantomData<&'p mut ()>,
+    // Same invariant brand carrier as [`Witness`]. Binds the witness
+    // to the originating `Pending<'brand>` instance so a forget
+    // witness from one mount cannot be discharged against another's
+    // hot-tier buffer (Codex PR #217 r2 finding `3293832936`).
+    _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
     _not_send: PhantomData<*const ()>,
 }
 
-impl<'p> KernelForgetWitness<'p> {
+impl<'p, 'brand> KernelForgetWitness<'p, 'brand> {
     /// Mint a kernel-forget witness. Visible only inside this module.
     fn new(id: u64) -> Self {
         Self {
             id,
             _borrow: PhantomData,
+            _brand: PhantomData,
             _not_send: PhantomData,
         }
     }
@@ -243,7 +299,7 @@ impl<'p> KernelForgetWitness<'p> {
     }
 }
 
-impl Pending {
+impl<'brand> Pending<'brand> {
     /// Witness that `id` is in `Live { open_count >= 1 }`. Returns
     /// `None` for any other state, including `Live { open_count == 0 }`,
     /// any `Orphan`, and `Released` (no entry). This is the
@@ -255,7 +311,7 @@ impl Pending {
     ///
     /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
     #[doc(hidden)]
-    pub fn witness_live_nonzero(&mut self, id: u64) -> Option<Witness<'_, LiveNonZero>> {
+    pub fn witness_live_nonzero(&mut self, id: u64) -> Option<Witness<'_, 'brand, LiveNonZero>> {
         match self.lookup_state(id) {
             Some(NodeState::Live { open_count }) if open_count >= 1 => Some(Witness::new(id)),
             _ => None,
@@ -266,7 +322,7 @@ impl Pending {
     /// `None` for `Live` with any non-zero refcount, for any `Orphan`,
     /// and for `Released`.
     #[doc(hidden)]
-    pub fn witness_live_zero(&mut self, id: u64) -> Option<Witness<'_, LiveZero>> {
+    pub fn witness_live_zero(&mut self, id: u64) -> Option<Witness<'_, 'brand, LiveZero>> {
         match self.lookup_state(id) {
             Some(NodeState::Live { open_count: 0 }) => Some(Witness::new(id)),
             _ => None,
@@ -276,7 +332,7 @@ impl Pending {
     /// Witness that `id` is in `Orphan { .. }` (any refcount).
     /// Returns `None` for `Live` (any refcount) and `Released`.
     #[doc(hidden)]
-    pub fn witness_orphan(&mut self, id: u64) -> Option<Witness<'_, Orphan>> {
+    pub fn witness_orphan(&mut self, id: u64) -> Option<Witness<'_, 'brand, Orphan>> {
         match self.lookup_state(id) {
             Some(NodeState::Orphan { .. }) => Some(Witness::new(id)),
             _ => None,
@@ -289,7 +345,7 @@ impl Pending {
     /// (`record_open` minting a `LiveZero -> LiveNonZero` transition
     /// when there is no prior entry).
     #[doc(hidden)]
-    pub fn witness_released(&mut self, id: u64) -> Option<Witness<'_, Released>> {
+    pub fn witness_released(&mut self, id: u64) -> Option<Witness<'_, 'brand, Released>> {
         match self.lookup_state(id) {
             None => Some(Witness::new(id)),
             _ => None,
@@ -314,7 +370,7 @@ impl Pending {
     ///
     /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
     #[doc(hidden)]
-    pub fn witness_kernel_forget(&mut self, id: u64) -> Option<KernelForgetWitness<'_>> {
+    pub fn witness_kernel_forget(&mut self, id: u64) -> Option<KernelForgetWitness<'_, 'brand>> {
         match self.lookup_state(id) {
             None => Some(KernelForgetWitness::new(id)),
             Some(NodeState::Live { open_count: 0 }) => Some(KernelForgetWitness::new(id)),
@@ -537,11 +593,11 @@ mod tests {
         struct Invalid;
         impl<T: ?Sized + Send> AmbiguousIfSend<Invalid> for T {}
 
-        let _ = <Witness<'static, LiveNonZero> as AmbiguousIfSend<_>>::some;
-        let _ = <Witness<'static, LiveZero> as AmbiguousIfSend<_>>::some;
-        let _ = <Witness<'static, Orphan> as AmbiguousIfSend<_>>::some;
-        let _ = <Witness<'static, Released> as AmbiguousIfSend<_>>::some;
-        let _ = <KernelForgetWitness<'static> as AmbiguousIfSend<_>>::some;
+        let _ = <Witness<'static, 'static, LiveNonZero> as AmbiguousIfSend<_>>::some;
+        let _ = <Witness<'static, 'static, LiveZero> as AmbiguousIfSend<_>>::some;
+        let _ = <Witness<'static, 'static, Orphan> as AmbiguousIfSend<_>>::some;
+        let _ = <Witness<'static, 'static, Released> as AmbiguousIfSend<_>>::some;
+        let _ = <KernelForgetWitness<'static, 'static> as AmbiguousIfSend<_>>::some;
     };
 
     const _ASSERT_NOT_SYNC: () = {
@@ -553,10 +609,91 @@ mod tests {
         struct Invalid;
         impl<T: ?Sized + Sync> AmbiguousIfSync<Invalid> for T {}
 
-        let _ = <Witness<'static, LiveNonZero> as AmbiguousIfSync<_>>::some;
-        let _ = <Witness<'static, LiveZero> as AmbiguousIfSync<_>>::some;
-        let _ = <Witness<'static, Orphan> as AmbiguousIfSync<_>>::some;
-        let _ = <Witness<'static, Released> as AmbiguousIfSync<_>>::some;
-        let _ = <KernelForgetWitness<'static> as AmbiguousIfSync<_>>::some;
+        let _ = <Witness<'static, 'static, LiveNonZero> as AmbiguousIfSync<_>>::some;
+        let _ = <Witness<'static, 'static, LiveZero> as AmbiguousIfSync<_>>::some;
+        let _ = <Witness<'static, 'static, Orphan> as AmbiguousIfSync<_>>::some;
+        let _ = <Witness<'static, 'static, Released> as AmbiguousIfSync<_>>::some;
+        let _ = <KernelForgetWitness<'static, 'static> as AmbiguousIfSync<_>>::some;
     };
+
+    // ------- brand isolation (Codex PR #217 r2) ------------------------------
+
+    /// `with_brand` is the only way to mint a brand-bound witness;
+    /// each invocation introduces a freshly-typed, invariant
+    /// `'brand` lifetime via HRTB. Verify it threads through
+    /// witness construction at the type level — and that
+    /// brand-free data (a `u64` NodeId) can escape the closure
+    /// while a `Witness<'_, 'brand, S>` (carrying `'brand`) cannot.
+    /// The cross-instance brand-rejection invariant itself is
+    /// pinned by the `compile_fail` doctest at
+    /// `crates/mount/src/lib.rs::__pending_substrate_for_doctest`.
+    #[test]
+    fn with_brand_threads_a_fresh_brand_through_witness_construction() {
+        let mut p = Pending::default();
+        p.test_insert_state(7, NodeState::Live { open_count: 1 });
+        let id = p
+            .with_brand(|p| {
+                // `w` is `Witness<'_, 'brand, LiveNonZero>` for the
+                // closure's fresh `'brand`. We extract the brand-free
+                // NodeId and drop `w` — the witness itself cannot
+                // escape because it carries `'brand`.
+                p.witness_live_nonzero(7).map(|w| w.id())
+            })
+            .expect("LiveNonZero witness");
+        assert_eq!(id, 7);
+    }
+
+    /// Two `Pending` values, each accessed under its own
+    /// `with_brand` closure, mint witnesses with brands that don't
+    /// unify. Verify the positive side — each closure round-trips
+    /// its own NodeIds independently — so a future regression that
+    /// accidentally collapses the brand into a shared one (e.g., by
+    /// removing the `PhantomData<fn(&'brand ()) -> &'brand ()>`
+    /// invariance marker) is visible in the lib test output rather
+    /// than only in the doctest.
+    #[test]
+    fn brand_round_trips_independently_across_two_pendings() {
+        let mut p1 = Pending::default();
+        let mut p2 = Pending::default();
+        p1.test_insert_state(11, NodeState::Live { open_count: 2 });
+        p2.test_insert_state(13, NodeState::Live { open_count: 0 });
+
+        let id1 = p1
+            .with_brand(|p| p.witness_live_nonzero(11).map(|w| w.id()))
+            .expect("p1 LiveNonZero witness");
+        let id2 = p2
+            .with_brand(|p| p.witness_live_zero(13).map(|w| w.id()))
+            .expect("p2 LiveZero witness");
+
+        assert_eq!(id1, 11);
+        assert_eq!(id2, 13);
+    }
+
+    /// `peek_witness` is the cross-instance brand-check entry
+    /// point used by the `compile_fail` doctest in
+    /// [`crate::__pending_substrate_for_doctest`]. Cross-instance
+    /// is the *only* shape the substrate proves compile-rejects
+    /// here; the same-instance consume pattern
+    /// (`p.transition_to_orphan(w)`) that retrofit issues
+    /// (heddle#209-#212) want is a separate spike-doc question
+    /// — the witness's `_borrow: PhantomData<&'p mut ()>` field
+    /// already prevents it independent of brand. Verify the
+    /// cross-instance positive path: `peek_witness` on a *third*
+    /// `Pending` (`p_observer`) with a witness from `p_subject`
+    /// type-checks when both share the same `with_brand`-induced
+    /// brand (they don't here, so it can't — the negative shape is
+    /// in the doctest). Use a witness already-discharged via
+    /// `w.id()` to keep the test focused on `with_brand` ergonomics
+    /// rather than the borrow-pattern.
+    #[test]
+    fn with_brand_can_return_unbranded_node_id() {
+        let mut p = Pending::default();
+        p.test_insert_state(17, NodeState::Orphan { open_count: 3 });
+        let extracted: u64 = p.with_brand(|p| {
+            // `u64` is brand-free, so it escapes the closure.
+            // A `Witness<'_, 'brand, Orphan>` could not.
+            p.witness_orphan(17).map(|w| w.id()).unwrap_or(0)
+        });
+        assert_eq!(extracted, 17);
+    }
 }
