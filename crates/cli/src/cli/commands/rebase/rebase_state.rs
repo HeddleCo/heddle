@@ -220,6 +220,22 @@ fn load_rebase_state_internal(
         (None, false) => return Err(anyhow!("Missing 'transaction_id' in rebase state")),
     };
 
+    // heddle#198 r4 (Codex PR #218 P1): the persisted invariant is
+    // `pending_advances.len() == current_index` — `replay_commits_internal`
+    // and `resume_manual_resolution_if_present` always bump both in
+    // lockstep before the save. A crash-truncated REBASE_STATE that keeps
+    // `current_index=` but drops trailing `pending_advance=` lines breaks
+    // it; strict `--continue` must hard-fail rather than silently flush
+    // an incomplete batch. Abort tolerates because it discards the
+    // buffered FF history when rewinding to `original_head`.
+    if !for_abort && pending_advances.len() != current_index {
+        return Err(anyhow!(
+            "Inconsistent rebase state: pending_advance lines ({}) do not match current_index ({})",
+            pending_advances.len(),
+            current_index,
+        ));
+    }
+
     Ok(RebaseState {
         onto,
         original_head,
@@ -241,10 +257,18 @@ mod tests {
     use super::*;
 
     fn sample_state(pending: Vec<OpRecord>) -> RebaseState {
+        // The persisted invariant (heddle#198 r4 / Codex PR #218 P1) is
+        // `pending_advances.len() == current_index`; derive `current_index`
+        // from the supplied vec so every fixture round-trips cleanly
+        // through the strict loader.
+        let current_index = pending.len();
+        let commits_to_replay = (0..(current_index + 1))
+            .map(|_| ChangeId::generate())
+            .collect();
         RebaseState {
             onto: ChangeId::generate(),
-            commits_to_replay: vec![ChangeId::generate(), ChangeId::generate()],
-            current_index: 1,
+            commits_to_replay,
+            current_index,
             original_head: ChangeId::generate(),
             pending_manual_resolution: Some(ChangeId::generate()),
             pre_conflict_head: Some(ChangeId::generate()),
@@ -280,7 +304,7 @@ mod tests {
 
         assert_eq!(loaded.onto, original.onto);
         assert_eq!(loaded.original_head, original.original_head);
-        assert_eq!(loaded.current_index, 1);
+        assert_eq!(loaded.current_index, original.current_index);
         assert_eq!(loaded.commits_to_replay, original.commits_to_replay);
         assert_eq!(loaded.pending_manual_resolution, original.pending_manual_resolution);
         assert_eq!(loaded.pre_conflict_head, original.pre_conflict_head);
@@ -539,6 +563,36 @@ mod tests {
         .unwrap();
         let err = load_rebase_state(&path).unwrap_err().to_string();
         assert!(err.contains("Missing 'transaction_id'"), "got: {err}");
+    }
+
+    /// Companion to the strict-rejection pin above (heddle#198 r4 /
+    /// Codex PR #218 P1): the abort loader must tolerate a
+    /// `current_index` / `pending_advances` mismatch — abort only needs
+    /// `original_head` to rewind, and discards the buffered FF history
+    /// anyway. Refusing to load would strand the operator with neither
+    /// `--abort` nor `--continue` available, exactly the trap the
+    /// per-loader contract (continue strict, abort tolerant) was set
+    /// up to avoid.
+    #[test]
+    fn load_for_abort_tolerates_truncated_pending_advances() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let advance = ff_record();
+        let bytes = rmp_serde::to_vec(&advance).unwrap();
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=3\ncommits=\npending_advance={pa}\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+            pa = hex::encode(&bytes),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let loaded = load_rebase_state_for_abort(&path)
+            .expect("abort loader must tolerate a count mismatch — the buffered FFs are discarded on rewind");
+        // The advance still decodes; we just don't refuse the file for
+        // having the wrong number of them.
+        assert_eq!(loaded.current_index, 3);
+        assert_eq!(loaded.pending_advances.len(), 1);
     }
 
     /// heddle#198 r4 (Codex PR #218 P1): the persisted invariant in
