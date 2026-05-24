@@ -420,7 +420,8 @@ pub(crate) enum NodeState {
 /// (Bug Class A in the spike doc §4) that produced every Codex
 /// finding r6 → r9 on PR #182.
 #[derive(Default)]
-pub(crate) struct Pending {
+#[doc(hidden)]
+pub struct Pending {
     /// Hot tier: per-`NodeId` open-file buffers.
     hot: BTreeMap<u64, HotBuffer>,
     /// Reverse-index for the hot tier: which NodeId currently owns a

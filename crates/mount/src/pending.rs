@@ -62,7 +62,8 @@ mod sealed {
 /// The per-NodeId lifecycle the FSM tracks. Sealed — only the four
 /// ZSTs in this module implement it, and only this module can ever
 /// add more.
-pub(crate) trait Lifecycle: sealed::Sealed {}
+#[doc(hidden)]
+pub trait Lifecycle: sealed::Sealed {}
 
 /// Marker: `Live { open_count >= 1 }`.
 ///
@@ -70,7 +71,8 @@ pub(crate) trait Lifecycle: sealed::Sealed {}
 /// which `transition_to_orphan` is sound (closing the r11 #1 bug
 /// once the retrofit lands).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct LiveNonZero;
+#[doc(hidden)]
+pub struct LiveNonZero;
 
 /// Marker: `Live { open_count == 0 }`.
 ///
@@ -78,7 +80,8 @@ pub(crate) struct LiveNonZero;
 /// from [`LiveNonZero`] so a method that requires the "has open fds"
 /// invariant can name it at the type level.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct LiveZero;
+#[doc(hidden)]
+pub struct LiveZero;
 
 /// Marker: `Orphan { open_count >= 0 }`.
 ///
@@ -87,7 +90,8 @@ pub(crate) struct LiveZero;
 /// `transition_to_orphan`, the only state from which the open-unlinked
 /// last-close-wins flow runs.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Orphan;
+#[doc(hidden)]
+pub struct Orphan;
 
 /// Marker: entry absent from the `state` map.
 ///
@@ -96,7 +100,8 @@ pub(crate) struct Orphan;
 /// Never stored in the map; the marker exists purely so a
 /// [`Witness<'_, Released>`] can prove the absence at the call site.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Released;
+#[doc(hidden)]
+pub struct Released;
 
 impl sealed::Sealed for LiveNonZero {}
 impl sealed::Sealed for LiveZero {}
@@ -130,7 +135,8 @@ impl Lifecycle for Released {}
 ///
 /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
 #[derive(Debug)]
-pub(crate) struct Witness<'p, S: Lifecycle> {
+#[doc(hidden)]
+pub struct Witness<'p, S: Lifecycle> {
     id: u64,
     _state: PhantomData<S>,
     // Invariance over `'p` + ties the witness to a `&mut Pending`
@@ -160,8 +166,39 @@ impl<'p, S: Lifecycle> Witness<'p, S> {
 
     /// The NodeId the witness is bound to. Retrofitted method bodies
     /// will read this to know which entry of `Pending` to act on.
-    pub(crate) fn id(&self) -> u64 {
+    #[doc(hidden)]
+    pub fn id(&self) -> u64 {
         self.id
+    }
+}
+
+impl Pending {
+    /// Re-borrow `self` for a callback that wants to mint witnesses.
+    ///
+    /// In the red-commit shape this is an identity no-op — it hands
+    /// the caller the same `&mut Pending`. The green commit
+    /// introduces a brand-lifetime parameter on `Pending` and uses
+    /// the HRTB on `f` to issue a fresh, invariant brand per call;
+    /// that's what makes witnesses minted inside non-fungible with
+    /// witnesses from a different `Pending` (the Codex PR #217 r2
+    /// finding). Keeping the shape here in the red commit lets the
+    /// `compile_fail` doctest reference the same call pattern across
+    /// red and green.
+    #[doc(hidden)]
+    pub fn with_brand<R>(&mut self, f: impl FnOnce(&mut Pending) -> R) -> R {
+        f(self)
+    }
+
+    /// Substrate hook for the brand-isolation doctest: takes a
+    /// witness and returns its NodeId without doing anything else.
+    /// Retrofit issues (heddle#209/#210/#211/#212) will replace
+    /// this no-op with the real witness-gated transitions; for the
+    /// substrate PR it exists so the `compile_fail` proof in
+    /// [`crate::__pending_substrate_for_doctest`] can demonstrate
+    /// brand-mismatch rejection.
+    #[doc(hidden)]
+    pub fn discharge_witness<S: Lifecycle>(&mut self, w: Witness<'_, S>) -> u64 {
+        w.id()
     }
 }
 
@@ -182,7 +219,8 @@ impl<'p, S: Lifecycle> Witness<'p, S> {
 ///
 /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
 #[derive(Debug)]
-pub(crate) struct KernelForgetWitness<'p> {
+#[doc(hidden)]
+pub struct KernelForgetWitness<'p> {
     id: u64,
     _borrow: PhantomData<&'p mut ()>,
     _not_send: PhantomData<*const ()>,
@@ -199,7 +237,8 @@ impl<'p> KernelForgetWitness<'p> {
     }
 
     /// The NodeId the witness is bound to.
-    pub(crate) fn id(&self) -> u64 {
+    #[doc(hidden)]
+    pub fn id(&self) -> u64 {
         self.id
     }
 }
@@ -215,7 +254,8 @@ impl Pending {
     /// orphaned by construction.
     ///
     /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
-    pub(crate) fn witness_live_nonzero(&mut self, id: u64) -> Option<Witness<'_, LiveNonZero>> {
+    #[doc(hidden)]
+    pub fn witness_live_nonzero(&mut self, id: u64) -> Option<Witness<'_, LiveNonZero>> {
         match self.lookup_state(id) {
             Some(NodeState::Live { open_count }) if open_count >= 1 => Some(Witness::new(id)),
             _ => None,
@@ -225,7 +265,8 @@ impl Pending {
     /// Witness that `id` is in `Live { open_count == 0 }`. Returns
     /// `None` for `Live` with any non-zero refcount, for any `Orphan`,
     /// and for `Released`.
-    pub(crate) fn witness_live_zero(&mut self, id: u64) -> Option<Witness<'_, LiveZero>> {
+    #[doc(hidden)]
+    pub fn witness_live_zero(&mut self, id: u64) -> Option<Witness<'_, LiveZero>> {
         match self.lookup_state(id) {
             Some(NodeState::Live { open_count: 0 }) => Some(Witness::new(id)),
             _ => None,
@@ -234,7 +275,8 @@ impl Pending {
 
     /// Witness that `id` is in `Orphan { .. }` (any refcount).
     /// Returns `None` for `Live` (any refcount) and `Released`.
-    pub(crate) fn witness_orphan(&mut self, id: u64) -> Option<Witness<'_, Orphan>> {
+    #[doc(hidden)]
+    pub fn witness_orphan(&mut self, id: u64) -> Option<Witness<'_, Orphan>> {
         match self.lookup_state(id) {
             Some(NodeState::Orphan { .. }) => Some(Witness::new(id)),
             _ => None,
@@ -246,7 +288,8 @@ impl Pending {
     /// variants. Useful for the "first open" path of the lifecycle
     /// (`record_open` minting a `LiveZero -> LiveNonZero` transition
     /// when there is no prior entry).
-    pub(crate) fn witness_released(&mut self, id: u64) -> Option<Witness<'_, Released>> {
+    #[doc(hidden)]
+    pub fn witness_released(&mut self, id: u64) -> Option<Witness<'_, Released>> {
         match self.lookup_state(id) {
             None => Some(Witness::new(id)),
             _ => None,
@@ -270,7 +313,8 @@ impl Pending {
     /// the retrofit).
     ///
     /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
-    pub(crate) fn witness_kernel_forget(&mut self, id: u64) -> Option<KernelForgetWitness<'_>> {
+    #[doc(hidden)]
+    pub fn witness_kernel_forget(&mut self, id: u64) -> Option<KernelForgetWitness<'_>> {
         match self.lookup_state(id) {
             None => Some(KernelForgetWitness::new(id)),
             Some(NodeState::Live { open_count: 0 }) => Some(KernelForgetWitness::new(id)),
