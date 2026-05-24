@@ -657,11 +657,21 @@ fn is_rebase_batch(batch: &OpBatch) -> bool {
 
 fn earliest_rebase_pre_target_id(batch: &OpBatch) -> Option<ChangeId> {
     // Entries are sorted by `batch_index` (see
-    // `PackedOpLog::collect_batches_scoped`), so the first FF arm
-    // we encounter carries the pre-rebase tip.
+    // `PackedOpLog::collect_batches_scoped`), so the first advance arm
+    // we encounter carries the pre-rebase tip. Detached-mode rebases
+    // (heddle#198 r2 / Codex PR #218 P2) flush `OpRecord::Goto` rather
+    // than `FastForward*` — `ff_advance_deferred` falls back to it when
+    // there's no thread ref to FF — and their `prev_head` is the same
+    // pre-rebase tip a `pre_target_id` would name. Skip `Goto` entries
+    // without a `prev_head` (legacy or operator-issued goto with no
+    // recoverable previous state) and keep scanning.
     batch.entries.iter().find_map(|entry| match &entry.operation {
         OpRecord::FastForwardV2 { pre_target_id, .. } => Some(*pre_target_id),
         OpRecord::FastForward { pre_target_id, .. } => Some(*pre_target_id),
+        OpRecord::Goto {
+            prev_head: Some(prev),
+            ..
+        } => Some(*prev),
         _ => None,
     })
 }
