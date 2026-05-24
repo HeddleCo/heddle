@@ -244,6 +244,29 @@ impl<'a> Pending<'a> {
         let mut bp = BrandedPending { inner: rebranded };
         f(&mut bp)
     }
+
+    /// Retire per-NodeId entries that the just-completed capture has
+    /// folded into the new state, and clear all path-keyed overlays.
+    ///
+    /// **NOTE — heddle#210 in progress.** This commit extracts the
+    /// previously-inline drain in `core::ContentAddressedMount::capture_with_attribution`
+    /// into a method but **preserves the pre-retrofit (buggy) behaviour**:
+    /// every `Live` entry is dropped, including `Live { open_count >= 1 }`.
+    /// That's r11 #2 — POSIX last-close-wins is broken across capture
+    /// because the open fd's lifecycle entry + hot/warm bytes disappear.
+    /// The green commit replaces this body with a [`ResidentLifecycle`]-
+    /// typed exhaustive match so the "drop `LiveNonZero`" line cannot be
+    /// written without naming the discriminant explicitly.
+    pub(crate) fn drain_for_capture(&mut self) {
+        let surviving: std::collections::BTreeSet<u64> = self
+            .lifecycle_iter()
+            .filter_map(|(id, s)| match s {
+                NodeState::Orphan { .. } => Some(id),
+                NodeState::Live { .. } => None,
+            })
+            .collect();
+        self.apply_drain_for_capture(&surviving);
+    }
 }
 
 /// Sealed wrapper that grants access to the witness constructors.
@@ -839,5 +862,162 @@ mod tests {
             bp.witness_orphan(17).map(|w| w.id()).unwrap_or(0)
         });
         assert_eq!(extracted, 17);
+    }
+
+    // ------- drain_for_capture (heddle#210 — r11 #2 retrofit) ----------------
+    //
+    // Pin the per-lifecycle contract of [`Pending::drain_for_capture`]:
+    //
+    // * `LiveZero` retires — the entry has no open fds, so its byte
+    //   storage and lifecycle row are safe to drop once the capture
+    //   folds the path into the new tree.
+    // * `LiveNonZero` survives — open fds still hold the NodeId; POSIX
+    //   last-close-wins says the fd's view outlives the path-level
+    //   capture. Dropping this entry strands the kernel fd and loses
+    //   the writes it accumulated (r11 #2).
+    // * `Orphan` survives — directory entry already gone (T1/T3); the
+    //   open-but-unlinked POSIX flow needs the bytes to live until the
+    //   last close.
+    //
+    // Pre-retrofit (the buggy body this commit extracts) drops every
+    // `Live` entry indiscriminately, so the `LiveNonZero` tests below
+    // fail until the green commit lands the typed-match fix.
+
+    #[test]
+    fn drain_for_capture_preserves_live_nonzero_state() {
+        let mut p = Pending::default();
+        p.test_insert_state(7, NodeState::Live { open_count: 1 });
+        p.drain_for_capture();
+        assert_eq!(
+            p.lookup_state(7),
+            Some(NodeState::Live { open_count: 1 }),
+            "LiveNonZero must survive capture (POSIX last-close-wins; r11 #2)"
+        );
+    }
+
+    #[test]
+    fn drain_for_capture_preserves_live_nonzero_with_high_refcount() {
+        let mut p = Pending::default();
+        p.test_insert_state(11, NodeState::Live { open_count: u32::MAX });
+        p.drain_for_capture();
+        assert_eq!(
+            p.lookup_state(11),
+            Some(NodeState::Live {
+                open_count: u32::MAX
+            }),
+            "LiveNonZero entries must carry their open_count across capture"
+        );
+    }
+
+    #[test]
+    fn drain_for_capture_preserves_live_nonzero_hot_bytes() {
+        let mut p = Pending::default();
+        p.test_insert_state(13, NodeState::Live { open_count: 2 });
+        p.test_insert_hot(13, std::path::PathBuf::from("file.txt"), b"BYTES".to_vec());
+        p.drain_for_capture();
+        assert!(
+            p.test_has_hot(13),
+            "hot[id] for a LiveNonZero entry must survive capture so reads via the open fd serve the buffered bytes"
+        );
+    }
+
+    #[test]
+    fn drain_for_capture_drops_live_zero_state() {
+        let mut p = Pending::default();
+        p.test_insert_state(9, NodeState::Live { open_count: 0 });
+        p.drain_for_capture();
+        assert!(
+            p.lookup_state(9).is_none(),
+            "LiveZero entries (no open fds) must be retired by capture; the new tree owns their data"
+        );
+    }
+
+    #[test]
+    fn drain_for_capture_drops_live_zero_hot_bytes() {
+        let mut p = Pending::default();
+        p.test_insert_state(9, NodeState::Live { open_count: 0 });
+        p.test_insert_hot(9, std::path::PathBuf::from("x.txt"), b"X".to_vec());
+        p.drain_for_capture();
+        assert!(
+            !p.test_has_hot(9),
+            "hot[id] for a LiveZero entry should be dropped alongside its state row"
+        );
+    }
+
+    #[test]
+    fn drain_for_capture_preserves_orphan_state() {
+        let mut p = Pending::default();
+        p.test_insert_state(21, NodeState::Orphan { open_count: 3 });
+        p.drain_for_capture();
+        assert_eq!(
+            p.lookup_state(21),
+            Some(NodeState::Orphan { open_count: 3 }),
+            "Orphan entries must survive capture (open-but-unlinked POSIX)"
+        );
+    }
+
+    #[test]
+    fn drain_for_capture_preserves_orphan_with_zero_refcount() {
+        // Orphan { open_count: 0 } is a transient state the FSM
+        // releases on the next `release_node` — it must NOT be
+        // collapsed with `LiveZero` and dropped, because the
+        // path-side handler that retires it relies on observing the
+        // discriminant.
+        let mut p = Pending::default();
+        p.test_insert_state(23, NodeState::Orphan { open_count: 0 });
+        p.drain_for_capture();
+        assert_eq!(
+            p.lookup_state(23),
+            Some(NodeState::Orphan { open_count: 0 }),
+            "Orphan with zero refcount must survive capture; the discriminant — not the count — is what matters"
+        );
+    }
+
+    #[test]
+    fn drain_for_capture_preserves_orphan_hot_bytes() {
+        let mut p = Pending::default();
+        p.test_insert_state(25, NodeState::Orphan { open_count: 1 });
+        p.test_insert_hot(
+            25,
+            std::path::PathBuf::from("gone.txt"),
+            b"SURVIVES".to_vec(),
+        );
+        p.drain_for_capture();
+        assert!(
+            p.test_has_hot(25),
+            "hot[id] for an Orphan entry must survive capture so the surviving fd serves the inode's own bytes"
+        );
+    }
+
+    #[test]
+    fn drain_for_capture_mixed_state_map() {
+        // One of each resident lifecycle — the typed match must
+        // handle them simultaneously without collapsing distinctions.
+        let mut p = Pending::default();
+        p.test_insert_state(100, NodeState::Live { open_count: 1 }); // preserve
+        p.test_insert_state(101, NodeState::Live { open_count: 0 }); // drop
+        p.test_insert_state(102, NodeState::Orphan { open_count: 2 }); // preserve
+        p.test_insert_state(103, NodeState::Orphan { open_count: 0 }); // preserve
+        p.test_insert_state(104, NodeState::Live { open_count: 7 }); // preserve
+
+        p.drain_for_capture();
+
+        assert_eq!(
+            p.lookup_state(100),
+            Some(NodeState::Live { open_count: 1 })
+        );
+        assert!(p.lookup_state(101).is_none(), "LiveZero must retire");
+        assert_eq!(
+            p.lookup_state(102),
+            Some(NodeState::Orphan { open_count: 2 })
+        );
+        assert_eq!(
+            p.lookup_state(103),
+            Some(NodeState::Orphan { open_count: 0 })
+        );
+        assert_eq!(
+            p.lookup_state(104),
+            Some(NodeState::Live { open_count: 7 })
+        );
     }
 }
