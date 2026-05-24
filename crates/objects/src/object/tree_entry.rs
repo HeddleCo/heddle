@@ -5,8 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use super::{ContentHash, EntryType, FileMode, TreeError};
 
-/// Validates that a tree entry name is valid.
-pub(crate) fn validate_name(name: &str) -> Result<(), TreeError> {
+/// Validates that a tree entry name is valid. Exposed publicly so
+/// callers that build entries at higher layers (the FUSE mount's
+/// write-side ops in particular) can fail-fast with the same reject
+/// set the tree serializer enforces — otherwise the overlay accepts
+/// a name that later blows up at capture with an "invalid object"
+/// error rather than a clean EINVAL at write time. Codex heddle#180
+/// r13 thread 3293733163 (P2).
+pub fn validate_name(name: &str) -> Result<(), TreeError> {
     if name.is_empty() {
         return Err(TreeError::InvalidName("entry name cannot be empty".into()));
     }

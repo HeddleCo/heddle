@@ -3170,10 +3170,10 @@ mod write_ops {
     /// fits entirely in that lock-free window — it inserts
     /// `tombstones[old]`, removes `hot_by_path[old]`, and rebases the
     /// inode's stored path. When `apply_truncate`'s phase-2 mutation
-    /// re-acquires the pending lock and runs `tombstones.remove(&path)
-    /// + hot_by_path.insert(path, node)` with the stale `path = old`,
-    /// the rename's tombstone is wiped and `lookup(old)` resurrects
-    /// the file.
+    /// re-acquires the pending lock and runs
+    /// `tombstones.remove(&path) + hot_by_path.insert(path, node)`
+    /// with the stale `path = old`, the rename's tombstone is wiped
+    /// and `lookup(old)` resurrects the file.
     ///
     /// Stress shape: 200 trials, two threads sync on a barrier and
     /// then run their op concurrently. Even a single observation of

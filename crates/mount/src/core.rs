@@ -2011,9 +2011,29 @@ impl ContentAddressedMount {
     /// `setattr` / etc. Returns post-update [`Attrs`] for an
     /// inline reply.
     pub fn set_attrs(&self, node: NodeId, update: AttrUpdate) -> Result<Attrs> {
+        // Codex r13 thread 3293733165 (P1): every mutating branch of
+        // `set_attrs` must serialize against `rename` / `create` /
+        // `unlink` / `rmdir` under `write_mu`. Without it, a
+        // `setattr(size=...)` racing with a `rename` re-uses the
+        // pre-rename pathname in `apply_truncate`'s phase-2
+        // bookkeeping — `tombstones.remove(old)` clears the rename's
+        // tombstone and `hot_by_path.insert(old, node)` resurrects
+        // the file at the old name. The mode-mutation branch has the
+        // same shape (touches `hot_by_path[path]` / `warm[id]` derived
+        // from `inodes.by_path[path]`), so we hold the lock for the
+        // whole mutating prologue.
+        let _write_guard = self.inner.write_mu.lock().expect("write mu");
+
         // Mode mutation: only meaningful for file-kind records.
         if let Some(raw_mode) = update.mode {
-            let new_mode = if (raw_mode & 0o111) != 0 {
+            // Codex r13 thread 3293733164 (P2): the Normal↔Executable
+            // fold is gated on the user execute bit (S_IXUSR = 0o100)
+            // only, not on any of the three execute bits. A
+            // `chmod 0o010` (group execute only) must leave the record
+            // as Normal — otherwise capture would persist a
+            // `FileMode::Executable` and grant owner+other execute
+            // bits the agent never requested.
+            let new_mode = if (raw_mode & 0o100) != 0 {
                 FileMode::Executable
             } else {
                 FileMode::Normal
@@ -2502,29 +2522,29 @@ impl ContentAddressedMount {
 }
 
 /// Reject FUSE entry names that wouldn't survive a `TreeEntry`'s
-/// validator: empty, the `.`/`..` pseudo-entries, anything with a
-/// path separator, anything with a NUL byte. Returns the validated
-/// name as a `&str` so callers can build paths without re-decoding.
+/// validator. Delegates to [`objects::object::validate_tree_entry_name`]
+/// so the mount's write-side reject set stays in lockstep with the
+/// tree serializer's — Codex r13 thread 3293733163 (P2) caught the
+/// drift where the overlay accepted backslash and control bytes that
+/// the serializer later rejected at capture with a confusing
+/// "invalid object" error. The NUL pre-check is here (not in the
+/// shared validator) because `OsStr` on Unix can carry interior NUL
+/// bytes that `to_str()` would otherwise round-trip through to the
+/// validator as an unmarked control byte; we surface a more specific
+/// error.
 fn validate_entry_name(name: &OsStr) -> Result<&str> {
     let bytes = name.as_encoded_bytes();
-    if bytes.is_empty() {
-        return Err(MountError::InvalidArgument("empty entry name".into()));
-    }
-    if bytes == b"." || bytes == b".." {
+    if bytes.contains(&0) {
         return Err(MountError::InvalidArgument(format!(
-            "'{}' is not a valid entry name",
-            name.to_string_lossy()
+            "entry name {name:?} contains NUL"
         )));
     }
-    if bytes.iter().any(|&b| b == 0 || b == b'/') {
-        return Err(MountError::InvalidArgument(format!(
-            "entry name {:?} contains NUL or '/'",
-            name
-        )));
-    }
-    name.to_str().ok_or_else(|| {
+    let name_str = name.to_str().ok_or_else(|| {
         MountError::InvalidArgument(format!("entry name {name:?} is not valid UTF-8"))
-    })
+    })?;
+    objects::object::validate_tree_entry_name(name_str)
+        .map_err(|e| MountError::InvalidArgument(e.to_string()))?;
+    Ok(name_str)
 }
 
 /// Mount-relative path for a warm-tier entry, derived from its
