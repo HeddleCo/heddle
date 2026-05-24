@@ -2893,6 +2893,252 @@ mod write_ops {
             "attrs on orphan must report hot-buffer size, not captured"
         );
     }
+
+    // --- Codex round 12 findings: capture / invalidate / forget / rmdir / -----
+    // --- symlinks / read_link ------------------------------------------------
+    //
+    // Six P1 + one P3 findings on the post-spike base (`58a30b2`). Each test
+    // pins the contract from one Codex review thread on PR #182.
+
+    /// Codex thread 3293484633 (P1). `capture_with_attribution` clears
+    /// `pending.state` unconditionally → drops Orphan tracking for inodes
+    /// with still-open fds. Post-capture writes through such an fd then take
+    /// the non-orphan branch and republish the (tombstoned) pathname. The
+    /// fix retains Orphan entries (and their per-NodeId hot/warm bytes) and
+    /// only retires Live entries.
+    #[test]
+    fn capture_preserves_orphan_state_for_open_inodes() {
+        let (_temp, mount) = open_mount();
+        // Create a fresh file, open it (refcount = 1), write through the
+        // fd, then unlink. The directory entry goes; the inode lives on
+        // behind the fd as an Orphan with open_count = 1.
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .expect("create");
+        mount.on_open(entry.node).expect("on_open");
+        mount.write(entry.node, 0, b"BYTES").expect("write");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("unlink");
+        assert!(
+            mount.orphans_contains(entry.node),
+            "pre-capture sanity: unlink-while-open must orphan the inode"
+        );
+
+        // Capture. Pre-fix, this wipes `state` (and `hot` + `warm`),
+        // losing the orphan tracking + the surviving fd's bytes.
+        mount
+            .capture(Some("capture with orphan open".into()))
+            .expect("capture");
+
+        // The fd is still in the kernel's hands; the inode must remain
+        // Orphan so a subsequent write through the fd takes the orphan
+        // branch and does not republish the deleted pathname.
+        assert!(
+            mount.orphans_contains(entry.node),
+            "capture must preserve Orphan state for inodes with surviving fds"
+        );
+        mount
+            .write(entry.node, 0, b"AFTER")
+            .expect("write through orphan fd survives capture");
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("scratch"))
+                .unwrap()
+                .is_none(),
+            "post-capture write through orphan fd must not republish the path"
+        );
+        // The per-NodeId hot bytes must also survive capture so reads via
+        // the orphan fd serve the inode's own data (POSIX open-unlinked).
+        let mut buf = vec![0u8; 32];
+        let n = mount
+            .read(entry.node, 0, &mut buf)
+            .expect("read via orphan fd after capture");
+        assert_eq!(
+            &buf[..n],
+            b"AFTER",
+            "orphan hot bytes must survive capture so the fd's own writes are readable"
+        );
+    }
+
+    /// Codex threads 3293484634 + 3293510311 (P1). `invalidate` (FUSE
+    /// `forget`) drops `pending.warm[node]` unconditionally, but `forget`
+    /// only signals that the kernel released its cached inode reference —
+    /// not that the file's pending overlay data can be discarded. Warm is
+    /// the only durable pre-capture copy of flushed writes; dropping it
+    /// silently loses the user's committed-in-session data.
+    #[test]
+    fn invalidate_preserves_warm_bytes_for_live_inode() {
+        let (_temp, mount) = open_mount();
+        let entry = mount
+            .create_file(NodeId::ROOT, OsStr::new("durable"), FileMode::Normal, false)
+            .expect("create");
+        mount.write(entry.node, 0, b"DURABLE-WARM").expect("write");
+        mount
+            .flush(entry.node)
+            .expect("flush — promote bytes to warm tier");
+        assert!(
+            mount.warm_blob("durable").is_some(),
+            "pre-invalidate: warm tier holds the flushed bytes"
+        );
+
+        // Kernel drops its cached inode reference. The file's path still
+        // exists from the user's POV; capture must still plant its bytes.
+        mount.invalidate(entry.node).expect("invalidate (kernel forget)");
+
+        let change_id = mount
+            .capture(Some("post-invalidate capture".into()))
+            .expect("capture");
+        let bytes = read_captured_blob(&mount, &change_id, "durable");
+        assert_eq!(
+            &bytes[..],
+            b"DURABLE-WARM",
+            "warm bytes must survive invalidate so capture can plant them"
+        );
+    }
+
+    /// Codex thread 3293510310 (P1). `rmdir_entry` plants a
+    /// `dir_tombstones` entry but leaves `inodes.by_path[child_path]`
+    /// intact. A subsequent `create_file` / `make_dir` at the same path
+    /// then coalesces onto the removed directory's NodeId via
+    /// `Inodes::intern`'s path-keyed reverse index — that's a stale-handle
+    /// class identical to the one `unlink_entry` already guards against
+    /// by retiring `by_path`.
+    #[test]
+    fn rmdir_retires_path_to_inode_binding() {
+        let (_temp, mount) = open_mount();
+        let dir = mount
+            .make_dir(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("mkdir");
+        mount
+            .rmdir_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("rmdir");
+        // Recreate the name as a regular file. The fresh inode must NOT
+        // be the removed directory's NodeId — POSIX remove-and-recreate
+        // isolation forbids rebinding a cached dir inode to a different
+        // object type.
+        let file = mount
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("scratch"),
+                FileMode::Normal,
+                false,
+            )
+            .expect("recreate as file");
+        assert_ne!(
+            file.node, dir.node,
+            "remove-and-recreate at same path must mint a fresh inode \
+             (rmdir must retire inodes.by_path so intern does not coalesce)"
+        );
+    }
+
+    /// Codex thread 3293510316 (P1). `read_link` on a captured `Symlink`
+    /// record reconstructs an `OsStr` with `OsStr::from_encoded_bytes_unchecked`
+    /// from blob bytes loaded from the store. That call's safety contract
+    /// requires bytes minted by `OsStr::as_encoded_bytes` in *this*
+    /// process and Rust version — captured-tree bytes can come from any
+    /// process and any version, so the call is unsound.
+    ///
+    /// On Unix, the platform-safe replacement is `OsStrExt::from_bytes`
+    /// (sound for any byte sequence); on Windows, the bytes must be UTF-8
+    /// validated and rejected otherwise (the encoding contract for `OsStr`
+    /// is process-internal). This test pins the round-trip contract: a
+    /// captured symlink's target is recoverable byte-for-byte.
+    #[test]
+    fn read_link_safe_for_captured_symlink_bytes() {
+        let (_temp, mount) = open_mount();
+        // Create + capture a symlink so the next read_link goes through
+        // the captured-blob branch (the unsound site).
+        mount
+            .create_symlink(NodeId::ROOT, OsStr::new("link"), Path::new("hello.txt"))
+            .expect("create_symlink");
+        let _ = mount
+            .capture(Some("plant link".into()))
+            .expect("capture");
+        let entry = mount
+            .lookup(NodeId::ROOT, OsStr::new("link"))
+            .unwrap()
+            .expect("captured symlink resolves");
+        let resolved = mount.read_link(entry.node).expect("read_link");
+        assert_eq!(
+            resolved,
+            std::ffi::OsString::from("hello.txt"),
+            "captured symlink must decode via a sound platform-safe path"
+        );
+    }
+
+    /// Codex thread 3293510317 (P3). `unlink_entry` always transitions
+    /// the removed node into `NodeState::Orphan`, but symlinks are not
+    /// openable for IO — they never receive `open`/`release` lifecycle
+    /// events to clear the state. The entry accumulates in `pending.state`
+    /// until capture/invalidate. The fix gates the orphan transition on
+    /// `entry.kind != Symlink`.
+    #[test]
+    fn unlink_of_symlink_does_not_create_orphan_state() {
+        let (_temp, mount) = open_mount();
+        let link = mount
+            .create_symlink(NodeId::ROOT, OsStr::new("link"), Path::new("hello.txt"))
+            .expect("create_symlink");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("link"))
+            .expect("unlink symlink");
+        assert!(
+            !mount.orphans_contains(link.node),
+            "symlinks have no open/release lifecycle; unlink must not orphan them"
+        );
+    }
+
+    /// Codex thread 3293680448 (P1). `Inodes::forget` unconditionally
+    /// removes `by_path[path]` for the retired record. After an
+    /// unlink-then-recreate cycle, the stored `path` may be rebound to
+    /// a *different* live inode. A late kernel `forget` for the old
+    /// inode then deletes the live inode's path binding — capture's
+    /// warm-entry path check skips the entry, breaking lookup/read/write
+    /// routing for the replacement.
+    #[test]
+    fn forget_after_unlink_recreate_preserves_new_path_binding() {
+        let (_temp, mount) = open_mount();
+        // v1 minted and opened. unlink while open → v1 orphans; by_path
+        // is detached. v2 created at the same name → mints fresh inode.
+        let v1 = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .expect("create v1");
+        mount.on_open(v1.node).expect("on_open v1");
+        mount
+            .unlink_entry(NodeId::ROOT, OsStr::new("scratch"))
+            .expect("unlink v1");
+        let v2 = mount
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
+            .expect("recreate as v2");
+        assert_ne!(v1.node, v2.node, "recreate must mint a fresh inode");
+        mount.write(v2.node, 0, b"v2-bytes").expect("write v2");
+        mount.flush(v2.node).expect("flush v2 to warm");
+
+        // Kernel forgets v1 (the orphan). Pre-fix, `Inodes::forget`'s
+        // blind `by_path.remove("scratch")` wipes v2's binding.
+        mount.invalidate(v1.node).expect("forget v1");
+
+        // Lookup via warm must still resolve via v2.
+        let hit = mount
+            .lookup(NodeId::ROOT, OsStr::new("scratch"))
+            .unwrap()
+            .expect("scratch still resolves after old-inode forget");
+        assert_eq!(hit.node, v2.node, "lookup must return v2's NodeId");
+
+        // Capture must plant v2's bytes. Pre-fix the by_path binding is
+        // wiped → apply_pending_to_tree's path check skips v2 → captured
+        // tree is missing scratch.
+        let change_id = mount
+            .capture(Some("post-forget capture".into()))
+            .expect("capture");
+        let captured = read_captured_blob(&mount, &change_id, "scratch");
+        assert_eq!(
+            &captured[..],
+            b"v2-bytes",
+            "captured tree must contain v2's bytes — forget of the old \
+             inode must not wipe the new inode's path binding"
+        );
+    }
 }
 
 // D1. Property test for two-tier semantics.
