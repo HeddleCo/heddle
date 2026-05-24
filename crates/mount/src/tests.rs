@@ -3139,6 +3139,233 @@ mod write_ops {
              inode must not wipe the new inode's path binding"
         );
     }
+
+    // --- Codex round 13 findings: setattr lock discipline + name/mode pickiness
+    //
+    // r12 closed the post-spike NodeId-keyed refactor's residual surgical
+    // gaps. r13 surfaces three more same-class issues that all live in the
+    // write-side `set_attrs` / `validate_entry_name` surface:
+    //
+    //   1. `set_attrs(size=...)` routes into `apply_truncate` without taking
+    //      `write_mu`. Concurrent with `rename`, the truncate's final
+    //      bookkeeping uses the pre-rename pathname — republishing
+    //      `hot_by_path[old]` and clearing the rename's tombstone, so the
+    //      old name resurrects. (Codex thread 3293733165, P1.)
+    //   2. `validate_entry_name` rejects only NUL and `/`, but the tree
+    //      serializer additionally rejects `\` and control bytes
+    //      (0x01..=0x1F, 0x7F). Names that pass the FUSE-side check then
+    //      fail at capture with a confusing "invalid object" error rather
+    //      than a clean EINVAL at write time. (Codex thread 3293733163, P2.)
+    //   3. `set_attrs`'s Normal↔Executable fold treats any of the three
+    //      execute bits as executable (`mode & 0o111 != 0`). The contract
+    //      is "user execute only" — a `chmod 0o010` (group execute) must
+    //      stay Normal. (Codex thread 3293733164, P2.)
+
+    /// Codex r13 thread 3293733165 (P1). `set_attrs(size=...)` racing
+    /// with `rename_entry` must not republish the pre-rename pathname.
+    ///
+    /// Mechanism without `write_mu` in `set_attrs`: `apply_truncate`
+    /// captures `path` at the top via `record_for`, then drops every
+    /// lock for the seed `load_blob_bytes` call. A concurrent rename
+    /// fits entirely in that lock-free window — it inserts
+    /// `tombstones[old]`, removes `hot_by_path[old]`, and rebases the
+    /// inode's stored path. When `apply_truncate`'s phase-2 mutation
+    /// re-acquires the pending lock and runs `tombstones.remove(&path)
+    /// + hot_by_path.insert(path, node)` with the stale `path = old`,
+    /// the rename's tombstone is wiped and `lookup(old)` resurrects
+    /// the file.
+    ///
+    /// Stress shape: 200 trials, two threads sync on a barrier and
+    /// then run their op concurrently. Even a single observation of
+    /// `lookup(old).is_some()` after both complete fails the test.
+    /// With the fix (`write_mu` held around the mutating `set_attrs`
+    /// paths), the race is structurally impossible.
+    #[test]
+    fn setattr_truncate_serializes_against_rename() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        const TRIALS: usize = 200;
+        let mut resurrected: Vec<usize> = Vec::new();
+        for trial in 0..TRIALS {
+            let (_temp, mount) = open_mount();
+            let mount = Arc::new(mount);
+            // `hello.txt` is a captured 5-byte file; `apply_truncate`'s
+            // NeedSeed branch will fetch the blob and widen the
+            // lock-free window during the race.
+            let node = mount.lookup_path("hello.txt").unwrap();
+            let barrier = Arc::new(Barrier::new(2));
+
+            let b_a = barrier.clone();
+            let m_a = mount.clone();
+            let h_a = thread::spawn(move || {
+                b_a.wait();
+                m_a.set_attrs(
+                    node,
+                    AttrUpdate {
+                        size: Some(2),
+                        ..Default::default()
+                    },
+                )
+                .expect("setattr(size=2)");
+            });
+            let b_b = barrier.clone();
+            let m_b = mount.clone();
+            let h_b = thread::spawn(move || {
+                b_b.wait();
+                m_b.rename_entry(
+                    NodeId::ROOT,
+                    OsStr::new("hello.txt"),
+                    NodeId::ROOT,
+                    OsStr::new("renamed.txt"),
+                )
+                .expect("rename");
+            });
+            h_a.join().unwrap();
+            h_b.join().unwrap();
+
+            // Invariant: regardless of interleaving, the pre-rename
+            // path must not resolve after both ops complete.
+            if mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_some()
+            {
+                resurrected.push(trial);
+            }
+        }
+        assert!(
+            resurrected.is_empty(),
+            "setattr(size)+rename race resurrected pre-rename path \
+             in {} of {} trials (trials: {:?})",
+            resurrected.len(),
+            TRIALS,
+            resurrected,
+        );
+    }
+
+    /// Codex r13 thread 3293733163 (P2). `validate_entry_name` must
+    /// reject every name the tree serializer would reject — otherwise
+    /// the overlay accepts a create/rename that later blows up at
+    /// `capture` with a confusing "invalid object" error.
+    ///
+    /// The tree serializer's rule (objects::object::tree_entry::
+    /// validate_name) rejects: empty, `.`, `..`, anything containing
+    /// `/` or `\`, anything with a byte < 0x20 or == 0x7F. The mount's
+    /// `validate_entry_name` previously rejected only NUL + `/`.
+    ///
+    /// Each name in this list pins one rule the mount must enforce up
+    /// front. Without the fix, `create_file` / `rename` accept these
+    /// and the failure surfaces later (or not at all, leaking a stale
+    /// pending entry).
+    #[test]
+    fn create_rejects_names_tree_cannot_serialize() {
+        let (_temp, mount) = open_mount();
+        // Each (name, why) tuple is rejected by the tree serializer.
+        let cases: &[(&[u8], &str)] = &[
+            (b"with\\backslash", "backslash (path separator on Windows)"),
+            (b"bel\x07", "BEL (0x07) is a control char"),
+            (b"esc\x1b", "ESC (0x1B) is a control char"),
+            (b"tab\there", "TAB (0x09) is a control char"),
+            (b"newline\nhere", "LF (0x0A) is a control char"),
+            (b"cr\rhere", "CR (0x0D) is a control char"),
+            (b"del\x7f", "DEL (0x7F) is the upper control char"),
+        ];
+        for (bytes, why) in cases {
+            // Build the OsStr from raw bytes so we can include non-UTF-8
+            // tricks (the safe path here is all-ASCII, but the helper
+            // is byte-oriented to match the tree serializer's reject
+            // set).
+            #[cfg(unix)]
+            let name = {
+                use std::os::unix::ffi::OsStrExt;
+                std::ffi::OsString::from(OsStr::from_bytes(bytes))
+            };
+            #[cfg(not(unix))]
+            let name = std::ffi::OsString::from(
+                std::str::from_utf8(bytes).expect("ascii test inputs"),
+            );
+
+            let err = mount
+                .create_file(NodeId::ROOT, &name, FileMode::Normal, false)
+                .expect_err(&format!(
+                    "create_file must reject {name:?} ({why}) up front"
+                ));
+            assert!(
+                matches!(err, MountError::InvalidArgument(_)),
+                "expected InvalidArgument for {name:?} ({why}), got {err:?}"
+            );
+        }
+    }
+
+    /// Codex r13 thread 3293733164 (P2). The Normal↔Executable mode
+    /// fold must trigger on the user execute bit (S_IXUSR = 0o100)
+    /// only, not on any of the three execute bits (0o111). A
+    /// `chmod 0o010` (group execute only) must NOT promote a Normal
+    /// file to Executable — that would unexpectedly grant owner
+    /// execute at capture time.
+    #[test]
+    fn chmod_group_execute_alone_doesnt_promote_to_executable() {
+        let (_temp, mount) = open_mount();
+        let node = mount.lookup_path("hello.txt").unwrap();
+        // chmod 0o010: group execute only. Per the contract, this
+        // must NOT promote to Executable.
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    mode: Some(0o100_010),
+                    ..Default::default()
+                },
+            )
+            .expect("chmod 0o010");
+        // FileMode::Normal serializes to 0o644 (no execute anywhere);
+        // FileMode::Executable serializes to 0o755 (all execute bits).
+        // The fix gates the fold on S_IXUSR (0o100), so 0o010 leaves
+        // the record as Normal → unix_mode has no execute bits at all.
+        assert_eq!(
+            attrs.unix_mode & 0o111,
+            0,
+            "chmod 0o010 must NOT promote to Executable (got unix_mode={:o})",
+            attrs.unix_mode
+        );
+
+        // Companion assertion (anti-regression): chmod 0o100 (user
+        // execute only) DOES promote to Executable.
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    mode: Some(0o100_100),
+                    ..Default::default()
+                },
+            )
+            .expect("chmod 0o100");
+        assert_eq!(
+            attrs.unix_mode & 0o111,
+            0o111,
+            "chmod 0o100 must promote to Executable (got unix_mode={:o})",
+            attrs.unix_mode
+        );
+
+        // And chmod 0o755 (the canonical Executable path) still
+        // works — this is the path the r12 baseline already covers
+        // and we don't want to regress.
+        let attrs = mount
+            .set_attrs(
+                node,
+                AttrUpdate {
+                    mode: Some(0o100_755),
+                    ..Default::default()
+                },
+            )
+            .expect("chmod 0o755");
+        assert_eq!(
+            attrs.unix_mode & 0o111,
+            0o111,
+            "chmod 0o755 must keep Executable (got unix_mode={:o})",
+            attrs.unix_mode
+        );
+    }
 }
 
 // D1. Property test for two-tier semantics.
