@@ -142,14 +142,19 @@ fn replay_commits_internal(
 
 /// Mint a fresh rebase-batch transaction id. Carries the
 /// `REBASE_TRANSACTION_ID_PREFIX` so [`is_rebase_batch`] in `undo.rs`
-/// recognises the batch envelope. The nanosecond suffix is
-/// forensic-only — the dedup helper [`flush_rebase_batch`] compares
-/// ids verbatim.
+/// recognises the batch envelope. The nanosecond segment stays for
+/// forensic chronology (`heddle undo --list` ordering); the v4 UUID
+/// suffix is what guarantees uniqueness — `chrono::Utc::now()` alone
+/// can return the same nanos value across cores or on coarse-clock
+/// hosts, and `flush_rebase_batch`'s dedup keys on this id verbatim
+/// so a collision would silently drop the later rebase's batch
+/// (heddle#198 r3 / Codex PR #218 P2).
 pub(super) fn mint_rebase_transaction_id() -> String {
     format!(
-        "{}{}",
+        "{}{}-{}",
         REBASE_TRANSACTION_ID_PREFIX,
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+        uuid::Uuid::new_v4().simple()
     )
 }
 
