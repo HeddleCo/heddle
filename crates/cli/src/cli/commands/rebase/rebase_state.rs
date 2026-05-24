@@ -23,6 +23,14 @@ pub(crate) struct RebaseState {
     /// `--continue` invocations so a conflict pause doesn't drop the
     /// in-flight records.
     pub(crate) pending_advances: Vec<OpRecord>,
+    /// Stable id for the rebase batch's `TransactionCommit` envelope.
+    /// Persisted at rebase start so that a crash between
+    /// `flush_rebase_batch` and `fs::remove_file(REBASE_STATE)` can
+    /// retry the flush with the same id and the helper's oplog-dedup
+    /// check (heddle#198 r2 / Codex PR #218 P2) recognises the prior
+    /// commit and skips, instead of doubling the rebase's undo
+    /// history.
+    pub(crate) transaction_id: String,
 }
 
 pub(crate) fn collect_commits_to_rebase(
@@ -79,6 +87,7 @@ pub(crate) fn save_rebase_state(path: &std::path::Path, state: &RebaseState) -> 
         "original_head={}\n",
         state.original_head.to_string_full()
     ));
+    content.push_str(&format!("transaction_id={}\n", state.transaction_id));
     content.push_str(&format!("current_index={}\n", state.current_index));
     if let Some(commit) = state.pending_manual_resolution {
         content.push_str(&format!(
@@ -119,6 +128,7 @@ pub(crate) fn load_rebase_state(path: &std::path::Path) -> Result<RebaseState> {
 
     let mut onto = None;
     let mut original_head = None;
+    let mut transaction_id = None;
     let mut current_index = 0;
     let mut commits_to_replay = Vec::new();
     let mut pending_manual_resolution = None;
@@ -130,6 +140,8 @@ pub(crate) fn load_rebase_state(path: &std::path::Path) -> Result<RebaseState> {
             onto = Some(ChangeId::parse(value)?);
         } else if let Some(value) = line.strip_prefix("original_head=") {
             original_head = Some(ChangeId::parse(value)?);
+        } else if let Some(value) = line.strip_prefix("transaction_id=") {
+            transaction_id = Some(value.to_string());
         } else if let Some(value) = line.strip_prefix("current_index=") {
             current_index = value.parse().unwrap_or(0);
         } else if let Some(value) = line.strip_prefix("pending_manual_resolution=") {
@@ -155,6 +167,8 @@ pub(crate) fn load_rebase_state(path: &std::path::Path) -> Result<RebaseState> {
         onto: onto.ok_or_else(|| anyhow!("Missing 'onto' in rebase state"))?,
         original_head: original_head
             .ok_or_else(|| anyhow!("Missing 'original_head' in rebase state"))?,
+        transaction_id: transaction_id
+            .ok_or_else(|| anyhow!("Missing 'transaction_id' in rebase state"))?,
         current_index,
         commits_to_replay,
         pending_manual_resolution,
@@ -180,6 +194,7 @@ mod tests {
             pending_manual_resolution: Some(ChangeId::generate()),
             pre_conflict_head: Some(ChangeId::generate()),
             pending_advances: pending,
+            transaction_id: "rebase-test-sample".to_string(),
         }
     }
 
@@ -246,7 +261,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
-            "onto={onto}\noriginal_head={oh}\ncurrent_index=0\ncommits=\npending_advance=not-hex!!\n",
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance=not-hex!!\n",
             onto = ChangeId::generate().to_string_full(),
             oh = ChangeId::generate().to_string_full(),
         );
@@ -267,7 +282,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
-            "onto={onto}\noriginal_head={oh}\ncurrent_index=0\ncommits=\npending_advance=deadbeef\n",
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=0\ncommits=\npending_advance=deadbeef\n",
             onto = ChangeId::generate().to_string_full(),
             oh = ChangeId::generate().to_string_full(),
         );
@@ -289,7 +304,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("REBASE_STATE");
         let body = format!(
-            "onto={onto}\noriginal_head={oh}\ncurrent_index=not-a-number\ncommits=\n",
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=rebase-test\ncurrent_index=not-a-number\ncommits=\n",
             onto = ChangeId::generate().to_string_full(),
             oh = ChangeId::generate().to_string_full(),
         );

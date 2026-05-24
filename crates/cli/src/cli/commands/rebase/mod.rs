@@ -19,7 +19,9 @@ use crate::{
 mod rebase_ops;
 mod rebase_state;
 
-use rebase_ops::{flush_rebase_batch, replay_commits, replay_commits_silent};
+use rebase_ops::{
+    flush_rebase_batch, mint_rebase_transaction_id, replay_commits, replay_commits_silent,
+};
 pub(crate) use rebase_state::load_rebase_state as load_persisted_rebase_state;
 use rebase_state::{
     RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state, save_rebase_state,
@@ -184,7 +186,7 @@ fn run_rebase(
         // arms. The undo behavior is unchanged — single-entry vs
         // multi-entry batches both rewind in one step.
         let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
-        flush_rebase_batch(repo, &[advance])?;
+        flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -216,7 +218,7 @@ fn run_rebase(
         // Same single-FF-as-rebase-batch wrap as the is_ancestor arm
         // above (heddle#198).
         let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
-        flush_rebase_batch(repo, &[advance])?;
+        flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -236,6 +238,11 @@ fn run_rebase(
         pending_manual_resolution: None,
         pre_conflict_head: None,
         pending_advances: Vec::new(),
+        // Mint once and persist so a crash between `flush_rebase_batch`
+        // and `fs::remove_file(REBASE_STATE)` can re-flush with the
+        // same id; the helper's dedup check then recognises the prior
+        // commit (heddle#198 r2 / Codex PR #218 P2).
+        transaction_id: mint_rebase_transaction_id(),
     };
 
     save_rebase_state(&rebase_state_path, &rebase_state)?;

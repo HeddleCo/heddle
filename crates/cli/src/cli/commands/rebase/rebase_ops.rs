@@ -122,7 +122,7 @@ fn replay_commits_internal(
     // and `heddle log` — its inverse is a no-op (same as elsewhere in
     // `undo_apply.rs`), so it doesn't interfere with the reverse-walk
     // that undoes the FF entries.
-    flush_rebase_batch(repo, &state.pending_advances)?;
+    flush_rebase_batch(repo, &state.pending_advances, &state.transaction_id)?;
 
     fs::remove_file(rebase_state_path)?;
 
@@ -140,18 +140,30 @@ fn replay_commits_internal(
     Ok(())
 }
 
-pub(super) fn flush_rebase_batch(repo: &Repository, advances: &[OpRecord]) -> Result<()> {
+/// Mint a fresh rebase-batch transaction id. Carries the
+/// `REBASE_TRANSACTION_ID_PREFIX` so [`is_rebase_batch`] in `undo.rs`
+/// recognises the batch envelope. The nanosecond suffix is
+/// forensic-only — the dedup helper [`flush_rebase_batch`] compares
+/// ids verbatim.
+pub(super) fn mint_rebase_transaction_id() -> String {
+    format!(
+        "{}{}",
+        REBASE_TRANSACTION_ID_PREFIX,
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    )
+}
+
+pub(super) fn flush_rebase_batch(
+    repo: &Repository,
+    advances: &[OpRecord],
+    transaction_id: &str,
+) -> Result<()> {
     if advances.is_empty() {
         return Ok(());
     }
     let mut batch: Vec<OpRecord> = advances.to_vec();
-    let transaction_id = format!(
-        "{}{}",
-        REBASE_TRANSACTION_ID_PREFIX,
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-    );
     batch.push(OpRecord::TransactionCommit {
-        transaction_id,
+        transaction_id: transaction_id.to_string(),
         op_count: advances.len() as u32,
     });
     repo.oplog()
@@ -621,7 +633,7 @@ mod tests {
             .unwrap()
             .len();
 
-        flush_rebase_batch(&repo, &[]).unwrap();
+        flush_rebase_batch(&repo, &[], "rebase-noop-test").unwrap();
 
         let after = repo
             .oplog()
@@ -629,5 +641,90 @@ mod tests {
             .unwrap()
             .len();
         assert_eq!(before, after, "empty flush must not record a batch");
+    }
+
+    fn synthetic_goto_advance() -> OpRecord {
+        OpRecord::Goto {
+            target: objects::object::ChangeId::generate(),
+            prev_head: Some(objects::object::ChangeId::generate()),
+        }
+    }
+
+    /// heddle#198 r2 (Codex PR #218 P2): `flush_rebase_batch` must be
+    /// idempotent across re-invocations with the same `transaction_id`.
+    /// The crash window between a successful flush and the
+    /// `fs::remove_file(REBASE_STATE)` call leaves the state file on
+    /// disk; the next `rebase --continue` reloads it, reaches the loop
+    /// tail with `current_index == len`, and re-enters
+    /// `flush_rebase_batch`. Without the dedup check it would append a
+    /// second `TransactionCommit`-bracketed batch and the rebase would
+    /// then need two `heddle undo` invocations to roll back instead of
+    /// one — exactly the duplicated undo/redo history Codex flagged.
+    #[test]
+    fn flush_rebase_batch_skips_when_transaction_id_already_committed() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let txn_id = "rebase-idempotency-fixture";
+        let advance = synthetic_goto_advance();
+
+        let before = repo
+            .oplog()
+            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .unwrap()
+            .len();
+
+        flush_rebase_batch(&repo, std::slice::from_ref(&advance), txn_id).unwrap();
+        let after_first = repo
+            .oplog()
+            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .unwrap()
+            .len();
+        assert_eq!(
+            after_first,
+            before + 1,
+            "first flush must append exactly one batch"
+        );
+
+        flush_rebase_batch(&repo, std::slice::from_ref(&advance), txn_id).unwrap();
+        let after_second = repo
+            .oplog()
+            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .unwrap()
+            .len();
+        assert_eq!(
+            after_second, after_first,
+            "second flush with the same transaction_id must be a noop, not double the batch"
+        );
+    }
+
+    /// Distinct transaction ids — separate rebases or a fresh mint —
+    /// must each produce their own batch. Pins that the dedup check
+    /// keys strictly on the supplied id and doesn't accidentally
+    /// suppress legitimate back-to-back rebases.
+    #[test]
+    fn flush_rebase_batch_records_distinct_transaction_ids_separately() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let advance = synthetic_goto_advance();
+
+        let before = repo
+            .oplog()
+            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .unwrap()
+            .len();
+
+        flush_rebase_batch(&repo, std::slice::from_ref(&advance), "rebase-id-A").unwrap();
+        flush_rebase_batch(&repo, std::slice::from_ref(&advance), "rebase-id-B").unwrap();
+
+        let after = repo
+            .oplog()
+            .recent_batches_scoped(20, Some(&repo.op_scope()))
+            .unwrap()
+            .len();
+        assert_eq!(
+            after,
+            before + 2,
+            "two distinct transaction ids must produce two batches"
+        );
     }
 }
