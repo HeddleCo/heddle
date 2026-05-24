@@ -758,3 +758,161 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
         shorts.join(", "),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use objects::object::Principal;
+    use oplog::OpEntry;
+
+    use super::*;
+
+    fn op_entry(id: u64, operation: OpRecord, batch_index: u32) -> OpEntry {
+        OpEntry {
+            id,
+            timestamp: Utc::now(),
+            operation,
+            undone: false,
+            batch_id: 1,
+            batch_index,
+            scope: None,
+            actor: Principal::new("Test", "test@example.com"),
+            operation_id: None,
+        }
+    }
+
+    fn rebase_txn_commit_entry(index: u32) -> OpEntry {
+        op_entry(
+            100 + u64::from(index),
+            OpRecord::TransactionCommit {
+                transaction_id: "rebase-1234567890".to_string(),
+                op_count: 1,
+            },
+            index,
+        )
+    }
+
+    /// heddle#198 r2 (Codex PR #218 P2): detached-mode rebase batches
+    /// carry `OpRecord::Goto` (no thread ref to FF), and the purge
+    /// safety scan must lift the pre-rebase tip from `prev_head` for
+    /// these entries. Pre-fix, the helper matched only `FastForward*`
+    /// arms and returned `None` for detached batches; the gate then
+    /// silently skipped them.
+    #[test]
+    fn earliest_rebase_pre_target_id_extracts_prev_head_from_goto() {
+        let pre = ChangeId::generate();
+        let post = ChangeId::generate();
+        let batch = OpBatch {
+            id: 1,
+            entries: vec![
+                op_entry(
+                    1,
+                    OpRecord::Goto {
+                        target: post,
+                        prev_head: Some(pre),
+                    },
+                    0,
+                ),
+                rebase_txn_commit_entry(1),
+            ],
+        };
+        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre));
+    }
+
+    /// The same helper must keep the existing `FastForwardV2` arm — a
+    /// regression here would silently break the attached-mode purge
+    /// scan that's already covered by the integration tests.
+    #[test]
+    fn earliest_rebase_pre_target_id_extracts_pre_target_from_fast_forward_v2() {
+        let pre = ChangeId::generate();
+        let post = ChangeId::generate();
+        let batch = OpBatch {
+            id: 2,
+            entries: vec![
+                op_entry(
+                    1,
+                    OpRecord::FastForwardV2 {
+                        source_thread: "<rebase>".to_string(),
+                        target_thread: "main".to_string(),
+                        pre_target_id: pre,
+                        post_target_id: post,
+                    },
+                    0,
+                ),
+                rebase_txn_commit_entry(1),
+            ],
+        };
+        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre));
+    }
+
+    /// When the first replayed-commit advance is a Goto and the second
+    /// is an FF, the earliest pre-target must come from the Goto. The
+    /// `batch_index` ordering (set by `PackedOpLog::collect_batches_scoped`)
+    /// is preserved by `entries`, so `find_map` walks oldest-first.
+    #[test]
+    fn earliest_rebase_pre_target_id_prefers_first_entry_when_mixed() {
+        let pre_goto = ChangeId::generate();
+        let mid = ChangeId::generate();
+        let post = ChangeId::generate();
+        let batch = OpBatch {
+            id: 3,
+            entries: vec![
+                op_entry(
+                    1,
+                    OpRecord::Goto {
+                        target: mid,
+                        prev_head: Some(pre_goto),
+                    },
+                    0,
+                ),
+                op_entry(
+                    2,
+                    OpRecord::FastForwardV2 {
+                        source_thread: "<rebase>".to_string(),
+                        target_thread: "main".to_string(),
+                        pre_target_id: mid,
+                        post_target_id: post,
+                    },
+                    1,
+                ),
+                rebase_txn_commit_entry(2),
+            ],
+        };
+        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre_goto));
+    }
+
+    /// A `Goto` without `prev_head` (legacy or operator-issued goto)
+    /// has nothing to rewind to and must skip past it rather than
+    /// surface a placeholder. The helper continues scanning for a
+    /// subsequent FF/Goto that does carry a pre-target.
+    #[test]
+    fn earliest_rebase_pre_target_id_skips_goto_without_prev_head() {
+        let pre = ChangeId::generate();
+        let post = ChangeId::generate();
+        let batch = OpBatch {
+            id: 4,
+            entries: vec![
+                op_entry(
+                    1,
+                    OpRecord::Goto {
+                        target: post,
+                        prev_head: None,
+                    },
+                    0,
+                ),
+                op_entry(
+                    2,
+                    OpRecord::FastForwardV2 {
+                        source_thread: "<rebase>".to_string(),
+                        target_thread: "main".to_string(),
+                        pre_target_id: pre,
+                        post_target_id: post,
+                    },
+                    1,
+                ),
+                rebase_txn_commit_entry(2),
+            ],
+        };
+        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre));
+    }
+}
