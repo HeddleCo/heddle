@@ -2581,6 +2581,94 @@ fn test_undo_rebase_refuses_when_pre_rebase_blob_purged() {
     );
 }
 
+/// Pending-advances persistence across `heddle rebase --continue`:
+/// when the rebase pauses on a conflict mid-replay, the per-commit
+/// FF records that *did* apply cleanly before the conflict must
+/// survive the pause and end up in the same final batch as the
+/// post-resolution FF. Without persistence the buffered records
+/// would be lost on the second `heddle` invocation and the rebase
+/// would land with only the post-conflict FFs in the oplog, leaving
+/// `heddle undo` unable to rewind back past the conflict point.
+#[test]
+fn test_undo_rebase_continue_preserves_pre_conflict_advances() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    // Conflict happens on conflict.txt only — main has a clean
+    // commit on a.txt first, then a commit that conflicts.
+    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("conflict.txt"), "feature version\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature edit"], temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    // Commit #1 (a.txt) — clean against feature; rebase will apply
+    // this one successfully and buffer its FF record in
+    // RebaseState.pending_advances.
+    std::fs::write(temp.path().join("a.txt"), "a1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    // Commit #2 (conflict.txt) — conflicts with feature; rebase
+    // pauses here. The buffered FF for commit #1 must survive the
+    // pause via the on-disk REBASE_STATE.
+    std::fs::write(temp.path().join("conflict.txt"), "main version\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path()))
+        .unwrap_or_else(|out| out);
+    assert!(
+        rebase_output.contains("Conflict applying")
+            || rebase_output.contains("\"status\": \"conflict\""),
+        "expected rebase to pause on conflict; got: {rebase_output}"
+    );
+    assert!(
+        temp.path().join(".heddle/REBASE_STATE").exists(),
+        "rebase state should persist while waiting for manual resolution"
+    );
+
+    // Resolve via a manual capture, then thread resolve + continue
+    // (matching the existing test_rebase_continue_accepts_manual_resolution_snapshot
+    // pattern in state_management/merge.rs).
+    std::fs::write(
+        temp.path().join("conflict.txt"),
+        "feature version\nmain version\n",
+    )
+    .unwrap();
+    heddle_must_succeed(&["capture", "-m", "Manual rebase resolution"], temp.path());
+    let _ = heddle(&["thread", "resolve", "main", "--json"], Some(temp.path()));
+    heddle_must_succeed(&["rebase", "--continue"], temp.path());
+    assert!(
+        !temp.path().join(".heddle/REBASE_STATE").exists(),
+        "REBASE_STATE should clear after a successful continue"
+    );
+
+    // Single undo must rewind back past BOTH the pre-conflict FF
+    // (commit #1) AND the post-resolution FF — i.e. all the way to
+    // the pre-rebase tip. If pending_advances were lost across the
+    // continue, the undo would stop at the pre-conflict point and
+    // strand the tip on a synthetic state.
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        main_tip_before,
+        "single undo must restore HEAD to pre-rebase tip even when the rebase paused on a conflict"
+    );
+    let repo = Repository::open(temp.path()).unwrap();
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, main_tip_before,
+        "single undo must restore main thread ref to pre-rebase tip across a --continue"
+    );
+}
+
 /// A rebase batch must show up in `heddle undo --list` as a SINGLE
 /// batch with N entries (one per replayed commit), not N separate
 /// batches with one entry each. The JSON contract is the structured
