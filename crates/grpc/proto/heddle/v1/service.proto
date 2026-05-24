@@ -139,6 +139,20 @@ service AuthService {
   // minutes — and revoking the parent session kills it via cascade
   // rev-id rejection.
   rpc IssuePresenceToken(IssuePresenceTokenRequest) returns (IssuePresenceTokenResponse);
+
+  // Mint a fresh anonymous Biscuit for a browser that has no
+  // session cookie yet. Unauthenticated — the response IS the
+  // identity. The returned biscuit carries `subject_kind("anon")`
+  // and a fresh `Anon(uuid)` subject; tapestry base64-encodes the
+  // bytes and emits `Set-Cookie: weft_auth=<…>; HttpOnly; Secure;
+  // SameSite=Lax`. Subsequent calls from the same browser ride on
+  // this biscuit as a normal bearer; later sign-in is an
+  // anon→user promotion (mint a new user-subject biscuit, revoke
+  // the anon rev_id). Per-IP rate-limited; when
+  // `WEFT_MINT_TURNSTILE_REQUIRED=true`, requires a valid
+  // Turnstile token. See HeddleCo/weft#189 and
+  // `docs/auth/anon-biscuit-spike.md` §3 + §7.1.
+  rpc MintAnonBiscuit(MintAnonBiscuitRequest) returns (MintAnonBiscuitResponse);
 }
 
 service ContentService {
@@ -1078,6 +1092,32 @@ message DeviceAuthProof {
   // device's private key. Replaces the old proof field on
   // `ExchangeDeviceAuthorizationRequest`.
   bytes signature = 3;
+}
+
+// Mint a fresh anonymous Biscuit. Unauthenticated; per-IP
+// rate-limited server-side (see `docs/auth/anon-biscuit-spike.md`
+// §7.1: 10/hour/IP). When `WEFT_MINT_TURNSTILE_REQUIRED=true` on
+// the server, `turnstile_token` MUST be a valid Cloudflare
+// Turnstile token; otherwise the field is ignored. See
+// HeddleCo/weft#189 and HeddleCo/weft#192.
+message MintAnonBiscuitRequest {
+  // Cloudflare Turnstile token captured by the caller's frontend.
+  // Required when the server has `WEFT_MINT_TURNSTILE_REQUIRED=true`
+  // (operator-flippable break-glass under coordinated abuse). Empty
+  // / omitted when the flag is off.
+  optional string turnstile_token = 1;
+}
+
+message MintAnonBiscuitResponse {
+  // Raw biscuit bytes carrying `subject_kind("anon")` + a fresh
+  // `Anon(uuid)` subject. The caller (tapestry's worker) base64-
+  // encodes these for the `weft_auth` cookie value. See
+  // `docs/auth/anon-biscuit-spike.md` §3.3 for the cookie shape.
+  bytes biscuit = 1;
+  // Hard expiry the biscuit was minted with. Same value as the
+  // biscuit's internal `expires_at` fact; surfaced so callers can
+  // set `Max-Age` on the cookie without parsing the token.
+  google.protobuf.Timestamp expires_at = 2;
 }
 
 message IssuedCredentialResponse {
