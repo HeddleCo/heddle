@@ -6,6 +6,7 @@ use std::fs;
 use anyhow::{Result, anyhow};
 use objects::object::{Blob, ChangeId, ContentHash, EntryType, State};
 use oplog::OpRecord;
+use refs::Head;
 use repo::Repository;
 
 use super::{
@@ -192,6 +193,30 @@ fn resume_manual_resolution_if_present(
         return Ok(());
     }
 
+    // heddle#198 r2 (Codex PR #218 P1): the accepted manual-resolution
+    // capture advanced the attached thread (or HEAD, when detached) from
+    // `pre_conflict_head` to `current_state.change_id`, but unlike a
+    // normal `apply_commit` arm there is no `ff_advance_deferred` call
+    // to buffer the corresponding FF (or `Goto`) into the rebase batch.
+    // Without folding it in here, the batch's last FF points at the
+    // pre-conflict commit's rebased tip; `heddle redo` then replays
+    // only the recorded FFs and lands one commit short of the actual
+    // post-rebase tip. Append the implicit advance before bumping
+    // `current_index` so the batch envelope reflects the full rebase
+    // even when it paused for a manual fix-up.
+    let resolution_advance = match repo.head_ref()? {
+        Head::Attached { thread } => OpRecord::FastForwardV2 {
+            source_thread: REBASE_REPLAY_SOURCE.to_string(),
+            target_thread: thread,
+            pre_target_id: pre_conflict_head,
+            post_target_id: current_state.change_id,
+        },
+        Head::Detached { .. } => OpRecord::Goto {
+            target: current_state.change_id,
+            prev_head: Some(pre_conflict_head),
+        },
+    };
+    state.pending_advances.push(resolution_advance);
     state.current_index += 1;
     state.pending_manual_resolution = None;
     state.pre_conflict_head = None;
