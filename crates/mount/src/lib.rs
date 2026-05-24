@@ -30,6 +30,7 @@
 pub mod cache;
 pub mod core;
 pub mod error;
+mod pending;
 pub mod shell;
 
 #[cfg(all(target_os = "linux", feature = "fuse"))]

@@ -392,7 +392,7 @@ struct PendingEntry {
 /// pair with one map and forcing every callback that branches on
 /// lifecycle to `match`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NodeState {
+pub(crate) enum NodeState {
     /// Live: the inode owns a binding in `inodes.by_path`. The
     /// refcount tracks how many FUSE `open` / `create` callbacks
     /// have minted handles to it; `release` drives it back down.
@@ -420,7 +420,7 @@ enum NodeState {
 /// (Bug Class A in the spike doc §4) that produced every Codex
 /// finding r6 → r9 on PR #182.
 #[derive(Default)]
-struct Pending {
+pub(crate) struct Pending {
     /// Hot tier: per-`NodeId` open-file buffers.
     hot: BTreeMap<u64, HotBuffer>,
     /// Reverse-index for the hot tier: which NodeId currently owns a
@@ -485,6 +485,26 @@ impl Pending {
             Some(NodeState::Live { open_count } | NodeState::Orphan { open_count }) => *open_count,
             None => 0,
         }
+    }
+
+    /// Read-only access to the per-NodeId lifecycle entry. Sole
+    /// reachable point for the [`crate::pending`] witness constructors
+    /// to query the FSM without taking a `pub(crate)` dependency on
+    /// the underlying `state` field. Returning `Option<NodeState>` by
+    /// value keeps the field private to this module — callers cannot
+    /// mutate state through this handle.
+    pub(crate) fn lookup_state(&self, id: u64) -> Option<NodeState> {
+        self.state.get(&id).copied()
+    }
+
+    /// Test-only: insert a per-NodeId lifecycle entry directly,
+    /// bypassing the FSM entry points. Used by the
+    /// [`crate::pending`] substrate tests to set up `Pending` states
+    /// without dragging in the full mount lifecycle. Gated behind
+    /// `cfg(test)` so it never reaches a release binary.
+    #[cfg(test)]
+    pub(crate) fn test_insert_state(&mut self, id: u64, state: NodeState) {
+        self.state.insert(id, state);
     }
 }
 
