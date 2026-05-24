@@ -155,6 +155,33 @@ mod tests;
 /// //         is on `BrandedPending` now, so this also fails to compile.
 /// let _ = p2.peek_witness(&w);
 /// ```
+///
+/// # Witness-gated transitions (heddle#209)
+///
+/// The retrofit issues that consume the substrate (heddle#209 / #210 /
+/// #211 / #212) add FSM-transition methods on
+/// [`crate::pending::BrandedPending`] whose entry-point gating mirrors
+/// the [`crate::pending::BrandedPending::witness_*`] constructors:
+/// they live on `BrandedPending`, which can only be obtained via
+/// [`core::Pending::with_brand`]. Direct callers in `core.rs` (or
+/// future external callers) cannot reach the transitions on
+/// [`core::Pending`] itself.
+///
+/// The doctest below pins that entry-point discipline for the first
+/// retrofitted transition (`transition_to_orphan`, heddle#209). It
+/// compiles only if `Pending::transition_to_orphan` exists as a
+/// directly-callable method — and it doesn't, so the doctest fails
+/// to compile and the `compile_fail` assertion holds (GREEN).
+///
+/// ```compile_fail
+/// use mount::__pending_substrate_for_doctest::*;
+/// let mut p = Pending::default();
+/// // `transition_to_orphan` lives on `BrandedPending`, not on
+/// // `Pending`. A direct call on `Pending` is the bypass shape:
+/// // post-retrofit it fails to compile (the method doesn't exist on
+/// // `Pending`), so the `compile_fail` assertion holds → GREEN.
+/// let _ = p.transition_to_orphan(0);
+/// ```
 #[doc(hidden)]
 pub mod __pending_substrate_for_doctest {
     pub use crate::core::Pending;

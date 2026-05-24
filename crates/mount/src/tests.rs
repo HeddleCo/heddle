@@ -1754,6 +1754,12 @@ mod write_ops {
         let entry = mount
             .create_file(NodeId::ROOT, OsStr::new("temp"), FileMode::Normal, false)
             .expect("create");
+        // The `O_CREAT|O_RDWR` open above bumps `open_count` to 1 —
+        // without this the witness-gated unlink (heddle#209) sees the
+        // node as `Released` (no entry) and skips the orphan
+        // transition, breaking the open-unlinked POSIX flow this test
+        // exercises.
+        mount.on_open(entry.node).expect("on_open");
         mount.write(entry.node, 0, b"v1").expect("first write");
         // `unlink("temp")` while the handle is still in use.
         mount
@@ -2087,6 +2093,47 @@ mod write_ops {
         assert_eq!(target.as_os_str(), OsStr::new("hello.txt"));
     }
 
+    /// r11 #4 regression: renaming a regular file over a symlink must
+    /// not push an `Orphan { open_count: 0 }` state entry for the
+    /// displaced symlink's NodeId. Symlinks have no `open`/`release`
+    /// lifecycle, so a state entry there is dead bookkeeping that
+    /// nothing will ever reap — it just grows under symlink churn.
+    ///
+    /// Pre-retrofit (heddle#209) `rename_entry_with_options`'s displaced-
+    /// destination branch unconditionally did
+    /// `pending.state.insert(displaced_dest, Orphan{ open_count })` even
+    /// for non-`Live` nodes (Codex PR #182 r11 finding 3293575541). The
+    /// witness-gated retrofit replaces that with a
+    /// `BrandedPending::witness_live_nonzero` check whose `None` result
+    /// IS the short-circuit — a symlink never enters `state`, so the
+    /// witness constructor returns `None` and no transition fires.
+    #[test]
+    fn rename_over_symlink_does_not_orphan_state() {
+        let (_temp, mount) = open_mount();
+        let link = mount
+            .create_symlink(NodeId::ROOT, OsStr::new("link"), Path::new("hello.txt"))
+            .expect("create symlink");
+        assert!(
+            !mount.orphans_contains(link.node),
+            "newly-created symlink must have no Pending state entry",
+        );
+        mount
+            .create_file(NodeId::ROOT, OsStr::new("source"), FileMode::Normal, false)
+            .expect("create source file");
+        mount
+            .rename_entry(
+                NodeId::ROOT,
+                OsStr::new("source"),
+                NodeId::ROOT,
+                OsStr::new("link"),
+            )
+            .expect("rename file over symlink");
+        assert!(
+            !mount.orphans_contains(link.node),
+            "displaced symlink must not acquire a Pending state entry (r11 #4)",
+        );
+    }
+
     /// Cross-tree directory rename — i.e. renaming a captured-tree
     /// directory — is intentionally refused by `move_overlay_dir`;
     /// the overlay would otherwise need to rewrite every descendant
@@ -2321,6 +2368,11 @@ mod write_ops {
         let (_temp, mount) = open_mount();
         // `fd = open("hello.txt")` — captured file, no overlay yet.
         let node = mount.lookup_path("hello.txt").unwrap();
+        // The `open` above bumps `open_count` to 1 — without this the
+        // witness-gated unlink (heddle#209) skips the orphan
+        // transition for `Released` (no entry) nodes and the test's
+        // open-unlinked POSIX flow doesn't engage.
+        mount.on_open(node).expect("on_open");
         // `unlink("hello.txt")` while the handle is still in use.
         mount
             .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
@@ -2420,6 +2472,11 @@ mod write_ops {
         let (_temp, mount) = open_mount();
         // `fd = open("hello.txt")` — captured file, no overlay.
         let dest_id = mount.lookup_path("hello.txt").unwrap();
+        // The `open` above bumps `open_count` to 1 — without this the
+        // witness-gated rename-over (heddle#209) skips the orphan
+        // transition for `Released` destinations and the
+        // captured-bytes-via-old-fd flow doesn't engage.
+        mount.on_open(dest_id).expect("on_open");
         // Source file with replacement payload; flush so move_file's
         // flush_node returns immediately.
         let src = mount
@@ -2467,6 +2524,11 @@ mod write_ops {
         let (_temp, mount) = open_mount();
         // `fd = open("hello.txt")` — captured Normal-mode file.
         let orphan_id = mount.lookup_path("hello.txt").unwrap();
+        // The `open` above bumps `open_count` to 1 — without this the
+        // witness-gated unlink (heddle#209) skips the orphan
+        // transition for `Released` (no entry) nodes and the
+        // open-unlinked POSIX flow this test exercises doesn't engage.
+        mount.on_open(orphan_id).expect("on_open");
         // `unlink("hello.txt")` while the fd lives on.
         mount
             .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
@@ -2543,6 +2605,10 @@ mod write_ops {
         // so the bytes are at `pending.warm["hello.txt"]`, not in any
         // hot buffer.
         let node = mount.lookup_path("hello.txt").unwrap();
+        // The `open` above bumps `open_count` to 1 — without this the
+        // witness-gated unlink (heddle#209) sees the node as
+        // `Released` (no entry) and skips the orphan transition.
+        mount.on_open(node).expect("on_open");
         mount.write(node, 0, b"WARM-BYTES").expect("write");
         mount.flush(node).expect("flush — promote to warm");
         // Sanity: warm tier holds the bytes.
@@ -2591,6 +2657,11 @@ mod write_ops {
         let entry = mount
             .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
             .expect("create");
+        // The `create` (`O_CREAT|O_RDWR`) above bumps `open_count` to
+        // 1 — without this the witness-gated unlink (heddle#209) sees
+        // the node as `Released` (no entry) and skips the orphan
+        // transition, breaking the open-unlinked POSIX flow.
+        mount.on_open(entry.node).expect("on_open");
         mount.write(entry.node, 0, b"hello-world").expect("write");
         mount.flush(entry.node).expect("flush — promote to warm");
         assert!(
@@ -2644,6 +2715,11 @@ mod write_ops {
         // not hot. r7's existing rename-over preservation fix is for
         // hot buffers; this one exercises the warm-tier preservation.
         let dest_id = mount.lookup_path("hello.txt").unwrap();
+        // The `open` above bumps `open_count` to 1 — without this the
+        // witness-gated rename-over (heddle#209) skips the orphan
+        // transition for `Released` destinations and the
+        // warm-preservation path doesn't engage.
+        mount.on_open(dest_id).expect("on_open");
         mount.write(dest_id, 0, b"DEST-WARM-BYTES").expect("write dest");
         mount.flush(dest_id).expect("flush dest — promote to warm");
         assert!(

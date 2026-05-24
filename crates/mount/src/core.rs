@@ -507,6 +507,27 @@ impl<'brand> Pending<'brand> {
         self.state.get(&id).copied()
     }
 
+    /// Witness-gated LiveNonZero → Orphan state transition. The
+    /// `&Witness<'_, 'brand, Orphan>` parameter is the type-level
+    /// proof that the caller has already gone through the FSM check —
+    /// `Witness::new` is module-private to [`crate::pending`], so the
+    /// only callers that can name this method's argument type are the
+    /// [`crate::pending::BrandedPending::transition_to_orphan`] body
+    /// (which constructs the witness after consuming a matching
+    /// `Witness<LiveNonZero>`) and code that already held a
+    /// `Witness<Orphan>` (in which case the state was already Orphan,
+    /// and re-inserting is a no-op on the discriminant). Direct
+    /// callers in this module have no way to mint a `Witness<Orphan>`,
+    /// so they cannot bypass the witness discipline.
+    pub(crate) fn apply_transition_to_orphan(
+        &mut self,
+        w: &crate::pending::Witness<'_, 'brand, crate::pending::Orphan>,
+    ) {
+        let id = w.id();
+        let open_count = self.open_count(id);
+        self.state.insert(id, NodeState::Orphan { open_count });
+    }
+
     /// Test-only: insert a per-NodeId lifecycle entry directly,
     /// bypassing the FSM entry points. Used by the
     /// [`crate::pending`] substrate tests to set up `Pending` states
@@ -1480,26 +1501,24 @@ impl ContentAddressedMount {
             // (r9 fix: pre-spike code called `pending.hot.remove(&node_id)`
             // here and the unflushed bytes vanished.)
             pending.hot_by_path.remove(&child_path);
-            // Transition T1: Live → Orphan { open_count: N }. Carry
-            // the current open count over so the final `release`
-            // fires correctly. N == 0 is permitted; the inode stays
-            // tracked until `release` / `invalidate` / `capture`
-            // drops it (matching pre-spike orphan-set semantics for
-            // tests that skip the explicit `on_open`).
+            // Transition T1: Live{open_count >= 1} → Orphan{open_count}.
+            // The witness-gated retrofit (heddle#209) makes the FSM
+            // check the gate: `bp.transition_to_orphan(node_id)`
+            // returns `None` (without touching `state`) for any
+            // non-`LiveNonZero` state, and the missing
+            // `Witness<Orphan>` IS the short-circuit at this call
+            // site.
             //
-            // Codex r12 thread 3293510317 (P3): symlinks have no
-            // `open`/`release` lifecycle (they're not openable for
-            // IO), so we MUST NOT orphan them — no event would ever
-            // clear the state entry, and `pending.state` would grow
-            // under symlink churn until capture/invalidate. Files
-            // (regular + executable) do receive open/release events
-            // and take the Orphan branch.
-            if entry.kind != NodeKind::Symlink {
-                let open_count = pending.open_count(node_id);
-                pending
-                    .state
-                    .insert(node_id, NodeState::Orphan { open_count });
-            }
+            // That subsumes two earlier defensive checks: Codex r12
+            // thread 3293510317 (symlinks have no `open`/`release`
+            // lifecycle, so they never enter `state` and the
+            // transition never fires for them), and r11 finding
+            // 3293575534 (orphaning a `Live { open_count: 0 }` node
+            // creates a record nothing will ever reap — same shape,
+            // same fix).
+            pending.with_brand(|bp| {
+                let _ = bp.transition_to_orphan(node_id);
+            });
             // Symlinks are path-keyed; their overlay goes when the
             // directory entry goes.
             pending.symlinks.remove(&child_path);
@@ -1756,14 +1775,26 @@ impl ContentAddressedMount {
                 buf.path = new_path.clone();
             }
             if let Some(dest_id) = displaced_dest {
-                // T3: the displaced destination transitions to Orphan.
-                // Bytes (hot[dest_id], warm[dest_id]) stay put so the
+                // T3: the displaced destination transitions to Orphan
+                // iff it's currently `Live { open_count >= 1 }`. Bytes
+                // (hot[dest_id], warm[dest_id]) stay put so the
                 // surviving fd keeps reading the inode's own data
                 // (spike doc §1.2 T3).
-                let open_count = pending.open_count(dest_id);
-                pending
-                    .state
-                    .insert(dest_id, NodeState::Orphan { open_count });
+                //
+                // Closes Codex PR #182 r11 finding 3293575541 (heddle
+                // #209): `bp.transition_to_orphan(dest_id)` returns
+                // `None` (without touching `state`) for any
+                // non-`LiveNonZero` displaced destination, and the
+                // missing `Witness<Orphan>` IS the short-circuit at
+                // this call site. Pre-retrofit this branch
+                // unconditionally inserted `Orphan { open_count: 0 }`
+                // for non-`Live` destinations — including symlinks,
+                // which have no `open`/`release` lifecycle and would
+                // never reap the entry, growing `state` under symlink
+                // churn until capture / invalidate.
+                pending.with_brand(|bp| {
+                    let _ = bp.transition_to_orphan(dest_id);
+                });
             }
         }
         Ok(())
