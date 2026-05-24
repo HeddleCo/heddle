@@ -565,6 +565,57 @@ mod tests {
         assert!(err.contains("Missing 'transaction_id'"), "got: {err}");
     }
 
+    /// heddle#198 r4 (Codex PR #218 P2): the strict loader checks only
+    /// key presence of `transaction_id=`, not the value. A torn write
+    /// can leave the line emitted with an empty value
+    /// (`transaction_id=\n`); `flush_rebase_batch`'s dedup keys on the
+    /// supplied id verbatim, so an empty id collides against any prior
+    /// rebase whose state file was similarly truncated and silently
+    /// suppresses the new batch. Pin that strict load rejects the
+    /// blank-value form too — the existing "Missing" message only
+    /// fires when the line is absent entirely.
+    #[test]
+    fn load_strict_rejects_blank_transaction_id() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=\ncurrent_index=0\ncommits=\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("transaction_id") && (err.contains("blank") || err.contains("empty")),
+            "expected blank-transaction_id error, got: {err}"
+        );
+    }
+
+    /// Whitespace-only is the same hazard as the empty form: `trim()`
+    /// would have made the value usable for the dedup key but Codex's
+    /// concern is that any non-content id keys collisions across
+    /// otherwise-unrelated corrupted rebases. Pin that the strict
+    /// loader rejects whitespace too — there's no legitimate way for
+    /// `mint_rebase_transaction_id` to emit one.
+    #[test]
+    fn load_strict_rejects_whitespace_only_transaction_id() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=   \t\ncurrent_index=0\ncommits=\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let err = load_rebase_state(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("transaction_id") && (err.contains("blank") || err.contains("empty")),
+            "expected blank-transaction_id error, got: {err}"
+        );
+    }
+
     /// Companion to the strict-rejection pin above (heddle#198 r4 /
     /// Codex PR #218 P1): the abort loader must tolerate a
     /// `current_index` / `pending_advances` mismatch — abort only needs
