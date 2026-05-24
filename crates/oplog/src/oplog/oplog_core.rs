@@ -202,6 +202,79 @@ impl OpLog {
         Ok(ids)
     }
 
+    /// Atomic dedup+append for transaction-scoped batches.
+    ///
+    /// Scans the most recent `recent_window` batches for an
+    /// `OpRecord::TransactionCommit { transaction_id: id, .. }` marker
+    /// matching `transaction_id`. If one is present the batch was
+    /// already committed (e.g. by a prior crash-recovery retry) and
+    /// this call returns `Ok(None)` without writing. Otherwise the
+    /// batch is appended and `Ok(Some(ids))` is returned.
+    ///
+    /// Pre-r4 the rebase helper did the existence check and the append
+    /// in two separate oplog calls with no shared lock, so two
+    /// concurrent `rebase --continue` invocations sharing one
+    /// persisted `transaction_id` could both observe "not committed"
+    /// and both append — reintroducing the duplicate-batch hazard from
+    /// r2 (heddle#198 r4 / Codex PR #218 P2). This method holds the
+    /// existing oplog write lock across both the scan and the append,
+    /// so the two operations are atomic with respect to any other
+    /// oplog writer in the process or on the host.
+    pub fn record_batch_scoped_if_no_transaction(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+        recent_window: usize,
+    ) -> Result<Option<Vec<u64>>> {
+        if operations.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let _lock = self.write_lock()?;
+        let mut packed = self.load_fresh()?;
+
+        let recent =
+            packed.collect_batches_scoped(recent_window, |_| true, scope);
+        if recent.iter().any(|batch| {
+            batch.entries.iter().any(|entry| {
+                matches!(
+                    &entry.operation,
+                    OpRecord::TransactionCommit { transaction_id: id, .. }
+                        if id == transaction_id
+                )
+            })
+        }) {
+            return Ok(None);
+        }
+
+        let start_id = packed.head_id + 1;
+        let timestamp = Utc::now();
+        let mut new_entries = Vec::with_capacity(operations.len());
+        let mut ids = Vec::with_capacity(operations.len());
+        for (index, operation) in operations.into_iter().enumerate() {
+            let id = start_id + index as u64;
+            new_entries.push(OpEntry {
+                id,
+                timestamp,
+                operation,
+                undone: false,
+                batch_id: start_id,
+                batch_index: index as u32,
+                scope: scope.map(str::to_string),
+                actor: self.actor.clone(),
+                operation_id: None,
+            });
+            ids.push(id);
+        }
+
+        packed.append(new_entries);
+        packed.save()?;
+        *self.cached.lock().unwrap() = Some(packed);
+
+        Ok(Some(ids))
+    }
+
     pub(super) fn record_single_scoped(
         &self,
         operation: OpRecord,
@@ -293,6 +366,22 @@ impl OpLogBackend for OpLog {
         scope: Option<&str>,
     ) -> Result<Vec<u64>> {
         OpLog::record_batch_scoped(self, operations, scope)
+    }
+
+    fn record_batch_scoped_if_no_transaction(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+        recent_window: usize,
+    ) -> Result<Option<Vec<u64>>> {
+        OpLog::record_batch_scoped_if_no_transaction(
+            self,
+            operations,
+            scope,
+            transaction_id,
+            recent_window,
+        )
     }
 
     fn last(&self) -> Result<Option<OpEntry>> {

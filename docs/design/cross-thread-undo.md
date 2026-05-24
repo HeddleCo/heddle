@@ -323,10 +323,10 @@ Today's call sites that emit `FastForwardV2` (via the shared
 | Site | Command | `source_thread` value | Notes |
 |---|---|---|---|
 | `commands/merge/mod.rs` | `heddle merge` (FF path) | merge `track_name` | heddle#99 |
-| `commands/rebase/mod.rs` (is_ancestor) | `heddle rebase` (pure FF) | rebase target thread | heddle#110 |
-| `commands/rebase/mod.rs` (empty-replay) | `heddle rebase` (no commits to replay) | rebase target thread | heddle#110 |
-| `commands/rebase/rebase_ops.rs:apply_commit` | `heddle rebase` (replay step) | `"<rebase>"` synthetic | heddle#110; one op per replayed commit |
-| `commands/rebase/rebase_ops.rs:apply_tree_to_worktree` | `heddle rebase` (parentless replay) | `"<rebase>"` synthetic | heddle#110; rare parentless-commit replay |
+| `commands/rebase/mod.rs` (is_ancestor) | `heddle rebase` (pure FF) | rebase target thread | heddle#110; wrapped in a single-FF rebase batch via `flush_rebase_batch` (heddle#198) so listing is uniform |
+| `commands/rebase/mod.rs` (empty-replay) | `heddle rebase` (no commits to replay) | rebase target thread | heddle#110; same `flush_rebase_batch` envelope as the is_ancestor arm |
+| `commands/rebase/rebase_ops.rs:apply_commit` | `heddle rebase` (replay step) | `"<rebase>"` synthetic | heddle#110; one op per replayed commit, **buffered in `RebaseState.pending_advances` and flushed as one batch on completion** (heddle#198) so `heddle undo` rewinds the whole rebase atomically |
+| `commands/rebase/rebase_ops.rs:apply_tree_to_worktree` | `heddle rebase` (parentless replay) | `"<rebase>"` synthetic | heddle#110; rare parentless-commit replay; same buffering as `apply_commit` |
 | `commands/workflow.rs:adopt_manual_resolution` | `heddle ship` (manual-resolution adopt) | shipped thread name | heddle#110 |
 | `commands/remote/remote_ops.rs:pull_local` | `heddle pull` (local sync, repeat pull) | remote thread name | heddle#110; first-time pull falls back to `Goto` because there's no pre-target tip to restore |
 | `commands/resolve.rs:abort_merge_state` | `heddle resolve --abort` | `"<abort>"` synthetic | heddle#110; today this is a pre-target = post-target no-op record (HEAD doesn't move during a 3-way conflict merge), kept on the same code path so a future merge variant that does move HEAD before abort gets correct undo semantics for free |
@@ -336,6 +336,16 @@ Any new caller of `fast_forward_attached` should go through
 pre-mutates the thread ref, à la `pull_local`). Calling
 `fast_forward_attached` directly is reserved for tests and for the
 detached-HEAD bootstrap path inside the helper itself.
+
+For multi-step compound operations (rebase replay loop, future
+batched verbs) use `ff_advance_deferred` to perform the mutation
+without recording, accumulate the returned `OpRecord` in caller
+state (persisted across `--continue` invocations when applicable),
+then flush all accumulated records as a single oplog batch via
+`rebase_ops::flush_rebase_batch` (or an equivalent batched-record
+helper). The batch carries an `OpRecord::TransactionCommit` envelope
+marker so the grouping is forensically identifiable in `undo --list`
+and `heddle log` — see heddle#198 for the rebase use case.
 
 The pattern is now well-established enough that any new ref-mutating
 `OpRecord` variant should be reviewed against this matrix at design

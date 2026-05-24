@@ -8,7 +8,7 @@ use refs::Head;
 use repo::Repository;
 
 use super::{
-    ff_record::record_ff_advance, snapshot::ensure_current_state,
+    ff_record::ff_advance_deferred, snapshot::ensure_current_state,
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
@@ -19,10 +19,13 @@ use crate::{
 mod rebase_ops;
 mod rebase_state;
 
-use rebase_ops::{replay_commits, replay_commits_silent};
+use rebase_ops::{
+    flush_rebase_batch, mint_rebase_transaction_id, replay_commits, replay_commits_silent,
+};
 pub(crate) use rebase_state::load_rebase_state as load_persisted_rebase_state;
 use rebase_state::{
-    RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state, save_rebase_state,
+    RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state,
+    load_rebase_state_for_abort, save_rebase_state,
 };
 
 const REBASE_STATE_FILE: &str = "REBASE_STATE";
@@ -177,7 +180,14 @@ fn run_rebase(
     let is_ancestor = is_ancestor_of(repo, &current_state.change_id, &target_change_id)?;
 
     if is_ancestor {
-        record_ff_advance(repo, target_thread, &target_change_id)?;
+        // heddle#198: even the single-FF rebase paths surface as a
+        // rebase batch ([FF, TransactionCommit]) so `undo --list`,
+        // `heddle log`, and downstream tooling can identify a rebase
+        // by its envelope shape uniformly across the replay and FF
+        // arms. The undo behavior is unchanged — single-entry vs
+        // multi-entry batches both rewind in one step.
+        let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
+        flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -206,7 +216,10 @@ fn run_rebase(
         collect_commits_to_rebase(repo, &current_state.change_id, &target_change_id)?;
 
     if commits_to_replay.is_empty() {
-        record_ff_advance(repo, target_thread, &target_change_id)?;
+        // Same single-FF-as-rebase-batch wrap as the is_ancestor arm
+        // above (heddle#198).
+        let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
+        flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -225,6 +238,12 @@ fn run_rebase(
         original_head: current_state.change_id,
         pending_manual_resolution: None,
         pre_conflict_head: None,
+        pending_advances: Vec::new(),
+        // Mint once and persist so a crash between `flush_rebase_batch`
+        // and `fs::remove_file(REBASE_STATE)` can re-flush with the
+        // same id; the helper's dedup check then recognises the prior
+        // commit (heddle#198 r2 / Codex PR #218 P2).
+        transaction_id: mint_rebase_transaction_id(),
     };
 
     save_rebase_state(&rebase_state_path, &rebase_state)?;
@@ -260,7 +279,12 @@ fn handle_abort(
         return Err(anyhow!("No rebase in progress"));
     }
 
-    let state = load_rebase_state(rebase_state_path)?;
+    // heddle#198 r2 (Codex PR #218 P2): abort uses the lenient loader
+    // so a single corrupted `pending_advance=` line — crash mid-write
+    // or a hand-edit — doesn't strand the operator with neither abort
+    // nor continue available. Abort only needs `original_head` to
+    // rewind; the buffered FF history is discarded.
+    let state = load_rebase_state_for_abort(rebase_state_path)?;
     repo.goto_without_record(&state.original_head)?;
 
     fs::remove_file(rebase_state_path)?;

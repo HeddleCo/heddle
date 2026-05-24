@@ -21,6 +21,42 @@ pub trait OpLogBackend: Send + Sync {
         scope: Option<&str>,
     ) -> Result<Vec<u64>>;
 
+    /// Atomic dedup+append for transaction-scoped batches: scan the
+    /// most recent `recent_window` batches under the same write lock
+    /// used by [`OpLogBackend::record_batch_scoped`] for an
+    /// `OpRecord::TransactionCommit { transaction_id: id, .. }` marker.
+    /// On a hit, return `Ok(None)` (batch was already committed by a
+    /// prior call). Otherwise append `operations` and return
+    /// `Ok(Some(ids))`.
+    ///
+    /// The default implementation is non-atomic — it calls the two
+    /// existing methods in sequence and is therefore subject to a
+    /// check/append race under concurrent writers. The local
+    /// file-backed `OpLog` overrides it to hold the write lock across
+    /// the scan and the append (heddle#198 r4 / Codex PR #218 P2).
+    fn record_batch_scoped_if_no_transaction(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+        recent_window: usize,
+    ) -> Result<Option<Vec<u64>>> {
+        let recent = self.recent_batches_scoped(recent_window, scope)?;
+        if recent.iter().any(|batch| {
+            batch.entries.iter().any(|entry| {
+                matches!(
+                    &entry.operation,
+                    OpRecord::TransactionCommit { transaction_id: id, .. }
+                        if id == transaction_id
+                )
+            })
+        }) {
+            return Ok(None);
+        }
+        let ids = self.record_batch_scoped(operations, scope)?;
+        Ok(Some(ids))
+    }
+
     fn last(&self) -> Result<Option<OpEntry>>;
     fn recent(&self, count: usize) -> Result<Vec<OpEntry>>;
     fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>>;

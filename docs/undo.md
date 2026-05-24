@@ -23,6 +23,7 @@ follow-ups.
 | `heddle marker create`   | Deletes the marker.                                             |
 | `heddle marker drop`     | Recreates the marker at its prior state.                        |
 | `heddle redact apply`    | Removes the redaction record so the next materialize restores the original bytes. Requires `--allow-redact-undo` (see "Safety contracts"). Refused when the blob has since been purged. |
+| `heddle rebase`          | Restores HEAD **and** the rebased thread ref to the pre-rebase tip in a single undo step. The whole rebase (every per-commit FF the replay emitted) is grouped into one oplog batch via the `OpRecord::TransactionCommit` envelope marker, so undo never lands the tip on an intermediate replay state. Refused when a blob reachable from the pre-rebase tree has since been purged (see "Safety contracts"). Local-only — see "Not undoable" for the remote-aware variant. |
 
 The list above is the **shipped** surface for v0.2. The inverses live in
 `crates/cli/src/cli/commands/undo_apply.rs`; the oplog records that drive them
@@ -80,6 +81,15 @@ contracts below are enforced by integration tests in
   reaching past the live oplog window — `heddle undo` refuses with a single
   clear message naming the missing op id. Restore from a backup or list past
   the boundary with `heddle undo --list`.
+- **Rebase-undo refusal across `purge`.** Undoing a `heddle rebase` rewinds
+  the attached thread to its pre-rebase tip. If any blob reachable from
+  that tree has since been redacted+purged, the rewind would land the
+  worktree on a state whose next materialize fails with a missing-blob
+  error. `heddle undo` refuses pre-mutation with a single message naming
+  the rebase batch and the purged blob — same fail-loud discipline as the
+  Redact inverse's "Refused regardless of the flag when the underlying
+  bytes have since been purged" rule. Restore from a backup or list past
+  the rebase with `heddle undo --list`.
 - **Worktree-attached `ThreadCreate` refusal.** `heddle undo` refuses to
   roll back a `heddle start <name> --path <dir>` while the materialized
   worktree at `<dir>` is still on disk. The inverse only deletes the

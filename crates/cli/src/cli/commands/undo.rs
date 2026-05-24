@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Undo and redo commands.
 
+use std::collections::HashSet;
+
 use anyhow::{Result, anyhow};
-use objects::object::{ChangeId, ContentHash};
+use objects::object::{ChangeId, ContentHash, Tree};
 use oplog::{OpBatch, OpRecord};
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
@@ -101,6 +103,14 @@ pub fn cmd_undo(
     // and a phantom ThreadManager record. Pre-preview for the same
     // honesty reason as the redaction gate.
     ensure_thread_worktree_undo_safe(&repo, &batches)?;
+    // heddle#198: a rebase batch's inverse restores the thread tip to
+    // its pre-rebase state. If any blob reachable from that tree has
+    // been purged since (Redact + Purge), the rewind would land the
+    // worktree on a tip whose next `materialize` fails with a
+    // missing-blob error. Refuse pre-mutation with a message naming
+    // the affected blob — same fail-loud discipline as the Redact
+    // path's purge gate in `ensure_redaction_undo_safe`.
+    ensure_rebase_undo_safe(&repo, &batches)?;
 
     if preview {
         let output = UndoRedoOutput {
@@ -556,6 +566,142 @@ fn ensure_redaction_redo_supported(batches: &[OpBatch]) -> Result<()> {
     ))
 }
 
+/// heddle#198 — Rebase-undo safety against a purge that crossed the
+/// rebase batch. The rebase inverse rewinds the attached thread to
+/// the earliest recorded `pre_target_id`. Materializing that tip
+/// requires every blob in its tree; if `Redact apply` + `Purge` have
+/// run on any of those blobs since the rebase, the bytes are gone
+/// and the rewind would surface a raw `missing blob` from inside
+/// `goto`. Refuse pre-mutation with a single message naming the
+/// blob and the rebase batch — mirrors the "Refused regardless of
+/// the flag when the underlying bytes have since been purged" rule
+/// the Redact inverse already enforces (docs/undo.md "Safety
+/// contracts").
+///
+/// Identification: a rebase batch is the one written by
+/// `rebase_ops::flush_rebase_batch` — its `TransactionCommit`
+/// envelope marker carries an id with prefix `"rebase-"`. Both the
+/// replay path and the FF arms (is_ancestor / empty-commits) flush
+/// through the same helper so the marker is uniform.
+fn ensure_rebase_undo_safe(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
+    let mut blocking: Vec<(u64, ChangeId, ContentHash)> = Vec::new();
+
+    for batch in batches {
+        if !is_rebase_batch(batch) {
+            continue;
+        }
+        // The earliest FF in the batch carries the pre-rebase tip
+        // (batch_index is monotonic; the replay loop appends in
+        // order). Materializing that tip needs every blob in its
+        // tree — that's the surface a purge can invalidate.
+        let Some(pre_target) = earliest_rebase_pre_target_id(batch) else {
+            continue;
+        };
+        let Some(tree) = load_tree_for_state(repo, &pre_target)? else {
+            // Pre-tip state already missing — `ensure_undo_states_reachable`
+            // surfaces that with the destructive-boundary message;
+            // don't double-report here.
+            continue;
+        };
+        let mut blobs: HashSet<ContentHash> = HashSet::new();
+        collect_tree_blobs(repo, &tree, &mut blobs)?;
+        for blob in &blobs {
+            let redactions = repo.get_redactions_for_blob(blob)?;
+            if redactions.redactions.iter().any(|r| r.is_purged()) {
+                blocking.push((batch.id, pre_target, *blob));
+                break; // one purged blob per batch is sufficient to refuse
+            }
+        }
+    }
+
+    if blocking.is_empty() {
+        return Ok(());
+    }
+
+    let shorts: Vec<String> = blocking
+        .iter()
+        .map(|(batch_id, pre_target, blob)| {
+            format!(
+                "rebase batch {} (pre-rebase tip {}, purged blob {})",
+                batch_id,
+                pre_target.short(),
+                blob.short()
+            )
+        })
+        .collect();
+    Err(anyhow!(
+        "Refusing to undo: at least one rebase in this chain rewinds to a tip whose tree \
+         references blobs that have since been purged ({}). The rewind would land the worktree \
+         on a state whose next `materialize` would fail with a missing-blob error rather than \
+         restore content. Purge is irreversible — restore the bytes from a backup or run \
+         `heddle undo --list` and target an op past the rebase.",
+        shorts.join(", "),
+    ))
+}
+
+/// A rebase batch is identified by its `TransactionCommit` marker
+/// (id prefix `"rebase-"`) — see `rebase_ops::flush_rebase_batch`.
+/// Pre-198 oplog entries did not flush a marker; they age out as the
+/// undo window slides forward. The check tolerates batches without
+/// the marker (treats them as non-rebase, no rebase-specific
+/// refusal applies).
+fn is_rebase_batch(batch: &OpBatch) -> bool {
+    batch.entries.iter().any(|entry| {
+        matches!(
+            &entry.operation,
+            OpRecord::TransactionCommit { transaction_id, .. }
+                if transaction_id.starts_with("rebase-")
+        )
+    })
+}
+
+fn earliest_rebase_pre_target_id(batch: &OpBatch) -> Option<ChangeId> {
+    // Entries are sorted by `batch_index` (see
+    // `PackedOpLog::collect_batches_scoped`), so the first advance arm
+    // we encounter carries the pre-rebase tip. Detached-mode rebases
+    // (heddle#198 r2 / Codex PR #218 P2) flush `OpRecord::Goto` rather
+    // than `FastForward*` — `ff_advance_deferred` falls back to it when
+    // there's no thread ref to FF — and their `prev_head` is the same
+    // pre-rebase tip a `pre_target_id` would name. Skip `Goto` entries
+    // without a `prev_head` (legacy or operator-issued goto with no
+    // recoverable previous state) and keep scanning.
+    batch.entries.iter().find_map(|entry| match &entry.operation {
+        OpRecord::FastForwardV2 { pre_target_id, .. } => Some(*pre_target_id),
+        OpRecord::FastForward { pre_target_id, .. } => Some(*pre_target_id),
+        OpRecord::Goto {
+            prev_head: Some(prev),
+            ..
+        } => Some(*prev),
+        _ => None,
+    })
+}
+
+fn load_tree_for_state(repo: &Repository, state: &ChangeId) -> Result<Option<Tree>> {
+    let Some(state_obj) = repo.store().get_state(state)? else {
+        return Ok(None);
+    };
+    Ok(repo.store().get_tree(&state_obj.tree)?)
+}
+
+fn collect_tree_blobs(
+    repo: &Repository,
+    tree: &Tree,
+    out: &mut HashSet<ContentHash>,
+) -> Result<()> {
+    for entry in tree.iter() {
+        if entry.is_blob() {
+            out.insert(entry.hash);
+            continue;
+        }
+        if entry.is_tree()
+            && let Some(subtree) = repo.store().get_tree(&entry.hash)?
+        {
+            collect_tree_blobs(repo, &subtree, out)?;
+        }
+    }
+    Ok(())
+}
+
 /// Cross-thread undo safety: refuse to undo any `ThreadCreate` whose
 /// ThreadManager record carries a materialized worktree path that still
 /// exists on disk. The undo inverse only deletes the thread ref — without
@@ -621,4 +767,162 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
          `heddle thread drop <name> --delete-thread`, then re-run `heddle undo`.",
         shorts.join(", "),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use objects::object::Principal;
+    use oplog::OpEntry;
+
+    use super::*;
+
+    fn op_entry(id: u64, operation: OpRecord, batch_index: u32) -> OpEntry {
+        OpEntry {
+            id,
+            timestamp: Utc::now(),
+            operation,
+            undone: false,
+            batch_id: 1,
+            batch_index,
+            scope: None,
+            actor: Principal::new("Test", "test@example.com"),
+            operation_id: None,
+        }
+    }
+
+    fn rebase_txn_commit_entry(index: u32) -> OpEntry {
+        op_entry(
+            100 + u64::from(index),
+            OpRecord::TransactionCommit {
+                transaction_id: "rebase-1234567890".to_string(),
+                op_count: 1,
+            },
+            index,
+        )
+    }
+
+    /// heddle#198 r2 (Codex PR #218 P2): detached-mode rebase batches
+    /// carry `OpRecord::Goto` (no thread ref to FF), and the purge
+    /// safety scan must lift the pre-rebase tip from `prev_head` for
+    /// these entries. Pre-fix, the helper matched only `FastForward*`
+    /// arms and returned `None` for detached batches; the gate then
+    /// silently skipped them.
+    #[test]
+    fn earliest_rebase_pre_target_id_extracts_prev_head_from_goto() {
+        let pre = ChangeId::generate();
+        let post = ChangeId::generate();
+        let batch = OpBatch {
+            id: 1,
+            entries: vec![
+                op_entry(
+                    1,
+                    OpRecord::Goto {
+                        target: post,
+                        prev_head: Some(pre),
+                    },
+                    0,
+                ),
+                rebase_txn_commit_entry(1),
+            ],
+        };
+        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre));
+    }
+
+    /// The same helper must keep the existing `FastForwardV2` arm — a
+    /// regression here would silently break the attached-mode purge
+    /// scan that's already covered by the integration tests.
+    #[test]
+    fn earliest_rebase_pre_target_id_extracts_pre_target_from_fast_forward_v2() {
+        let pre = ChangeId::generate();
+        let post = ChangeId::generate();
+        let batch = OpBatch {
+            id: 2,
+            entries: vec![
+                op_entry(
+                    1,
+                    OpRecord::FastForwardV2 {
+                        source_thread: "<rebase>".to_string(),
+                        target_thread: "main".to_string(),
+                        pre_target_id: pre,
+                        post_target_id: post,
+                    },
+                    0,
+                ),
+                rebase_txn_commit_entry(1),
+            ],
+        };
+        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre));
+    }
+
+    /// When the first replayed-commit advance is a Goto and the second
+    /// is an FF, the earliest pre-target must come from the Goto. The
+    /// `batch_index` ordering (set by `PackedOpLog::collect_batches_scoped`)
+    /// is preserved by `entries`, so `find_map` walks oldest-first.
+    #[test]
+    fn earliest_rebase_pre_target_id_prefers_first_entry_when_mixed() {
+        let pre_goto = ChangeId::generate();
+        let mid = ChangeId::generate();
+        let post = ChangeId::generate();
+        let batch = OpBatch {
+            id: 3,
+            entries: vec![
+                op_entry(
+                    1,
+                    OpRecord::Goto {
+                        target: mid,
+                        prev_head: Some(pre_goto),
+                    },
+                    0,
+                ),
+                op_entry(
+                    2,
+                    OpRecord::FastForwardV2 {
+                        source_thread: "<rebase>".to_string(),
+                        target_thread: "main".to_string(),
+                        pre_target_id: mid,
+                        post_target_id: post,
+                    },
+                    1,
+                ),
+                rebase_txn_commit_entry(2),
+            ],
+        };
+        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre_goto));
+    }
+
+    /// A `Goto` without `prev_head` (legacy or operator-issued goto)
+    /// has nothing to rewind to and must skip past it rather than
+    /// surface a placeholder. The helper continues scanning for a
+    /// subsequent FF/Goto that does carry a pre-target.
+    #[test]
+    fn earliest_rebase_pre_target_id_skips_goto_without_prev_head() {
+        let pre = ChangeId::generate();
+        let post = ChangeId::generate();
+        let batch = OpBatch {
+            id: 4,
+            entries: vec![
+                op_entry(
+                    1,
+                    OpRecord::Goto {
+                        target: post,
+                        prev_head: None,
+                    },
+                    0,
+                ),
+                op_entry(
+                    2,
+                    OpRecord::FastForwardV2 {
+                        source_thread: "<rebase>".to_string(),
+                        target_thread: "main".to_string(),
+                        pre_target_id: pre,
+                        post_target_id: post,
+                    },
+                    1,
+                ),
+                rebase_txn_commit_entry(2),
+            ],
+        };
+        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre));
+    }
 }
