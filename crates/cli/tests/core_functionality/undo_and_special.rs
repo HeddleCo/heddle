@@ -2316,3 +2316,202 @@ fn test_redo_pull_pins_recorded_tip_when_source_advances() {
          not the source's advanced tip"
     );
 }
+
+// ---------------------------------------------------------------------------
+// heddle#198 — `heddle undo` for `heddle rebase` via transaction grouping.
+//
+// Pre-fix, `rebase_ops::replay_commits` recorded one `FastForwardV2` op
+// per replayed commit, each in its own undo batch. A 3-commit rebase
+// therefore needed 3 `heddle undo` invocations to roll back, and an
+// undo chain that stopped one or two steps in left the thread tip
+// stranded at an intermediate replayed commit. Post-fix, the whole
+// rebase is wrapped in a single oplog batch so one undo rewinds the
+// whole rebase atomically — matching the "safety net" framing of
+// `heddle undo`.
+// ---------------------------------------------------------------------------
+
+/// Red commit: rebase replays multiple commits, then a single `heddle
+/// undo` must rewind the entire rebase to the pre-rebase thread tip
+/// and the rebased thread ref must follow. Pre-fix this needed N undo
+/// steps for N replayed commits; one step rewound only the last
+/// replay, leaving the thread tip on a synthetic intermediate state.
+#[test]
+fn test_undo_rebase_replay_multi_commit_rewinds_whole_transaction() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    // feature diverges on a different file so the rebase replays
+    // cleanly (no conflict resolution needed).
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature commit"], temp.path());
+
+    // main accumulates THREE commits on disjoint paths so the rebase
+    // produces three apply_commit calls, each of which today records
+    // its own FastForwardV2 entry.
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    std::fs::write(temp.path().join("b.txt"), "b1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
+    std::fs::write(temp.path().join("c.txt"), "c1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "c"], temp.path());
+    let main_tip_before = head_short(temp.path());
+
+    heddle_must_succeed(&["rebase", "feature"], temp.path());
+    let after_rebase = head_short(temp.path());
+    assert_ne!(
+        after_rebase, main_tip_before,
+        "rebase replay must produce a fresh tip distinct from the pre-rebase main"
+    );
+
+    // The contract: ONE undo rewinds the whole rebase (not N undos
+    // for N replayed commits).
+    heddle_must_succeed(&["undo"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        main_tip_before,
+        "single undo of a multi-commit rebase must restore HEAD to the pre-rebase tip"
+    );
+    let repo = Repository::open(temp.path()).unwrap();
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, main_tip_before,
+        "single undo of a multi-commit rebase must restore main thread ref to the pre-rebase tip"
+    );
+    match repo.head_ref().unwrap() {
+        refs::Head::Attached { thread } => assert_eq!(thread, "main"),
+        refs::Head::Detached { state } => panic!(
+            "HEAD must stay attached to main; got detached at {}",
+            state.short()
+        ),
+    }
+
+    // Materializing the pre-rebase tip must still find the original
+    // commits' trees in the store — the append-only object store
+    // means the rebase's tree mutations don't displace the originals.
+    for path in ["a.txt", "b.txt", "c.txt"].iter() {
+        assert!(
+            temp.path().join(path).exists(),
+            "{path} from the original pre-rebase tree must still materialize after undo"
+        );
+    }
+}
+
+/// Redo symmetry for multi-commit rebase: undo then redo must restore
+/// the post-rebase tip in a single redo step (matching the single-step
+/// undo). Persists across CLI invocations, same as the existing FF
+/// redo surface in `test_redo_rebase_pins_recorded_tip_when_source_advances`.
+#[test]
+fn test_redo_rebase_replay_multi_commit_restores_post_rebase_tip() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature work").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature commit"], temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    std::fs::write(temp.path().join("b.txt"), "b1").unwrap();
+    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
+
+    heddle_must_succeed(&["rebase", "feature"], temp.path());
+    let after_rebase = head_short(temp.path());
+
+    heddle_must_succeed(&["undo"], temp.path());
+    heddle_must_succeed(&["redo"], temp.path());
+    assert_eq!(
+        head_short(temp.path()),
+        after_rebase,
+        "single redo of a multi-commit rebase must restore HEAD to the post-rebase tip"
+    );
+    let repo = Repository::open(temp.path()).unwrap();
+    let main_tip = repo
+        .refs()
+        .get_thread("main")
+        .unwrap()
+        .expect("main thread still exists")
+        .short();
+    assert_eq!(
+        main_tip, after_rebase,
+        "single redo of a multi-commit rebase must restore main thread ref to the post-rebase tip"
+    );
+}
+
+/// A rebase batch must show up in `heddle undo --list` as a SINGLE
+/// batch with N entries (one per replayed commit), not N separate
+/// batches with one entry each. The JSON contract is the structured
+/// surface that downstream tools (and our own integration tests)
+/// depend on.
+#[test]
+fn test_undo_list_shows_multi_commit_rebase_as_single_batch() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feat.txt"), "feature").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature"], temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    std::fs::write(temp.path().join("b.txt"), "b").unwrap();
+    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
+
+    heddle_must_succeed(&["rebase", "feature"], temp.path());
+
+    let list = heddle_must_succeed(
+        &["--output", "json", "undo", "--list", "--depth", "10"],
+        temp.path(),
+    );
+    let parsed: Value = serde_json::from_str(&list).expect("list output is JSON");
+    let batches = parsed
+        .get("batches")
+        .and_then(|b| b.as_array())
+        .expect("list output has batches array");
+
+    // The most recent batch (index 0 — undo --list is most-recent-first)
+    // must be the rebase, and it must carry both replayed-commit ops
+    // in one batch.
+    let rebase_batch = &batches[0];
+    let ops = rebase_batch
+        .get("operations")
+        .and_then(|o| o.as_array())
+        .expect("batch has operations array");
+    assert!(
+        ops.len() >= 2,
+        "multi-commit rebase batch must contain >=2 ops; saw {}: {list}",
+        ops.len()
+    );
+    // Every op in the batch must be a fast-forward — no foreign ops
+    // should have been folded into the rebase batch.
+    for op in ops {
+        let desc = op
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("");
+        assert!(
+            desc.starts_with("fast-forward") || desc.starts_with("transaction commit"),
+            "rebase batch entry must be FF or txn-commit marker, got: {desc}"
+        );
+    }
+}
