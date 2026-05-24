@@ -214,7 +214,17 @@ fn load_rebase_state_internal(
     // crash-recovery dedup is dead code. The strict loader still
     // demands the line because `--continue` does flush, and a blank
     // id would key the dedup against every prior empty-id batch.
+    // heddle#198 r4 (Codex PR #218 P2): a torn write can leave the
+    // `transaction_id=` line emitted with an empty (or whitespace-only)
+    // value; `flush_rebase_batch`'s dedup keys verbatim, so a blank id
+    // collides with every prior empty-id batch and silently suppresses
+    // the new one. Strict loader rejects blank values (the missing-key
+    // arm still rejects absence). Abort tolerates either shape — it
+    // never reaches the dedup helper.
     let transaction_id = match (transaction_id, for_abort) {
+        (Some(id), false) if id.trim().is_empty() => {
+            return Err(anyhow!("Blank 'transaction_id' in rebase state"));
+        }
         (Some(id), _) => id,
         (None, true) => String::new(),
         (None, false) => return Err(anyhow!("Missing 'transaction_id' in rebase state")),
@@ -587,7 +597,7 @@ mod tests {
 
         let err = load_rebase_state(&path).unwrap_err().to_string();
         assert!(
-            err.contains("transaction_id") && (err.contains("blank") || err.contains("empty")),
+            err.contains("Blank 'transaction_id'"),
             "expected blank-transaction_id error, got: {err}"
         );
     }
@@ -611,9 +621,30 @@ mod tests {
 
         let err = load_rebase_state(&path).unwrap_err().to_string();
         assert!(
-            err.contains("transaction_id") && (err.contains("blank") || err.contains("empty")),
+            err.contains("Blank 'transaction_id'"),
             "expected blank-transaction_id error, got: {err}"
         );
+    }
+
+    /// Companion to the blank-transaction_id strict-rejection pin above
+    /// (heddle#198 r4 / Codex PR #218 P2): abort never reaches the
+    /// dedup helper, so a blank value is harmless on that path and
+    /// refusing it would strand the operator the same way the missing-
+    /// line case did before r3. Pin that abort still loads.
+    #[test]
+    fn load_for_abort_tolerates_blank_transaction_id() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("REBASE_STATE");
+        let body = format!(
+            "onto={onto}\noriginal_head={oh}\ntransaction_id=\ncurrent_index=0\ncommits=\n",
+            onto = ChangeId::generate().to_string_full(),
+            oh = ChangeId::generate().to_string_full(),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let loaded = load_rebase_state_for_abort(&path)
+            .expect("abort loader must tolerate a blank transaction_id");
+        assert!(loaded.transaction_id.is_empty());
     }
 
     /// Companion to the strict-rejection pin above (heddle#198 r4 /
