@@ -810,6 +810,67 @@ mod tests {
         );
     }
 
+    /// heddle#198 r4 (Codex PR #218 P2): `flush_rebase_batch` pre-r4
+    /// called `recent_batches_scoped` (read) and `record_batch_scoped`
+    /// (write) in two separate oplog calls with no shared lock. Two
+    /// concurrent `rebase --continue` invocations with the same
+    /// persisted `transaction_id` (the crash-recovery retry path —
+    /// state file survives the `fs::remove_file` failure window and a
+    /// second operator triggers continue while the first's retry is
+    /// still in flight) both observe "not committed" and both append,
+    /// reintroducing the duplicate-batch scenario from r2.
+    ///
+    /// This test maximises the race window with a `Barrier` so every
+    /// thread enters the dedup check at the same instant; pre-r4 the
+    /// assertion fails with N>1 added batches, post-r4 the check and
+    /// append happen atomically under the oplog's existing write lock
+    /// so exactly one batch lands regardless of contention.
+    #[test]
+    fn flush_rebase_batch_is_atomic_across_concurrent_continues() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        const N_THREADS: usize = 8;
+
+        let temp = TempDir::new().unwrap();
+        let repo = Arc::new(Repository::init_default(temp.path()).unwrap());
+        let txn_id = "rebase-concurrent-continue-fixture";
+
+        let before = repo
+            .oplog()
+            .recent_batches_scoped(64, Some(&repo.op_scope()))
+            .unwrap()
+            .len();
+
+        let barrier = Arc::new(Barrier::new(N_THREADS));
+        let handles: Vec<_> = (0..N_THREADS)
+            .map(|_| {
+                let repo = Arc::clone(&repo);
+                let barrier = Arc::clone(&barrier);
+                let txn_id = txn_id.to_string();
+                thread::spawn(move || {
+                    let advance = synthetic_goto_advance();
+                    barrier.wait();
+                    flush_rebase_batch(&repo, std::slice::from_ref(&advance), &txn_id).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let after = repo
+            .oplog()
+            .recent_batches_scoped(64, Some(&repo.op_scope()))
+            .unwrap()
+            .len();
+        let added = after - before;
+        assert_eq!(
+            added, 1,
+            "concurrent flush_rebase_batch calls with the same transaction_id must produce exactly one batch — got {added}",
+        );
+    }
+
     /// Distinct transaction ids — separate rebases or a fresh mint —
     /// must each produce their own batch. Pins that the dedup check
     /// keys strictly on the supplied id and doesn't accidentally
