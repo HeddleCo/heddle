@@ -392,7 +392,7 @@ struct PendingEntry {
 /// pair with one map and forcing every callback that branches on
 /// lifecycle to `match`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NodeState {
+pub(crate) enum NodeState {
     /// Live: the inode owns a binding in `inodes.by_path`. The
     /// refcount tracks how many FUSE `open` / `create` callbacks
     /// have minted handles to it; `release` drives it back down.
@@ -420,7 +420,8 @@ enum NodeState {
 /// (Bug Class A in the spike doc §4) that produced every Codex
 /// finding r6 → r9 on PR #182.
 #[derive(Default)]
-struct Pending {
+#[doc(hidden)]
+pub struct Pending<'brand> {
     /// Hot tier: per-`NodeId` open-file buffers.
     hot: BTreeMap<u64, HotBuffer>,
     /// Reverse-index for the hot tier: which NodeId currently owns a
@@ -464,9 +465,18 @@ struct Pending {
     /// state (Released) — entries are removed on final `release`,
     /// `invalidate`, and `capture`.
     state: BTreeMap<u64, NodeState>,
+    /// Invariant phantom: ties this `Pending` to a unique `'brand`
+    /// introduced by [`Pending::with_brand`]. Witnesses minted under
+    /// one `'brand` cannot be passed to methods on a `Pending`
+    /// carrying a different `'brand` — closes Codex PR #217 r2
+    /// finding `3293832936`. The `fn(&'brand ()) -> &'brand ()`
+    /// shape makes `'brand` invariant (neither covariant nor
+    /// contravariant), so the borrow checker refuses to unify two
+    /// fresh brands handed out by separate `with_brand` calls.
+    _brand: std::marker::PhantomData<fn(&'brand ()) -> &'brand ()>,
 }
 
-impl Pending {
+impl<'brand> Pending<'brand> {
     /// True iff the NodeId is currently Orphan (directory entry gone
     /// but `open_count >= 0` fds still reference the inode). Every
     /// callback that branches on lifecycle goes through this helper
@@ -485,6 +495,26 @@ impl Pending {
             Some(NodeState::Live { open_count } | NodeState::Orphan { open_count }) => *open_count,
             None => 0,
         }
+    }
+
+    /// Read-only access to the per-NodeId lifecycle entry. Sole
+    /// reachable point for the [`crate::pending`] witness constructors
+    /// to query the FSM without taking a `pub(crate)` dependency on
+    /// the underlying `state` field. Returning `Option<NodeState>` by
+    /// value keeps the field private to this module — callers cannot
+    /// mutate state through this handle.
+    pub(crate) fn lookup_state(&self, id: u64) -> Option<NodeState> {
+        self.state.get(&id).copied()
+    }
+
+    /// Test-only: insert a per-NodeId lifecycle entry directly,
+    /// bypassing the FSM entry points. Used by the
+    /// [`crate::pending`] substrate tests to set up `Pending` states
+    /// without dragging in the full mount lifecycle. Gated behind
+    /// `cfg(test)` so it never reaches a release binary.
+    #[cfg(test)]
+    pub(crate) fn test_insert_state(&mut self, id: u64, state: NodeState) {
+        self.state.insert(id, state);
     }
 }
 
@@ -546,7 +576,19 @@ pub(crate) struct MountInner {
     thread: String,
     state: RwLock<MountState>,
     inodes: Mutex<Inodes>,
-    pending: Mutex<Pending>,
+    // Storage carries `Pending<'static>` as the long-lived shape;
+    // every actual witness-minting access goes through
+    // [`Pending::with_brand`], which re-borrows under a fresh
+    // invariant `'brand` introduced by HRTB and hands the closure a
+    // [`crate::pending::BrandedPending<'_, 'brand>`]. The `'static`
+    // slot can never be exposed as a witness brand because
+    // `Pending<'brand>` carries no witness constructors at all — the
+    // `witness_*` methods live on [`crate::pending::BrandedPending`],
+    // whose private field makes it unconstructible outside
+    // `with_brand`'s body. This closes the structural gap Codex
+    // flagged in r2 (`3293832936`) and the r3 follow-on
+    // (`3293898540`).
+    pending: Mutex<Pending<'static>>,
     promotion: RwLock<PromotionPolicy>,
     mounted_at: SystemTime,
     /// Write-side serialization. Acquired by structural-mutation
