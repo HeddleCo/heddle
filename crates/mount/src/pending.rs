@@ -22,7 +22,7 @@
 //! * [`Released`] — entry retired; absence from
 //!   [`crate::core::Pending`]'s `state` map. Never stored in the map —
 //!   the marker exists so a witness can prove "no entry at this id"
-//!   for the `Pending::witness_*` constructors that need it.
+//!   for the `BrandedPending::witness_*` constructors that need it.
 //!
 //! # What this module is **not**
 //!
@@ -118,22 +118,28 @@ impl Lifecycle for Released {}
 ///
 /// # Invariants
 ///
-/// * Constructed only by [`Pending::witness_live_nonzero`] /
-///   [`Pending::witness_live_zero`] / [`Pending::witness_orphan`] /
-///   [`Pending::witness_released`], each of which performs the
-///   matching FSM check and returns `Some` iff it holds.
-/// * The lifetime parameter `'p` is the lifetime of the `&mut Pending`
-///   borrow that produced the witness. The borrow checker therefore
-///   forbids any other code from mutating `Pending` while the witness
-///   exists — closing the "stale witness across a mutation" hole
-///   spelled out in
+/// * Constructed only by [`BrandedPending::witness_live_nonzero`] /
+///   [`BrandedPending::witness_live_zero`] /
+///   [`BrandedPending::witness_orphan`] /
+///   [`BrandedPending::witness_released`], each of which performs the
+///   matching FSM check and returns `Some` iff it holds. Those
+///   constructors live on [`BrandedPending`] (not [`Pending`]), and
+///   [`BrandedPending`] is only constructible inside
+///   [`Pending::with_brand`] — so every witness in the system
+///   originates from a `with_brand` invocation by construction
+///   (Codex PR #217 r2 finding `3293898540`).
+/// * The lifetime parameter `'p` is the lifetime of the
+///   `&mut BrandedPending` borrow that produced the witness. The
+///   borrow checker therefore forbids any other code from mutating
+///   the underlying `Pending` while the witness exists — closing the
+///   "stale witness across a mutation" hole spelled out in
 ///   [`docs/design/mount-pending-api-contracts.md`][doc] §2.2.1.
 /// * The lifetime parameter `'brand` ties the witness to the specific
-///   `Pending` instance that minted it. Two `Pending<'brand>` values
-///   handed out by separate [`Pending::with_brand`] calls carry
-///   distinct, invariant brands; a witness from one cannot be passed
-///   to methods on the other (closes Codex PR #217 r2 finding
-///   `3293832936`).
+///   [`BrandedPending`] instance that minted it. Two
+///   `BrandedPending<'_, 'brand>` values handed out by separate
+///   [`Pending::with_brand`] calls carry distinct, invariant brands;
+///   a witness from one cannot be passed to methods on the other
+///   (closes Codex PR #217 r2 finding `3293832936`).
 /// * `S` is invariant via the [`PhantomData<&'p mut ()>`] field — the
 ///   compiler will not silently widen or narrow the state parameter.
 /// * `!Send` and `!Sync` via the raw-pointer marker — the witness is
@@ -145,18 +151,21 @@ impl Lifecycle for Released {}
 pub struct Witness<'p, 'brand, S: Lifecycle> {
     id: u64,
     _state: PhantomData<S>,
-    // Invariance over `'p` + ties the witness to a `&mut Pending`
-    // borrow. The `&'p mut ()` is for the lifetime relationship; the
-    // borrow extension on `&'p mut Pending -> Witness<'p, _, _>` is
-    // what makes the borrow checker refuse a concurrent mutable
-    // borrow of `Pending` while the witness is alive.
+    // Invariance over `'p` + ties the witness to a
+    // `&mut BrandedPending` borrow. The `&'p mut ()` is for the
+    // lifetime relationship; the borrow extension on
+    // `&'p mut BrandedPending -> Witness<'p, _, _>` is what makes
+    // the borrow checker refuse a concurrent mutable borrow of the
+    // wrapper (and hence of the underlying `Pending`) while the
+    // witness is alive.
     _borrow: PhantomData<&'p mut ()>,
     // Invariant brand binding the witness to its originating
-    // `Pending<'brand>` instance. `fn(&'brand ()) -> &'brand ()` is
-    // the canonical invariant carrier — neither covariant nor
-    // contravariant. Witnesses minted under one `with_brand` HRTB
-    // closure cannot be passed to a `Pending` with a different
-    // brand, even when both carry the same lifecycle state `S`.
+    // `BrandedPending<'_, 'brand>` instance.
+    // `fn(&'brand ()) -> &'brand ()` is the canonical invariant
+    // carrier — neither covariant nor contravariant. Witnesses
+    // minted under one `with_brand` HRTB closure cannot be passed
+    // to a `BrandedPending` with a different brand, even when both
+    // carry the same lifecycle state `S`.
     _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
     // `!Send` + `!Sync` marker. The witness is short-lived and tied
     // to one thread of execution by design; cross-thread transfer is
@@ -166,8 +175,8 @@ pub struct Witness<'p, 'brand, S: Lifecycle> {
 
 impl<'p, 'brand, S: Lifecycle> Witness<'p, 'brand, S> {
     /// Mint a witness. Visible only inside this module — every
-    /// witness must come from a `Pending::witness_*` constructor that
-    /// performed the FSM check.
+    /// witness must come from a `BrandedPending::witness_*`
+    /// constructor that performed the FSM check.
     fn new(id: u64) -> Self {
         Self {
             id,
@@ -188,30 +197,41 @@ impl<'p, 'brand, S: Lifecycle> Witness<'p, 'brand, S> {
 
 impl<'a> Pending<'a> {
     /// Re-borrow `self` under a freshly-minted, invariant `'brand`
-    /// lifetime that's unique to this call.
+    /// lifetime that's unique to this call, and hand the resulting
+    /// [`BrandedPending`] to `f`.
+    ///
+    /// `with_brand` is the **only** way to obtain a [`BrandedPending`]
+    /// — and [`BrandedPending`] is the **only** type that exposes the
+    /// `witness_*` constructors. Internal callers that hold a
+    /// `&mut Pending<'static>` (e.g. through `MountInner::pending`)
+    /// therefore cannot mint a witness without first going through
+    /// `with_brand`, which forces the brand to be a fresh HRTB-bound
+    /// existential rather than the storage's `'static` slot. This
+    /// closes Codex PR #217 r2 follow-up `3293898540`.
     ///
     /// The HRTB on `f` (`for<'brand>`) forces the compiler to treat
     /// the brand as opaque inside the closure. Each call to
     /// `with_brand` issues a brand that can't unify with any other
     /// call's brand, even if both originate from the same physical
-    /// `Pending`. Witnesses minted on the inner `&mut Pending<'brand>`
-    /// carry that closure's `'brand` and cannot be passed to a
-    /// `Pending` borrowed under a different `with_brand` invocation
-    /// — closing Codex PR #217 r2 finding `3293832936`.
+    /// `Pending`. Witnesses minted on the inner
+    /// [`BrandedPending<'_, 'brand>`] carry that closure's `'brand`
+    /// and cannot be passed to a [`BrandedPending`] borrowed under a
+    /// different `with_brand` invocation — closing Codex PR #217 r2
+    /// finding `3293832936`.
     ///
     /// # Soundness
     ///
     /// The transmute changes only the phantom brand lifetime, which
     /// has no representation in the type's layout (`PhantomData<fn(..)>`
     /// is zero-sized). All other lifetime + ownership invariants
-    /// transfer verbatim through `mem::transmute_mut`. The HRTB
-    /// bound on `f` prevents the inner brand from escaping the
-    /// closure: any value returned by `f` cannot mention `'brand`
-    /// because there's no fixed `'brand` to mention from outside.
+    /// transfer verbatim. The HRTB bound on `f` prevents the inner
+    /// brand from escaping the closure: any value returned by `f`
+    /// cannot mention `'brand` because there's no fixed `'brand` to
+    /// mention from outside.
     #[doc(hidden)]
     pub fn with_brand<R>(
         &mut self,
-        f: impl for<'brand> FnOnce(&mut Pending<'brand>) -> R,
+        f: impl for<'brand> FnOnce(&mut BrandedPending<'_, 'brand>) -> R,
     ) -> R {
         // SAFETY: `Pending<'a>` and `Pending<'brand>` have identical
         // layout — `_brand` is `PhantomData<fn(&_ ()) -> &_ ()>`,
@@ -219,23 +239,50 @@ impl<'a> Pending<'a> {
         // only the phantom-only lifetime parameter changes. The
         // HRTB on `f` ensures the freshly-introduced `'brand`
         // cannot leak via the return type.
-        let branded: &mut Pending<'_> =
+        let rebranded: &mut Pending<'_> =
             unsafe { std::mem::transmute::<&mut Pending<'a>, &mut Pending<'_>>(self) };
-        f(branded)
+        let mut bp = BrandedPending { inner: rebranded };
+        f(&mut bp)
     }
+}
 
+/// Sealed wrapper that grants access to the witness constructors.
+///
+/// `BrandedPending` is the only type with `witness_*` (and
+/// [`BrandedPending::peek_witness`]) methods. Its single field is
+/// private to this module, so the wrapper can only be constructed
+/// from inside [`Pending::with_brand`]; the HRTB on `with_brand`'s
+/// closure then forces `'brand` to be a fresh existential per call.
+///
+/// Together those two properties enforce: every witness in the
+/// system originates from a `with_brand` invocation, and every
+/// witness's `'brand` is unique to that invocation. The
+/// `MountInner`-stores-`Pending<'static>` escape that Codex flagged
+/// in `3293898540` is closed by construction — internal code with
+/// `&mut Pending<'static>` literally cannot name a `witness_*`
+/// method on it.
+#[doc(hidden)]
+pub struct BrandedPending<'p, 'brand> {
+    // Private — outside this module, no one can build a
+    // `BrandedPending`. Inside this module, only `Pending::with_brand`
+    // does. That single chokepoint is what enforces brand gating.
+    inner: &'p mut Pending<'brand>,
+}
+
+impl<'p, 'brand> BrandedPending<'p, 'brand> {
     /// Substrate hook for the brand-isolation doctest: takes a
-    /// borrowed witness branded to `self`'s `'a` and returns its
-    /// NodeId without doing anything else.
+    /// borrowed witness branded to this [`BrandedPending`]'s `'brand`
+    /// and returns its NodeId without doing anything else.
     ///
     /// Retrofit issues (heddle#209/#210/#211/#212) will introduce
     /// the real witness-gated transitions, which need to mutate
     /// `self` and consume the witness; those signatures live there,
     /// not here. For the substrate PR we only need a non-consuming
-    /// brand-matching method so the [`crate::__pending_substrate_for_doctest`]
-    /// `compile_fail` proof can demonstrate that a witness minted
-    /// under a different `with_brand` closure fails to type-check
-    /// (the brand lifetimes are invariant and don't unify).
+    /// brand-matching method so the
+    /// [`crate::__pending_substrate_for_doctest`] `compile_fail`
+    /// proof can demonstrate that a witness minted under a different
+    /// `with_brand` closure fails to type-check (the brand lifetimes
+    /// are invariant and don't unify).
     ///
     /// `&self` (not `&mut self`) plus `&Witness` (not `Witness`)
     /// keeps the proof orthogonal to the separate borrow-checker
@@ -246,7 +293,7 @@ impl<'a> Pending<'a> {
     /// makes it not compile today; see the spike doc §2.2.1) and
     /// isn't this PR's scope.
     #[doc(hidden)]
-    pub fn peek_witness<S: Lifecycle>(&self, w: &Witness<'_, 'a, S>) -> u64 {
+    pub fn peek_witness<S: Lifecycle>(&self, w: &Witness<'_, 'brand, S>) -> u64 {
         let _ = self;
         w.id()
     }
@@ -263,8 +310,11 @@ impl<'a> Pending<'a> {
 ///
 /// # Invariants
 ///
-/// * Constructed only by [`Pending::witness_kernel_forget`], whose
-///   body IS the discharge-safety check.
+/// * Constructed only by [`BrandedPending::witness_kernel_forget`],
+///   whose body IS the discharge-safety check. Same brand-gating
+///   logic as [`Witness`]: the constructor lives on
+///   [`BrandedPending`], which is only constructible inside
+///   [`Pending::with_brand`].
 /// * Lifetime + `!Send` / `!Sync` semantics identical to [`Witness`].
 ///
 /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
@@ -274,9 +324,9 @@ pub struct KernelForgetWitness<'p, 'brand> {
     id: u64,
     _borrow: PhantomData<&'p mut ()>,
     // Same invariant brand carrier as [`Witness`]. Binds the witness
-    // to the originating `Pending<'brand>` instance so a forget
-    // witness from one mount cannot be discharged against another's
-    // hot-tier buffer (Codex PR #217 r2 finding `3293832936`).
+    // to the originating `BrandedPending<'_, 'brand>` instance so a
+    // forget witness from one mount cannot be discharged against
+    // another's hot-tier buffer (Codex PR #217 r2 finding `3293832936`).
     _brand: PhantomData<fn(&'brand ()) -> &'brand ()>,
     _not_send: PhantomData<*const ()>,
 }
@@ -299,7 +349,7 @@ impl<'p, 'brand> KernelForgetWitness<'p, 'brand> {
     }
 }
 
-impl<'brand> Pending<'brand> {
+impl<'p, 'brand> BrandedPending<'p, 'brand> {
     /// Witness that `id` is in `Live { open_count >= 1 }`. Returns
     /// `None` for any other state, including `Live { open_count == 0 }`,
     /// any `Orphan`, and `Released` (no entry). This is the
@@ -312,7 +362,7 @@ impl<'brand> Pending<'brand> {
     /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
     #[doc(hidden)]
     pub fn witness_live_nonzero(&mut self, id: u64) -> Option<Witness<'_, 'brand, LiveNonZero>> {
-        match self.lookup_state(id) {
+        match self.inner.lookup_state(id) {
             Some(NodeState::Live { open_count }) if open_count >= 1 => Some(Witness::new(id)),
             _ => None,
         }
@@ -323,7 +373,7 @@ impl<'brand> Pending<'brand> {
     /// and for `Released`.
     #[doc(hidden)]
     pub fn witness_live_zero(&mut self, id: u64) -> Option<Witness<'_, 'brand, LiveZero>> {
-        match self.lookup_state(id) {
+        match self.inner.lookup_state(id) {
             Some(NodeState::Live { open_count: 0 }) => Some(Witness::new(id)),
             _ => None,
         }
@@ -333,7 +383,7 @@ impl<'brand> Pending<'brand> {
     /// Returns `None` for `Live` (any refcount) and `Released`.
     #[doc(hidden)]
     pub fn witness_orphan(&mut self, id: u64) -> Option<Witness<'_, 'brand, Orphan>> {
-        match self.lookup_state(id) {
+        match self.inner.lookup_state(id) {
             Some(NodeState::Orphan { .. }) => Some(Witness::new(id)),
             _ => None,
         }
@@ -346,7 +396,7 @@ impl<'brand> Pending<'brand> {
     /// when there is no prior entry).
     #[doc(hidden)]
     pub fn witness_released(&mut self, id: u64) -> Option<Witness<'_, 'brand, Released>> {
-        match self.lookup_state(id) {
+        match self.inner.lookup_state(id) {
             None => Some(Witness::new(id)),
             _ => None,
         }
@@ -371,7 +421,7 @@ impl<'brand> Pending<'brand> {
     /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
     #[doc(hidden)]
     pub fn witness_kernel_forget(&mut self, id: u64) -> Option<KernelForgetWitness<'_, 'brand>> {
-        match self.lookup_state(id) {
+        match self.inner.lookup_state(id) {
             None => Some(KernelForgetWitness::new(id)),
             Some(NodeState::Live { open_count: 0 }) => Some(KernelForgetWitness::new(id)),
             _ => None,
@@ -383,42 +433,53 @@ impl<'brand> Pending<'brand> {
 mod tests {
     use super::*;
 
+    // The witnesses can't escape `with_brand`'s HRTB closure (they
+    // carry the fresh `'brand`), but the brand-free `Option<u64>`
+    // shape can. Every test below extracts `.id()` inside the
+    // closure and asserts against the unbranded `Option<u64>` outside;
+    // negative tests use `.is_some()` for the same reason. This
+    // mirrors the canonical ghost-cell / branded-vec test style.
+
     // ------- witness_live_nonzero --------------------------------------------
 
     #[test]
     fn witness_live_nonzero_some_for_live_with_open() {
         let mut p = Pending::default();
         p.test_insert_state(7, NodeState::Live { open_count: 1 });
-        let w = p.witness_live_nonzero(7).expect("LiveNonZero witness");
-        assert_eq!(w.id(), 7);
+        let id = p
+            .with_brand(|bp| bp.witness_live_nonzero(7).map(|w| w.id()))
+            .expect("LiveNonZero witness");
+        assert_eq!(id, 7);
     }
 
     #[test]
     fn witness_live_nonzero_some_for_high_refcount() {
         let mut p = Pending::default();
         p.test_insert_state(11, NodeState::Live { open_count: u32::MAX });
-        let w = p.witness_live_nonzero(11).expect("LiveNonZero witness");
-        assert_eq!(w.id(), 11);
+        let id = p
+            .with_brand(|bp| bp.witness_live_nonzero(11).map(|w| w.id()))
+            .expect("LiveNonZero witness");
+        assert_eq!(id, 11);
     }
 
     #[test]
     fn witness_live_nonzero_none_for_live_zero() {
         let mut p = Pending::default();
         p.test_insert_state(7, NodeState::Live { open_count: 0 });
-        assert!(p.witness_live_nonzero(7).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_live_nonzero(7).is_some()));
     }
 
     #[test]
     fn witness_live_nonzero_none_for_orphan() {
         let mut p = Pending::default();
         p.test_insert_state(7, NodeState::Orphan { open_count: 3 });
-        assert!(p.witness_live_nonzero(7).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_live_nonzero(7).is_some()));
     }
 
     #[test]
     fn witness_live_nonzero_none_for_released() {
         let mut p = Pending::default();
-        assert!(p.witness_live_nonzero(7).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_live_nonzero(7).is_some()));
     }
 
     // ------- witness_live_zero ------------------------------------------------
@@ -427,15 +488,17 @@ mod tests {
     fn witness_live_zero_some_for_live_zero() {
         let mut p = Pending::default();
         p.test_insert_state(9, NodeState::Live { open_count: 0 });
-        let w = p.witness_live_zero(9).expect("LiveZero witness");
-        assert_eq!(w.id(), 9);
+        let id = p
+            .with_brand(|bp| bp.witness_live_zero(9).map(|w| w.id()))
+            .expect("LiveZero witness");
+        assert_eq!(id, 9);
     }
 
     #[test]
     fn witness_live_zero_none_for_live_nonzero() {
         let mut p = Pending::default();
         p.test_insert_state(9, NodeState::Live { open_count: 2 });
-        assert!(p.witness_live_zero(9).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_live_zero(9).is_some()));
     }
 
     #[test]
@@ -445,13 +508,13 @@ mod tests {
         // witness must reject it.
         let mut p = Pending::default();
         p.test_insert_state(9, NodeState::Orphan { open_count: 0 });
-        assert!(p.witness_live_zero(9).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_live_zero(9).is_some()));
     }
 
     #[test]
     fn witness_live_zero_none_for_released() {
         let mut p = Pending::default();
-        assert!(p.witness_live_zero(9).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_live_zero(9).is_some()));
     }
 
     // ------- witness_orphan ---------------------------------------------------
@@ -460,8 +523,10 @@ mod tests {
     fn witness_orphan_some_for_orphan_nonzero() {
         let mut p = Pending::default();
         p.test_insert_state(13, NodeState::Orphan { open_count: 4 });
-        let w = p.witness_orphan(13).expect("Orphan witness");
-        assert_eq!(w.id(), 13);
+        let id = p
+            .with_brand(|bp| bp.witness_orphan(13).map(|w| w.id()))
+            .expect("Orphan witness");
+        assert_eq!(id, 13);
     }
 
     #[test]
@@ -472,28 +537,30 @@ mod tests {
         // release).
         let mut p = Pending::default();
         p.test_insert_state(13, NodeState::Orphan { open_count: 0 });
-        let w = p.witness_orphan(13).expect("Orphan witness");
-        assert_eq!(w.id(), 13);
+        let id = p
+            .with_brand(|bp| bp.witness_orphan(13).map(|w| w.id()))
+            .expect("Orphan witness");
+        assert_eq!(id, 13);
     }
 
     #[test]
     fn witness_orphan_none_for_live_nonzero() {
         let mut p = Pending::default();
         p.test_insert_state(13, NodeState::Live { open_count: 1 });
-        assert!(p.witness_orphan(13).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_orphan(13).is_some()));
     }
 
     #[test]
     fn witness_orphan_none_for_live_zero() {
         let mut p = Pending::default();
         p.test_insert_state(13, NodeState::Live { open_count: 0 });
-        assert!(p.witness_orphan(13).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_orphan(13).is_some()));
     }
 
     #[test]
     fn witness_orphan_none_for_released() {
         let mut p = Pending::default();
-        assert!(p.witness_orphan(13).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_orphan(13).is_some()));
     }
 
     // ------- witness_released -------------------------------------------------
@@ -501,29 +568,31 @@ mod tests {
     #[test]
     fn witness_released_some_for_absent_entry() {
         let mut p = Pending::default();
-        let w = p.witness_released(21).expect("Released witness");
-        assert_eq!(w.id(), 21);
+        let id = p
+            .with_brand(|bp| bp.witness_released(21).map(|w| w.id()))
+            .expect("Released witness");
+        assert_eq!(id, 21);
     }
 
     #[test]
     fn witness_released_none_for_live_nonzero() {
         let mut p = Pending::default();
         p.test_insert_state(21, NodeState::Live { open_count: 1 });
-        assert!(p.witness_released(21).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_released(21).is_some()));
     }
 
     #[test]
     fn witness_released_none_for_live_zero() {
         let mut p = Pending::default();
         p.test_insert_state(21, NodeState::Live { open_count: 0 });
-        assert!(p.witness_released(21).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_released(21).is_some()));
     }
 
     #[test]
     fn witness_released_none_for_orphan() {
         let mut p = Pending::default();
         p.test_insert_state(21, NodeState::Orphan { open_count: 2 });
-        assert!(p.witness_released(21).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_released(21).is_some()));
     }
 
     // ------- witness_kernel_forget --------------------------------------------
@@ -531,8 +600,10 @@ mod tests {
     #[test]
     fn witness_kernel_forget_some_for_released() {
         let mut p = Pending::default();
-        let w = p.witness_kernel_forget(31).expect("KernelForget witness");
-        assert_eq!(w.id(), 31);
+        let id = p
+            .with_brand(|bp| bp.witness_kernel_forget(31).map(|w| w.id()))
+            .expect("KernelForget witness");
+        assert_eq!(id, 31);
     }
 
     #[test]
@@ -541,8 +612,10 @@ mod tests {
         // kernel fds. The forget cannot race an open handle here.
         let mut p = Pending::default();
         p.test_insert_state(31, NodeState::Live { open_count: 0 });
-        let w = p.witness_kernel_forget(31).expect("KernelForget witness");
-        assert_eq!(w.id(), 31);
+        let id = p
+            .with_brand(|bp| bp.witness_kernel_forget(31).map(|w| w.id()))
+            .expect("KernelForget witness");
+        assert_eq!(id, 31);
     }
 
     #[test]
@@ -551,7 +624,7 @@ mod tests {
         // hot[id] here loses data. The constructor must reject.
         let mut p = Pending::default();
         p.test_insert_state(31, NodeState::Live { open_count: 1 });
-        assert!(p.witness_kernel_forget(31).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_kernel_forget(31).is_some()));
     }
 
     #[test]
@@ -562,14 +635,14 @@ mod tests {
         // handle the FSM has not yet observed.
         let mut p = Pending::default();
         p.test_insert_state(31, NodeState::Orphan { open_count: 0 });
-        assert!(p.witness_kernel_forget(31).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_kernel_forget(31).is_some()));
     }
 
     #[test]
     fn witness_kernel_forget_none_for_orphan_nonzero() {
         let mut p = Pending::default();
         p.test_insert_state(31, NodeState::Orphan { open_count: 5 });
-        assert!(p.witness_kernel_forget(31).is_none());
+        assert!(!p.with_brand(|bp| bp.witness_kernel_forget(31).is_some()));
     }
 
     // ------- substrate hygiene -----------------------------------------------
@@ -632,12 +705,12 @@ mod tests {
         let mut p = Pending::default();
         p.test_insert_state(7, NodeState::Live { open_count: 1 });
         let id = p
-            .with_brand(|p| {
+            .with_brand(|bp| {
                 // `w` is `Witness<'_, 'brand, LiveNonZero>` for the
                 // closure's fresh `'brand`. We extract the brand-free
                 // NodeId and drop `w` — the witness itself cannot
                 // escape because it carries `'brand`.
-                p.witness_live_nonzero(7).map(|w| w.id())
+                bp.witness_live_nonzero(7).map(|w| w.id())
             })
             .expect("LiveNonZero witness");
         assert_eq!(id, 7);
@@ -659,10 +732,10 @@ mod tests {
         p2.test_insert_state(13, NodeState::Live { open_count: 0 });
 
         let id1 = p1
-            .with_brand(|p| p.witness_live_nonzero(11).map(|w| w.id()))
+            .with_brand(|bp| bp.witness_live_nonzero(11).map(|w| w.id()))
             .expect("p1 LiveNonZero witness");
         let id2 = p2
-            .with_brand(|p| p.witness_live_zero(13).map(|w| w.id()))
+            .with_brand(|bp| bp.witness_live_zero(13).map(|w| w.id()))
             .expect("p2 LiveZero witness");
 
         assert_eq!(id1, 11);
@@ -689,10 +762,10 @@ mod tests {
     fn with_brand_can_return_unbranded_node_id() {
         let mut p = Pending::default();
         p.test_insert_state(17, NodeState::Orphan { open_count: 3 });
-        let extracted: u64 = p.with_brand(|p| {
+        let extracted: u64 = p.with_brand(|bp| {
             // `u64` is brand-free, so it escapes the closure.
             // A `Witness<'_, 'brand, Orphan>` could not.
-            p.witness_orphan(17).map(|w| w.id()).unwrap_or(0)
+            bp.witness_orphan(17).map(|w| w.id()).unwrap_or(0)
         });
         assert_eq!(extracted, 17);
     }

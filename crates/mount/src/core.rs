@@ -579,12 +579,15 @@ pub(crate) struct MountInner {
     // Storage carries `Pending<'static>` as the long-lived shape;
     // every actual witness-minting access goes through
     // [`Pending::with_brand`], which re-borrows under a fresh
-    // invariant `'brand` introduced by HRTB. The `'static` slot is
-    // never exposed as a witness brand — `with_brand` is the only
-    // entry point that mints `Witness`/`KernelForgetWitness`, and
-    // its HRTB closure makes the inner brand opaque so witnesses
-    // from one access cannot leak to another (Codex PR #217 r2
-    // finding `3293832936`).
+    // invariant `'brand` introduced by HRTB and hands the closure a
+    // [`crate::pending::BrandedPending<'_, 'brand>`]. The `'static`
+    // slot can never be exposed as a witness brand because
+    // `Pending<'brand>` carries no witness constructors at all — the
+    // `witness_*` methods live on [`crate::pending::BrandedPending`],
+    // whose private field makes it unconstructible outside
+    // `with_brand`'s body. This closes the structural gap Codex
+    // flagged in r2 (`3293832936`) and the r3 follow-on
+    // (`3293898540`).
     pending: Mutex<Pending<'static>>,
     promotion: RwLock<PromotionPolicy>,
     mounted_at: SystemTime,

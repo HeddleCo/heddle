@@ -159,6 +159,7 @@ mod tests;
 pub mod __pending_substrate_for_doctest {
     pub use crate::core::Pending;
     pub use crate::pending::{
-        KernelForgetWitness, Lifecycle, LiveNonZero, LiveZero, Orphan, Released, Witness,
+        BrandedPending, KernelForgetWitness, Lifecycle, LiveNonZero, LiveZero, Orphan, Released,
+        Witness,
     };
 }
