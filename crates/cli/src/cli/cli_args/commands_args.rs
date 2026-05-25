@@ -1021,6 +1021,15 @@ pub struct PushArgs {
     /// Force push.
     #[arg(short, long)]
     pub force: bool,
+
+    /// Ad-hoc dual-push: after the primary push to the heddle remote
+    /// succeeds, also push to the named git-bridge remote (default
+    /// `origin`). Use `--mirror` alone for `origin`, or `--mirror=<name>`
+    /// to target a specific git remote. The mirror push is best-effort:
+    /// if it fails, the primary push is still reported as successful
+    /// and the mirror failure surfaces as a warning.
+    #[arg(long, value_name = "REMOTE", num_args = 0..=1, default_missing_value = "origin")]
+    pub mirror: Option<String>,
 }
 
 /// Arguments for the `pull` command.

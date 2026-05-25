@@ -372,6 +372,7 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             None,
             merge_output.merge_state.clone(),
             false,
+            None,
         )
         .await?;
         pushed = true;
