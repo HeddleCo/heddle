@@ -10330,6 +10330,21 @@ fn push_without_default_remote_uses_typed_json_recovery() {
         envelope["primary_command"],
         "heddle remote add <name> <url>"
     );
+    assert!(envelope["primary_command_argv"].is_null(), "{envelope}");
+    assert_eq!(
+        envelope["primary_command_template"]["argv_template"],
+        heddle_argv_json(["remote", "add", "<name>", "<url>"]),
+        "{envelope}"
+    );
+    assert!(
+        envelope["recovery_action_templates"]
+            .as_array()
+            .is_some_and(
+                |templates| templates.iter().any(|template| template["argv_template"]
+                    == heddle_argv_json(["remote", "set-default", "<name>"]))
+            ),
+        "push remote setup should include structured set-default recovery: {envelope}"
+    );
     assert!(
         envelope["recovery_commands"]
             .as_array()
