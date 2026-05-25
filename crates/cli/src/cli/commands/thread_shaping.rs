@@ -12,15 +12,15 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
-    merge::{
-        merge_thread_into_current, ship_command_for_thread,
-        ship_command_for_thread_with_push_target,
-    },
+    merge::merge_thread_into_current,
     operator_core::OperatorCommandOutput,
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread_cmd::{load_thread, refresh_thread, refresh_thread_freshness, thread_not_found_advice},
+    thread_landing::{
+        merge_preview_command, ship_command_for_thread, ship_command_with_push_target,
+    },
 };
 use crate::{
     cli::{Cli, render::shell_quote, should_output_json, style, worktree_status_options},
@@ -358,7 +358,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 thread.id,
                 preview.conflicts.join(", ")
             ));
-            recommended_action = format!("heddle merge {} --preview", thread.id);
+            recommended_action = merge_preview_command(&thread.id);
         }
     }
     if blockers.is_empty() {
@@ -505,8 +505,7 @@ fn thread_resolve_refresh_operator(
     thread_id: &str,
     trust: &RepositoryVerificationState,
 ) -> OperatorCommandOutput {
-    let ship_command =
-        ship_command_for_thread_with_push_target(thread_id, trust.default_remote.is_some());
+    let ship_command = ship_command_with_push_target(thread_id, trust.default_remote.is_some());
     if trust.verified {
         return OperatorCommandOutput {
             status: "synced".to_string(),

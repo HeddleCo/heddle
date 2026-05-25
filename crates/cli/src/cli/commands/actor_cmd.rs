@@ -528,7 +528,8 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
 }
 
 fn actor_done_recommended_action(thread: &str, coordination_status: &str) -> Option<String> {
-    (coordination_status == "merge-ready").then(|| format!("heddle merge {thread} --preview"))
+    (coordination_status == "merge-ready")
+        .then(|| super::thread_landing::merge_preview_command(thread))
 }
 
 pub async fn cmd_actor_explain(cli: &Cli, session_id: Option<String>) -> Result<()> {

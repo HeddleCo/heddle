@@ -624,7 +624,8 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
             summary.thread_health = "remote_tracking".to_string();
             summary.coordination_status = CoordinationStatus::Clean;
             summary.blockers.clear();
-            summary.recommended_action = format!("heddle merge {} --preview", summary.name);
+            summary.recommended_action =
+                super::thread_landing::merge_preview_command(&summary.name);
         }
         if summary.is_current {
             summary.operation = operation.clone();
@@ -1027,25 +1028,7 @@ pub(crate) fn contextual_thread_action(
     target_thread: Option<&str>,
     action: &str,
 ) -> String {
-    let Some(main_root) = repo.heddle_dir().parent() else {
-        return action.to_string();
-    };
-    if main_root == repo.root() || target_thread.is_none() {
-        return action.to_string();
-    }
-    if action == format!("heddle merge {thread_id} --preview") {
-        return format!(
-            "heddle --repo {} merge {thread_id} --preview",
-            quote_action_arg(&main_root.display().to_string())
-        );
-    }
-    if action == format!("heddle ship --thread {thread_id} --no-push") {
-        return format!(
-            "heddle --repo {} ship --thread {thread_id} --no-push",
-            quote_action_arg(&main_root.display().to_string())
-        );
-    }
-    action.to_string()
+    super::thread_landing::contextual_thread_action(repo, thread_id, target_thread, action)
 }
 
 pub(crate) fn current_thread_next_action_with_verification(
@@ -1087,16 +1070,6 @@ pub(crate) fn thread_recovery_action_is_primary(
 
 fn non_empty_action_ref(action: Option<&str>) -> Option<&str> {
     action.filter(|action| !action.trim().is_empty())
-}
-
-fn quote_action_arg(value: &str) -> String {
-    if !value
-        .chars()
-        .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '\\'))
-    {
-        return value.to_string();
-    }
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn apply_terminal_thread_advice(summary: &mut ThreadSummary) {

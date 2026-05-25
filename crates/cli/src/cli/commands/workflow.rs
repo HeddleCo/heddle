@@ -21,6 +21,7 @@ use super::{
     thread_cmd::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
     },
+    thread_landing::{merge_preview_command, ship_local_command},
 };
 use crate::{
     cli::{
@@ -213,12 +214,13 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             )
         })?)
     } else {
+        let merge_preview = merge_preview_command(&thread.id);
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "thread_worktree_missing",
             format!("Thread '{}' worktree is missing", thread.id),
             format!(
-                "Materialize the thread again with `heddle start {} --path <path>` or merge it by ref with `heddle merge {} --preview`.",
-                thread.id, thread.id
+                "Materialize the thread again with `heddle start {} --path <path>` or merge it by ref with `{merge_preview}`.",
+                thread.id
             ),
             format!(
                 "recorded execution path does not exist: {}",
@@ -226,8 +228,8 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             ),
             "ship would need to inspect that checkout for unsaved work before merging",
             "repository state, refs, metadata, and worktree files were left unchanged",
-            format!("heddle merge {} --preview", thread.id),
-            vec![format!("heddle merge {} --preview", thread.id)],
+            merge_preview.clone(),
+            vec![merge_preview],
         )));
     };
     if args.push && args.no_push {
@@ -763,8 +765,8 @@ fn ship_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
             let mut commands = remote_decision
                 .map(|decision| decision.recovery_commands)
                 .unwrap_or_else(|| vec![primary_command.clone()]);
-            commands.push(format!("heddle merge {thread_id} --preview"));
-            commands.push(format!("heddle ship --thread {thread_id} --no-push"));
+            commands.push(merge_preview_command(thread_id));
+            commands.push(ship_local_command(thread_id));
             commands
         } else {
             trust.recovery_commands.clone()
