@@ -18,7 +18,7 @@ use crate::cli::{
     cli_args::{
         CommandCatalogArgs, ConflictCommands, DiscussCommands, ReviewCommands, TransactionCommands,
     },
-    render::{write_json_stdout, write_stdout},
+    render::{shell_quote, write_json_stdout, write_stdout},
     should_output_json, style,
 };
 #[cfg(feature = "client")]
@@ -170,6 +170,32 @@ impl ActionFields {
             template: None,
         }
     }
+}
+
+pub(crate) fn checked_action_from_argv<I, S>(argv: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let action = argv
+        .into_iter()
+        .map(|arg| shell_quote(arg.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    validate_recommended_action(&action)
+        .unwrap_or_else(|err| panic!("invalid recommended action `{action}`: {err}"));
+    action
+}
+
+pub(crate) fn heddle_action<I, S>(args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let argv = std::iter::once("heddle".to_string())
+        .chain(args.into_iter().map(|arg| arg.as_ref().to_string()))
+        .collect::<Vec<_>>();
+    checked_action_from_argv(argv)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -3439,6 +3465,7 @@ mod tests {
             "heddle clone /tmp/source <path> --thread main",
             "heddle bridge git import --path <full-git-repo> --ref <ref>",
             "heddle thread promote main",
+            "heddle thread resolve main",
             "heddle bisect good <state> or heddle bisect bad <state>",
         ] {
             validate_recommended_action(action)
@@ -3630,6 +3657,22 @@ mod tests {
             .expect("shell-quoted apostrophe should parse")
             .expect("concrete action should expose argv");
         assert_eq!(argv[1..], ["merge", "feature 'quoted'", "--preview"]);
+    }
+
+    #[test]
+    fn checked_action_builder_quotes_and_validates_from_argv() {
+        let action = heddle_action(["merge", "feature with spaces", "--preview"]);
+        assert_eq!(action, "heddle merge 'feature with spaces' --preview");
+        let argv = recommended_action_argv(&action)
+            .expect("built action should parse")
+            .expect("built action should be executable");
+        assert_eq!(argv[1..], ["merge", "feature with spaces", "--preview"]);
+
+        let panic = std::panic::catch_unwind(|| checked_action_from_argv(["git", "status"]));
+        assert!(
+            panic.is_err(),
+            "non-Heddle actions should not enter runtime advice sidecars"
+        );
     }
 
     #[test]

@@ -21,15 +21,12 @@ use serde::{Serialize, Serializer};
 use super::{
     advice::RecoveryAdvice,
     command_catalog::{
-        ActionFields, ActionTemplate, build_command_catalog, recommended_action_argv,
-        recommended_action_template,
+        ActionFields, ActionTemplate, build_command_catalog, heddle_action,
+        recommended_action_argv, recommended_action_template,
     },
     schemas::opaque_schema_verbs,
 };
-use crate::{
-    cli::{render::shell_quote, worktree_status_options},
-    remote::RemoteConfig,
-};
+use crate::{cli::worktree_status_options, remote::RemoteConfig};
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub(crate) struct GitOverlayHealth {
@@ -1439,7 +1436,7 @@ pub(crate) fn detached_git_head_mutation_advice(repo: &Repository, action: &str)
 fn detached_head_primary_recovery(repo: &Repository) -> String {
     match repo.refs().read_head() {
         Ok(Head::Attached { thread }) if !thread.trim().is_empty() => {
-            return format!("heddle switch {thread}");
+            return heddle_action(["switch", thread.as_str()]);
         }
         _ => {}
     }
@@ -1450,7 +1447,7 @@ fn detached_head_primary_recovery(repo: &Repository) -> String {
             .filter(|tip| tip.history_imported)
             .find(|tip| tip.git_commit == detached_commit)
     {
-        return format!("heddle switch {}", tip.branch);
+        return heddle_action(["switch", tip.branch.as_str()]);
     }
     "heddle switch <branch>".to_string()
 }
@@ -2701,7 +2698,7 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
             let recovery = if status == "needs_checkpoint" {
                 "heddle checkpoint -m \"...\"".to_string()
             } else {
-                format!("heddle bridge git reconcile --ref {ref_name} --preview")
+                canonical_bridge_reconcile_ref_preview_command(None, &ref_name)
             };
             checks.push(check);
             return GitOverlayHealth {
@@ -2934,7 +2931,7 @@ fn tag_mapping_recovery_commands(check: &GitOverlayHealthCheck) -> Vec<String> {
         .unwrap_or_default();
 
     if tag_names.len() == 1 {
-        vec![format!("heddle adopt --ref {}", tag_names[0])]
+        vec![canonical_adopt_ref_command(&tag_names[0])]
     } else {
         vec!["heddle adopt".to_string()]
     }
@@ -3121,11 +3118,11 @@ fn needs_import(
 }
 
 pub(crate) fn canonical_adopt_ref_command(ref_name: &str) -> String {
-    format!("heddle adopt --ref {}", shell_quote(ref_name))
+    heddle_action(["adopt", "--ref", ref_name])
 }
 
 pub(crate) fn canonical_bridge_import_ref_command(ref_name: &str) -> String {
-    format!("heddle bridge git import --ref {}", shell_quote(ref_name))
+    heddle_action(["bridge", "git", "import", "--ref", ref_name])
 }
 
 pub(crate) fn canonical_bridge_reconcile_ref_preview_command(
@@ -3133,24 +3130,30 @@ pub(crate) fn canonical_bridge_reconcile_ref_preview_command(
     ref_name: &str,
 ) -> String {
     match prefer {
-        Some(prefer) => format!(
-            "heddle bridge git reconcile --prefer {} --ref {} --preview",
-            shell_quote(prefer),
-            shell_quote(ref_name)
-        ),
-        None => format!(
-            "heddle bridge git reconcile --ref {} --preview",
-            shell_quote(ref_name)
-        ),
+        Some(prefer) => heddle_action([
+            "bridge",
+            "git",
+            "reconcile",
+            "--prefer",
+            prefer,
+            "--ref",
+            ref_name,
+            "--preview",
+        ]),
+        None => heddle_action(["bridge", "git", "reconcile", "--ref", ref_name, "--preview"]),
     }
 }
 
 pub(crate) fn canonical_bridge_reconcile_ref_command(prefer: &str, ref_name: &str) -> String {
-    format!(
-        "heddle bridge git reconcile --prefer {} --ref {}",
-        shell_quote(prefer),
-        shell_quote(ref_name)
-    )
+    heddle_action([
+        "bridge",
+        "git",
+        "reconcile",
+        "--prefer",
+        prefer,
+        "--ref",
+        ref_name,
+    ])
 }
 
 pub(crate) fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) -> bool {

@@ -326,6 +326,15 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     } else {
         summary.blockers.clone()
     };
+    let mut warnings = Vec::new();
+    if !blockers.is_empty()
+        && blockers
+            .iter()
+            .all(|blocker| is_manual_review_blocker(blocker))
+    {
+        warnings = blockers.clone();
+        blockers.clear();
+    }
     let mut recommended_action = summary.recommended_action.clone();
     if blockers.is_empty() && rebase_state_path.exists() {
         let rebase_state = super::rebase::load_persisted_rebase_state(&rebase_state_path)?;
@@ -400,18 +409,26 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 },
                 action: "resolve".to_string(),
                 message: if blockers.is_empty() {
-                    "Thread manual resolution recorded".to_string()
+                    if warnings.is_empty() {
+                        "Thread manual resolution recorded".to_string()
+                    } else {
+                        "Thread manual review recorded".to_string()
+                    }
                 } else {
                     "Thread requires a manual follow-up".to_string()
                 },
                 blockers: blockers.clone(),
-                warnings: Vec::new(),
+                warnings,
                 next_action: recommended_action.clone(),
                 recommended_action,
             },
             thread: summary.name.clone(),
         },
     )
+}
+
+fn is_manual_review_blocker(blocker: &str) -> bool {
+    blocker.starts_with("Heavy-impact change:")
 }
 
 fn thread_resolve_next_action(
@@ -732,6 +749,12 @@ fn emit_thread_resolve(cli: &Cli, output: &ThreadResolveOutput) -> Result<()> {
             println!("{}", style::warn("Blockers:"));
             for blocker in &output.operator.blockers {
                 println!("  - {}", style::warn(blocker));
+            }
+        }
+        if !output.operator.warnings.is_empty() {
+            println!("{}", style::warn("Reviewed:"));
+            for warning in &output.operator.warnings {
+                println!("  - {}", style::warn(warning));
             }
         }
         if let Some(next) = output
