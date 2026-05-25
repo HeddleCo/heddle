@@ -51,8 +51,7 @@ mod status_untracked_scan;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs,
-    io::{self, Write},
+    fs, io,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -104,6 +103,17 @@ pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeSta
 use serde::{Deserialize, Serialize};
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
+const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[
+    ".heddle/",
+    ".heddleignore",
+    "target",
+    "node_modules",
+    "__pycache__",
+    "*.pyc",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryCapability {
@@ -491,6 +501,13 @@ impl Repository {
             repo.refs.write_head(&head)?;
         }
         Ok(repo)
+    }
+
+    /// Install local, untracked Git exclude rules Heddle needs for Git-overlay
+    /// repos. This keeps raw Git status aligned with Heddle's default ignore
+    /// policy without writing project-tracked sidecars.
+    pub fn ensure_git_overlay_local_excludes(path: impl AsRef<Path>) -> Result<()> {
+        ensure_git_overlay_exclude(path.as_ref())
     }
 
     /// Open an existing Heddle repository using a custom object store backend.
@@ -1892,7 +1909,10 @@ impl Repository {
 }
 
 fn ensure_git_overlay_exclude(root: &Path) -> Result<()> {
-    let git_dir = root.join(".git");
+    let git_dir = match gix::discover(root) {
+        Ok(repo) if repo.workdir().is_some() => repo.git_dir().to_path_buf(),
+        _ => root.join(".git"),
+    };
     if !git_dir.is_dir() {
         return Ok(());
     }
@@ -1900,24 +1920,38 @@ fn ensure_git_overlay_exclude(root: &Path) -> Result<()> {
     let info_dir = git_dir.join("info");
     fs::create_dir_all(&info_dir)?;
     let exclude_path = info_dir.join("exclude");
-    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
-    let already_has_rule = existing
-        .lines()
-        .map(str::trim)
-        .any(|line| line == ".heddle/" || line == "/.heddle/" || line == ".heddle");
-    if already_has_rule {
+    let mut contents = fs::read_to_string(&exclude_path).unwrap_or_default();
+    let existing_lines = contents.lines().map(str::trim).collect::<BTreeSet<_>>();
+    let mut missing = Vec::new();
+    for pattern in GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS {
+        if !existing_lines
+            .iter()
+            .any(|line| git_overlay_exclude_line_matches(line, pattern))
+        {
+            missing.push(*pattern);
+        }
+    }
+    if missing.is_empty() {
         return Ok(());
     }
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&exclude_path)?;
-    if !existing.is_empty() && !existing.ends_with('\n') {
-        writeln!(file)?;
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
     }
-    writeln!(file, ".heddle/")?;
+    contents.push_str("# Heddle local metadata and generated-noise defaults\n");
+    for pattern in missing {
+        contents.push_str(pattern);
+        contents.push('\n');
+    }
+    fs::write(exclude_path, contents)?;
     Ok(())
+}
+
+fn git_overlay_exclude_line_matches(line: &str, pattern: &str) -> bool {
+    line == pattern
+        || matches!(
+            (line, pattern),
+            (".heddle", ".heddle/") | ("/.heddle/", ".heddle/") | ("/.heddle", ".heddle/")
+        )
 }
 
 /// Stable system principal stamped into the synthetic seed state created

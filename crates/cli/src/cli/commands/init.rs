@@ -328,7 +328,10 @@ fn init_side_effects(
     let mut side_effects = Vec::new();
     if has_git {
         side_effects.push("created Heddle sidecar for the existing Git repository".to_string());
-        side_effects.push("left Git-tracked files and `git status --short` untouched".to_string());
+        side_effects.push(
+            "updated .git/info/exclude for Heddle metadata and default generated noise".to_string(),
+        );
+        side_effects.push("left Git-tracked files untouched".to_string());
     } else {
         side_effects.push("created Heddle repository metadata".to_string());
         if installed_heddleignore {

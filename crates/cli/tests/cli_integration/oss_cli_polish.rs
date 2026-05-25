@@ -785,6 +785,17 @@ fn init_json_names_side_effects_next_action_and_schema() {
         }),
         "Git-overlay init should say it left Git-tracked files untouched: {init}"
     );
+    assert!(
+        init["side_effects"].as_array().is_some_and(|effects| {
+            effects.iter().any(|effect| {
+                effect.as_str().is_some_and(|effect| {
+                    effect.contains(".git/info/exclude")
+                        && effect.contains("default generated noise")
+                })
+            })
+        }),
+        "Git-overlay init should name its local Git exclude policy update: {init}"
+    );
     assert_schema_declares_runtime_top_level(&["init"], &init);
     assert_eq!(
         std::process::Command::new("git")
@@ -805,6 +816,7 @@ fn init_json_names_side_effects_next_action_and_schema() {
     assert!(
         text.contains("Side effects:")
             && text.contains("Principal: Heddle Test <heddle@example.com> from git_config")
+            && text.contains(".git/info/exclude")
             && text.contains("left Git-tracked files")
             && text.contains("Next: heddle adopt --ref main"),
         "init text should make side effects and import next step obvious: {text}"
@@ -10873,6 +10885,13 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
         clone_output["verification"]["recovery_commands"],
         serde_json::json!([])
     );
+    let exclude = std::fs::read_to_string(work.join(".git/info/exclude")).unwrap();
+    for pattern in [".heddle/", ".heddleignore", "__pycache__", "*.pyc"] {
+        assert!(
+            exclude.lines().any(|line| line.trim() == pattern),
+            "clone should install the same local Git exclude policy as init; missing {pattern:?}: {exclude}"
+        );
+    }
 
     let json = heddle(&["--output", "json", "verify"], Some(&work)).expect("verify JSON");
     let parsed: Value = serde_json::from_str(&json).expect("verify JSON parses");

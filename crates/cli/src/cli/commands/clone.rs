@@ -814,22 +814,7 @@ fn network_clone_unavailable_advice() -> RecoveryAdvice {
 }
 
 fn ensure_git_excludes_heddle(local_path: &Path) -> Result<()> {
-    let exclude_path = local_path.join(".git").join("info").join("exclude");
-    if let Some(parent) = exclude_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut contents = fs::read_to_string(&exclude_path).unwrap_or_default();
-    for pattern in [".heddle/", ".heddleignore"] {
-        if !contents.lines().any(|line| line.trim() == pattern) {
-            if !contents.ends_with('\n') && !contents.is_empty() {
-                contents.push('\n');
-            }
-            contents.push_str(pattern);
-            contents.push('\n');
-        }
-    }
-    fs::write(exclude_path, contents)?;
-    Ok(())
+    Ok(Repository::ensure_git_overlay_local_excludes(local_path)?)
 }
 
 /// Best-effort repo-name extraction for the text-mode clone summary.
