@@ -1145,6 +1145,80 @@ pub(crate) fn verification_blocking_mutation_advice(
     ))
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GitOverlayMutationPreflight {
+    pub check_detached_head: bool,
+    pub check_unimported_git_history: bool,
+    pub check_raw_git_operation: bool,
+    pub check_verification: bool,
+}
+
+impl GitOverlayMutationPreflight {
+    pub(crate) fn capture_like() -> Self {
+        Self {
+            check_detached_head: false,
+            check_unimported_git_history: true,
+            check_raw_git_operation: true,
+            check_verification: true,
+        }
+    }
+
+    pub(crate) fn checkpoint_like() -> Self {
+        Self {
+            check_detached_head: true,
+            check_unimported_git_history: true,
+            check_raw_git_operation: false,
+            check_verification: true,
+        }
+    }
+
+    pub(crate) fn commit_like() -> Self {
+        Self {
+            check_detached_head: true,
+            check_unimported_git_history: true,
+            check_raw_git_operation: true,
+            check_verification: true,
+        }
+    }
+}
+
+pub(crate) fn plain_git_mutation_preflight_advice(
+    start: &std::path::Path,
+    action: &str,
+) -> anyhow::Result<Option<RecoveryAdvice>> {
+    Ok(build_plain_git_verification_probe(start)?
+        .map(|probe| plain_git_mutation_advice(&probe, action)))
+}
+
+pub(crate) fn git_overlay_mutation_preflight_advice(
+    repo: &Repository,
+    action: &str,
+    preflight: GitOverlayMutationPreflight,
+) -> anyhow::Result<Option<RecoveryAdvice>> {
+    if repo.capability() != repo::RepositoryCapability::GitOverlay {
+        return Ok(None);
+    }
+    if preflight.check_detached_head && repo.git_overlay_head_is_detached()? {
+        return Ok(Some(detached_git_head_mutation_advice(repo, action)));
+    }
+    if preflight.check_unimported_git_history
+        && let Some(advice) = unimported_git_history_advice(repo, action)?
+    {
+        return Ok(Some(advice));
+    }
+    if preflight.check_raw_git_operation
+        && let Some(advice) = raw_git_operation_mutation_advice(repo, action)?
+    {
+        return Ok(Some(advice));
+    }
+    if preflight.check_verification
+        && let Some(advice) = verification_blocking_mutation_advice(repo, action)
+    {
+        return Ok(Some(advice));
+    }
+    Ok(None)
+}
+
 pub(crate) fn repository_verification_blocked_advice(
     kind: &'static str,
     error: impl Into<String>,
