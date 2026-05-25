@@ -170,10 +170,17 @@ pub(crate) struct VerificationCheck {
 pub(crate) struct PlainGitVerificationProbe {
     pub root: PathBuf,
     pub git_branch: Option<String>,
-    #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
-    pub git_branches: Vec<String>,
+    pub import_hint: Option<PlainGitImportHint>,
     pub changes: WorktreeStatus,
     pub trust: RepositoryVerificationState,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlainGitImportHint {
+    pub current_branch: String,
+    pub missing_branch_count: usize,
+    pub missing_branches: Vec<String>,
+    pub recommended_command: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1324,6 +1331,16 @@ pub(crate) fn build_plain_git_verification_probe(
     } else {
         vec![init.clone()]
     };
+    let import_hint = git_head_has_commit.then(|| {
+        let missing_branches =
+            plain_git_missing_import_branches(git_branch.as_deref(), &git_branches);
+        PlainGitImportHint {
+            current_branch: git_branch.clone().unwrap_or_default(),
+            missing_branch_count: missing_branches.len(),
+            missing_branches,
+            recommended_command: import.clone(),
+        }
+    });
     let machine_contract_coverage = machine_contract_coverage();
     let mut details = BTreeMap::new();
     details.insert("path".to_string(), root.display().to_string());
@@ -1455,8 +1472,18 @@ pub(crate) fn build_plain_git_verification_probe(
         heddle_thread: None,
         worktree_dirty: !changes.is_clean(),
         worktree_state: if changes.is_clean() { "clean" } else { "dirty" }.to_string(),
-        import_state: "needs_init".to_string(),
-        mapping_state: "needs_init".to_string(),
+        import_state: if git_head_has_commit {
+            "needs_import"
+        } else {
+            "no_commits"
+        }
+        .to_string(),
+        mapping_state: if git_head_has_commit {
+            "needs_import"
+        } else {
+            "no_commits"
+        }
+        .to_string(),
         remote_drift: "unknown".to_string(),
         active_operation: None,
         default_remote,
@@ -1477,10 +1504,27 @@ pub(crate) fn build_plain_git_verification_probe(
     Ok(Some(PlainGitVerificationProbe {
         root,
         git_branch,
-        git_branches,
+        import_hint,
         changes,
         trust,
     }))
+}
+
+fn plain_git_missing_import_branches(
+    git_branch: Option<&str>,
+    git_branches: &[String],
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if let Some(branch) = git_branch {
+        missing.push(branch.to_string());
+    }
+    missing.extend(
+        git_branches
+            .iter()
+            .filter(|branch| Some(branch.as_str()) != git_branch)
+            .cloned(),
+    );
+    dedup_commands(missing)
 }
 
 fn plain_git_current_branch(git_repo: &gix::Repository) -> Option<String> {

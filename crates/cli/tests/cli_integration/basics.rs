@@ -894,7 +894,15 @@ fn test_cli_status_in_plain_git_repo_handles_deeper_history_and_many_branches() 
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
     assert_eq!(
         bridge["git_overlay_import_hint"]["missing_branch_count"],
-        20
+        21
+    );
+    assert!(
+        bridge["git_overlay_import_hint"]["missing_branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| branch.as_str() == Some("feature/drop-in")),
+        "first-run bridge import hint should include the active branch: {bridge}"
     );
 }
 

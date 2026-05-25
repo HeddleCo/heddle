@@ -17,8 +17,8 @@ use super::{
     git_overlay_health::{
         GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_argv,
         action_template, build_git_overlay_health, build_plain_git_verification_probe,
-        build_repository_verification_state, canonical_adopt_ref_command,
-        serialize_empty_action_as_null, trust_visible_worktree_status,
+        build_repository_verification_state, serialize_empty_action_as_null,
+        trust_visible_worktree_status,
     },
     operator_loop::primary_next_action,
     thread::{
@@ -174,13 +174,13 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
         total: probe.changes.change_count(),
     };
     let import_hint = probe
-        .git_branch
-        .as_ref()
-        .map(|branch| DiagnoseGitOverlayImportHintOutput {
-            current_branch: branch.clone(),
-            missing_branch_count: 1,
-            missing_branches: vec![branch.clone()],
-            recommended_command: canonical_adopt_ref_command(branch),
+        .import_hint
+        .clone()
+        .map(|hint| DiagnoseGitOverlayImportHintOutput {
+            current_branch: hint.current_branch,
+            missing_branch_count: hint.missing_branch_count,
+            missing_branches: hint.missing_branches,
+            recommended_command: hint.recommended_command,
         });
     let trust = probe.trust.clone();
     let git_overlay_health = GitOverlayHealth {

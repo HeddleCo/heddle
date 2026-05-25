@@ -292,7 +292,10 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
         let mirror_note = if output.trust.status == "needs_import" {
             "not initialized yet; the import step will create it".to_string()
         } else if output.trust.status == "needs_init" {
-            "not initialized yet; run `heddle adopt`".to_string()
+            format!(
+                "not initialized yet; run `{}`",
+                output.recommended_action.as_str()
+            )
         } else {
             "not initialized yet".to_string()
         };
@@ -320,7 +323,19 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
                 println!("Optional: {}", style::dim(&hint.recommended_command));
             }
         }
-        None => println!("Git import: in sync"),
+        None => println!(
+            "Git import: {}",
+            if output
+                .trust
+                .checks
+                .iter()
+                .any(|check| check.name == "Mapping" && check.status == "no_commits")
+            {
+                "no commits to import yet"
+            } else {
+                "in sync"
+            }
+        ),
     }
     println!(
         "Git overlay health: {}",
@@ -363,27 +378,15 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
         let cwd = std::env::current_dir()?;
         let start = cli.repo.as_ref().unwrap_or(&cwd);
         if let Some(probe) = build_plain_git_verification_probe(start)? {
-            let missing_branches = probe
-                .git_branches
-                .iter()
-                .filter(|branch| Some(branch.as_str()) != probe.git_branch.as_deref())
-                .cloned()
-                .collect::<Vec<_>>();
-            let import_hint = if missing_branches.is_empty() {
-                None
-            } else {
-                let command_ref = missing_branches
-                    .first()
-                    .cloned()
-                    .or_else(|| probe.git_branch.clone())
-                    .unwrap_or_else(|| "HEAD".to_string());
-                Some(BridgeGitImportHintOutput {
-                    current_branch: probe.git_branch.clone().unwrap_or_default(),
-                    missing_branch_count: missing_branches.len(),
-                    missing_branches,
-                    recommended_command: canonical_adopt_ref_command(&command_ref),
-                })
-            };
+            let import_hint = probe
+                .import_hint
+                .clone()
+                .map(|hint| BridgeGitImportHintOutput {
+                    current_branch: hint.current_branch,
+                    missing_branch_count: hint.missing_branch_count,
+                    missing_branches: hint.missing_branches,
+                    recommended_command: hint.recommended_command,
+                });
             let output = BridgeGitStatusOutput {
                 output_kind: "bridge_git_status",
                 repository_capability: "plain-git".to_string(),

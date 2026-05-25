@@ -694,6 +694,29 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
         !temp.path().join(".heddle").exists(),
         "status in a plain Git repo must be probe-only"
     );
+    let bridge = json(
+        temp.path(),
+        &["bridge", "git", "status", "--output", "json"],
+    );
+    assert_eq!(bridge["recommended_action"], "heddle init");
+    assert_eq!(bridge["verification"]["recommended_action"], "heddle init");
+    assert_eq!(bridge["verification"]["import_state"], "no_commits");
+    assert_eq!(bridge["verification"]["mapping_state"], "no_commits");
+    assert!(bridge["git_overlay_import_hint"].is_null());
+    let bridge_text = heddle(
+        &["bridge", "git", "status", "--output", "text"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(
+        bridge_text.contains("run `heddle init`")
+            && bridge_text.contains("Git import: no commits to import yet")
+            && !bridge_text.contains("run `heddle adopt`"),
+        "unborn bridge status text should not recommend invalid adoption: {bridge_text}"
+    );
+    let diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    assert_eq!(diagnose["recommended_action"], "heddle init");
+    assert_eq!(diagnose["git_overlay_import_hint"], Value::Null);
 
     let failed_adopt = heddle_output(
         &["--output", "json", "adopt", "--ref", "trunk"],
@@ -798,6 +821,20 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
     );
     assert_eq!(bridge["git_overlay_health"]["status"], "needs_init");
     assert_eq!(bridge["verification"]["status"], "needs_init");
+    assert_eq!(bridge["verification"]["import_state"], "needs_import");
+    assert_eq!(bridge["verification"]["mapping_state"], "needs_import");
+    assert_eq!(
+        bridge["git_overlay_import_hint"]["recommended_command"],
+        "heddle adopt --ref main"
+    );
+    assert!(
+        bridge["git_overlay_import_hint"]["missing_branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| branch.as_str() == Some("main")),
+        "bridge status should not call the active unimported branch in sync before setup: {bridge}"
+    );
     assert_verify_check_rows(&bridge["verification"]);
     assert!(
         !temp.path().join(".heddle").exists(),
