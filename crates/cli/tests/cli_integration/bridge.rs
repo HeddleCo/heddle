@@ -117,14 +117,23 @@ fn test_cli_push_mirror_dual_push_to_weft_and_git_remote() {
     let weft_path = weft_target.path().to_string_lossy().to_string();
     let git_path = git_remote.path().to_string_lossy().to_string();
     let mirror_arg = format!("--mirror={}", git_path);
-    let result = heddle(
-        &["push", &weft_path, "--thread", "main", &mirror_arg],
+    // `--output text` forces the text branch of `render_mirror_outcome`.
+    // Default `auto` resolves to JSON when stdout is piped (which it is
+    // under `cargo test`), so without this flag the text-success path
+    // would never execute and codecov/patch would miss it.
+    let stdout = heddle(
+        &[
+            "--output", "text", "push", &weft_path, "--thread", "main", &mirror_arg,
+        ],
         Some(source.path()),
-    );
+    )
+    .expect("dual push (--mirror=<remote>) should succeed");
+
+    // Text branch on success emits a "mirrored to <remote>" line.
     assert!(
-        result.is_ok(),
-        "dual push (--mirror=<remote>) should succeed: {:?}",
-        result.err()
+        stdout.contains("mirrored to") && stdout.contains(&git_path),
+        "text-mode success line missing: {}",
+        stdout
     );
 
     // Primary push landed at the heddle target.
@@ -162,8 +171,15 @@ fn test_cli_push_mirror_failure_does_not_abort_primary_push() {
         .to_string_lossy()
         .to_string();
     let mirror_arg = format!("--mirror={}", bogus_mirror);
+    // `--output text` forces the text branch of `render_mirror_outcome`
+    // on the failure path. The warning lands on stderr, so this test
+    // proves the primary push still succeeds and leaves separate
+    // stderr-checking to the JSON variant (which captures the structured
+    // failure on stdout).
     let result = heddle(
-        &["push", &weft_path, "--thread", "main", &mirror_arg],
+        &[
+            "--output", "text", "push", &weft_path, "--thread", "main", &mirror_arg,
+        ],
         Some(source.path()),
     );
     assert!(
