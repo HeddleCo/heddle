@@ -25,6 +25,11 @@ const RAW_RECOVERY_PHRASES: &[&str] = &[
     "Use one path.",
     "--principal-name is required",
     "--principal-email is required",
+    "--annotation-kind is required for into-annotation",
+    "--annotation-content is required for into-annotation",
+    "--reason is required for dismiss",
+    "--symbols expects 'file:symbol'",
+    "has no recorded parent; pass --into",
 ];
 
 const RAW_THREAD_NOT_FOUND_PHRASES: &[&str] = &[

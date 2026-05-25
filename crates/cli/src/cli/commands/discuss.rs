@@ -131,15 +131,13 @@ async fn run_resolve(
     };
     let resolution = match args.mode {
         ResolveModeArg::IntoAnnotation => {
-            let kind_str = args
-                .annotation_kind
-                .as_deref()
-                .ok_or_else(|| anyhow!("--annotation-kind is required for into-annotation"))?;
+            let kind_str = args.annotation_kind.as_deref().ok_or_else(|| {
+                anyhow!(RecoveryAdvice::discuss_resolve_missing_annotation_kind())
+            })?;
             let kind = parse_annotation_kind(kind_str)?;
-            let content = args
-                .annotation_content
-                .clone()
-                .ok_or_else(|| anyhow!("--annotation-content is required for into-annotation"))?;
+            let content = args.annotation_content.clone().ok_or_else(|| {
+                anyhow!(RecoveryAdvice::discuss_resolve_missing_annotation_content())
+            })?;
             let tags = args
                 .annotation_tags
                 .as_deref()
@@ -163,7 +161,7 @@ async fn run_resolve(
             reason: args
                 .reason
                 .clone()
-                .ok_or_else(|| anyhow!("--reason is required for dismiss"))?,
+                .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_resolve_missing_dismiss_reason()))?,
         }),
     };
     let req = ResolveDiscussionRequest {

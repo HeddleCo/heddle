@@ -492,6 +492,111 @@ impl RecoveryAdvice {
         )
     }
 
+    pub(crate) fn missing_option(
+        kind: &'static str,
+        option: &'static str,
+        required_for: &'static str,
+        primary_command: impl Into<String>,
+    ) -> Self {
+        let primary_command = primary_command.into();
+        Self::invalid_usage(
+            kind,
+            format!("{option} is required for {required_for}"),
+            format!("Retry with `{option}` set: `{primary_command}`."),
+            primary_command,
+        )
+    }
+
+    pub(crate) fn malformed_option_value(
+        kind: &'static str,
+        option: &'static str,
+        raw: &str,
+        expected: &'static str,
+        primary_command: impl Into<String>,
+    ) -> Self {
+        let primary_command = primary_command.into();
+        Self::invalid_usage(
+            kind,
+            format!("{option} expects {expected}, got '{raw}'"),
+            format!("Retry with {option} in the expected form: `{primary_command}`."),
+            primary_command,
+        )
+    }
+
+    pub(crate) fn missing_integration_target(
+        kind: &'static str,
+        error: impl Into<String>,
+        hint: impl Into<String>,
+        primary_command: impl Into<String>,
+        recovery_commands: Vec<String>,
+    ) -> Self {
+        let primary_command = primary_command.into();
+        Self::safety_refusal(
+            kind,
+            error,
+            hint,
+            "the command has no recorded target to integrate into",
+            "guessing an integration target could merge or move work into the wrong thread",
+            "no repository objects, refs, metadata, or worktree files were changed",
+            primary_command.clone(),
+            if recovery_commands.is_empty() {
+                vec![primary_command]
+            } else {
+                recovery_commands
+            },
+        )
+    }
+
+    pub(crate) fn discuss_resolve_missing_annotation_kind() -> Self {
+        Self::missing_option(
+            "discuss_resolve_missing_annotation_kind",
+            "--annotation-kind",
+            "into-annotation",
+            "heddle discuss resolve <id> --mode into-annotation --annotation-kind rationale --annotation-content \"...\"",
+        )
+    }
+
+    pub(crate) fn discuss_resolve_missing_annotation_content() -> Self {
+        Self::missing_option(
+            "discuss_resolve_missing_annotation_content",
+            "--annotation-content",
+            "into-annotation",
+            "heddle discuss resolve <id> --mode into-annotation --annotation-kind rationale --annotation-content \"...\"",
+        )
+    }
+
+    pub(crate) fn discuss_resolve_missing_dismiss_reason() -> Self {
+        Self::missing_option(
+            "discuss_resolve_missing_dismiss_reason",
+            "--reason",
+            "dismiss",
+            "heddle discuss resolve <id> --mode dismiss --reason \"...\"",
+        )
+    }
+
+    pub(crate) fn review_symbols_malformed(raw: &str) -> Self {
+        Self::malformed_option_value(
+            "review_symbols_malformed",
+            "--symbols",
+            raw,
+            "'file:symbol'",
+            "heddle review sign <state> --kind read --symbols <file>:<symbol> --public-key <hex> --signature <hex> --signed-at-unix <secs>",
+        )
+    }
+
+    pub(crate) fn thread_absorb_parent_required(thread: &str) -> Self {
+        let primary_command = format!("heddle thread absorb {thread} --into <parent-thread>");
+        Self::missing_integration_target(
+            "thread_absorb_parent_required",
+            format!("Thread '{thread}' has no recorded parent; pass --into"),
+            format!(
+                "Choose a parent with `heddle thread list`, then retry with `{primary_command}`."
+            ),
+            primary_command.clone(),
+            vec![primary_command, "heddle thread list".to_string()],
+        )
+    }
+
     pub(crate) fn repository_no_head_capture_first(action: &str) -> Self {
         Self::safety_refusal(
             "repository_no_head",
