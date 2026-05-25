@@ -23,13 +23,13 @@ use super::{
         create_git_checkpoint, create_git_checkpoint_from_index_snapshot,
         preflight_git_checkpoint_ref_update,
     },
-    command_catalog::ActionTemplate,
+    command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{
-        RepositoryVerificationState, action_argv, action_template,
-        build_plain_git_verification_probe, build_repository_verification_state,
-        detached_git_head_mutation_advice, plain_git_mutation_advice,
-        raw_git_operation_mutation_advice, repository_verification_blocked_advice,
-        unimported_git_history_advice, verification_blocking_mutation_advice,
+        RepositoryVerificationState, build_plain_git_verification_probe,
+        build_repository_verification_state, detached_git_head_mutation_advice,
+        plain_git_mutation_advice, raw_git_operation_mutation_advice,
+        repository_verification_blocked_advice, unimported_git_history_advice,
+        verification_blocking_mutation_advice,
     },
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
@@ -916,13 +916,13 @@ fn pending_capture_before_commit(repo: &Repository) -> Result<Option<ChangeId>> 
 
 fn with_commit_action_metadata(mut output: CommitCompatOutput) -> CommitCompatOutput {
     output.recommended_action = output.next_action.clone();
-    output.next_action_argv = output.next_action.as_deref().and_then(action_argv);
-    output.next_action_template = output.next_action.as_deref().and_then(action_template);
-    output.recommended_action_argv = output.recommended_action.as_deref().and_then(action_argv);
-    output.recommended_action_template = output
-        .recommended_action
-        .as_deref()
-        .and_then(action_template);
+    let next_action = ActionFields::from_optional_action_ref(output.next_action.as_deref());
+    let recommended_action =
+        ActionFields::from_optional_action_ref(output.recommended_action.as_deref());
+    output.next_action_argv = next_action.argv;
+    output.next_action_template = next_action.template;
+    output.recommended_action_argv = recommended_action.argv;
+    output.recommended_action_template = recommended_action.template;
     output
 }
 

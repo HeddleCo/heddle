@@ -9,12 +9,11 @@ use serde::Serialize;
 use tokio::time::{Duration, sleep};
 
 use super::{
-    command_catalog::ActionTemplate,
+    command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{
-        RepositoryVerificationState, action_argv, action_template,
-        build_plain_git_verification_probe, build_repository_verification_state,
-        canonical_adopt_ref_command, override_trust_recommended_action,
-        serialize_empty_action_as_null,
+        RepositoryVerificationState, build_plain_git_verification_probe,
+        build_repository_verification_state, canonical_adopt_ref_command,
+        override_trust_recommended_action, serialize_empty_action_as_null,
     },
     thread::{
         AvailableGitRef, DEFAULT_AVAILABLE_GIT_REF_LIMIT, ThreadSummary, collect_thread_summaries,
@@ -264,6 +263,7 @@ pub(crate) fn build_workspace_output(cli: &Cli) -> Result<WorkspaceSummaryOutput
         current_summary.and_then(|summary| summary.target_thread.as_deref()),
         current_summary.and_then(|summary| summary.parent_thread.as_deref()),
     );
+    let recommended_action_fields = ActionFields::from_action(&recommended_action);
 
     Ok(WorkspaceSummaryOutput {
         output_kind: "workspace_summary",
@@ -285,8 +285,8 @@ pub(crate) fn build_workspace_output(cli: &Cli) -> Result<WorkspaceSummaryOutput
         remote_tracking: remote_tracking.clone(),
         trust,
         recommended_action: recommended_action.clone(),
-        recommended_action_argv: action_argv(&recommended_action),
-        recommended_action_template: action_template(&recommended_action),
+        recommended_action_argv: recommended_action_fields.argv,
+        recommended_action_template: recommended_action_fields.template,
         current_thread,
         groups,
         available_git_refs,

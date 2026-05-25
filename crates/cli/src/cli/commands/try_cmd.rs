@@ -42,8 +42,8 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    command_catalog::ActionTemplate,
-    git_overlay_health::{action_argv, action_template, action_templates, command_argvs},
+    command_catalog::{ActionFields, ActionTemplate},
+    git_overlay_health::{action_templates, command_argvs},
     merge::merge_thread_into_current,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread::start_thread,
@@ -366,8 +366,8 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         None
     };
     let recommended_action = next_action.clone();
-    let recommended_action_argv = recommended_action.as_deref().and_then(action_argv);
-    let recommended_action_template = recommended_action.as_deref().and_then(action_template);
+    let recommended_action_fields =
+        ActionFields::from_optional_action_ref(recommended_action.as_deref());
     let recovery_commands = if !args.auto_merge || !thread_dropped {
         vec![format!("heddle thread drop {thread_name}")]
     } else {
@@ -423,11 +423,11 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         captured_state,
         merge_state,
         next_action,
-        next_action_argv: recommended_action_argv.clone(),
-        next_action_template: recommended_action_template.clone(),
+        next_action_argv: recommended_action_fields.argv.clone(),
+        next_action_template: recommended_action_fields.template.clone(),
         recommended_action,
-        recommended_action_argv,
-        recommended_action_template,
+        recommended_action_argv: recommended_action_fields.argv,
+        recommended_action_template: recommended_action_fields.template,
         recovery_commands,
         recovery_command_argv,
         recovery_action_templates,
