@@ -1968,7 +1968,11 @@ pub fn build_command_catalog() -> CommandCatalogOutput {
     }
 
     let mut commands = Vec::new();
-    walk_commands(&command, &mut Vec::new(), &mut commands);
+    let op_id_option = command
+        .get_arguments()
+        .find(|arg| arg.get_long() == Some("op-id"))
+        .map(catalog_option);
+    walk_commands(&command, &mut Vec::new(), &mut commands, &op_id_option);
     CommandCatalogOutput {
         kind: "command_catalog".to_string(),
         executable_path: heddle_argv0(),
@@ -2013,16 +2017,21 @@ fn walk_commands(
     command: &clap::Command,
     prefix: &mut Vec<String>,
     out: &mut Vec<CommandCatalogEntry>,
+    op_id_option: &Option<CommandCatalogOption>,
 ) {
     for subcommand in command.get_subcommands() {
         prefix.push(subcommand.get_name().to_string());
-        out.push(catalog_entry(subcommand, prefix));
-        walk_commands(subcommand, prefix, out);
+        out.push(catalog_entry(subcommand, prefix, op_id_option));
+        walk_commands(subcommand, prefix, out, op_id_option);
         prefix.pop();
     }
 }
 
-fn catalog_entry(command: &clap::Command, path: &[String]) -> CommandCatalogEntry {
+fn catalog_entry(
+    command: &clap::Command,
+    path: &[String],
+    op_id_option: &Option<CommandCatalogOption>,
+) -> CommandCatalogEntry {
     let mut options = Vec::new();
     let mut arguments = Vec::new();
     for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
@@ -2035,7 +2044,9 @@ fn catalog_entry(command: &clap::Command, path: &[String]) -> CommandCatalogEntr
 
     let contract = command_contract(path);
     if contract.supports_op_id {
-        options.push(op_id_option());
+        if let Some(op_id_option) = op_id_option {
+            options.push(op_id_option.clone());
+        }
     }
     CommandCatalogEntry {
         path: path.to_vec(),
@@ -2476,22 +2487,6 @@ fn generated_help_option() -> CommandCatalogOption {
         default_values: Vec::new(),
         possible_values: Vec::new(),
         help: Some("Print help".to_string()),
-        required: false,
-        global: true,
-    }
-}
-
-fn op_id_option() -> CommandCatalogOption {
-    CommandCatalogOption {
-        id: "op_id".to_string(),
-        long: Some("op-id".to_string()),
-        aliases: Vec::new(),
-        short: None,
-        value_names: vec!["UUID".to_string()],
-        value_kind: "string".to_string(),
-        default_values: Vec::new(),
-        possible_values: Vec::new(),
-        help: Some("Client-supplied operation id (UUID v4) for idempotent retries.".to_string()),
         required: false,
         global: true,
     }
