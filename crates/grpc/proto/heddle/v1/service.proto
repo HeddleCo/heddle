@@ -89,6 +89,13 @@ service AuthService {
   rpc ListScopeCapabilities(ListScopeCapabilitiesRequest) returns (ListScopeCapabilitiesResponse);
   rpc LinkOAuthIdentity(LinkOAuthIdentityRequest) returns (AccessTokenResponse);
   rpc StoreProviderToken(StoreProviderTokenRequest) returns (StoreProviderTokenResponse);
+  // Verify the single-use token emailed to a signup address. On success
+  // the server marks the signup_email_verification challenge satisfied
+  // and returns a bootstrap-scope Biscuit the client presents on the
+  // subsequent `BeginWebAuthnRegistration` call. Closes the latent
+  // duplicate-username takeover surface named in HeddleCo/weft#120 §1
+  // and tracked by HeddleCo/weft#181.
+  rpc VerifySignupEmail(VerifySignupEmailRequest) returns (VerifySignupEmailResponse);
   rpc AnalyzeExternalDiff(AnalyzeExternalDiffRequest) returns (AnalyzeExternalDiffResponse);
 
   // Public lookup of an invitation's shape (namespace path + role) by id.
@@ -1957,6 +1964,25 @@ message StoreProviderTokenRequest {
 }
 
 message StoreProviderTokenResponse {}
+
+// ── Signup-email verification ───────────────────────────────────────────────
+
+message VerifySignupEmailRequest {
+  // The single-use token emailed to the signup address (opaque to
+  // clients — the server validates this against the pending
+  // signup_email_verification challenge row).
+  string verification_token = 1;
+}
+
+message VerifySignupEmailResponse {
+  // Opaque bootstrap-scope Biscuit the client presents on the
+  // subsequent `BeginWebAuthnRegistration` call. Empty on rejection
+  // (the RPC returns a non-OK status in that case; this field is
+  // populated only on success). Carrying the token as raw bytes lets
+  // future fields (expiry, refresh window) extend the response
+  // additively without breaking the wire format.
+  bytes bootstrap_token = 1;
+}
 
 // ── External diff analysis (for PR review packets) ──────────────────────────
 
