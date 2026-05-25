@@ -98,3 +98,97 @@ fn test_cli_bridge_git_push_to_local_bare_remote() {
 
     assert!(remote_repo.find_reference("refs/heads/main").is_ok());
 }
+
+/// `heddle push --mirror=<git-remote>` performs the primary push to the
+/// heddle remote AND a git-bridge push to the configured mirror, in one
+/// invocation.
+#[test]
+fn test_cli_push_mirror_dual_push_to_weft_and_git_remote() {
+    let source = TempDir::new().unwrap();
+    let weft_target = TempDir::new().unwrap();
+    let git_remote = TempDir::new().unwrap();
+    let mirror_repo = gix::init_bare(git_remote.path()).unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(weft_target.path())).unwrap();
+    std::fs::write(source.path().join("file.txt"), "dual push").unwrap();
+    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
+
+    let weft_path = weft_target.path().to_string_lossy().to_string();
+    let git_path = git_remote.path().to_string_lossy().to_string();
+    let result = heddle(
+        &[
+            "push",
+            &weft_path,
+            "--thread",
+            "main",
+            "--mirror",
+            &git_path,
+        ],
+        Some(source.path()),
+    );
+    assert!(
+        result.is_ok(),
+        "dual push (--mirror) should succeed: {:?}",
+        result.err()
+    );
+
+    // Primary push landed at the heddle target.
+    let threads = heddle(&["thread", "list"], Some(weft_target.path())).unwrap();
+    assert!(
+        threads.contains("main"),
+        "weft target should have main thread after primary push: {}",
+        threads
+    );
+
+    // Mirror push landed at the bare git remote.
+    assert!(
+        mirror_repo.find_reference("refs/heads/main").is_ok(),
+        "git mirror remote should have refs/heads/main after mirror push"
+    );
+}
+
+/// Mirror push failure is reported as a warning but does NOT cause the
+/// primary push to fail. The user still sees the primary push succeed.
+#[test]
+fn test_cli_push_mirror_failure_does_not_abort_primary_push() {
+    let source = TempDir::new().unwrap();
+    let weft_target = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(weft_target.path())).unwrap();
+    std::fs::write(source.path().join("file.txt"), "warn on mirror fail").unwrap();
+    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
+
+    let weft_path = weft_target.path().to_string_lossy().to_string();
+    // Pointing the mirror at a nonexistent path is a failure.
+    let bogus_mirror = source
+        .path()
+        .join("does-not-exist-mirror")
+        .to_string_lossy()
+        .to_string();
+    let result = heddle(
+        &[
+            "push",
+            &weft_path,
+            "--thread",
+            "main",
+            "--mirror",
+            &bogus_mirror,
+        ],
+        Some(source.path()),
+    );
+    assert!(
+        result.is_ok(),
+        "primary push must still succeed even when mirror push fails: {:?}",
+        result.err()
+    );
+
+    // Primary push still landed.
+    let threads = heddle(&["thread", "list"], Some(weft_target.path())).unwrap();
+    assert!(
+        threads.contains("main"),
+        "primary push should land even if mirror push fails: {}",
+        threads
+    );
+}
