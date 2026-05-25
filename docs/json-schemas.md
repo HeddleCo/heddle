@@ -1246,11 +1246,16 @@ verification.
 
 ```json
 {
+  "output_kind": "clone",
+  "action": "clone",
   "status": "cloned",
+  "success": true,
+  "cloned": true,
   "transport": "git",
   "remote": "file:///tmp/source.git",
   "local": "work",
   "branch": "main",
+  "repository_capability": "git-overlay",
   "commits_imported": 3,
   "states_created": 3,
   "verification": {
@@ -2019,8 +2024,9 @@ the same ready envelope.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `status`, `transport`, `remote`, `local`, `branch` | string \| null | required for Git-overlay `clone` | Clone outcome, transport, source, destination, and checked-out branch. |
+| `output_kind`, `action`, `status`, `success`, `cloned`, `transport`, `remote`, `local`, `branch`, `repository_capability` | mixed | required for successful `clone` | Stable clone envelope, transport, source, destination, checked-out branch, and initialized repository capability. |
 | `commits_imported`, `states_created` | int \| null | required for Git-overlay `clone` | Import counts reported after clone verification. |
+| `objects`, `state` | int/string \| null | native/hosted Heddle clone only | Transferred object count and resulting Heddle state when the transport is native Heddle rather than Git-overlay. |
 | `verification` | object \| null | required for Git-overlay `clone` | Post-clone repository verification proof; clean clones report `clone_verification: "verified"`. |
 | `remotes` | array<object> | required for `remote list` | Configured remotes. Empty if none. |
 | `name`, `url`, `source`, `is_default` | string/string/string/bool | required for `remote show` and remote entries | Remote identity and default marker. |

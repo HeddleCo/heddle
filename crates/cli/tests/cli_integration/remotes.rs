@@ -648,7 +648,23 @@ fn test_cli_clone_local_attaches_head_to_cloned_thread() {
 
     let source_path = source.path().to_string_lossy().to_string();
     let clone_path = clone_dir.to_string_lossy().to_string();
-    heddle(&["clone", &source_path, &clone_path], None).expect("local clone succeeds");
+    let clone_json = heddle(
+        &["--output", "json", "clone", &source_path, &clone_path],
+        None,
+    )
+    .expect("local clone succeeds");
+    let clone_output: Value = serde_json::from_str(&clone_json).expect("clone JSON parses");
+    assert_eq!(clone_output["output_kind"], "clone");
+    assert_eq!(clone_output["action"], "clone");
+    assert_eq!(clone_output["status"], "cloned");
+    assert_eq!(clone_output["success"], true);
+    assert_eq!(clone_output["cloned"], true);
+    assert_eq!(clone_output["transport"], "heddle");
+    assert_eq!(clone_output["branch"], "main");
+    assert_eq!(clone_output["repository_capability"], "native");
+    assert!(clone_output["objects"].is_number());
+    assert!(clone_output["state"].is_string());
+    assert_eq!(clone_output["verification"]["status"], "clean");
 
     let head = std::fs::read_to_string(clone_dir.join(".heddle").join("HEAD"))
         .expect("read cloned Heddle HEAD");
