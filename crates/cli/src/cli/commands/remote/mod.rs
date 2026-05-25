@@ -14,10 +14,11 @@ use gix::{bstr::ByteSlice, refs::transaction::PreviousValue};
 use proto::AuthToken;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
+use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    command_catalog::{recommended_action_argv, recommended_action_template},
+    command_catalog::{ActionTemplate, recommended_action_argv, recommended_action_template},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::ensure_current_state,
 };
@@ -84,6 +85,87 @@ pub(crate) struct GitOverlayConfiguredRemote {
     url: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct PushOutput {
+    output_kind: &'static str,
+    action: &'static str,
+    status: &'static str,
+    success: bool,
+    pushed: bool,
+    changed: bool,
+    transport: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push_scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ref_scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_notes_ref: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_notes_visibility_warning: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_tracking_remote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_remote_configured: Option<GitRemoteConfiguredOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git_upstream_configured: Option<GitUpstreamConfiguredOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags_included: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objects: Option<usize>,
+    next_action: Option<String>,
+    next_action_argv: Option<Vec<String>>,
+    next_action_template: Option<ActionTemplate>,
+    recommended_action: Option<String>,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<ActionTemplate>,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GitRemoteConfiguredOutput {
+    name: String,
+    url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GitUpstreamConfiguredOutput {
+    branch: String,
+    remote: String,
+}
+
+#[derive(Debug, Clone)]
+struct PushActionFields {
+    action: Option<String>,
+    argv: Option<Vec<String>>,
+    template: Option<ActionTemplate>,
+}
+
+fn push_action_fields(trust: &RepositoryVerificationState) -> PushActionFields {
+    let recommended_action = trust.recommended_action.trim();
+    if recommended_action.is_empty() {
+        return PushActionFields {
+            action: None,
+            argv: None,
+            template: None,
+        };
+    }
+
+    PushActionFields {
+        action: Some(trust.recommended_action.clone()),
+        argv: recommended_action_argv(&trust.recommended_action)
+            .ok()
+            .flatten(),
+        template: recommended_action_template(&trust.recommended_action),
+    }
+}
+
 /// Execute push command.
 pub async fn cmd_push(
     cli: &Cli,
@@ -128,53 +210,14 @@ pub async fn cmd_push(
         let (remote_name, scope, current_thread, tracking_refresh, trust) =
             push_git_overlay_refs(&repo, remote.as_deref(), all_threads)?;
         if should_output_json(cli, Some(repo.config())) {
-            let action = action_value(&trust);
-            let configured_remote = tracking_refresh
-                .as_ref()
-                .and_then(|refresh| refresh.configured_remote.as_ref());
-            println!(
-                "{}",
-                serde_json::json!({
-                    "output_kind": "push",
-                    "status": "pushed",
-                    "success": true,
-                    "pushed": true,
-                    "changed": true,
-                    "transport": "git",
-                    "remote": remote_name,
-                    "push_scope": match scope {
-                        GitPushScope::CurrentThread => "current_thread",
-                        GitPushScope::AllThreads => "all_threads",
-                    },
-                    "ref_scope": match scope {
-                        GitPushScope::CurrentThread => "branch_and_heddle_notes",
-                        GitPushScope::AllThreads => "all_threads_tags_and_heddle_notes",
-                    },
-                    "git_notes_ref": "refs/notes/heddle",
-                    "git_notes_visibility_warning": "ordinary `git log --all` may show Heddle metadata commits from refs/notes/heddle",
-                    "git_tracking_remote": tracking_refresh.as_ref().map(|refresh| refresh.remote_name.as_str()),
-                    "git_remote_configured": configured_remote.map(|remote| serde_json::json!({
-                        "name": remote.name.as_str(),
-                        "url": remote.url.as_str(),
-                    })),
-                    "git_upstream_configured": tracking_refresh
-                        .as_ref()
-                        .and_then(|refresh| refresh.upstream_branch.as_ref())
-                        .map(|branch| serde_json::json!({
-                            "branch": branch,
-                            "remote": tracking_refresh.as_ref().map(|refresh| refresh.remote_name.as_str()).unwrap_or("origin"),
-                        })),
-                    "tags_included": matches!(scope, GitPushScope::AllThreads),
-                    "thread": current_thread,
-                    "next_action": action,
-                    "next_action_argv": action_argv_value(&trust),
-                    "next_action_template": action_template_value(&trust),
-                    "recommended_action": action_value(&trust),
-                    "recommended_action_argv": action_argv_value(&trust),
-                    "recommended_action_template": action_template_value(&trust),
-                    "verification": trust,
-                })
+            let output = git_overlay_push_output(
+                remote_name,
+                scope,
+                current_thread,
+                tracking_refresh,
+                trust,
             );
+            crate::cli::render::write_json_stdout(&output)?;
         } else {
             println!(
                 "{} pushed {} to {} ({})",
@@ -336,6 +379,107 @@ pub async fn cmd_push(
     }
 
     Ok(())
+}
+
+fn git_overlay_push_output(
+    remote_name: String,
+    scope: GitPushScope,
+    current_thread: Option<String>,
+    tracking_refresh: Option<GitOverlayTrackingRefresh>,
+    trust: RepositoryVerificationState,
+) -> PushOutput {
+    let action = push_action_fields(&trust);
+    let tracking_remote = tracking_refresh
+        .as_ref()
+        .map(|refresh| refresh.remote_name.clone());
+    let configured_remote = tracking_refresh
+        .as_ref()
+        .and_then(|refresh| refresh.configured_remote.as_ref())
+        .map(|remote| GitRemoteConfiguredOutput {
+            name: remote.name.clone(),
+            url: remote.url.clone(),
+        });
+    let upstream_configured = tracking_refresh
+        .as_ref()
+        .and_then(|refresh| refresh.upstream_branch.as_ref())
+        .map(|branch| GitUpstreamConfiguredOutput {
+            branch: branch.clone(),
+            remote: tracking_remote
+                .clone()
+                .unwrap_or_else(|| "origin".to_string()),
+        });
+    PushOutput {
+        output_kind: "push",
+        action: "push",
+        status: "pushed",
+        success: true,
+        pushed: true,
+        changed: true,
+        transport: "git",
+        remote: Some(remote_name),
+        push_scope: Some(match scope {
+            GitPushScope::CurrentThread => "current_thread",
+            GitPushScope::AllThreads => "all_threads",
+        }),
+        ref_scope: Some(match scope {
+            GitPushScope::CurrentThread => "branch_and_heddle_notes",
+            GitPushScope::AllThreads => "all_threads_tags_and_heddle_notes",
+        }),
+        git_notes_ref: Some("refs/notes/heddle"),
+        git_notes_visibility_warning: Some(
+            "ordinary `git log --all` may show Heddle metadata commits from refs/notes/heddle",
+        ),
+        git_tracking_remote: tracking_remote,
+        git_remote_configured: configured_remote,
+        git_upstream_configured: upstream_configured,
+        tags_included: Some(matches!(scope, GitPushScope::AllThreads)),
+        thread: current_thread,
+        state: None,
+        objects: None,
+        next_action: action.action.clone(),
+        next_action_argv: action.argv.clone(),
+        next_action_template: action.template.clone(),
+        recommended_action: action.action,
+        recommended_action_argv: action.argv,
+        recommended_action_template: action.template,
+        trust,
+    }
+}
+
+fn heddle_push_output(
+    state: Option<String>,
+    objects: Option<usize>,
+    trust: RepositoryVerificationState,
+) -> PushOutput {
+    let action = push_action_fields(&trust);
+    PushOutput {
+        output_kind: "push",
+        action: "push",
+        status: "pushed",
+        success: true,
+        pushed: true,
+        changed: true,
+        transport: "heddle",
+        remote: None,
+        push_scope: None,
+        ref_scope: None,
+        git_notes_ref: None,
+        git_notes_visibility_warning: None,
+        git_tracking_remote: None,
+        git_remote_configured: None,
+        git_upstream_configured: None,
+        tags_included: None,
+        thread: None,
+        state,
+        objects,
+        next_action: action.action.clone(),
+        next_action_argv: action.argv.clone(),
+        next_action_template: action.template.clone(),
+        recommended_action: action.action,
+        recommended_action_argv: action.argv,
+        recommended_action_template: action.template,
+        trust,
+    }
 }
 
 fn native_heddle_local_push_target(
@@ -896,27 +1040,8 @@ async fn push_local(
 
     if should_output_json(cli, Some(repo.config())) {
         let trust = build_repository_verification_state(repo);
-        let action = action_value(&trust);
-        println!(
-            "{}",
-            serde_json::json!({
-                "output_kind": "push",
-                "status": "pushed",
-                "success": true,
-                "pushed": true,
-                "changed": true,
-                "transport": "heddle",
-                "state": state_id.to_string(),
-                "objects": objects_copied,
-                "next_action": action,
-                "next_action_argv": action_argv_value(&trust),
-                "next_action_template": action_template_value(&trust),
-                "recommended_action": action_value(&trust),
-                "recommended_action_argv": action_argv_value(&trust),
-                "recommended_action_template": action_template_value(&trust),
-                "verification": trust,
-            })
-        );
+        let output = heddle_push_output(Some(state_id.to_string()), Some(objects_copied), trust);
+        crate::cli::render::write_json_stdout(&output)?;
     } else {
         println!(
             "{} pushed {} to {} ({})",
@@ -969,26 +1094,8 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
     if result.success {
         if should_output_json(options.cli, Some(repo.config())) {
             let trust = build_repository_verification_state(repo);
-            let action = action_value(&trust);
-            println!(
-                "{}",
-                serde_json::json!({
-                    "output_kind": "push",
-                    "status": "pushed",
-                    "success": true,
-                    "pushed": true,
-                    "changed": true,
-                    "transport": "heddle",
-                    "state": result.new_state.map(|s| s.to_string()).unwrap_or_default(),
-                    "next_action": action,
-                    "next_action_argv": action_argv_value(&trust),
-                    "next_action_template": action_template_value(&trust),
-                    "recommended_action": action_value(&trust),
-                    "recommended_action_argv": action_argv_value(&trust),
-                    "recommended_action_template": action_template_value(&trust),
-                    "verification": trust,
-                })
-            );
+            let output = heddle_push_output(result.new_state.map(|s| s.to_string()), None, trust);
+            crate::cli::render::write_json_stdout(&output)?;
         } else {
             println!(
                 "{} pushed to {}",
@@ -1028,35 +1135,6 @@ fn network_push_failed_advice(track_name: &str, error: &str) -> RecoveryAdvice {
         primary_command.clone(),
         vec![primary_command, "heddle verify".to_string()],
     )
-}
-
-fn action_value(trust: &RepositoryVerificationState) -> serde_json::Value {
-    if trust.recommended_action.trim().is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::String(trust.recommended_action.clone())
-    }
-}
-
-fn action_argv_value(trust: &RepositoryVerificationState) -> serde_json::Value {
-    trust
-        .recommended_action
-        .trim()
-        .is_empty()
-        .then_some(serde_json::Value::Null)
-        .unwrap_or_else(|| {
-            recommended_action_argv(&trust.recommended_action)
-                .ok()
-                .flatten()
-                .map(serde_json::Value::from)
-                .unwrap_or(serde_json::Value::Null)
-        })
-}
-
-fn action_template_value(trust: &RepositoryVerificationState) -> serde_json::Value {
-    recommended_action_template(&trust.recommended_action)
-        .and_then(|template| serde_json::to_value(template).ok())
-        .unwrap_or(serde_json::Value::Null)
 }
 
 #[cfg(feature = "client")]

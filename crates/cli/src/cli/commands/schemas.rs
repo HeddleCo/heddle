@@ -1791,6 +1791,7 @@ pub struct PullSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PushSchema {
     pub output_kind: Option<String>,
+    pub action: Option<String>,
     pub status: Option<String>,
     pub pushed: Option<bool>,
     pub changed: Option<bool>,
@@ -1801,6 +1802,16 @@ pub struct PushSchema {
     pub push_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ref_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_notes_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_notes_visibility_warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_tracking_remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_remote_configured: Option<GitRemoteConfiguredSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_upstream_configured: Option<GitUpstreamConfiguredSchema>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags_included: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1815,6 +1826,18 @@ pub struct PushSchema {
     pub recommended_action_template: Option<ActionTemplateSchema>,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GitRemoteConfiguredSchema {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GitUpstreamConfiguredSchema {
+    pub branch: String,
+    pub remote: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

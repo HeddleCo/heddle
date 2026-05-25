@@ -1727,6 +1727,40 @@ fn test_cli_git_overlay_explicit_path_push_discloses_configured_git_tracking_rem
 }
 
 #[test]
+fn test_cli_git_overlay_explicit_path_push_json_reports_configured_git_tracking_remote() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    gix::init_bare(&origin).expect("init bare origin");
+    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    std::fs::create_dir_all(&work).unwrap();
+    git_ok(&["init", "-b", "main"], &work);
+    git_ok(&["config", "user.name", "Heddle Test"], &work);
+    git_ok(&["config", "user.email", "heddle@example.com"], &work);
+    std::fs::write(work.join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], &work);
+    git_ok(&["commit", "-m", "seed"], &work);
+
+    heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt seeded Git repo");
+    std::fs::write(work.join("README.md"), "seed\nlocal heddle\n").unwrap();
+    heddle(&["commit", "-m", "local heddle"], Some(&work)).expect("heddle commit succeeds");
+
+    let origin_arg = origin.to_str().expect("origin path utf8");
+    let push_json = heddle(&["--output", "json", "push", origin_arg], Some(&work))
+        .expect("explicit path JSON push succeeds");
+    let push: Value = serde_json::from_str(&push_json).expect("push JSON parses");
+    assert_eq!(push["action"], "push");
+    assert_eq!(push["remote"], origin_arg);
+    assert_eq!(push["git_tracking_remote"], "origin");
+    assert_eq!(push["git_remote_configured"]["name"], "origin");
+    assert_eq!(push["git_remote_configured"]["url"], origin_arg);
+    assert_eq!(push["git_upstream_configured"]["branch"], "main");
+    assert_eq!(push["git_upstream_configured"]["remote"], "origin");
+    assert_eq!(push["verification"]["status"], "clean");
+}
+
+#[test]
 fn test_cli_raw_git_clone_adopt_fetches_notes_before_import() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
