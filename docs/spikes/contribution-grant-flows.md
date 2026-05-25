@@ -215,10 +215,40 @@ These two cases collapse onto the existing split:
 
 - Handle / known-user → `CreateGrant` directly (the substrate RPC
   exists; idempotent via `client_operation_id`).
-- Email / not-yet-a-user → `CreateInvitation`
-  (`service.proto:37`, body at proto:607-613). The existing
-  `Invitation` row carries `email`, `namespace_path`, `role`,
-  `expires_at` — accepted_at/accepted_by track the redeem step.
+- Email / not-yet-a-user → invitation. **The existing
+  `CreateInvitation` (`service.proto:37`, body at proto:607-613) is
+  namespace-scoped only — it carries `namespace_path`, not a repo
+  path.** A maintainer triggering invite from a repo-settings page
+  must not have their invite silently widened to the whole parent
+  namespace; that is a privilege blunder. This spike therefore extends
+  `CreateInvitationRequest` to take a `GrantTargetRef target` oneof in
+  place of the bare `namespace_path` field (same shape `CreateGrant`
+  uses at proto:501-506), so the invite redeem path mints a grant on
+  the same target the maintainer chose:
+
+  ```proto
+  message CreateInvitationRequest {
+    string email = 1;
+    GrantTargetRef target = 2;   // CHANGED: was string namespace_path
+    HostedRole role = 3;
+    google.protobuf.Timestamp expires_at = 4;
+    map<string, string> metadata = 5;
+    string client_operation_id = 15;
+  }
+  ```
+
+  The `Invitation` row gains `target_kind` + `target_path` columns
+  (migration listed in §5); the redeem handler reads them and calls
+  the same code path `CreateGrant` uses for the matching target kind.
+  Justification for extending the existing RPC rather than adding a
+  parallel `CreateRepoInvitation`: the wire shape is already
+  `(email, target, role, expires_at)` and the redeem path is shared;
+  splitting the RPC duplicates both handler and persistence with no
+  semantic gain. The field swap is wire-incompatible with
+  heddle-grpc 0.7 — this is one of the changes motivating the
+  0.7 → 0.8 minor bump in §4 (additive on new RPCs, breaking on
+  this one field; consumers are pinned to the workspace so the bump
+  is coordinated).
 
 **Picking handle-vs-email.** Recommend offering **both** in the UI
 behind a single field that auto-detects (regex on `@`). Justification:
@@ -251,16 +281,60 @@ that picks the right RPC.
 **Trigger.** A signed-in user (anon-promoted or signed-up directly)
 browses to a public repo or namespace they don't yet have a role on.
 The repo settings / contributor surface shows a "Request access"
-affordance instead of the editor — same trigger condition the
-existing handler gate would use, surfaced as a UI hint by
-`ListGrants(resource)` returning an empty set for the caller.
+affordance instead of the editor.
+
+**Trigger probe — new RPC.** `ListGrants` cannot be the probe here:
+it's gated on `can_manage_namespace` / `can_manage_repository`
+(`user.rs:541-547`), i.e. admin-only. A normal user calling it on a
+resource they have no role on would be rejected, which is the
+opposite of the signal the UI needs. The spike adds a small
+self-introspection RPC any signed-in user can call:
+
+```proto
+message GetMyEffectiveRoleRequest {
+  GrantTargetRef target = 1;
+}
+message GetMyEffectiveRoleResponse {
+  // Unset when the caller has no effective role on `target`
+  // (direct or inherited). Present otherwise; equals the
+  // `effective_role_for_repository` walk result.
+  optional HostedRole effective_role = 1;
+  // When `effective_role` is set, names the resource the grant is
+  // actually stored on (direct = `target`, inherited = ancestor ns).
+  GrantTargetRef source_resource = 2;
+}
+```
+
+Gating: `Subject::User` only (anon rejected with
+`failed_precondition`). No `can_manage_*` gate — the caller asks
+about themselves, no information leak beyond what
+`effective_role_for_repository` already enforces (target must be
+visible; reject `not_found` on private-and-not-already-visible
+resources, same discipline as `enforce.rs:9-12`). The UI hint is
+"effective_role is unset → show Request access; effective_role
+is set → show the editor".
+
+Alternative considered + rejected: keep the `ListGrants` gate but
+admit a self-filtered variant (`ListGrants(resource, only_self=true)`
+callable by any signed-in user). Weirder shape: it conflates
+"who can manage" with "what is my role", and the natural answer
+type is a single role / not a list. The dedicated
+`GetMyEffectiveRole` RPC is the clearer primitive.
 
 **Wire shape — new RPC.** No existing RPC covers this flow. New:
 
 ```proto
+enum RoleGrantRequestStatus {
+  ROLE_GRANT_REQUEST_STATUS_UNSPECIFIED = 0;
+  ROLE_GRANT_REQUEST_STATUS_PENDING = 1;
+  ROLE_GRANT_REQUEST_STATUS_APPROVED = 2;
+  ROLE_GRANT_REQUEST_STATUS_DENIED = 3;
+  ROLE_GRANT_REQUEST_STATUS_EXPIRED = 4;
+}
+
 message RequestRoleGrantRequest {
   GrantTargetRef target = 1;
-  HostedRole requested_role = 2;
+  HostedRole requested_role = 2;   // MUST be != HOSTED_ROLE_UNSPECIFIED
   string justification = 3;        // optional, max 2000 chars; UI-rendered
   string client_operation_id = 15; // idempotency
 }
@@ -273,7 +347,7 @@ message RoleGrantRequest {  // the persisted entity
   string justification = 5;
   google.protobuf.Timestamp created_at = 6;
   google.protobuf.Timestamp expires_at = 7; // server-set, e.g. +14d
-  string status = 8;               // "pending" | "approved" | "denied" | "expired"
+  RoleGrantRequestStatus status = 8;
   google.protobuf.Timestamp responded_at = 9;
   string responder_subject = 10;
   string response_message = 11;
@@ -282,10 +356,38 @@ message RoleGrantRequest {  // the persisted entity
 message RequestRoleGrantResponse { RoleGrantRequest request = 1; }
 ```
 
-**Persistence.** New table `pending_grant_requests` keyed
-`(requester_subject, target_kind, target_path)` UNIQUE — a
-requester can have at most one pending request per resource. Status
-flips to `expired` on a background sweep after `expires_at`.
+**Validation.** The handler rejects with
+`Status::invalid_argument` if `requested_role ==
+HOSTED_ROLE_UNSPECIFIED`. proto3 deserialises omitted enum fields
+as the zero variant, so without an explicit check an empty
+request would be accepted as an ambiguous-role request and then
+either get clamped (silently inventing a role the user didn't ask
+for) or written through as zero (a no-permission grant on
+approval, depending on substrate). The lifecycle enum is given
+its own type rather than a free string so wire drift / typos are
+caught at compile time across weft, heddle-grpc, and tapestry —
+the same discipline the rest of the proto follows.
+
+**Persistence.** New table `pending_grant_requests`. The natural
+"one pending request per (requester, resource)" invariant is
+enforced by a **partial unique index** rather than a full
+`UNIQUE` constraint:
+
+```sql
+CREATE UNIQUE INDEX pending_grant_requests_one_per_target
+  ON pending_grant_requests (requester_subject, target_kind, target_path)
+  WHERE status = 'pending';
+```
+
+A full `UNIQUE(requester_subject, target_kind, target_path)` would
+make denied/expired rows permanent blockers — once denied, the
+requester could never re-request, which conflicts with the
+"refuse a new request within N days of the most recent denied
+request" policy below (the policy implies a re-request is
+possible after the cool-down). Denied / approved / expired rows
+stay in the table for history + the cool-down lookup but do not
+participate in the uniqueness check. Status flips to `expired` on
+a background sweep after `expires_at`.
 
 **Gating.**
 
@@ -304,10 +406,12 @@ flips to `expired` on a background sweep after `expires_at`.
 - Per-IP via the existing `PerIpRateLimitLayer`
   (already applied to anon-admitted RPCs; extend the limit class to
   cover this RPC).
-- Per-requester-per-resource: the `pending_grant_requests` UNIQUE
-  index makes a second concurrent request a no-op; on top of that,
-  refuse a new request within N days of the *most recent denied*
-  request for the same `(requester, target)` pair (N=14 suggested).
+- Per-requester-per-resource: the partial-unique pending-only
+  index above makes a second concurrent request fail at the DB
+  level; on top of that, the handler refuses a new request within
+  N days of the *most recent denied* request for the same
+  `(requester, target)` pair (N=14 suggested) by querying the
+  archived denied rows.
 
 **Approval/denial.** Two new RPCs:
 
@@ -323,9 +427,13 @@ message ListPendingGrantRequestsResponse {
 message RespondToGrantRequestRequest {
   string request_id = 1;
   bool approve = 2;
-  HostedRole granted_role = 3;     // only read if approve=true; may be
-                                   // lower than requested
-  google.protobuf.Timestamp expires_at = 4; // optional grant expiry
+  HostedRole granted_role = 3;     // when approve=true, MUST be
+                                   // != HOSTED_ROLE_UNSPECIFIED; may be
+                                   // lower than requested. Ignored when
+                                   // approve=false.
+  google.protobuf.Timestamp expires_at = 4; // optional grant expiry;
+                                   // requires the HostedGrant schema
+                                   // change below
   string message = 5;              // optional, surfaced to requester
   string client_operation_id = 15;
 }
@@ -335,10 +443,41 @@ message RespondToGrantRequestResponse {
 }
 ```
 
+**Validation.** When `approve == true`, the handler rejects with
+`Status::invalid_argument` if `granted_role ==
+HOSTED_ROLE_UNSPECIFIED`. Same proto3-zero-enum reasoning as the
+request side: an omitted `granted_role` would otherwise silently
+write a zero-role grant on approval, which is either no-permission
+(confusing) or substrate-undefined (worse). Explicit reject.
+
+**Approval grant expiry — schema change.** The existing
+`HostedGrant` shape (proto:501-…) has no `expires_at` field, and
+the `grants` table the substrate writes through (`CreateGrant`
+path in `user.rs:489-551`) has no expiry column. The `expires_at`
+parameter on `RespondToGrantRequest` therefore requires a
+coordinated schema + proto change before it can be honoured:
+
+- Migration: `ALTER TABLE grants ADD COLUMN expires_at TIMESTAMPTZ NULL`
+  (NULL = no expiry, preserving today's semantics for existing rows).
+- Proto: add `google.protobuf.Timestamp expires_at` to `HostedGrant`
+  (additive field, optional / NULL on existing direct-grant rows).
+- A background sweep that revokes (deletes / archives) grants past
+  `expires_at` — same sweep cadence as the
+  `pending_grant_requests` expiry sweep.
+
+These three items are listed in §5 as sub-impl issues alongside the
+new RPCs. Until they ship, `RespondToGrantRequest` treats a
+non-NULL `expires_at` on the response as a no-op + warning (the
+field is accepted on the wire so the proto bump can land
+independently, but the substrate ignores it until the migration is
+in place). The spike's preference is to ship both together as one
+atomic sub-impl batch so the field never has a no-op window.
+
 `RespondToGrantRequest` on `approve=true` runs as a single
 transaction: insert the row into the existing `grants` table (same
-write path as `CreateGrant`), mark the request `approved`, return
-both. On `approve=false`, just update the request row.
+write path as `CreateGrant`, plus the new `expires_at` column),
+mark the request `approved`, return both. On `approve=false`, just
+update the request row.
 
 **Gating for the maintainer side.** `ListPendingGrantRequests` and
 `RespondToGrantRequest` both require `can_manage_namespace`
@@ -424,12 +563,21 @@ Summary of the new wire surface introduced by this spike:
 | RPC | Status | Notes |
 |---|---|---|
 | `CreateGrant` | exists (proto:25) | reused by §3.1 |
-| `CreateInvitation` | exists (proto:37) | reused by §3.1 (email path) |
+| `CreateInvitation` | extend | §3.1 — swap `namespace_path` for `GrantTargetRef target` so repo-scoped invites stay repo-scoped (wire-breaking on the one field; covered by the 0.7 → 0.8 bump) |
 | `ListGrants` | extend | add `include_inherited` field + `source_resource` on `HostedGrant` (§3.3) |
-| `RequestRoleGrant` | **new** | §3.2 — user asks for access |
+| `GetMyEffectiveRole` | **new** | §3.2 — any signed-in user; trigger for "Request access" UI without needing the admin-gated `ListGrants` |
+| `RequestRoleGrant` | **new** | §3.2 — user asks for access; `requested_role != UNSPECIFIED` enforced |
 | `ListPendingGrantRequests` | **new** | §3.2 — maintainer inbox |
-| `RespondToGrantRequest` | **new** | §3.2 — approve/deny |
+| `RespondToGrantRequest` | **new** | §3.2 — approve/deny; `granted_role != UNSPECIFIED` enforced when `approve=true` |
 | `DeleteGrant` | exists (proto:28) | revoke is already covered |
+
+**Additional message-level changes:**
+
+- `RoleGrantRequest.status` is typed as the new
+  `RoleGrantRequestStatus` enum, not a free string (§3.2).
+- `HostedGrant` gains `google.protobuf.Timestamp expires_at`
+  (additive, NULL-on-existing) to support temporary grants minted
+  via `RespondToGrantRequest` (§3.2).
 
 **heddle-grpc proto bump:** 0.7 → 0.8 (semver-minor: additive RPCs +
 additive message fields, no breaks). Three consumers track this
@@ -437,9 +585,17 @@ proto — heddle, weft, tapestry — and each needs a coordinated
 version bump and codegen refresh, same workflow as the
 0.6 → 0.7 bump in heddle#226 / weft#228.
 
-**Database migrations (weft):** one new table
-`pending_grant_requests` plus the `UNIQUE(requester, target)`
-constraint and a TTL index supporting the expiry sweep.
+**Database migrations (weft):**
+
+- New table `pending_grant_requests` with the partial-unique
+  `WHERE status = 'pending'` index from §3.2 and a TTL index
+  supporting the expiry sweep.
+- `ALTER TABLE invitations` adding `target_kind` + `target_path`
+  columns (and a back-fill that maps existing rows'
+  `namespace_path` onto `(target_kind='namespace', target_path=…)`).
+- `ALTER TABLE grants ADD COLUMN expires_at TIMESTAMPTZ NULL` to
+  back the new `HostedGrant.expires_at` field and the temporary-
+  grant path in `RespondToGrantRequest`.
 
 ---
 
@@ -447,10 +603,22 @@ constraint and a TTL index supporting the expiry sweep.
 
 (Filed after this spike merges — not in this PR.)
 
-- **weft:** implement `RequestRoleGrant`, `ListPendingGrantRequests`,
-  `RespondToGrantRequest` + the `pending_grant_requests` table.
-  Includes the per-IP + per-requester anti-spam rate-limit hookup
-  (extend `PerIpRateLimitLayer`'s limit class).
+- **weft:** implement `GetMyEffectiveRole`, `RequestRoleGrant`,
+  `ListPendingGrantRequests`, `RespondToGrantRequest` + the
+  `pending_grant_requests` table (with the partial-unique
+  pending-only index). Includes the per-IP + per-requester
+  anti-spam rate-limit hookup (extend `PerIpRateLimitLayer`'s
+  limit class) and the `requested_role` / `granted_role`
+  `UNSPECIFIED`-rejection validation.
+- **weft:** extend `CreateInvitation` to accept
+  `GrantTargetRef target`; migrate `invitations` table; update the
+  redeem handler to mint a grant on the stored target kind.
+- **weft:** add `expires_at` column to `grants`, populate
+  `HostedGrant.expires_at` on reads, honour it on
+  `RespondToGrantRequest` writes, and add a background sweep that
+  revokes expired grants. Land in lockstep with
+  `RespondToGrantRequest` so the wire field never has a no-op
+  window.
 - **weft:** extend `ListGrants` with `include_inherited` +
   populate `HostedGrant.source_resource` on the inheritance walk.
 - **weft:** background sweep that flips `pending_grant_requests`
