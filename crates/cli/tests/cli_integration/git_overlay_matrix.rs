@@ -1366,6 +1366,19 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
             && status_text.contains("No unsaved changes, worktree clean"),
         "ready thread status should distinguish captured thread changes from unsaved worktree edits: {status_text}"
     );
+    let status_json = json(&thread_path, &["--output", "json", "status"]);
+    assert_eq!(
+        status_json["changed_path_count"], 1,
+        "aggregate status count should still include captured thread delta: {status_json}"
+    );
+    assert_eq!(
+        status_json["worktree_changed_path_count"], 0,
+        "ready thread status should expose clean worktree count separately: {status_json}"
+    );
+    assert_eq!(
+        status_json["thread_changed_path_count"], 1,
+        "ready thread status should expose captured thread delta separately: {status_json}"
+    );
 
     let thread_show_before_preview = json(
         temp.path(),

@@ -159,6 +159,9 @@ pub async fn cmd_push(
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
         return Err(anyhow!(RecoveryAdvice::remote_not_configured("push")));
     }
+    if let Some(remote_name) = remote.as_deref() {
+        ensure_remote_arg_resolves(&repo, remote_name)?;
+    }
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         let default_remote_name = if remote.is_none() {
             resolved_default_remote_name(&repo)?
@@ -473,6 +476,31 @@ fn heddle_push_output(
         recommended_action_template: action.template,
         trust,
     }
+}
+
+fn ensure_remote_arg_resolves(repo: &Repository, remote_arg: &str) -> Result<()> {
+    if remote_arg.trim().is_empty()
+        || RemoteTarget::parse(remote_arg).is_ok()
+        || looks_like_remote_location(remote_arg)
+        || looks_like_git_remote_url(remote_arg)
+    {
+        return Ok(());
+    }
+    if RemoteConfig::open(repo)
+        .map_err(anyhow::Error::msg)?
+        .get(remote_arg)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && git_remote_names(repo.root())?
+            .iter()
+            .any(|name| name == remote_arg)
+    {
+        return Ok(());
+    }
+    Err(anyhow!(RecoveryAdvice::remote_not_found(remote_arg)))
 }
 
 fn native_heddle_local_push_target(
