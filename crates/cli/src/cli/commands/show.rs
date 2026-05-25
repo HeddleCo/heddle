@@ -168,8 +168,15 @@ fn render_plain_git_show(
             println!("Git branch: {}", style::bold(branch));
         }
         println!("State: unavailable until this Git repo is initialized and imported");
-        print_next_step("heddle init");
-        if let Some(branch) = &probe.git_branch {
+        if probe.trust.recommended_action.is_empty() {
+            print_next_step("heddle init");
+        } else {
+            print_next_step(&probe.trust.recommended_action);
+        }
+        if let Some(branch) = &probe.git_branch
+            && probe.trust.recommended_action
+                != super::git_overlay_health::canonical_adopt_ref_command(branch)
+        {
             println!(
                 "Then: {}",
                 style::bold(&super::git_overlay_health::canonical_adopt_ref_command(

@@ -13,6 +13,7 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    import_progress::ImportProgress,
 };
 use crate::{
     bridge::{
@@ -64,6 +65,14 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         );
     }
 
+    let scope = if args.refs.is_empty() {
+        "all local branches and tags".to_string()
+    } else {
+        format!("{} ref(s): {}", args.refs.len(), args.refs.join(", "))
+    };
+    let source_label = repo.root().display().to_string();
+    let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
+    progress.advance("importing commits");
     let mut bridge = GitBridge::new(&repo);
     let _ = bridge.hydrate_checkout_heddle_notes_from_configured_remotes();
     let stats = if args.refs.is_empty() {
@@ -71,6 +80,8 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     } else {
         import_selected_refs(&mut bridge, Some(repo.root()), &args.refs)?
     };
+    progress.advance("writing refs");
+    progress.finish();
     let trust = build_repository_verification_state(&repo);
     let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
     let recommended_action = action_value(&trust);
@@ -235,7 +246,7 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
 
     if output.initialized {
         println!(
-            "{} Heddle adopted the requested Git history",
+            "{} Heddle imported the requested Git history",
             style::ok_marker()
         );
     } else if output.already_in_sync {
@@ -258,7 +269,7 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
     } else {
         output.refs.join(", ")
     };
-    println!("  {}", style::field("Adopted", &scope));
+    println!("  {}", style::field("Imported refs", &scope));
     println!(
         "  {}",
         style::field(
@@ -312,13 +323,13 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
     if output.trust.worktree_state == "clean" {
         println!(
             "Git worktree: {}",
-            style::accent("stays clean; adoption wrote .heddle metadata and imported Git history")
+            style::accent("stays clean; import wrote .heddle metadata and imported Git history")
         );
     } else {
         println!(
             "Git worktree: {}",
             style::warn(
-                "left existing changes untouched; adoption wrote .heddle metadata and imported Git history"
+                "left existing changes untouched; import wrote .heddle metadata and imported Git history"
             )
         );
     }

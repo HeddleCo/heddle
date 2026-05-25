@@ -152,6 +152,7 @@ struct MergeOutputInput<'a> {
     conflicts: Option<Vec<String>>,
     semantic_result: Option<String>,
     conflict_count: Option<usize>,
+    changed_paths: Option<Vec<String>>,
     preview_summary: Vec<String>,
     message: String,
     renames: Vec<RenameEntry>,
@@ -521,6 +522,7 @@ pub(crate) fn merge_thread_into_current(
             conflicts: Some(vec![]),
             semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
             conflict_count: Some(0),
+            changed_paths: Some(Vec::new()),
             preview_summary: vec![],
             message: "Already up to date".to_string(),
             renames: vec![],
@@ -540,11 +542,7 @@ pub(crate) fn merge_thread_into_current(
         // Use the parent↔thread-tip diff as the source of truth for
         // which paths the merge writes — see `merge_changed_paths` for
         // why thread.changed_paths can't be relied on here.
-        let ff_paths: Vec<String> = if git_commit {
-            merge_changed_paths(repo, &current_state.change_id, &merge_target_id)?
-        } else {
-            thread_paths(&thread)
-        };
+        let ff_paths = merge_changed_paths(repo, &current_state.change_id, &merge_target_id)?;
 
         // FF: current..target IS the change set that lands. Compute once
         // and reuse for any per-branch return below.
@@ -574,6 +572,7 @@ pub(crate) fn merge_thread_into_current(
                 conflicts: Some(vec![]),
                 semantic_result: Some("fast_forward".to_string()),
                 conflict_count: Some(0),
+                changed_paths: Some(ff_paths.clone()),
                 preview_summary,
                 message: "Fast-forward blocked: --git-commit precondition failed".to_string(),
                 renames: ff_renames,
@@ -705,14 +704,7 @@ pub(crate) fn merge_thread_into_current(
                 files: ff_paths.clone(),
             });
         }
-        let output_changed_paths = {
-            let paths = thread_paths(&thread);
-            if paths.is_empty() {
-                ff_diff.as_ref().map(diff_changed_paths).unwrap_or(paths)
-            } else {
-                paths
-            }
-        };
+        let output_changed_paths = ff_paths.clone();
         let output_changed_path_count = output_changed_paths.len();
 
         let recommended_action = if preview {
@@ -723,6 +715,10 @@ pub(crate) fn merge_thread_into_current(
                 if let Some(report) = preview_report.as_ref()
                     && !report.blockers.is_empty()
                     && !report.recommended_action.trim().is_empty()
+                    && report
+                        .blockers
+                        .iter()
+                        .any(|blocker| is_real_merge_blocker(blocker))
                 {
                     Some(report.recommended_action.clone())
                 } else {
@@ -881,19 +877,17 @@ pub(crate) fn merge_thread_into_current(
         // `current..merge_target`. The source-tip diff can show
         // deletions of files that only exist on the destination branch
         // even though a real 3-way merge would preserve them.
-        let preview_diff = if with_diff {
-            Some(compute_tree_diff(
-                repo,
-                &current_state.change_id,
-                &merge_result.tree,
-                "<merged-preview>",
-                semantic,
-                3,
-            )?)
-        } else {
-            None
-        }
-        .map(|diff| diff_with_known_renames(diff, &rename_entries));
+        let preview_path_diff = compute_tree_diff(
+            repo,
+            &current_state.change_id,
+            &merge_result.tree,
+            "<merged-preview>",
+            with_diff && semantic,
+            if with_diff { 3 } else { 0 },
+        )
+        .map(|diff| diff_with_known_renames(diff, &rename_entries))?;
+        let preview_changed_paths = diff_changed_paths(&preview_path_diff);
+        let preview_diff = with_diff.then_some(preview_path_diff);
         if merge_result.conflicts.is_empty()
             && thread
                 .as_ref()
@@ -910,15 +904,13 @@ pub(crate) fn merge_thread_into_current(
             conflicts: Some(merge_result.conflicts.clone()),
             semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
             conflict_count: Some(merge_plan.relation().conflict_count()),
+            changed_paths: Some(preview_changed_paths.clone()),
             preview_summary,
             message: merge_preview_message(
                 thread.as_ref(),
                 track_name,
                 merge_result.conflicts.len(),
-                preview_diff
-                    .as_ref()
-                    .map(|diff| diff.changed_path_count)
-                    .unwrap_or_default(),
+                preview_changed_paths.len(),
             ),
             renames: rename_entries.clone(),
             directory_renames: dir_rename_entries.clone(),
@@ -959,6 +951,7 @@ pub(crate) fn merge_thread_into_current(
             conflicts: Some(merge_result.conflicts.clone()),
             semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
             conflict_count: Some(merge_plan.relation().conflict_count()),
+            changed_paths: Some(merge_result.conflicts.clone()),
             preview_summary,
             message: "Merged with conflicts".to_string(),
             renames: rename_entries,
@@ -985,6 +978,16 @@ pub(crate) fn merge_thread_into_current(
         // the post-snapshot path. Re-running without `--no-commit` (or
         // running `heddle diff` against the new state) recovers the
         // full payload.
+        let no_commit_path_diff = compute_tree_diff(
+            repo,
+            &current_state.change_id,
+            &merge_result.tree,
+            "<merged-no-commit>",
+            false,
+            0,
+        )
+        .map(|diff| diff_with_known_renames(diff, &rename_entries))?;
+        let no_commit_changed_paths = diff_changed_paths(&no_commit_path_diff);
         let no_commit_diff: Option<DiffOutput> = None;
         return Ok(merge_output_from_report(MergeOutputInput {
             repo,
@@ -993,6 +996,7 @@ pub(crate) fn merge_thread_into_current(
             conflicts: Some(vec![]),
             semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
             conflict_count: Some(merge_plan.relation().conflict_count()),
+            changed_paths: Some(no_commit_changed_paths),
             preview_summary,
             message: "Merge applied (not committed)".to_string(),
             renames: rename_entries,
@@ -1057,6 +1061,7 @@ pub(crate) fn merge_thread_into_current(
             conflicts: Some(vec![]),
             semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
             conflict_count: Some(merge_plan.relation().conflict_count()),
+            changed_paths: Some(Vec::new()),
             preview_summary,
             message: "Merge blocked: git --git-commit precondition failed".to_string(),
             renames: rename_entries,
@@ -1191,8 +1196,16 @@ pub(crate) fn merge_thread_into_current(
     // the change set the user can audit, NOT `current..merge_target`
     // which can include removals of current-branch edits the merge
     // preserved.
-    let committed_diff = diff_for(&current_state.change_id, &new_state.change_id)?
-        .map(|diff| diff_with_known_renames(diff, &rename_entries));
+    let committed_path_diff = compute_state_diff(
+        repo,
+        &current_state.change_id,
+        &new_state.change_id,
+        with_diff && semantic,
+        if with_diff { 3 } else { 0 },
+    )
+    .map(|diff| diff_with_known_renames(diff, &rename_entries))?;
+    let committed_changed_paths = diff_changed_paths(&committed_path_diff);
+    let committed_diff = with_diff.then_some(committed_path_diff);
 
     let final_message = if post_snapshot_git_blockers.is_empty() {
         format!("Merged as {}", new_state.change_id.short())
@@ -1210,6 +1223,7 @@ pub(crate) fn merge_thread_into_current(
         conflicts: Some(vec![]),
         semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
         conflict_count: Some(merge_plan.relation().conflict_count()),
+        changed_paths: Some(committed_changed_paths),
         preview_summary,
         message: final_message,
         renames: rename_entries,
@@ -1275,10 +1289,15 @@ fn merge_preview_message(
     let subject = thread
         .map(|thread| thread.id.as_str())
         .unwrap_or(track_name);
-    let changed_path_count = thread
+    let thread_changed_path_count = thread
         .map(|thread| thread.changed_paths.len())
-        .unwrap_or(diff_changed_path_count)
-        .max(conflict_count);
+        .unwrap_or_default();
+    let changed_path_count = if thread_changed_path_count == 0 {
+        diff_changed_path_count
+    } else {
+        thread_changed_path_count
+    }
+    .max(conflict_count);
     if conflict_count > 0 {
         format!(
             "Would merge {subject} with {conflict_count} conflict(s) across {changed_path_count} changed path(s)"
@@ -1875,7 +1894,9 @@ fn build_thread_preview_report_with_graph(
 fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
     let report_conflicts = input.conflicts.unwrap_or_default();
     let diff_changed_paths = input.diff.as_ref().map(diff_changed_paths);
-    let changed_paths = if let Some(thread) = input.thread.as_ref() {
+    let changed_paths = if let Some(paths) = input.changed_paths {
+        paths
+    } else if let Some(thread) = input.thread.as_ref() {
         let paths = thread.changed_paths.clone();
         if paths.is_empty() {
             diff_changed_paths.unwrap_or(paths)
@@ -2512,15 +2533,14 @@ fn render_merge_output(cli: &Cli, output: MergeOutput) -> Result<()> {
 /// advancing state) versus a non-blocking nudge.
 ///
 /// Real blockers are conflict-shaped strings ("path conflict(s) need
-/// manual resolution", "needs attention before integration"). Items
-/// like "Heavy-impact change …" or "Thread '…' is stale against …"
-/// are advisory: the merge succeeds anyway and the user can act on
-/// them later. Mis-classifying advisory items as blockers causes the
-/// "merge succeeded but status:blocked" contradiction that this
-/// helper exists to prevent.
+/// manual resolution") or explicit policy gates such as heavy-impact
+/// review. Lower-confidence review nudges remain advisory; treating
+/// every "needs attention" string as a blocker causes the "merge
+/// succeeded but status:blocked" contradiction that this helper exists
+/// to prevent.
 fn is_real_merge_blocker(advisory: &str) -> bool {
     let lower = advisory.to_lowercase();
-    lower.contains("path conflict") || lower.contains("needs attention before integration")
+    lower.contains("path conflict") || lower.contains("heavy-impact change")
 }
 
 fn thread_paths(thread: &Option<Thread>) -> Vec<String> {

@@ -18,7 +18,8 @@ use super::{
     super::{
         git_overlay_health::{
             PlainGitVerificationProbe, build_plain_git_verification_probe,
-            build_repository_verification_state, trust_visible_worktree_status,
+            build_repository_verification_state, plain_git_setup_advice,
+            trust_visible_worktree_status,
         },
         history_target::{require_resolved_state, resolve_state_id},
     },
@@ -65,6 +66,9 @@ pub fn cmd_diff(
         && from_is_head_or_default
         && let Some(probe) = build_plain_git_verification_probe(start)?
     {
+        if probe.changes.is_clean() {
+            return Err(anyhow!(plain_git_setup_advice(&probe, "diff", None)));
+        }
         return render_plain_git_head_diff(cli, &probe, stat, name_only);
     }
 

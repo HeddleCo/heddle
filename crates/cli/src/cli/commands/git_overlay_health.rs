@@ -1204,6 +1204,64 @@ pub(crate) fn plain_git_mutation_preflight_advice(
         .map(|probe| plain_git_mutation_advice(&probe, action)))
 }
 
+pub(crate) fn plain_git_setup_advice(
+    probe: &PlainGitVerificationProbe,
+    command: &str,
+    requested_target: Option<&str>,
+) -> RecoveryAdvice {
+    let primary = if probe.trust.recommended_action.is_empty() {
+        "heddle init".to_string()
+    } else {
+        probe.trust.recommended_action.clone()
+    };
+    let mut recovery_commands = probe.trust.recovery_commands.clone();
+    if recovery_commands.is_empty() {
+        recovery_commands.push(primary.clone());
+    }
+    let retry = requested_target
+        .map(|target| format!("heddle {command} {target}"))
+        .unwrap_or_else(|| format!("heddle {command}"));
+    let mut advice = RecoveryAdvice::safety_refusal(
+        "plain_git_not_adopted",
+        "Heddle has not adopted this Git repo",
+        format!("Run `{primary}` to import the current Git branch, then retry `{retry}`."),
+        format!(
+            "plain Git repository at '{}' has no .heddle metadata",
+            probe.root.display()
+        ),
+        format!(
+            "`heddle {command}` needs Heddle history before it can inspect Heddle states without guessing"
+        ),
+        "observe-only command; Heddle metadata, Git refs, index, and worktree files were left unchanged",
+        primary,
+        recovery_commands,
+    );
+    advice.extra_json_fields.insert(
+        "repository_capability".to_string(),
+        serde_json::Value::String("plain-git".to_string()),
+    );
+    advice.extra_json_fields.insert(
+        "storage_model".to_string(),
+        serde_json::Value::String("git".to_string()),
+    );
+    advice.extra_json_fields.insert(
+        "requested_command".to_string(),
+        serde_json::Value::String(command.to_string()),
+    );
+    if let Some(target) = requested_target {
+        advice.extra_json_fields.insert(
+            "requested_target".to_string(),
+            serde_json::Value::String(target.to_string()),
+        );
+    }
+    if let Ok(verification) = serde_json::to_value(&probe.trust) {
+        advice
+            .extra_json_fields
+            .insert("verification".to_string(), verification);
+    }
+    advice
+}
+
 pub(crate) fn git_overlay_mutation_preflight_advice(
     repo: &Repository,
     action: &str,
@@ -2426,6 +2484,17 @@ pub(crate) fn remote_drift_primary_action(repo: &Repository) -> Option<String> {
         .ok()
         .flatten()
         .and_then(|remote| remote_drift_decision(repo, &remote).primary_action)
+}
+
+pub(crate) fn remote_tracking_with_verification_action(
+    mut remote: GitRemoteTrackingStatus,
+    trust: &RepositoryVerificationState,
+) -> GitRemoteTrackingStatus {
+    let remote_status = remote_tracking_status(&remote);
+    if trust.status == remote_status && !trust.recommended_action.trim().is_empty() {
+        remote.next_action = trust.recommended_action.clone();
+    }
+    remote
 }
 
 fn default_remote_name(repo: &Repository) -> Option<String> {

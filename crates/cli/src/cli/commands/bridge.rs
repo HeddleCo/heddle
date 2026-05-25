@@ -2,7 +2,6 @@
 //! Bridge command implementations.
 
 use std::{
-    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,6 +21,7 @@ use super::{
         canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_command,
         canonical_bridge_reconcile_ref_preview_command, serialize_empty_action_as_null,
     },
+    import_progress::ImportProgress,
     remote::resolve_default_remote_name,
 };
 use crate::{
@@ -138,70 +138,6 @@ impl Drop for ScratchDir {
         // Best-effort cleanup; if it fails we leave the dir behind for the
         // user to inspect rather than masking a real problem.
         let _ = std::fs::remove_dir_all(&self.path);
-    }
-}
-
-struct ImportProgress {
-    enabled: bool,
-    current: usize,
-    total: usize,
-}
-
-impl ImportProgress {
-    fn start(cli: &Cli, repo: &Repository, scope: &str, source_label: &str) -> Self {
-        let enabled = !should_output_json(cli, Some(repo.config()));
-        if enabled {
-            println!(
-                "{} {} from {}",
-                style::dim("Importing Git history:"),
-                scope,
-                style::dim(source_label)
-            );
-        }
-        let progress = Self {
-            enabled,
-            current: 0,
-            total: 3,
-        };
-        progress.step("scanning refs");
-        progress
-    }
-
-    fn step(&self, label: &str) {
-        if !self.enabled {
-            return;
-        }
-        let next = self.current + 1;
-        if io::stdout().is_terminal() {
-            print!(
-                "\r{}",
-                style::dim(&format!("[{next}/{}] {label}...", self.total))
-            );
-            io::stdout().flush().ok();
-        } else {
-            println!(
-                "{}",
-                style::dim(&format!("[{next}/{}] {label}", self.total))
-            );
-        }
-    }
-
-    fn advance(&mut self, label: &str) {
-        self.current += 1;
-        self.step(label);
-    }
-
-    fn finish(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        self.current = self.total;
-        if io::stdout().is_terminal() {
-            print!("\r{}\n", style::accent("[done] imported Git history"));
-            io::stdout().flush().ok();
-        } else {
-            println!("{}", style::accent("[done] imported Git history"));
-        }
     }
 }
 

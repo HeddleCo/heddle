@@ -429,8 +429,19 @@ async fn async_main() -> Result<()> {
         }
 
         Commands::Inspect { target } => {
-            let repo =
-                repo::Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+            let cwd;
+            let start = if let Some(path) = cli.repo.as_ref() {
+                path
+            } else {
+                cwd = std::env::current_dir()?;
+                &cwd
+            };
+            if let Some(state) = target
+                && is_plain_git_without_heddle(start)
+            {
+                return cmd_show(&cli, state.clone());
+            }
+            let repo = repo::Repository::open(start)?;
             match target {
                 Some(name) if repo.refs().get_thread(name)?.is_some() => {
                     cmd_thread_show(&cli, &repo, Some(name.clone()))
@@ -1014,6 +1025,16 @@ fn global_arg_takes_value(arg: &Arg) -> bool {
 
 fn explicit_json_requested(cli: &Cli) -> bool {
     matches!(cli.output, Some(cli::cli::OutputMode::Json))
+}
+
+fn is_plain_git_without_heddle(start: &std::path::Path) -> bool {
+    let Ok(git_repo) = gix::discover(start) else {
+        return false;
+    };
+    let Some(workdir) = git_repo.workdir() else {
+        return false;
+    };
+    !workdir.join(".heddle").exists()
 }
 
 fn is_broken_pipe_error(error: &anyhow::Error) -> bool {

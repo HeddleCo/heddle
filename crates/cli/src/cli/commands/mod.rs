@@ -42,6 +42,7 @@ mod harness_bridge;
 pub(crate) mod heddleignore_defaults;
 mod history_target;
 mod hook;
+mod import_progress;
 mod index;
 mod init;
 mod integration;

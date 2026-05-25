@@ -53,6 +53,7 @@ struct CommitCompatOutput {
     action: &'static str,
     change_id: String,
     git_commit: Option<String>,
+    git_previous_commit: Option<String>,
     summary: String,
     confidence: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,6 +143,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             let trust = build_repository_verification_state(&repo);
             if trust.status == "needs_checkpoint" {
                 preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
+                let git_previous_commit = git_head_oid(repo.root());
                 let record = create_git_checkpoint(
                     &repo,
                     Some(message.as_str()),
@@ -154,6 +156,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     action: "commit",
                     change_id: state.change_id.short(),
                     git_commit: Some(record.git_commit),
+                    git_previous_commit,
                     summary: record.summary,
                     confidence: state.confidence,
                     git_index: None,
@@ -204,6 +207,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             action: "commit",
             change_id: snapshot.change_id,
             git_commit: None,
+            git_previous_commit: None,
             summary: snapshot.message,
             confidence: captured_state.confidence,
             git_index: None,
@@ -229,6 +233,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
 
     preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
     preflight_git_checkpoint_ref_update(&repo, "commit")?;
+    let git_previous_commit = git_head_oid(repo.root());
     let index_intent = git_index_intent(&repo)?;
     let pending_capture = pending_capture_before_commit(&repo)?;
     if !args.all && !index_intent.staged_paths.is_empty() {
@@ -291,6 +296,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         action: "commit",
         change_id: snapshot.change_id,
         git_commit: Some(record.git_commit),
+        git_previous_commit,
         summary: record.summary,
         confidence: captured_state.confidence,
         git_index: Some(git_index),
@@ -345,6 +351,7 @@ fn commit_staged_index(
         .current_state()?
         .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
     let snapshot_batch = find_recent_snapshot_batch(repo, &captured_state.change_id)?;
+    let git_previous_commit = git_head_oid(repo.root());
     let record = create_git_checkpoint_from_index_snapshot(
         repo,
         Some(message),
@@ -371,6 +378,7 @@ fn commit_staged_index(
         action: "commit",
         change_id: snapshot.change_id,
         git_commit: Some(record.git_commit),
+        git_previous_commit,
         summary: staged_commit_summary(&record.summary, &intent),
         confidence: captured_state.confidence,
         git_index: Some(GitIndexPlan::from_intent(&intent, false)),
@@ -1090,6 +1098,11 @@ fn find_recent_git_checkpoint_batch(repo: &Repository, git_commit: &str) -> Resu
         .ok_or_else(|| anyhow!("Git checkpoint succeeded but its oplog batch was not found"))
 }
 
+fn git_head_oid(root: &Path) -> Option<String> {
+    let git = gix::discover(root).ok()?;
+    git.head_id().ok().map(|id| id.to_string())
+}
+
 fn render_commit_compat(output: &CommitCompatOutput, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string(&output)?);
@@ -1108,6 +1121,15 @@ fn render_commit_compat(output: &CommitCompatOutput, json: bool) -> Result<()> {
                 ),
             }
         );
+        if let (Some(before), Some(after)) = (&output.git_previous_commit, &output.git_commit)
+            && before != after
+        {
+            println!(
+                "Git HEAD moved: {} -> {}",
+                style::dim(&before[..std::cmp::min(12, before.len())]),
+                style::dim(&after[..std::cmp::min(12, after.len())])
+            );
+        }
         if let Some(pending) = &output.included_pending_capture {
             println!(
                 "Included prior Heddle-only save {}; this Git commit checkpoints the resulting state.",

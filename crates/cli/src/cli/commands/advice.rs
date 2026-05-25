@@ -935,28 +935,19 @@ impl RecoveryAdvice {
     pub(crate) fn git_heddle_thread_diverged(thread: &str, branch: &str) -> Self {
         let primary_command =
             super::git_overlay_health::canonical_bridge_reconcile_ref_preview_command(None, branch);
-        let heddle_preview =
-            super::git_overlay_health::canonical_bridge_reconcile_ref_preview_command(
-                Some("heddle"),
-                branch,
-            );
-        let git_preview = super::git_overlay_health::canonical_bridge_reconcile_ref_preview_command(
-            Some("git"),
-            branch,
-        );
         Self::safety_refusal(
             "git_heddle_thread_diverged",
             "Git branch and Heddle thread have diverged",
             format!(
-                "Inspect both local repair choices with `{primary_command}`. Preview mode does not move refs, update the index, change worktree files, push, or pull."
+                "Inspect the local repair choices with `{primary_command}`. Preview mode does not move refs, update the index, change worktree files, push, or pull."
             ),
             format!(
                 "Heddle thread '{thread}' and Git branch '{branch}' both contain history the other side lacks"
             ),
             "importing or syncing now would need to choose whether the local Git branch or Heddle thread is authoritative",
-            "Heddle refs, Git refs, and worktree files were left unchanged",
+            "Heddle thread refs, Git refs, index, and worktree files were left unchanged; imported commit states and Git/Heddle mapping records may have been preserved for inspection or retry",
             primary_command.clone(),
-            vec![primary_command, heddle_preview, git_preview],
+            vec![primary_command],
         )
     }
 
