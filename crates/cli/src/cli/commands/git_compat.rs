@@ -28,8 +28,8 @@ use super::{
         RepositoryVerificationState, action_argv, action_template,
         build_plain_git_verification_probe, build_repository_verification_state,
         detached_git_head_mutation_advice, plain_git_mutation_advice,
-        raw_git_operation_mutation_advice, unimported_git_history_advice,
-        verification_blocking_mutation_advice,
+        raw_git_operation_mutation_advice, repository_verification_blocked_advice,
+        unimported_git_history_advice, verification_blocking_mutation_advice,
     },
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
@@ -940,31 +940,21 @@ fn nothing_to_commit_advice() -> RecoveryAdvice {
 }
 
 fn commit_blocked_by_trust_advice(trust: &RepositoryVerificationState) -> RecoveryAdvice {
-    let primary_command = if trust.recommended_action.trim().is_empty() {
-        "heddle verify".to_string()
-    } else {
-        trust.recommended_action.clone()
-    };
-    let recovery_commands = if trust.recovery_commands.is_empty() {
-        vec![primary_command.clone()]
-    } else {
-        trust.recovery_commands.clone()
-    };
-    RecoveryAdvice::safety_refusal(
+    repository_verification_blocked_advice(
         "commit_blocked_by_verification",
         format!(
             "refusing to report nothing to commit: repository verification is blocked ({})",
             trust.status
         ),
-        format!("Run `{primary_command}` before retrying `heddle commit`."),
+        "retrying `heddle commit`",
+        trust,
         format!(
             "repository verification status is {}: {}",
             trust.status, trust.summary
         ),
         "claiming nothing to commit could hide a Git/Heddle/import/operation disagreement",
         "no capture, Git checkpoint, refs, or worktree files were changed",
-        primary_command,
-        recovery_commands,
+        None,
     )
 }
 

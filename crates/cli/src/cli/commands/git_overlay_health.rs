@@ -1125,32 +1125,70 @@ pub(crate) fn verification_blocking_mutation_advice(
     if trust.status != "needs_reconcile" {
         return None;
     }
-    let primary_command = if trust.recommended_action.trim().is_empty() {
-        "heddle verify".to_string()
-    } else {
-        trust.recommended_action.clone()
-    };
-    let recovery_commands = if trust.recovery_commands.is_empty() {
-        vec![primary_command.clone()]
-    } else {
-        trust.recovery_commands.clone()
-    };
-    Some(RecoveryAdvice::safety_refusal(
+    Some(repository_verification_blocked_advice(
         "repository_verification_blocked",
         format!(
             "Refusing to {action}: repository verification is blocked ({})",
             trust.status
         ),
-        format!("Run `{primary_command}` before retrying `heddle {action}`."),
+        format!("retrying `heddle {action}`"),
+        &trust,
         format!(
             "repository verification status is {}: {}",
             trust.status, trust.summary
         ),
         format!("{action} would write new Heddle or Git state while Git and Heddle disagree"),
         "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
+        None,
+    ))
+}
+
+pub(crate) fn repository_verification_blocked_advice(
+    kind: &'static str,
+    error: impl Into<String>,
+    retry_context: impl Into<String>,
+    trust: &RepositoryVerificationState,
+    unsafe_condition: impl Into<String>,
+    would_change: impl Into<String>,
+    preserved: impl Into<String>,
+    primary_override: Option<String>,
+) -> RecoveryAdvice {
+    let primary_command =
+        primary_override.unwrap_or_else(|| repository_verification_primary_command(trust));
+    let recovery_commands = repository_verification_recovery_commands(trust, &primary_command);
+    RecoveryAdvice::safety_refusal(
+        kind,
+        error,
+        format!("Run `{}` before {}.", primary_command, retry_context.into()),
+        unsafe_condition,
+        would_change,
+        preserved,
         primary_command,
         recovery_commands,
-    ))
+    )
+}
+
+pub(crate) fn repository_verification_primary_command(
+    trust: &RepositoryVerificationState,
+) -> String {
+    if trust.recommended_action.trim().is_empty() {
+        "heddle verify".to_string()
+    } else {
+        trust.recommended_action.clone()
+    }
+}
+
+pub(crate) fn repository_verification_recovery_commands(
+    trust: &RepositoryVerificationState,
+    primary_command: &str,
+) -> Vec<String> {
+    if primary_command != trust.recommended_action && !trust.recommended_action.trim().is_empty() {
+        vec![primary_command.to_string(), "heddle verify".to_string()]
+    } else if trust.recovery_commands.is_empty() {
+        vec![primary_command.to_string()]
+    } else {
+        trust.recovery_commands.clone()
+    }
 }
 
 pub(crate) fn plain_git_mutation_advice(
@@ -2997,8 +3035,121 @@ fn mapped_change_relation(
 
 #[cfg(test)]
 mod tests {
-    use super::machine_contract_coverage;
+    use super::{
+        RepositoryVerificationState, machine_contract_coverage,
+        repository_verification_blocked_advice,
+    };
     use crate::cli::commands::build_command_catalog;
+
+    fn verification_state(
+        recommended_action: impl Into<String>,
+        recovery_commands: Vec<String>,
+    ) -> RepositoryVerificationState {
+        RepositoryVerificationState {
+            verified: false,
+            status: "needs_reconcile".to_string(),
+            repository_mode: "git_overlay".to_string(),
+            heddle_initialized: true,
+            git_branch: Some("main".to_string()),
+            heddle_thread: Some("main".to_string()),
+            worktree_dirty: false,
+            worktree_state: "clean".to_string(),
+            import_state: "imported".to_string(),
+            mapping_state: "needs_reconcile".to_string(),
+            remote_drift: "none".to_string(),
+            active_operation: None,
+            default_remote: None,
+            clone_verification: "verified".to_string(),
+            machine_contract: "verified".to_string(),
+            machine_contract_coverage: machine_contract_coverage(),
+            workflow_status: "blocked".to_string(),
+            workflow_summary: "Git and Heddle disagree".to_string(),
+            summary: "Git and Heddle disagree".to_string(),
+            recommended_action: recommended_action.into(),
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            recovery_commands,
+            recovery_command_argv: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            checks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn repository_verification_blocked_advice_uses_verify_when_no_action_exists() {
+        let trust = verification_state("", Vec::new());
+
+        let advice = repository_verification_blocked_advice(
+            "repository_verification_blocked",
+            "blocked",
+            "retrying the operation",
+            &trust,
+            "unsafe",
+            "would change",
+            "nothing changed",
+            None,
+        );
+
+        assert_eq!(advice.primary_command, "heddle verify");
+        assert_eq!(advice.recovery_commands, vec!["heddle verify"]);
+        assert_eq!(
+            advice.hint,
+            "Run `heddle verify` before retrying the operation."
+        );
+    }
+
+    #[test]
+    fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
+        let trust = verification_state(
+            "heddle bridge git reconcile --ref main --preview",
+            vec![
+                "heddle bridge git reconcile --ref main --preview".to_string(),
+                "heddle verify".to_string(),
+            ],
+        );
+
+        let advice = repository_verification_blocked_advice(
+            "repository_verification_blocked",
+            "blocked",
+            "retrying the operation",
+            &trust,
+            "unsafe",
+            "would change",
+            "nothing changed",
+            None,
+        );
+
+        assert_eq!(
+            advice.primary_command,
+            "heddle bridge git reconcile --ref main --preview"
+        );
+        assert_eq!(advice.recovery_commands, trust.recovery_commands);
+    }
+
+    #[test]
+    fn repository_verification_blocked_advice_keeps_primary_override_first() {
+        let trust = verification_state(
+            "heddle bridge git import --ref origin/main",
+            vec!["heddle bridge git import --ref origin/main".to_string()],
+        );
+
+        let advice = repository_verification_blocked_advice(
+            "git_checkpoint_preflight_blocked",
+            "blocked",
+            "retrying `heddle commit`",
+            &trust,
+            "unsafe",
+            "would change",
+            "nothing changed",
+            Some("heddle pull origin main --preview".to_string()),
+        );
+
+        assert_eq!(advice.primary_command, "heddle pull origin main --preview");
+        assert_eq!(
+            advice.recovery_commands,
+            vec!["heddle pull origin main --preview", "heddle verify"]
+        );
+    }
 
     #[test]
     fn machine_contract_coverage_counts_the_same_rows_as_command_catalog() {
