@@ -11,6 +11,7 @@ use repo::{
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     git_overlay_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
@@ -431,7 +432,7 @@ fn write_trust_blocked_setup(recommended_action: Option<&str>) {
     println!("  {}", style::field("checks", "not run"));
     if let Some(recommended_action) = recommended_action.filter(|action| !action.is_empty()) {
         println!();
-        println!("Next: {}", style::bold(recommended_action));
+        print_next(recommended_action);
     }
 }
 
@@ -640,7 +641,7 @@ fn write_preview_report(report: &ThreadPreviewReport, recommended_action: Option
     }
     if let Some(recommended_action) = recommended_action.filter(|action| !action.is_empty()) {
         println!();
-        println!("Next: {}", style::bold(recommended_action));
+        print_next(recommended_action);
     }
 }
 

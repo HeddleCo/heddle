@@ -25,6 +25,7 @@ use repo::{
 use serde::Serialize;
 
 use super::{
+    action_line::{print_nested_next_step, print_nested_optional, print_next_step},
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, recommended_action_template},
     git_overlay_health::{
@@ -1326,7 +1327,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
             && !output.recommended_action.is_empty()
         {
             println!("Verification: {}", style::warn(&output.trust.summary));
-            println!("Next step: {}", style::bold(&output.recommended_action));
+            print_next_step(&output.recommended_action);
         }
         if output.trust.verified
             && let Some(hint) = &output.git_overlay_import_hint
@@ -1449,7 +1450,7 @@ fn render_available_git_refs(refs: &[AvailableGitRef], verbose: bool) {
             println!("    git tip: {}", style::dim(&entry.git_commit));
         }
         if !entry.recommended_action.is_empty() {
-            println!("    optional: {}", style::dim(&entry.recommended_action));
+            print_nested_optional(&entry.recommended_action);
         }
     }
     println!(
@@ -1584,9 +1585,9 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
         );
     }
     if !entry.recommended_action.is_empty() && thread_is_available_git_ref(entry) {
-        println!("    optional: {}", style::dim(&entry.recommended_action));
+        print_nested_optional(&entry.recommended_action);
     } else if !entry.recommended_action.is_empty() {
-        println!("    next step: {}", style::bold(&entry.recommended_action));
+        print_nested_next_step(&entry.recommended_action);
     }
 }
 
@@ -2732,7 +2733,7 @@ pub(crate) fn show_thread_summary(
             && !trust.recommended_action.is_empty()
         {
             println!("Verification: {}", style::warn(&trust.summary));
-            println!("Next step: {}", style::bold(&trust.recommended_action));
+            print_next_step(&trust.recommended_action);
             next_step_printed = true;
         }
         if let Some(operation) = &summary.operation {
@@ -2937,7 +2938,7 @@ pub(crate) fn show_thread_summary(
             println!("Blocked by: {}", summary.blockers.join(" | "));
         }
         if !summary.recommended_action.is_empty() && !next_step_printed {
-            println!("Next step: {}", summary.recommended_action);
+            print_next_step(&summary.recommended_action);
         }
     }
 
@@ -3058,7 +3059,7 @@ fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
                 println!("Execution root: {}", style::dim(path));
             }
             if !thread.recommended_action.is_empty() {
-                println!("Next step: {}", style::bold(&thread.recommended_action));
+                print_next_step(&thread.recommended_action);
             }
         }
     }

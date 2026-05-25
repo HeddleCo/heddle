@@ -28,6 +28,7 @@ use tokio_tungstenite::{
 use tracing::debug;
 
 use super::{
+    action_line::print_command,
     command_catalog::ActionFields,
     git_compat::{GitIndexPlan, git_index_plan_for_root},
     git_overlay_health::{
@@ -389,7 +390,7 @@ fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool
     }
     println!();
     println!("{}", style::bold("Next"));
-    println!("  command: {}", style::bold(&output.recommended_action));
+    print_command(&output.recommended_action);
     Ok(())
 }
 
@@ -1672,7 +1673,7 @@ fn render_status_advice(output: &StatusOutput) {
     if !output.recommended_action.is_empty() {
         println!();
         println!("{}", style::bold("Next"));
-        println!("  command: {}", style::bold(&output.recommended_action));
+        print_command(&output.recommended_action);
         println!("  why: {}", status_next_reason(output));
         if let Some(after) = status_next_follow_up(output) {
             println!("  then: {}", style::dim(after));

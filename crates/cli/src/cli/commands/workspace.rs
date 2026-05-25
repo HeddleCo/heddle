@@ -9,6 +9,7 @@ use serde::Serialize;
 use tokio::time::{Duration, sleep};
 
 use super::{
+    action_line::{print_dim_next_step, print_nested_next_step, print_nested_optional},
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
@@ -357,7 +358,7 @@ fn render_workspace(cli: &Cli, output: &WorkspaceSummaryOutput) {
         );
     }
     if !output.recommended_action.is_empty() {
-        println!("Next step: {}", style::dim(&output.recommended_action));
+        print_dim_next_step(&output.recommended_action);
     }
     if let Some(current) = &output.current_thread {
         println!("Current thread: {}", style::bold(current));
@@ -449,7 +450,7 @@ fn render_workspace_thread(thread: &ThreadSummary, verbose: bool) {
         );
     }
     if !thread.recommended_action.is_empty() {
-        println!("    next step: {}", style::bold(&thread.recommended_action));
+        print_nested_next_step(&thread.recommended_action);
     }
 }
 
@@ -470,7 +471,7 @@ fn render_workspace_available_git_refs(refs: &[AvailableGitRef], verbose: bool) 
             println!("    git tip: {}", style::dim(&entry.git_commit));
         }
         if !entry.recommended_action.is_empty() {
-            println!("    optional: {}", style::dim(&entry.recommended_action));
+            print_nested_optional(&entry.recommended_action);
         }
     }
     println!(

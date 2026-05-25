@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use super::{
     RecoveryAdvice,
+    action_line::print_next,
     git_overlay_health::{
         RepositoryVerificationState, VerificationCheck, build_plain_git_verification_probe,
         build_repository_verification_state,
@@ -143,7 +144,7 @@ fn render_verify(cli: &Cli, output: &VerifyOutput, verbose: bool) -> Result<()> 
     }
     if !output.trust.recommended_action.is_empty() {
         println!();
-        println!("Next: {}", style::bold(&output.trust.recommended_action));
+        print_next(&output.trust.recommended_action);
     }
     if !output.trust.recovery_commands.is_empty() && verbose {
         for command in &output.trust.recovery_commands {
@@ -205,7 +206,7 @@ fn render_compact_verify(output: &VerifyOutput) -> Result<()> {
     }
     if !output.trust.recommended_action.is_empty() {
         println!();
-        println!("Next: {}", style::bold(&output.trust.recommended_action));
+        print_next(&output.trust.recommended_action);
     }
     println!();
     println!("Proof: {}", style::bold("heddle verify --verbose"));
