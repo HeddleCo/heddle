@@ -19,7 +19,9 @@ use super::{
     },
     merge::{ThreadPreviewReport, build_thread_preview_report},
     next_action::{NextActionInput, effective_next_action},
-    operator_core::{OperatorCommandOutput, exit_if_blocked_operator_status},
+    operator_core::{
+        OperatorCommandOutput, VerificationClaimPolicy, exit_if_blocked_operator_status,
+    },
     snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread::contextual_thread_action,
     thread_cmd::{current_thread, load_thread, thread_manager, thread_not_found_advice},
@@ -258,28 +260,13 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_overlay_import_hint()?;
     let mut trust = build_repository_verification_state(&repo);
-    let trust_blockers = trust
-        .checks
-        .iter()
-        .filter(|check| !check.clean)
-        .map(|check| format!("{}: {}", check.name, check.summary))
-        .collect::<Vec<_>>();
     let report_recommended_action = ready_report_recommended_action(&report);
-    let trust_only_blocks_on_this_ready_thread = trust.workflow_status == "ready"
-        && report_recommended_action
-            .as_deref()
-            .is_some_and(|action| trust.recommended_action == action);
-    let trust_blocks_ready = !trust.verified && !trust_only_blocks_on_this_ready_thread;
-    let recommended_action = if !trust_blocks_ready {
-        ready_scoped_next_action(
-            operation.as_ref(),
-            remote_tracking.as_ref(),
-            import_hint.as_ref(),
-            report_recommended_action.as_deref(),
-        )
-    } else {
-        trust.recommended_action.clone()
-    };
+    let recommended_action = ready_scoped_next_action(
+        operation.as_ref(),
+        remote_tracking.as_ref(),
+        import_hint.as_ref(),
+        report_recommended_action.as_deref(),
+    );
     let recommended_action = contextual_thread_action(
         &repo,
         &thread.id,
@@ -292,9 +279,6 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
             contextual_thread_action(&repo, &thread.id, thread.target_thread.as_deref(), action)
         })
         .is_some_and(|action| action == recommended_action);
-    if !recommended_action.is_empty() && trust.recommended_action != recommended_action {
-        override_trust_recommended_action(&mut trust, recommended_action.clone());
-    }
     if report_action_selected
         && !recommended_action.is_empty()
         && report.recommended_action != recommended_action
@@ -305,36 +289,33 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     let recommended_action_value =
         (!recommended_action.is_empty()).then(|| recommended_action.clone());
 
-    let status = if trust_blocks_ready {
-        "blocked"
-    } else if thread.state == ThreadState::Ready || !has_integration_target {
+    let status = if thread.state == ThreadState::Ready || !has_integration_target {
         "completed"
     } else {
         "blocked"
     };
-    let message = if trust_blocks_ready {
-        format!(
-            "Thread '{}' reached readiness checks, but repository verification is blocked: {}",
-            thread.id, trust.summary
-        )
-    } else {
-        message.clone()
+    let mut operator = OperatorCommandOutput {
+        status: status.to_string(),
+        action: "ready".to_string(),
+        message: message.clone(),
+        blockers: report.blockers.clone(),
+        warnings: Vec::new(),
+        next_action: recommended_action_value.clone(),
+        recommended_action: recommended_action_value,
     };
-
+    operator.block_success_claim_if_verification_blocked(
+        &trust,
+        format!("Thread '{}' readiness", thread.id),
+        VerificationClaimPolicy::strict().allow_matching_workflow_action(),
+    );
+    if !matches!(operator.status.as_str(), "blocked" | "failed")
+        && !recommended_action.is_empty()
+        && trust.recommended_action != recommended_action
+    {
+        override_trust_recommended_action(&mut trust, recommended_action.clone());
+    }
     let output = ReadyOutput {
-        operator: OperatorCommandOutput {
-            status: status.to_string(),
-            action: "ready".to_string(),
-            message: message.clone(),
-            blockers: if !trust_blocks_ready {
-                report.blockers.clone()
-            } else {
-                trust_blockers
-            },
-            warnings: Vec::new(),
-            next_action: recommended_action_value.clone(),
-            recommended_action: recommended_action_value,
-        },
+        operator,
         captured,
         captured_state,
         thread_state: thread.state.to_string(),

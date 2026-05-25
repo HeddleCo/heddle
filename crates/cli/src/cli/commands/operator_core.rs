@@ -62,6 +62,79 @@ impl OperatorCommandOutput {
             recommended_action: Some(recommended_action),
         }
     }
+
+    pub(crate) fn block_success_claim_if_verification_blocked(
+        &mut self,
+        trust: &RepositoryVerificationState,
+        local_context: impl Into<String>,
+        policy: VerificationClaimPolicy,
+    ) {
+        if repository_verification_allows_success_claim(self, trust, policy) {
+            return;
+        }
+        *self = Self::blocked_by_repository_verification(
+            self.action.clone(),
+            format!(
+                "{} reached local checks, but repository verification is blocked: {}",
+                local_context.into(),
+                trust.summary
+            ),
+            trust,
+        );
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VerificationClaimPolicy {
+    allow_ship_publish_followup: bool,
+    allow_matching_workflow_action: bool,
+}
+
+impl VerificationClaimPolicy {
+    pub(crate) fn strict() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn allow_ship_publish_followup(mut self) -> Self {
+        self.allow_ship_publish_followup = true;
+        self
+    }
+
+    pub(crate) fn allow_matching_workflow_action(mut self) -> Self {
+        self.allow_matching_workflow_action = true;
+        self
+    }
+}
+
+fn repository_verification_allows_success_claim(
+    output: &OperatorCommandOutput,
+    trust: &RepositoryVerificationState,
+    policy: VerificationClaimPolicy,
+) -> bool {
+    if trust.verified || matches!(output.status.as_str(), "blocked" | "failed") {
+        return true;
+    }
+    if policy.allow_ship_publish_followup
+        && output.action == "ship"
+        && output.status == "shipped"
+        && trust.recommended_action == "heddle push"
+        && matches!(
+            trust.remote_drift.as_str(),
+            "remote_untracked" | "remote_ahead"
+        )
+    {
+        return true;
+    }
+    if policy.allow_matching_workflow_action
+        && trust.workflow_status == "ready"
+        && output
+            .recommended_action
+            .as_deref()
+            .is_some_and(|action| action == trust.recommended_action)
+    {
+        return true;
+    }
+    false
 }
 
 pub(crate) fn blocked_operator_exit_code(status: &str) -> Option<i32> {
@@ -471,7 +544,10 @@ fn git_unmerged_paths(repo: &Repository) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::cli::commands::git_overlay_health::{VerificationCheck, machine_contract_coverage};
 
     #[test]
     fn raw_git_operation_handoff_recommends_heddle_preservation_not_git_cli() {
@@ -504,5 +580,127 @@ mod tests {
                 .as_deref()
                 .is_some_and(|action| action.starts_with("git "))
         );
+    }
+
+    #[test]
+    fn verification_claim_gate_blocks_local_success_claims() {
+        let trust = verification_state(false, "needs_checkpoint", "heddle checkpoint -m \"...\"");
+        let mut output = OperatorCommandOutput {
+            status: "synced".to_string(),
+            action: "sync".to_string(),
+            message: "Thread is already current".to_string(),
+            blockers: Vec::new(),
+            warnings: Vec::new(),
+            next_action: None,
+            recommended_action: None,
+        };
+
+        output.block_success_claim_if_verification_blocked(
+            &trust,
+            "sync",
+            VerificationClaimPolicy::strict(),
+        );
+
+        assert_eq!(output.status, "blocked");
+        assert_eq!(
+            output.recommended_action.as_deref(),
+            Some("heddle checkpoint -m \"...\"")
+        );
+        assert!(
+            output
+                .message
+                .contains("repository verification is blocked")
+        );
+    }
+
+    #[test]
+    fn verification_claim_gate_allows_ship_publish_followup_only_by_policy() {
+        let trust = verification_state(false, "remote_ahead", "heddle push");
+        let shipped = || OperatorCommandOutput {
+            status: "shipped".to_string(),
+            action: "ship".to_string(),
+            message: "Shipped thread 'feature'".to_string(),
+            blockers: Vec::new(),
+            warnings: Vec::new(),
+            next_action: Some("heddle push".to_string()),
+            recommended_action: Some("heddle push".to_string()),
+        };
+
+        let mut strict = shipped();
+        strict.block_success_claim_if_verification_blocked(
+            &trust,
+            "ship",
+            VerificationClaimPolicy::strict(),
+        );
+        assert_eq!(strict.status, "blocked");
+
+        let mut allowed = shipped();
+        allowed.block_success_claim_if_verification_blocked(
+            &trust,
+            "ship",
+            VerificationClaimPolicy::strict().allow_ship_publish_followup(),
+        );
+        assert_eq!(allowed.status, "shipped");
+        assert_eq!(allowed.recommended_action.as_deref(), Some("heddle push"));
+    }
+
+    fn verification_state(
+        verified: bool,
+        status: &str,
+        recommended_action: &str,
+    ) -> RepositoryVerificationState {
+        let check = VerificationCheck {
+            name: "Worktree".to_string(),
+            status: status.to_string(),
+            clean: verified,
+            summary: "repository verification fixture".to_string(),
+            recommended_action: (!verified).then(|| recommended_action.to_string()),
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            recovery_commands: if verified {
+                Vec::new()
+            } else {
+                vec![recommended_action.to_string()]
+            },
+            recovery_command_argv: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            details: BTreeMap::new(),
+        };
+        RepositoryVerificationState {
+            verified,
+            status: status.to_string(),
+            repository_mode: "git-overlay".to_string(),
+            heddle_initialized: true,
+            git_branch: Some("main".to_string()),
+            heddle_thread: Some("main".to_string()),
+            worktree_dirty: false,
+            worktree_state: "clean".to_string(),
+            import_state: "clean".to_string(),
+            mapping_state: "clean".to_string(),
+            remote_drift: status.to_string(),
+            active_operation: None,
+            default_remote: Some("origin".to_string()),
+            clone_verification: "not_applicable".to_string(),
+            machine_contract: "available".to_string(),
+            machine_contract_coverage: machine_contract_coverage(),
+            workflow_status: "clean".to_string(),
+            workflow_summary: "workflow fixture".to_string(),
+            summary: "repository verification fixture".to_string(),
+            recommended_action: if verified {
+                String::new()
+            } else {
+                recommended_action.to_string()
+            },
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            recovery_commands: if verified {
+                Vec::new()
+            } else {
+                vec![recommended_action.to_string()]
+            },
+            recovery_command_argv: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            checks: vec![check],
+        }
     }
 }
