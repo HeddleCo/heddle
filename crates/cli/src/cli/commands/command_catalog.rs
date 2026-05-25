@@ -187,6 +187,7 @@ struct CommandContract {
     json_kind: &'static str,
     schema_verbs: &'static [&'static str],
     documented_schema_verbs: &'static [&'static str],
+    opaque_schema_verbs: &'static [&'static str],
     surface: &'static str,
     help_visibility: &'static str,
     help_rank: u16,
@@ -227,6 +228,7 @@ pub struct CommandRuntimeContract {
     pub json_kind: &'static str,
     pub schema_verbs: &'static [&'static str],
     pub documented_schema_verbs: &'static [&'static str],
+    pub opaque_schema_verbs: &'static [&'static str],
     pub may_initialize: bool,
     pub may_import_git: bool,
     pub may_write_worktree: bool,
@@ -481,6 +483,7 @@ const READ_JSON: CommandContract = CommandContract {
     json_kind: "json",
     schema_verbs: &[],
     documented_schema_verbs: &[],
+    opaque_schema_verbs: &[],
     surface: "native",
     help_visibility: "advanced",
     help_rank: 1000,
@@ -537,6 +540,7 @@ const MUTATING: CommandContract = CommandContract {
     json_kind: "json",
     schema_verbs: &[],
     documented_schema_verbs: &[],
+    opaque_schema_verbs: &[],
     surface: "native",
     help_visibility: "advanced",
     help_rank: 1000,
@@ -666,6 +670,18 @@ const fn documented_schemas(
     CommandContract {
         schema_verbs,
         documented_schema_verbs: schema_verbs,
+        ..contract
+    }
+}
+
+const fn opaque_schemas(
+    contract: CommandContract,
+    schema_verbs: &'static [&'static str],
+) -> CommandContract {
+    CommandContract {
+        schema_verbs,
+        documented_schema_verbs: schema_verbs,
+        opaque_schema_verbs: schema_verbs,
         ..contract
     }
 }
@@ -856,19 +872,19 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["bisect"], GROUP),
     entry(
         &["bisect", "start"],
-        documented_schemas(WORKTREE_MUTATION, &["bisect start"]),
+        opaque_schemas(WORKTREE_MUTATION, &["bisect start"]),
     ),
     entry(
         &["bisect", "good"],
-        documented_schemas(WORKTREE_MUTATION, &["bisect good"]),
+        opaque_schemas(WORKTREE_MUTATION, &["bisect good"]),
     ),
     entry(
         &["bisect", "bad"],
-        documented_schemas(WORKTREE_MUTATION, &["bisect bad"]),
+        opaque_schemas(WORKTREE_MUTATION, &["bisect bad"]),
     ),
     entry(
         &["bisect", "reset"],
-        documented_schemas(WORKTREE_MUTATION, &["bisect reset"]),
+        opaque_schemas(WORKTREE_MUTATION, &["bisect reset"]),
     ),
     entry(&["blame"], documented_schemas(READ_JSON, &["blame"])),
     entry(
@@ -965,14 +981,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["bridge", "git", "ingest"],
         surface(
-            documented_schemas(IMPORTING_MUTATION, &["bridge git ingest"]),
+            opaque_schemas(IMPORTING_MUTATION, &["bridge git ingest"]),
             "git_adapter",
         ),
     ),
     entry(
         &["bridge", "git", "reason"],
         surface(
-            documented_schemas(DATA_MUTATION, &["bridge git reason"]),
+            opaque_schemas(DATA_MUTATION, &["bridge git reason"]),
             "git_adapter",
         ),
     ),
@@ -996,7 +1012,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["cherry-pick"],
-        documented_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
+        opaque_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
     ),
     entry(
         &["clean"],
@@ -1019,7 +1035,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             220,
         ),
     ),
-    entry(&["collapse"], documented_schemas(MUTATING, &["collapse"])),
+    entry(&["collapse"], opaque_schemas(MUTATING, &["collapse"])),
     entry(
         &["commit"],
         front_door(
@@ -1044,77 +1060,71 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["commands"],
         surface(documented_schemas(READ_JSON, &["commands"]), "automation"),
     ),
-    entry(&["compare"], documented_schemas(READ_JSON, &["compare"])),
+    entry(&["compare"], opaque_schemas(READ_JSON, &["compare"])),
     entry(&["completion"], READ_TEXT),
     entry(&["conflict"], GROUP),
     entry(
         &["conflict", "list"],
-        documented_schemas(READ_JSON, &["conflict list"]),
+        opaque_schemas(READ_JSON, &["conflict list"]),
     ),
     entry(
         &["conflict", "show"],
-        documented_schemas(READ_JSON, &["conflict show"]),
+        opaque_schemas(READ_JSON, &["conflict show"]),
     ),
     entry(&["continue"], documented_schemas(MUTATING, &["continue"])),
     entry(&["context"], GROUP),
     entry(
         &["context", "set"],
-        documented_schemas(MUTATING, &["context set"]),
+        opaque_schemas(MUTATING, &["context set"]),
     ),
     entry(
         &["context", "get"],
-        documented_schemas(READ_JSON, &["context get"]),
+        opaque_schemas(READ_JSON, &["context get"]),
     ),
     entry(
         &["context", "list"],
-        documented_schemas(READ_JSON, &["context list"]),
+        opaque_schemas(READ_JSON, &["context list"]),
     ),
     entry(
         &["context", "history"],
-        documented_schemas(READ_JSON, &["context history"]),
+        opaque_schemas(READ_JSON, &["context history"]),
     ),
     entry(
         &["context", "edit"],
-        documented_schemas(MUTATING, &["context edit"]),
+        opaque_schemas(MUTATING, &["context edit"]),
     ),
     entry(
         &["context", "supersede"],
-        documented_schemas(MUTATING, &["context supersede"]),
+        opaque_schemas(MUTATING, &["context supersede"]),
     ),
     entry(
         &["context", "rm"],
-        documented_schemas(MUTATING, &["context rm"]),
+        opaque_schemas(MUTATING, &["context rm"]),
     ),
     entry(
         &["context", "check"],
-        documented_schemas(READ_JSON, &["context check"]),
+        opaque_schemas(READ_JSON, &["context check"]),
     ),
     entry(
         &["context", "suggest"],
-        documented_schemas(READ_JSON, &["context suggest"]),
+        opaque_schemas(READ_JSON, &["context suggest"]),
     ),
     entry(
         &["context", "audit"],
-        documented_schemas(READ_JSON, &["context audit"]),
+        opaque_schemas(READ_JSON, &["context audit"]),
     ),
     entry(&["daemon"], surface(GROUP, "admin")),
     entry(
         &["daemon", "serve"],
-        surface(
-            documented_schemas(DAEMON_MUTATION, &["daemon serve"]),
-            "admin",
-        ),
+        surface(opaque_schemas(DAEMON_MUTATION, &["daemon serve"]), "admin"),
     ),
     entry(
         &["daemon", "status"],
-        surface(documented_schemas(READ_JSON, &["daemon status"]), "admin"),
+        surface(opaque_schemas(READ_JSON, &["daemon status"]), "admin"),
     ),
     entry(
         &["daemon", "stop"],
-        surface(
-            documented_schemas(DAEMON_MUTATION, &["daemon stop"]),
-            "admin",
-        ),
+        surface(opaque_schemas(DAEMON_MUTATION, &["daemon stop"]), "admin"),
     ),
     entry(
         &["delegate"],
@@ -1174,9 +1184,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "Use pull for the normal remote update workflow; inspect verification output before materializing changes.",
         ),
     ),
-    entry(&["fork"], documented_schemas(MUTATING, &["fork"])),
+    entry(&["fork"], opaque_schemas(MUTATING, &["fork"])),
     entry(&["fsck"], documented_schemas(MUTATING, &["fsck"])),
-    entry(&["gc"], hidden(documented_schemas(GC_MUTATION, &["gc"]))),
+    entry(&["gc"], hidden(opaque_schemas(GC_MUTATION, &["gc"]))),
     entry(
         &["git-overlay"],
         documented_schemas(READ_JSON, &["git-overlay"]),
@@ -1184,34 +1194,31 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["goto"], documented_schemas(WORKTREE_MUTATION, &["goto"])),
     entry(
         &["harness-bridge"],
-        hidden(documented_schemas(READ_JSONL, &["harness-bridge"])),
+        hidden(opaque_schemas(READ_JSONL, &["harness-bridge"])),
     ),
     entry(&["help"], READ_TEXT),
     entry(&["hook"], surface(GROUP, "automation")),
     entry(
         &["hook", "list"],
-        surface(documented_schemas(READ_JSON, &["hook list"]), "automation"),
+        surface(opaque_schemas(READ_JSON, &["hook list"]), "automation"),
     ),
     entry(
         &["hook", "install"],
         surface(
-            documented_schemas(HOOK_MUTATION, &["hook install"]),
+            opaque_schemas(HOOK_MUTATION, &["hook install"]),
             "automation",
         ),
     ),
     entry(
         &["hook", "uninstall"],
         surface(
-            documented_schemas(HOOK_MUTATION, &["hook uninstall"]),
+            opaque_schemas(HOOK_MUTATION, &["hook uninstall"]),
             "automation",
         ),
     ),
     entry(
         &["hook", "events"],
-        surface(
-            documented_schemas(READ_JSON, &["hook events"]),
-            "automation",
-        ),
+        surface(opaque_schemas(READ_JSON, &["hook events"]), "automation"),
     ),
     entry(
         &["index"],
@@ -1225,43 +1232,31 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
         &["integration", "list"],
-        surface(
-            documented_schemas(READ_JSON, &["integration list"]),
-            "admin",
-        ),
+        surface(opaque_schemas(READ_JSON, &["integration list"]), "admin"),
     ),
     entry(
         &["integration", "install"],
-        surface(
-            documented_schemas(MUTATING, &["integration install"]),
-            "admin",
-        ),
+        surface(opaque_schemas(MUTATING, &["integration install"]), "admin"),
     ),
     entry(
         &["integration", "doctor"],
-        surface(
-            documented_schemas(READ_JSON, &["integration doctor"]),
-            "admin",
-        ),
+        surface(opaque_schemas(READ_JSON, &["integration doctor"]), "admin"),
     ),
     entry(
         &["integration", "uninstall"],
         surface(
-            documented_schemas(MUTATING, &["integration uninstall"]),
+            opaque_schemas(MUTATING, &["integration uninstall"]),
             "admin",
         ),
     ),
     entry(
         &["integration", "upgrade"],
-        surface(
-            documented_schemas(MUTATING, &["integration upgrade"]),
-            "admin",
-        ),
+        surface(opaque_schemas(MUTATING, &["integration upgrade"]), "admin"),
     ),
     entry(
         &["integration", "relay"],
         hidden(surface(
-            documented_schemas(MUTATING, &["integration relay"]),
+            opaque_schemas(MUTATING, &["integration relay"]),
             "admin",
         )),
     ),
@@ -1272,21 +1267,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["maintenance"], surface(GROUP, "admin")),
     entry(
         &["maintenance", "inspect"],
-        surface(
-            documented_schemas(READ_JSON, &["maintenance inspect"]),
-            "admin",
-        ),
+        surface(opaque_schemas(READ_JSON, &["maintenance inspect"]), "admin"),
     ),
     entry(
         &["maintenance", "run"],
-        surface(documented_schemas(MUTATING, &["maintenance run"]), "admin"),
+        surface(opaque_schemas(MUTATING, &["maintenance run"]), "admin"),
     ),
     entry(
         &["maintenance", "gc"],
-        surface(
-            documented_schemas(GC_MUTATION, &["maintenance gc"]),
-            "admin",
-        ),
+        surface(opaque_schemas(GC_MUTATION, &["maintenance gc"]), "admin"),
     ),
     entry(
         &["maintenance", "index"],
@@ -1297,10 +1286,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["maintenance", "monitor"],
-        surface(
-            documented_schemas(READ_JSON, &["maintenance monitor"]),
-            "admin",
-        ),
+        surface(opaque_schemas(READ_JSON, &["maintenance monitor"]), "admin"),
     ),
     entry(&["marker"], GROUP),
     entry(
@@ -1335,7 +1321,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["monitor"],
-        hidden(documented_schemas(READ_JSON, &["monitor"])),
+        hidden(opaque_schemas(READ_JSON, &["monitor"])),
     ),
     #[cfg(feature = "client")]
     entry(&["presence"], READ_JSON),
@@ -1358,7 +1344,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["purge"], GROUP),
     entry(
         &["purge", "apply"],
-        documented_schemas(
+        opaque_schemas(
             CommandContract {
                 destructive_requires_force: true,
                 ..DESTRUCTIVE_DATA_MUTATION
@@ -1368,7 +1354,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["purge", "list"],
-        documented_schemas(READ_JSON, &["purge list"]),
+        opaque_schemas(READ_JSON, &["purge list"]),
     ),
     entry(
         &["push"],
@@ -1396,35 +1382,32 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["ready"],
         front_door(documented_schemas(CAPTURE, &["ready"]), 50),
     ),
-    entry(
-        &["rebase"],
-        documented_schemas(WORKTREE_MUTATION, &["rebase"]),
-    ),
+    entry(&["rebase"], opaque_schemas(WORKTREE_MUTATION, &["rebase"])),
     entry(&["redact"], GROUP),
     entry(
         &["redact", "apply"],
-        documented_schemas(DATA_MUTATION, &["redact apply"]),
+        opaque_schemas(DATA_MUTATION, &["redact apply"]),
     ),
     entry(
         &["redact", "list"],
-        documented_schemas(READ_JSON, &["redact list"]),
+        opaque_schemas(READ_JSON, &["redact list"]),
     ),
     entry(
         &["redact", "show"],
-        documented_schemas(READ_JSON, &["redact show"]),
+        opaque_schemas(READ_JSON, &["redact show"]),
     ),
     entry(&["redact", "trust"], GROUP),
     entry(
         &["redact", "trust", "add"],
-        documented_schemas(DATA_MUTATION, &["redact trust add"]),
+        opaque_schemas(DATA_MUTATION, &["redact trust add"]),
     ),
     entry(
         &["redact", "trust", "list"],
-        documented_schemas(READ_JSON, &["redact trust list"]),
+        opaque_schemas(READ_JSON, &["redact trust list"]),
     ),
     entry(
         &["redact", "trust", "remove"],
-        documented_schemas(DATA_MUTATION, &["redact trust remove"]),
+        opaque_schemas(DATA_MUTATION, &["redact trust remove"]),
     ),
     entry(&["redo"], documented_schemas(WORKTREE_MUTATION, &["redo"])),
     entry(&["remote"], surface(GROUP, "native")),
@@ -1482,7 +1465,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["semantic"], GROUP),
     entry(
         &["semantic", "hot"],
-        documented_schemas(READ_JSON, &["semantic hot"]),
+        opaque_schemas(READ_JSON, &["semantic hot"]),
     ),
     entry(&["session"], surface(GROUP, "automation")),
     entry(
@@ -1621,7 +1604,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["store"], surface(GROUP, "admin")),
     entry(
         &["store", "warm"],
-        surface(documented_schemas(MUTATING, &["store warm"]), "admin"),
+        surface(opaque_schemas(MUTATING, &["store warm"]), "admin"),
     ),
     #[cfg(feature = "client")]
     entry(&["support"], MUTATING),
@@ -1716,7 +1699,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["transaction"], hidden(GROUP)),
     entry(
         &["transaction", "begin"],
-        hidden(documented_schemas(MUTATING, &["transaction begin"])),
+        hidden(opaque_schemas(MUTATING, &["transaction begin"])),
     ),
     entry(
         &["transaction", "commit"],
@@ -1724,11 +1707,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["transaction", "abort"],
-        hidden(documented_schemas(MUTATING, &["transaction abort"])),
+        hidden(opaque_schemas(MUTATING, &["transaction abort"])),
     ),
     entry(
         &["transaction", "status"],
-        hidden(documented_schemas(READ_JSON, &["transaction status"])),
+        hidden(opaque_schemas(READ_JSON, &["transaction status"])),
     ),
     entry(
         &["verify"],
@@ -2528,6 +2511,7 @@ fn runtime_contract(
         json_kind: contract.json_kind,
         schema_verbs: contract.schema_verbs,
         documented_schema_verbs: contract.documented_schema_verbs,
+        opaque_schema_verbs: contract.opaque_schema_verbs,
         may_initialize: contract.may_initialize,
         may_import_git: contract.may_import_git,
         may_write_worktree: contract.may_write_worktree,
@@ -2806,6 +2790,10 @@ pub(crate) fn documented_schema_verbs() -> Vec<&'static str> {
     let mut verbs = collect_schema_verbs(|contract| contract.documented_schema_verbs);
     verbs.push("error");
     verbs
+}
+
+pub(crate) fn opaque_schema_verbs() -> Vec<&'static str> {
+    collect_schema_verbs(|contract| contract.opaque_schema_verbs)
 }
 
 fn collect_schema_verbs(
@@ -3701,6 +3689,16 @@ mod tests {
                 assert!(
                     contract.schema_verbs.contains(verb),
                     "`{display}` documents schema verb `{verb}` without registering it"
+                );
+            }
+            for verb in contract.opaque_schema_verbs {
+                assert!(
+                    contract.schema_verbs.contains(verb),
+                    "`{display}` marks schema verb `{verb}` opaque without registering it"
+                );
+                assert!(
+                    contract.documented_schema_verbs.contains(verb),
+                    "`{display}` marks schema verb `{verb}` opaque without documenting it"
                 );
             }
             if !contract.schema_verbs.is_empty() {

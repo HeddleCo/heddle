@@ -392,6 +392,53 @@ impl RecoveryAdvice {
         )
     }
 
+    pub(crate) fn init_path_conflict(positional: &str, repo_path: &str) -> Self {
+        Self::invalid_usage(
+            "init_path_conflict",
+            format!(
+                "`heddle init` received both a positional path ({positional}) and --repo ({repo_path})"
+            ),
+            "Pass exactly one repository path so initialization targets one checkout.",
+            "heddle init <path>",
+        )
+    }
+
+    pub(crate) fn init_principal_field_required(field: &str) -> Self {
+        Self::invalid_usage(
+            "init_principal_field_required",
+            format!("{field} is required when configuring a principal during init"),
+            "Pass both `--principal-name` and `--principal-email`, or omit both and configure identity later.",
+            "heddle init",
+        )
+    }
+
+    pub(crate) fn network_feature_unavailable(operation: &str) -> Self {
+        Self::safety_refusal(
+            "network_feature_unavailable",
+            format!(
+                "network {operation} support is not available in this build; enable the `client` feature"
+            ),
+            "Use a Heddle binary built with the `client` feature for hosted network remotes, or use a local Git-overlay remote.",
+            "this Heddle binary was built without hosted network transport support",
+            format!("network {operation} cannot contact or mutate the requested hosted remote"),
+            "repository state, refs, metadata, and worktree files were left unchanged",
+            "heddle remote list",
+            vec![
+                "heddle remote list".to_string(),
+                "heddle commands --output json".to_string(),
+            ],
+        )
+    }
+
+    pub(crate) fn git_remote_name_invalid(name: &str) -> Self {
+        Self::invalid_usage(
+            "git_remote_name_invalid",
+            format!("invalid Git remote name for Git-overlay repository: {name}"),
+            "Use a Git remote name without spaces, control characters, path separators, ref metacharacters, leading dots, or a `.lock` suffix.",
+            "heddle remote list",
+        )
+    }
+
     pub(crate) fn hook_veto(hook: &str, action: &str, reason: impl Into<String>) -> Self {
         let reason = reason.into();
         Self::safety_refusal(

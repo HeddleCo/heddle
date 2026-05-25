@@ -317,9 +317,7 @@ pub async fn cmd_push(
             #[cfg(not(feature = "client"))]
             let _ = (addr, repo_path, token);
             #[cfg(not(feature = "client"))]
-            anyhow::bail!(
-                "network push support is not available in this build; enable the `client` feature"
-            );
+            anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }
     }
 
