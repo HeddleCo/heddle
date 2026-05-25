@@ -7,38 +7,28 @@
 # `[features] default = [...]` set), Linux mounts silently fall back
 # to NFS at runtime (heddle#190 r5 / Codex PR #225 P2).
 #
-# We use `cargo build --message-format=json` rather than poking at
-# `target/debug/` directly so the check works regardless of
-# `CARGO_TARGET_DIR` (the orchestrator points workspaces at a shared
-# per-repo target dir) and regardless of build profile.
+# We resolve the target dir via `cargo metadata` (rather than piping
+# `cargo build --message-format=json` through a reader that breaks
+# early) so the check works regardless of `CARGO_TARGET_DIR` /
+# `.cargo/config.toml` redirects, AND avoids the SIGPIPE+pipefail
+# trap that bit r5–r7 on arm64 CI runners: cargo was still streaming
+# JSON when the consumer hit its match and closed stdin, cargo got
+# SIGPIPE (exit 141), and `set -o pipefail` propagated that.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-artifact=$(cargo build --locked -p heddle-cli --message-format=json 2>/dev/null \
-  | python3 -c '
-import json, sys
-for line in sys.stdin:
-    try:
-        m = json.loads(line)
-    except ValueError:
-        continue
-    if (m.get("reason") == "compiler-artifact"
-            and m.get("target", {}).get("name") == "heddle-fuse-worker"
-            and m.get("executable")):
-        print(m["executable"])
-        break
-')
+cargo build --locked -p heddle-cli >/dev/null
 
-if [ -z "$artifact" ]; then
-    echo "ERROR: default \`cargo build -p heddle-cli\` did not produce heddle-fuse-worker" >&2
+target_dir=$(cargo metadata --no-deps --format-version=1 \
+    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+worker="${target_dir}/debug/heddle-fuse-worker"
+
+if [ ! -x "$worker" ]; then
+    echo "ERROR: default \`cargo build -p heddle-cli\` did not produce heddle-fuse-worker at:" >&2
+    echo "  $worker" >&2
     echo "  heddle-cli's [features] default = [...] must include \"mount\"" >&2
-    echo "  (or the [[bin]] must drop its required-features = [\"mount\"] gate)." >&2
+    echo "  (or the [[bin]] heddle-fuse-worker must drop required-features = [\"mount\"])." >&2
     exit 1
 fi
 
-if [ ! -x "$artifact" ]; then
-    echo "ERROR: artifact path is not executable: $artifact" >&2
-    exit 1
-fi
-
-echo "OK: heddle-fuse-worker built at $artifact"
+echo "OK: heddle-fuse-worker built at $worker"
