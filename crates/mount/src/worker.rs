@@ -816,10 +816,17 @@ fn supervise_watcher_spawn(
     match spawn_result {
         Ok(handle) => Ok(handle),
         Err(e) => {
-            // RED-COMMIT STUB: propagates the error without reaping
-            // the child. The unit test asserts kill+wait happens;
-            // this path makes it fail.
-            let _ = child_slot;
+            if let Some(mut child) = child_slot
+                .lock()
+                .expect("watcher child slot lock")
+                .take()
+            {
+                // `kill` may fail with ESRCH if the worker raced
+                // us and already exited; either way `wait` reaps
+                // the entry so we don't leave a zombie behind.
+                let _ = child.kill();
+                let _ = child.wait();
+            }
             Err(e)
         }
     }
