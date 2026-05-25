@@ -218,27 +218,6 @@ impl ErrorClassification {
         }
     }
 
-    fn known_with_error(
-        kind: &'static str,
-        human_error: impl Into<String>,
-        hint: impl Into<String>,
-        unsafe_condition: impl Into<String>,
-        would_change: impl Into<String>,
-        preserved: impl Into<String>,
-        primary_command: impl Into<String>,
-    ) -> Self {
-        let mut classification = Self::known(
-            kind,
-            hint,
-            unsafe_condition,
-            would_change,
-            preserved,
-            primary_command,
-        );
-        classification.human_error = Some(human_error.into());
-        classification
-    }
-
     fn runtime() -> Self {
         Self::known(
             "runtime_error",
@@ -297,43 +276,8 @@ fn classify_error(err: &anyhow::Error) -> ErrorClassification {
             };
         }
         if let Some(git_error) = cause.downcast_ref::<crate::bridge::git_core::GitBridgeError>() {
-            match git_error {
-                crate::bridge::git_core::GitBridgeError::NonFastForwardRef { name, .. }
-                    if name == crate::bridge::git_notes::NOTES_REF =>
-                {
-                    return git_overlay_note_ref_conflict_classification();
-                }
-                crate::bridge::git_core::GitBridgeError::NonFastForwardRef { name, .. } => {
-                    if let Some(branch) = name.strip_prefix("refs/heads/") {
-                        return git_overlay_remote_push_rejected_classification(branch);
-                    }
-                }
-                crate::bridge::git_core::GitBridgeError::Conflict(message)
-                    if is_git_overlay_mapping_conflict(message) =>
-                {
-                    return git_overlay_mapping_conflict_classification();
-                }
-                crate::bridge::git_core::GitBridgeError::GitHeddleThreadDiverged {
-                    thread,
-                    branch,
-                    ..
-                } => {
-                    return git_heddle_thread_diverged_classification(thread, branch);
-                }
-                crate::bridge::git_core::GitBridgeError::RemoteDiverged {
-                    branch,
-                    upstream,
-                    ..
-                } => {
-                    return git_overlay_remote_diverged_classification(branch, upstream);
-                }
-                crate::bridge::git_core::GitBridgeError::ShallowClone {
-                    repository,
-                    retry_command,
-                } => {
-                    return git_overlay_shallow_clone_classification(repository, retry_command);
-                }
-                _ => {}
+            if let Some(advice) = RecoveryAdvice::from_git_bridge_error(git_error) {
+                return ErrorClassification::from_advice(&advice);
             }
         }
         if let Some(heddle_err) = cause.downcast_ref::<HeddleError>() {
@@ -537,122 +481,4 @@ fn classify_error(err: &anyhow::Error) -> ErrorClassification {
         );
     }
     ErrorClassification::runtime()
-}
-
-fn is_git_overlay_mapping_conflict(message: &str) -> bool {
-    (message.starts_with("git oid ") || message.starts_with("change id "))
-        && message.contains(" mapped to ")
-        && message.contains(" (new ")
-}
-
-fn git_overlay_note_ref_conflict_classification() -> ErrorClassification {
-    let mut classification = ErrorClassification::known_with_error(
-        "git_overlay_note_ref_conflict",
-        "Remote Heddle notes do not fast-forward",
-        "Fetch the remote Heddle notes, then retry the push. If the conflict remains, create a fresh Heddle clone from the remote so Git-to-Heddle identity metadata stays authoritative.",
-        "updating refs/notes/heddle would replace remote Git-to-Heddle identity metadata instead of fast-forwarding it",
-        "pushing would remap commits that another Heddle checkout already identified",
-        "remote refs/notes/heddle was left unchanged",
-        "heddle fetch",
-    );
-    classification.recovery_commands = vec![
-        "heddle fetch".to_string(),
-        "heddle push".to_string(),
-        "heddle clone <remote> <fresh-path>".to_string(),
-    ];
-    classification
-}
-
-fn git_overlay_mapping_conflict_classification() -> ErrorClassification {
-    ErrorClassification::known_with_error(
-        "git_overlay_mapping_conflict",
-        "Git-overlay mapping metadata disagrees with refs/notes/heddle",
-        "The local sidecar and refs/notes/heddle disagree about Git-to-Heddle identity. Use a fresh Heddle clone from the remote, or restore the notes ref from the checkout whose mapping is authoritative before retrying.",
-        "one Git commit maps to different Heddle change ids across the sidecar and refs/notes/heddle",
-        "continuing would corrupt or hide the Git/Heddle identity mapping",
-        "the command stopped before applying the requested ref or worktree update",
-        "heddle clone <remote> <fresh-path>",
-    )
-}
-
-fn git_overlay_shallow_clone_classification(
-    repository: &std::path::Path,
-    retry_command: &str,
-) -> ErrorClassification {
-    let primary_command = "heddle clone <remote> <fresh-path>".to_string();
-    let mut classification = ErrorClassification::known_with_error(
-        "git_overlay_shallow_clone",
-        "Shallow Git repository cannot be imported",
-        format!(
-            "Import needs complete ancestry. Create or choose a complete checkout with `{primary_command}`, then retry with `{retry_command}`."
-        ),
-        format!(
-            "Git repository '{}' is shallow and does not contain the full commit ancestry Heddle needs to preserve stable change identity",
-            repository.display()
-        ),
-        "importing from this checkout would create an incomplete Git-to-Heddle history map",
-        "Heddle refs, Git refs, index, and worktree files were left unchanged",
-        primary_command.clone(),
-    );
-    classification.recovery_commands = vec![primary_command, retry_command.to_string()];
-    classification
-}
-
-fn git_heddle_thread_diverged_classification(thread: &str, branch: &str) -> ErrorClassification {
-    let primary_command = format!("heddle bridge git reconcile --ref {branch} --preview");
-    let heddle_preview =
-        format!("heddle bridge git reconcile --prefer heddle --ref {branch} --preview");
-    let git_preview = format!("heddle bridge git reconcile --prefer git --ref {branch} --preview");
-    let mut classification = ErrorClassification::known_with_error(
-        "git_heddle_thread_diverged",
-        "Git branch and Heddle thread have diverged",
-        format!(
-            "Inspect both local repair choices with `{primary_command}`. Preview mode does not move refs, update the index, change worktree files, push, or pull."
-        ),
-        format!(
-            "Heddle thread '{thread}' and Git branch '{branch}' both contain history the other side lacks"
-        ),
-        "importing or syncing now would need to choose whether the local Git branch or Heddle thread is authoritative",
-        "Heddle refs, Git refs, and worktree files were left unchanged",
-        primary_command.clone(),
-    );
-    classification.recovery_commands = vec![primary_command, heddle_preview, git_preview];
-    classification
-}
-
-fn git_overlay_remote_push_rejected_classification(branch: &str) -> ErrorClassification {
-    let primary_command = "heddle fetch".to_string();
-    let mut classification = ErrorClassification::known_with_error(
-        "git_overlay_remote_diverged",
-        "Remote branch does not fast-forward the local Git checkpoint",
-        "Fetch first so Heddle can inspect the remote tip locally, then run `heddle verify` for the exact integration command.",
-        format!(
-            "pushing branch '{branch}' would rewrite the remote branch instead of fast-forwarding it"
-        ),
-        "pushing now would replace work that exists on the remote",
-        "the remote branch, local Git branch, Heddle refs, index, and worktree files were left unchanged",
-        primary_command.clone(),
-    );
-    classification.recovery_commands = vec![primary_command, "heddle verify".to_string()];
-    classification
-}
-
-fn git_overlay_remote_diverged_classification(branch: &str, upstream: &str) -> ErrorClassification {
-    let import_command = format!("heddle bridge git import --ref {upstream}");
-    let merge_preview = format!("heddle merge {upstream} --preview");
-    let mut classification = ErrorClassification::known_with_error(
-        "git_overlay_remote_diverged",
-        "Remote branch does not fast-forward the local Git checkpoint",
-        format!(
-            "Import the fetched upstream tip with `{import_command}`, then preview integration with `{merge_preview}`."
-        ),
-        format!(
-            "local branch '{branch}' and upstream '{upstream}' both contain commits the other side lacks"
-        ),
-        "pulling now would need to integrate upstream work with local Heddle work before moving the branch",
-        "Heddle refs, the visible Git branch, and worktree files were left unchanged",
-        import_command.clone(),
-    );
-    classification.recovery_commands = vec![import_command, merge_preview];
-    classification
 }

@@ -117,6 +117,34 @@ fn known_recovery_phrases_stay_in_typed_advice() {
     );
 }
 
+#[test]
+fn git_bridge_recovery_policy_stays_out_of_error_renderer() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let envelope = src_dir.join(ALLOWED_ENVELOPE_FILE);
+    let source = fs::read_to_string(&envelope)
+        .unwrap_or_else(|err| panic!("read {}: {err}", envelope.display()));
+
+    assert!(
+        source.contains("RecoveryAdvice::from_git_bridge_error"),
+        "{ALLOWED_ENVELOPE_FILE} should delegate GitBridgeError policy to typed advice"
+    );
+    for forbidden in [
+        "NonFastForwardRef",
+        "GitHeddleThreadDiverged",
+        "RemoteDiverged",
+        "ShallowClone",
+        "refs/notes/heddle",
+        "git_overlay_remote_diverged",
+        "git_overlay_mapping_conflict",
+        "git_overlay_shallow_clone",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "{ALLOWED_ENVELOPE_FILE} should render Git bridge recovery advice, not own policy `{forbidden}`"
+        );
+    }
+}
+
 fn recovery_phrase_allowed(rel: &Path, phrase: &str) -> bool {
     rel == Path::new(ALLOWED_ADVICE_FILE)
         || rel == Path::new(ALLOWED_ENVELOPE_FILE)
