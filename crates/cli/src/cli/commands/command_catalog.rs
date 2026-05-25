@@ -32,6 +32,7 @@ pub struct CommandCatalogOutput {
     pub executable_path: String,
     pub commands: Vec<CommandCatalogEntry>,
     pub global_options: Vec<CommandCatalogOption>,
+    pub json_discriminators: Vec<CommandJsonDiscriminator>,
     pub recommended_action_placeholders: Vec<String>,
     pub recommended_action_templates: Vec<ActionTemplate>,
 }
@@ -76,6 +77,7 @@ pub struct CommandCatalogEntry {
     pub side_effect_class: String,
     pub first_run_behavior: String,
     pub json_kind: String,
+    pub json_discriminators: Vec<CommandJsonDiscriminator>,
     pub schema_verbs: Vec<String>,
     pub documented_schema_verbs: Vec<String>,
     pub options: Vec<CommandCatalogOption>,
@@ -129,6 +131,16 @@ pub struct ActionTemplate {
     pub argv_template: Vec<String>,
     pub required_inputs: Vec<String>,
     pub agent_may_fill: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct CommandJsonDiscriminator {
+    pub path: Vec<String>,
+    pub display: String,
+    pub schema_verb: Option<String>,
+    pub field: String,
+    pub value: String,
+    pub no_schema_reason: Option<String>,
 }
 
 impl CommandCatalogOutput {
@@ -251,6 +263,15 @@ pub struct CommandRuntimeContract {
 struct CommandContractEntry {
     path: &'static [&'static str],
     contract: CommandContract,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandJsonDiscriminatorEntry {
+    path: &'static [&'static str],
+    schema_verb: Option<&'static str>,
+    field: &'static str,
+    value: &'static str,
+    no_schema_reason: Option<&'static str>,
 }
 
 const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
@@ -1740,11 +1761,93 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
 ];
 
+const JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorEntry] = &[
+    json_discriminator(&["commands"], Some("commands"), "kind", "command_catalog"),
+    json_discriminator(&["schemas"], Some("schemas"), "output_kind", "schemas"),
+    json_discriminator(&["status"], Some("status"), "output_kind", "status"),
+    json_discriminator(&["diff"], Some("diff"), "output_kind", "diff"),
+    json_discriminator(&["capture"], Some("capture"), "output_kind", "capture"),
+    json_discriminator(&["commit"], Some("commit"), "output_kind", "commit"),
+    json_discriminator(
+        &["checkpoint"],
+        Some("checkpoint"),
+        "output_kind",
+        "checkpoint",
+    ),
+    json_discriminator(&["undo"], Some("undo"), "output_kind", "undo"),
+    json_discriminator(&["redo"], Some("redo"), "output_kind", "redo"),
+    json_discriminator(
+        &["doctor", "schemas"],
+        Some("doctor schemas"),
+        "output_kind",
+        "doctor_schemas",
+    ),
+    json_discriminator(
+        &["doctor", "docs"],
+        Some("doctor docs"),
+        "output_kind",
+        "doctor_docs",
+    ),
+    json_discriminator(
+        &["bridge", "git", "status"],
+        Some("bridge git status"),
+        "output_kind",
+        "bridge_git_status",
+    ),
+    json_discriminator(
+        &["bridge", "git", "sync"],
+        Some("bridge git sync"),
+        "output_kind",
+        "bridge_git_sync",
+    ),
+    json_discriminator(
+        &["bridge", "git", "reconcile"],
+        Some("bridge git reconcile"),
+        "output_kind",
+        "bridge_git_reconcile",
+    ),
+    json_discriminator(
+        &["thread", "list"],
+        Some("thread list"),
+        "output_kind",
+        "thread_list",
+    ),
+    json_discriminator(
+        &["thread", "show"],
+        Some("thread show"),
+        "output_kind",
+        "thread_show",
+    ),
+    json_discriminator(
+        &["workspace", "show"],
+        Some("workspace show"),
+        "output_kind",
+        "workspace_summary",
+    ),
+];
+
 static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =
+    OnceLock::new();
+static ACTIVE_JSON_DISCRIMINATOR_ENTRIES: OnceLock<Vec<&'static CommandJsonDiscriminatorEntry>> =
     OnceLock::new();
 
 const fn entry(path: &'static [&'static str], contract: CommandContract) -> CommandContractEntry {
     CommandContractEntry { path, contract }
+}
+
+const fn json_discriminator(
+    path: &'static [&'static str],
+    schema_verb: Option<&'static str>,
+    field: &'static str,
+    value: &'static str,
+) -> CommandJsonDiscriminatorEntry {
+    CommandJsonDiscriminatorEntry {
+        path,
+        schema_verb,
+        field,
+        value,
+        no_schema_reason: None,
+    }
 }
 
 pub fn cmd_commands(cli: &Cli, args: &CommandCatalogArgs) -> Result<()> {
@@ -1869,6 +1972,7 @@ pub fn build_command_catalog() -> CommandCatalogOutput {
         executable_path: heddle_argv0(),
         commands,
         global_options,
+        json_discriminators: command_json_discriminators(),
         recommended_action_placeholders: RECOMMENDED_ACTION_PLACEHOLDERS
             .iter()
             .map(|action| (*action).to_string())
@@ -1984,6 +2088,7 @@ fn catalog_entry(command: &clap::Command, path: &[String]) -> CommandCatalogEntr
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
+        json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
         schema_verbs: contract
             .schema_verbs
             .iter()
@@ -2451,6 +2556,18 @@ fn active_command_contract_entries() -> &'static [&'static CommandContractEntry]
         .as_slice()
 }
 
+fn active_json_discriminator_entries() -> &'static [&'static CommandJsonDiscriminatorEntry] {
+    ACTIVE_JSON_DISCRIMINATOR_ENTRIES
+        .get_or_init(|| {
+            let command = Cli::command();
+            JSON_DISCRIMINATORS
+                .iter()
+                .filter(|entry| clap_command_path_exists(&command, entry.path))
+                .collect()
+        })
+        .as_slice()
+}
+
 fn clap_command_path_exists(command: &clap::Command, path: &[&str]) -> bool {
     let mut current = command;
     for part in path {
@@ -2463,6 +2580,49 @@ fn clap_command_path_exists(command: &clap::Command, path: &[&str]) -> bool {
         current = next;
     }
     true
+}
+
+pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
+    active_json_discriminator_entries()
+        .iter()
+        .copied()
+        .map(json_discriminator_metadata)
+        .collect()
+}
+
+pub fn command_json_discriminator_for_schema_verb(
+    schema_verb: &str,
+) -> Option<CommandJsonDiscriminator> {
+    active_json_discriminator_entries()
+        .iter()
+        .copied()
+        .find(|entry| entry.schema_verb == Some(schema_verb))
+        .map(json_discriminator_metadata)
+}
+
+fn json_discriminators_for_path<'a>(
+    path: impl IntoIterator<Item = &'a str>,
+) -> Vec<CommandJsonDiscriminator> {
+    let path = path.into_iter().collect::<Vec<_>>();
+    active_json_discriminator_entries()
+        .iter()
+        .copied()
+        .filter(|entry| entry.path == path.as_slice())
+        .map(json_discriminator_metadata)
+        .collect()
+}
+
+fn json_discriminator_metadata(
+    entry: &'static CommandJsonDiscriminatorEntry,
+) -> CommandJsonDiscriminator {
+    CommandJsonDiscriminator {
+        path: entry.path.iter().map(|part| (*part).to_string()).collect(),
+        display: entry.path.join(" "),
+        schema_verb: entry.schema_verb.map(str::to_string),
+        field: entry.field.to_string(),
+        value: entry.value.to_string(),
+        no_schema_reason: entry.no_schema_reason.map(str::to_string),
+    }
 }
 
 pub fn command_runtime_contract_for_command(command: &Commands) -> CommandRuntimeContract {
@@ -3759,6 +3919,128 @@ mod tests {
                 "`{display}` must advertise its streaming JSON contract"
             );
         }
+    }
+
+    #[test]
+    fn json_discriminator_table_starts_with_bounded_command_slice() {
+        let displays = JSON_DISCRIMINATORS
+            .iter()
+            .map(|entry| entry.path.join(" "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            displays,
+            vec![
+                "commands",
+                "schemas",
+                "status",
+                "diff",
+                "capture",
+                "commit",
+                "checkpoint",
+                "undo",
+                "redo",
+                "doctor schemas",
+                "doctor docs",
+                "bridge git status",
+                "bridge git sync",
+                "bridge git reconcile",
+                "thread list",
+                "thread show",
+                "workspace show",
+            ]
+        );
+    }
+
+    #[test]
+    fn json_discriminator_metadata_is_internally_consistent() {
+        let raw_paths = JSON_DISCRIMINATORS
+            .iter()
+            .map(|entry| entry.path.to_vec())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            raw_paths.len(),
+            JSON_DISCRIMINATORS.len(),
+            "JSON discriminator table contains duplicate command paths"
+        );
+
+        let mut schema_verbs = BTreeSet::new();
+        for entry in JSON_DISCRIMINATORS {
+            let display = entry.path.join(" ");
+            let contract = raw_command_contract_for_path(entry.path.iter().copied())
+                .unwrap_or_else(|| panic!("JSON discriminator references unknown `{display}`"));
+            assert!(
+                contract.supports_json,
+                "`{display}` advertises JSON discriminator `{}` but does not support JSON",
+                entry.value
+            );
+            assert!(
+                matches!(entry.field, "kind" | "output_kind"),
+                "`{display}` advertises unsupported discriminator field `{}`",
+                entry.field
+            );
+            assert!(
+                !entry.value.is_empty(),
+                "`{display}` discriminator value must be non-empty"
+            );
+
+            if let Some(schema_verb) = entry.schema_verb {
+                assert!(
+                    schema_verbs.insert(schema_verb),
+                    "JSON discriminator schema verb `{schema_verb}` is registered more than once"
+                );
+                assert!(
+                    contract.schema_verbs.contains(&schema_verb),
+                    "`{display}` advertises discriminator schema verb `{schema_verb}` not present in its command contract"
+                );
+                assert!(
+                    entry.no_schema_reason.is_none(),
+                    "`{display}` cannot have both a schema verb and a no-schema reason"
+                );
+            } else {
+                assert!(
+                    entry
+                        .no_schema_reason
+                        .is_some_and(|reason| !reason.is_empty()),
+                    "`{display}` discriminator without a schema verb must document why"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_catalog_exposes_active_json_discriminator_metadata() {
+        let catalog = build_command_catalog();
+        let active = command_json_discriminators();
+        for discriminator in &active {
+            let entry = catalog
+                .commands
+                .iter()
+                .find(|command| command.display == discriminator.display)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "active JSON discriminator references missing command `{}`",
+                        discriminator.display
+                    )
+                });
+            assert!(entry.supports_json);
+            assert!(
+                entry
+                    .json_discriminators
+                    .iter()
+                    .any(|entry_discriminator| entry_discriminator == discriminator),
+                "`{}` catalog entry must expose its JSON discriminator metadata",
+                discriminator.display
+            );
+        }
+
+        let status = catalog
+            .commands
+            .iter()
+            .find(|entry| entry.display == "status")
+            .expect("status should be cataloged");
+        assert_eq!(status.json_discriminators.len(), 1);
+        assert_eq!(status.json_discriminators[0].field, "output_kind");
+        assert_eq!(status.json_discriminators[0].value, "status");
     }
 
     #[test]
