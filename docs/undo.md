@@ -76,7 +76,7 @@ contracts below are enforced by integration tests in
   dirty paths. Capture the changes with `heddle capture -m "..."` (or remove
   them) and retry. The check is shared with `cherry-pick` and `rebase`.
 - **Destructive-boundary refusal.** If the state the inverse would restore
-  has been removed from the object store — typically by `heddle gc --prune`
+  has been removed from the object store — typically by `heddle maintenance gc --prune`
   reaching past the live oplog window — `heddle undo` refuses with a single
   clear message naming the missing op id. Restore from a backup or list past
   the boundary with `heddle undo --list`.

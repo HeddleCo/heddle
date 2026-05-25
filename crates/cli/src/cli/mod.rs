@@ -14,20 +14,20 @@ pub mod transaction_sentinel;
 #[cfg(feature = "client")]
 pub use cli_args::PresenceCommands;
 pub use cli_args::{
-    ActorCommands, AgentCommands, AttemptArgs, BisectCommands, BranchArgs, CheckpointArgs, Cli,
-    CloneArgs, CollapseArgs, Commands, CommitArgs, ContextCommands, DaemonCommands, DiagnoseArgs,
-    DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, HookCommands, HookInstallSource,
-    InitArgs, IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs,
-    IntegrationTargetArgs, LogArgs, MaintenanceCommands, MarkerCommands, MergeArgs, OutputMode,
-    PullArgs, PurgeApplyArgs, PurgeCommands, PurgeListArgs, PushArgs, ReadyArgs, RedactApplyArgs,
-    RedactCommands, RedactListArgs, RedactShowArgs, RedactTrustAddArgs, RedactTrustCommands,
-    RedactTrustListArgs, RedactTrustRemoveArgs, RemoteCommands, ResolveArgs, RetroArgs, RevertArgs,
-    RunArgs, SessionCommands, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
-    SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs, StashCommands, StoreCommands,
-    SwitchArgs, ThreadAbsorbArgs, ThreadCleanupArgs, ThreadCommands, ThreadDropArgs,
-    ThreadListArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
-    ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
-    WorkspaceCommands, WorkspaceModeArg, WorkspaceShowArgs,
+    ActorCommands, AdoptArgs, AgentCommands, AttemptArgs, BisectCommands, BranchArgs,
+    CheckpointArgs, Cli, CloneArgs, CollapseArgs, Commands, CommitArgs, ContextCommands,
+    DaemonCommands, DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs,
+    HookCommands, HookInstallSource, InitArgs, IntegrationCommands, IntegrationInstallArgs,
+    IntegrationRelayArgs, IntegrationTargetArgs, LogArgs, MaintenanceCommands, MarkerCommands,
+    MergeArgs, OutputMode, PullArgs, PurgeApplyArgs, PurgeCommands, PurgeListArgs, PushArgs,
+    ReadyArgs, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, RedactTrustAddArgs,
+    RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, RemoteCommands, ResolveArgs,
+    RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
+    SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs,
+    StashCommands, StoreCommands, SwitchArgs, ThreadAbsorbArgs, ThreadCleanupArgs, ThreadCommands,
+    ThreadDropArgs, ThreadListArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
+    ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs,
+    WatchArgs, WorkspaceCommands, WorkspaceModeArg, WorkspaceShowArgs,
 };
 #[cfg(feature = "client")]
 pub use cli_args::{AuthCommands, SupportCommands};
@@ -64,8 +64,6 @@ pub fn load_user_config_or_exit() -> UserConfig {
 /// 1. user config `output.format` (or `auto` if unset)
 /// 2. repo config `output.format` (falls back to user config)
 /// 3. `--output {auto|json|text}` CLI flag
-/// 4. `--json` CLI flag (deprecated; routes to JSON without warning so
-///    machine-mode stderr stays parseable)
 ///
 /// `auto` resolves by stream type: text on a TTY, JSON when piped.
 pub fn should_output_json(cli: &Cli, config: Option<&Config>) -> bool {
@@ -81,10 +79,6 @@ pub fn should_output_json(cli: &Cli, config: Option<&Config>) -> bool {
             OutputMode::Json => OutputFormat::Json,
             OutputMode::Text => OutputFormat::Text,
         };
-    }
-
-    if cli.json {
-        format = OutputFormat::Json;
     }
 
     match format {

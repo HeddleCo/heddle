@@ -4,10 +4,12 @@
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
 
 use anyhow::{Result, bail};
-use repo::Repository;
+use objects::object::Principal;
+use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 use tracing::{debug, info};
 
+use super::git_overlay_health::{RepositoryVerificationState, build_repository_verification_state};
 use crate::{
     cli::{Cli, InitArgs, should_output_json},
     config::UserConfig,
@@ -15,8 +17,30 @@ use crate::{
 
 #[derive(Serialize)]
 struct InitOutput {
+    status: String,
+    action: String,
     path: PathBuf,
+    repository_mode: String,
+    git_detected: bool,
+    heddle_initialized: bool,
+    installed_heddleignore: bool,
+    principal_configured: bool,
+    principal_status: String,
+    principal_source: Option<String>,
+    principal: Option<InitPrincipalOutput>,
+    principal_recommended_action: Option<String>,
+    side_effects: Vec<String>,
     message: String,
+    next_action: Option<String>,
+    recommended_action: Option<String>,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize)]
+struct InitPrincipalOutput {
+    name: String,
+    email: String,
 }
 
 pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
@@ -67,6 +91,8 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         maybe_install_default_heddleignore(repo.root())?
     };
 
+    let mut user_config = UserConfig::load_default()?;
+    let mut principal_configured = false;
     if args.principal_name.is_some() || args.principal_email.is_some() {
         let name = args
             .principal_name
@@ -76,18 +102,18 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
             .principal_email
             .clone()
             .ok_or_else(|| anyhow::anyhow!("--principal-email is required"))?;
-        let mut config = UserConfig::load_default()?;
-        config.set_principal(name.clone(), email.clone());
-        let config_path = config.save_default()?;
+        user_config.set_principal(name.clone(), email.clone());
+        let config_path = user_config.save_default()?;
         info!(principal_name = %name, principal_email = %email, "Principal configured");
         debug!(config_path = %config_path.display(), "User config updated");
+        principal_configured = true;
     }
 
     super::maybe_prompt_init_install(cli, &repo, &args)?;
 
     let mut message = if has_git {
         format!(
-            "Initialized Heddle sidecar in {} for Git-overlay workflows",
+            "Initialized Heddle data in {} for Git-overlay workflows",
             repo.heddle_dir().display()
         )
     } else {
@@ -100,9 +126,28 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         message.push_str("\nWrote default .heddleignore (edit to customize)");
     }
 
+    let trust = build_repository_verification_state(&repo);
+    let next_action =
+        (!trust.recommended_action.is_empty()).then(|| trust.recommended_action.clone());
+    let principal_status = init_principal_status(&repo, &user_config)?;
     let output = InitOutput {
+        status: "initialized".to_string(),
+        action: "init".to_string(),
         path: repo.heddle_dir().to_path_buf(),
+        repository_mode: repo.capability_label().to_string(),
+        git_detected: has_git,
+        heddle_initialized: true,
+        installed_heddleignore,
+        principal_configured,
+        principal_status: principal_status.status,
+        principal_source: principal_status.source,
+        principal: principal_status.principal,
+        principal_recommended_action: principal_status.recommended_action,
+        side_effects: init_side_effects(has_git, installed_heddleignore, principal_configured),
         message,
+        next_action: next_action.clone(),
+        recommended_action: next_action,
+        trust,
     };
 
     render_init(&output, should_output_json(cli, Some(repo.config())))
@@ -170,8 +215,125 @@ fn render_init(output: &InitOutput, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string(output)?);
     } else {
         println!("{}", output.message);
+        match output.principal.as_ref() {
+            Some(principal) => {
+                let source = output
+                    .principal_source
+                    .as_deref()
+                    .map(|source| format!(" from {source}"))
+                    .unwrap_or_default();
+                println!(
+                    "Principal: {} <{}>{source}",
+                    principal.name, principal.email
+                );
+            }
+            None => {
+                println!("Principal: not configured");
+                if let Some(action) = output.principal_recommended_action.as_deref() {
+                    println!("  set with: {action}");
+                }
+            }
+        }
+        if !output.side_effects.is_empty() {
+            println!("Side effects:");
+            for effect in &output.side_effects {
+                println!("  - {effect}");
+            }
+        }
+        if let Some(next) = output.recommended_action.as_deref() {
+            println!("Next: {next}");
+        }
     }
     Ok(())
+}
+
+struct InitPrincipalStatus {
+    status: String,
+    source: Option<String>,
+    principal: Option<InitPrincipalOutput>,
+    recommended_action: Option<String>,
+}
+
+fn init_principal_status(
+    repo: &Repository,
+    user_config: &UserConfig,
+) -> Result<InitPrincipalStatus> {
+    if let Some(principal) = Principal::from_env()
+        && !principal_is_unconfigured(&principal)
+    {
+        return Ok(configured_principal_status("environment", principal));
+    }
+
+    if let Some(config) = &repo.config().principal {
+        let principal = Principal::new(&config.name, &config.email);
+        if !principal_is_unconfigured(&principal) {
+            return Ok(configured_principal_status("repository", principal));
+        }
+    }
+
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        let principal = repo.get_principal()?;
+        if !principal_is_unconfigured(&principal) {
+            return Ok(configured_principal_status("git_config", principal));
+        }
+    }
+
+    if let Some(config) = &user_config.principal {
+        let principal = Principal::new(&config.name, &config.email);
+        if !principal_is_unconfigured(&principal) {
+            return Ok(configured_principal_status("user_config", principal));
+        }
+    }
+
+    Ok(InitPrincipalStatus {
+        status: "not_configured".to_string(),
+        source: None,
+        principal: None,
+        recommended_action: Some(set_principal_command().to_string()),
+    })
+}
+
+fn configured_principal_status(source: &str, principal: Principal) -> InitPrincipalStatus {
+    InitPrincipalStatus {
+        status: "configured".to_string(),
+        source: Some(source.to_string()),
+        principal: Some(InitPrincipalOutput {
+            name: principal.name,
+            email: principal.email,
+        }),
+        recommended_action: None,
+    }
+}
+
+fn principal_is_unconfigured(principal: &Principal) -> bool {
+    principal.name.trim().is_empty()
+        || principal.email.trim().is_empty()
+        || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")
+}
+
+fn set_principal_command() -> &'static str {
+    "heddle init --principal-name <name> --principal-email <email>"
+}
+
+fn init_side_effects(
+    has_git: bool,
+    installed_heddleignore: bool,
+    principal_configured: bool,
+) -> Vec<String> {
+    let mut side_effects = Vec::new();
+    if has_git {
+        side_effects.push("created Heddle sidecar for the existing Git repository".to_string());
+        side_effects.push("left Git-tracked files and `git status --short` untouched".to_string());
+    } else {
+        side_effects.push("created Heddle repository metadata".to_string());
+        if installed_heddleignore {
+            side_effects.push("wrote default .heddleignore".to_string());
+        }
+    }
+    if principal_configured {
+        side_effects.push("updated default principal attribution".to_string());
+    }
+    side_effects
 }
 
 #[cfg(test)]

@@ -9,13 +9,18 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    undo_apply::{apply_redo_batch, apply_undo_batch},
+    command_catalog::{ActionTemplate, recommended_action_argv, recommended_action_template},
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    undo_apply::{
+        apply_redo_batch, apply_undo_batch, preflight_redo_batches, preflight_undo_batches,
+    },
     worktree_safety::ensure_worktree_clean,
 };
-use crate::cli::{Cli, should_output_json};
+use crate::cli::{Cli, should_output_json, style};
 
 #[derive(Serialize)]
 struct OpListOutput {
+    output_kind: &'static str,
     batches: Vec<OpBatchOutput>,
 }
 
@@ -38,9 +43,20 @@ struct OpListEntry {
 
 #[derive(Serialize)]
 struct UndoRedoOutput {
+    output_kind: &'static str,
+    status: &'static str,
     action: String,
     message: String,
     batches: Vec<OpBatchOutput>,
+    next_action: Option<String>,
+    next_action_argv: Option<Vec<String>>,
+    next_action_template: Option<ActionTemplate>,
+    recommended_action: Option<String>,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<ActionTemplate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "verification")]
+    trust: Option<RepositoryVerificationState>,
 }
 
 pub fn cmd_undo(
@@ -61,17 +77,20 @@ pub fn cmd_undo(
         let scope = repo.op_scope();
         let batches = repo.oplog().recent_batches_scoped(depth, Some(&scope))?;
         let output = OpListOutput {
+            output_kind: "undo_list",
             batches: batches.iter().map(build_batch_output).collect(),
         };
 
         if should_output_json(cli, Some(repo.config())) {
             println!("{}", serde_json::to_string(&output)?);
         } else {
-            println!("Recent operation batches (showing up to {}):", depth);
+            println!("Recent undo history (showing up to {}):", depth);
             if output.batches.is_empty() {
-                println!("  No operations");
-            } else {
+                println!("  No saved changes to undo");
+            } else if cli.verbose > 0 {
                 print_batches(&output.batches);
+            } else {
+                print_human_history(&output.batches);
             }
         }
 
@@ -85,26 +104,18 @@ pub fn cmd_undo(
         return Err(anyhow!(empty_history_advice("undo", "undo")));
     }
 
-    // Run the redaction safety pre-flight before the `--preview`
-    // short-circuit so preview output is honest about refusals. A
-    // `Redact` without `--allow-redact-undo`, or any batch that crosses
-    // a `Purge`, must surface the same error here that the real undo
-    // would surface — otherwise `--preview` advertises "Would undo …"
-    // for a chain the real command would reject. The other pre-flights
-    // (`ensure_worktree_clean`, `ensure_undo_states_reachable`) stay
-    // post-preview: dirty worktree and gc-pruned states are conditions
-    // operators expect `--preview` to ignore.
+    // Run safety pre-flights before the `--preview` short-circuit so
+    // preview output is honest about refusals. Preview must not
+    // advertise "Would undo …" for a chain the real command would
+    // reject.
     ensure_redaction_undo_safe(&repo, &batches, allow_redact_undo)?;
-    // Cross-thread safety: refuse to undo a `ThreadCreate` whose
-    // ThreadManager record still has a materialized worktree on disk.
-    // The inverse only deletes the ref, so silently proceeding would
-    // leave the worktree directory orphaned with a broken `.heddle/HEAD`
-    // and a phantom ThreadManager record. Pre-preview for the same
-    // honesty reason as the redaction gate.
     ensure_thread_worktree_undo_safe(&repo, &batches)?;
+    preflight_undo_execution(&repo, &batches)?;
 
     if preview {
         let output = UndoRedoOutput {
+            output_kind: "undo",
+            status: "preview",
             action: "undo".to_string(),
             message: format!(
                 "Would undo {} batch{}",
@@ -112,25 +123,31 @@ pub fn cmd_undo(
                 if batches.len() == 1 { "" } else { "es" }
             ),
             batches: batches.iter().map(build_batch_output).collect(),
+            next_action: None,
+            next_action_argv: None,
+            next_action_template: None,
+            recommended_action: None,
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            trust: None,
         };
 
         if should_output_json(cli, Some(repo.config())) {
             println!("{}", serde_json::to_string(&output)?);
         } else {
-            println!("{}", output.message);
-            print_batches(&output.batches);
+            println!(
+                "{}",
+                human_undo_redo_message("undo", output.batches.len(), true)
+            );
+            if cli.verbose > 0 {
+                print_batches(&output.batches);
+            } else {
+                print_human_history(&output.batches);
+            }
         }
 
         return Ok(());
     }
-
-    ensure_worktree_clean(&repo, "undo")?;
-    // Refuse before mutating anything when a state the batch needs to
-    // restore is missing from the object store — typically because `gc
-    // --prune` or a truncated oplog has reached past the live window.
-    // Letting `apply_undo_batch` discover this mid-apply would leave the
-    // repo half-undone (worktree partially rewritten, batch not marked).
-    ensure_undo_states_reachable(&repo, &batches)?;
 
     let mut updated_batches = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -138,7 +155,12 @@ pub fn cmd_undo(
         updated_batches.push(repo.oplog().mark_batch_undone(&batch)?);
     }
 
+    let post_undo_repo = Repository::open(repo.root())?;
+    let post_undo_trust = build_repository_verification_state(&post_undo_repo);
+    let recommended_action = optional_action(&post_undo_trust.recommended_action);
     let output = UndoRedoOutput {
+        output_kind: "undo",
+        status: "completed",
         action: "undo".to_string(),
         message: format!(
             "Undone {} batch{}",
@@ -146,14 +168,31 @@ pub fn cmd_undo(
             if updated_batches.len() == 1 { "" } else { "es" }
         ),
         batches: updated_batches.iter().map(build_batch_output).collect(),
+        next_action: recommended_action.clone(),
+        next_action_argv: action_argv(&recommended_action),
+        next_action_template: action_template(&recommended_action),
+        recommended_action: recommended_action.clone(),
+        recommended_action_argv: action_argv(&recommended_action),
+        recommended_action_template: action_template(&recommended_action),
+        trust: Some(post_undo_trust),
     };
 
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("{}", output.message);
-        print_batches(&output.batches);
-        print_head(&repo)?;
+        println!(
+            "{}",
+            human_undo_redo_message("undo", output.batches.len(), false)
+        );
+        if cli.verbose > 0 {
+            print_batches(&output.batches);
+        } else {
+            print_human_history(&output.batches);
+        }
+        print_head(&post_undo_repo)?;
+        if let Some(trust) = &output.trust {
+            print_post_undo_trust(trust);
+        }
     }
 
     Ok(())
@@ -178,6 +217,8 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
 
     if preview {
         let output = UndoRedoOutput {
+            output_kind: "redo",
+            status: "preview",
             action: "redo".to_string(),
             message: format!(
                 "Would redo {} batch{}",
@@ -185,19 +226,34 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
                 if batches.len() == 1 { "" } else { "es" }
             ),
             batches: batches.iter().map(build_batch_output).collect(),
+            next_action: None,
+            next_action_argv: None,
+            next_action_template: None,
+            recommended_action: None,
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            trust: None,
         };
 
         if should_output_json(cli, Some(repo.config())) {
             println!("{}", serde_json::to_string(&output)?);
         } else {
-            println!("{}", output.message);
-            print_batches(&output.batches);
+            println!(
+                "{}",
+                human_undo_redo_message("redo", output.batches.len(), true)
+            );
+            if cli.verbose > 0 {
+                print_batches(&output.batches);
+            } else {
+                print_human_history(&output.batches);
+            }
         }
 
         return Ok(());
     }
 
     ensure_worktree_clean(&repo, "redo")?;
+    preflight_redo_batches(&repo, &batches)?;
 
     let mut updated_batches = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -205,7 +261,11 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         updated_batches.push(repo.oplog().mark_batch_redone(&batch)?);
     }
 
+    let post_redo_trust = build_repository_verification_state(&repo);
+    let recommended_action = optional_action(&post_redo_trust.recommended_action);
     let output = UndoRedoOutput {
+        output_kind: "redo",
+        status: "completed",
         action: "redo".to_string(),
         message: format!(
             "Redone {} batch{}",
@@ -213,13 +273,27 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
             if updated_batches.len() == 1 { "" } else { "es" }
         ),
         batches: updated_batches.iter().map(build_batch_output).collect(),
+        next_action: recommended_action.clone(),
+        next_action_argv: action_argv(&recommended_action),
+        next_action_template: action_template(&recommended_action),
+        recommended_action: recommended_action.clone(),
+        recommended_action_argv: action_argv(&recommended_action),
+        recommended_action_template: action_template(&recommended_action),
+        trust: Some(post_redo_trust),
     };
 
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("{}", output.message);
-        print_batches(&output.batches);
+        println!(
+            "{}",
+            human_undo_redo_message("redo", output.batches.len(), false)
+        );
+        if cli.verbose > 0 {
+            print_batches(&output.batches);
+        } else {
+            print_human_history(&output.batches);
+        }
         print_head(&repo)?;
     }
 
@@ -251,8 +325,8 @@ fn empty_history_advice(action: &str, noun: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         kind,
         format!("Nothing to {action}"),
-        "Inspect recent operation batches with `heddle undo --list`.",
-        format!("there are no {noun} batches in the current checkout lane"),
+        "Inspect recent undo history with `heddle undo --list`.",
+        format!("there are no {noun} entries in the current checkout lane"),
         format!("{action} would need to move Heddle and Git state, but no eligible batch exists"),
         "repository state was left unchanged",
         "heddle undo --list",
@@ -288,6 +362,20 @@ fn build_batch_output(batch: &OpBatch) -> OpBatchOutput {
     }
 }
 
+fn optional_action(action: &str) -> Option<String> {
+    (!action.trim().is_empty()).then(|| action.to_string())
+}
+
+fn action_argv(action: &Option<String>) -> Option<Vec<String>> {
+    action
+        .as_deref()
+        .and_then(|action| recommended_action_argv(action).ok().flatten())
+}
+
+fn action_template(action: &Option<String>) -> Option<ActionTemplate> {
+    action.as_deref().and_then(recommended_action_template)
+}
+
 fn batch_status(batch: &OpBatch) -> (bool, bool) {
     let any_undone = batch.entries.iter().any(|entry| entry.undone);
     let all_undone = batch.entries.iter().all(|entry| entry.undone);
@@ -296,6 +384,51 @@ fn batch_status(batch: &OpBatch) -> (bool, bool) {
 
 fn format_timestamp(timestamp: chrono::DateTime<chrono::Utc>) -> String {
     timestamp.format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn human_undo_redo_message(action: &str, count: usize, preview: bool) -> String {
+    let noun = if count == 1 {
+        "saved change"
+    } else {
+        "saved changes"
+    };
+    let verb = match (action, preview) {
+        ("undo", true) => "Would undo",
+        ("undo", false) => "Undid",
+        ("redo", true) => "Would redo",
+        ("redo", false) => "Redid",
+        _ if preview => "Would apply",
+        _ => "Applied",
+    };
+    format!("{verb} {count} {noun}")
+}
+
+fn print_human_history(batches: &[OpBatchOutput]) {
+    for batch in batches {
+        let status = if batch.undone {
+            " undone"
+        } else if batch.partial {
+            " partial"
+        } else {
+            ""
+        };
+        println!("  {}{}", style::dim(&batch.timestamp), style::dim(status));
+        for entry in &batch.operations {
+            let entry_status = if entry.undone { " (undone)" } else { "" };
+            println!(
+                "    - {}{}",
+                human_operation_description(&entry.description),
+                style::dim(entry_status)
+            );
+        }
+    }
+}
+
+fn human_operation_description(description: &str) -> String {
+    if description.starts_with("git checkpoint ") {
+        return "Git commit written".to_string();
+    }
+    description.to_string()
 }
 
 fn print_batches(batches: &[OpBatchOutput]) {
@@ -330,6 +463,66 @@ fn print_head(repo: &Repository) -> Result<()> {
         println!("Now at: {}", id.short());
     }
     Ok(())
+}
+
+fn print_post_undo_trust(trust: &RepositoryVerificationState) {
+    println!("Verification: {}", human_post_undo_trust_status(trust));
+    if !trust.recommended_action.trim().is_empty() {
+        println!("Next: {}", style::bold(&trust.recommended_action));
+    }
+}
+
+fn human_post_undo_trust_status(trust: &RepositoryVerificationState) -> String {
+    if matches!(trust.status.as_str(), "dirty_worktree" | "uncaptured") {
+        "changes to save".to_string()
+    } else {
+        trust.status.clone()
+    }
+}
+
+fn preflight_undo_execution(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
+    ensure_no_active_operation(repo, "undo")?;
+    ensure_worktree_clean(repo, "undo")?;
+    // Refuse before mutating anything when a state the batch needs to
+    // restore is missing from the object store — typically because `gc
+    // --prune` or a truncated oplog has reached past the live window.
+    // Letting `apply_undo_batch` discover this mid-apply would leave the
+    // repo half-undone (worktree partially rewritten, batch not marked).
+    ensure_undo_states_reachable(repo, batches)?;
+    preflight_undo_batches(repo, batches)
+}
+
+fn ensure_no_active_operation(repo: &Repository, action: &str) -> Result<()> {
+    let Some(operation) = repo.operation_status()? else {
+        return Ok(());
+    };
+    let primary_command = operation.next_action.clone();
+    let mut recovery_commands = vec![primary_command.clone()];
+    if !recovery_commands
+        .iter()
+        .any(|command| command == "heddle abort")
+    {
+        recovery_commands.push("heddle abort".to_string());
+    }
+    if !recovery_commands
+        .iter()
+        .any(|command| command == "heddle verify")
+    {
+        recovery_commands.push("heddle verify".to_string());
+    }
+    Err(anyhow!(RecoveryAdvice::safety_refusal(
+        "operation_in_progress",
+        format!("Refusing to {action}: {}", operation.message),
+        format!("Finish or abort the active operation with `{primary_command}` before retrying."),
+        format!(
+            "{} {} is {}",
+            operation.scope, operation.kind, operation.state
+        ),
+        format!("{action} would move repository state while an operation still owns the checkout"),
+        "no undo mutation was applied",
+        primary_command,
+        recovery_commands,
+    )))
 }
 
 /// Walk every batch we're about to undo and verify that each state the

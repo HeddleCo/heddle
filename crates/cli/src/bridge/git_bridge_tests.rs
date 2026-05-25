@@ -21,7 +21,7 @@ use tempfile::TempDir;
 
 use crate::bridge::{
     GitBridge,
-    git_core::{copy_local_repo_to_bare, delete_reference_if_present, set_reference},
+    git_core::{GitPushScope, copy_local_repo_to_bare, delete_reference_if_present, set_reference},
     git_export::export_tree,
     git_import::{import_all, import_git_tree},
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
@@ -720,7 +720,7 @@ fn copy_local_repo_to_bare_preserves_source_head_branch() {
 /// `write_through_current_checkout`'s rollback path used to only reset
 /// the branch ref when a *prior* OID existed at that ref. If write-through
 /// created the branch from scratch (no prior value) and then a later
-/// step failed — e.g., `mirror_notes_ref` or one of the fsyncs — the
+/// step failed — e.g., an index write or one of the fsyncs — the
 /// new branch was left behind, so callers saw an error but Git still
 /// showed the half-written ref.
 ///
@@ -1050,7 +1050,10 @@ fn push_exports_local_branches_and_tags_to_path_remote() {
         .expect("import from git");
 
     bridge
-        .push(remote_temp.path().to_str().expect("remote path"))
+        .push_with_scope(
+            remote_temp.path().to_str().expect("remote path"),
+            GitPushScope::AllThreads,
+        )
         .expect("push remote");
 
     let main_oid = remote_repo
@@ -1089,6 +1092,53 @@ fn push_exports_local_branches_and_tags_to_path_remote() {
         .find_reference(crate::bridge::git_notes::NOTES_REF)
         .expect("notes ref should be pushed to remote");
     let _ = note_ref;
+}
+
+#[test]
+fn push_current_thread_scope_exports_only_attached_branch_to_path_remote() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_source_temp, source_repo) = init_git_repo();
+    let (remote_temp, remote_repo) = init_bare_git_repo();
+
+    let tree_oid = empty_tree_oid(&source_repo);
+    let main_oid = commit_with_tree(&source_repo, Some("refs/heads/main"), tree_oid, "main", &[]);
+    let side_oid = commit_with_tree(&source_repo, Some("refs/heads/side"), tree_oid, "side", &[]);
+    create_annotated_tag(&source_repo, "v1.0", side_oid, "release");
+
+    let mut bridge = GitBridge::new(&repo);
+    bridge
+        .import(Some(source_repo.workdir().expect("workdir")))
+        .expect("import from git");
+
+    bridge
+        .push_with_scope(
+            remote_temp.path().to_str().expect("remote path"),
+            GitPushScope::CurrentThread,
+        )
+        .expect("push current thread");
+
+    let pushed_main = remote_repo
+        .find_reference("refs/heads/main")
+        .expect("main ref")
+        .peel_to_id()
+        .expect("main target")
+        .detach();
+    assert_eq!(pushed_main, main_oid);
+    assert!(
+        remote_repo.find_reference("refs/heads/side").is_err(),
+        "current-thread push must not push sibling branches"
+    );
+    assert!(
+        remote_repo.find_reference("refs/tags/v1.0").is_err(),
+        "current-thread push must not push tags"
+    );
+    assert!(
+        remote_repo
+            .find_reference(crate::bridge::git_notes::NOTES_REF)
+            .is_ok(),
+        "current-thread push must carry Heddle notes so cloned Git commits keep stable state IDs"
+    );
 }
 
 /// Phase C: a deep linear commit chain must not blow the stack on import.
@@ -1395,18 +1445,18 @@ fn build_source_repo_three_commits_with_blobs() -> (
     (temp, repo, [c1, c2, c3], [blob1, blob2, blob3])
 }
 
-/// Issue 49 (20b): `clone_url_to_bare` must honour `depth = Some(1)` by
-/// writing a `shallow` boundary file at the dest and only pulling the
-/// tip commit per ref. Without the wire-level deepen capability, the
-/// fixture's full three-commit chain comes across.
+/// `file://` clones use the native local-copy path rather than gix's
+/// file transport, because that transport spawns Git upload-pack
+/// helpers. Until Heddle has native shallow-object pruning for local
+/// copies, shallow `file://` clones fail closed instead of requiring a
+/// Git executable suite on the host.
 #[test]
-fn clone_url_to_bare_honours_depth_for_shallow_clone() {
+fn clone_url_to_bare_rejects_shallow_file_url_without_shelling_to_git() {
     use gix::bstr::ByteSlice;
 
     use crate::bridge::git_core::clone_url_to_bare;
 
-    let (_src_temp, source_repo, commits, _blobs) = build_source_repo_three_commits_with_blobs();
-    let [_c1, _c2, c3] = commits;
+    let (_src_temp, source_repo, _commits, _blobs) = build_source_repo_three_commits_with_blobs();
 
     let src_path = source_repo
         .workdir()
@@ -1418,145 +1468,67 @@ fn clone_url_to_bare_honours_depth_for_shallow_clone() {
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    clone_url_to_bare(&url, &dest, Some(1), None).expect("shallow clone");
-
-    let dest_repo = gix::open(&dest).expect("open dest");
-    let dest_main = dest_repo
-        .find_reference("refs/heads/main")
-        .expect("main ref present")
-        .peel_to_id()
-        .expect("peel main")
-        .detach();
-    assert_eq!(dest_main, c3, "main must point at the tip commit");
-
-    let shallow_path = dest.join("shallow");
+    let err = clone_url_to_bare(&url, &dest, Some(1), None)
+        .expect_err("shallow file:// clone should fail closed in no-git runtime");
+    let msg = err.to_string();
     assert!(
-        shallow_path.exists(),
-        "issue#49: shallow boundary file `.git/shallow` must exist when --depth was applied"
+        msg.contains("shallow file:// Git clones are not supported")
+            && msg.contains("native no-git runtime")
+            && msg.contains("without spawning Git transport helpers"),
+        "shallow file:// refusal should explain the no-git native boundary: {msg}"
     );
-    let shallow_contents = std::fs::read_to_string(&shallow_path).expect("read shallow");
     assert!(
-        shallow_contents.contains(&c3.to_string()),
-        "issue#49: shallow file must list the tip OID at the boundary; got `{}`",
-        shallow_contents.trim()
-    );
-
-    let walk = dest_repo
-        .rev_walk([c3])
-        .all()
-        .expect("rev walk")
-        .map(|info| info.expect("walk step").id().detach())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        walk.len(),
-        1,
-        "issue#49: depth=1 must yield exactly one commit in the local history; got {:?}",
-        walk
+        !dest.exists(),
+        "rejection should happen before writing destination state"
     );
 }
 
-/// Issue 49 (20b): with `filter = Some("blob:none")` the wire must send
-/// the v2 `filter` capability, the resulting bare repo must record the
-/// partial-clone markers in its config, and no blob objects must land
-/// in the destination ODB.
+/// Filtered Git-overlay clones are rejected until Heddle has a native
+/// partial-clone implementation. The product contract is Git-compatible,
+/// not Git-binary-dependent, so this path must not fall back to `git clone`.
 #[test]
-fn clone_url_to_bare_honours_blob_none_filter() {
+fn clone_url_to_bare_rejects_blob_none_filter_without_shelling_to_git() {
     use gix::bstr::ByteSlice;
 
     use crate::bridge::git_core::clone_url_to_bare;
 
-    let (_src_temp, source_repo, commits, blobs) = build_source_repo_three_commits_with_blobs();
-    let [_c1, _c2, c3] = commits;
+    let (_src_temp, source_repo, _commits, _blobs) = build_source_repo_three_commits_with_blobs();
 
     let src_path = source_repo
         .workdir()
         .expect("workdir")
         .canonicalize()
         .expect("canonicalize");
-
-    // Default `upload-pack` (which is what `git clone` spawns for
-    // file:// URLs) only advertises the `filter` capability when the
-    // *server* repo has `uploadpack.allowFilter = true`. Without
-    // this, the server logs "filtering not recognized by server,
-    // ignoring" and ships every blob anyway, leaving the assertions
-    // below to fail. Enable it on the fixture so we exercise the
-    // real filter wire-up.
-    let cfg = src_path.join(".git").join("config");
-    let mut text = std::fs::read_to_string(&cfg).expect("read source config");
-    if !text.contains("allowFilter") {
-        if !text.ends_with('\n') && !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str("[uploadpack]\n\tallowFilter = true\n");
-        std::fs::write(&cfg, text).expect("write source config");
-    }
-
     let url_str = format!("file://{}", src_path.display());
     let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    clone_url_to_bare(&url, &dest, Some(1), Some("blob:none")).expect("partial clone");
-
-    let dest_repo = gix::open(&dest).expect("open dest");
-    let dest_main = dest_repo
-        .find_reference("refs/heads/main")
-        .expect("main ref present")
-        .peel_to_id()
-        .expect("peel main")
-        .detach();
-    assert_eq!(dest_main, c3, "main must point at the tip commit");
-
-    let config = std::fs::read_to_string(dest.join("config")).expect("read config");
+    let err = clone_url_to_bare(&url, &dest, Some(1), Some("blob:none"))
+        .expect_err("filtered clone must be rejected in no-git runtime");
+    let msg = err.to_string();
     assert!(
-        config.contains("partialclonefilter")
-            || config.contains("partialClone")
-            || config.contains("partialclone"),
-        "issue#49: config must record partial-clone markers; got:\n{}",
-        config
+        msg.contains("partial Git clone filter `blob:none` is not supported")
+            && msg.contains("native no-git runtime"),
+        "filter refusal should explain the no-git native boundary: {msg}"
     );
-
-    use gix::objs::Exists;
-    for blob in blobs {
-        assert!(
-            !dest_repo.objects.exists(&blob),
-            "issue#49: blob {} must be absent from a `--filter=blob:none` clone",
-            blob
-        );
-    }
 }
 
-/// Issue 49 (20b): `clone_url_to_bare` must succeed when the caller
-/// pre-creates the destination as an empty directory — both `bridge.rs`
-/// (via `ScratchDir`) and `clone.rs` (via `local_path.join(".git")` when
-/// `local_path` is a fresh `mkdir`) rely on this for the subprocess
-/// path that handles filter clones. The function should detect the
-/// empty leaf and let `git clone` populate it. This also exercises the
-/// filter-without-depth wiring.
+/// Rejected filtered clones must stop before touching the destination,
+/// even when the caller pre-created an empty scratch directory.
 #[test]
-fn clone_url_to_bare_via_git_handles_pre_created_empty_dest() {
+fn clone_url_to_bare_filter_rejection_preserves_pre_created_empty_dest() {
     use gix::bstr::ByteSlice;
 
     use crate::bridge::git_core::clone_url_to_bare;
 
-    let (_src_temp, source_repo, commits, _blobs) = build_source_repo_three_commits_with_blobs();
-    let [_c1, _c2, c3] = commits;
+    let (_src_temp, source_repo, _commits, _blobs) = build_source_repo_three_commits_with_blobs();
 
     let src_path = source_repo
         .workdir()
         .expect("workdir")
         .canonicalize()
         .expect("canonicalize");
-    let cfg = src_path.join(".git").join("config");
-    let mut text = std::fs::read_to_string(&cfg).expect("read source config");
-    if !text.contains("allowFilter") {
-        if !text.ends_with('\n') && !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str("[uploadpack]\n\tallowFilter = true\n");
-        std::fs::write(&cfg, text).expect("write source config");
-    }
-
     let url_str = format!("file://{}", src_path.display());
     let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
 
@@ -1565,27 +1537,29 @@ fn clone_url_to_bare_via_git_handles_pre_created_empty_dest() {
     std::fs::create_dir(&dest).expect("pre-create empty dest");
     assert!(dest.exists() && dest.read_dir().expect("read empty").next().is_none());
 
-    clone_url_to_bare(&url, &dest, None, Some("blob:none")).expect("partial clone");
-
-    let dest_repo = gix::open(&dest).expect("open dest");
-    let dest_main = dest_repo
-        .find_reference("refs/heads/main")
-        .expect("main ref present")
-        .peel_to_id()
-        .expect("peel main")
-        .detach();
-    assert_eq!(
-        dest_main, c3,
-        "main must point at the tip commit even when no depth was applied"
+    let err = clone_url_to_bare(&url, &dest, None, Some("blob:none"))
+        .expect_err("filtered clone must be rejected in no-git runtime");
+    assert!(
+        err.to_string().contains("retry without --filter/--lazy"),
+        "filter refusal should give the native retry path: {err}"
+    );
+    assert!(
+        dest.exists(),
+        "rejection should not remove caller scratch dir"
+    );
+    assert!(
+        dest.read_dir()
+            .expect("read preserved empty")
+            .next()
+            .is_none(),
+        "rejection should not write partial Git state"
     );
 }
 
-/// Issue 49 (20b): if the underlying `git clone` invocation fails (e.g.
-/// the URL is unreachable), the subprocess path must surface the
-/// stderr-derived message rather than panicking. Uses a `file://` URL
-/// pointing at a path that doesn't exist.
+/// Filter rejection happens before network/filesystem clone work, so an
+/// unreachable URL still reports the unsupported native capability first.
 #[test]
-fn clone_url_to_bare_via_git_surfaces_subprocess_failure() {
+fn clone_url_to_bare_filter_rejection_precedes_remote_probe() {
     use gix::bstr::ByteSlice;
 
     use crate::bridge::git_core::clone_url_to_bare;
@@ -1601,8 +1575,12 @@ fn clone_url_to_bare_via_git_surfaces_subprocess_failure() {
     let err = clone_url_to_bare(&url, &dest, Some(1), Some("blob:none")).expect_err("must fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("git clone failed"),
-        "subprocess failure must be surfaced via GitBridgeError::Git: got `{msg}`"
+        msg.contains("partial Git clone filter `blob:none` is not supported"),
+        "unsupported native capability should be reported before remote probing: {msg}"
+    );
+    assert!(
+        !dest.exists(),
+        "rejection should not create destination state"
     );
 }
 

@@ -67,7 +67,7 @@ else
   ok "no workflow_dispatch trigger (anti-pattern correctly absent)"
 fi
 
-# Trust gate: validate-publish job must run before publish and emit
+# Verification gate: validate-publish job must run before publish and emit
 # validated outputs. The structural shape is checked here; the strict
 # pass verifies the outputs exist on the job and that publish reads
 # from them.
@@ -350,7 +350,7 @@ fi
 # publishable crate's CURRENT version satisfies. If it doesn't, the
 # next push-to-main publish will fail.
 #
-# Trust-aspect: we DON'T trust the PUBLISHABLE_CRATES env var from the
+# Verification aspect: we DON'T trust the PUBLISHABLE_CRATES env var from the
 # workflow as the source of truth here. We re-derive the publishable
 # set from each Cargo.toml's [package].publish field (default-publish
 # is publishable). That way a brand-new publishable crate added to the

@@ -8,7 +8,7 @@ Heddle is an AI-native version control system built around three core ideas:
 
 1. **Content-addressed storage** - immutable objects addressed by BLAKE3 content hash
 2. **Stable change identity** - logical changes keep stable identifiers even when history is rewritten
-3. **Explicit attribution** - changes can carry both human and agent attribution, plus related trust metadata
+3. **Explicit attribution** - changes can carry both human and agent attribution, plus related verification metadata
 
 ## Capability Status
 
@@ -283,16 +283,16 @@ The `web/` app is not a browser IDE. It is an emerging hosted product for:
 
 Some web routes are fully API-backed today. Others are foundation surfaces with partial or mock-backed UI. Product copy and docs should label that distinction rather than flattening it.
 
-## Security And Trust
+## Security And Verification
 
-Current trust architecture includes:
+Current verification architecture includes:
 
 - explicit principal and agent attribution in state metadata
 - scoped hosted authorization
 - signatures and verification metadata where supported
 - structured denial reasoning in hosted paths where possible
 
-Future trust work includes provenance-aware review workflows, richer verification surfaces, and build/workflow writeback into the repository record.
+Future verification work includes provenance-aware review workflows, richer verification surfaces, and build/workflow writeback into the repository record.
 
 ## Performance And Scale Themes
 

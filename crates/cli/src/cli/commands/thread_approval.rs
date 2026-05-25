@@ -18,6 +18,7 @@ use anyhow::{Context, Result, anyhow};
 use repo::Repository;
 use serde::Serialize;
 
+use super::RecoveryAdvice;
 use crate::{
     cli::{
         Cli,
@@ -74,6 +75,13 @@ struct EligibilityOutput {
     valid_approvals: Vec<ApprovalOutput>,
 }
 
+#[derive(Serialize)]
+struct ApprovalRevokeOutput {
+    output_kind: &'static str,
+    id: String,
+    deleted: bool,
+}
+
 /// Resolve the named remote and its repo_path. Errors if the remote
 /// is local (approvals are a hosted-server concept) or has no path.
 async fn open_heddle_client(
@@ -88,9 +96,16 @@ async fn open_heddle_client(
             repo_path.context("hosted remote must include a repository path")?,
         ),
         RemoteTarget::Local(_) => {
-            return Err(anyhow!(
-                "approvals are a hosted-server feature; remote '{remote_name}' is local"
-            ));
+            return Err(anyhow!(RecoveryAdvice::safety_refusal(
+                "hosted_remote_required",
+                format!("approvals require a hosted remote; remote '{remote_name}' is local"),
+                "Configure a hosted remote or retry against one that resolves to a network target.",
+                format!("remote '{remote_name}' is local, but approvals run on the hosted server"),
+                "running locally would imply a hosted approval policy change that no server recorded",
+                "no hosted request was sent and local repository state was left unchanged",
+                "heddle remote list",
+                vec!["heddle remote list".to_string()],
+            )));
         }
     };
 
@@ -235,7 +250,12 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
     let (mut client, _repo_path) = open_heddle_client(&repo, &args.remote).await?;
     client.revoke_approval(&args.id).await?;
     if should_output_json(cli, Some(repo.config())) {
-        println!("{{\"deleted\":true,\"id\":\"{}\"}}", args.id);
+        let output = ApprovalRevokeOutput {
+            output_kind: "thread_revoke_approval",
+            id: args.id,
+            deleted: true,
+        };
+        println!("{}", serde_json::to_string(&output)?);
     } else {
         println!("Revoked approval {}.", args.id);
     }

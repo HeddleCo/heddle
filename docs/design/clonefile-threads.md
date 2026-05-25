@@ -207,7 +207,7 @@ $ heddle start feature-x          # materialize + cd
 ```
 
 Without the hook the user gets the dest path on stdout
-(`heddle start feature-x --print-cd-path`) and `cd`s themselves.
+(`heddle start feature-x --path <dir>`) and `cd`s themselves.
 
 ### CLI surface
 

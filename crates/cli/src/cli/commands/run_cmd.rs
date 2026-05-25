@@ -25,9 +25,13 @@ pub fn cmd_run(cli: &Cli, thread: Option<String>, command: Vec<String>) -> Resul
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     let thread = match thread {
         Some(thread_id) => load_thread(&repo, &thread_id)?,
-        None => {
-            current_thread(&repo)?.ok_or_else(|| anyhow!("No current thread; pass --thread"))?
-        }
+        None => current_thread(&repo)?.ok_or_else(|| {
+            anyhow!(RecoveryAdvice::no_current_thread(
+                "run",
+                Some("--thread"),
+                "heddle run --thread <name> -- <cmd...>",
+            ))
+        })?,
     };
 
     let program = &command[0];

@@ -45,6 +45,83 @@ use crate::{
     },
 };
 
+pub(crate) fn probe_current_process_harness(
+    repo: &Repository,
+    current_provider: Option<String>,
+    current_model: Option<String>,
+    current_policy: Option<String>,
+) -> Result<HarnessProbeResult> {
+    probe_harness_actor(&HarnessProbeInput {
+        argv: detected_harness_argv().or_else(|| Some(std::env::args().collect())),
+        env_hints: harness_env_hints(),
+        explicit_harness: None,
+        explicit_provider: None,
+        explicit_model: None,
+        explicit_thinking_level: None,
+        explicit_policy: None,
+        probe_metadata: BTreeMap::new(),
+        current_provider,
+        current_model,
+        current_policy,
+        repo_root: repo.root().display().to_string(),
+    })
+}
+
+fn harness_env_hints() -> BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(key, value)| {
+            !value.trim().is_empty()
+                && (key.starts_with("HEDDLE_AGENT_")
+                    || key.starts_with("CODEX_")
+                    || key.starts_with("CLAUDE")
+                    || key.starts_with("ANTHROPIC_")
+                    || key.starts_with("OPENAI_")
+                    || key.starts_with("OPENCODE_")
+                    || key.starts_with("AIDER_")
+                    || matches!(
+                        key.as_str(),
+                        "MODEL" | "REASONING_EFFORT" | "THINKING_LEVEL"
+                    ))
+        })
+        .collect()
+}
+
+fn detected_harness_argv() -> Option<Vec<String>> {
+    detected_harness_argv_impl()
+}
+
+#[cfg(target_os = "linux")]
+fn detected_harness_argv_impl() -> Option<Vec<String>> {
+    let mut pid = std::process::id();
+    for _ in 0..8 {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let ppid = stat.split_whitespace().nth(3)?.parse::<u32>().ok()?;
+        if ppid == 0 || ppid == pid {
+            return None;
+        }
+        pid = ppid;
+        let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let argv = raw
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).to_string())
+            .collect::<Vec<_>>();
+        let program = argv.first().map(|arg| arg.to_ascii_lowercase())?;
+        if ["codex", "claude", "opencode", "aider"]
+            .iter()
+            .any(|needle| program.contains(needle))
+        {
+            return Some(argv);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detected_harness_argv_impl() -> Option<Vec<String>> {
+    None
+}
+
 pub fn cmd_harness_bridge(cli: &Cli) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     let user_config = UserConfig::load_default().unwrap_or_default();
@@ -1259,7 +1336,7 @@ impl HarnessBridgeRuntime {
                 .ok_or_else(|| anyhow!("registry entry disappeared during update"));
         }
 
-        if probe.native_actor_key.is_some() {
+        if client_instance_id.is_none() && probe.native_actor_key.is_some() {
             let (entry, _) = registry.find_or_create_active_entry(
                 |entry| {
                     claude_actor_compatible(entry, probe, self.repo.root())
@@ -1699,7 +1776,9 @@ fn resolve_actor_attachment(
     }
     precedence.push("explicit-heddle-session:miss".to_string());
 
-    if let Some(native_actor_key) = probe.native_actor_key.as_deref() {
+    if client_instance_id.is_none()
+        && let Some(native_actor_key) = probe.native_actor_key.as_deref()
+    {
         if let Some(entry) = registry.find_active_by_native_actor_key(native_actor_key)?
             && claude_actor_compatible(&entry, probe, repo.root())
             && let Some(bound_session_id) = entry.heddle_session_id.clone()
@@ -1762,7 +1841,7 @@ fn resolve_actor_attachment(
         precedence.push("client-instance-id:miss".to_string());
     }
 
-    if probe.native_actor_key.is_some() {
+    if client_instance_id.is_none() && probe.native_actor_key.is_some() {
         precedence.push("native-instance-key:skipped-strong-native-key".to_string());
         return Ok(ResolvedAttachment {
             target: AttachTarget::CreateNew {
@@ -3346,7 +3425,11 @@ mod tests {
         drop(repo);
 
         let fresh_repo = Repository::open(temp.path()).unwrap();
-        let user_config = UserConfig::default();
+        let mut user_config = UserConfig::default();
+        user_config.principal = Some(crate::config::UserPrincipalConfig {
+            name: "Ada Lovelace".to_string(),
+            email: "ada@example.com".to_string(),
+        });
         let mut runtime = HarnessBridgeRuntime::new(fresh_repo, user_config);
         let payload = serde_json::json!({
             "session_id": "claude-sess-123",

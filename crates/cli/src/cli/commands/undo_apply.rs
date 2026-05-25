@@ -1,15 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Apply undo/redo operations to the repository.
 
-use std::process::Command;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Result, anyhow};
+use gix::{
+    ObjectId,
+    refs::{
+        Target,
+        transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
+    },
+};
 use objects::object::ChangeId;
 use oplog::{OpBatch, OpEntry, OpRecord};
 use refs::Head;
-use repo::{Repository, ThreadManager};
+use repo::{
+    CommitGraphIndex, Repository, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
+    ThreadState, refresh_thread_freshness,
+};
 
 use super::advice::RecoveryAdvice;
+use crate::bridge::git_core::{open_repo as open_git_repo, set_reference};
 
 pub(super) fn apply_undo_batch(repo: &Repository, batch: &OpBatch) -> Result<()> {
     for entry in batch.entries.iter().rev() {
@@ -25,11 +40,105 @@ pub(super) fn apply_redo_batch(repo: &Repository, batch: &OpBatch) -> Result<()>
     Ok(())
 }
 
+pub(super) fn preflight_undo_batches(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
+    if !batches_have_git_checkpoint(batches) {
+        return Ok(());
+    }
+    let mut simulated_git_head = current_git_head(repo)?;
+    for batch in batches {
+        for entry in batch.entries.iter().rev() {
+            if let OpRecord::GitCheckpoint {
+                new_git_oid,
+                previous_git_oid,
+                ..
+            } = &entry.operation
+            {
+                ensure_simulated_git_head_is(
+                    repo,
+                    &simulated_git_head,
+                    new_git_oid,
+                    "undo git checkpoint",
+                )?;
+                if let Some(previous) = previous_git_oid {
+                    simulated_git_head = previous.clone();
+                }
+            }
+        }
+    }
+    ensure_git_worktree_clean(repo, "undo git checkpoint")?;
+    Ok(())
+}
+
+pub(super) fn preflight_redo_batches(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
+    if !batches_have_git_checkpoint(batches) {
+        return Ok(());
+    }
+    let mut simulated_git_head = current_git_head(repo)?;
+    for batch in batches {
+        for entry in &batch.entries {
+            if let OpRecord::GitCheckpoint {
+                previous_git_oid,
+                new_git_oid,
+                ..
+            } = &entry.operation
+            {
+                if let Some(previous) = previous_git_oid {
+                    ensure_simulated_git_head_is(
+                        repo,
+                        &simulated_git_head,
+                        previous,
+                        "redo git checkpoint",
+                    )?;
+                }
+                simulated_git_head = new_git_oid.clone();
+            }
+        }
+    }
+    ensure_git_worktree_clean(repo, "redo git checkpoint")?;
+    Ok(())
+}
+
+fn batches_have_git_checkpoint(batches: &[OpBatch]) -> bool {
+    batches.iter().any(|batch| {
+        batch
+            .entries
+            .iter()
+            .any(|entry| matches!(&entry.operation, OpRecord::GitCheckpoint { .. }))
+    })
+}
+
+fn current_git_head(repo: &Repository) -> Result<String> {
+    let git = git_checkout_repo(repo)?;
+    git.head_id()
+        .map(|id| id.detach().to_string())
+        .map_err(|error| anyhow!("failed to inspect Git HEAD: {error}"))
+}
+
+fn ensure_simulated_git_head_is(
+    repo: &Repository,
+    actual: &str,
+    expected: &str,
+    action: &str,
+) -> Result<()> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(anyhow!(RecoveryAdvice::git_head_mismatch(
+        action,
+        actual,
+        expected,
+        repo.git_overlay_current_branch()?
+            .unwrap_or_else(|| "HEAD".to_string()),
+        git_dirty_paths(repo),
+    )))
+}
+
 fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
     match &entry.operation {
         OpRecord::Snapshot {
             prev_head: Some(prev),
             thread,
+            new_state,
             ..
         } => {
             repo.goto_without_record(prev)?;
@@ -39,6 +148,7 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
                     thread: thread.clone(),
                 })?;
                 sync_thread_record_state(repo, thread, *prev)?;
+                mark_merged_threads_unintegrated_for_target(repo, thread, new_state, prev)?;
             }
         }
         OpRecord::Goto {
@@ -118,16 +228,18 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         //
         // V1 and V2 share the same undo: both carry `pre_target_id`.
         OpRecord::FastForward {
+            source_thread,
             target_thread,
             pre_target_id,
             ..
         }
         | OpRecord::FastForwardV2 {
+            source_thread,
             target_thread,
             pre_target_id,
             ..
         } => {
-            apply_ff_undo(repo, target_thread, pre_target_id)?;
+            apply_ff_undo(repo, source_thread, target_thread, pre_target_id)?;
         }
         OpRecord::GitCheckpoint {
             branch,
@@ -143,19 +255,27 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
     Ok(())
 }
 
-fn apply_ff_undo(repo: &Repository, target_thread: &str, pre_target_id: &ChangeId) -> Result<()> {
+fn apply_ff_undo(
+    repo: &Repository,
+    source_thread: &str,
+    target_thread: &str,
+    pre_target_id: &ChangeId,
+) -> Result<()> {
     repo.goto_without_record(pre_target_id)?;
     repo.refs().set_thread(target_thread, pre_target_id)?;
     repo.refs().write_head(&Head::Attached {
         thread: target_thread.to_string(),
     })?;
-    sync_thread_record_state(repo, target_thread, *pre_target_id)
+    sync_thread_record_state(repo, target_thread, *pre_target_id)?;
+    mark_source_thread_unintegrated(repo, source_thread, pre_target_id)
 }
 
 fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
     match &entry.operation {
         OpRecord::Snapshot {
-            new_state, thread, ..
+            new_state,
+            prev_head,
+            thread,
         } => {
             repo.goto_without_record(new_state)?;
             if let Some(thread) = thread {
@@ -164,6 +284,7 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
                     thread: thread.clone(),
                 })?;
                 sync_thread_record_state(repo, thread, *new_state)?;
+                mark_ready_threads_integrated_for_target(repo, thread, new_state, prev_head)?;
             }
         }
         OpRecord::Goto { target, .. } => {
@@ -243,11 +364,12 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         // etc.). Closes heddle#99 r2 — Codex's non-determinism finding
         // on the r1 implementation.
         OpRecord::FastForwardV2 {
+            source_thread,
             target_thread,
             post_target_id,
             ..
         } => {
-            apply_ff_redo(repo, target_thread, post_target_id)?;
+            apply_ff_redo(repo, source_thread, target_thread, post_target_id)?;
         }
         OpRecord::GitCheckpoint {
             branch,
@@ -276,7 +398,7 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
                     source_thread
                 )
             })?;
-            apply_ff_redo(repo, target_thread, &source_tip)?;
+            apply_ff_redo(repo, source_thread, target_thread, &source_tip)?;
         }
         _ => {}
     }
@@ -284,13 +406,19 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
     Ok(())
 }
 
-fn apply_ff_redo(repo: &Repository, target_thread: &str, post_target_id: &ChangeId) -> Result<()> {
+fn apply_ff_redo(
+    repo: &Repository,
+    source_thread: &str,
+    target_thread: &str,
+    post_target_id: &ChangeId,
+) -> Result<()> {
     repo.goto_without_record(post_target_id)?;
     repo.refs().set_thread(target_thread, post_target_id)?;
     repo.refs().write_head(&Head::Attached {
         thread: target_thread.to_string(),
     })?;
-    sync_thread_record_state(repo, target_thread, *post_target_id)
+    sync_thread_record_state(repo, target_thread, *post_target_id)?;
+    mark_source_thread_integrated(repo, source_thread, post_target_id)
 }
 
 fn apply_git_checkpoint_undo(
@@ -301,30 +429,33 @@ fn apply_git_checkpoint_undo(
 ) -> Result<()> {
     ensure_git_head_is(repo, new_git_oid, "undo git checkpoint")?;
     ensure_git_worktree_clean(repo, "undo git checkpoint")?;
+    let git = git_checkout_repo(repo)?;
+    let new_oid = parse_git_oid(new_git_oid)?;
     match previous_git_oid {
         Some(previous) => {
-            run_git(
-                repo,
-                &[
-                    "update-ref",
-                    &format!("refs/heads/{branch}"),
-                    previous,
-                    new_git_oid,
-                ],
-            )?;
-            run_git(repo, &["checkout", "-q", branch])?;
-            run_git(repo, &["reset", "--hard", previous])?;
+            let previous_oid = parse_git_oid(previous)?;
+            if branch != "HEAD" {
+                let ref_name = format!("refs/heads/{branch}");
+                if ref_target_oid(&git, &ref_name)? != Some(previous_oid) {
+                    attach_git_head_to_branch(&git, branch)?;
+                    set_attached_git_head(
+                        &git,
+                        branch,
+                        previous_oid,
+                        new_oid,
+                        "heddle: undo git checkpoint",
+                    )?;
+                }
+                attach_git_head_to_branch(&git, branch)?;
+            }
+            reset_git_index_to_commit(&git, previous_oid)?;
+            update_mirror_branch_ref(repo, branch, Some(previous), Some(new_git_oid))?;
         }
         None => {
-            run_git(
-                repo,
-                &[
-                    "update-ref",
-                    "-d",
-                    &format!("refs/heads/{branch}"),
-                    new_git_oid,
-                ],
-            )?;
+            if branch != "HEAD" {
+                delete_reference_matching(&git, &format!("refs/heads/{branch}"), Some(new_oid))?;
+            }
+            update_mirror_branch_ref(repo, branch, None, Some(new_git_oid))?;
         }
     }
     Ok(())
@@ -339,25 +470,89 @@ fn apply_git_checkpoint_redo(
     if let Some(previous) = previous_git_oid {
         ensure_git_head_is(repo, previous, "redo git checkpoint")?;
     }
-    ensure_git_worktree_clean(repo, "redo git checkpoint")?;
-    run_git(
-        repo,
-        &["update-ref", &format!("refs/heads/{branch}"), new_git_oid],
-    )?;
-    run_git(repo, &["checkout", "-q", branch])?;
-    run_git(repo, &["reset", "--hard", new_git_oid])?;
+    let git = git_checkout_repo(repo)?;
+    let new_oid = parse_git_oid(new_git_oid)?;
+    if branch != "HEAD" {
+        match previous_git_oid {
+            Some(previous) => {
+                attach_git_head_to_branch(&git, branch)?;
+                set_attached_git_head(
+                    &git,
+                    branch,
+                    new_oid,
+                    parse_git_oid(previous)?,
+                    "heddle: redo git checkpoint",
+                )?;
+            }
+            None => {
+                set_reference(
+                    &git,
+                    &format!("refs/heads/{branch}"),
+                    new_oid,
+                    PreviousValue::Any,
+                    "heddle: redo git checkpoint",
+                )?;
+                attach_git_head_to_branch(&git, branch)?;
+            }
+        }
+    }
+    reset_git_index_to_commit(&git, new_oid)?;
+    update_mirror_branch_ref(repo, branch, Some(new_git_oid), previous_git_oid)?;
     Ok(())
 }
 
+fn update_mirror_branch_ref(
+    repo: &Repository,
+    branch: &str,
+    target_oid: Option<&str>,
+    expected_old_oid: Option<&str>,
+) -> Result<()> {
+    if branch == "HEAD" {
+        return Ok(());
+    }
+    let mirror = repo.heddle_dir().join("git");
+    if !mirror.exists() {
+        return Ok(());
+    }
+    let git = open_git_repo(&mirror)?;
+    let ref_name = format!("refs/heads/{branch}");
+    if let Some(target) = target_oid
+        && ref_target_oid(&git, &ref_name)? == Some(parse_git_oid(target)?)
+    {
+        return Ok(());
+    }
+    match (target_oid, expected_old_oid) {
+        (Some(target), Some(expected)) => set_reference(
+            &git,
+            &ref_name,
+            parse_git_oid(target)?,
+            PreviousValue::MustExistAndMatch(Target::Object(parse_git_oid(expected)?)),
+            "heddle: update mirror checkpoint ref",
+        )
+        .map_err(|error| anyhow!(error)),
+        (Some(target), None) => set_reference(
+            &git,
+            &ref_name,
+            parse_git_oid(target)?,
+            PreviousValue::Any,
+            "heddle: update mirror checkpoint ref",
+        )
+        .map_err(|error| anyhow!(error)),
+        (None, Some(expected)) => {
+            delete_reference_matching(&git, &ref_name, Some(parse_git_oid(expected)?))
+        }
+        (None, None) => delete_reference_matching(&git, &ref_name, None),
+    }
+}
+
 fn ensure_git_head_is(repo: &Repository, expected: &str, action: &str) -> Result<()> {
-    let output = git_stdout(repo, &["rev-parse", "HEAD"])?;
-    let actual = output.trim();
+    let actual = current_git_head(repo)?;
     if actual == expected {
         return Ok(());
     }
     Err(anyhow!(RecoveryAdvice::git_head_mismatch(
         action,
-        actual,
+        &actual,
         expected,
         repo.git_overlay_current_branch()?
             .unwrap_or_else(|| "HEAD".to_string()),
@@ -366,55 +561,166 @@ fn ensure_git_head_is(repo: &Repository, expected: &str, action: &str) -> Result
 }
 
 fn ensure_git_worktree_clean(repo: &Repository, action: &str) -> Result<()> {
-    let output = git_stdout(repo, &["status", "--porcelain"])?;
-    if output.trim().is_empty() {
+    let Some(status) = repo.git_overlay_worktree_status()? else {
+        return Ok(());
+    };
+    if status.is_clean() {
         return Ok(());
     }
     Err(anyhow!(RecoveryAdvice::dirty_worktree(
         action,
-        git_porcelain_paths(&output),
+        git_status_paths(&status),
         "the Heddle undo batch has not been applied",
     )))
 }
 
-fn git_porcelain_paths(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| line.get(3..))
-        .map(|path| {
-            path.split_once(" -> ")
-                .map(|(_, new_path)| new_path)
-                .unwrap_or(path)
-                .to_string()
-        })
-        .collect()
-}
-
 fn git_dirty_paths(repo: &Repository) -> Vec<String> {
-    git_stdout(repo, &["status", "--porcelain"])
-        .map(|output| git_porcelain_paths(&output))
+    repo.git_overlay_worktree_status()
+        .ok()
+        .flatten()
+        .map(|status| git_status_paths(&status))
         .unwrap_or_default()
 }
 
-fn git_stdout(repo: &Repository, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo.root())
-        .args(args)
-        .output()
-        .map_err(|error| anyhow!("failed to run git {}: {error}", args.join(" ")))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "git {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+fn git_status_paths(status: &objects::worktree::WorktreeStatus) -> Vec<String> {
+    let mut paths = Vec::new();
+    paths.extend(format_status_paths("modified", &status.modified));
+    paths.extend(format_status_paths("added", &status.added));
+    paths.extend(format_status_paths("deleted", &status.deleted));
+    paths
 }
 
-fn run_git(repo: &Repository, args: &[&str]) -> Result<()> {
-    let _ = git_stdout(repo, args)?;
+fn format_status_paths(kind: &str, paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| format!("{kind}: {}", path.display()))
+        .collect()
+}
+
+fn git_checkout_repo(repo: &Repository) -> Result<gix::Repository> {
+    open_git_repo(repo.root()).map_err(|error| anyhow!(error))
+}
+
+fn parse_git_oid(oid: &str) -> Result<ObjectId> {
+    oid.parse::<ObjectId>()
+        .map_err(|error| anyhow!("invalid Git object id '{oid}': {error}"))
+}
+
+fn ref_target_oid(repo: &gix::Repository, name: &str) -> Result<Option<ObjectId>> {
+    let Some(mut reference) = repo
+        .try_find_reference(name)
+        .map_err(|error| anyhow!("failed to inspect Git reference '{name}': {error}"))?
+    else {
+        return Ok(None);
+    };
+    reference
+        .peel_to_id()
+        .map(|id| Some(id.detach()))
+        .map_err(|error| anyhow!("failed to resolve Git reference '{name}': {error}"))
+}
+
+fn attach_git_head_to_branch(repo: &gix::Repository, branch: &str) -> Result<()> {
+    if branch == "HEAD" {
+        return Ok(());
+    }
+    let head_path = repo.git_dir().join("HEAD");
+    fs::write(&head_path, format!("ref: refs/heads/{branch}\n"))
+        .map_err(|error| anyhow!("failed to attach Git HEAD to branch '{branch}': {error}"))?;
+    fsync_file_and_parent(&head_path)?;
+    Ok(())
+}
+
+fn set_attached_git_head(
+    repo: &gix::Repository,
+    branch: &str,
+    target: ObjectId,
+    expected: ObjectId,
+    log_message: &str,
+) -> Result<()> {
+    let signature = git_signature();
+    let mut time_buf = gix::date::parse::TimeBuf::default();
+    let edit = RefEdit {
+        change: Change::Update {
+            log: LogChange {
+                mode: RefLog::AndReference,
+                force_create_reflog: false,
+                message: log_message.into(),
+            },
+            expected: PreviousValue::MustExistAndMatch(Target::Object(expected)),
+            new: Target::Object(target),
+        },
+        name: "HEAD"
+            .try_into()
+            .map_err(|error| anyhow!("invalid Git HEAD ref: {error}"))?,
+        deref: true,
+    };
+    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
+        .map_err(|error| anyhow!("failed to update Git HEAD for branch '{branch}': {error}"))?;
+    Ok(())
+}
+
+fn reset_git_index_to_commit(repo: &gix::Repository, oid: ObjectId) -> Result<()> {
+    let commit = repo
+        .find_commit(oid)
+        .map_err(|error| anyhow!("failed to inspect Git commit {oid}: {error}"))?;
+    let tree_id = commit
+        .tree_id()
+        .map_err(|error| anyhow!("failed to inspect Git commit tree {oid}: {error}"))?;
+    let mut index = repo
+        .index_from_tree(tree_id.as_ref())
+        .map_err(|error| anyhow!("failed to build Git index for commit {oid}: {error}"))?;
+    index
+        .write(gix_index::write::Options::default())
+        .map_err(|error| anyhow!("failed to write Git index for commit {oid}: {error}"))?;
+    Ok(())
+}
+
+fn delete_reference_matching(
+    repo: &gix::Repository,
+    name: &str,
+    expected: Option<ObjectId>,
+) -> Result<()> {
+    let signature = git_signature();
+    let mut time_buf = gix::date::parse::TimeBuf::default();
+    let expected = expected.map_or(PreviousValue::MustExist, |oid| {
+        PreviousValue::MustExistAndMatch(Target::Object(oid))
+    });
+    let edit = RefEdit {
+        change: Change::Delete {
+            log: RefLog::AndReference,
+            expected,
+        },
+        name: name
+            .try_into()
+            .map_err(|error| anyhow!("invalid Git reference '{name}': {error}"))?,
+        deref: false,
+    };
+    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
+        .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}"))?;
+    Ok(())
+}
+
+fn git_signature() -> gix::actor::Signature {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    gix::actor::Signature {
+        name: "Heddle".into(),
+        email: "heddle@local".into(),
+        time: gix::date::Time { seconds, offset: 0 },
+    }
+}
+
+fn fsync_file_and_parent(path: &Path) -> Result<()> {
+    fs::File::open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| anyhow!("failed to sync '{}': {error}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|error| anyhow!("failed to sync '{}': {error}", parent.display()))?;
+    }
     Ok(())
 }
 
@@ -445,6 +751,138 @@ fn sync_thread_record_state(
         manager.save(&thread)?;
     }
     Ok(())
+}
+
+fn mark_source_thread_unintegrated(
+    repo: &Repository,
+    source_thread: &str,
+    target_after_undo: &ChangeId,
+) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let Some(mut thread) = manager.find_by_thread(source_thread)? else {
+        return Ok(());
+    };
+    let source_tip = repo.refs().get_thread(source_thread)?;
+    let still_integrated = source_tip
+        .as_ref()
+        .is_some_and(|source_tip| change_contains(repo, source_tip, target_after_undo));
+    if still_integrated {
+        return Ok(());
+    }
+
+    if matches!(thread.state, ThreadState::Merged) {
+        thread.state = ThreadState::Ready;
+    }
+    if let Some(source_tip) = source_tip {
+        thread.current_state = Some(source_tip.short());
+    }
+    thread.merged_state = None;
+    if matches!(
+        thread.integration_policy_result.status.as_deref(),
+        Some("auto_integrated")
+    ) {
+        thread.integration_policy_result = ThreadIntegrationPolicy::default();
+    }
+    refresh_thread_freshness(repo, &mut thread)?;
+    if matches!(thread.freshness, ThreadFreshness::Unknown) {
+        thread.freshness = ThreadFreshness::Current;
+    }
+    thread.updated_at = chrono::Utc::now();
+    manager.save(&thread)?;
+    Ok(())
+}
+
+fn mark_merged_threads_unintegrated_for_target(
+    repo: &Repository,
+    target_thread: &str,
+    integrated_state: &ChangeId,
+    target_after_undo: &ChangeId,
+) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    for thread in manager.list()? {
+        if thread.thread == target_thread
+            || thread.target_thread.as_deref() != Some(target_thread)
+            || thread.state != ThreadState::Merged
+        {
+            continue;
+        }
+        let points_at_integrated_state = thread
+            .merged_state
+            .as_deref()
+            .or(thread.current_state.as_deref())
+            .and_then(|state| repo.resolve_state(state).ok().flatten())
+            .is_some_and(|state| state == *integrated_state);
+        if points_at_integrated_state {
+            mark_source_thread_unintegrated(repo, &thread.thread, target_after_undo)?;
+        }
+    }
+    Ok(())
+}
+
+fn mark_source_thread_integrated(
+    repo: &Repository,
+    source_thread: &str,
+    target_after_redo: &ChangeId,
+) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let Some(mut thread) = manager.find_by_thread(source_thread)? else {
+        return Ok(());
+    };
+    let source_tip = repo.refs().get_thread(source_thread)?;
+    let integrated = source_tip
+        .as_ref()
+        .is_some_and(|source_tip| change_contains(repo, source_tip, target_after_redo));
+    if !integrated {
+        return Ok(());
+    }
+
+    thread.state = ThreadState::Merged;
+    thread.merged_state = Some(target_after_redo.short());
+    thread.current_state = source_tip
+        .map(|source_tip| source_tip.short())
+        .or_else(|| Some(target_after_redo.short()));
+    thread.integration_policy_result = ThreadIntegrationPolicy {
+        status: Some("auto_integrated".to_string()),
+        reason: Some("redo restored integrated target state".to_string()),
+        manual_resolution_state: thread.integration_policy_result.manual_resolution_state,
+    };
+    thread.freshness = ThreadFreshness::Current;
+    thread.updated_at = chrono::Utc::now();
+    manager.save(&thread)?;
+    Ok(())
+}
+
+fn mark_ready_threads_integrated_for_target(
+    repo: &Repository,
+    target_thread: &str,
+    integrated_state: &ChangeId,
+    target_before_redo: &Option<ChangeId>,
+) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    for thread in manager.list()? {
+        if thread.thread == target_thread
+            || thread.target_thread.as_deref() != Some(target_thread)
+            || thread.state != ThreadState::Ready
+        {
+            continue;
+        }
+        let Some(source_tip) = repo.refs().get_thread(&thread.thread)? else {
+            continue;
+        };
+        let newly_integrated = change_contains(repo, &source_tip, integrated_state)
+            && !target_before_redo
+                .as_ref()
+                .is_some_and(|before| change_contains(repo, &source_tip, before));
+        if newly_integrated {
+            mark_source_thread_integrated(repo, &thread.thread, integrated_state)?;
+        }
+    }
+    Ok(())
+}
+
+fn change_contains(repo: &Repository, ancestor: &ChangeId, descendant: &ChangeId) -> bool {
+    let mut graph = CommitGraphIndex::new(repo);
+    graph.is_ancestor(ancestor, descendant).unwrap_or(false)
 }
 
 /// Remove the ThreadManager record matching `thread_name`. No-op when no

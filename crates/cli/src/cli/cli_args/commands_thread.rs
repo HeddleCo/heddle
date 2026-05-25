@@ -83,7 +83,7 @@ pub enum ThreadCommands {
     /// Guide a blocked or stale thread toward its next clean state.
     Resolve(ThreadResolveArgs),
 
-    /// Promote a thread to a heavy checkout at a chosen path.
+    /// Promote a thread to a materialized checkout at a chosen path.
     Promote(ThreadPromoteArgs),
 
     /// Drop a thread and mark it abandoned.
@@ -103,18 +103,23 @@ pub enum ThreadCommands {
     /// the repo's branch-protection policies. Read-only.
     CheckMerge(ThreadCheckMergeArgs),
 
-    /// Sweep threads that have outlived their usefulness — drop their
-    /// checkouts and registry entries to reclaim disk and de-clutter
-    /// `heddle thread list`.
-    ///
-    /// Two modes are supported:
-    ///   * `--merged`: drop threads in [`ThreadState::Merged`].
-    ///   * `--auto --older-than <duration>`: drop harness-created
-    ///     threads that have not been touched in the given duration.
-    ///
-    /// The two flags can be combined to sweep both classes in one
-    /// invocation. Pair with `--dry-run` to preview the work without
-    /// changing anything on disk.
+    /// Sweep merged or stale auto-created threads.
+    #[command(
+        long_about = "\
+Sweep threads that have outlived their usefulness. Cleanup removes recorded checkouts, marks matching thread records abandoned, and prunes live thread refs so everyday thread lists stay focused.
+
+Modes:
+  - --merged: clean up threads recorded as merged.
+  - --auto --older-than <duration>: clean up harness-created threads that have not been touched in the given duration.
+
+The two modes can be combined. Pair with --dry-run to preview the work without changing anything on disk.",
+        after_help = "\
+Examples:
+  heddle thread cleanup --merged --dry-run
+  heddle thread cleanup --merged
+  heddle thread cleanup --auto --older-than 7d --dry-run
+"
+    )]
     Cleanup(ThreadCleanupArgs),
 }
 
@@ -138,9 +143,7 @@ pub struct ThreadListArgs {
 /// when `--auto` is set.
 #[derive(Args, Clone, Debug)]
 pub struct ThreadCleanupArgs {
-    /// Drop threads whose recorded state is `merged`. Their checkouts
-    /// and registry entries are removed; the underlying ref and
-    /// states remain addressable.
+    /// Clean up threads whose recorded state is `merged`.
     #[arg(long)]
     pub merged: bool,
 

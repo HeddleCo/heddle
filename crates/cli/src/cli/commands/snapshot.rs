@@ -18,7 +18,19 @@ pub(crate) use repo::{summarize_confidence, summarize_verification};
 use serde::Serialize;
 use tracing::{debug, info};
 
-use super::{advice::RecoveryAdvice, thread::find_active_thread_entry, thread_cmd::current_thread};
+use super::{
+    advice::RecoveryAdvice,
+    command_catalog::ActionTemplate,
+    error_envelope::print_error_with_hint,
+    git_overlay_health::{
+        RepositoryVerificationState, action_template, build_plain_git_verification_probe,
+        build_repository_verification_state, plain_git_mutation_advice,
+        raw_git_operation_mutation_advice, unimported_git_history_advice,
+        verification_blocking_mutation_advice,
+    },
+    thread::find_active_thread_entry,
+    thread_cmd::current_thread,
+};
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
@@ -26,13 +38,65 @@ use crate::{
 
 #[derive(Serialize)]
 pub(crate) struct SnapshotOutput {
+    pub output_kind: &'static str,
+    pub status: &'static str,
+    pub action: &'static str,
     pub change_id: String,
     pub content_hash: String,
     pub intent: Option<String>,
     pub confidence: Option<f32>,
+    pub principal: SnapshotPrincipalOutput,
+    pub agent: Option<SnapshotAgentOutput>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
     pub message: String,
+    pub next_action: Option<String>,
+    pub next_action_argv: Option<Vec<String>>,
+    pub next_action_template: Option<ActionTemplate>,
+    pub recommended_action: Option<String>,
+    pub recommended_action_argv: Option<Vec<String>>,
+    pub recommended_action_template: Option<ActionTemplate>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SnapshotPrincipalOutput {
+    name: String,
+    email: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SnapshotAgentOutput {
+    provider: String,
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    segment_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_id: Option<String>,
+}
+
+impl From<&Principal> for SnapshotPrincipalOutput {
+    fn from(principal: &Principal) -> Self {
+        Self {
+            name: principal.name.clone(),
+            email: principal.email.clone(),
+        }
+    }
+}
+
+impl From<&Agent> for SnapshotAgentOutput {
+    fn from(agent: &Agent) -> Self {
+        Self {
+            provider: agent.provider.clone(),
+            model: agent.model.clone(),
+            session_id: agent.session_id.clone(),
+            segment_id: agent.segment_id.clone(),
+            policy_id: agent.policy_id.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -69,25 +133,38 @@ pub async fn cmd_snapshot(
     force: bool,
     agent: SnapshotAgentOverrides,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let intent = require_capture_intent(intent)?;
+    let cwd;
+    let start = if let Some(path) = cli.repo.as_ref() {
+        path
+    } else {
+        cwd = std::env::current_dir()?;
+        &cwd
+    };
+    if let Some(probe) = build_plain_git_verification_probe(start)? {
+        return Err(anyhow!(plain_git_mutation_advice(&probe, "capture")));
+    }
+
+    let repo = Repository::open(start)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
 
+    if let Some(advice) = unimported_git_history_advice(&repo, "capture")? {
+        return Err(anyhow!(advice));
+    }
     preflight_large_capture(&repo, force)?;
-    let output = match create_snapshot(&repo, &user_config, intent, confidence, agent) {
+    let output = match create_snapshot(&repo, &user_config, Some(intent), confidence, agent) {
         Ok(output) => output,
         Err(err) => {
             // ENOSPC is the only mid-capture failure where the user's
             // working tree is guaranteed safe (we never touched it) and
             // the recovery is mechanical (free disk, re-run). Surface
-            // that contract explicitly: a clean stderr line, a stable
-            // exit code, and no anyhow stack-noise. Every other error
+            // that contract through the shared advice/envelope renderer
+            // while preserving the stable exit code. Every other error
             // bubbles through `?` unchanged so the existing diagnostics
             // path keeps working.
             if is_disk_full_anyhow(&err) {
-                eprintln!("error: {err:#}");
-                eprintln!(
-                    "hint: free disk space and re-run `heddle capture`. Your working tree changes are intact."
-                );
+                let err = anyhow!(capture_disk_full_advice(&err));
+                print_error_with_hint(cli, &err);
                 std::process::exit(CAPTURE_EXIT_DISK_FULL);
             }
             return Err(err);
@@ -95,6 +172,7 @@ pub async fn cmd_snapshot(
     };
 
     let as_json = should_output_json(cli, Some(repo.config()));
+    let git_overlay = repo.capability() == repo::RepositoryCapability::GitOverlay;
     if as_json {
         println!("{}", serde_json::to_string(&output)?);
     } else {
@@ -107,16 +185,24 @@ pub async fn cmd_snapshot(
             style::change_id(&output.change_id),
             style::dim(&output.content_hash),
         );
-        // Surface the recorded confidence so users see the value that
-        // actually landed on the state — including when it's absent.
-        // An unset confidence renders as `—`; never as `0.00`. The
-        // shared helper lives in `repo::snapshot_metadata` so
-        // `show.rs` and `log.rs` agree on the same sentinel.
-        let confidence_text = format_confidence(output.confidence);
         println!(
-            "Confidence: {}",
-            style::confidence(output.confidence, &confidence_text)
+            "Saved by: {}",
+            style::principal(&output.principal.name, &output.principal.email)
         );
+        if let Some(agent) = &output.agent {
+            println!(
+                "Agent: {}/{}",
+                style::bold(&agent.provider),
+                style::dim(&agent.model)
+            );
+        }
+        if output.confidence.is_some() {
+            let confidence_text = format_confidence(output.confidence);
+            println!(
+                "Confidence: {}",
+                style::confidence(output.confidence, &confidence_text)
+            );
+        }
         if output.promotion_suggested && !output.heavy_impact_paths.is_empty() {
             println!(
                 "{}: {}",
@@ -127,20 +213,72 @@ pub async fn cmd_snapshot(
                 )
             );
         }
+        if let Some(next) = output.recommended_action.as_deref() {
+            println!("Next: {}", style::bold(next));
+        } else if !git_overlay
+            && let Ok(Some(thread)) = current_thread(&repo)
+            && thread.target_thread.is_some()
+        {
+            println!("Next: {}", style::bold("heddle ready"));
+        }
     }
 
-    // Discoverability tip after a successful capture: nudge
-    // toward `heddle checkpoint` for cheaper mid-stream saves. Only
-    // fires once per session per repo, never on `--json`.
-    crate::cli::tips::maybe_emit(
-        repo.root(),
-        Some(repo.config()),
-        crate::cli::tips::Tip::CheckpointAfterCapture,
-        as_json,
-        cli.quiet,
-    );
+    let captured_thread_targets_integration = current_thread(&repo)
+        .ok()
+        .flatten()
+        .and_then(|thread| thread.target_thread)
+        .is_some();
+    if !git_overlay && !captured_thread_targets_integration {
+        // Discoverability tip after a successful capture in native Heddle
+        // repos. In Git-overlay repos the concrete checkpoint next step
+        // above is more useful; in isolated feature checkouts, `ready`
+        // is the next product step.
+        crate::cli::tips::maybe_emit(
+            repo.root(),
+            Some(repo.config()),
+            crate::cli::tips::Tip::CheckpointAfterCapture,
+            as_json,
+            cli.quiet,
+        );
+    }
 
     Ok(())
+}
+
+pub(crate) fn require_capture_intent(intent: Option<String>) -> Result<String> {
+    match intent {
+        Some(intent) if !intent.trim().is_empty() => Ok(intent),
+        _ => Err(anyhow!(missing_capture_intent_advice())),
+    }
+}
+
+fn missing_capture_intent_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "missing_capture_intent",
+        "refusing to capture without an intent",
+        "Provide a short intent with `heddle capture -m \"...\"`.",
+        "no capture intent was supplied with -m/--message/--intent",
+        "capturing without intent would create a weak provenance record",
+        "repository state, refs, metadata, and worktree files were left unchanged",
+        "heddle capture -m \"...\"",
+        vec!["heddle capture -m \"...\"".to_string()],
+    )
+}
+
+fn missing_capture_identity_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "capture_identity_required",
+        "Refusing to capture: no accountable identity is configured",
+        "Set `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, or run `heddle init --principal-name <name> --principal-email <email>`, then retry the capture.",
+        "Heddle would otherwise have to record Unknown <unknown@example.com> on the captured state",
+        "capture would create durable Heddle history without a real principal",
+        "Heddle refs, captured states, Git refs, index, and worktree files were left unchanged",
+        "heddle init --principal-name <name> --principal-email <email>",
+        vec![
+            "heddle init --principal-name <name> --principal-email <email>".to_string(),
+            "heddle capture -m \"...\"".to_string(),
+        ],
+    )
 }
 
 /// Resolve the current thread name for hook payloads. Returns `""`
@@ -187,11 +325,50 @@ fn preflight_large_capture(repo: &Repository, force: bool) -> Result<()> {
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    anyhow::bail!(
-        "Large capture safety check: this would capture {total} changed paths ({delete_count} deletions, {add_count} additions).\n\
-         Sample: {sample}\n\
-         If this is intentional, rerun with `heddle capture --force -m \"...\"`."
-    );
+    Err(anyhow!(large_capture_advice(
+        total,
+        delete_count,
+        add_count,
+        sample,
+    )))
+}
+
+fn large_capture_advice(
+    total: usize,
+    delete_count: usize,
+    add_count: usize,
+    sample: String,
+) -> RecoveryAdvice {
+    let sample = if sample.is_empty() {
+        "no sample paths available".to_string()
+    } else {
+        sample
+    };
+    RecoveryAdvice::safety_refusal(
+        "large_capture_requires_force",
+        format!(
+            "Large capture safety check: this would capture {total} changed paths ({delete_count} deletions, {add_count} additions)"
+        ),
+        "If this is intentional, rerun with `heddle capture --force -m \"...\"`.",
+        format!("sample changed paths: {sample}"),
+        "capture would preserve an unusually large Git-overlay worktree change without an explicit confirmation",
+        "repository state, refs, metadata, and worktree files were left unchanged",
+        "heddle capture --force -m \"...\"",
+        vec!["heddle capture --force -m \"...\"".to_string()],
+    )
+}
+
+fn capture_disk_full_advice(err: &anyhow::Error) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "capture_out_of_space",
+        format!("Capture aborted because the filesystem is out of space: {err:#}"),
+        "Free disk space and re-run `heddle capture`. Your working tree changes are intact.",
+        "the filesystem reported no remaining space while Heddle was writing captured objects",
+        "retrying before freeing space may fail again or leave another incomplete object write",
+        "the working tree was not modified; already-committed repository data remains behind atomic write boundaries",
+        "heddle capture -m \"...\"",
+        vec!["heddle capture -m \"...\"".to_string()],
+    )
 }
 
 pub(crate) fn create_snapshot(
@@ -202,6 +379,18 @@ pub(crate) fn create_snapshot(
     agent: SnapshotAgentOverrides,
 ) -> Result<SnapshotOutput> {
     create_snapshot_profiled(repo, user_config, intent, confidence, agent).map(|(output, _)| output)
+}
+
+pub(crate) fn create_snapshot_from_tree(
+    repo: &Repository,
+    user_config: &UserConfig,
+    tree: Tree,
+    intent: Option<String>,
+    confidence: Option<f32>,
+    agent: SnapshotAgentOverrides,
+) -> Result<SnapshotOutput> {
+    create_snapshot_from_tree_profiled(repo, user_config, tree, intent, confidence, agent)
+        .map(|(output, _)| output)
 }
 
 pub(crate) fn ensure_current_state(
@@ -241,6 +430,16 @@ pub(crate) fn create_snapshot_profiled(
     agent: SnapshotAgentOverrides,
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     info!("Creating snapshot");
+
+    if let Some(advice) = unimported_git_history_advice(repo, "capture")? {
+        return Err(anyhow!(advice));
+    }
+    if let Some(advice) = raw_git_operation_mutation_advice(repo, "capture")? {
+        return Err(anyhow!(advice));
+    }
+    if let Some(advice) = verification_blocking_mutation_advice(repo, "capture") {
+        return Err(anyhow!(advice));
+    }
 
     let hook_manager = HookManager::new(repo);
     let hook_ctx = HookContext::new(repo);
@@ -284,11 +483,32 @@ pub(crate) fn create_snapshot_profiled(
         update_active_thread_metadata(repo, &execution.state, &execution.tree)?;
     let thread_metadata_ms = thread_metadata_start.elapsed().as_millis();
 
+    let trust = build_repository_verification_state(repo);
+    let recommended_action =
+        (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone());
+    let recommended_action_argv = recommended_action
+        .as_ref()
+        .and(trust.recommended_action_argv.clone());
+    let recommended_action_template = recommended_action
+        .as_deref()
+        .and_then(action_template)
+        .or_else(|| trust.recommended_action_template.clone());
+
     let output = SnapshotOutput {
+        output_kind: "capture",
+        status: "captured",
+        action: "capture",
         change_id: execution.state.change_id.short(),
         content_hash: execution.state.hash().short(),
         intent: execution.state.intent.clone(),
         confidence: execution.state.confidence,
+        principal: (&execution.state.attribution.principal).into(),
+        agent: execution
+            .state
+            .attribution
+            .agent
+            .as_ref()
+            .map(SnapshotAgentOutput::from),
         promotion_suggested,
         heavy_impact_paths: heavy_impact_paths.clone(),
         message: format!(
@@ -296,6 +516,13 @@ pub(crate) fn create_snapshot_profiled(
             execution.state.change_id.short(),
             execution.state.hash().short()
         ),
+        next_action: recommended_action.clone(),
+        next_action_argv: recommended_action_argv.clone(),
+        next_action_template: recommended_action_template.clone(),
+        recommended_action,
+        recommended_action_argv,
+        recommended_action_template,
+        trust,
     };
 
     hook_manager.run(Hook::PostSnapshot, &hook_ctx)?;
@@ -303,6 +530,129 @@ pub(crate) fn create_snapshot_profiled(
     // `post_capture` JSON-protocol fire. Best-effort: a
     // post-capture hook can't veto the snapshot (already persisted).
     // A timeout/error is tracing-warned and swallowed.
+    let post_capture_payload = serde_json::json!({
+        "state_id": execution.state.change_id.to_string_full(),
+    });
+    if let Err(err) = hook_manager.run_with_payload(
+        Hook::PostSnapshot,
+        &hook_ctx,
+        &post_capture_payload,
+        std::time::Duration::from_secs(5),
+    ) {
+        tracing::warn!(error = %err, "post_capture hook error swallowed");
+    }
+
+    Ok((
+        output,
+        snapshot_command_profile(execution.profile, thread_metadata_ms),
+    ))
+}
+
+pub(crate) fn create_snapshot_from_tree_profiled(
+    repo: &Repository,
+    user_config: &UserConfig,
+    tree: Tree,
+    intent: Option<String>,
+    confidence: Option<f32>,
+    agent: SnapshotAgentOverrides,
+) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
+    info!("Creating snapshot from supplied tree");
+
+    if let Some(advice) = unimported_git_history_advice(repo, "capture")? {
+        return Err(anyhow!(advice));
+    }
+    if let Some(advice) = raw_git_operation_mutation_advice(repo, "capture")? {
+        return Err(anyhow!(advice));
+    }
+    if let Some(advice) = verification_blocking_mutation_advice(repo, "capture") {
+        return Err(anyhow!(advice));
+    }
+
+    let hook_manager = HookManager::new(repo);
+    let hook_ctx = HookContext::new(repo);
+
+    hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
+
+    let pre_capture_payload = serde_json::json!({
+        "thread": current_thread_name(repo),
+        "intent": intent.clone().unwrap_or_default(),
+    });
+    let pre_capture_response = hook_manager.run_with_payload(
+        Hook::PreSnapshot,
+        &hook_ctx,
+        &pre_capture_payload,
+        std::time::Duration::from_secs(5),
+    )?;
+    if let Some(resp) = pre_capture_response
+        && !resp.abort.is_empty()
+    {
+        return Err(anyhow!(RecoveryAdvice::hook_veto(
+            "pre_capture",
+            "capture",
+            resp.abort
+        )));
+    }
+
+    let attribution = build_attribution(repo, user_config, &agent)?;
+    if let Some(ref agent) = attribution.agent {
+        debug!(provider = %agent.provider, model = %agent.model, "Agent attribution");
+    }
+
+    let mut execution = repo.snapshot_tree_with_attribution_profiled(
+        tree,
+        intent.clone(),
+        confidence,
+        attribution,
+    )?;
+    let thread_metadata_start = Instant::now();
+    let (promotion_suggested, heavy_impact_paths) =
+        update_active_thread_metadata(repo, &execution.state, &execution.tree)?;
+    let thread_metadata_ms = thread_metadata_start.elapsed().as_millis();
+
+    let trust = build_repository_verification_state(repo);
+    let recommended_action =
+        (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone());
+    let recommended_action_argv = recommended_action
+        .as_ref()
+        .and(trust.recommended_action_argv.clone());
+    let recommended_action_template = recommended_action
+        .as_deref()
+        .and_then(action_template)
+        .or_else(|| trust.recommended_action_template.clone());
+
+    let output = SnapshotOutput {
+        output_kind: "capture",
+        status: "captured",
+        action: "capture",
+        change_id: execution.state.change_id.short(),
+        content_hash: execution.state.hash().short(),
+        intent: execution.state.intent.clone(),
+        confidence: execution.state.confidence,
+        principal: (&execution.state.attribution.principal).into(),
+        agent: execution
+            .state
+            .attribution
+            .agent
+            .as_ref()
+            .map(SnapshotAgentOutput::from),
+        promotion_suggested,
+        heavy_impact_paths: heavy_impact_paths.clone(),
+        message: format!(
+            "Captured state {} ({})",
+            execution.state.change_id.short(),
+            execution.state.hash().short()
+        ),
+        next_action: recommended_action.clone(),
+        next_action_argv: recommended_action_argv.clone(),
+        next_action_template: recommended_action_template.clone(),
+        recommended_action,
+        recommended_action_argv,
+        recommended_action_template,
+        trust,
+    };
+
+    hook_manager.run(Hook::PostSnapshot, &hook_ctx)?;
+
     let post_capture_payload = serde_json::json!({
         "state_id": execution.state.change_id.to_string_full(),
     });
@@ -357,6 +707,9 @@ fn build_attribution(
     agent: &SnapshotAgentOverrides,
 ) -> Result<Attribution> {
     let principal = resolve_principal(repo, user_config)?;
+    if is_default_unknown_principal(&principal) {
+        return Err(anyhow!(missing_capture_identity_advice()));
+    }
 
     if agent.no_agent {
         return Ok(Attribution::human(principal));
@@ -400,35 +753,91 @@ fn build_attribution(
         .as_ref()
         .and_then(|e| e.model.clone())
         .and_then(clean_attribution_value);
+    let session_provider = current_session
+        .as_ref()
+        .and_then(|session| session.current_segment())
+        .map(|segment| segment.provider.clone())
+        .and_then(clean_attribution_value);
+    let session_model = current_session
+        .as_ref()
+        .and_then(|session| session.current_segment())
+        .map(|segment| segment.model.clone())
+        .and_then(clean_attribution_value);
+    let session_policy = current_session
+        .as_ref()
+        .and_then(|session| session.current_segment())
+        .and_then(|segment| segment.policy_id.clone())
+        .and_then(clean_attribution_value);
+    let harness_probe = crate::harness::probe_current_process_harness(
+        repo,
+        thread_provider.clone().or_else(|| session_provider.clone()),
+        thread_model.clone().or_else(|| session_model.clone()),
+        session_policy.clone(),
+    )
+    .ok();
+    let harness_provider = harness_probe
+        .as_ref()
+        .and_then(|probe| probe.provider.clone())
+        .and_then(clean_attribution_value);
+    let harness_model = harness_probe
+        .as_ref()
+        .and_then(|probe| probe.model.clone())
+        .and_then(clean_attribution_value);
+    let harness_policy = harness_probe
+        .as_ref()
+        .and_then(|probe| probe.policy.clone())
+        .and_then(clean_attribution_value);
 
     let provider = agent
         .provider
         .clone()
         .or(thread_provider)
-        .or_else(|| std::env::var("HEDDLE_AGENT_PROVIDER").ok())
         .or_else(|| {
-            current_session
-                .as_ref()
-                .and_then(|session| session.current_segment())
-                .map(|segment| segment.provider.clone())
+            std::env::var("HEDDLE_AGENT_PROVIDER")
+                .ok()
                 .and_then(clean_attribution_value)
         })
-        .or_else(|| user_config.agent.provider.clone())
-        .or_else(|| repo.config().agent.provider.clone());
+        .or(harness_provider)
+        .or(session_provider)
+        .or_else(|| {
+            user_config
+                .agent
+                .provider
+                .clone()
+                .and_then(clean_attribution_value)
+        })
+        .or_else(|| {
+            repo.config()
+                .agent
+                .provider
+                .clone()
+                .and_then(clean_attribution_value)
+        });
     let model = agent
         .model
         .clone()
         .or(thread_model)
-        .or_else(|| std::env::var("HEDDLE_AGENT_MODEL").ok())
         .or_else(|| {
-            current_session
-                .as_ref()
-                .and_then(|session| session.current_segment())
-                .map(|segment| segment.model.clone())
+            std::env::var("HEDDLE_AGENT_MODEL")
+                .ok()
                 .and_then(clean_attribution_value)
         })
-        .or_else(|| user_config.agent.model.clone())
-        .or_else(|| repo.config().agent.model.clone());
+        .or(harness_model)
+        .or(session_model)
+        .or_else(|| {
+            user_config
+                .agent
+                .model
+                .clone()
+                .and_then(clean_attribution_value)
+        })
+        .or_else(|| {
+            repo.config()
+                .agent
+                .model
+                .clone()
+                .and_then(clean_attribution_value)
+        });
     let session_id = agent
         .session
         .clone()
@@ -449,7 +858,13 @@ fn build_attribution(
         agent
             .policy
             .clone()
-            .or_else(|| std::env::var("HEDDLE_AGENT_POLICY").ok())
+            .or_else(|| {
+                std::env::var("HEDDLE_AGENT_POLICY")
+                    .ok()
+                    .and_then(clean_attribution_value)
+            })
+            .or(harness_policy)
+            .or(session_policy)
             .or_else(|| user_config.agent.default_policy.clone())
             .or_else(|| repo.config().policies.default_policy.clone())
     };
@@ -495,9 +910,19 @@ pub(crate) fn resolve_attribution(
     user_config: &UserConfig,
 ) -> Result<Attribution> {
     let principal = resolve_principal(repo, user_config)?;
+    let harness_probe = crate::harness::probe_current_process_harness(repo, None, None, None).ok();
+    let harness_provider = harness_probe
+        .as_ref()
+        .and_then(|probe| probe.provider.clone())
+        .and_then(clean_attribution_value);
+    let harness_model = harness_probe
+        .as_ref()
+        .and_then(|probe| probe.model.clone())
+        .and_then(clean_attribution_value);
     let agent_provider = std::env::var("HEDDLE_AGENT_PROVIDER")
         .ok()
         .and_then(clean_attribution_value)
+        .or(harness_provider)
         .or_else(|| {
             user_config
                 .agent
@@ -515,6 +940,7 @@ pub(crate) fn resolve_attribution(
     let agent_model = std::env::var("HEDDLE_AGENT_MODEL")
         .ok()
         .and_then(clean_attribution_value)
+        .or(harness_model)
         .or_else(|| {
             user_config
                 .agent
@@ -539,7 +965,9 @@ pub(crate) fn resolve_attribution(
 }
 
 pub(crate) fn resolve_principal(repo: &Repository, user_config: &UserConfig) -> Result<Principal> {
-    // Precedence: env > repo .heddle/config.toml > user ~/.config/heddle/config.toml > Unknown.
+    // Precedence: env > repo .heddle/config.toml > Git-overlay Git config
+    // (including the shared parent checkout for isolated work) > user
+    // ~/.config/heddle/config.toml > Unknown.
     //
     // Repo-level config must win over user-level: a repo carrying an
     // explicit `[principal]` is recording "captures in this project use
@@ -556,10 +984,20 @@ pub(crate) fn resolve_principal(repo: &Repository, user_config: &UserConfig) -> 
     if let Some(config) = &repo.config().principal {
         return Ok(Principal::new(&config.name, &config.email));
     }
+    let principal = repo.get_principal()?;
+    if !is_default_unknown_principal(&principal) {
+        return Ok(principal);
+    }
     if let Some(config) = &user_config.principal {
         return Ok(Principal::new(&config.name, &config.email));
     }
-    Ok(repo.get_principal()?)
+    Ok(principal)
+}
+
+fn is_default_unknown_principal(principal: &Principal) -> bool {
+    principal.name.trim().is_empty()
+        || principal.email.trim().is_empty()
+        || (principal.name.trim() == "Unknown" && principal.email.trim() == "unknown@example.com")
 }
 
 /// Walks the `anyhow::Error` source chain looking for an underlying
@@ -613,6 +1051,24 @@ mod tests {
 
         let bare = anyhow::anyhow!("something else went wrong");
         assert!(!is_disk_full_anyhow(&bare));
+    }
+
+    #[test]
+    fn capture_disk_full_advice_preserves_capture_contract() {
+        let io_err = std::io::Error::from_raw_os_error(28);
+        let err = anyhow::Error::from(io_err).context("snapshot blob write failed");
+        let advice = capture_disk_full_advice(&err);
+
+        assert_eq!(advice.kind, "capture_out_of_space");
+        assert!(advice.error.contains("Capture aborted"));
+        assert!(advice.hint.contains("heddle capture"));
+        assert!(advice.hint.contains("working tree changes are intact"));
+        assert_eq!(advice.primary_command, "heddle capture -m \"...\"");
+        assert_eq!(
+            advice.recovery_commands,
+            vec!["heddle capture -m \"...\"".to_string()]
+        );
+        assert!(advice.preserved.contains("working tree was not modified"));
     }
 
     #[test]

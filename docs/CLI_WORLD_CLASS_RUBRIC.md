@@ -31,7 +31,7 @@ The audit standard is grounded in these sources:
   accessible color use, direct error language, parseable structured output,
   non-interactive safety, verb-oriented command design, and flag clarity.
 - Heddle's own principles: [docs/PRINCIPLES.md](PRINCIPLES.md), especially
-  trust, disposability, composability, restraint, and honesty.
+  verification, disposability, composability, restraint, and honesty.
 - Heddle's JSON contract: [docs/json-schemas.md](json-schemas.md).
 
 ## Scoring model
@@ -51,9 +51,12 @@ hard gate and clears the weighted score thresholds.
 
 Release thresholds:
 
-- Everyday commands must score **A or better**: `init`, `status`, `start`,
-  `capture`, `checkpoint`, `log`, `show`, `diff`, `merge`, `resolve`, `undo`,
-  `thread`, `bridge`, `doctor`, `diagnose`, `help`, `version`.
+- Everyday commands must score **A or better**: `init`, `adopt`, `status`,
+  `verify`, `start`, `capture`, `commit`, `log`, `show`, `diff`, `merge`,
+  `resolve`, `undo`, `thread`, `doctor`, `diagnose`, `help`, `version`.
+  Git-adapter commands, including `bridge` and `checkpoint`, must meet the
+  same hard gates but are evaluated as explicit adapter surfaces rather than
+  the native first-run loop.
 - Advanced commands must score **B or better** unless hidden from curated help.
 - Hidden/internal commands must still pass hard gates, but may be exempt from
   human-output polish if they are documented as machine-only.
@@ -67,9 +70,11 @@ score. A global hard-gate failure blocks release.
 
 1. **No `git` executable dependency in Git-overlay mode.** With `PATH` stripped
    of `git`, supported overlay workflows must still work: init/adopt, status,
-   bridge import/status/sync/export where implemented, clone from local/bare
-   repos where implemented, log/show/diff, checkpoint, merge, and fsck. Spawning
-   `git` is allowed only in explicitly documented optional escape hatches.
+   verify, clone from local/bare repos where implemented, log/show/diff, commit,
+   merge, and fsck. Explicit Git-adapter workflows such as bridge
+   import/status/sync/export have their own adapter gates. Production CLI
+   runtime code must not spawn `git`; raw-Git operation interop must preserve
+   work and hand off through Heddle recovery commands.
 2. **Correct exit status.** Success returns 0. User, environment, data, conflict,
    parse, and internal failures return non-zero. Dry runs that find work to do
    still return 0 unless documented otherwise.
@@ -208,13 +213,13 @@ real invocation transcripts.
   including empty repos, branches, tags, merges, renames, binary blobs, large
   histories, weird paths, and corrupt inputs.
 
-### 8. Safety, trust, and state integrity: 10 pts
+### 8. Safety, Verification, And State Integrity: 10 pts
 
 - 2 pts: destructive operations have preview/dry-run and force semantics.
 - 1 pt: operation state is durable enough for continue/abort/retry.
 - 1 pt: oplog/undo records are written for meaningful mutations.
 - 1 pt: actor/principal attribution is shown and serialized where relevant.
-- 1 pt: confidence/trust metadata is not inflated by the UI.
+- 1 pt: confidence/verification metadata is not inflated by the UI.
 - 1 pt: fsck/doctor surfaces integrity issues without requiring implementation
   knowledge.
 - 1 pt: concurrent invocations avoid corrupting refs, indexes, object stores, or
@@ -312,7 +317,7 @@ Heddle is ready to present as a best-of-class OSS CLI only when:
 2. All everyday commands score A or better.
 3. No advanced public command scores below B.
 4. `docs/json-schemas.md`, `heddle schemas`, and runtime JSON agree.
-5. `heddle doctor docs --all --json` and schema drift checks are clean.
+5. `heddle doctor docs --all --output json` and schema drift checks are clean.
 6. The Git-overlay matrix passes with no `git` executable on `PATH`.
 7. Every C-or-lower audit finding has an owner, issue, and release-blocking
    decision.

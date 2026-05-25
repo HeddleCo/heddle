@@ -76,7 +76,7 @@ they tune the 1.0 targets the next sections propose against it.
   (`realworld_git_large_binary_blob_stress_without_git_on_path`,
   gated `#[ignore]` and run only on demand via
   `HEDDLE_LARGE_BLOB_MB`), but there is no scheduled CI job that
-  loops capture/checkpoint/undo over hours or days.
+  loops commit/undo over hours or days.
 - **Supply-chain gate.** `cargo deny` + `cargo audit` run on every PR
   touching `Cargo.toml`/`Cargo.lock`/`deny.toml`/`audit.yml` and on a
   weekly Monday cron — see
@@ -184,7 +184,7 @@ fixed corpus:
 | `heddle status` | 10 k tracked files, clean tree | <TBD: maintainer> ms |
 | `heddle capture` | 100 changed files | <TBD: maintainer> ms |
 | `heddle log --oneline -n 1000` | 10 k-state history | <TBD: maintainer> ms |
-| `heddle bridge git import` | linux.git head | <TBD: maintainer> s |
+| `heddle adopt --ref <branch>` | linux.git head | <TBD: maintainer> s |
 | Snapshot 1 000 small files | synthetic | <TBD: maintainer> ms |
 
 Tradeoffs:
@@ -211,9 +211,10 @@ Tradeoffs:
   compares against a stored baseline.
 - **What gets gated, what gets observed.** Not every CLI verb needs
   a budget. Proposed: budget the verbs in the AGENTS.md "core thread
-  workflow" (`status`, `capture`, `checkpoint`, `log`, `show`,
-  `start`, `merge --preview`) plus the Git-bridge entry point; track
-  the rest as observed timings without a fail-the-build gate.
+  workflow" (`status`, `capture`, `commit`, `log`, `show`, `start`,
+  `merge --preview`) plus explicit Git-adapter import/export/sync
+  entry points; track the rest as observed timings without a
+  fail-the-build gate.
 
 ### 1.3 Maximum known-bug count by severity
 
@@ -244,8 +245,8 @@ maintainer, written before this gate fires.
 ### 1.4 Soak / long-running test
 
 <TBD: maintainer> — no soak harness exists today. Proposed: a
-**24-hour** soak that runs `heddle capture` / `heddle checkpoint` /
-`heddle undo` / `heddle redo` in a loop against a synthetic
+**24-hour** soak that runs `heddle commit` / `heddle undo` /
+`heddle redo` in a loop against a synthetic
 repository, asserts that no `fsck` errors appear at the end, asserts
 that the oplog is replayable from zero, and asserts that
 `heddle maintenance gc --prune` does not delete anything reachable.
@@ -260,10 +261,9 @@ Tradeoffs:
 - **Where it runs.** Daily cron on the same `blacksmith-4vcpu`
   runner as `rust-tests.yml`. Cheaper than a dedicated runner; the
   runner cost dominates over the rare cancellation.
-- **What's exercised.** Proposed: capture/checkpoint/undo/redo loop
-  plus a `bridge git sync` loop against a fixture upstream. The
-  bridge is the most state-rich code path and benefits most from a
-  long run.
+- **What's exercised.** Proposed: commit/undo/redo loop plus a
+  `bridge git sync` loop against a fixture upstream. The bridge is the
+  most state-rich adapter code path and benefits most from a long run.
 
 ## 2. API stability commitment
 
@@ -367,9 +367,8 @@ meet first":
 - Tier-`Everyday` verb names + their documented flags are frozen.
   Renames require a major bump and a deprecation cycle (§5).
 - Tier-`Advanced` verbs may rename in a major bump without a
-  deprecation cycle, but the JSON output schema (when `--json` or
-  `--output json` is passed) is frozen on the same terms as
-  `Everyday`.
+  deprecation cycle, but the JSON output schema (when `--output json`
+  is passed) is frozen on the same terms as `Everyday`.
 - Tier-`Hidden` verbs are explicitly *not* covered — they exist for
   internal use and may change at any time.
 
@@ -627,7 +626,7 @@ When a stable item is to be removed:
   removed. The reader removal is itself a breaking change (§4.1).
 
 Tradeoffs: a shorter window (e.g. one minor) is operationally
-cheaper but burns trust quickly when consumers can't keep up. A
+cheaper but burns confidence quickly when consumers can't keep up. A
 longer window (e.g. 4 minors) is friendlier to consumers but
 accumulates deprecated code paths that are themselves a
 maintenance liability — and every deprecated path is a place where

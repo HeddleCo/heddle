@@ -351,7 +351,7 @@ fn resolve_state(explicit: Option<&str>) -> Result<Vec<u8>> {
     let repo = Repository::open(&cwd).context("open Heddle repository")?;
     if let Some(s) = explicit {
         // Routes through the canonical resolver so short/full IDs and
-        // marker names all work — matches `heddle log --json` output.
+        // marker names all work — matches `heddle log --output json` output.
         return Ok(resolve_state_id(&repo, s)?.as_bytes().to_vec());
     }
     let head = repo

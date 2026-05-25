@@ -481,6 +481,30 @@ fn test_compare_worktree_cached_marks_clean_symlink_index_entry_fresh() {
 
 #[test]
 #[cfg(unix)]
+fn test_compare_worktree_cached_marks_retargeted_symlink_modified() {
+    let (temp_dir, repo) = create_test_repo();
+
+    fs::write(temp_dir.path().join("old.txt"), "old content").unwrap();
+    fs::write(temp_dir.path().join("new.txt"), "new content").unwrap();
+    std::os::unix::fs::symlink("old.txt", temp_dir.path().join("link")).unwrap();
+
+    let state = repo.snapshot(Some("initial".to_string()), None).unwrap();
+    let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+
+    fs::remove_file(temp_dir.path().join("link")).unwrap();
+    std::os::unix::fs::symlink("new.txt", temp_dir.path().join("link")).unwrap();
+
+    let status = repo.compare_worktree_cached(&tree).unwrap();
+    assert_eq!(status.modified, vec![std::path::PathBuf::from("link")]);
+    assert!(
+        status.added.is_empty(),
+        "retargeting a tracked symlink must not classify it as added"
+    );
+    assert!(status.deleted.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
 fn test_materialize_tree_creates_symlinks() {
     let (temp_dir, repo) = create_test_repo();
 
@@ -1002,14 +1026,10 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
 #[test]
 fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     let temp_dir = TempDir::new().unwrap();
-    // Fake a minimal git-overlay layout: just `.git/HEAD` pointing at a
-    // branch ref. `has_git_metadata` flips capability to GitOverlay; the
-    // open-time sync reads this file via `detect_git_head_fast`.
-    let git_dir = temp_dir.path().join(".git");
-    fs::create_dir_all(&git_dir).unwrap();
-    fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    gix::init(temp_dir.path()).expect("init real git repository");
 
     let repo = Repository::init_default(temp_dir.path()).unwrap();
+    assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
     fs::write(temp_dir.path().join("a.txt"), "version 1").unwrap();
     let state1 = repo.snapshot(Some("v1".to_string()), None).unwrap();

@@ -33,12 +33,12 @@ cargo doc --open              # Generate and open docs
 
 ```bash
 # Local/client binary
-cargo run -p cli -- init
-cargo run -p cli -- status
-cargo run -p cli -- capture -m "message"
-cargo run -p cli -- actor list
-cargo run -p cli -- actor explain
-cargo run -p cli -- integration install claude-code
+cargo run -p heddle-cli -- init
+cargo run -p heddle-cli -- status
+cargo run -p heddle-cli -- capture -m "message"
+cargo run -p heddle-cli -- actor list
+cargo run -p heddle-cli -- actor explain
+cargo run -p heddle-cli -- integration install claude-code
 
 # Hosted server/admin binary
 cargo run -p hosted -- serve --bind 0.0.0.0 --port 8421

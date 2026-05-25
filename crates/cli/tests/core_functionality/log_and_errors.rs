@@ -9,7 +9,7 @@ fn test_log_reverse_order() {
     heddle_must_succeed(&["capture", "-m", "First"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "second").unwrap();
     heddle_must_succeed(&["capture", "-m", "Second"], temp.path());
-    let result = heddle(&["log", "--json"], Some(temp.path())).unwrap();
+    let result = heddle(&["log", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&result).expect("Log should output valid JSON");
     let states = parsed
         .get("states")
@@ -29,7 +29,7 @@ fn test_log_json_output() {
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Test"], temp.path());
-    let result = heddle(&["log", "--json"], Some(temp.path())).unwrap();
+    let result = heddle(&["log", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&result).expect("Log should output valid JSON");
     assert!(parsed.get("states").is_some());
 }
@@ -71,7 +71,11 @@ fn test_log_path_filter_shows_only_matching_history() {
     std::fs::write(temp.path().join("src.rs"), "two").unwrap();
     heddle_must_succeed(&["capture", "-m", "src two"], temp.path());
 
-    let result = heddle(&["log", "--json", "--path", "src.rs"], Some(temp.path())).unwrap();
+    let result = heddle(
+        &["log", "--output", "json", "--path", "src.rs"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&result).expect("Log should output valid JSON");
     let intents: Vec<_> = parsed["states"]
         .as_array()
@@ -107,8 +111,8 @@ fn test_history_alias_for_log() {
     std::fs::write(temp.path().join("file.txt"), "second").unwrap();
     heddle_must_succeed(&["capture", "-m", "Second"], temp.path());
 
-    let log_out = heddle(&["log", "--json"], Some(temp.path())).unwrap();
-    let history_out = heddle(&["history", "--json"], Some(temp.path()))
+    let log_out = heddle(&["log", "--output", "json"], Some(temp.path())).unwrap();
+    let history_out = heddle(&["history", "--output", "json"], Some(temp.path()))
         .expect("`heddle history` should be accepted as an alias for `heddle log`");
     assert_eq!(log_out, history_out);
 }

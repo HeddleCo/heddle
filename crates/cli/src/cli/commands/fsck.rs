@@ -120,7 +120,7 @@ fn fsck_integrity_error_advice(error_count: usize, repaired: bool) -> RecoveryAd
         "Repository has integrity errors",
         "Inspect repository integrity with `heddle fsck --full`, then restore or repair the reported object/ref.",
         format!("{error_count} integrity error(s) remain after fsck"),
-        "continuing to trust this repository could hide missing or corrupt objects/refs",
+        "treating this repository as verified could hide missing or corrupt objects/refs",
         preserved,
         "heddle fsck --full",
         vec!["heddle fsck --full".to_string()],

@@ -2,11 +2,12 @@
 //! Progressive-disclosure help: curated default, advanced surface,
 //! topic-scoped help.
 //!
-//! The Heddle CLI's default `heddle help` lists only everyday verbs.
-//! Advanced affordances (review/discuss/context, checkpoint, query,
-//! conflict, hook, agent serve, ephemeral threads) are reachable via
-//! `heddle help advanced` or `heddle help <topic>`. Per-verb help via
-//! `heddle <verb> --help` continues to derive from clap doc-comments.
+//! The Heddle CLI's default `heddle help` lists only the native loop
+//! from the command contract table. Advanced affordances, automation,
+//! admin commands, and Git adapter commands are reachable
+//! via `heddle help advanced` or `heddle help <topic>`. Per-verb help
+//! via `heddle <verb> --help` continues to derive from clap
+//! doc-comments.
 //!
 //! # Cultural deliverable
 //!
@@ -18,13 +19,13 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     /// Front-door verbs in the core loop: setup, orient, isolate work,
-    /// capture, check readiness, inspect, integrate, recover, and
+    /// commit, check readiness, inspect, integrate, recover, and
     /// diagnose. See [`everyday_verbs`] for the authoritative list.
     Everyday,
     /// Reachable via `heddle help advanced` or `heddle help <topic>`.
     /// Most agent-loop and operational verbs land here.
     Advanced,
-    /// Compatibility aliases that should not be advertised at all.
+    /// Hidden verbs that should not be advertised at all.
     Hidden,
 }
 
@@ -39,116 +40,40 @@ pub fn tier_of(verb: &str) -> Tier {
     }
 }
 
-/// Verbs that show in `heddle help`, in editorial order. Blurbs are
-/// looked up at print time from each verb's clap `about` (its first
-/// doc-comment line) — see [`about_first_line`]. Keeping only names
-/// here means there's a single source of truth for command summaries.
-pub fn everyday_verbs() -> &'static [&'static str] {
-    &[
-        "init",
-        "clone",
-        "status",
-        "workspace",
-        "start",
-        "capture",
-        "ready",
-        "diff",
-        "merge",
-        "resolve",
-        "undo",
-        "log",
-        "show",
-        "thread",
-        "bridge",
-        "doctor",
-        "trust",
-    ]
+/// Verbs that show in `heddle help`, in command-contract order. Blurbs
+/// are looked up at print time from the command catalog.
+pub fn everyday_verbs() -> Vec<&'static str> {
+    crate::cli::commands::root_commands_for_help_visibility("everyday")
 }
 
-/// Verbs surfaced by `heddle help advanced`, in editorial order. Not
-/// exhaustive of every existing verb (see [`tier_of`] for the full
-/// table) — focuses on the agent-loop surface plus the
-/// operational verbs power users reach for. As with [`everyday_verbs`],
-/// blurbs come from clap at print time.
-pub fn advanced_verbs() -> &'static [&'static str] {
-    &[
-        "agent",
-        "daemon",
-        "hook",
-        "review",
-        "discuss",
-        "context",
-        "commands",
-        "commit",
-        "branch",
-        "switch",
-        "fork",
-        "goto",
-        "collapse",
-        "compare",
-        "stash",
-        "fetch",
-        "push",
-        "pull",
-        "remote",
-        "rebase",
-        "cherry-pick",
-        "blame",
-        "bisect",
-        "fsck",
-        "semantic",
-        "watch",
-        "redo",
-        "revert",
-        "clean",
-        "ship",
-        "checkpoint",
-        "sync",
-        "delegate",
-        "run",
-        "continue",
-        "abort",
-        "marker",
-        "integration",
-        "maintenance",
-        "auth",
-        "diagnose",
-        "query",
-        "session",
-        "actor",
-        "store",
-        "completion",
-        "presence",
-        "version",
-    ]
+/// The first screen of help is smaller than the complete everyday set:
+/// it shows the primary work loop, then points at setup, sync, proof,
+/// and recovery as nearby verbs.
+fn primary_loop_verbs(catalog: &crate::cli::commands::CommandCatalogOutput) -> Vec<&'static str> {
+    everyday_verbs()
+        .into_iter()
+        .filter(|verb| {
+            catalog
+                .command_by_display(verb)
+                .is_some_and(|entry| entry.help_rank <= 70)
+        })
+        .collect()
 }
 
-/// Look up the first line of a top-level subcommand's clap `about`
-/// text. Returns an empty string when the verb is not a direct
-/// subcommand of `cmd` or has no `about` set — `print_help` skips
-/// rows with empty blurbs so feature-gated verbs (e.g. `semantic`
-/// without the `semantic` feature) don't advertise themselves. The
-/// `verb_blurbs_resolve_from_clap` test enforces that, under
-/// `--all-features`, every advertised verb resolves.
-///
-/// The "Automation/workflow command:" prefix in `--help` is useful
-/// framing on the per-verb page but pure noise in the curated
-/// summary column, so it gets stripped here.
-fn about_first_line(cmd: &clap::Command, verb: &str) -> String {
-    let raw = cmd
-        .get_subcommands()
-        .find(|sc| sc.get_name() == verb)
-        .and_then(|sc| sc.get_about())
-        .map(|about| about.to_string().lines().next().unwrap_or("").to_string())
-        .unwrap_or_default();
-    let stripped = raw
-        .trim_start_matches("Automation/workflow command:")
-        .trim_start();
-    let mut chars = stripped.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
+/// Verbs surfaced by `heddle help advanced`, in command-contract order.
+/// This includes power surfaces, automation/admin commands, and
+/// Git-shaped aliases, each labeled by the contract table.
+pub fn advanced_verbs() -> Vec<&'static str> {
+    crate::cli::commands::root_commands_for_advanced_help()
+}
+
+/// Look up the catalog summary for a top-level command. Returns an empty
+/// string when the verb is feature-gated out of the current build.
+fn catalog_summary(catalog: &crate::cli::commands::CommandCatalogOutput, verb: &str) -> String {
+    catalog
+        .command_by_display(verb)
+        .map(|entry| entry.summary.clone())
+        .unwrap_or_default()
 }
 
 /// Entry point for the `Commands::Help { topics }` dispatch arm
@@ -165,16 +90,35 @@ pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> 
     let mut out = stdout.lock();
     match topic {
         [] => {
+            let catalog = crate::cli::commands::build_command_catalog();
             writeln!(out, "Heddle — AI-native version control")?;
             writeln!(out)?;
-            writeln!(out, "Everyday commands:")?;
-            for &name in everyday_verbs() {
-                let blurb = about_first_line(cmd, name);
+            writeln!(out, "Common loop:")?;
+            for name in primary_loop_verbs(&catalog) {
+                let blurb = catalog_summary(&catalog, name);
                 if blurb.is_empty() {
                     continue;
                 }
                 writeln!(out, "  {:<10}  {}", name, blurb)?;
             }
+            writeln!(out)?;
+            writeln!(
+                out,
+                "Existing Git: heddle status -> heddle adopt -> heddle verify -> heddle commit -m \"...\" -> heddle push"
+            )?;
+            writeln!(
+                out,
+                "Isolated work: heddle start <name> --path ../<name> -> heddle ready -> heddle merge --preview -> heddle ship"
+            )?;
+            writeln!(out)?;
+            writeln!(
+                out,
+                "Nearby: `heddle undo`, `heddle verify`, `heddle push`, `heddle pull`."
+            )?;
+            writeln!(
+                out,
+                "Start here: `heddle init`, `heddle adopt`, or `heddle clone`."
+            )?;
             writeln!(out)?;
             writeln!(
                 out,
@@ -184,21 +128,33 @@ pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> 
             writeln!(out)?;
             writeln!(
                 out,
-                "Run `heddle help advanced` for advanced commands or \
-                 `heddle help <topic>` for a topic page (e.g. `threads`, \
-                 `daemon`, `signals`, `bridge`, `operation-ids`, \
-                 `git-dependencies`)."
+                "Run `heddle help model` for the short mental model, \
+                 `heddle help advanced` for power surfaces, automation, and Git interop, \
+                 or `heddle help <topic>` for a topic page (e.g. `git-overlay`, \
+                 `threads`, `daemon`, `signals`, `bridge`, `operation-ids`, \
+                 `remotes`, `git-dependencies`)."
             )?;
         }
         [name] if name == "advanced" => {
+            let catalog = crate::cli::commands::build_command_catalog();
             writeln!(out, "{}", ADVANCED_HELP)?;
             writeln!(out, "Advanced commands:")?;
-            for &name in advanced_verbs() {
-                let blurb = about_first_line(cmd, name);
+            for name in advanced_verbs() {
+                let blurb = catalog_summary(&catalog, name);
                 if blurb.is_empty() {
                     continue;
                 }
-                writeln!(out, "  {:<14}  {}", name, blurb)?;
+                let visibility = crate::cli::commands::command_help_visibility(name);
+                let surface = crate::cli::commands::command_surface(name);
+                let label = if visibility == "git_adapter" || surface != "native" {
+                    surface
+                } else {
+                    visibility
+                };
+                let canonical = crate::cli::commands::command_canonical_command(name)
+                    .map(|canonical| format!("; use `{canonical}`"))
+                    .unwrap_or_default();
+                writeln!(out, "  {:<14}  {} [{}{}]", name, blurb, label, canonical)?;
             }
         }
         [name] if topic_text(name).is_some() => {
@@ -225,6 +181,17 @@ pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> 
     Ok(())
 }
 
+pub fn print_direct_help_for_raw(
+    cmd: &clap::Command,
+    raw: &[String],
+) -> Option<std::io::Result<()>> {
+    let path = command_path_from_raw_help_request(cmd, raw)?;
+    Some(match help_command_for_path(cmd, &path) {
+        Some(mut subcommand) => subcommand.print_long_help(),
+        None => print_help(cmd, &path),
+    })
+}
+
 fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::Command> {
     if path.is_empty() {
         return None;
@@ -232,14 +199,86 @@ fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::C
 
     let mut current = cmd;
     let mut bin_name = cmd.get_name().to_string();
+    let mut canonical_path = Vec::new();
     for part in path {
-        let subcommand = current.find_subcommand(part)?;
+        let subcommand = find_subcommand_or_alias(current, part)?;
         bin_name.push(' ');
         bin_name.push_str(part);
+        canonical_path.push(subcommand.get_name().to_string());
         current = subcommand;
     }
 
-    Some(current.clone().bin_name(bin_name))
+    let mut help = current.clone().bin_name(bin_name);
+    for arg in cmd
+        .get_arguments()
+        .filter(|arg| arg.is_global_set() && !arg.is_hide_set())
+    {
+        help = help.arg(arg.clone());
+    }
+    if crate::cli::commands::command_runtime_contract(&canonical_path.join(" "))
+        .is_some_and(|contract| contract.supports_op_id)
+        && let Some(arg) = cmd
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("op-id"))
+    {
+        help = help.arg(arg.clone().hide(false).value_name("UUID"));
+    }
+    Some(help)
+}
+
+fn find_subcommand_or_alias<'a>(
+    command: &'a clap::Command,
+    name: &str,
+) -> Option<&'a clap::Command> {
+    command.find_subcommand(name).or_else(|| {
+        command
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_all_aliases().any(|alias| alias == name))
+    })
+}
+
+fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Option<Vec<String>> {
+    if !raw.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return None;
+    }
+    if raw
+        .iter()
+        .all(|arg| arg == "--help" || arg == "-h" || arg.starts_with('-'))
+    {
+        return None;
+    }
+
+    let mut current = cmd;
+    let mut path = Vec::new();
+    let mut skip_next = false;
+    for token in raw {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if token == "--help" || token == "-h" {
+            continue;
+        }
+        if let Some(arg) = current.get_arguments().find(|arg| {
+            arg.get_long()
+                .is_some_and(|long| token == &format!("--{long}"))
+        }) {
+            skip_next = arg.get_action().takes_values();
+            continue;
+        }
+        if token.starts_with("--") {
+            continue;
+        }
+        if token.starts_with('-') {
+            continue;
+        }
+        if let Some(subcommand) = find_subcommand_or_alias(current, token) {
+            path.push(subcommand.get_name().to_string());
+            current = subcommand;
+        }
+    }
+
+    (!path.is_empty()).then_some(path)
 }
 
 /// Static per-topic help. Topics are addressed via `heddle help <topic>`.
@@ -247,8 +286,11 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
     Some(match topic {
         "advanced" => ADVANCED_HELP,
         "agent" | "daemon" => DAEMON_TOPIC,
-        "threads" | "model" => THREADS_TOPIC,
+        "git-overlay" => GIT_OVERLAY_TOPIC,
+        "model" | "mental-model" | "concepts" => MODEL_TOPIC,
+        "threads" => THREADS_TOPIC,
         "operation-ids" | "idempotency" => OPERATION_IDS_TOPIC,
+        "remotes" => REMOTES_TOPIC,
         "git-dependencies" | "git-deps" | "git-dependency" => GIT_DEPENDENCIES_TOPIC,
         "review" => REVIEW_TOPIC,
         "discuss" | "discussions" => DISCUSS_TOPIC,
@@ -258,12 +300,14 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
     })
 }
 
-const ADVANCED_HELP: &str = "Advanced verbs — see `heddle help advanced` for the complete list.\n\
+const ADVANCED_HELP: &str = "Advanced commands for power users, agents, automation, Git interop, and recovery.\n\
 \n\
-The default `heddle help` curates the core loop: init/clone, status/workspace,\n\
-start/capture, ready/diff, merge/resolve/undo, log/show/thread, bridge/doctor.\n\
-Everything else lives behind this topic and `heddle help <verb> --help` for the full\n\
-clap-derived docs.\n\
+The default `heddle help` curates the native loop: init/adopt/clone,\n\
+status/diff/commit/start, ready/merge/ship/push/pull, undo, log/show,\n\
+doctor/verify. Power nouns such as thread/workspace/remote/bridge/agent and\n\
+Git adapter commands live behind this topic. Use `heddle help\n\
+<verb>` for curated topics or `heddle <verb> --help` for the full clap-derived\n\
+docs.\n\
 \n\
 This is intentional. The everyday surface stays minimal so first-time users aren't\n\
 overwhelmed; agents and power users reach for the advanced affordances when they\n\
@@ -279,9 +323,51 @@ const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are 
                          `.heddle/sockets/`. Hosts the local agent\n\
                          services (state-review, discussion, signal, operation-log\n\
                          query, hook) so agents avoid per-command\n\
-                         process startup latency. Mode: same-user only,\n\
-                         peer-cred check enforced. Out of scope for first ship:\n\
-                         multi-user, remote, TLS.\n";
+                         process startup latency. Mode: same-user only;\n\
+                         peer-credential checks are enforced.\n";
+
+const MODEL_TOPIC: &str = r#"Heddle mental model — the everyday loop in one screen.
+
+Heddle is built around saved states and isolated threads. Git compatibility is
+an output and interop layer, not the thing you have to think about first.
+
+Core nouns:
+
+- State: a captured tree with a stable change id, attribution, intent, and
+  provenance. States are what `log`, `show`, `diff`, `undo`, and agents can
+  reason about.
+- Thread: a named line of work with its own checkout and captured history.
+  Use it for risky edits, agent work, or parallel experiments without stash
+  juggling.
+- Capture: a cheap recoverable save point on the current thread.
+- Commit: the normal human save path. In native Heddle it saves the state; in a
+  Git-overlay repo it saves the Heddle state and writes the matching Git
+  checkpoint as one operation.
+- Checkpoint: the explicit Git-overlay boundary for already-captured work.
+- Verify: the proof surface. It says whether Heddle, Git mapping, worktree,
+  remotes, active operations, clone state, and machine contracts agree.
+
+Everyday loop:
+
+    heddle status
+    heddle diff
+    heddle commit -m "..."
+    heddle start <name> --path ../<name>
+    heddle ready
+    heddle merge <name> --preview
+    heddle ship --thread <name>
+    heddle undo
+    heddle verify
+
+Existing Git checkout:
+
+    heddle status
+    heddle adopt                 # or the exact adopt/import command status prints
+    heddle verify
+
+If a command refuses, read the first `Next:` line. Heddle fails closed when it
+cannot prove the move is safe.
+"#;
 
 const THREADS_TOPIC: &str = "Threads — Heddle's unit of in-progress work.\n\
 \n\
@@ -300,9 +386,9 @@ between threads with `heddle thread switch <name>`, and integrate with\n\
   is just a ref.\n\
 - Multiple threads coexist on disk simultaneously without `git stash` /\n\
   `git worktree` gymnastics. Each thread's working tree is its own.\n\
-- `heddle capture` records into the thread's state history; `heddle\n\
-  checkpoint` is what materializes a git-overlay commit on the\n\
-  downstream branch.\n\
+- `heddle commit` captures work and writes the Git-facing checkpoint.\n\
+  Use `heddle capture` and `heddle checkpoint` separately when you want\n\
+  finer-grained Heddle states before producing Git commits.\n\
 \n\
 # Workspace modes (`--workspace`)\n\
 \n\
@@ -333,7 +419,7 @@ identically. The mode only controls bytes-on-disk semantics.\n\
   materialized` (or rely on `auto`) when you want real bytes on disk\n\
   from the start.\n\
 - `heddle thread promote <name> --path <dir>` upgrades an existing\n\
-  thread to a heavy checkout at a chosen path. Use it when a thread\n\
+  thread to an isolated materialized checkout at a chosen path. Use it when a thread\n\
   that started lightweight (`virtualized`, or no on-disk checkout)\n\
   needs to become a real working tree — for example, to hand it to a\n\
   tool that can't read through the mount.\n\
@@ -379,6 +465,8 @@ These three look similar but operate at different layers:\n\
 - `heddle capture` records a recoverable Heddle step on the current\n\
   thread — for undo, provenance, and review. Captures are\n\
   fine-grained and accumulate freely as work progresses.\n\
+- `heddle commit -m \"...\"` is the one-step human path: capture the\n\
+  current work and write the Git-facing checkpoint.\n\
 - `heddle checkpoint` commits the current captured work to the\n\
   git-overlay branch/index. It refuses when the worktree has changes\n\
   that haven't been captured yet — capture first, then checkpoint.\n\
@@ -389,17 +477,43 @@ These three look similar but operate at different layers:\n\
 See also: `heddle help advanced` for the full operational surface,\n\
 `heddle thread --help` for the thread subcommand list.\n";
 
-const OPERATION_IDS_TOPIC: &str = "Idempotency — every state-changing call accepts a `client_operation_id`.\n\
+const OPERATION_IDS_TOPIC: &str = "Idempotency — machine retries for supported mutating commands.\n\
 \n\
-The same id replayed with the same body returns the original outcome\n\
-bit-identical; with a different body it returns FAILED_PRECONDITION.\n\
+Commands that advertise `supports_op_id: true` in `heddle commands --output json`\n\
+accept `--op-id <UUID>` or `HEDDLE_OPERATION_ID`. Replaying the same id\n\
+with the same body returns the recorded outcome; with a different body it\n\
+returns a typed conflict.\n\
+\n\
+`op_id_behavior: explicit_replay` means the caller must provide the id.\n\
+`op_id_behavior: generated_resume` is reserved for commands that also\n\
+advertise `persists_op_id: true` and can save a generated id across an\n\
+interrupted retry loop. Commands with `op_id_behavior: none` reject --op-id.\n\
 \n\
 The dedup store is file-backed locally (`.heddle/state/operation_dedup.bin`,\n\
 rmp-serde, 7-day default retention) and Postgres-backed in hosted deployments.\n\
 \n\
-The CLI accepts `--op-id <UUID>` on every state-changing verb (or honours\n\
-`HEDDLE_OPERATION_ID`). Without an id, dedup is bypassed and the call\n\
-executes normally.\n";
+Without an id, dedup is bypassed and the call executes normally. For the\n\
+authoritative per-command contract, use `heddle commands --output json`.\n";
+
+const REMOTES_TOPIC: &str = "Remotes — local, Git-overlay, and hosted destinations.\n\
+\n\
+Core loop:\n\
+\n\
+    heddle remote add origin <url-or-path>\n\
+    heddle remote set-default origin\n\
+    heddle fetch\n\
+    heddle push\n\
+    heddle pull\n\
+    heddle verify\n\
+\n\
+Remote values may be hosted endpoints, Git URLs, file URLs, or local bare Git\n\
+paths depending on the workflow. Top-level `fetch`, `push`, and `pull` use the\n\
+default remote unless a positional remote name is supplied, for example\n\
+`heddle fetch backup`. `heddle bridge git status` shows Git-overlay mapping and\n\
+drift before a sync operation changes refs.\n\
+\n\
+When a remote action is unsafe, Heddle reports the blocker and one primary\n\
+next command instead of falling back to raw Git.\n";
 
 const GIT_DEPENDENCIES_TOPIC: &str = "Git executable dependencies — what works without `git` on PATH.\n\
 \n\
@@ -409,15 +523,18 @@ import`, `bridge git status`, `bridge git sync/export` where implemented,\n\
 `thread list`, `workspace`, `log`, `show`, `diff`, `checkpoint`, `merge`,\n\
 `ready`, and `fsck`.\n\
 \n\
-Remaining `git` process calls are optional escape hatches:\n\
+Heddle is Git-compatible, not Git-binary-dependent. Public CLI runtime paths\n\
+must not spawn a `git` process; Git-format reads, writes, transport, index,\n\
+and ref updates go through native/library code.\n\
 \n\
-- partial/filter clone fallback when the native transport cannot honor the\n\
-  requested capability;\n\
-- lazy promisor hydration for missing partial-clone blobs;\n\
-- `merge --git-commit`, which explicitly asks Heddle to write a Git commit;\n\
-- raw Git continue/abort interop for externally-started Git operations;\n\
-- best-effort environment metadata such as `git --version` in verbose bug\n\
-  context.\n\
+If Heddle detects an externally-started raw Git sequencer operation, it leaves\n\
+Git metadata, refs, index, and worktree files unchanged and reports a Heddle\n\
+preservation command. Finish or abort that operation with the Git-compatible\n\
+tool that started it, then run `heddle verify`.\n\
+\n\
+Unsupported native Git-overlay capabilities, such as filtered/lazy Git clones,\n\
+fail closed with recovery advice instead of silently invoking a `git` binary.\n\
+`merge --git-commit` writes Git objects and refs natively.\n\
 \n\
 Run `heddle commands --output json` to inspect the public command surface, and\n\
 `heddle doctor` / `heddle fsck --full` when a repository reports integrity or\n\
@@ -431,8 +548,8 @@ const REVIEW_TOPIC: &str = "Review surface — `heddle review show | sign | next
 `sign <state>`    — submit a `read | agent_preview | agent_co_review`\n\
                     signature. `--symbols file:symbol` scopes to\n\
                     specific symbols; default is the whole change.\n\
-`next`            — placeholder until the operation-log query layer wires real\n\
-                    pending-review selection.\n\
+`next`            — show the next locally discoverable review item, or explain\n\
+                    why none is available.\n\
 `health [--window N]`\n\
                   — per-module signal fire-rate over the last N states.\n\
 \n\
@@ -456,7 +573,79 @@ turns and resolves into one of three terminal states:\n\
 Visibility: `--visibility public|internal|team:NAME|restricted:LABEL`.\n\
 Defaults to the repo's namespace policy.\n";
 
-const BRIDGE_TOPIC: &str = "Bridge export footer + git notes.\n\
+const GIT_OVERLAY_TOPIC: &str = "Git-overlay quick start\n\
+\n\
+Use this when you want Heddle's captured states, isolated threads, merge\n\
+previews, undo, provenance, and machine-safe JSON with Git compatibility kept\n\
+behind the bridge/adapter.\n\
+\n\
+Start in an existing Git checkout:\n\
+\n\
+    heddle status\n\
+    heddle adopt --ref <branch>               # use the exact command printed by status\n\
+    heddle verify\n\
+\n\
+Save and sync ordinary work:\n\
+\n\
+    heddle diff\n\
+    heddle commit -m \"...\"                    # one Heddle state + one Git commit\n\
+    heddle push\n\
+\n\
+Isolate risky work:\n\
+\n\
+    heddle start <name> --path ../<name>\n\
+    cd ../<name>\n\
+    heddle ready\n\
+    cd -\n\
+    heddle merge <name> --preview\n\
+    heddle ship --thread <name> --no-push     # add --push when ready to publish\n\
+\n\
+Recover or prove state:\n\
+\n\
+    heddle undo\n\
+    heddle verify\n\
+\n\
+State-specific recovery:\n\
+\n\
+    Worktree has unsaved edits: heddle commit -m \"...\"\n\
+    Captured in Heddle but not Git: heddle checkpoint -m \"...\"\n\
+    Git refs changed externally: heddle adopt --ref <branch>\n";
+
+const BRIDGE_TOPIC: &str = "Git bridge — adopt existing Git repos through an adapter.\n\
+\n\
+Use the bridge when you are standing in a normal Git checkout and want Heddle's\n\
+captured states, isolated threads, merge previews, undo, and machine-safe JSON\n\
+while keeping Git remotes and commits available as interoperability surfaces.\n\
+\n\
+First run:\n\
+\n\
+    heddle status\n\
+    heddle adopt --ref <branch>               # use the exact command printed by status\n\
+    heddle verify\n\
+\n\
+Manual setup, when you want one ref at a time:\n\
+\n\
+    heddle init\n\
+    heddle bridge git import --ref <branch>\n\
+\n\
+Daily loop:\n\
+\n\
+    heddle status\n\
+    heddle commit -m \"...\"                    # save work as Heddle + Git\n\
+    heddle push                               # Git-overlay remotes use the top-level verb\n\
+    heddle start <name> --path ../<name>\n\
+    heddle ready --thread <name>              # or cd into ../<name> and run heddle ready\n\
+    heddle merge <name> --preview\n\
+    heddle ship --thread <name> --no-push     # add --push to land and push together\n\
+\n\
+Recovery and inspection:\n\
+\n\
+    heddle bridge git status\n\
+    heddle bridge git reconcile --ref <branch> --preview\n\
+    heddle doctor\n\
+    heddle verify --output json\n\
+\n\
+Export metadata for Git readers:\n\
 \n\
 Every exported commit carries a footer at the tail of the commit message:\n\
 \n\
@@ -468,12 +657,10 @@ This is the durable record — every reader on every host sees it regardless\n\
 of remote configuration.\n\
 \n\
 Per-scope annotation drop counts and signal counts ride on the opt-in\n\
-git note at `refs/notes/heddle`. To fetch + push notes:\n\
-\n\
-    git config --add remote.origin.fetch '+refs/notes/heddle:refs/notes/heddle'\n\
-    git config --add remote.origin.push  'refs/notes/heddle:refs/notes/heddle'\n\
-\n\
-Then `git log --notes=heddle` displays the rich metadata inline.\n";
+Git note at `refs/notes/heddle`. Heddle reads and writes that ref natively;\n\
+people who still inspect the repository through another Git client can opt\n\
+that client into showing notes, but Heddle itself does not require a Git\n\
+executable on the system.\n";
 
 const SIGNALS_TOPIC: &str = "Risk signals — five modules behind a pure trait.\n\
 \n\
@@ -502,7 +689,7 @@ mod tests {
 
     #[test]
     fn everyday_verbs_in_curated_list_have_everyday_tier() {
-        for &verb in everyday_verbs() {
+        for verb in everyday_verbs() {
             assert_eq!(tier_of(verb), Tier::Everyday, "{verb}");
         }
     }
@@ -516,12 +703,16 @@ mod tests {
     fn topic_text_returns_some_for_advertised_topics() {
         for topic in [
             "advanced",
+            "git-overlay",
             "agent",
             "daemon",
             "threads",
             "model",
+            "mental-model",
+            "concepts",
             "operation-ids",
             "idempotency",
+            "remotes",
             "git-dependencies",
             "review",
             "discuss",
@@ -538,7 +729,7 @@ mod tests {
 
     #[test]
     fn tier_of_advanced_verbs_classifies_correctly() {
-        for &verb in advanced_verbs() {
+        for verb in advanced_verbs() {
             let t = tier_of(verb);
             assert!(
                 matches!(t, Tier::Advanced),
@@ -547,14 +738,23 @@ mod tests {
         }
     }
 
-    /// Regression: heddle#150. `query`, `checkpoint`, `continue`, and
+    /// Regression: heddle#150. `query`, `capture`, `checkpoint`, `continue`, and
     /// `abort` are referenced in inline tips and error messages but
     /// were absent from the `heddle help advanced` listing, leaving
     /// users unable to discover the verb they were told to run.
     #[test]
     fn advanced_verbs_lists_tip_referenced_commands() {
-        let advanced: std::collections::HashSet<&str> = advanced_verbs().iter().copied().collect();
-        for verb in ["query", "checkpoint", "continue", "abort"] {
+        let advanced: std::collections::HashSet<&str> = advanced_verbs().into_iter().collect();
+        for verb in [
+            "query",
+            "capture",
+            "checkpoint",
+            "continue",
+            "abort",
+            "shell",
+            "git-overlay",
+            "inspect",
+        ] {
             assert!(
                 advanced.contains(verb),
                 "`{verb}` is referenced in user-facing tips but is not \
@@ -565,29 +765,14 @@ mod tests {
 
     /// The everyday surface should mirror the core loop rather than
     /// mixing in every collaboration feature. A first-time user should
-    /// be able to orient, create/capture work, check readiness, inspect,
+    /// be able to orient, commit work, check readiness, inspect,
     /// integrate, recover, and diagnose from the first help screen.
     #[test]
     fn everyday_verbs_surface_the_core_loop() {
-        let everyday: std::collections::HashSet<&str> = everyday_verbs().iter().copied().collect();
+        let everyday: std::collections::HashSet<&str> = everyday_verbs().into_iter().collect();
         for verb in [
-            "init",
-            "clone",
-            "status",
-            "workspace",
-            "start",
-            "capture",
-            "ready",
-            "diff",
-            "merge",
-            "resolve",
-            "undo",
-            "log",
-            "show",
-            "thread",
-            "bridge",
-            "doctor",
-            "trust",
+            "init", "clone", "status", "start", "commit", "ready", "diff", "merge", "ship",
+            "resolve", "undo", "log", "show", "pull", "push", "doctor", "verify",
         ] {
             assert!(
                 everyday.contains(verb),
@@ -595,7 +780,7 @@ mod tests {
                  the everyday surface"
             );
         }
-        for verb in ["review", "discuss", "context", "goto"] {
+        for verb in ["review", "discuss", "context", "goto", "thread", "bridge"] {
             assert!(
                 !everyday.contains(verb),
                 "`{verb}` belongs behind advanced/topic help, not the core-loop surface"
@@ -612,29 +797,26 @@ mod tests {
 
     /// Build-break property: every verb listed in `everyday_verbs` and
     /// `advanced_verbs` that's compiled into the current build MUST
-    /// resolve to a clap subcommand with a non-empty `about`. Verbs
+    /// resolve to a command catalog entry with a non-empty summary. Verbs
     /// gated behind a feature that isn't enabled (e.g. `semantic` when
     /// the `semantic` feature is off) are skipped — `print_help`
     /// already skips them at render time. If a verb is renamed in the
-    /// `Commands` enum without a matching update here, this test
-    /// fails for whichever feature combo the variant lives in.
+    /// contract table without a matching catalog entry, this test fails
+    /// for whichever feature combo the variant lives in.
     #[test]
-    fn verb_blurbs_resolve_from_clap() {
-        use clap::CommandFactory;
-        let cmd = crate::cli::Cli::command();
-        for &verb in everyday_verbs().iter().chain(advanced_verbs().iter()) {
+    fn verb_blurbs_resolve_from_command_catalog() {
+        let catalog = crate::cli::commands::build_command_catalog();
+        for verb in everyday_verbs().into_iter().chain(advanced_verbs()) {
             // Feature-gated verbs may not be present in this build —
             // skip them. The render path mirrors this.
-            let Some(subcommand) = cmd.get_subcommands().find(|sc| sc.get_name() == verb) else {
+            if catalog.command_by_display(verb).is_none() {
                 continue;
-            };
-            let blurb = about_first_line(&cmd, verb);
+            }
+            let blurb = catalog_summary(&catalog, verb);
             assert!(
                 !blurb.is_empty(),
-                "verb `{verb}` is a clap subcommand but its `about` \
-                 doc-comment is empty. The curated help printer needs \
-                 a non-empty first line. (subcommand seen: {:?})",
-                subcommand.get_name()
+                "verb `{verb}` is cataloged but its summary is empty. \
+                 The curated help printer needs a non-empty catalog summary."
             );
         }
     }

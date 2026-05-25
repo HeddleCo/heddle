@@ -151,7 +151,8 @@ fn watch_emits_json_per_line() {
     let (mut child, rx) = spawn_watch(
         temp.path(),
         &[
-            "--json",
+            "--output",
+            "json",
             "--max-iterations",
             "3",
             "--poll-interval-ms",
@@ -207,7 +208,8 @@ fn watch_filter_drops_non_matching_kinds() {
     let (mut child, rx) = spawn_watch(
         temp.path(),
         &[
-            "--json",
+            "--output",
+            "json",
             "--filter",
             "thread_create",
             "--max-iterations",

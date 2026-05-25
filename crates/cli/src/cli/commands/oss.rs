@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::process::Command;
-
 use anyhow::Result;
 use repo::Repository;
 use serde::Serialize;
@@ -26,15 +24,19 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
             "{}",
             serde_json::json!({
                 "topic": "git-overlay",
-                "summary": "Use Heddle as the daily Git-overlay loop: status, capture, checkpoint, push; use threads for isolated work.",
+                "summary": "Use Heddle as the daily loop with Git compatibility through the bridge: status, diff, commit, start --path, ready, merge --preview, ship, undo, verify.",
                 "steps": [
                     "heddle status",
+                    "heddle adopt --ref <branch>",
                     "heddle diff",
-                    "heddle start <name> --path <dir>",
-                    "heddle capture -m <message>",
-                    "heddle checkpoint -m <message>",
-                    "heddle merge <name>",
-                    "heddle push"
+                    "heddle commit -m <message>",
+                    "heddle start <name> --path ../<name>",
+                    "heddle ready",
+                    "heddle merge <name> --preview",
+                    "heddle ship --thread <name> --no-push",
+                    "heddle push",
+                    "heddle undo",
+                    "heddle verify"
                 ]
             })
         );
@@ -42,64 +44,67 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
     }
 
     println!("{}", style::bold("Git-overlay quick start"));
-    println!("Use Heddle as the daily loop while keeping Git interoperability explicit.");
+    println!("Use Heddle as the daily loop with Git interoperability kept explicit.");
     println!();
     println!("1. Orient");
     println!("   {}", style::bold("heddle status"));
+    println!("   {}", style::bold("heddle adopt --ref <branch>"));
+    println!(
+        "   {}",
+        style::dim("use the exact adopt command printed by status")
+    );
     println!("   {}", style::bold("heddle workspace"));
     println!("2. Inspect changes");
     println!("   {}", style::bold("heddle diff"));
     println!("3. Save work");
-    println!("   {}", style::bold("heddle capture -m '<message>'"));
-    println!("   {}", style::bold("heddle checkpoint -m '<message>'"));
-    println!("   {}", style::dim("or: heddle commit -m '<message>'"));
-    println!("4. Isolate risky work");
+    println!("   {}", style::bold("heddle commit -m '<message>'"));
     println!(
         "   {}",
-        style::bold("heddle start <topic> --path ../<topic>")
+        style::dim(
+            "advanced split: heddle capture -m '<message>' && heddle checkpoint -m '<message>'"
+        )
     );
+    println!("4. Isolate risky work");
+    println!("   {}", style::bold("heddle start <name> --path ../<name>"));
     println!("5. Integrate");
     println!("   {}", style::bold("heddle ready"));
-    println!("   {}", style::bold("heddle merge <topic>"));
-    println!("   {}", style::bold("heddle continue"));
+    println!("   {}", style::bold("heddle merge <name> --preview"));
+    println!(
+        "   {}",
+        style::bold("heddle ship --thread <name> --no-push")
+    );
     println!("6. Sync with remotes");
     println!("   {}", style::bold("heddle pull"));
     println!("   {}", style::bold("heddle push"));
+    println!("7. Recover or prove state");
+    println!("   {}", style::bold("heddle undo"));
+    println!("   {}", style::bold("heddle verify"));
     println!();
-    println!("{}", style::bold("When Heddle and Git disagree"));
+    println!("{}", style::bold("State-specific recovery"));
     println!(
-        "  Heddle clean, Git has pending changes: {}",
-        style::bold("heddle checkpoint")
+        "  Worktree has unsaved edits: {}",
+        style::bold("heddle commit -m '<message>'")
     );
     println!(
-        "  Git changed outside Heddle: {}",
-        style::bold("heddle capture -m '<message>'")
+        "  Captured in Heddle but not Git: {}",
+        style::bold("heddle checkpoint -m '<message>'")
     );
     println!(
-        "  History-oriented command asks for import: {}",
-        style::bold("heddle bridge git import --ref <branch>")
+        "  Git refs changed externally: {}",
+        style::bold("heddle adopt --ref <branch>")
     );
     println!();
-    println!("When unsure, run {}", style::bold("heddle doctor"));
+    println!("When unsure, run {}", style::bold("heddle verify"));
     Ok(())
 }
 
 pub fn cmd_version(cli: &Cli, verbose: bool) -> Result<()> {
-    if !verbose {
-        println!("heddle {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
+    let as_json = should_output_json(cli, None);
+    if !verbose && !as_json {
+        return render_version_short();
     }
 
-    let git_version = Command::new("git")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|output| {
-            output
-                .status
-                .success()
-                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        });
+    let git_version = None;
 
     let repo_path = cli.repo.clone().or_else(|| std::env::current_dir().ok());
     let repo = repo_path.and_then(|path| Repository::open(path).ok());
@@ -121,18 +126,31 @@ pub fn cmd_version(cli: &Cli, verbose: bool) -> Result<()> {
         repository_root,
     };
 
-    if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
-        return Ok(());
+    if as_json {
+        return render_version_json(&output);
     }
 
+    render_version_text(&output)
+}
+
+fn render_version_short() -> Result<()> {
+    println!("heddle {}", env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
+fn render_version_json(output: &VersionOutput) -> Result<()> {
+    println!("{}", serde_json::to_string(output)?);
+    Ok(())
+}
+
+fn render_version_text(output: &VersionOutput) -> Result<()> {
     println!("Heddle {}", output.version);
     println!("Build profile: {}", output.profile);
     println!("Features: {}", output.features.join(", "));
     if let Some(git_version) = &output.git_version {
-        println!("Git: {git_version}");
+        println!("Git binary: {git_version}");
     } else {
-        println!("Git: unavailable");
+        println!("Git binary: not required");
     }
     if let Some(capability) = &output.repository_capability {
         println!("Repository: {capability}");

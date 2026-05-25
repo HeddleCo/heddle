@@ -4,7 +4,7 @@
 use std::fs;
 
 use anyhow::{Result, anyhow};
-use objects::object::{Blob, ChangeId, ContentHash, EntryType, State};
+use objects::object::{Blob, ChangeId, ContentHash, State};
 use repo::Repository;
 
 use super::{
@@ -214,50 +214,73 @@ fn apply_commit(
     let changes = compute_tree_diff(&parent_tree, &commit_tree);
 
     let mut has_conflicts = false;
-    let mut updated_entries: Vec<(String, objects::object::EntryType, ContentHash)> = Vec::new();
+    let mut updated_entries: Vec<objects::object::TreeEntry> = Vec::new();
     let mut deleted_paths: Vec<String> = Vec::new();
 
     for (path, change) in changes {
         match change {
-            TreeChange::Added(entry_type, hash) => {
+            TreeChange::Added(entry) => {
                 if let Some(existing) = find_entry_in_tree(&current_tree, &path) {
-                    if existing.1 != hash {
+                    if existing != entry {
                         has_conflicts = true;
                     }
                 } else {
-                    updated_entries.push((path, entry_type, hash));
+                    updated_entries.push(entry);
                 }
             }
-            TreeChange::Modified(entry_type, hash) => {
-                if let Some(existing) = find_entry_in_tree(&current_tree, &path)
-                    && existing.1 == hash
-                {
-                    continue;
-                }
+            TreeChange::Modified(entry) => {
                 if let Some(parent) = find_entry_in_tree(&parent_tree, &path)
                     && let Some(existing) = find_entry_in_tree(&current_tree, &path)
-                    && existing.1 != parent.1
-                    && existing.1 != hash
                 {
-                    if let Some(merged_hash) =
-                        try_auto_merge_textual_change(repo, &parent.1, &existing.1, &hash)?
-                    {
-                        updated_entries.push((path, EntryType::Blob, merged_hash));
+                    let rebased_entry = compose_rebased_entry(&entry, &parent, &existing, None);
+                    if existing == rebased_entry {
                         continue;
                     }
-                    if blob_contains_both(repo, &hash, &existing.1, &parent.1)? {
-                        updated_entries.push((path, entry_type, hash));
+
+                    let content_conflict = existing.hash != parent.hash
+                        && existing.hash != entry.hash
+                        && parent.hash != entry.hash;
+                    let mode_conflict = existing.mode != parent.mode
+                        && existing.mode != entry.mode
+                        && parent.mode != entry.mode;
+
+                    if content_conflict {
+                        if let Some(merged_hash) = try_auto_merge_textual_change(
+                            repo,
+                            &parent.hash,
+                            &existing.hash,
+                            &entry.hash,
+                        )? {
+                            updated_entries.push(compose_rebased_entry(
+                                &entry,
+                                &parent,
+                                &existing,
+                                Some(merged_hash),
+                            ));
+                            continue;
+                        }
+                        if blob_contains_both(repo, &entry.hash, &existing.hash, &parent.hash)? {
+                            updated_entries.push(rebased_entry);
+                            continue;
+                        }
+                        has_conflicts = true;
                         continue;
                     }
-                    has_conflicts = true;
-                    continue;
+
+                    if mode_conflict {
+                        has_conflicts = true;
+                        continue;
+                    }
+
+                    updated_entries.push(rebased_entry);
+                } else {
+                    updated_entries.push(entry);
                 }
-                updated_entries.push((path, entry_type, hash));
             }
             TreeChange::Deleted => {
                 if let Some(existing) = find_entry_in_tree(&current_tree, &path) {
                     if let Some(parent) = find_entry_in_tree(&parent_tree, &path)
-                        && existing.1 != parent.1
+                        && existing != parent
                     {
                         has_conflicts = true;
                         continue;
@@ -434,8 +457,8 @@ fn get_tree_for_state(repo: &Repository, state_id: &ChangeId) -> Result<ContentH
 
 #[derive(Clone)]
 enum TreeChange {
-    Added(objects::object::EntryType, ContentHash),
-    Modified(objects::object::EntryType, ContentHash),
+    Added(objects::object::TreeEntry),
+    Modified(objects::object::TreeEntry),
     Deleted,
 }
 
@@ -451,18 +474,15 @@ fn compute_tree_diff(
         let old_entry = old_tree.entries().iter().find(|e| e.name == entry.name);
         match old_entry {
             Some(old) => {
-                if old.hash != entry.hash {
-                    changes.push((
-                        entry.name.clone(),
-                        TreeChange::Modified(entry.entry_type, entry.hash),
-                    ));
+                if old.hash != entry.hash
+                    || old.mode != entry.mode
+                    || old.entry_type != entry.entry_type
+                {
+                    changes.push((entry.name.clone(), TreeChange::Modified(entry.clone())));
                 }
             }
             None => {
-                changes.push((
-                    entry.name.clone(),
-                    TreeChange::Added(entry.entry_type, entry.hash),
-                ));
+                changes.push((entry.name.clone(), TreeChange::Added(entry.clone())));
             }
         }
     }
@@ -479,18 +499,37 @@ fn compute_tree_diff(
 fn find_entry_in_tree(
     tree: &objects::object::Tree,
     name: &str,
-) -> Option<(objects::object::EntryType, ContentHash)> {
+) -> Option<objects::object::TreeEntry> {
     for entry in tree.entries() {
         if entry.name == name {
-            return Some((entry.entry_type, entry.hash));
+            return Some(entry.clone());
         }
     }
     None
 }
 
+fn compose_rebased_entry(
+    incoming: &objects::object::TreeEntry,
+    parent: &objects::object::TreeEntry,
+    existing: &objects::object::TreeEntry,
+    hash_override: Option<ContentHash>,
+) -> objects::object::TreeEntry {
+    let mut entry = incoming.clone();
+    if incoming.hash == parent.hash {
+        entry.hash = existing.hash;
+    }
+    if let Some(hash) = hash_override {
+        entry.hash = hash;
+    }
+    if incoming.mode == parent.mode {
+        entry.mode = existing.mode;
+    }
+    entry
+}
+
 fn apply_changes_to_tree(
     base_tree: &objects::object::Tree,
-    updates: &[(String, objects::object::EntryType, ContentHash)],
+    updates: &[objects::object::TreeEntry],
     deletions: &[String],
 ) -> Result<objects::object::Tree> {
     let mut entries: Vec<objects::object::TreeEntry> = base_tree.entries().to_vec();
@@ -499,20 +538,9 @@ fn apply_changes_to_tree(
         entries.retain(|e| &e.name != name);
     }
 
-    for (name, entry_type, hash) in updates {
-        entries.retain(|e| &e.name != name);
-        let new_entry = match entry_type {
-            objects::object::EntryType::Blob => {
-                objects::object::TreeEntry::file(name.clone(), *hash, false)?
-            }
-            objects::object::EntryType::Tree => {
-                objects::object::TreeEntry::directory(name.clone(), *hash)?
-            }
-            objects::object::EntryType::Symlink => {
-                objects::object::TreeEntry::symlink(name.clone(), *hash)?
-            }
-        };
-        entries.push(new_entry);
+    for entry in updates {
+        entries.retain(|existing| existing.name != entry.name);
+        entries.push(entry.clone());
     }
 
     entries.sort_by(|a, b| a.name.cmp(&b.name));

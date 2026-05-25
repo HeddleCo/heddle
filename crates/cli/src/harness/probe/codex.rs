@@ -18,6 +18,8 @@ impl HarnessActorProbe for CodexProbe {
             || input.probe_metadata.contains_key("thread_id")
             || input.probe_metadata.contains_key("client_name")
             || input.env_hints.contains_key("CODEX_SANDBOX")
+            || input.env_hints.contains_key("CODEX_THREAD_ID")
+            || input.env_hints.contains_key("CODEX_CI")
             || input
                 .argv
                 .as_ref()
@@ -28,7 +30,10 @@ impl HarnessActorProbe for CodexProbe {
     fn probe(&self, input: &HarnessProbeInput) -> Result<HarnessProbeResult> {
         let metadata = &input.probe_metadata;
         let argv = input.argv.as_deref().unwrap_or(&[]);
-        let thread_id = metadata.get("thread_id").cloned();
+        let thread_id = metadata
+            .get("thread_id")
+            .cloned()
+            .or_else(|| input.env_hints.get("CODEX_THREAD_ID").cloned());
         let client_name = metadata
             .get("client_name")
             .cloned()
@@ -43,18 +48,21 @@ impl HarnessActorProbe for CodexProbe {
             .get("model")
             .cloned()
             .or_else(|| argv_value(argv, "--model"))
+            .or_else(|| input.env_hints.get("CODEX_MODEL").cloned())
             .or_else(|| input.env_hints.get("OPENAI_MODEL").cloned())
             .or_else(|| input.current_model.clone());
         let provider = metadata
             .get("model_provider")
             .cloned()
             .or_else(|| input.explicit_provider.clone())
-            .or(Some("openai".to_string()))
-            .or_else(|| input.current_provider.clone());
+            .or_else(|| input.env_hints.get("HEDDLE_AGENT_PROVIDER").cloned())
+            .or_else(|| input.current_provider.clone())
+            .or(Some("openai".to_string()));
         let thinking_level = metadata
             .get("model_reasoning_effort")
             .cloned()
             .or_else(|| metadata.get("reasoning_effort").cloned())
+            .or_else(|| input.env_hints.get("CODEX_REASONING_EFFORT").cloned())
             .or_else(|| input.env_hints.get("OPENAI_REASONING_EFFORT").cloned());
         let probe_source = if thread_id.is_some() {
             ProbeSource::AppProtocol

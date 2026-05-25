@@ -29,6 +29,8 @@ struct BlameLine {
 
 #[derive(Serialize)]
 struct BlameOutput {
+    output_kind: &'static str,
+    status: &'static str,
     file: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     context: Vec<ContextSnippet>,
@@ -151,6 +153,8 @@ pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: b
             .collect();
 
         let output = BlameOutput {
+            output_kind: "blame",
+            status: "completed",
             file: file.clone(),
             context,
             lines: output_lines,

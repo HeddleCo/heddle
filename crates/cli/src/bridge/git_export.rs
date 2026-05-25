@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Export Heddle states to Git commits functionality.
 
+use std::collections::HashSet;
+
+use gix::bstr::ByteSlice;
 use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, FileMode},
@@ -8,7 +11,10 @@ use objects::{
 use repo::Repository as HeddleRepository;
 
 use crate::bridge::{
-    git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err},
+    git_core::{
+        GitBridge, GitBridgeError, GitResult, LocalGitIdentity, SyncMapping,
+        git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
+    },
     git_notes,
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
     git_util::ExportStats,
@@ -17,11 +23,13 @@ use crate::bridge::{
 const SUBMODULE_PREFIX: &str = "heddle-submodule:";
 
 /// Export a single state to Git.
-pub fn export_state(
+pub(crate) fn export_state(
     mapping: &mut SyncMapping,
     heddle_repo: &HeddleRepository,
     repo: &gix::Repository,
     state_id: &ChangeId,
+    identity: Option<&LocalGitIdentity>,
+    message_override: Option<&str>,
 ) -> GitResult<gix::hash::ObjectId> {
     let state = heddle_repo
         .store()
@@ -41,8 +49,14 @@ pub fn export_state(
         .upstream_url
         .as_deref()
         .filter(|s| !s.is_empty());
-    let message =
-        GitBridge::build_commit_message_with_footer(&state, hosted_url, /*omitted=*/ 0);
+    let message = match message_override {
+        Some(message) => GitBridge::build_commit_message_with_footer_with_body(
+            &state, message, hosted_url, /*omitted=*/ 0,
+        ),
+        None => {
+            GitBridge::build_commit_message_with_footer(&state, hosted_url, /*omitted=*/ 0)
+        }
+    };
     let parent_oids: Vec<gix::hash::ObjectId> = state
         .parents
         .iter()
@@ -53,7 +67,16 @@ pub fn export_state(
         })
         .collect::<GitResult<Vec<_>>>()?;
 
-    let sig = GitBridge::state_to_signature(&state);
+    let sig = if principal_is_default_unknown(&state.attribution.principal) {
+        let Some(identity) = identity else {
+            return Err(GitBridgeError::Git(
+                "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
+            ));
+        };
+        identity.to_signature(state.created_at.timestamp())
+    } else {
+        state_to_signature(&state)
+    };
     let mut committer_buf = gix::date::parse::TimeBuf::default();
     let mut author_buf = gix::date::parse::TimeBuf::default();
     let commit = repo
@@ -146,16 +169,37 @@ pub fn export_tree(
 
 /// Export all Heddle states to Git commits.
 pub fn export_all(bridge: &mut GitBridge) -> GitResult<ExportStats> {
+    export_scoped(bridge, None)
+}
+
+/// Export one Heddle thread to its matching Git branch.
+pub fn export_current_thread(bridge: &mut GitBridge, thread: &str) -> GitResult<ExportStats> {
+    export_scoped(bridge, Some(thread))
+}
+
+fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<ExportStats> {
     bridge.init_mirror()?;
 
-    let states = bridge.heddle_repo.store().list_states()?;
+    let states = match thread {
+        Some(thread) => {
+            let Some(state_id) = bridge.heddle_repo.refs().get_thread(thread)? else {
+                return Err(GitBridgeError::Git(format!(
+                    "thread '{thread}' has no state to export"
+                )));
+            };
+            reachable_states(bridge.heddle_repo, &[state_id])?
+        }
+        None => bridge.heddle_repo.store().list_states()?,
+    };
     let mut stats = ExportStats::default();
 
     bridge.build_existing_mapping(None)?;
+    let identity = git_config_identity_with_global_fallback(bridge.heddle_repo.root())?;
 
     let sorted_states = bridge.sort_states_topologically(&states)?;
     let repo = bridge.open_git_repo()?;
     bridge.mapping.retain_git_objects(&repo);
+    bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
 
     for state_id in sorted_states {
         // Skip states already mapped to a git object that exists in the
@@ -165,7 +209,18 @@ pub fn export_all(bridge: &mut GitBridge) -> GitResult<ExportStats> {
         if bridge.mapping.has_heddle(&state_id) {
             continue;
         }
-        let git_oid = export_state(&mut bridge.mapping, bridge.heddle_repo, &repo, &state_id)?;
+        let message_override = bridge
+            .commit_message_overrides
+            .get(&state_id)
+            .map(String::as_str);
+        let git_oid = export_state(
+            &mut bridge.mapping,
+            bridge.heddle_repo,
+            &repo,
+            &state_id,
+            identity.as_ref(),
+            message_override,
+        )?;
         bridge.mapping.insert(state_id, git_oid);
         stats.states_exported += 1;
 
@@ -193,7 +248,19 @@ pub fn export_all(bridge: &mut GitBridge) -> GitResult<ExportStats> {
         }
     }
 
-    let threads = bridge.heddle_repo.refs().list_threads()?;
+    let threads = match thread {
+        Some(thread) => vec![thread.to_string()],
+        None => {
+            let remote_names = git_remote_names(bridge.heddle_repo);
+            bridge
+                .heddle_repo
+                .refs()
+                .list_threads()?
+                .into_iter()
+                .filter(|thread| !is_remote_tracking_thread_name(thread, &remote_names))
+                .collect()
+        }
+    };
     for track_name in threads {
         if let Some(state_id) = bridge.heddle_repo.refs().get_thread(&track_name)?
             && let Some(git_oid) = bridge.mapping.get_git(&state_id)
@@ -203,19 +270,69 @@ pub fn export_all(bridge: &mut GitBridge) -> GitResult<ExportStats> {
         }
     }
 
-    let markers = bridge.heddle_repo.refs().list_markers()?;
-    for marker_name in markers {
-        if let Some(state_id) = bridge.heddle_repo.refs().get_marker(&marker_name)?
-            && let Some(git_oid) = bridge.mapping.get_git(&state_id)
-        {
-            sync_marker_to_tag(&repo, &marker_name, git_oid)?;
-            stats.markers_synced += 1;
+    if thread.is_none() {
+        let markers = bridge.heddle_repo.refs().list_markers()?;
+        for marker_name in markers {
+            if let Some(state_id) = bridge.heddle_repo.refs().get_marker(&marker_name)?
+                && let Some(git_oid) = bridge.mapping.get_git(&state_id)
+            {
+                sync_marker_to_tag(&repo, &marker_name, git_oid)?;
+                stats.markers_synced += 1;
+            }
         }
     }
 
     bridge.save_mapping_to_disk()?;
 
     Ok(stats)
+}
+
+fn git_remote_names(heddle_repo: &HeddleRepository) -> HashSet<String> {
+    let Ok(repo) = gix::discover(heddle_repo.root()) else {
+        return HashSet::new();
+    };
+    repo.remote_names()
+        .into_iter()
+        .map(|name| name.to_str_lossy().into_owned())
+        .filter(|name| !name.trim().is_empty())
+        .collect()
+}
+
+fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<String>) -> bool {
+    let Some((remote, branch)) = thread.split_once('/') else {
+        return false;
+    };
+    !branch.is_empty() && remote_names.contains(remote)
+}
+
+fn reachable_states(
+    heddle_repo: &HeddleRepository,
+    roots: &[ChangeId],
+) -> GitResult<Vec<ChangeId>> {
+    let mut stack = roots.to_vec();
+    let mut seen = HashSet::new();
+    let mut states = Vec::new();
+    while let Some(state_id) = stack.pop() {
+        if !seen.insert(state_id) {
+            continue;
+        }
+        states.push(state_id);
+        if let Some(state) = heddle_repo.store().get_state(&state_id)? {
+            stack.extend(state.parents.iter().copied());
+        }
+    }
+    Ok(states)
+}
+
+fn state_to_signature(state: &objects::object::State) -> gix::actor::Signature {
+    gix::actor::Signature {
+        name: state.attribution.principal.name.as_str().into(),
+        email: state.attribution.principal.email.as_str().into(),
+        time: gix::date::Time {
+            seconds: state.created_at.timestamp(),
+            offset: 0,
+        },
+    }
 }
 
 fn submodule_oid_from_blob(content: &[u8]) -> Option<gix::hash::ObjectId> {

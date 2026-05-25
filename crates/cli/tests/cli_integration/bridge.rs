@@ -23,7 +23,17 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
     let dest_holder = TempDir::new().unwrap();
     let dest = dest_holder.path().join("export");
 
-    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(
+        &[
+            "init",
+            "--principal-name",
+            "Heddle Test",
+            "--principal-email",
+            "heddle@example.com",
+        ],
+        Some(source.path()),
+    )
+    .unwrap();
     std::fs::write(source.path().join("file.txt"), "bridge export").unwrap();
     heddle(&["capture", "-m", "Bridge source"], Some(source.path())).unwrap();
 
@@ -86,7 +96,17 @@ fn test_cli_bridge_git_push_to_local_bare_remote() {
     let remote = TempDir::new().unwrap();
     let remote_repo = gix::init_bare(remote.path()).unwrap();
 
-    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(
+        &[
+            "init",
+            "--principal-name",
+            "Heddle Test",
+            "--principal-email",
+            "heddle@example.com",
+        ],
+        Some(source.path()),
+    )
+    .unwrap();
     std::fs::write(source.path().join("push.txt"), "bridge push").unwrap();
     heddle(&["capture", "-m", "Bridge push"], Some(source.path())).unwrap();
 

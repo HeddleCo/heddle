@@ -80,13 +80,25 @@ fn generic_probe(input: &HarnessProbeInput) -> HarnessProbeResult {
     let fingerprint = fingerprint_from_hints(input.argv.as_deref(), &input.env_hints);
     HarnessProbeResult {
         harness: input.explicit_harness.clone().or(fingerprint.harness),
-        provider: input.explicit_provider.clone().or(fingerprint.provider),
-        model: input.explicit_model.clone().or(fingerprint.model),
+        provider: input
+            .explicit_provider
+            .clone()
+            .or(fingerprint.provider)
+            .or_else(|| input.current_provider.clone()),
+        model: input
+            .explicit_model
+            .clone()
+            .or(fingerprint.model)
+            .or_else(|| input.current_model.clone()),
         thinking_level: input
             .explicit_thinking_level
             .clone()
             .or(fingerprint.thinking_level),
-        policy: input.explicit_policy.clone().or(fingerprint.policy),
+        policy: input
+            .explicit_policy
+            .clone()
+            .or(fingerprint.policy)
+            .or_else(|| input.current_policy.clone()),
         confidence: Some(if input.explicit_harness.is_some() {
             1.0
         } else {
@@ -146,10 +158,17 @@ fn fingerprint_from_hints(
         .map(|arg| arg.to_ascii_lowercase())
         .unwrap_or_default();
 
-    if program.contains("claude") || env_hints.contains_key("CLAUDECODE") {
+    if program.contains("claude")
+        || env_hints.contains_key("CLAUDECODE")
+        || env_hints.contains_key("CLAUDE_CODE")
+    {
         fingerprint.harness = Some("claude-code".to_string());
         fingerprint.provider = Some("anthropic".to_string());
-    } else if program.contains("codex") || env_hints.contains_key("CODEX_SANDBOX") {
+    } else if program.contains("codex")
+        || env_hints.contains_key("CODEX_SANDBOX")
+        || env_hints.contains_key("CODEX_THREAD_ID")
+        || env_hints.contains_key("CODEX_CI")
+    {
         fingerprint.harness = Some("codex".to_string());
         fingerprint.provider = Some("openai".to_string());
     } else if program.contains("opencode") || env_hints.contains_key("OPENCODE_CLIENT") {
@@ -158,16 +177,21 @@ fn fingerprint_from_hints(
         fingerprint.harness = Some("aider".to_string());
     }
 
+    fingerprint.provider = env_hints.get("HEDDLE_AGENT_PROVIDER").cloned();
     fingerprint.model = env_hints
         .get("HEDDLE_AGENT_MODEL")
         .cloned()
+        .or_else(|| env_hints.get("CODEX_MODEL").cloned())
         .or_else(|| env_hints.get("CLAUDE_MODEL").cloned())
         .or_else(|| env_hints.get("ANTHROPIC_MODEL").cloned())
         .or_else(|| env_hints.get("OPENAI_MODEL").cloned())
+        .or_else(|| env_hints.get("OPENCODE_MODEL").cloned())
+        .or_else(|| env_hints.get("AIDER_MODEL").cloned())
         .or_else(|| env_hints.get("MODEL").cloned());
     fingerprint.thinking_level = env_hints
         .get("THINKING_LEVEL")
         .cloned()
+        .or_else(|| env_hints.get("CODEX_REASONING_EFFORT").cloned())
         .or_else(|| env_hints.get("REASONING_EFFORT").cloned())
         .or_else(|| env_hints.get("OPENAI_REASONING_EFFORT").cloned());
     fingerprint.policy = env_hints
@@ -203,4 +227,134 @@ pub(crate) fn csv_paths(value: Option<&String>) -> Vec<String> {
 
 pub(crate) fn parse_u64(value: Option<&String>) -> Option<u64> {
     value.and_then(|v| v.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_thread_env_identifies_codex_actor() {
+        let mut env_hints = BTreeMap::new();
+        env_hints.insert("CODEX_THREAD_ID".to_string(), "thread-123".to_string());
+        env_hints.insert("CODEX_MODEL".to_string(), "gpt-5.5".to_string());
+        env_hints.insert("CODEX_REASONING_EFFORT".to_string(), "xhigh".to_string());
+
+        let result = probe_harness_actor(&HarnessProbeInput {
+            env_hints,
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("codex"));
+        assert_eq!(result.provider.as_deref(), Some("openai"));
+        assert_eq!(result.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(result.thinking_level.as_deref(), Some("xhigh"));
+        assert_eq!(
+            result.native_actor_key.as_deref(),
+            Some("codex:thread:thread-123")
+        );
+    }
+
+    #[test]
+    fn codex_current_provider_wins_before_default_provider() {
+        let mut env_hints = BTreeMap::new();
+        env_hints.insert("CODEX_THREAD_ID".to_string(), "thread-123".to_string());
+        env_hints.insert("OPENAI_MODEL".to_string(), "gpt-5.3-codex".to_string());
+
+        let result = probe_harness_actor(&HarnessProbeInput {
+            env_hints,
+            current_provider: Some("openai-compatible".to_string()),
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("codex"));
+        assert_eq!(result.provider.as_deref(), Some("openai-compatible"));
+        assert_eq!(result.model.as_deref(), Some("gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn generic_harness_probe_keeps_heddle_agent_env_identity() {
+        let mut env_hints = BTreeMap::new();
+        env_hints.insert("HEDDLE_AGENT_PROVIDER".to_string(), "custom-ai".to_string());
+        env_hints.insert("HEDDLE_AGENT_MODEL".to_string(), "custom-model".to_string());
+
+        let result = probe_harness_actor(&HarnessProbeInput {
+            env_hints,
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness, None);
+        assert_eq!(result.provider.as_deref(), Some("custom-ai"));
+        assert_eq!(result.model.as_deref(), Some("custom-model"));
+    }
+
+    #[test]
+    fn argv_parent_hint_identifies_claude_code_actor() {
+        let result = probe_harness_actor(&HarnessProbeInput {
+            argv: Some(vec![
+                "/home/user/.local/bin/claude".to_string(),
+                "--model".to_string(),
+                "claude-opus-4-7".to_string(),
+            ]),
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("claude-code"));
+        assert_eq!(result.provider.as_deref(), Some("anthropic"));
+        assert_eq!(result.model.as_deref(), Some("claude-opus-4-7"));
+    }
+
+    #[test]
+    fn claude_code_env_model_fills_detected_harness_identity() {
+        let mut env_hints = BTreeMap::new();
+        env_hints.insert("CLAUDECODE".to_string(), "1".to_string());
+        env_hints.insert(
+            "HEDDLE_AGENT_MODEL".to_string(),
+            "claude-opus-4-7".to_string(),
+        );
+        env_hints.insert("THINKING_LEVEL".to_string(), "xhigh".to_string());
+
+        let result = probe_harness_actor(&HarnessProbeInput {
+            env_hints,
+            current_provider: Some("anthropic".to_string()),
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("claude-code"));
+        assert_eq!(result.provider.as_deref(), Some("anthropic"));
+        assert_eq!(result.model.as_deref(), Some("claude-opus-4-7"));
+        assert_eq!(result.thinking_level.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn opencode_env_model_fills_detected_harness_identity() {
+        let mut env_hints = BTreeMap::new();
+        env_hints.insert("OPENCODE_CLIENT".to_string(), "desktop".to_string());
+        env_hints.insert("OPENCODE_PROVIDER".to_string(), "anthropic".to_string());
+        env_hints.insert(
+            "OPENCODE_MODEL".to_string(),
+            "claude-sonnet-4-6".to_string(),
+        );
+
+        let result = probe_harness_actor(&HarnessProbeInput {
+            env_hints,
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("opencode"));
+        assert_eq!(result.provider.as_deref(), Some("anthropic"));
+        assert_eq!(result.model.as_deref(), Some("claude-sonnet-4-6"));
+    }
 }

@@ -2,6 +2,7 @@
 //! CLI command implementations.
 
 mod actor_cmd;
+mod adopt;
 mod advice;
 mod agent;
 mod agent_cmd;
@@ -26,6 +27,7 @@ mod diff;
 mod discuss;
 mod doctor_docs;
 mod doctor_schemas;
+mod error_envelope;
 mod fetch;
 mod ff_record;
 mod fork;
@@ -80,10 +82,10 @@ mod thread_approval;
 mod thread_cmd;
 mod thread_shaping;
 mod transaction;
-mod trust;
 mod try_cmd;
 mod undo;
 mod undo_apply;
+mod verify;
 mod watch;
 mod workflow;
 mod workspace;
@@ -93,6 +95,7 @@ mod worktree_safety;
 pub use actor_cmd::{
     cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show, cmd_actor_spawn,
 };
+pub use adopt::cmd_adopt;
 pub use advice::RecoveryAdvice;
 // `agent` (singular) is main's local-daemon dispatcher (`heddle agent
 // serve|status|stop`). `agent_cmd` is the reservation/orchestration
@@ -116,9 +119,12 @@ pub use clean::cmd_clean;
 pub use clone::{GitOverlayBlobHydrator, cmd_clone, register_git_overlay_factory};
 pub use collapse::cmd_collapse;
 pub use command_catalog::{
-    CommandCatalogOutput, build_command_catalog, cmd_commands, command_contract_root_commands,
-    command_help_tier, command_path, command_persists_op_id, command_supports_json_for_command,
-    command_supports_op_id, command_supports_op_id_for_command, observe_only_root_commands,
+    CommandCatalogOutput, build_command_catalog, cmd_commands, command_canonical_command,
+    command_contract_root_commands, command_help_tier, command_help_visibility, command_path,
+    command_persists_op_id, command_runtime_contract, command_runtime_contract_for_command,
+    command_supports_json_for_command, command_supports_op_id, command_supports_op_id_for_command,
+    command_surface, observe_only_root_commands, recommended_action_argv,
+    root_commands_for_advanced_help, root_commands_for_help_visibility,
 };
 pub use compare::cmd_compare;
 pub use completion::cmd_completion;
@@ -135,6 +141,7 @@ pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor_docs::cmd_doctor_docs;
 pub use doctor_schemas::cmd_doctor_schemas;
+pub use error_envelope::{print_error_with_hint, print_parse_error_json_envelope};
 pub use fetch::cmd_fetch;
 pub use fork::cmd_fork;
 pub use fsck::cmd_fsck;
@@ -193,9 +200,9 @@ pub use thread_shaping::{
     cmd_capture_split, cmd_thread_absorb, cmd_thread_move, cmd_thread_resolve,
 };
 pub use transaction::run as cmd_transaction;
-pub use trust::cmd_trust;
 pub use try_cmd::cmd_try;
 pub use undo::{cmd_redo, cmd_undo};
+pub use verify::cmd_verify;
 pub use watch::cmd_watch;
 pub use workflow::{cmd_delegate, cmd_ship, cmd_sync};
 pub use workspace::{cmd_workspace, cmd_workspace_show};

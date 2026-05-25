@@ -12,13 +12,13 @@
 //! still errors — but with an explicit message that names both the
 //! missing positional and the unavailable fallback.
 
-use std::fs;
+use std::{fs, path::PathBuf, str};
 
 use repo::{Repository, ThreadManager};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::heddle;
+use super::{assert_json_recovery_advice_fields, heddle, heddle_output};
 
 /// Bootstrap a fresh repo with one snapshot. We then run
 /// `thread create` followed by `thread switch` so HEAD is attached
@@ -38,6 +38,19 @@ fn setup_thread(name: &str) -> TempDir {
     temp
 }
 
+fn detach_head_to_current_state(path: &std::path::Path) {
+    let repo = Repository::open(path).unwrap();
+    let head = repo
+        .head()
+        .unwrap()
+        .expect("repo should have a current state before detaching");
+    fs::write(
+        path.join(".heddle").join("HEAD"),
+        format!("{}\n", head.to_string_full()),
+    )
+    .unwrap();
+}
+
 /// `heddle thread show` with no positional should resolve to whatever
 /// thread the working checkout is attached to and return that
 /// thread's metadata — same shape as passing the name explicitly.
@@ -45,10 +58,13 @@ fn setup_thread(name: &str) -> TempDir {
 fn thread_show_without_arg_resolves_current_thread() {
     let repo = setup_thread("probe");
 
-    let omitted = heddle(&["--json", "thread", "show"], Some(repo.path()))
+    let omitted = heddle(&["--output", "json", "thread", "show"], Some(repo.path()))
         .expect("thread show should succeed without a positional when HEAD is attached");
-    let with_arg = heddle(&["--json", "thread", "show", "probe"], Some(repo.path()))
-        .expect("thread show with explicit positional should still succeed");
+    let with_arg = heddle(
+        &["--output", "json", "thread", "show", "probe"],
+        Some(repo.path()),
+    )
+    .expect("thread show with explicit positional should still succeed");
 
     let omitted: Value = serde_json::from_str(&omitted).unwrap();
     let with_arg: Value = serde_json::from_str(&with_arg).unwrap();
@@ -69,8 +85,11 @@ fn thread_captures_without_arg_resolves_current_thread() {
     // Should not require the name; should not panic; should produce
     // *some* output (the captures list may be empty for a fresh
     // thread, which is fine — we only assert that the command exits 0).
-    heddle(&["--json", "thread", "captures"], Some(repo.path()))
-        .expect("thread captures should succeed without a positional when HEAD is attached");
+    heddle(
+        &["--output", "json", "thread", "captures"],
+        Some(repo.path()),
+    )
+    .expect("thread captures should succeed without a positional when HEAD is attached");
 }
 
 /// When HEAD is detached and no positional is supplied, the command
@@ -108,13 +127,92 @@ fn thread_show_without_arg_errors_when_no_current_thread() {
         .expect_err("thread show should fail when HEAD has no attached thread");
 
     assert!(
-        err.contains("no thread specified and no current thread"),
+        err.contains("No current thread; pass <THREAD>"),
         "expected the explicit fallback error message; got: {err}"
     );
     assert!(
-        err.contains("pass <THREAD> explicitly"),
+        err.contains("heddle thread show <THREAD>"),
         "expected guidance on how to recover; got: {err}"
     );
+
+    let json_output = heddle_output(&["--output", "json", "thread", "show"], Some(temp.path()))
+        .expect("thread show JSON failure should run");
+    assert!(
+        !json_output.status.success(),
+        "thread show should fail when HEAD has no attached thread"
+    );
+    let stderr = str::from_utf8(&json_output.stderr).expect("stderr should be utf8");
+    let envelope: Value = serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(envelope["kind"], "no_current_thread");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("pass <THREAD>")),
+        "thread show JSON error should name the missing selector: {envelope}"
+    );
+    assert_eq!(envelope["primary_command"], "heddle thread show <THREAD>");
+    assert_json_recovery_advice_fields(&envelope, stderr);
+}
+
+#[test]
+fn thread_current_detached_head_uses_typed_advice() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("base.txt"), "base").unwrap();
+    heddle(&["capture", "-m", "init"], Some(temp.path())).unwrap();
+    detach_head_to_current_state(temp.path());
+
+    let output = heddle_output(
+        &["--output", "json", "thread", "current"],
+        Some(temp.path()),
+    )
+    .expect("thread current JSON failure should run");
+    assert!(
+        !output.status.success(),
+        "thread current should fail when HEAD has no attached thread"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON failure should keep stdout quiet: {}",
+        str::from_utf8(&output.stdout).unwrap_or("")
+    );
+    let stderr = str::from_utf8(&output.stderr).expect("stderr should be utf8");
+    let envelope: Value = serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(envelope["kind"], "no_current_thread");
+    assert_eq!(envelope["primary_command"], "heddle thread list");
+    assert_json_recovery_advice_fields(&envelope, stderr);
+}
+
+#[test]
+fn thread_cd_without_available_worktree_uses_typed_advice() {
+    let temp = setup_thread("cd-target");
+
+    let repo = Repository::open(temp.path()).unwrap();
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let mut thread = manager
+        .load("cd-target")
+        .unwrap()
+        .expect("thread record exists after create");
+    thread.execution_path = PathBuf::new();
+    manager.save(&thread).unwrap();
+    drop(repo);
+
+    let output = heddle_output(&["thread", "cd", "cd-target"], Some(temp.path()))
+        .expect("thread cd failure should run");
+    assert!(
+        !output.status.success(),
+        "thread cd should fail when the thread has no checkout path"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "thread cd failure should keep stdout quiet: {}",
+        str::from_utf8(&output.stdout).unwrap_or("")
+    );
+    let stderr = str::from_utf8(&output.stderr).expect("stderr should be utf8");
+    let envelope: Value = serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(envelope["kind"], "thread_worktree_unavailable");
+    assert_eq!(envelope["primary_command"], "heddle thread show cd-target");
+    assert_json_recovery_advice_fields(&envelope, stderr);
 }
 
 /// Regression: when HEAD is detached but the working checkout is
@@ -167,7 +265,7 @@ fn thread_show_without_arg_resolves_via_execution_path_when_detached() {
     // Sanity: confirm `thread show` with the explicit positional
     // still works, since that's the baseline we're matching.
     let with_arg = heddle(
-        &["--json", "thread", "show", "feat/probe"],
+        &["--output", "json", "thread", "show", "feat/probe"],
         Some(temp.path()),
     )
     .expect("thread show with positional should succeed");
@@ -176,7 +274,7 @@ fn thread_show_without_arg_resolves_via_execution_path_when_detached() {
 
     // The actual regression assertion: no positional, HEAD detached,
     // but execution_path-keyed lookup resolves the thread.
-    let omitted = heddle(&["--json", "thread", "show"], Some(temp.path())).expect(
+    let omitted = heddle(&["--output", "json", "thread", "show"], Some(temp.path())).expect(
         "thread show without positional must resolve via execution_path when HEAD is detached",
     );
     let omitted: Value = serde_json::from_str(&omitted).unwrap();

@@ -148,11 +148,11 @@ pub async fn cmd_context_history(
     let context_root = state_obj
         .context
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No context annotations in this repository"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (target, blob, index) = repo
         .find_annotation(context_root, &annotation_id)?
-        .ok_or_else(|| anyhow::anyhow!("Annotation not found: {annotation_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
     let annotation = &blob.annotations[index];
     let (target_kind, target_label) = target_label(&target);
     let output = AnnotationHistoryOutput {
@@ -214,7 +214,7 @@ pub async fn cmd_context_check(
     let context_root = state_obj
         .context
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No context annotations in this repository"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let target_filter = match (path, state) {
         (Some(path), None) => Some(ContextTarget::file(path)?),

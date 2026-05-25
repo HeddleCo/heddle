@@ -20,9 +20,31 @@ use anyhow::{Result, anyhow};
 use repo::daemon::{
     MountDaemonRequest, MountDaemonResponse, load_endpoint, mount_daemon_endpoint_path, pid_alive,
 };
+use serde::Serialize;
 
 use super::client::{rpc, sweep_stale_mounts};
-use crate::cli::{Cli, commands::advice::RecoveryAdvice};
+use crate::cli::{Cli, commands::advice::RecoveryAdvice, should_output_json};
+
+#[derive(Debug, Serialize)]
+struct DaemonStatusOutput {
+    status: &'static str,
+    running: bool,
+    endpoint_path: String,
+    ok: bool,
+    version: Option<u32>,
+    uptime_s: Option<u64>,
+    mount_count: usize,
+    materialized_count: usize,
+    materialized_threads: Vec<MaterializedThreadStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct MaterializedThreadStatus {
+    thread: String,
+    state: String,
+    files: usize,
+    tree: String,
+}
 
 #[cfg(all(target_os = "linux", feature = "mount"))]
 pub fn cmd_daemon_serve(cli: &Cli) -> Result<()> {
@@ -58,6 +80,17 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
     let heddle_dir = resolve_heddle_dir(cli).unwrap_or_else(|_| repo_root.join(".heddle"));
     let materialized =
         repo::thread_manifest::list_thread_manifests(&heddle_dir).unwrap_or_default();
+    let materialized_threads = materialized
+        .iter()
+        .map(|manifest| MaterializedThreadStatus {
+            thread: manifest.thread.clone(),
+            state: manifest.state_id.to_string(),
+            files: manifest.file_count,
+            tree: manifest.tree_hash.to_string()[..12].to_string(),
+        })
+        .collect::<Vec<_>>();
+    let endpoint_path = mount_daemon_endpoint_path(&repo_root).display().to_string();
+    let json = should_output_json(cli, None);
     match response {
         Some(MountDaemonResponse::Health {
             version,
@@ -65,10 +98,26 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
             uptime_s,
             mount_count,
         }) => {
-            println!(
-                "daemon: ok={ok} version={version} uptime_s={uptime_s} mount_count={mount_count} materialized_count={}",
-                materialized.len()
-            );
+            if json {
+                let output = DaemonStatusOutput {
+                    status: "running",
+                    running: true,
+                    endpoint_path,
+                    ok,
+                    version: Some(version),
+                    uptime_s: Some(uptime_s),
+                    mount_count,
+                    materialized_count: materialized_threads.len(),
+                    materialized_threads,
+                };
+                crate::cli::render::write_json_stdout(&output)?;
+                return Ok(());
+            } else {
+                println!(
+                    "daemon: ok={ok} version={version} uptime_s={uptime_s} mount_count={mount_count} materialized_count={}",
+                    materialized.len()
+                );
+            }
         }
         Some(MountDaemonResponse::Error { code, message, .. }) => {
             return Err(anyhow!(daemon_response_refusal(
@@ -89,11 +138,27 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
             )));
         }
         None => {
-            println!(
-                "daemon: not running (no live endpoint at {}) materialized_count={}",
-                mount_daemon_endpoint_path(&repo_root).display(),
-                materialized.len()
-            );
+            if json {
+                let output = DaemonStatusOutput {
+                    status: "not_running",
+                    running: false,
+                    endpoint_path,
+                    ok: false,
+                    version: None,
+                    uptime_s: None,
+                    mount_count: 0,
+                    materialized_count: materialized_threads.len(),
+                    materialized_threads,
+                };
+                crate::cli::render::write_json_stdout(&output)?;
+                return Ok(());
+            } else {
+                println!(
+                    "daemon: not running (no live endpoint at {}) materialized_count={}",
+                    mount_daemon_endpoint_path(&repo_root).display(),
+                    materialized.len()
+                );
+            }
         }
     }
     if !materialized.is_empty() {
@@ -213,7 +278,7 @@ fn daemon_response_refusal(
         error,
         format!("Inspect the daemon with `{primary_command}` before retrying."),
         unsafe_condition,
-        "continuing could trust stale mount-daemon state or act on the wrong daemon response",
+        "continuing could accept stale mount-daemon state or act on the wrong daemon response",
         "repository objects, refs, worktree files, and mount registry files were left unchanged",
         primary_command.clone(),
         vec![primary_command],

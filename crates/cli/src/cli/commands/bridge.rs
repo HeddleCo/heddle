@@ -15,8 +15,10 @@ use serde::Serialize;
 use super::{
     advice::RecoveryAdvice,
     git_overlay_health::{
-        GitOverlayHealth, GitOverlayHealthCheck, RepositoryTrustState, build_git_overlay_health,
-        build_plain_git_trust_probe, build_repository_trust_state,
+        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_argv,
+        action_template, build_git_overlay_health, build_plain_git_verification_probe,
+        build_repository_verification_state, canonical_adopt_ref_command,
+        serialize_empty_action_as_null,
     },
     remote::resolve_default_remote_name,
 };
@@ -163,13 +165,14 @@ fn resolve_source(repo: &Repository, source: GitSource) -> Result<ResolvedSource
     }
 }
 
-/// Wire shape for `heddle bridge git status --json`. This is the
-/// canonical surface for import-hint information; other `--json`
+/// Wire shape for `heddle bridge git status --output json`. This is the
+/// canonical surface for import-hint information; other `--output json`
 /// outputs no longer include it. Optional fields are emitted as
 /// explicit `null` rather than omitted, matching the discipline used
 /// across the CLI's JSON outputs.
 #[derive(Serialize)]
 struct BridgeGitStatusOutput {
+    output_kind: &'static str,
     repository_capability: String,
     storage_model: String,
     /// Path on disk to the bridge mirror, when initialized.
@@ -180,7 +183,14 @@ struct BridgeGitStatusOutput {
     /// haven't been imported yet. `None` when the bridge is in sync.
     git_overlay_import_hint: Option<BridgeGitImportHintOutput>,
     git_overlay_health: GitOverlayHealth,
-    trust: RepositoryTrustState,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
+    recommended_action: String,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
+    recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
 }
 
 #[derive(Serialize)]
@@ -193,12 +203,38 @@ struct BridgeGitImportHintOutput {
 
 #[derive(Serialize)]
 struct BridgeGitReconcileOutput {
+    output_kind: &'static str,
     status: String,
-    prefer: String,
+    action: &'static str,
+    prefer: Option<String>,
     ref_name: String,
     preview: bool,
     summary: String,
+    recommended_action: Option<String>,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct BridgeGitSyncOutput {
+    output_kind: &'static str,
+    status: String,
+    action: &'static str,
+    summary: String,
+    states_exported: usize,
+    commits_imported: usize,
+    threads_synced: usize,
+    markers_synced: usize,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
+    recommended_action: String,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
+    recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
 }
 
 fn cmd_bridge_git_status(cli: &Cli, repo: &Repository) -> Result<()> {
@@ -207,8 +243,9 @@ fn cmd_bridge_git_status(cli: &Cli, repo: &Repository) -> Result<()> {
     let mirror_initialized = mirror_path.exists();
     let import_hint = repo.git_overlay_import_hint().unwrap_or(None);
     let git_overlay_health = build_git_overlay_health(repo);
-    let trust = RepositoryTrustState::from_health(repo, git_overlay_health.clone());
+    let trust = RepositoryVerificationState::from_health(repo, git_overlay_health.clone());
     let output = BridgeGitStatusOutput {
+        output_kind: "bridge_git_status",
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
         mirror_path: Some(mirror_path.display().to_string()),
@@ -220,6 +257,11 @@ fn cmd_bridge_git_status(cli: &Cli, repo: &Repository) -> Result<()> {
             recommended_command: hint.recommended_command,
         }),
         git_overlay_health,
+        recommended_action: trust.recommended_action.clone(),
+        recommended_action_argv: trust.recommended_action_argv.clone(),
+        recommended_action_template: trust.recommended_action_template.clone(),
+        recovery_commands: trust.recovery_commands.clone(),
+        recovery_command_argv: trust.recovery_command_argv.clone(),
         trust,
     };
     render_bridge_git_status(&output, should_output_json(cli, Some(repo.config())));
@@ -235,8 +277,11 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
         return;
     }
     println!(
-        "Repository mode: {} ({})",
-        output.repository_capability, output.storage_model
+        "Repository: {}",
+        crate::cli::render::repository_mode_label(
+            &output.repository_capability,
+            &output.storage_model
+        )
     );
     if output.mirror_initialized {
         println!(
@@ -244,25 +289,42 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
             style::dim(output.mirror_path.as_deref().unwrap_or(""))
         );
     } else {
+        let mirror_note = if output.trust.status == "needs_import" {
+            "not initialized yet; the import step will create it".to_string()
+        } else if output.trust.status == "needs_init" {
+            "not initialized yet; run `heddle adopt`".to_string()
+        } else {
+            "not initialized yet".to_string()
+        };
         println!(
-            "Mirror: {} (not initialized — run `heddle bridge git init`)",
+            "Mirror: {} ({mirror_note})",
             style::dim(output.mirror_path.as_deref().unwrap_or(""))
         );
     }
     match &output.git_overlay_import_hint {
         Some(hint) => {
             println!(
-                "Git import: {} branch(es) still live only in Git ({})",
-                hint.missing_branch_count,
-                crate::cli::render::preview_list(&hint.missing_branches, hint.missing_branch_count,)
+                "{}",
+                crate::cli::render::git_only_branch_summary(
+                    &hint.missing_branches,
+                    hint.missing_branch_count,
+                )
             );
-            println!("Next step: {}", style::bold(&hint.recommended_command));
+            if hint
+                .missing_branches
+                .iter()
+                .any(|branch| branch == &hint.current_branch)
+            {
+                println!("Next step: {}", style::bold(&hint.recommended_command));
+            } else {
+                println!("Optional: {}", style::dim(&hint.recommended_command));
+            }
         }
         None => println!("Git import: in sync"),
     }
     println!(
         "Git overlay health: {}",
-        if output.trust.trusted {
+        if output.trust.verified {
             style::accent(&output.trust.summary)
         } else {
             style::warn(&output.trust.summary)
@@ -283,7 +345,13 @@ fn render_bridge_git_reconcile(
     } else {
         println!("{}", output.summary);
         for command in &output.recovery_commands {
-            println!("Recovery: {}", style::bold(command));
+            if output.preview && output.prefer.is_none() {
+                println!("Option: {}", style::bold(command));
+            } else if output.preview {
+                println!("To apply: {}", style::bold(command));
+            } else {
+                println!("Recovery: {}", style::bold(command));
+            }
         }
     }
     Ok(())
@@ -294,7 +362,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
     if matches!(&command, GitCommands::Status) {
         let cwd = std::env::current_dir()?;
         let start = cli.repo.as_ref().unwrap_or(&cwd);
-        if let Some(probe) = build_plain_git_trust_probe(start)? {
+        if let Some(probe) = build_plain_git_verification_probe(start)? {
             let missing_branches = probe
                 .git_branches
                 .iter()
@@ -313,10 +381,11 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     current_branch: probe.git_branch.clone().unwrap_or_default(),
                     missing_branch_count: missing_branches.len(),
                     missing_branches,
-                    recommended_command: format!("heddle bridge git import --ref {command_ref}"),
+                    recommended_command: canonical_adopt_ref_command(&command_ref),
                 })
             };
             let output = BridgeGitStatusOutput {
+                output_kind: "bridge_git_status",
                 repository_capability: "plain-git".to_string(),
                 storage_model: "git-only".to_string(),
                 mirror_path: None,
@@ -324,7 +393,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 git_overlay_import_hint: import_hint,
                 git_overlay_health: GitOverlayHealth {
                     status: probe.trust.status.clone(),
-                    clean: probe.trust.trusted,
+                    clean: probe.trust.verified,
                     summary: probe.trust.summary.clone(),
                     recovery_commands: probe.trust.recovery_commands.clone(),
                     checks: probe
@@ -335,9 +404,15 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                             name: check.name.clone(),
                             status: check.status.clone(),
                             summary: check.summary.clone(),
+                            details: check.details.clone(),
                         })
                         .collect(),
                 },
+                recommended_action: probe.trust.recommended_action.clone(),
+                recommended_action_argv: probe.trust.recommended_action_argv.clone(),
+                recommended_action_template: probe.trust.recommended_action_template.clone(),
+                recovery_commands: probe.trust.recovery_commands.clone(),
+                recovery_command_argv: probe.trust.recovery_command_argv.clone(),
                 trust: probe.trust,
             };
             render_bridge_git_status(&output, should_output_json(cli, None));
@@ -561,26 +636,53 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             // on this sync, which is what callers reading
             // `commits_imported` from a sync result actually want.
             let sync_commits_imported = import_stats.states_created;
+            let threads_synced = export_stats.threads_synced + import_stats.branches_synced;
+            let markers_synced = export_stats.markers_synced + import_stats.tags_synced;
+            let trust = build_repository_verification_state(&repo);
+            let sync_output = BridgeGitSyncOutput {
+                output_kind: "bridge_git_sync",
+                status: if trust.verified {
+                    "completed".to_string()
+                } else {
+                    "blocked".to_string()
+                },
+                action: "bridge git sync",
+                summary: if trust.verified {
+                    "Synced Git overlay; repository verification is clean".to_string()
+                } else {
+                    format!(
+                        "Synced Git overlay, but repository verification is blocked: {}",
+                        trust.summary
+                    )
+                },
+                states_exported: export_stats.states_exported,
+                commits_imported: sync_commits_imported,
+                threads_synced,
+                markers_synced,
+                recommended_action: trust.recommended_action.clone(),
+                recommended_action_argv: trust.recommended_action_argv.clone(),
+                recommended_action_template: trust.recommended_action_template.clone(),
+                recovery_commands: trust.recovery_commands.clone(),
+                recovery_command_argv: trust.recovery_command_argv.clone(),
+                trust,
+            };
             if should_output_json(cli, Some(repo.config())) {
-                let out = serde_json::json!({
-                    "states_exported": export_stats.states_exported,
-                    "commits_imported": sync_commits_imported,
-                    "threads_synced": export_stats.threads_synced + import_stats.branches_synced,
-                    "markers_synced": export_stats.markers_synced + import_stats.tags_synced,
-                });
-                println!("{out}");
+                println!("{}", serde_json::to_string(&sync_output)?);
             } else {
                 println!("{} synced Git overlay", style::ok_marker());
                 println!(
                     "  {}",
                     style::field(
                         "exported",
-                        &style::count(export_stats.states_exported, "state")
+                        &style::count(sync_output.states_exported, "state")
                     )
                 );
                 println!(
                     "  {}",
-                    style::field("imported", &style::count(sync_commits_imported, "commit"))
+                    style::field(
+                        "imported",
+                        &style::count(sync_output.commits_imported, "commit")
+                    )
                 );
                 println!(
                     "  {}",
@@ -588,10 +690,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                         "threads",
                         &format!(
                             "{} synced with branches",
-                            style::bold(
-                                &(export_stats.threads_synced + import_stats.branches_synced)
-                                    .to_string()
-                            )
+                            style::bold(&sync_output.threads_synced.to_string())
                         )
                     )
                 );
@@ -601,13 +700,23 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                         "markers",
                         &format!(
                             "{} synced with tags",
-                            style::bold(
-                                &(export_stats.markers_synced + import_stats.tags_synced)
-                                    .to_string()
-                            )
+                            style::bold(&sync_output.markers_synced.to_string())
                         )
                     )
                 );
+                if !sync_output.trust.verified {
+                    println!();
+                    println!("{}", style::section("Verification"));
+                    println!(
+                        "  {}",
+                        style::field("status", &style::thread_state(&sync_output.trust.status))
+                    );
+                    println!("  {}", sync_output.trust.summary);
+                }
+                if !sync_output.recommended_action.is_empty() {
+                    println!();
+                    println!("Next: {}", style::bold(&sync_output.recommended_action));
+                }
             }
         }
 
@@ -616,15 +725,24 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             ref_name,
             preview,
         } => {
-            let recovery_commands = match prefer.as_str() {
-                "git" => vec![format!("heddle bridge git import --ref {ref_name}")],
-                "heddle" => vec![format!(
+            let heddle_preview =
+                format!("heddle bridge git reconcile --prefer heddle --ref {ref_name} --preview");
+            let git_preview =
+                format!("heddle bridge git reconcile --prefer git --ref {ref_name} --preview");
+            let recovery_commands = match prefer.as_deref() {
+                Some("git") => vec![format!("heddle bridge git import --ref {ref_name}")],
+                Some("heddle") => vec![format!(
                     "heddle bridge git reconcile --prefer heddle --ref {ref_name}"
                 )],
-                _ => Vec::new(),
+                None if preview => vec![heddle_preview.clone(), git_preview.clone()],
+                None => return Err(anyhow!(reconcile_direction_required_advice(&ref_name))),
+                _ => unreachable!("clap restricts --prefer values"),
             };
             if !preview {
-                match prefer.as_str() {
+                let prefer = prefer
+                    .as_deref()
+                    .ok_or_else(|| reconcile_direction_required_advice(&ref_name))?;
+                match prefer {
                     "git" => {
                         let stats = import_selected_refs(
                             &mut bridge,
@@ -638,15 +756,21 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                             })?;
                         }
                         let output = BridgeGitReconcileOutput {
+                            output_kind: "bridge_git_reconcile",
                             status: "completed".to_string(),
-                            prefer: prefer.clone(),
+                            action: "bridge git reconcile",
+                            prefer: Some(prefer.to_string()),
                             ref_name: ref_name.clone(),
                             preview,
                             summary: format!(
                                 "Reconciled '{ref_name}' by importing {} Git commit(s) into Heddle",
                                 stats.commits_imported
                             ),
+                            recommended_action: None,
+                            recommended_action_argv: None,
+                            recommended_action_template: None,
                             recovery_commands: Vec::new(),
+                            recovery_command_argv: Vec::new(),
                         };
                         render_bridge_git_reconcile(cli, &repo, &output)?;
                         return Ok(());
@@ -663,8 +787,10 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                         match bridge.write_through_current_checkout()? {
                             crate::bridge::WriteThroughOutcome::Wrote(git_oid) => {
                                 let output = BridgeGitReconcileOutput {
+                                    output_kind: "bridge_git_reconcile",
                                     status: "completed".to_string(),
-                                    prefer: prefer.clone(),
+                                    action: "bridge git reconcile",
+                                    prefer: Some(prefer.to_string()),
                                     ref_name: ref_name.clone(),
                                     preview,
                                     summary: format!(
@@ -672,7 +798,11 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                                         state.short(),
                                         git_oid
                                     ),
+                                    recommended_action: None,
+                                    recommended_action_argv: None,
+                                    recommended_action_template: None,
                                     recovery_commands: Vec::new(),
+                                    recovery_command_argv: Vec::new(),
                                 };
                                 render_bridge_git_reconcile(cli, &repo, &output)?;
                                 return Ok(());
@@ -689,13 +819,30 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 }
             }
             let output = BridgeGitReconcileOutput {
+                output_kind: "bridge_git_reconcile",
                 status: "preview".to_string(),
+                action: "bridge git reconcile",
                 prefer: prefer.clone(),
                 ref_name: ref_name.clone(),
                 preview,
-                summary: format!(
-                    "Would reconcile '{ref_name}' by preferring the {prefer} side; no refs were changed"
-                ),
+                summary: reconcile_preview_summary(&ref_name, prefer.as_deref()),
+                recommended_action: prefer
+                    .as_ref()
+                    .and_then(|_| recovery_commands.first().cloned()),
+                recommended_action_argv: prefer.as_ref().and_then(|_| {
+                    recovery_commands
+                        .first()
+                        .and_then(|action| action_argv(action))
+                }),
+                recommended_action_template: prefer.as_ref().and_then(|_| {
+                    recovery_commands
+                        .first()
+                        .and_then(|action| action_template(action))
+                }),
+                recovery_command_argv: recovery_commands
+                    .iter()
+                    .filter_map(|action| action_argv(action))
+                    .collect(),
                 recovery_commands,
             };
             render_bridge_git_reconcile(cli, &repo, &output)?;
@@ -709,7 +856,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 let out = serde_json::json!({
                     "pushed": true,
                     "remote": remote_name,
-                    "trust": build_repository_trust_state(&repo),
+                    "verification": build_repository_verification_state(&repo),
                 });
                 println!("{out}");
             } else {
@@ -723,21 +870,36 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
 
         GitCommands::Pull { remote } => {
             let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
-            bridge.pull(&remote_name)?;
+            let outcome = bridge.pull(&remote_name)?;
+            let status = if outcome.changed {
+                "updated"
+            } else {
+                "up_to_date"
+            };
 
             if should_output_json(cli, Some(repo.config())) {
                 let out = serde_json::json!({
-                    "pulled": true,
+                    "status": status,
+                    "pulled": outcome.changed,
+                    "changed": outcome.changed,
                     "remote": remote_name,
-                    "trust": build_repository_trust_state(&repo),
+                    "verification": build_repository_verification_state(&repo),
                 });
                 println!("{out}");
             } else {
-                println!(
-                    "{} pulled from remote {}",
-                    style::ok_marker(),
-                    style::bold(&remote_name)
-                );
+                if outcome.changed {
+                    println!(
+                        "{} pulled from remote {}",
+                        style::ok_marker(),
+                        style::bold(&remote_name)
+                    );
+                } else {
+                    println!(
+                        "{} already up to date with remote {}",
+                        style::ok_marker(),
+                        style::bold(&remote_name)
+                    );
+                }
             }
         }
 
@@ -775,7 +937,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
 }
 
 fn reconcile_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
-    let import_command = format!("heddle bridge git import --ref {ref_name}");
+    let import_command = canonical_adopt_ref_command(ref_name);
     let reconcile_git_command =
         format!("heddle bridge git reconcile --prefer git --ref {ref_name}");
 
@@ -795,6 +957,41 @@ fn reconcile_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
             "heddle thread list".to_string(),
         ],
     )
+}
+
+fn reconcile_direction_required_advice(ref_name: &str) -> RecoveryAdvice {
+    let preview_command = format!("heddle bridge git reconcile --ref {ref_name} --preview");
+    RecoveryAdvice::safety_refusal(
+        "reconcile_direction_required",
+        format!("Refusing to reconcile '{ref_name}': choose a local side before applying"),
+        format!(
+            "Run `{preview_command}` to inspect both local repair choices, then rerun with `--prefer heddle` or `--prefer git`."
+        ),
+        "no --prefer side was supplied for a non-preview reconcile",
+        "applying reconcile without a side would need to choose whether Heddle or the local Git branch is authoritative",
+        "Git refs, Heddle refs, index, remotes, and worktree files were left unchanged",
+        preview_command.clone(),
+        vec![
+            preview_command,
+            format!("heddle bridge git reconcile --prefer heddle --ref {ref_name} --preview"),
+            format!("heddle bridge git reconcile --prefer git --ref {ref_name} --preview"),
+        ],
+    )
+}
+
+fn reconcile_preview_summary(ref_name: &str, prefer: Option<&str>) -> String {
+    match prefer {
+        Some("heddle") => format!(
+            "Preview: prefer Heddle for '{ref_name}'. Apply would write the Heddle thread state into local Git and update the checkout; no refs, remotes, index, or worktree files were changed in preview"
+        ),
+        Some("git") => format!(
+            "Preview: prefer Git for '{ref_name}'. Apply would import the local Git branch tip into Heddle and leave local Git authoritative; no refs, remotes, index, or worktree files were changed in preview"
+        ),
+        None => format!(
+            "Preview: local Git/Heddle repair choices for '{ref_name}'. Choose --prefer heddle to write the Heddle thread state into local Git, or --prefer git to import the local Git branch tip into Heddle. This does not push, pull, rewrite remotes, move refs, update the index, or change worktree files"
+        ),
+        _ => unreachable!("clap restricts --prefer values"),
+    }
 }
 
 fn reconcile_write_through_skipped_advice(ref_name: &str, reason: String) -> RecoveryAdvice {
@@ -899,11 +1096,10 @@ fn run_reason(
 
     let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");
     if !map_path.exists() {
-        anyhow::bail!(
-            "no sha map at {}. Run `heddle bridge ingest --path {}` first.",
-            map_path.display(),
-            git_path.display(),
-        );
+        anyhow::bail!(RecoveryAdvice::bridge_ingest_required(
+            &map_path.display().to_string(),
+            &git_path.display().to_string(),
+        ));
     }
     let map = ShaMap::open(&map_path)?;
     let git = GitSource::open(git_path)?;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Machine-readable command catalog.
 
-use std::io::{self, Write};
+use std::sync::OnceLock;
 
 use anyhow::Result;
 use clap::{ArgAction, CommandFactory};
@@ -15,7 +15,10 @@ use crate::cli::{
     DoctorCommands, HookCommands, IntegrationCommands, MaintenanceCommands, MarkerCommands,
     PurgeCommands, RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands,
     ShellCommands, StashCommands, StoreCommands, ThreadCommands, WorkspaceCommands,
-    cli_args::{ConflictCommands, DiscussCommands, ReviewCommands, TransactionCommands},
+    cli_args::{
+        CommandCatalogArgs, ConflictCommands, DiscussCommands, ReviewCommands, TransactionCommands,
+    },
+    render::{write_json_stdout, write_stdout},
     should_output_json, style,
 };
 #[cfg(feature = "client")]
@@ -25,28 +28,51 @@ use crate::cli::{BridgeCommands, GitCommands};
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommandCatalogOutput {
+    pub kind: String,
+    pub executable_path: String,
     pub commands: Vec<CommandCatalogEntry>,
     pub global_options: Vec<CommandCatalogOption>,
     pub recommended_action_placeholders: Vec<String>,
+    pub recommended_action_templates: Vec<ActionTemplate>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommandCatalogEntry {
     pub path: Vec<String>,
     pub display: String,
+    pub aliases: Vec<String>,
     pub tier: String,
+    pub surface: String,
+    pub help_visibility: String,
+    pub help_rank: u16,
+    pub canonical_command: Option<String>,
+    pub canonical_action: Option<CanonicalAction>,
+    pub command_action: Option<CommandAction>,
     pub summary: String,
     pub has_subcommands: bool,
     pub supports_json: bool,
     pub mutates: bool,
     pub supports_op_id: bool,
     pub persists_op_id: bool,
+    pub op_id_behavior: String,
     pub observe_only: bool,
     pub may_initialize: bool,
     pub may_import_git: bool,
     pub may_write_worktree: bool,
     pub may_move_ref: bool,
     pub destructive_requires_force: bool,
+    pub writes_heddle_refs: bool,
+    pub writes_git_refs: bool,
+    pub writes_worktree: bool,
+    pub writes_config: bool,
+    pub writes_hooks: bool,
+    pub network_io: bool,
+    pub daemon_process: bool,
+    pub object_gc: bool,
+    pub external_command: bool,
+    pub requires_git_executable: bool,
+    pub destructive_data: bool,
+    pub side_effects: Vec<String>,
     pub side_effect_class: String,
     pub first_run_behavior: String,
     pub json_kind: String,
@@ -57,9 +83,28 @@ pub struct CommandCatalogEntry {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CanonicalAction {
+    pub command: String,
+    pub kind: String,
+    pub executable: bool,
+    pub note: String,
+    pub argv: Option<Vec<String>>,
+    pub template: Option<ActionTemplate>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CommandAction {
+    pub action: String,
+    pub executable: bool,
+    pub argv: Option<Vec<String>>,
+    pub template: Option<ActionTemplate>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CommandCatalogOption {
     pub id: String,
     pub long: Option<String>,
+    pub aliases: Vec<String>,
     pub short: Option<String>,
     pub value_names: Vec<String>,
     pub value_kind: String,
@@ -78,8 +123,46 @@ pub struct CommandCatalogArgument {
     pub required: bool,
 }
 
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ActionTemplate {
+    pub action: String,
+    pub argv_template: Vec<String>,
+    pub required_inputs: Vec<String>,
+    pub agent_may_fill: bool,
+}
+
+impl CommandCatalogOutput {
+    pub fn command_by_display(&self, display: &str) -> Option<&CommandCatalogEntry> {
+        self.commands.iter().find(|entry| entry.display == display)
+    }
+
+    pub fn command_by_path(&self, path: &[String]) -> Option<&CommandCatalogEntry> {
+        self.commands.iter().find(|entry| entry.path == path)
+    }
+
+    pub fn options_for_display(&self, display: &str) -> Option<Vec<&CommandCatalogOption>> {
+        let entry = self.command_by_display(display)?;
+        Some(self.options_for_entry(entry))
+    }
+
+    pub fn options_for_path(&self, path: &[String]) -> Option<Vec<&CommandCatalogOption>> {
+        let entry = self.command_by_path(path)?;
+        Some(self.options_for_entry(entry))
+    }
+
+    pub fn options_for_entry<'a>(
+        &'a self,
+        entry: &'a CommandCatalogEntry,
+    ) -> Vec<&'a CommandCatalogOption> {
+        self.global_options
+            .iter()
+            .chain(entry.options.iter())
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct CommandContract {
+struct CommandContract {
     supports_json: bool,
     mutates: bool,
     supports_op_id: bool,
@@ -90,10 +173,76 @@ pub(crate) struct CommandContract {
     may_write_worktree: bool,
     may_move_ref: bool,
     destructive_requires_force: bool,
+    writes_heddle_refs: bool,
+    writes_git_refs: bool,
+    writes_worktree: bool,
+    writes_config: bool,
+    writes_hooks: bool,
+    network_io: bool,
+    daemon_process: bool,
+    object_gc: bool,
+    external_command: bool,
+    requires_git_executable: bool,
+    destructive_data: bool,
     json_kind: &'static str,
     schema_verbs: &'static [&'static str],
     documented_schema_verbs: &'static [&'static str],
-    help_tier: &'static str,
+    surface: &'static str,
+    help_visibility: &'static str,
+    help_rank: u16,
+    canonical_command: Option<&'static str>,
+    canonical_kind: Option<&'static str>,
+    canonical_note: Option<&'static str>,
+    advertised_action: Option<AdvertisedAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdvertisedAction {
+    action: &'static str,
+    argv_template: &'static [&'static str],
+    required_inputs: &'static [&'static str],
+    agent_may_fill: bool,
+    executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandRuntimeContract {
+    pub path: Vec<&'static str>,
+    pub display: String,
+    pub supports_json: bool,
+    pub supports_op_id: bool,
+    pub persists_op_id: bool,
+    pub mutates: bool,
+    pub observe_only: bool,
+    pub help_visibility: &'static str,
+    pub help_rank: u16,
+    pub surface: &'static str,
+    pub canonical_command: Option<&'static str>,
+    pub canonical_kind: Option<&'static str>,
+    pub canonical_note: Option<&'static str>,
+    pub advertised_action: Option<AdvertisedAction>,
+    pub side_effects: Vec<&'static str>,
+    pub side_effect_class: &'static str,
+    pub first_run_behavior: &'static str,
+    pub json_kind: &'static str,
+    pub schema_verbs: &'static [&'static str],
+    pub documented_schema_verbs: &'static [&'static str],
+    pub may_initialize: bool,
+    pub may_import_git: bool,
+    pub may_write_worktree: bool,
+    pub may_move_ref: bool,
+    pub destructive_requires_force: bool,
+    pub writes_heddle_refs: bool,
+    pub writes_git_refs: bool,
+    pub writes_worktree: bool,
+    pub writes_config: bool,
+    pub writes_hooks: bool,
+    pub network_io: bool,
+    pub daemon_process: bool,
+    pub object_gc: bool,
+    pub external_command: bool,
+    pub requires_git_executable: bool,
+    pub destructive_data: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,16 +252,208 @@ struct CommandContractEntry {
 }
 
 const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
+    // Message templates are display-only until the caller supplies a
+    // real message. They must not be exposed as directly executable
+    // argv because the literal ellipsis would create bad history.
+    "heddle capture -m \"...\"",
+    "heddle capture -m \"...\" --confidence <confidence>",
+    "heddle checkpoint -m \"...\"",
+    "heddle commit -m \"...\"",
+    "heddle ready -m \"...\"",
+    "heddle stash push -m \"...\"",
     // Choice placeholders: the user must choose one command and fill
     // in the state after inspecting the bisect result.
     "heddle bisect good <state> or heddle bisect bad <state>",
-    // Raw-Git recovery is only surfaced while recovering an active
-    // raw Git operation Heddle did not start.
-    "git bisect good or git bisect bad",
-    "git add <files> && heddle continue",
     // Remote setup requires filling in a real name and URL after
     // inspecting current configuration.
     "heddle remote add <name> <url>",
+    // Clone recovery commands must name a real remote and an empty
+    // destination path chosen by the operator.
+    "heddle clone <local-path> <path>",
+    "heddle clone <remote> <path>",
+    "heddle clone <remote> <new-path>",
+    "heddle clone <remote> <fresh-path>",
+    "heddle clone <remote> <path> --thread <thread>",
+    // Shallow Git import recovery requires choosing a complete checkout.
+    "heddle bridge git import --path <full-git-repo>",
+    "heddle bridge git import --path <full-git-repo> --ref <ref>",
+    // Detached Git-overlay recovery requires the caller to choose the
+    // branch to reattach before retrying branch-writing operations.
+    "heddle switch <branch>",
+    // Merge recovery placeholders require choosing the source thread.
+    "heddle merge <thread> --git-commit",
+];
+
+const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
+    (
+        "heddle capture -m \"...\"",
+        &["heddle", "capture", "-m", "<message>"],
+        &["message"],
+        true,
+    ),
+    (
+        "heddle capture -m \"...\" --confidence <confidence>",
+        &[
+            "heddle",
+            "capture",
+            "-m",
+            "<message>",
+            "--confidence",
+            "<confidence>",
+        ],
+        &["message", "confidence"],
+        true,
+    ),
+    (
+        "heddle checkpoint -m \"...\"",
+        &["heddle", "checkpoint", "-m", "<message>"],
+        &["message"],
+        true,
+    ),
+    (
+        "heddle commit -m \"...\"",
+        &["heddle", "commit", "-m", "<message>"],
+        &["message"],
+        true,
+    ),
+    (
+        "heddle commit --all -m \"...\"",
+        &["heddle", "commit", "--all", "-m", "<message>"],
+        &["message"],
+        true,
+    ),
+    (
+        "heddle ready -m \"...\"",
+        &["heddle", "ready", "-m", "<message>"],
+        &["message"],
+        true,
+    ),
+    (
+        "heddle ready --thread <name>",
+        &["heddle", "ready", "--thread", "<thread>"],
+        &["thread"],
+        true,
+    ),
+    (
+        "heddle ship --thread <name>",
+        &["heddle", "ship", "--thread", "<thread>"],
+        &["thread"],
+        true,
+    ),
+    (
+        "heddle sync --thread <name>",
+        &["heddle", "sync", "--thread", "<thread>"],
+        &["thread"],
+        true,
+    ),
+    (
+        "heddle run --thread <name> -- <cmd...>",
+        &["heddle", "run", "--thread", "<thread>", "--", "<cmd...>"],
+        &["thread", "command"],
+        false,
+    ),
+    (
+        "heddle thread switch <name>",
+        &["heddle", "thread", "switch", "<thread>"],
+        &["thread"],
+        true,
+    ),
+    (
+        "heddle delegate --parent <THREAD> <task>",
+        &["heddle", "delegate", "--parent", "<thread>", "<task>"],
+        &["thread", "task"],
+        false,
+    ),
+    (
+        "heddle stash push -m \"...\"",
+        &["heddle", "stash", "push", "-m", "<message>"],
+        &["message"],
+        true,
+    ),
+    (
+        "heddle bisect good <state> or heddle bisect bad <state>",
+        &["heddle", "bisect", "<good|bad>", "<state>"],
+        &["verdict", "state"],
+        false,
+    ),
+    (
+        "heddle remote add <name> <url>",
+        &["heddle", "remote", "add", "<name>", "<url>"],
+        &["name", "url"],
+        false,
+    ),
+    (
+        "heddle merge <thread> --git-commit",
+        &["heddle", "merge", "<thread>", "--git-commit"],
+        &["thread"],
+        false,
+    ),
+    (
+        "heddle clone <local-path> <path>",
+        &["heddle", "clone", "<local-path>", "<path>"],
+        &["local_path", "path"],
+        false,
+    ),
+    (
+        "heddle clone <remote> <path>",
+        &["heddle", "clone", "<remote>", "<path>"],
+        &["remote", "path"],
+        false,
+    ),
+    (
+        "heddle clone <remote> <new-path>",
+        &["heddle", "clone", "<remote>", "<new-path>"],
+        &["remote", "path"],
+        false,
+    ),
+    (
+        "heddle clone <remote> <path> --thread <thread>",
+        &[
+            "heddle", "clone", "<remote>", "<path>", "--thread", "<thread>",
+        ],
+        &["remote", "path", "thread"],
+        false,
+    ),
+    (
+        "heddle clone <remote> <fresh-path>",
+        &["heddle", "clone", "<remote>", "<fresh-path>"],
+        &["remote", "path"],
+        false,
+    ),
+    (
+        "heddle bridge git import --path <full-git-repo>",
+        &[
+            "heddle",
+            "bridge",
+            "git",
+            "import",
+            "--path",
+            "<full-git-repo>",
+        ],
+        &["path"],
+        false,
+    ),
+    (
+        "heddle bridge git import --path <full-git-repo> --ref <ref>",
+        &[
+            "heddle",
+            "bridge",
+            "git",
+            "import",
+            "--path",
+            "<full-git-repo>",
+            "--ref",
+            "<ref>",
+        ],
+        &["path", "ref"],
+        false,
+    ),
+    (
+        "heddle switch <branch>",
+        &["heddle", "switch", "<branch>"],
+        &["branch"],
+        false,
+    ),
 ];
 
 const READ_JSON: CommandContract = CommandContract {
@@ -126,13 +467,36 @@ const READ_JSON: CommandContract = CommandContract {
     may_write_worktree: false,
     may_move_ref: false,
     destructive_requires_force: false,
+    writes_heddle_refs: false,
+    writes_git_refs: false,
+    writes_worktree: false,
+    writes_config: false,
+    writes_hooks: false,
+    network_io: false,
+    daemon_process: false,
+    object_gc: false,
+    external_command: false,
+    requires_git_executable: false,
+    destructive_data: false,
     json_kind: "json",
     schema_verbs: &[],
     documented_schema_verbs: &[],
-    help_tier: "advanced",
+    surface: "native",
+    help_visibility: "advanced",
+    help_rank: 1000,
+    canonical_command: None,
+    canonical_kind: None,
+    canonical_note: None,
+    advertised_action: None,
 };
 
 const READ_TEXT: CommandContract = CommandContract {
+    supports_json: false,
+    json_kind: "none",
+    ..READ_JSON
+};
+
+const GROUP: CommandContract = CommandContract {
     supports_json: false,
     json_kind: "none",
     ..READ_JSON
@@ -159,10 +523,27 @@ const MUTATING: CommandContract = CommandContract {
     may_write_worktree: false,
     may_move_ref: true,
     destructive_requires_force: false,
+    writes_heddle_refs: true,
+    writes_git_refs: false,
+    writes_worktree: false,
+    writes_config: false,
+    writes_hooks: false,
+    network_io: false,
+    daemon_process: false,
+    object_gc: false,
+    external_command: false,
+    requires_git_executable: false,
+    destructive_data: false,
     json_kind: "json",
     schema_verbs: &[],
     documented_schema_verbs: &[],
-    help_tier: "advanced",
+    surface: "native",
+    help_visibility: "advanced",
+    help_rank: 1000,
+    canonical_command: None,
+    canonical_kind: None,
+    canonical_note: None,
+    advertised_action: None,
 };
 
 const MUTATING_NO_OP_ID: CommandContract = CommandContract {
@@ -170,25 +551,56 @@ const MUTATING_NO_OP_ID: CommandContract = CommandContract {
     ..MUTATING
 };
 
+const MUTATING_TEXT: CommandContract = CommandContract {
+    supports_json: false,
+    supports_op_id: false,
+    json_kind: "none",
+    ..MUTATING
+};
+
 const INIT: CommandContract = CommandContract {
     may_initialize: true,
     may_move_ref: false,
-    ..MUTATING_NO_OP_ID
-};
-
-const CAPTURE: CommandContract = CommandContract {
-    may_initialize: true,
+    writes_heddle_refs: false,
+    writes_config: true,
     ..MUTATING
 };
+
+const CAPTURE: CommandContract = CommandContract { ..MUTATING };
 
 const WORKTREE_MUTATION: CommandContract = CommandContract {
     may_write_worktree: true,
+    writes_worktree: true,
     ..MUTATING
+};
+
+const WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
+    may_move_ref: false,
+    writes_heddle_refs: false,
+    ..WORKTREE_MUTATION
 };
 
 const DESTRUCTIVE_WORKTREE_MUTATION: CommandContract = CommandContract {
     destructive_requires_force: true,
+    destructive_data: true,
     ..WORKTREE_MUTATION
+};
+
+const DESTRUCTIVE_WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
+    destructive_requires_force: true,
+    destructive_data: true,
+    ..WORKTREE_ONLY_MUTATION
+};
+
+const DATA_MUTATION: CommandContract = CommandContract {
+    may_move_ref: false,
+    writes_heddle_refs: false,
+    ..MUTATING
+};
+
+const DESTRUCTIVE_DATA_MUTATION: CommandContract = CommandContract {
+    destructive_data: true,
+    ..DATA_MUTATION
 };
 
 const IMPORTING_MUTATION: CommandContract = CommandContract {
@@ -196,22 +608,56 @@ const IMPORTING_MUTATION: CommandContract = CommandContract {
     ..MUTATING
 };
 
-const fn persistent_op_id(contract: CommandContract) -> CommandContract {
-    CommandContract {
-        persists_op_id: true,
-        ..contract
-    }
-}
+const ADOPT: CommandContract = CommandContract {
+    may_initialize: true,
+    may_import_git: true,
+    writes_config: true,
+    ..MUTATING
+};
 
-const fn schemas(
-    contract: CommandContract,
-    schema_verbs: &'static [&'static str],
-) -> CommandContract {
-    CommandContract {
-        schema_verbs,
-        ..contract
-    }
-}
+const CONFIG_MUTATION: CommandContract = CommandContract {
+    may_move_ref: false,
+    writes_heddle_refs: false,
+    writes_config: true,
+    ..MUTATING
+};
+
+const HOOK_MUTATION: CommandContract = CommandContract {
+    writes_hooks: true,
+    ..CONFIG_MUTATION
+};
+
+const DAEMON_MUTATION: CommandContract = CommandContract {
+    may_move_ref: false,
+    writes_heddle_refs: false,
+    daemon_process: true,
+    ..MUTATING_NO_OP_ID
+};
+
+const GC_MUTATION: CommandContract = CommandContract {
+    may_move_ref: false,
+    writes_heddle_refs: false,
+    object_gc: true,
+    ..MUTATING
+};
+
+const EXTERNAL_COMMAND_MUTATION: CommandContract = CommandContract {
+    may_move_ref: false,
+    writes_heddle_refs: false,
+    external_command: true,
+    ..MUTATING_TEXT
+};
+
+const EXTERNAL_WORKTREE_COMMAND: CommandContract = CommandContract {
+    may_write_worktree: true,
+    external_command: true,
+    ..EXTERNAL_COMMAND_MUTATION
+};
+
+const EXTERNAL_WORKTREE_MUTATION: CommandContract = CommandContract {
+    external_command: true,
+    ..WORKTREE_MUTATION
+};
 
 const fn documented_schemas(
     contract: CommandContract,
@@ -224,179 +670,639 @@ const fn documented_schemas(
     }
 }
 
-const fn everyday(contract: CommandContract) -> CommandContract {
+const fn front_door(contract: CommandContract, help_rank: u16) -> CommandContract {
     CommandContract {
-        help_tier: "everyday",
+        help_visibility: "everyday",
+        help_rank,
         ..contract
     }
 }
 
 const fn hidden(contract: CommandContract) -> CommandContract {
     CommandContract {
-        help_tier: "hidden",
+        surface: "internal",
+        help_visibility: "hidden",
+        ..contract
+    }
+}
+
+const fn surface(contract: CommandContract, surface: &'static str) -> CommandContract {
+    CommandContract {
+        surface,
+        ..contract
+    }
+}
+
+const fn git_adapter_alias(
+    contract: CommandContract,
+    canonical_command: &'static str,
+) -> CommandContract {
+    git_adapter_action(
+        contract,
+        canonical_command,
+        "direct_command",
+        "Use this native Heddle command for the same operation.",
+    )
+}
+
+const fn git_adapter_action(
+    contract: CommandContract,
+    canonical_command: &'static str,
+    canonical_kind: &'static str,
+    canonical_note: &'static str,
+) -> CommandContract {
+    CommandContract {
+        surface: "git_adapter",
+        help_visibility: "git_adapter",
+        canonical_command: Some(canonical_command),
+        canonical_kind: Some(canonical_kind),
+        canonical_note: Some(canonical_note),
+        ..contract
+    }
+}
+
+const fn advertised_action(
+    contract: CommandContract,
+    action: &'static str,
+    argv_template: &'static [&'static str],
+    required_inputs: &'static [&'static str],
+    agent_may_fill: bool,
+    executable: bool,
+) -> CommandContract {
+    CommandContract {
+        advertised_action: Some(AdvertisedAction {
+            action,
+            argv_template,
+            required_inputs,
+            agent_may_fill,
+            executable,
+        }),
         ..contract
     }
 }
 
 const CONTRACTS: &[CommandContractEntry] = &[
-    entry(&["abort"], MUTATING),
-    entry(&["actor"], MUTATING),
-    entry(&["actor", "spawn"], MUTATING),
-    entry(&["actor", "list"], READ_JSON),
-    entry(&["actor", "show"], READ_JSON),
-    entry(&["actor", "explain"], READ_JSON),
-    entry(&["actor", "done"], MUTATING),
-    entry(&["agent"], MUTATING),
-    entry(&["agent", "serve"], MUTATING_NO_OP_ID),
-    entry(&["agent", "status"], READ_JSON),
-    entry(&["agent", "stop"], MUTATING_NO_OP_ID),
-    entry(&["agent", "reserve"], MUTATING),
-    entry(&["agent", "heartbeat"], MUTATING),
-    entry(&["agent", "capture"], CAPTURE),
-    entry(&["agent", "ready"], CAPTURE),
-    entry(&["agent", "release"], MUTATING),
-    entry(&["agent", "list"], READ_JSON),
-    entry(&["attempt"], MUTATING),
+    entry(&["abort"], documented_schemas(MUTATING, &["abort"])),
+    entry(
+        &["adopt"],
+        front_door(
+            advertised_action(
+                documented_schemas(ADOPT, &["adopt"]),
+                "heddle adopt --ref <branch>",
+                &["heddle", "adopt", "--ref", "<branch>"],
+                &["branch"],
+                true,
+                false,
+            ),
+            210,
+        ),
+    ),
+    entry(&["actor"], surface(GROUP, "automation")),
+    entry(
+        &["actor", "spawn"],
+        surface(documented_schemas(MUTATING, &["actor spawn"]), "automation"),
+    ),
+    entry(
+        &["actor", "list"],
+        surface(documented_schemas(READ_JSON, &["actor list"]), "automation"),
+    ),
+    entry(
+        &["actor", "show"],
+        surface(documented_schemas(READ_JSON, &["actor show"]), "automation"),
+    ),
+    entry(
+        &["actor", "explain"],
+        surface(
+            documented_schemas(READ_JSON, &["actor explain"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["actor", "done"],
+        surface(documented_schemas(MUTATING, &["actor done"]), "automation"),
+    ),
+    entry(&["agent"], surface(GROUP, "automation")),
+    entry(
+        &["agent", "serve"],
+        surface(
+            documented_schemas(DAEMON_MUTATION, &["agent serve"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "status"],
+        surface(
+            documented_schemas(READ_JSON, &["agent status"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "stop"],
+        surface(
+            documented_schemas(DAEMON_MUTATION, &["agent stop"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "reserve"],
+        surface(
+            documented_schemas(MUTATING, &["agent reserve"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "heartbeat"],
+        surface(
+            documented_schemas(MUTATING, &["agent heartbeat"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "capture"],
+        surface(
+            documented_schemas(CAPTURE, &["agent capture"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "ready"],
+        surface(documented_schemas(CAPTURE, &["agent ready"]), "automation"),
+    ),
+    entry(
+        &["agent", "release"],
+        surface(
+            documented_schemas(MUTATING, &["agent release"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["agent", "list"],
+        surface(documented_schemas(READ_JSON, &["agent list"]), "automation"),
+    ),
+    entry(
+        &["attempt"],
+        documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["attempt"]),
+    ),
     #[cfg(feature = "client")]
-    entry(&["auth"], MUTATING),
+    entry(&["auth"], GROUP),
     #[cfg(feature = "client")]
-    entry(&["auth", "login"], MUTATING_NO_OP_ID),
+    entry(&["auth", "login"], MUTATING_TEXT),
     #[cfg(feature = "client")]
     entry(&["auth", "logout"], MUTATING_NO_OP_ID),
     #[cfg(feature = "client")]
     entry(&["auth", "status"], READ_JSON),
     #[cfg(feature = "client")]
     entry(&["auth", "create-service-token"], MUTATING_NO_OP_ID),
-    entry(&["bisect"], WORKTREE_MUTATION),
-    entry(&["bisect", "start"], WORKTREE_MUTATION),
-    entry(&["bisect", "good"], WORKTREE_MUTATION),
-    entry(&["bisect", "bad"], WORKTREE_MUTATION),
-    entry(&["bisect", "reset"], WORKTREE_MUTATION),
-    entry(&["blame"], READ_JSON),
-    entry(&["branch"], MUTATING),
-    entry(&["bridge"], everyday(MUTATING)),
-    entry(&["bridge", "git"], MUTATING),
+    entry(&["bisect"], GROUP),
+    entry(
+        &["bisect", "start"],
+        documented_schemas(WORKTREE_MUTATION, &["bisect start"]),
+    ),
+    entry(
+        &["bisect", "good"],
+        documented_schemas(WORKTREE_MUTATION, &["bisect good"]),
+    ),
+    entry(
+        &["bisect", "bad"],
+        documented_schemas(WORKTREE_MUTATION, &["bisect bad"]),
+    ),
+    entry(
+        &["bisect", "reset"],
+        documented_schemas(WORKTREE_MUTATION, &["bisect reset"]),
+    ),
+    entry(&["blame"], documented_schemas(READ_JSON, &["blame"])),
+    entry(
+        &["branch"],
+        git_adapter_action(
+            documented_schemas(MUTATING, &["branch"]),
+            "thread",
+            "command_family",
+            "Use the thread command family for branch listing, creation, rename, and deletion.",
+        ),
+    ),
+    entry(&["bridge"], surface(GROUP, "git_adapter")),
+    entry(&["bridge", "git"], surface(GROUP, "git_adapter")),
     entry(
         &["bridge", "git", "status"],
-        documented_schemas(READ_JSON, &["bridge git status"]),
+        git_adapter_alias(
+            documented_schemas(READ_JSON, &["bridge git status"]),
+            "status",
+        ),
     ),
     entry(
         &["bridge", "git", "init"],
-        documented_schemas(INIT, &["bridge git init"]),
+        git_adapter_alias(documented_schemas(INIT, &["bridge git init"]), "init"),
     ),
     entry(
         &["bridge", "git", "export"],
-        documented_schemas(MUTATING_NO_OP_ID, &["bridge git export"]),
+        git_adapter_alias(
+            documented_schemas(
+                CommandContract {
+                    writes_git_refs: true,
+                    ..MUTATING
+                },
+                &["bridge git export"],
+            ),
+            "push",
+        ),
     ),
     entry(
         &["bridge", "git", "import"],
-        documented_schemas(IMPORTING_MUTATION, &["bridge git import"]),
+        git_adapter_action(
+            documented_schemas(IMPORTING_MUTATION, &["bridge git import"]),
+            "adopt",
+            "workflow",
+            "Use adopt for the guided Git-to-Heddle conversion workflow.",
+        ),
     ),
     entry(
         &["bridge", "git", "sync"],
-        documented_schemas(IMPORTING_MUTATION, &["bridge git sync"]),
+        git_adapter_action(
+            documented_schemas(IMPORTING_MUTATION, &["bridge git sync"]),
+            "adopt",
+            "workflow",
+            "Use adopt for the guided Git-to-Heddle conversion workflow.",
+        ),
     ),
-    entry(&["bridge", "git", "reconcile"], IMPORTING_MUTATION),
+    entry(
+        &["bridge", "git", "reconcile"],
+        git_adapter_action(
+            documented_schemas(IMPORTING_MUTATION, &["bridge git reconcile"]),
+            "adopt",
+            "workflow",
+            "Use adopt for the guided Git-to-Heddle conversion workflow.",
+        ),
+    ),
     entry(
         &["bridge", "git", "push"],
-        documented_schemas(MUTATING, &["bridge git push"]),
+        git_adapter_alias(
+            documented_schemas(
+                CommandContract {
+                    writes_heddle_refs: false,
+                    writes_git_refs: true,
+                    network_io: true,
+                    ..MUTATING
+                },
+                &["bridge git push"],
+            ),
+            "push",
+        ),
     ),
     entry(
         &["bridge", "git", "pull"],
-        documented_schemas(WORKTREE_MUTATION, &["bridge git pull"]),
+        git_adapter_alias(
+            documented_schemas(
+                CommandContract {
+                    writes_git_refs: true,
+                    network_io: true,
+                    ..WORKTREE_MUTATION
+                },
+                &["bridge git pull"],
+            ),
+            "pull",
+        ),
     ),
-    entry(&["bridge", "git", "ingest"], IMPORTING_MUTATION),
-    entry(&["bridge", "git", "reason"], MUTATING),
     entry(
-        &["capture"],
-        everyday(schemas(persistent_op_id(CAPTURE), &["capture"])),
+        &["bridge", "git", "ingest"],
+        surface(
+            documented_schemas(IMPORTING_MUTATION, &["bridge git ingest"]),
+            "git_adapter",
+        ),
     ),
-    entry(&["checkpoint"], schemas(CAPTURE, &["checkpoint"])),
-    entry(&["checkout"], WORKTREE_MUTATION),
-    entry(&["cherry-pick"], WORKTREE_MUTATION),
-    entry(&["clean"], DESTRUCTIVE_WORKTREE_MUTATION),
+    entry(
+        &["bridge", "git", "reason"],
+        surface(
+            documented_schemas(DATA_MUTATION, &["bridge git reason"]),
+            "git_adapter",
+        ),
+    ),
+    entry(&["capture"], documented_schemas(CAPTURE, &["capture"])),
+    entry(
+        &["checkpoint"],
+        documented_schemas(
+            CommandContract {
+                writes_git_refs: true,
+                ..CAPTURE
+            },
+            &["checkpoint"],
+        ),
+    ),
+    entry(
+        &["checkout"],
+        git_adapter_alias(
+            documented_schemas(WORKTREE_MUTATION, &["checkout"]),
+            "thread switch",
+        ),
+    ),
+    entry(
+        &["cherry-pick"],
+        documented_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
+    ),
+    entry(
+        &["clean"],
+        documented_schemas(DESTRUCTIVE_WORKTREE_ONLY_MUTATION, &["clean"]),
+    ),
     entry(
         &["clone"],
-        everyday(schemas(
-            CommandContract {
-                may_initialize: true,
-                may_write_worktree: true,
-                may_move_ref: true,
-                ..MUTATING_NO_OP_ID
-            },
-            &["clone"],
+        front_door(
+            documented_schemas(
+                CommandContract {
+                    may_initialize: true,
+                    may_write_worktree: true,
+                    may_move_ref: true,
+                    writes_worktree: true,
+                    network_io: true,
+                    ..MUTATING
+                },
+                &["clone"],
+            ),
+            220,
+        ),
+    ),
+    entry(&["collapse"], documented_schemas(MUTATING, &["collapse"])),
+    entry(
+        &["commit"],
+        front_door(
+            advertised_action(
+                documented_schemas(
+                    CommandContract {
+                        writes_git_refs: true,
+                        ..CAPTURE
+                    },
+                    &["commit"],
+                ),
+                "heddle commit -m <message>",
+                &["heddle", "commit", "-m", "<message>"],
+                &["message"],
+                true,
+                false,
+            ),
+            30,
+        ),
+    ),
+    entry(
+        &["commands"],
+        surface(documented_schemas(READ_JSON, &["commands"]), "automation"),
+    ),
+    entry(&["compare"], documented_schemas(READ_JSON, &["compare"])),
+    entry(&["completion"], READ_TEXT),
+    entry(&["conflict"], GROUP),
+    entry(
+        &["conflict", "list"],
+        documented_schemas(READ_JSON, &["conflict list"]),
+    ),
+    entry(
+        &["conflict", "show"],
+        documented_schemas(READ_JSON, &["conflict show"]),
+    ),
+    entry(&["continue"], documented_schemas(MUTATING, &["continue"])),
+    entry(&["context"], GROUP),
+    entry(
+        &["context", "set"],
+        documented_schemas(MUTATING, &["context set"]),
+    ),
+    entry(
+        &["context", "get"],
+        documented_schemas(READ_JSON, &["context get"]),
+    ),
+    entry(
+        &["context", "list"],
+        documented_schemas(READ_JSON, &["context list"]),
+    ),
+    entry(
+        &["context", "history"],
+        documented_schemas(READ_JSON, &["context history"]),
+    ),
+    entry(
+        &["context", "edit"],
+        documented_schemas(MUTATING, &["context edit"]),
+    ),
+    entry(
+        &["context", "supersede"],
+        documented_schemas(MUTATING, &["context supersede"]),
+    ),
+    entry(
+        &["context", "rm"],
+        documented_schemas(MUTATING, &["context rm"]),
+    ),
+    entry(
+        &["context", "check"],
+        documented_schemas(READ_JSON, &["context check"]),
+    ),
+    entry(
+        &["context", "suggest"],
+        documented_schemas(READ_JSON, &["context suggest"]),
+    ),
+    entry(
+        &["context", "audit"],
+        documented_schemas(READ_JSON, &["context audit"]),
+    ),
+    entry(&["daemon"], surface(GROUP, "admin")),
+    entry(
+        &["daemon", "serve"],
+        surface(
+            documented_schemas(DAEMON_MUTATION, &["daemon serve"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["daemon", "status"],
+        surface(documented_schemas(READ_JSON, &["daemon status"]), "admin"),
+    ),
+    entry(
+        &["daemon", "stop"],
+        surface(
+            documented_schemas(DAEMON_MUTATION, &["daemon stop"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["delegate"],
+        documented_schemas(WORKTREE_MUTATION, &["delegate"]),
+    ),
+    entry(&["diagnose"], documented_schemas(READ_JSON, &["diagnose"])),
+    entry(
+        &["diff"],
+        front_door(documented_schemas(READ_JSON, &["diff"]), 20),
+    ),
+    entry(&["discuss"], GROUP),
+    entry(
+        &["discuss", "open"],
+        documented_schemas(MUTATING, &["discuss open"]),
+    ),
+    entry(
+        &["discuss", "append"],
+        documented_schemas(MUTATING, &["discuss append"]),
+    ),
+    entry(
+        &["discuss", "resolve"],
+        documented_schemas(MUTATING, &["discuss resolve"]),
+    ),
+    entry(
+        &["discuss", "list"],
+        documented_schemas(READ_JSON, &["discuss list"]),
+    ),
+    entry(
+        &["discuss", "show"],
+        documented_schemas(READ_JSON, &["discuss show"]),
+    ),
+    entry(
+        &["doctor"],
+        front_door(documented_schemas(READ_JSON, &["doctor"]), 120),
+    ),
+    entry(
+        &["doctor", "docs"],
+        documented_schemas(READ_JSON, &["doctor docs"]),
+    ),
+    entry(
+        &["doctor", "schemas"],
+        documented_schemas(READ_JSON, &["doctor schemas"]),
+    ),
+    entry(
+        &["fetch"],
+        git_adapter_action(
+            documented_schemas(
+                CommandContract {
+                    writes_git_refs: true,
+                    network_io: true,
+                    ..MUTATING
+                },
+                &["fetch"],
+            ),
+            "pull",
+            "workflow",
+            "Use pull for the normal remote update workflow; inspect verification output before materializing changes.",
+        ),
+    ),
+    entry(&["fork"], documented_schemas(MUTATING, &["fork"])),
+    entry(&["fsck"], documented_schemas(MUTATING, &["fsck"])),
+    entry(&["gc"], hidden(documented_schemas(GC_MUTATION, &["gc"]))),
+    entry(
+        &["git-overlay"],
+        documented_schemas(READ_JSON, &["git-overlay"]),
+    ),
+    entry(&["goto"], documented_schemas(WORKTREE_MUTATION, &["goto"])),
+    entry(
+        &["harness-bridge"],
+        hidden(documented_schemas(READ_JSONL, &["harness-bridge"])),
+    ),
+    entry(&["help"], READ_TEXT),
+    entry(&["hook"], surface(GROUP, "automation")),
+    entry(
+        &["hook", "list"],
+        surface(documented_schemas(READ_JSON, &["hook list"]), "automation"),
+    ),
+    entry(
+        &["hook", "install"],
+        surface(
+            documented_schemas(HOOK_MUTATION, &["hook install"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["hook", "uninstall"],
+        surface(
+            documented_schemas(HOOK_MUTATION, &["hook uninstall"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["hook", "events"],
+        surface(
+            documented_schemas(READ_JSON, &["hook events"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["index"],
+        hidden(documented_schemas(READ_JSON, &["index"])),
+    ),
+    entry(
+        &["init"],
+        front_door(documented_schemas(INIT, &["init"]), 200),
+    ),
+    entry(&["inspect"], documented_schemas(READ_JSON, &["inspect"])),
+    entry(&["integration"], surface(GROUP, "admin")),
+    entry(
+        &["integration", "list"],
+        surface(
+            documented_schemas(READ_JSON, &["integration list"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["integration", "install"],
+        surface(
+            documented_schemas(MUTATING, &["integration install"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["integration", "doctor"],
+        surface(
+            documented_schemas(READ_JSON, &["integration doctor"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["integration", "uninstall"],
+        surface(
+            documented_schemas(MUTATING, &["integration uninstall"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["integration", "upgrade"],
+        surface(
+            documented_schemas(MUTATING, &["integration upgrade"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["integration", "relay"],
+        hidden(surface(
+            documented_schemas(MUTATING, &["integration relay"]),
+            "admin",
         )),
     ),
-    entry(&["collapse"], MUTATING),
-    entry(&["commit"], schemas(CAPTURE, &["commit"])),
-    entry(&["commands"], documented_schemas(READ_JSON, &["commands"])),
-    entry(&["compare"], READ_JSON),
-    entry(&["completion"], READ_TEXT),
-    entry(&["conflict"], READ_JSON),
-    entry(&["conflict", "list"], READ_JSON),
-    entry(&["conflict", "show"], READ_JSON),
-    entry(&["continue"], MUTATING),
-    entry(&["context"], MUTATING),
-    entry(&["context", "set"], MUTATING),
-    entry(&["context", "get"], READ_JSON),
-    entry(&["context", "list"], READ_JSON),
-    entry(&["context", "history"], READ_JSON),
-    entry(&["context", "edit"], MUTATING),
-    entry(&["context", "supersede"], MUTATING),
-    entry(&["context", "rm"], MUTATING),
-    entry(&["context", "check"], READ_JSON),
-    entry(&["context", "suggest"], READ_JSON),
-    entry(&["context", "audit"], READ_JSON),
-    entry(&["daemon"], MUTATING_NO_OP_ID),
-    entry(&["daemon", "serve"], MUTATING_NO_OP_ID),
-    entry(&["daemon", "status"], READ_JSON),
-    entry(&["daemon", "stop"], MUTATING_NO_OP_ID),
-    entry(&["delegate"], MUTATING),
-    entry(&["diagnose"], documented_schemas(READ_JSON, &["diagnose"])),
-    entry(&["diff"], everyday(schemas(READ_JSON, &["diff"]))),
-    entry(&["discuss"], MUTATING),
-    entry(&["discuss", "open"], MUTATING),
-    entry(&["discuss", "append"], MUTATING),
-    entry(&["discuss", "resolve"], MUTATING),
-    entry(&["discuss", "list"], READ_JSON),
-    entry(&["discuss", "show"], READ_JSON),
-    entry(&["doctor"], everyday(READ_JSON)),
-    entry(&["doctor", "docs"], READ_JSON),
-    entry(&["doctor", "schemas"], READ_JSON),
-    entry(&["fetch"], schemas(MUTATING, &["fetch"])),
-    entry(&["fork"], MUTATING),
-    entry(&["fsck"], MUTATING),
-    entry(&["gc"], hidden(MUTATING)),
-    entry(&["git-overlay"], READ_JSON),
-    entry(&["goto"], WORKTREE_MUTATION),
-    entry(&["harness-bridge"], hidden(READ_JSONL)),
-    entry(&["help"], everyday(READ_TEXT)),
-    entry(&["hook"], MUTATING),
-    entry(&["hook", "list"], READ_JSON),
-    entry(&["hook", "install"], MUTATING),
-    entry(&["hook", "uninstall"], MUTATING),
-    entry(&["hook", "events"], READ_JSON),
-    entry(&["index"], hidden(READ_JSON)),
-    entry(&["init"], everyday(INIT)),
-    entry(&["inspect"], READ_JSON),
-    entry(&["integration"], MUTATING),
-    entry(&["integration", "list"], READ_JSON),
-    entry(&["integration", "install"], MUTATING),
-    entry(&["integration", "doctor"], READ_JSON),
-    entry(&["integration", "uninstall"], MUTATING),
-    entry(&["integration", "upgrade"], MUTATING),
-    entry(&["integration", "relay"], MUTATING),
     entry(
         &["log"],
-        everyday(documented_schemas(READ_JSON, &["log", "log --reflog"])),
+        front_door(documented_schemas(READ_JSON, &["log", "log --reflog"]), 130),
     ),
-    entry(&["maintenance"], MUTATING),
-    entry(&["maintenance", "inspect"], READ_JSON),
-    entry(&["maintenance", "run"], MUTATING),
-    entry(&["maintenance", "gc"], MUTATING),
-    entry(&["maintenance", "index"], READ_JSON),
-    entry(&["maintenance", "monitor"], READ_JSON),
-    entry(&["marker"], MUTATING),
+    entry(&["maintenance"], surface(GROUP, "admin")),
+    entry(
+        &["maintenance", "inspect"],
+        surface(
+            documented_schemas(READ_JSON, &["maintenance inspect"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["maintenance", "run"],
+        surface(documented_schemas(MUTATING, &["maintenance run"]), "admin"),
+    ),
+    entry(
+        &["maintenance", "gc"],
+        surface(
+            documented_schemas(GC_MUTATION, &["maintenance gc"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["maintenance", "index"],
+        surface(
+            documented_schemas(READ_JSON, &["maintenance index"]),
+            "admin",
+        ),
+    ),
+    entry(
+        &["maintenance", "monitor"],
+        surface(
+            documented_schemas(READ_JSON, &["maintenance monitor"]),
+            "admin",
+        ),
+    ),
+    entry(&["marker"], GROUP),
     entry(
         &["marker", "list"],
         documented_schemas(READ_JSON, &["marker list"]),
@@ -415,59 +1321,150 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["merge"],
-        everyday(schemas(WORKTREE_MUTATION, &["merge --preview"])),
+        front_door(
+            advertised_action(
+                documented_schemas(WORKTREE_MUTATION, &["merge --preview"]),
+                "heddle merge <thread> --preview",
+                &["heddle", "merge", "<thread>", "--preview"],
+                &["thread"],
+                true,
+                false,
+            ),
+            60,
+        ),
     ),
-    entry(&["monitor"], hidden(READ_JSON)),
+    entry(
+        &["monitor"],
+        hidden(documented_schemas(READ_JSON, &["monitor"])),
+    ),
     #[cfg(feature = "client")]
     entry(&["presence"], READ_JSON),
     #[cfg(feature = "client")]
     entry(&["presence", "publish"], READ_JSON),
-    entry(&["pull"], schemas(WORKTREE_MUTATION, &["pull"])),
     entry(
-        &["purge"],
-        CommandContract {
-            destructive_requires_force: true,
-            ..MUTATING
-        },
+        &["pull"],
+        front_door(
+            documented_schemas(
+                CommandContract {
+                    writes_git_refs: true,
+                    network_io: true,
+                    ..WORKTREE_MUTATION
+                },
+                &["pull"],
+            ),
+            90,
+        ),
     ),
+    entry(&["purge"], GROUP),
     entry(
         &["purge", "apply"],
-        CommandContract {
-            destructive_requires_force: true,
-            ..MUTATING
-        },
+        documented_schemas(
+            CommandContract {
+                destructive_requires_force: true,
+                ..DESTRUCTIVE_DATA_MUTATION
+            },
+            &["purge apply"],
+        ),
     ),
-    entry(&["purge", "list"], READ_JSON),
-    entry(&["push"], schemas(MUTATING, &["push"])),
-    entry(&["query"], READ_JSON),
-    entry(&["ready"], everyday(schemas(CAPTURE, &["ready"]))),
-    entry(&["rebase"], WORKTREE_MUTATION),
-    entry(&["redact"], MUTATING),
-    entry(&["redact", "apply"], MUTATING),
-    entry(&["redact", "list"], READ_JSON),
-    entry(&["redact", "show"], READ_JSON),
-    entry(&["redact", "trust"], MUTATING),
-    entry(&["redact", "trust", "add"], MUTATING),
-    entry(&["redact", "trust", "list"], READ_JSON),
-    entry(&["redact", "trust", "remove"], MUTATING),
-    entry(&["redo"], WORKTREE_MUTATION),
-    entry(&["remote"], MUTATING),
-    entry(&["remote", "list"], schemas(READ_JSON, &["remote list"])),
-    entry(&["remote", "add"], MUTATING),
-    entry(&["remote", "remove"], MUTATING),
-    entry(&["remote", "set-default"], MUTATING),
-    entry(&["remote", "show"], schemas(READ_JSON, &["remote show"])),
-    entry(&["resolve"], everyday(MUTATING)),
-    entry(&["retro"], READ_JSON),
-    entry(&["revert"], MUTATING),
-    entry(&["review"], MUTATING),
+    entry(
+        &["purge", "list"],
+        documented_schemas(READ_JSON, &["purge list"]),
+    ),
+    entry(
+        &["push"],
+        front_door(
+            advertised_action(
+                documented_schemas(
+                    CommandContract {
+                        writes_git_refs: true,
+                        network_io: true,
+                        ..MUTATING
+                    },
+                    &["push"],
+                ),
+                "heddle push",
+                &["heddle", "push"],
+                &[],
+                true,
+                true,
+            ),
+            80,
+        ),
+    ),
+    entry(&["query"], documented_schemas(READ_JSON, &["query"])),
+    entry(
+        &["ready"],
+        front_door(documented_schemas(CAPTURE, &["ready"]), 50),
+    ),
+    entry(
+        &["rebase"],
+        documented_schemas(WORKTREE_MUTATION, &["rebase"]),
+    ),
+    entry(&["redact"], GROUP),
+    entry(
+        &["redact", "apply"],
+        documented_schemas(DATA_MUTATION, &["redact apply"]),
+    ),
+    entry(
+        &["redact", "list"],
+        documented_schemas(READ_JSON, &["redact list"]),
+    ),
+    entry(
+        &["redact", "show"],
+        documented_schemas(READ_JSON, &["redact show"]),
+    ),
+    entry(&["redact", "trust"], GROUP),
+    entry(
+        &["redact", "trust", "add"],
+        documented_schemas(DATA_MUTATION, &["redact trust add"]),
+    ),
+    entry(
+        &["redact", "trust", "list"],
+        documented_schemas(READ_JSON, &["redact trust list"]),
+    ),
+    entry(
+        &["redact", "trust", "remove"],
+        documented_schemas(DATA_MUTATION, &["redact trust remove"]),
+    ),
+    entry(&["redo"], documented_schemas(WORKTREE_MUTATION, &["redo"])),
+    entry(&["remote"], surface(GROUP, "native")),
+    entry(
+        &["remote", "list"],
+        documented_schemas(READ_JSON, &["remote list"]),
+    ),
+    entry(
+        &["remote", "add"],
+        documented_schemas(CONFIG_MUTATION, &["remote add"]),
+    ),
+    entry(
+        &["remote", "remove"],
+        documented_schemas(CONFIG_MUTATION, &["remote remove"]),
+    ),
+    entry(
+        &["remote", "set-default"],
+        documented_schemas(CONFIG_MUTATION, &["remote set-default"]),
+    ),
+    entry(
+        &["remote", "show"],
+        documented_schemas(READ_JSON, &["remote show"]),
+    ),
+    entry(
+        &["resolve"],
+        front_door(documented_schemas(MUTATING, &["resolve"]), 300),
+    ),
+    entry(&["retro"], documented_schemas(READ_JSON, &["retro"])),
+    entry(
+        &["revert"],
+        documented_schemas(WORKTREE_MUTATION, &["revert"]),
+    ),
+    entry(&["review"], GROUP),
     entry(
         &["review", "show"],
         documented_schemas(READ_JSON, &["review show"]),
     ),
     entry(
         &["review", "sign"],
-        documented_schemas(persistent_op_id(MUTATING), &["review sign"]),
+        documented_schemas(MUTATING, &["review sign"]),
     ),
     entry(
         &["review", "next"],
@@ -477,38 +1474,155 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["review", "health"],
         documented_schemas(READ_JSON, &["review health"]),
     ),
-    entry(&["run"], MUTATING_NO_OP_ID),
-    entry(&["schemas"], READ_JSON),
-    entry(&["semantic"], READ_JSON),
-    entry(&["semantic", "hot"], READ_JSON),
-    entry(&["session"], MUTATING),
-    entry(&["session", "start"], MUTATING),
-    entry(&["session", "segment"], MUTATING),
-    entry(&["session", "end"], MUTATING),
-    entry(&["session", "show"], READ_JSON),
-    entry(&["session", "list"], READ_JSON),
+    entry(&["run"], surface(EXTERNAL_WORKTREE_COMMAND, "automation")),
+    entry(
+        &["schemas"],
+        surface(documented_schemas(READ_JSON, &["schemas"]), "automation"),
+    ),
+    entry(&["semantic"], GROUP),
+    entry(
+        &["semantic", "hot"],
+        documented_schemas(READ_JSON, &["semantic hot"]),
+    ),
+    entry(&["session"], surface(GROUP, "automation")),
+    entry(
+        &["session", "start"],
+        surface(
+            documented_schemas(MUTATING, &["session start"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["session", "segment"],
+        surface(
+            documented_schemas(MUTATING, &["session segment"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["session", "end"],
+        surface(documented_schemas(MUTATING, &["session end"]), "automation"),
+    ),
+    entry(
+        &["session", "show"],
+        surface(
+            documented_schemas(READ_JSON, &["session show"]),
+            "automation",
+        ),
+    ),
+    entry(
+        &["session", "list"],
+        surface(
+            documented_schemas(READ_JSON, &["session list"]),
+            "automation",
+        ),
+    ),
     entry(&["shell"], READ_TEXT),
     entry(&["shell", "init"], READ_TEXT),
-    entry(&["ship"], MUTATING),
+    entry(
+        &["ship"],
+        front_door(
+            documented_schemas(
+                CommandContract {
+                    writes_git_refs: true,
+                    network_io: true,
+                    ..MUTATING
+                },
+                &["ship"],
+            ),
+            70,
+        ),
+    ),
     entry(
         &["show"],
-        everyday(documented_schemas(READ_JSON, &["show"])),
+        front_door(documented_schemas(READ_JSON, &["show"]), 140),
     ),
-    entry(&["start"], everyday(MUTATING)),
-    entry(&["stash"], WORKTREE_MUTATION),
-    entry(&["stash", "push"], WORKTREE_MUTATION),
-    entry(&["stash", "list"], READ_JSON),
-    entry(&["stash", "pop"], DESTRUCTIVE_WORKTREE_MUTATION),
-    entry(&["stash", "apply"], WORKTREE_MUTATION),
-    entry(&["stash", "drop"], DESTRUCTIVE_WORKTREE_MUTATION),
-    entry(&["stash", "clear"], DESTRUCTIVE_WORKTREE_MUTATION),
-    entry(&["stash", "show"], READ_JSON),
+    entry(
+        &["start"],
+        front_door(documented_schemas(WORKTREE_MUTATION, &["start"]), 40),
+    ),
+    entry(
+        &["stash"],
+        git_adapter_action(
+            READ_TEXT,
+            "capture",
+            "conceptual_home",
+            "Use capture, commit, and thread captures for durable Heddle saves.",
+        ),
+    ),
+    entry(
+        &["stash", "push"],
+        git_adapter_action(
+            documented_schemas(WORKTREE_ONLY_MUTATION, &["stash push"]),
+            "capture",
+            "workflow",
+            "Use capture for a durable named save point before changing the worktree.",
+        ),
+    ),
+    entry(
+        &["stash", "list"],
+        git_adapter_action(
+            documented_schemas(READ_JSON, &["stash list"]),
+            "thread captures",
+            "conceptual_home",
+            "Use thread captures to inspect durable Heddle save points.",
+        ),
+    ),
+    entry(
+        &["stash", "pop"],
+        git_adapter_action(
+            documented_schemas(
+                CommandContract {
+                    destructive_data: true,
+                    ..WORKTREE_ONLY_MUTATION
+                },
+                &["stash pop"],
+            ),
+            "undo",
+            "conceptual_home",
+            "Use undo to reverse the last Heddle operation; stash pop is not a direct semantic match.",
+        ),
+    ),
+    entry(
+        &["stash", "apply"],
+        git_adapter_action(
+            documented_schemas(WORKTREE_ONLY_MUTATION, &["stash apply"]),
+            "undo",
+            "conceptual_home",
+            "Use undo to reverse the last Heddle operation; stash apply is not a direct semantic match.",
+        ),
+    ),
+    entry(
+        &["stash", "drop"],
+        git_adapter_action(
+            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash drop"]),
+            "thread captures",
+            "conceptual_home",
+            "Use thread captures to inspect and manage durable Heddle save points.",
+        ),
+    ),
+    entry(
+        &["stash", "clear"],
+        git_adapter_action(
+            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["stash clear"]),
+            "thread captures",
+            "conceptual_home",
+            "Use thread captures to inspect and manage durable Heddle save points.",
+        ),
+    ),
+    entry(
+        &["stash", "show"],
+        git_adapter_alias(documented_schemas(READ_JSON, &["stash show"]), "show"),
+    ),
     entry(
         &["status"],
-        everyday(documented_schemas(READ_JSON_OR_JSONL, &["status"])),
+        front_door(documented_schemas(READ_JSON_OR_JSONL, &["status"]), 10),
     ),
-    entry(&["store"], MUTATING),
-    entry(&["store", "warm"], MUTATING),
+    entry(&["store"], surface(GROUP, "admin")),
+    entry(
+        &["store", "warm"],
+        surface(documented_schemas(MUTATING, &["store warm"]), "admin"),
+    ),
     #[cfg(feature = "client")]
     entry(&["support"], MUTATING),
     #[cfg(feature = "client")]
@@ -517,76 +1631,174 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["support", "list"], READ_JSON),
     #[cfg(feature = "client")]
     entry(&["support", "revoke"], MUTATING_NO_OP_ID),
-    entry(&["switch"], WORKTREE_MUTATION),
-    entry(&["sync"], MUTATING),
-    entry(&["thread"], everyday(MUTATING)),
-    entry(&["thread", "create"], MUTATING),
-    entry(&["thread", "current"], READ_JSON),
-    entry(&["thread", "switch"], WORKTREE_MUTATION),
+    entry(
+        &["switch"],
+        git_adapter_alias(
+            documented_schemas(WORKTREE_MUTATION, &["switch"]),
+            "thread switch",
+        ),
+    ),
+    entry(&["sync"], documented_schemas(MUTATING, &["sync"])),
+    entry(&["thread"], surface(GROUP, "native")),
+    entry(
+        &["thread", "create"],
+        documented_schemas(MUTATING, &["thread create"]),
+    ),
+    entry(
+        &["thread", "current"],
+        documented_schemas(READ_JSON, &["thread current"]),
+    ),
+    entry(
+        &["thread", "switch"],
+        documented_schemas(WORKTREE_MUTATION, &["thread switch"]),
+    ),
     entry(&["thread", "cd"], READ_TEXT),
     entry(
         &["thread", "list"],
         documented_schemas(READ_JSON, &["thread list"]),
     ),
-    entry(&["thread", "show"], READ_JSON_OR_JSONL),
-    entry(&["thread", "captures"], READ_JSON),
-    entry(&["thread", "rename"], MUTATING),
-    entry(&["thread", "refresh"], WORKTREE_MUTATION),
-    entry(&["thread", "move"], MUTATING),
-    entry(&["thread", "absorb"], MUTATING),
-    entry(&["thread", "resolve"], MUTATING),
-    entry(&["thread", "promote"], WORKTREE_MUTATION),
-    entry(&["thread", "drop"], DESTRUCTIVE_WORKTREE_MUTATION),
-    entry(&["thread", "approve"], MUTATING),
-    entry(&["thread", "approvals"], READ_JSON),
-    entry(&["thread", "revoke-approval"], MUTATING),
-    entry(&["thread", "check-merge"], READ_JSON),
-    entry(&["thread", "cleanup"], DESTRUCTIVE_WORKTREE_MUTATION),
-    entry(&["transaction"], hidden(MUTATING)),
-    entry(&["transaction", "begin"], MUTATING),
+    entry(
+        &["thread", "show"],
+        documented_schemas(READ_JSON_OR_JSONL, &["thread show"]),
+    ),
+    entry(
+        &["thread", "captures"],
+        documented_schemas(READ_JSON, &["thread captures"]),
+    ),
+    entry(
+        &["thread", "rename"],
+        documented_schemas(MUTATING, &["thread rename"]),
+    ),
+    entry(
+        &["thread", "refresh"],
+        documented_schemas(WORKTREE_MUTATION, &["thread refresh"]),
+    ),
+    entry(
+        &["thread", "move"],
+        documented_schemas(MUTATING, &["thread move"]),
+    ),
+    entry(
+        &["thread", "absorb"],
+        documented_schemas(MUTATING, &["thread absorb"]),
+    ),
+    entry(
+        &["thread", "resolve"],
+        documented_schemas(MUTATING, &["thread resolve"]),
+    ),
+    entry(
+        &["thread", "promote"],
+        documented_schemas(WORKTREE_MUTATION, &["thread promote"]),
+    ),
+    entry(
+        &["thread", "drop"],
+        documented_schemas(DESTRUCTIVE_WORKTREE_MUTATION, &["thread drop"]),
+    ),
+    entry(
+        &["thread", "approve"],
+        documented_schemas(MUTATING, &["thread approve"]),
+    ),
+    entry(
+        &["thread", "approvals"],
+        documented_schemas(READ_JSON, &["thread approvals"]),
+    ),
+    entry(
+        &["thread", "revoke-approval"],
+        documented_schemas(MUTATING, &["thread revoke-approval"]),
+    ),
+    entry(
+        &["thread", "check-merge"],
+        documented_schemas(READ_JSON, &["thread check-merge"]),
+    ),
+    entry(
+        &["thread", "cleanup"],
+        documented_schemas(DESTRUCTIVE_WORKTREE_MUTATION, &["thread cleanup"]),
+    ),
+    entry(&["transaction"], hidden(GROUP)),
+    entry(
+        &["transaction", "begin"],
+        hidden(documented_schemas(MUTATING, &["transaction begin"])),
+    ),
     entry(
         &["transaction", "commit"],
         documented_schemas(MUTATING, &["transaction commit"]),
     ),
-    entry(&["transaction", "abort"], MUTATING),
-    entry(&["transaction", "status"], READ_JSON),
     entry(
-        &["trust"],
-        everyday(documented_schemas(READ_JSON, &["trust"])),
+        &["transaction", "abort"],
+        hidden(documented_schemas(MUTATING, &["transaction abort"])),
     ),
-    entry(&["try"], MUTATING),
-    entry(&["undo"], everyday(WORKTREE_MUTATION)),
-    entry(&["version"], READ_JSON),
-    entry(&["watch"], READ_JSONL),
-    entry(&["workspace"], everyday(READ_JSON)),
+    entry(
+        &["transaction", "status"],
+        hidden(documented_schemas(READ_JSON, &["transaction status"])),
+    ),
+    entry(
+        &["verify"],
+        front_door(documented_schemas(READ_JSON, &["verify"]), 110),
+    ),
+    entry(
+        &["try"],
+        documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["try"]),
+    ),
+    entry(
+        &["undo"],
+        front_door(documented_schemas(WORKTREE_MUTATION, &["undo"]), 100),
+    ),
+    entry(&["version"], documented_schemas(READ_JSON, &["version"])),
+    entry(
+        &["watch"],
+        surface(documented_schemas(READ_JSONL, &["watch"]), "automation"),
+    ),
+    entry(
+        &["workspace"],
+        documented_schemas(READ_JSON, &["workspace show"]),
+    ),
     entry(
         &["workspace", "show"],
         documented_schemas(READ_JSON_OR_JSONL, &["workspace show"]),
     ),
 ];
 
+static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =
+    OnceLock::new();
+
 const fn entry(path: &'static [&'static str], contract: CommandContract) -> CommandContractEntry {
     CommandContractEntry { path, contract }
 }
 
-pub fn cmd_commands(cli: &Cli) -> Result<()> {
-    let output = build_command_catalog();
+pub fn cmd_commands(cli: &Cli, args: &CommandCatalogArgs) -> Result<()> {
+    let mut output = build_command_catalog();
+    apply_command_catalog_filters(&mut output, args);
     if should_output_json(cli, None) {
-        write_stdout(&format!("{}\n", serde_json::to_string(&output)?))?;
+        write_json_stdout(&output)?;
         return Ok(());
     }
 
     let mut rendered = String::new();
     rendered.push_str(&format!("{}\n", style::bold("Command catalog")));
-    rendered.push_str("Use `heddle commands --output json` for flags, arguments, and tiers.\n\n");
-    for tier in ["everyday", "advanced"] {
-        rendered.push_str(&format!("{}:\n", style::bold(tier)));
-        for command in output
+    rendered.push_str(
+        "Use `heddle commands --output json` for flags, arguments, side effects, schemas, and canonical command mappings.\n\n",
+    );
+    for title in [
+        "Native loop",
+        "Power surfaces",
+        "Git interop",
+        "Automation and admin",
+    ] {
+        rendered.push_str(&format!("{}:\n", style::bold(title)));
+        let mut section_commands = output
             .commands
             .iter()
-            .filter(|command| command.tier == tier && command.path.len() == 1)
-        {
-            rendered.push_str(&format!("  {:<14}  {}\n", command.display, command.summary));
+            .filter(|command| command_in_text_section(command, title))
+            .collect::<Vec<_>>();
+        section_commands.sort_by_key(|command| (command.help_rank, command.display.as_str()));
+        for command in section_commands {
+            let canonical = command
+                .canonical_action
+                .as_ref()
+                .map_or_else(String::new, canonical_action_text_suffix);
+            rendered.push_str(&format!(
+                "  {:<14}  {}{}\n",
+                command.display, command.summary, canonical
+            ));
         }
         rendered.push('\n');
     }
@@ -594,13 +1806,59 @@ pub fn cmd_commands(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn write_stdout(text: &str) -> Result<()> {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    match out.write_all(text.as_bytes()) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-        Err(err) => Err(err.into()),
+fn apply_command_catalog_filters(output: &mut CommandCatalogOutput, args: &CommandCatalogArgs) {
+    if args.commands.is_empty() && args.tier.is_empty() && !args.mutating && !args.supports_op_id {
+        return;
+    }
+
+    let command_filters = args
+        .commands
+        .iter()
+        .map(|command| normalize_command_filter(command))
+        .filter(|command| !command.is_empty())
+        .collect::<Vec<_>>();
+    let tier_filters = args
+        .tier
+        .iter()
+        .map(|tier| tier.as_str())
+        .collect::<Vec<_>>();
+
+    output.commands.retain(|command| {
+        (command_filters.is_empty()
+            || command_filters
+                .iter()
+                .any(|filter| command_matches_filter(command, filter)))
+            && (tier_filters.is_empty()
+                || tier_filters
+                    .iter()
+                    .any(|tier| command.tier.as_str() == *tier))
+            && (!args.mutating || command.mutates)
+            && (!args.supports_op_id || command.supports_op_id)
+    });
+}
+
+fn normalize_command_filter(command: &str) -> Vec<String> {
+    command
+        .split_whitespace()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn command_matches_filter(command: &CommandCatalogEntry, filter: &[String]) -> bool {
+    command.path == filter || command.path.starts_with(filter)
+}
+
+fn command_in_text_section(command: &CommandCatalogEntry, title: &str) -> bool {
+    if command.path.len() != 1 {
+        return false;
+    }
+    match title {
+        "Native loop" => command.help_visibility == "everyday",
+        "Power surfaces" => command.help_visibility == "advanced" && command.surface == "native",
+        "Git interop" => command.surface == "git_adapter",
+        "Automation and admin" => matches!(command.surface.as_str(), "automation" | "admin"),
+        _ => false,
     }
 }
 
@@ -612,22 +1870,54 @@ pub fn build_command_catalog() -> CommandCatalogOutput {
     );
 
     let command = Cli::command();
-    let global_options = command
+    let mut global_options: Vec<_> = command
         .get_arguments()
-        .filter(|arg| arg.is_global_set() && !arg.is_hide_set())
+        .filter(|arg| arg.is_global_set() && should_catalog_global_option(arg))
         .map(catalog_option)
         .collect();
+    if !command.is_disable_help_flag_set() {
+        global_options.push(generated_help_option());
+    }
 
     let mut commands = Vec::new();
     walk_commands(&command, &mut Vec::new(), &mut commands);
     CommandCatalogOutput {
+        kind: "command_catalog".to_string(),
+        executable_path: heddle_argv0(),
         commands,
         global_options,
         recommended_action_placeholders: RECOMMENDED_ACTION_PLACEHOLDERS
             .iter()
             .map(|action| (*action).to_string())
             .collect(),
+        recommended_action_templates: RECOMMENDED_ACTION_TEMPLATES
+            .iter()
+            .map(|(action, argv_template, required_inputs, agent_may_fill)| {
+                action_template_from_parts(action, argv_template, required_inputs, *agent_may_fill)
+            })
+            .collect(),
     }
+}
+
+pub(crate) fn heddle_argv0() -> String {
+    match std::env::current_exe() {
+        Ok(path) => {
+            let file_name = path.file_name().and_then(|name| name.to_str());
+            if matches!(file_name, Some("heddle") | Some("heddle.exe")) {
+                path.display().to_string()
+            } else {
+                "heddle".to_string()
+            }
+        }
+        Err(_) => "heddle".to_string(),
+    }
+}
+
+pub(crate) fn normalize_heddle_argv(mut argv: Vec<String>) -> Vec<String> {
+    if argv.first().is_some_and(|first| first == "heddle") {
+        argv[0] = heddle_argv0();
+    }
+    argv
 }
 
 fn walk_commands(
@@ -635,7 +1925,7 @@ fn walk_commands(
     prefix: &mut Vec<String>,
     out: &mut Vec<CommandCatalogEntry>,
 ) {
-    for subcommand in command.get_subcommands().filter(|cmd| !cmd.is_hide_set()) {
+    for subcommand in command.get_subcommands() {
         prefix.push(subcommand.get_name().to_string());
         out.push(catalog_entry(subcommand, prefix));
         walk_commands(subcommand, prefix, out);
@@ -655,26 +1945,59 @@ fn catalog_entry(command: &clap::Command, path: &[String]) -> CommandCatalogEntr
     }
 
     let contract = command_contract(path);
+    if contract.supports_op_id {
+        options.push(op_id_option());
+    }
     CommandCatalogEntry {
         path: path.to_vec(),
         display: path.join(" "),
-        tier: command_help_tier_for_path(path).to_string(),
-        summary: command
-            .get_about()
-            .or_else(|| command.get_long_about())
-            .map(|about| about.to_string().lines().next().unwrap_or("").to_string())
-            .unwrap_or_default(),
-        has_subcommands: command.get_subcommands().any(|cmd| !cmd.is_hide_set()),
+        aliases: command
+            .get_all_aliases()
+            .map(std::string::ToString::to_string)
+            .collect(),
+        tier: help_visibility_to_tier(contract.help_visibility).to_string(),
+        surface: contract.surface.to_string(),
+        help_visibility: contract.help_visibility.to_string(),
+        help_rank: contract.help_rank,
+        canonical_command: contract
+            .canonical_command
+            .map(std::string::ToString::to_string),
+        canonical_action: canonical_action(contract),
+        command_action: command_action(command, path, contract),
+        summary: clean_catalog_summary(
+            command
+                .get_about()
+                .or_else(|| command.get_long_about())
+                .map(|about| about.to_string().lines().next().unwrap_or("").to_string())
+                .unwrap_or_default(),
+        ),
+        has_subcommands: command.get_subcommands().next().is_some(),
         supports_json: contract.supports_json,
         mutates: contract.mutates,
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
+        op_id_behavior: op_id_behavior(contract).to_string(),
         observe_only: contract.observe_only,
         may_initialize: contract.may_initialize,
         may_import_git: contract.may_import_git,
         may_write_worktree: contract.may_write_worktree,
         may_move_ref: contract.may_move_ref,
         destructive_requires_force: contract.destructive_requires_force,
+        writes_heddle_refs: contract.writes_heddle_refs,
+        writes_git_refs: contract.writes_git_refs,
+        writes_worktree: contract.writes_worktree,
+        writes_config: contract.writes_config,
+        writes_hooks: contract.writes_hooks,
+        network_io: contract.network_io,
+        daemon_process: contract.daemon_process,
+        object_gc: contract.object_gc,
+        external_command: contract.external_command,
+        requires_git_executable: contract.requires_git_executable,
+        destructive_data: contract.destructive_data,
+        side_effects: side_effects(contract)
+            .iter()
+            .map(|effect| (*effect).to_string())
+            .collect(),
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
@@ -693,21 +2016,305 @@ fn catalog_entry(command: &clap::Command, path: &[String]) -> CommandCatalogEntr
     }
 }
 
+fn canonical_action(contract: CommandContract) -> Option<CanonicalAction> {
+    let command = contract.canonical_command?;
+    let kind = contract.canonical_kind.unwrap_or("direct_command");
+    let (argv, template) = canonical_action_metadata(command, kind);
+    Some(CanonicalAction {
+        command: command.to_string(),
+        kind: kind.to_string(),
+        executable: argv.is_some(),
+        note: contract.canonical_note.unwrap_or_default().to_string(),
+        argv,
+        template,
+    })
+}
+
+fn canonical_action_metadata(
+    command: &str,
+    kind: &str,
+) -> (Option<Vec<String>>, Option<ActionTemplate>) {
+    match (command, kind) {
+        ("adopt", "workflow") => (
+            None,
+            Some(action_template_from_parts(
+                "heddle adopt --ref <branch>",
+                &["heddle", "adopt", "--ref", "<branch>"],
+                &["branch"],
+                true,
+            )),
+        ),
+        ("capture", "workflow") => (
+            None,
+            Some(action_template_from_parts(
+                "heddle capture -m <message>",
+                &["heddle", "capture", "-m", "<message>"],
+                &["message"],
+                true,
+            )),
+        ),
+        ("thread switch", "direct_command") => (
+            None,
+            Some(action_template_from_parts(
+                "heddle thread switch <thread>",
+                &["heddle", "thread", "switch", "<thread>"],
+                &["thread"],
+                true,
+            )),
+        ),
+        (_, "direct_command") => {
+            let argv = std::iter::once("heddle".to_string())
+                .chain(command.split_whitespace().map(str::to_string))
+                .collect::<Vec<_>>();
+            (Some(normalize_heddle_argv(argv)), None)
+        }
+        _ => (None, None),
+    }
+}
+
+fn command_action(
+    command: &clap::Command,
+    path: &[String],
+    contract: CommandContract,
+) -> Option<CommandAction> {
+    if let Some(action) = contract.advertised_action {
+        return Some(command_action_from_advertised(action));
+    }
+    if command.get_subcommands().next().is_some() {
+        return None;
+    }
+
+    let mut argv_template = std::iter::once("heddle".to_string())
+        .chain(path.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut required_inputs = Vec::new();
+    for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+        if !arg.is_required_set() {
+            continue;
+        }
+        if let Some(long) = arg.get_long() {
+            argv_template.push(format!("--{long}"));
+        } else if let Some(short) = arg.get_short() {
+            argv_template.push(format!("-{short}"));
+        }
+        let names = value_names(arg);
+        if names.is_empty() {
+            required_inputs.push(arg.get_id().as_str().to_string());
+            if arg.get_long().is_none() && arg.get_short().is_none() {
+                argv_template.push(format!("<{}>", arg.get_id().as_str()));
+            }
+        } else {
+            for name in names {
+                let input = name.to_ascii_lowercase();
+                required_inputs.push(input.clone());
+                argv_template.push(format!("<{input}>"));
+            }
+        }
+    }
+
+    let action = argv_template.join(" ");
+    if required_inputs.is_empty() {
+        Some(CommandAction {
+            action,
+            executable: true,
+            argv: Some(normalize_heddle_argv(argv_template)),
+            template: None,
+        })
+    } else {
+        Some(CommandAction {
+            action: action.clone(),
+            executable: false,
+            argv: None,
+            template: Some(action_template_from_owned(
+                action,
+                argv_template,
+                required_inputs,
+                true,
+            )),
+        })
+    }
+}
+
+fn command_action_from_advertised(action: AdvertisedAction) -> CommandAction {
+    let argv_template = action
+        .argv_template
+        .iter()
+        .map(|part| (*part).to_string())
+        .collect::<Vec<_>>();
+    if action.executable {
+        CommandAction {
+            action: action.action.to_string(),
+            executable: true,
+            argv: Some(normalize_heddle_argv(argv_template)),
+            template: None,
+        }
+    } else {
+        CommandAction {
+            action: action.action.to_string(),
+            executable: false,
+            argv: None,
+            template: Some(action_template_from_parts(
+                action.action,
+                action.argv_template,
+                action.required_inputs,
+                action.agent_may_fill,
+            )),
+        }
+    }
+}
+
+fn action_template_from_parts(
+    action: &str,
+    argv_template: &[&str],
+    required_inputs: &[&str],
+    agent_may_fill: bool,
+) -> ActionTemplate {
+    action_template_from_owned(
+        action.to_string(),
+        argv_template
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect(),
+        required_inputs
+            .iter()
+            .map(|input| (*input).to_string())
+            .collect(),
+        agent_may_fill,
+    )
+}
+
+fn action_template_from_owned(
+    action: String,
+    argv_template: Vec<String>,
+    required_inputs: Vec<String>,
+    agent_may_fill: bool,
+) -> ActionTemplate {
+    ActionTemplate {
+        action,
+        argv_template: normalize_heddle_argv(argv_template),
+        required_inputs,
+        agent_may_fill,
+    }
+}
+
+fn canonical_action_text_suffix(action: &CanonicalAction) -> String {
+    let verb = match action.kind.as_str() {
+        "direct_command" => "use",
+        "command_family" => "see",
+        "workflow" => "start with",
+        "conceptual_home" => "see",
+        _ => "see",
+    };
+    format!(" ({verb} `{}`)", action.command)
+}
+
+fn clean_catalog_summary(summary: String) -> String {
+    let stripped = summary
+        .trim_start_matches("Automation/workflow command:")
+        .trim_start();
+    let mut chars = stripped.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn should_catalog_global_option(arg: &clap::Arg) -> bool {
+    !arg.is_hide_set()
+}
+
 fn side_effect_class(contract: CommandContract) -> &'static str {
     if contract.observe_only {
         "observe_only"
-    } else if contract.destructive_requires_force {
+    } else if contract.destructive_requires_force && contract.writes_worktree {
         "destructive_worktree_mutation"
-    } else if contract.may_write_worktree {
+    } else if contract.destructive_data {
+        "destructive_data"
+    } else if contract.object_gc {
+        "object_gc"
+    } else if contract.writes_worktree {
         "worktree_mutation"
     } else if contract.may_import_git {
         "git_import"
     } else if contract.may_initialize {
         "initialize"
-    } else if contract.may_move_ref {
+    } else if contract.writes_hooks {
+        "hook_mutation"
+    } else if contract.writes_config {
+        "config_mutation"
+    } else if contract.network_io {
+        "network_mutation"
+    } else if contract.daemon_process {
+        "daemon_process"
+    } else if contract.external_command {
+        "external_command"
+    } else if contract.writes_heddle_refs || contract.writes_git_refs || contract.may_move_ref {
         "ref_mutation"
     } else if contract.mutates {
         "mutation"
+    } else {
+        "none"
+    }
+}
+
+fn side_effects(contract: CommandContract) -> Vec<&'static str> {
+    if contract.observe_only {
+        return vec!["observe_only"];
+    }
+
+    let mut effects = Vec::new();
+    if contract.may_initialize {
+        effects.push("initialize");
+    }
+    if contract.may_import_git {
+        effects.push("import_git");
+    }
+    if contract.writes_heddle_refs {
+        effects.push("writes_heddle_refs");
+    }
+    if contract.writes_git_refs {
+        effects.push("writes_git_refs");
+    }
+    if contract.writes_worktree {
+        effects.push("writes_worktree");
+    } else if contract.may_write_worktree {
+        effects.push("may_write_worktree");
+    }
+    if contract.writes_config {
+        effects.push("writes_config");
+    }
+    if contract.writes_hooks {
+        effects.push("writes_hooks");
+    }
+    if contract.network_io {
+        effects.push("network_io");
+    }
+    if contract.daemon_process {
+        effects.push("daemon_process");
+    }
+    if contract.object_gc {
+        effects.push("object_gc");
+    }
+    if contract.external_command {
+        effects.push("external_command");
+    }
+    if contract.destructive_requires_force {
+        effects.push("destructive_requires_force");
+    }
+    if contract.destructive_data {
+        effects.push("destructive_data");
+    }
+    if effects.is_empty() && contract.mutates {
+        effects.push("mutation");
+    }
+    effects
+}
+
+fn op_id_behavior(contract: CommandContract) -> &'static str {
+    if contract.persists_op_id {
+        "generated_resume"
+    } else if contract.supports_op_id {
+        "explicit_replay"
     } else {
         "none"
     }
@@ -733,6 +2340,7 @@ fn catalog_option(arg: &clap::Arg) -> CommandCatalogOption {
     CommandCatalogOption {
         id: arg.get_id().as_str().to_string(),
         long: arg.get_long().map(str::to_string),
+        aliases: option_aliases(arg),
         short: arg.get_short().map(|short| short.to_string()),
         value_names: value_names(arg),
         value_kind: value_kind(arg).to_string(),
@@ -750,6 +2358,49 @@ fn catalog_option(arg: &clap::Arg) -> CommandCatalogOption {
         required: arg.is_required_set(),
         global: arg.is_global_set(),
     }
+}
+
+fn generated_help_option() -> CommandCatalogOption {
+    CommandCatalogOption {
+        id: "help".to_string(),
+        long: Some("help".to_string()),
+        aliases: Vec::new(),
+        short: Some("h".to_string()),
+        value_names: Vec::new(),
+        value_kind: "boolean".to_string(),
+        default_values: Vec::new(),
+        possible_values: Vec::new(),
+        help: Some("Print help".to_string()),
+        required: false,
+        global: true,
+    }
+}
+
+fn op_id_option() -> CommandCatalogOption {
+    CommandCatalogOption {
+        id: "op_id".to_string(),
+        long: Some("op-id".to_string()),
+        aliases: Vec::new(),
+        short: None,
+        value_names: vec!["UUID".to_string()],
+        value_kind: "string".to_string(),
+        default_values: Vec::new(),
+        possible_values: Vec::new(),
+        help: Some("Client-supplied operation id (UUID v4) for idempotent retries.".to_string()),
+        required: false,
+        global: true,
+    }
+}
+
+fn option_aliases(arg: &clap::Arg) -> Vec<String> {
+    let mut aliases = std::collections::BTreeSet::new();
+    for alias in arg.get_all_aliases().unwrap_or_default() {
+        aliases.insert(alias.to_string());
+    }
+    for alias in arg.get_visible_aliases().unwrap_or_default() {
+        aliases.insert(alias.to_string());
+    }
+    aliases.into_iter().collect()
 }
 
 fn catalog_argument(arg: &clap::Arg) -> CommandCatalogArgument {
@@ -778,12 +2429,24 @@ fn value_names(arg: &clap::Arg) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub(crate) fn command_contract(path: &[String]) -> CommandContract {
+fn command_contract(path: &[String]) -> CommandContract {
     command_contract_for_path(path.iter().map(String::as_str))
         .unwrap_or_else(|| panic!("missing command contract for `{}`", path.join(" ")))
 }
 
-pub(crate) fn command_contract_for_path<'a>(
+fn command_contract_for_path<'a>(
+    path: impl IntoIterator<Item = &'a str>,
+) -> Option<CommandContract> {
+    let path = path.into_iter().collect::<Vec<_>>();
+    active_command_contract_entries()
+        .iter()
+        .copied()
+        .find(|entry| entry.path == path.as_slice())
+        .map(|entry| entry.contract)
+}
+
+#[cfg(test)]
+fn raw_command_contract_for_path<'a>(
     path: impl IntoIterator<Item = &'a str>,
 ) -> Option<CommandContract> {
     let path = path.into_iter().collect::<Vec<_>>();
@@ -793,45 +2456,245 @@ pub(crate) fn command_contract_for_path<'a>(
         .map(|entry| entry.contract)
 }
 
+fn active_command_contract_entries() -> &'static [&'static CommandContractEntry] {
+    ACTIVE_COMMAND_CONTRACT_ENTRIES
+        .get_or_init(|| {
+            let command = Cli::command();
+            CONTRACTS
+                .iter()
+                .filter(|entry| clap_command_path_exists(&command, entry.path))
+                .collect()
+        })
+        .as_slice()
+}
+
+fn clap_command_path_exists(command: &clap::Command, path: &[&str]) -> bool {
+    let mut current = command;
+    for part in path {
+        let Some(next) = current
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == *part)
+        else {
+            return false;
+        };
+        current = next;
+    }
+    true
+}
+
+pub fn command_runtime_contract_for_command(command: &Commands) -> CommandRuntimeContract {
+    let path = command_path(command);
+    runtime_contract_for_path(path.iter().copied())
+        .unwrap_or_else(|| panic!("missing command contract for `{}`", path.join(" ")))
+}
+
+pub fn command_runtime_contract(command_name: &str) -> Option<CommandRuntimeContract> {
+    runtime_contract_for_path(command_name.split_whitespace())
+}
+
+fn runtime_contract_for_path<'a>(
+    path: impl IntoIterator<Item = &'a str>,
+) -> Option<CommandRuntimeContract> {
+    let path = path.into_iter().collect::<Vec<_>>();
+    active_command_contract_entries()
+        .iter()
+        .copied()
+        .find(|entry| entry.path == path.as_slice())
+        .map(|entry| runtime_contract(entry.path, entry.contract))
+}
+
+fn runtime_contract(
+    path: &'static [&'static str],
+    contract: CommandContract,
+) -> CommandRuntimeContract {
+    CommandRuntimeContract {
+        path: path.to_vec(),
+        display: path.join(" "),
+        supports_json: contract.supports_json,
+        supports_op_id: contract.supports_op_id,
+        persists_op_id: contract.persists_op_id,
+        mutates: contract.mutates,
+        observe_only: contract.observe_only,
+        help_visibility: contract.help_visibility,
+        help_rank: contract.help_rank,
+        surface: contract.surface,
+        canonical_command: contract.canonical_command,
+        canonical_kind: contract.canonical_kind,
+        canonical_note: contract.canonical_note,
+        advertised_action: contract.advertised_action,
+        side_effects: side_effects(contract),
+        side_effect_class: side_effect_class(contract),
+        first_run_behavior: first_run_behavior(contract),
+        json_kind: contract.json_kind,
+        schema_verbs: contract.schema_verbs,
+        documented_schema_verbs: contract.documented_schema_verbs,
+        may_initialize: contract.may_initialize,
+        may_import_git: contract.may_import_git,
+        may_write_worktree: contract.may_write_worktree,
+        may_move_ref: contract.may_move_ref,
+        destructive_requires_force: contract.destructive_requires_force,
+        writes_heddle_refs: contract.writes_heddle_refs,
+        writes_git_refs: contract.writes_git_refs,
+        writes_worktree: contract.writes_worktree,
+        writes_config: contract.writes_config,
+        writes_hooks: contract.writes_hooks,
+        network_io: contract.network_io,
+        daemon_process: contract.daemon_process,
+        object_gc: contract.object_gc,
+        external_command: contract.external_command,
+        requires_git_executable: contract.requires_git_executable,
+        destructive_data: contract.destructive_data,
+    }
+}
+
 pub fn command_supports_op_id(command_name: &str) -> bool {
-    command_contract_for_path(command_name.split_whitespace())
+    command_runtime_contract(command_name)
         .map(|contract| contract.supports_op_id)
         .unwrap_or(false)
 }
 
 pub fn command_persists_op_id(command_name: &str) -> bool {
-    command_contract_for_path(command_name.split_whitespace())
+    command_runtime_contract(command_name)
         .map(|contract| contract.persists_op_id)
         .unwrap_or(false)
 }
 
 pub fn command_supports_op_id_for_command(command: &Commands) -> bool {
-    let path = command_path(command);
-    command_contract_for_path(path)
-        .map(|contract| contract.supports_op_id)
-        .unwrap_or(false)
+    command_runtime_contract_for_command(command).supports_op_id
 }
 
 pub fn command_supports_json_for_command(command: &Commands) -> bool {
-    let path = command_path(command);
-    command_contract_for_path(path)
-        .map(|contract| contract.supports_json)
-        .unwrap_or(false)
+    command_runtime_contract_for_command(command).supports_json
 }
 
 pub fn command_help_tier(command_name: &str) -> &'static str {
-    command_contract_for_path(command_name.split_whitespace())
-        .map(|contract| contract.help_tier)
+    command_runtime_contract(command_name)
+        .map(|contract| help_visibility_to_tier(contract.help_visibility))
         .unwrap_or("advanced")
 }
 
-fn command_help_tier_for_path(path: &[String]) -> &'static str {
-    command_contract(path).help_tier
+pub fn command_surface(command_name: &str) -> &'static str {
+    command_runtime_contract(command_name)
+        .map(|contract| contract.surface)
+        .unwrap_or("native")
+}
+
+pub fn command_help_visibility(command_name: &str) -> &'static str {
+    command_runtime_contract(command_name)
+        .map(|contract| contract.help_visibility)
+        .unwrap_or("advanced")
+}
+
+pub fn command_canonical_command(command_name: &str) -> Option<&'static str> {
+    command_runtime_contract(command_name).and_then(|contract| contract.canonical_command)
+}
+
+pub fn root_commands_for_help_visibility(visibility: &str) -> Vec<&'static str> {
+    let mut entries = active_command_contract_entries()
+        .iter()
+        .copied()
+        .filter(|entry| entry.path.len() == 1 && entry.contract.help_visibility == visibility)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| (entry.contract.help_rank, entry.path[0]));
+    entries.into_iter().map(|entry| entry.path[0]).collect()
+}
+
+pub fn root_commands_for_advanced_help() -> Vec<&'static str> {
+    let mut entries = active_command_contract_entries()
+        .iter()
+        .copied()
+        .filter(|entry| {
+            entry.path.len() == 1
+                && !matches!(entry.contract.help_visibility, "everyday" | "hidden")
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| (entry.contract.help_rank, entry.path[0]));
+    entries.into_iter().map(|entry| entry.path[0]).collect()
+}
+
+pub(crate) fn recommended_action_template(action: &str) -> Option<ActionTemplate> {
+    let trimmed = action.trim();
+    RECOMMENDED_ACTION_TEMPLATES
+        .iter()
+        .find(|(template_action, _, _, _)| *template_action == trimmed)
+        .map(
+            |(template_action, argv_template, required_inputs, agent_may_fill)| {
+                action_template_from_parts(
+                    template_action,
+                    argv_template,
+                    required_inputs,
+                    *agent_may_fill,
+                )
+            },
+        )
+        .or_else(|| dynamic_recommended_action_template(trimmed))
+}
+
+fn dynamic_recommended_action_template(action: &str) -> Option<ActionTemplate> {
+    let argv = split_recommended_action(action).ok()?;
+    match argv.as_slice() {
+        [heddle, clone, remote, path]
+            if heddle == "heddle" && clone == "clone" && is_placeholder_arg(path) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    "clone".to_string(),
+                    remote.clone(),
+                    path.clone(),
+                ],
+                vec![placeholder_input_name(path)],
+                false,
+            ))
+        }
+        [heddle, clone, remote, path, flag, thread]
+            if heddle == "heddle"
+                && clone == "clone"
+                && flag == "--thread"
+                && is_placeholder_arg(path) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    "clone".to_string(),
+                    remote.clone(),
+                    path.clone(),
+                    "--thread".to_string(),
+                    thread.clone(),
+                ],
+                vec![placeholder_input_name(path)],
+                false,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn is_placeholder_arg(value: &str) -> bool {
+    value.starts_with('<') && value.ends_with('>') && value.len() > 2
+}
+
+fn placeholder_input_name(value: &str) -> String {
+    value
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .replace('-', "_")
+}
+
+fn help_visibility_to_tier(help_visibility: &str) -> &'static str {
+    match help_visibility {
+        "everyday" => "everyday",
+        "hidden" => "hidden",
+        _ => "advanced",
+    }
 }
 
 pub fn observe_only_root_commands() -> Vec<&'static str> {
-    CONTRACTS
+    active_command_contract_entries()
         .iter()
+        .copied()
         .filter(|entry| {
             entry.path.len() == 1 && entry.contract.observe_only && !entry.contract.mutates
         })
@@ -840,8 +2703,9 @@ pub fn observe_only_root_commands() -> Vec<&'static str> {
 }
 
 pub fn command_contract_root_commands() -> Vec<&'static str> {
-    CONTRACTS
+    active_command_contract_entries()
         .iter()
+        .copied()
         .filter(|entry| entry.path.len() == 1)
         .map(|entry| entry.path[0])
         .collect()
@@ -849,8 +2713,24 @@ pub fn command_contract_root_commands() -> Vec<&'static str> {
 
 pub(crate) fn validate_recommended_action(action: &str) -> std::result::Result<(), String> {
     let trimmed = action.trim();
-    if trimmed.is_empty() || RECOMMENDED_ACTION_PLACEHOLDERS.contains(&trimmed) {
+    if trimmed.is_empty() {
         return Ok(());
+    }
+    if RECOMMENDED_ACTION_PLACEHOLDERS.contains(&trimmed) {
+        return recommended_action_template(trimmed)
+            .map(|_| ())
+            .ok_or_else(|| {
+                format!(
+                    "recommended action placeholder `{trimmed}` must have a structured template"
+                )
+            });
+    }
+    if is_display_only_template(trimmed) {
+        return recommended_action_template(trimmed).map(|_| ()).ok_or_else(|| {
+            format!(
+                "display-only recommended action `{trimmed}` must be registered as a structured template"
+            )
+        });
     }
 
     let argv = split_recommended_action(trimmed)?;
@@ -864,6 +2744,25 @@ pub(crate) fn validate_recommended_action(action: &str) -> std::result::Result<(
         )),
         None => Ok(()),
     }
+}
+
+pub fn recommended_action_argv(action: &str) -> std::result::Result<Option<Vec<String>>, String> {
+    let trimmed = action.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if RECOMMENDED_ACTION_PLACEHOLDERS.contains(&trimmed) || is_display_only_template(trimmed) {
+        validate_recommended_action(trimmed)?;
+        return Ok(None);
+    }
+    validate_recommended_action(trimmed)?;
+    split_recommended_action(trimmed)
+        .map(normalize_heddle_argv)
+        .map(Some)
+}
+
+fn is_display_only_template(action: &str) -> bool {
+    action.contains("...") || action.contains('…') || (action.contains('<') && action.contains('>'))
 }
 
 fn split_recommended_action(action: &str) -> std::result::Result<Vec<String>, String> {
@@ -913,7 +2812,7 @@ fn collect_schema_verbs(
     select: impl Fn(CommandContract) -> &'static [&'static str],
 ) -> Vec<&'static str> {
     let mut verbs = Vec::new();
-    for entry in CONTRACTS {
+    for entry in active_command_contract_entries().iter().copied() {
         for verb in select(entry.contract) {
             if !verbs.contains(verb) {
                 verbs.push(*verb);
@@ -931,23 +2830,546 @@ mod tests {
 
     use super::*;
 
+    struct RuntimeContractParseSample {
+        path: &'static [&'static str],
+        argv_tail: &'static [&'static str],
+    }
+
+    // Representative parseable invocations for every runtime leaf command in
+    // CONTRACTS. The only intentionally skipped rows are non-runtime grouping
+    // contracts whose Clap variants require a subcommand, e.g. `thread`,
+    // `bridge git`, and `redact trust`.
+    const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
+        sample(&["abort"], &["abort"]),
+        sample(&["adopt"], &["adopt"]),
+        sample(&["actor", "spawn"], &["actor", "spawn"]),
+        sample(&["actor", "list"], &["actor", "list"]),
+        sample(&["actor", "show"], &["actor", "show"]),
+        sample(&["actor", "explain"], &["actor", "explain"]),
+        sample(&["actor", "done"], &["actor", "done"]),
+        sample(&["agent", "serve"], &["agent", "serve"]),
+        sample(&["agent", "status"], &["agent", "status"]),
+        sample(&["agent", "stop"], &["agent", "stop"]),
+        sample(
+            &["agent", "reserve"],
+            &["agent", "reserve", "--thread", "main"],
+        ),
+        sample(
+            &["agent", "heartbeat"],
+            &["agent", "heartbeat", "--session", "session-1"],
+        ),
+        sample(
+            &["agent", "capture"],
+            &["agent", "capture", "--session", "session-1"],
+        ),
+        sample(
+            &["agent", "ready"],
+            &["agent", "ready", "--session", "session-1"],
+        ),
+        sample(
+            &["agent", "release"],
+            &["agent", "release", "--session", "session-1"],
+        ),
+        sample(&["agent", "list"], &["agent", "list"]),
+        sample(&["attempt"], &["attempt", "1", "true"]),
+        sample(&["bisect", "start"], &["bisect", "start"]),
+        sample(&["bisect", "good"], &["bisect", "good"]),
+        sample(&["bisect", "bad"], &["bisect", "bad"]),
+        sample(&["bisect", "reset"], &["bisect", "reset"]),
+        sample(&["blame"], &["blame", "src/lib.rs"]),
+        sample(&["branch"], &["branch"]),
+        #[cfg(feature = "git-overlay")]
+        sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
+        #[cfg(feature = "git-overlay")]
+        sample(&["bridge", "git", "init"], &["bridge", "git", "init"]),
+        #[cfg(feature = "git-overlay")]
+        sample(&["bridge", "git", "export"], &["bridge", "git", "export"]),
+        #[cfg(feature = "git-overlay")]
+        sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
+        #[cfg(feature = "git-overlay")]
+        sample(&["bridge", "git", "sync"], &["bridge", "git", "sync"]),
+        #[cfg(feature = "git-overlay")]
+        sample(
+            &["bridge", "git", "reconcile"],
+            &[
+                "bridge",
+                "git",
+                "reconcile",
+                "--prefer",
+                "heddle",
+                "--ref",
+                "main",
+            ],
+        ),
+        #[cfg(feature = "git-overlay")]
+        sample(&["bridge", "git", "push"], &["bridge", "git", "push"]),
+        #[cfg(feature = "git-overlay")]
+        sample(&["bridge", "git", "pull"], &["bridge", "git", "pull"]),
+        #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+        sample(
+            &["bridge", "git", "ingest"],
+            &["bridge", "git", "ingest", "--path", "."],
+        ),
+        #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+        sample(
+            &["bridge", "git", "reason"],
+            &["bridge", "git", "reason", "--path", "."],
+        ),
+        sample(&["capture"], &["capture"]),
+        sample(&["checkpoint"], &["checkpoint"]),
+        sample(&["checkout"], &["checkout", "main"]),
+        sample(&["cherry-pick"], &["cherry-pick", "abc123"]),
+        sample(&["clean"], &["clean"]),
+        sample(&["clone"], &["clone", "remote", "local"]),
+        sample(
+            &["collapse"],
+            &["collapse", "s1", "s2", "--into", "squashed"],
+        ),
+        sample(&["commit"], &["commit"]),
+        sample(&["commands"], &["commands"]),
+        sample(&["compare"], &["compare", "s1", "s2"]),
+        sample(&["completion"], &["completion", "bash"]),
+        sample(&["conflict", "list"], &["conflict", "list"]),
+        sample(&["conflict", "show"], &["conflict", "show", "conflict-1"]),
+        sample(&["continue"], &["continue"]),
+        sample(
+            &["context", "set"],
+            &["context", "set", "--path", "src/lib.rs"],
+        ),
+        sample(
+            &["context", "get"],
+            &["context", "get", "--path", "src/lib.rs"],
+        ),
+        sample(&["context", "list"], &["context", "list"]),
+        sample(&["context", "history"], &["context", "history", "ctx-1"]),
+        sample(&["context", "edit"], &["context", "edit", "ctx-1"]),
+        sample(
+            &["context", "supersede"],
+            &["context", "supersede", "ctx-1", "--path", "src/lib.rs"],
+        ),
+        sample(
+            &["context", "rm"],
+            &["context", "rm", "--path", "src/lib.rs"],
+        ),
+        sample(&["context", "check"], &["context", "check"]),
+        sample(&["context", "suggest"], &["context", "suggest"]),
+        sample(&["context", "audit"], &["context", "audit"]),
+        sample(&["daemon", "serve"], &["daemon", "serve"]),
+        sample(&["daemon", "status"], &["daemon", "status"]),
+        sample(&["daemon", "stop"], &["daemon", "stop"]),
+        sample(&["delegate"], &["delegate", "task"]),
+        sample(&["diagnose"], &["diagnose"]),
+        sample(&["diff"], &["diff"]),
+        sample(
+            &["discuss", "open"],
+            &["discuss", "open", "src/lib.rs", "symbol", "body"],
+        ),
+        sample(
+            &["discuss", "append"],
+            &["discuss", "append", "discussion-1", "body"],
+        ),
+        sample(
+            &["discuss", "resolve"],
+            &["discuss", "resolve", "discussion-1", "--mode", "dismiss"],
+        ),
+        sample(&["discuss", "list"], &["discuss", "list"]),
+        sample(&["discuss", "show"], &["discuss", "show", "discussion-1"]),
+        sample(&["doctor"], &["doctor"]),
+        sample(&["doctor", "docs"], &["doctor", "docs"]),
+        sample(&["doctor", "schemas"], &["doctor", "schemas"]),
+        sample(&["fetch"], &["fetch"]),
+        sample(&["fork"], &["fork"]),
+        sample(&["fsck"], &["fsck"]),
+        sample(&["gc"], &["gc"]),
+        #[cfg(feature = "git-overlay")]
+        sample(&["git-overlay"], &["git-overlay"]),
+        sample(&["goto"], &["goto", "HEAD"]),
+        sample(&["harness-bridge"], &["harness-bridge"]),
+        sample(&["help"], &["help"]),
+        sample(&["hook", "list"], &["hook", "list"]),
+        sample(&["hook", "install"], &["hook", "install", "pre-snapshot"]),
+        sample(
+            &["hook", "uninstall"],
+            &["hook", "uninstall", "pre-snapshot"],
+        ),
+        sample(&["hook", "events"], &["hook", "events"]),
+        sample(&["index"], &["index"]),
+        sample(&["init"], &["init"]),
+        sample(&["inspect"], &["inspect"]),
+        sample(&["integration", "list"], &["integration", "list"]),
+        sample(&["integration", "install"], &["integration", "install"]),
+        sample(&["integration", "doctor"], &["integration", "doctor"]),
+        sample(&["integration", "uninstall"], &["integration", "uninstall"]),
+        sample(&["integration", "upgrade"], &["integration", "upgrade"]),
+        sample(
+            &["integration", "relay"],
+            &["integration", "relay", "codex", "agent_done"],
+        ),
+        sample(&["log"], &["log"]),
+        sample(&["maintenance", "inspect"], &["maintenance", "inspect"]),
+        sample(&["maintenance", "run"], &["maintenance", "run"]),
+        sample(&["maintenance", "gc"], &["maintenance", "gc"]),
+        sample(&["maintenance", "index"], &["maintenance", "index"]),
+        sample(&["maintenance", "monitor"], &["maintenance", "monitor"]),
+        sample(&["marker", "list"], &["marker", "list"]),
+        sample(&["marker", "create"], &["marker", "create", "mark-1"]),
+        sample(&["marker", "delete"], &["marker", "delete", "mark-1"]),
+        sample(&["marker", "show"], &["marker", "show", "mark-1"]),
+        sample(&["merge"], &["merge", "feature"]),
+        sample(&["monitor"], &["monitor"]),
+        sample(&["pull"], &["pull"]),
+        sample(
+            &["purge", "apply"],
+            &["purge", "apply", "HEAD", "--path", "secret.txt", "--force"],
+        ),
+        sample(&["purge", "list"], &["purge", "list"]),
+        sample(&["push"], &["push"]),
+        sample(&["query"], &["query"]),
+        sample(&["ready"], &["ready"]),
+        sample(&["rebase"], &["rebase"]),
+        sample(
+            &["redact", "apply"],
+            &[
+                "redact",
+                "apply",
+                "HEAD",
+                "--path",
+                "secret.txt",
+                "--reason",
+                "secret",
+            ],
+        ),
+        sample(&["redact", "list"], &["redact", "list"]),
+        sample(&["redact", "show"], &["redact", "show", "redaction-1"]),
+        sample(
+            &["redact", "trust", "add"],
+            &[
+                "redact",
+                "trust",
+                "add",
+                "--algorithm",
+                "ed25519",
+                "--public-key",
+                "abcd",
+            ],
+        ),
+        sample(&["redact", "trust", "list"], &["redact", "trust", "list"]),
+        sample(
+            &["redact", "trust", "remove"],
+            &["redact", "trust", "remove", "abcd"],
+        ),
+        sample(&["redo"], &["redo"]),
+        sample(&["remote", "list"], &["remote", "list"]),
+        sample(
+            &["remote", "add"],
+            &["remote", "add", "origin", "localhost:9418"],
+        ),
+        sample(&["remote", "remove"], &["remote", "remove", "origin"]),
+        sample(
+            &["remote", "set-default"],
+            &["remote", "set-default", "origin"],
+        ),
+        sample(&["remote", "show"], &["remote", "show", "origin"]),
+        sample(&["resolve"], &["resolve"]),
+        sample(&["retro"], &["retro"]),
+        sample(&["revert"], &["revert", "HEAD"]),
+        sample(&["review", "show"], &["review", "show"]),
+        sample(
+            &["review", "sign"],
+            &[
+                "review",
+                "sign",
+                "HEAD",
+                "--kind",
+                "read",
+                "--public-key",
+                "abcd",
+                "--signature",
+                "ef01",
+                "--signed-at-unix",
+                "1",
+            ],
+        ),
+        sample(&["review", "next"], &["review", "next"]),
+        sample(&["review", "health"], &["review", "health"]),
+        sample(&["run"], &["run", "true"]),
+        sample(&["schemas"], &["schemas"]),
+        #[cfg(feature = "semantic")]
+        sample(&["semantic", "hot"], &["semantic", "hot"]),
+        sample(
+            &["session", "start"],
+            &[
+                "session",
+                "start",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-5",
+            ],
+        ),
+        sample(
+            &["session", "segment"],
+            &[
+                "session",
+                "segment",
+                "--provider",
+                "openai",
+                "--model",
+                "gpt-5",
+            ],
+        ),
+        sample(&["session", "end"], &["session", "end"]),
+        sample(&["session", "show"], &["session", "show"]),
+        sample(&["session", "list"], &["session", "list"]),
+        sample(&["shell", "init"], &["shell", "init", "bash"]),
+        sample(&["ship"], &["ship"]),
+        sample(&["show"], &["show", "HEAD"]),
+        sample(&["start"], &["start", "feature"]),
+        sample(&["stash", "push"], &["stash", "push"]),
+        sample(&["stash", "list"], &["stash", "list"]),
+        sample(&["stash", "pop"], &["stash", "pop"]),
+        sample(&["stash", "apply"], &["stash", "apply"]),
+        sample(&["stash", "drop"], &["stash", "drop"]),
+        sample(&["stash", "clear"], &["stash", "clear"]),
+        sample(&["stash", "show"], &["stash", "show"]),
+        sample(&["status"], &["status"]),
+        sample(&["store", "warm"], &["store", "warm"]),
+        sample(&["switch"], &["switch", "main"]),
+        sample(&["sync"], &["sync"]),
+        sample(&["thread", "create"], &["thread", "create", "feature"]),
+        sample(&["thread", "current"], &["thread", "current"]),
+        sample(&["thread", "switch"], &["thread", "switch", "feature"]),
+        sample(&["thread", "cd"], &["thread", "cd", "feature"]),
+        sample(&["thread", "list"], &["thread", "list"]),
+        sample(&["thread", "show"], &["thread", "show"]),
+        sample(&["thread", "captures"], &["thread", "captures"]),
+        sample(
+            &["thread", "rename"],
+            &["thread", "rename", "old-feature", "new-feature"],
+        ),
+        sample(&["thread", "refresh"], &["thread", "refresh", "feature"]),
+        sample(
+            &["thread", "move"],
+            &["thread", "move", "source", "dest", "--path", "src/lib.rs"],
+        ),
+        sample(&["thread", "absorb"], &["thread", "absorb", "feature"]),
+        sample(&["thread", "resolve"], &["thread", "resolve", "feature"]),
+        sample(&["thread", "promote"], &["thread", "promote", "feature"]),
+        sample(&["thread", "drop"], &["thread", "drop", "feature"]),
+        sample(
+            &["thread", "approve"],
+            &["thread", "approve", "source", "target"],
+        ),
+        sample(
+            &["thread", "approvals"],
+            &["thread", "approvals", "source", "target"],
+        ),
+        sample(
+            &["thread", "revoke-approval"],
+            &[
+                "thread",
+                "revoke-approval",
+                "00000000-0000-0000-0000-000000000000",
+            ],
+        ),
+        sample(
+            &["thread", "check-merge"],
+            &["thread", "check-merge", "source", "target"],
+        ),
+        sample(&["thread", "cleanup"], &["thread", "cleanup", "--merged"]),
+        sample(&["transaction", "begin"], &["transaction", "begin"]),
+        sample(
+            &["transaction", "commit"],
+            &["transaction", "commit", "tx-1"],
+        ),
+        sample(&["transaction", "abort"], &["transaction", "abort", "tx-1"]),
+        sample(
+            &["transaction", "status"],
+            &["transaction", "status", "tx-1"],
+        ),
+        sample(&["verify"], &["verify"]),
+        sample(&["try"], &["try", "true"]),
+        sample(&["undo"], &["undo"]),
+        sample(&["version"], &["version"]),
+        sample(&["watch"], &["watch"]),
+        sample(&["workspace"], &["workspace"]),
+        sample(&["workspace", "show"], &["workspace", "show"]),
+    ];
+
+    const fn sample(
+        path: &'static [&'static str],
+        argv_tail: &'static [&'static str],
+    ) -> RuntimeContractParseSample {
+        RuntimeContractParseSample { path, argv_tail }
+    }
+
     #[test]
     fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         for action in [
             "",
             "heddle init",
-            "heddle bridge git import --ref main",
             "heddle capture -m \"...\"",
+            "heddle commit -m \"...\"",
             "heddle stash push -m \"...\"",
+            "heddle capture -m \"Preserve raw Git operation work\"",
+            "heddle switch <branch>",
+            "heddle clone <remote> <fresh-path>",
+            "heddle clone <local-path> <path>",
+            "heddle clone /tmp/source <path> --thread main",
+            "heddle bridge git import --path <full-git-repo> --ref <ref>",
             "heddle thread promote main",
-            "heddle bridge git reconcile --prefer heddle --ref main --preview",
             "heddle bisect good <state> or heddle bisect bad <state>",
-            "git bisect good or git bisect bad",
-            "git add <files> && heddle continue",
         ] {
             validate_recommended_action(action)
                 .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
         }
+        #[cfg(feature = "git-overlay")]
+        {
+            for action in [
+                "heddle bridge git import --ref main",
+                "heddle bridge git import --ref origin/main",
+                "heddle merge origin/main --preview",
+                "heddle bridge git reconcile --ref main --preview",
+                "heddle bridge git reconcile --prefer heddle --ref main --preview",
+            ] {
+                validate_recommended_action(action)
+                    .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
+            }
+        }
+    }
+
+    #[test]
+    fn recommended_action_templates_describe_display_only_placeholders() {
+        let catalog = build_command_catalog();
+        for placeholder in RECOMMENDED_ACTION_PLACEHOLDERS {
+            assert!(
+                recommended_action_template(placeholder).is_some(),
+                "placeholder `{placeholder}` must have a structured template"
+            );
+        }
+        for template in &catalog.recommended_action_templates {
+            validate_recommended_action(&template.action).unwrap_or_else(|err| {
+                panic!(
+                    "recommended action template `{}` must validate: {err}",
+                    template.action
+                )
+            });
+            assert_eq!(
+                recommended_action_argv(&template.action).unwrap_or_else(|err| panic!(
+                    "template `{}` should resolve: {err}",
+                    template.action
+                )),
+                None,
+                "template `{}` must not expose a literal placeholder argv",
+                template.action
+            );
+        }
+
+        let commit = catalog
+            .recommended_action_templates
+            .iter()
+            .find(|template| template.action == "heddle commit -m \"...\"")
+            .expect("commit placeholder should have a structured template");
+        assert_eq!(
+            commit.argv_template,
+            vec!["heddle", "commit", "-m", "<message>"]
+        );
+        assert_eq!(commit.required_inputs, vec!["message"]);
+        assert!(commit.agent_may_fill);
+
+        let template = recommended_action_template("heddle checkpoint -m \"...\"")
+            .expect("checkpoint placeholder should resolve");
+        assert_eq!(
+            template.argv_template,
+            vec!["heddle", "checkpoint", "-m", "<message>"]
+        );
+
+        let switch = recommended_action_template("heddle switch <branch>")
+            .expect("switch placeholder should resolve");
+        assert_eq!(switch.argv_template, vec!["heddle", "switch", "<branch>"]);
+        assert_eq!(switch.required_inputs, vec!["branch"]);
+        assert!(!switch.agent_may_fill);
+
+        let clone = recommended_action_template("heddle clone <remote> <fresh-path>")
+            .expect("clone recovery placeholder should resolve");
+        assert_eq!(
+            clone.argv_template,
+            vec!["heddle", "clone", "<remote>", "<fresh-path>"]
+        );
+        assert_eq!(clone.required_inputs, vec!["remote", "path"]);
+        assert!(!clone.agent_may_fill);
+
+        let local_clone = recommended_action_template("heddle clone <local-path> <path>")
+            .expect("local clone recovery placeholder should resolve");
+        assert_eq!(
+            local_clone.argv_template,
+            vec!["heddle", "clone", "<local-path>", "<path>"]
+        );
+        assert_eq!(local_clone.required_inputs, vec!["local_path", "path"]);
+        assert!(!local_clone.agent_may_fill);
+
+        let dynamic_clone =
+            recommended_action_template("heddle clone /tmp/source <path> --thread main")
+                .expect("dynamic clone recovery placeholder should resolve");
+        assert_eq!(
+            dynamic_clone.argv_template,
+            vec![
+                "heddle",
+                "clone",
+                "/tmp/source",
+                "<path>",
+                "--thread",
+                "main"
+            ]
+        );
+        assert_eq!(dynamic_clone.required_inputs, vec!["path"]);
+        assert!(!dynamic_clone.agent_may_fill);
+
+        let import = recommended_action_template(
+            "heddle bridge git import --path <full-git-repo> --ref <ref>",
+        )
+        .expect("shallow import recovery placeholder should resolve");
+        assert_eq!(
+            import.argv_template,
+            vec![
+                "heddle",
+                "bridge",
+                "git",
+                "import",
+                "--path",
+                "<full-git-repo>",
+                "--ref",
+                "<ref>"
+            ]
+        );
+        assert_eq!(import.required_inputs, vec!["path", "ref"]);
+        assert!(!import.agent_may_fill);
+
+        let merge = recommended_action_template("heddle merge <thread> --git-commit")
+            .expect("merge recovery placeholder should resolve");
+        assert_eq!(
+            merge.argv_template,
+            vec!["heddle", "merge", "<thread>", "--git-commit"]
+        );
+        assert_eq!(merge.required_inputs, vec!["thread"]);
+        assert!(!merge.agent_may_fill);
+    }
+
+    #[test]
+    fn display_only_recommended_actions_must_be_templated() {
+        let err = validate_recommended_action("heddle switch <missing-template>")
+            .expect_err("unregistered display placeholder should fail validation");
+        assert!(
+            err.contains("structured template"),
+            "error should explain missing template: {err}"
+        );
+
+        let err = recommended_action_argv("heddle switch <missing-template>")
+            .expect_err("argv helper must not silently drop unregistered placeholders");
+        assert!(
+            err.contains("structured template"),
+            "error should explain missing template: {err}"
+        );
     }
 
     #[test]
@@ -969,7 +3391,7 @@ mod tests {
 
     #[test]
     fn command_contract_table_matches_clap_command_tree() {
-        let contract_paths = CONTRACTS
+        let raw_contract_paths = CONTRACTS
             .iter()
             .map(|entry| {
                 entry
@@ -980,16 +3402,27 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            contract_paths.len(),
+            raw_contract_paths.len(),
             CONTRACTS.len(),
             "command contract table contains duplicate paths"
         );
+        let active_contract_paths = active_command_contract_entries()
+            .iter()
+            .copied()
+            .map(|entry| {
+                entry
+                    .path
+                    .iter()
+                    .map(|part| (*part).to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<BTreeSet<_>>();
 
         let mut clap_paths = BTreeSet::new();
         collect_clap_command_paths(&Cli::command(), &mut Vec::new(), &mut clap_paths);
 
         let missing_contracts = clap_paths
-            .difference(&contract_paths)
+            .difference(&active_contract_paths)
             .map(|path| path.join(" "))
             .collect::<Vec<_>>();
         assert!(
@@ -997,7 +3430,7 @@ mod tests {
             "Clap exposes command path(s) with no command contract: {missing_contracts:?}"
         );
 
-        let stale_contracts = contract_paths
+        let stale_contracts = active_contract_paths
             .difference(&clap_paths)
             .map(|path| path.join(" "))
             .collect::<Vec<_>>();
@@ -1021,6 +3454,73 @@ mod tests {
     }
 
     #[test]
+    fn parsed_runtime_contract_lookup_matches_contract_table_for_parseable_commands() {
+        let active_contracts = active_command_contract_entries();
+        let sample_paths = RUNTIME_CONTRACT_PARSE_SAMPLES
+            .iter()
+            .map(|sample| sample.path.to_vec())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            sample_paths.len(),
+            RUNTIME_CONTRACT_PARSE_SAMPLES.len(),
+            "runtime contract parse samples contain duplicate paths"
+        );
+
+        let child_contract_paths = contract_paths_with_children(&active_contracts);
+        let unsampled_contracts = active_contracts
+            .iter()
+            .filter(|entry| !child_contract_paths.contains(&entry.path.to_vec()))
+            .filter(|entry| !sample_paths.contains(&entry.path.to_vec()))
+            .map(|entry| entry.path.join(" "))
+            .collect::<Vec<_>>();
+        assert!(
+            unsampled_contracts.is_empty(),
+            "parseable leaf/runtime contract path(s) need parse samples: {unsampled_contracts:?}"
+        );
+
+        for sample in RUNTIME_CONTRACT_PARSE_SAMPLES {
+            let expected = active_contracts
+                .iter()
+                .find(|entry| entry.path == sample.path)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "runtime contract parse sample references missing contract `{}`",
+                        sample.path.join(" ")
+                    )
+                });
+            let mut argv = vec!["heddle"];
+            argv.extend_from_slice(sample.argv_tail);
+            let cli = Cli::try_parse_from(argv.clone())
+                .unwrap_or_else(|err| panic!("failed to parse sample {argv:?}: {err}"));
+            let runtime = command_runtime_contract_for_command(&cli.command);
+
+            assert_eq!(
+                runtime.path,
+                expected.path,
+                "parsed sample {argv:?} must resolve to contract path `{}`",
+                expected.path.join(" ")
+            );
+            assert_eq!(runtime.display, expected.path.join(" "));
+            assert_eq!(runtime.display, command_path(&cli.command).join(" "));
+        }
+    }
+
+    fn contract_paths_with_children(
+        entries: &[&'static CommandContractEntry],
+    ) -> BTreeSet<Vec<&'static str>> {
+        entries
+            .iter()
+            .filter(|candidate| {
+                entries.iter().any(|entry| {
+                    entry.path.len() > candidate.path.len()
+                        && entry.path.starts_with(candidate.path)
+                })
+            })
+            .map(|entry| entry.path.to_vec())
+            .collect()
+    }
+
+    #[test]
     fn command_contract_metadata_is_internally_consistent() {
         for entry in CONTRACTS {
             let display = entry.path.join(" ");
@@ -1039,6 +3539,67 @@ mod tests {
                 "`{display}` has unknown json_kind `{}`",
                 contract.json_kind
             );
+            assert!(
+                matches!(
+                    contract.surface,
+                    "native" | "git_adapter" | "automation" | "admin" | "internal"
+                ),
+                "`{display}` has unknown product surface `{}`",
+                contract.surface
+            );
+            assert!(
+                matches!(
+                    contract.help_visibility,
+                    "everyday" | "advanced" | "git_adapter" | "hidden"
+                ),
+                "`{display}` has unknown help visibility `{}`",
+                contract.help_visibility
+            );
+            if contract.help_visibility == "git_adapter" {
+                assert_eq!(
+                    contract.surface, "git_adapter",
+                    "`{display}` Git adapter commands must live on the Git adapter surface"
+                );
+                assert!(
+                    contract.canonical_command.is_some(),
+                    "`{display}` Git-shaped aliases must name a canonical Heddle command"
+                );
+                assert!(
+                    contract.canonical_kind.is_some(),
+                    "`{display}` Git-shaped aliases must classify the canonical action"
+                );
+                assert!(
+                    contract.canonical_note.is_some(),
+                    "`{display}` Git-shaped aliases must explain the canonical action"
+                );
+            }
+            if contract.help_visibility == "everyday" {
+                assert!(
+                    contract.help_rank < 1000,
+                    "`{display}` everyday commands must choose an explicit help rank"
+                );
+            }
+            if let Some(canonical) = contract.canonical_command {
+                let canonical_kind = contract
+                    .canonical_kind
+                    .unwrap_or_else(|| panic!("`{display}` canonical command must have a kind"));
+                assert!(
+                    matches!(
+                        canonical_kind,
+                        "direct_command" | "command_family" | "workflow" | "conceptual_home"
+                    ),
+                    "`{display}` has unknown canonical action kind `{canonical_kind}`"
+                );
+                assert!(
+                    raw_command_contract_for_path(canonical.split_whitespace()).is_some(),
+                    "`{display}` points at missing canonical command `{canonical}`"
+                );
+            } else {
+                assert!(
+                    contract.canonical_kind.is_none() && contract.canonical_note.is_none(),
+                    "`{display}` cannot describe a canonical action without a canonical command"
+                );
+            }
             if contract.persists_op_id {
                 assert!(
                     contract.supports_op_id,
@@ -1063,10 +3624,73 @@ mod tests {
                         && !contract.may_import_git
                         && !contract.may_write_worktree
                         && !contract.may_move_ref
-                        && !contract.destructive_requires_force,
+                        && !contract.destructive_requires_force
+                        && !contract.writes_heddle_refs
+                        && !contract.writes_git_refs
+                        && !contract.writes_worktree
+                        && !contract.writes_config
+                        && !contract.writes_hooks
+                        && !contract.network_io
+                        && !contract.daemon_process
+                        && !contract.object_gc
+                        && !contract.external_command
+                        && !contract.requires_git_executable
+                        && !contract.destructive_data,
                     "`{display}` observe-only commands must not advertise write side effects"
                 );
             }
+            assert!(
+                !contract.requires_git_executable,
+                "`{display}` must not require a `git` executable; Git-format work belongs in native/library code"
+            );
+            let effects = side_effects(contract);
+            assert!(
+                !effects.is_empty(),
+                "`{display}` must advertise at least one side effect"
+            );
+            if contract.observe_only {
+                assert_eq!(
+                    effects,
+                    vec!["observe_only"],
+                    "`{display}` observe-only side_effects must stay exact"
+                );
+            } else {
+                for (flag, effect) in [
+                    (contract.may_initialize, "initialize"),
+                    (contract.may_import_git, "import_git"),
+                    (contract.writes_heddle_refs, "writes_heddle_refs"),
+                    (contract.writes_git_refs, "writes_git_refs"),
+                    (contract.writes_worktree, "writes_worktree"),
+                    (contract.writes_config, "writes_config"),
+                    (contract.writes_hooks, "writes_hooks"),
+                    (contract.network_io, "network_io"),
+                    (contract.daemon_process, "daemon_process"),
+                    (contract.object_gc, "object_gc"),
+                    (contract.external_command, "external_command"),
+                    (
+                        contract.destructive_requires_force,
+                        "destructive_requires_force",
+                    ),
+                    (contract.destructive_data, "destructive_data"),
+                ] {
+                    assert_eq!(
+                        effects.contains(&effect),
+                        flag,
+                        "`{display}` side_effects must mirror `{effect}`"
+                    );
+                }
+                if contract.may_write_worktree && !contract.writes_worktree {
+                    assert!(
+                        effects.contains(&"may_write_worktree"),
+                        "`{display}` side_effects must preserve flag-sensitive worktree writes"
+                    );
+                }
+            }
+            assert_eq!(
+                contract.may_move_ref,
+                contract.writes_heddle_refs || contract.writes_git_refs,
+                "`{display}` may_move_ref must summarize concrete ref dimensions"
+            );
             if contract.destructive_requires_force {
                 assert!(
                     contract.mutates,
@@ -1084,11 +3708,37 @@ mod tests {
                     contract.supports_json,
                     "`{display}` registers JSON schema verbs but does not support JSON"
                 );
-                assert_ne!(
-                    contract.json_kind, "jsonl",
-                    "`{display}` JSONL command cannot have a single-value schema"
-                );
             }
+        }
+    }
+
+    #[cfg(not(feature = "git-overlay"))]
+    #[test]
+    fn native_only_catalog_excludes_git_overlay_commands() {
+        let catalog = build_command_catalog();
+        for display in [
+            "bridge",
+            "bridge git",
+            "bridge git status",
+            "bridge git init",
+            "bridge git import",
+            "bridge git export",
+            "bridge git sync",
+            "bridge git reconcile",
+            "bridge git push",
+            "bridge git pull",
+            "bridge git ingest",
+            "bridge git reason",
+            "git-overlay",
+        ] {
+            assert!(
+                catalog.command_by_display(display).is_none(),
+                "native-only catalog must not advertise git-overlay command `{display}`"
+            );
+            assert!(
+                command_runtime_contract(display).is_none(),
+                "native-only runtime contracts must not resolve git-overlay command `{display}`"
+            );
         }
     }
 
@@ -1114,12 +3764,110 @@ mod tests {
     }
 
     #[test]
+    fn catalog_option_lookup_includes_globals_and_finite_values() {
+        let catalog = build_command_catalog();
+
+        let start_options = catalog
+            .options_for_display("start")
+            .expect("start should be cataloged");
+        let output = start_options
+            .iter()
+            .find(|option| option.long.as_deref() == Some("output"))
+            .expect("global --output should be included in command options");
+        assert_eq!(output.possible_values, vec!["auto", "json", "text"]);
+        for command in &catalog.commands {
+            assert!(
+                !command
+                    .options
+                    .iter()
+                    .any(|option| option.long.as_deref() == Some("json")),
+                "legacy --json should not be included in command options for {}",
+                command.path.join(" ")
+            );
+        }
+        assert!(
+            start_options
+                .iter()
+                .any(|option| option.long.as_deref() == Some("help")),
+            "generated --help should be included in command options"
+        );
+
+        let workspace = start_options
+            .iter()
+            .find(|option| option.long.as_deref() == Some("workspace"))
+            .expect("start --workspace should be cataloged");
+        assert_eq!(
+            workspace.possible_values,
+            vec!["auto", "materialized", "virtualized", "solid"]
+        );
+
+        let context_set_options = catalog
+            .options_for_path(&["context".to_string(), "set".to_string()])
+            .expect("context set should be cataloged");
+        let scope = context_set_options
+            .iter()
+            .find(|option| option.long.as_deref() == Some("scope"))
+            .expect("context set --scope should be cataloged");
+        assert!(
+            scope.possible_values.is_empty(),
+            "context scope accepts open-ended values like symbol:<name>"
+        );
+        let kind = context_set_options
+            .iter()
+            .find(|option| option.long.as_deref() == Some("kind"))
+            .expect("context set --kind should be cataloged");
+        assert_eq!(
+            kind.possible_values,
+            vec!["constraint", "invariant", "rationale"]
+        );
+
+        let integration_install_options = catalog
+            .options_for_display("integration install")
+            .expect("integration install should be cataloged");
+        let scope = integration_install_options
+            .iter()
+            .find(|option| option.long.as_deref() == Some("scope"))
+            .expect("integration install --scope should be cataloged");
+        assert_eq!(scope.possible_values, vec!["repo", "user"]);
+        assert_eq!(scope.aliases, vec!["harness-install-scope"]);
+    }
+
+    #[test]
     fn command_contract_table_drives_help_tiers() {
         let catalog = build_command_catalog();
-        for (display, tier) in [
-            ("status", "everyday"),
-            ("trust", "everyday"),
-            ("commit", "advanced"),
+        for (display, tier, surface, visibility, canonical, canonical_kind, executable) in [
+            (
+                "status", "everyday", "native", "everyday", None, None, false,
+            ),
+            (
+                "verify", "everyday", "native", "everyday", None, None, false,
+            ),
+            (
+                "commit", "everyday", "native", "everyday", None, None, false,
+            ),
+            ("ship", "everyday", "native", "everyday", None, None, false),
+            ("push", "everyday", "native", "everyday", None, None, false),
+            (
+                "capture", "advanced", "native", "advanced", None, None, false,
+            ),
+            (
+                "checkpoint",
+                "advanced",
+                "native",
+                "advanced",
+                None,
+                None,
+                false,
+            ),
+            (
+                "switch",
+                "advanced",
+                "git_adapter",
+                "git_adapter",
+                Some("thread switch"),
+                Some("direct_command"),
+                false,
+            ),
         ] {
             let entry = catalog
                 .commands
@@ -1127,7 +3875,49 @@ mod tests {
                 .find(|entry| entry.display == display)
                 .unwrap_or_else(|| panic!("missing command catalog entry for `{display}`"));
             assert_eq!(entry.tier, tier);
+            assert_eq!(entry.surface, surface);
+            assert_eq!(entry.help_visibility, visibility);
+            assert_eq!(entry.canonical_command.as_deref(), canonical);
+            assert_eq!(
+                entry
+                    .canonical_action
+                    .as_ref()
+                    .map(|action| action.kind.as_str()),
+                canonical_kind
+            );
+            assert_eq!(
+                entry
+                    .canonical_action
+                    .as_ref()
+                    .is_some_and(|action| action.executable),
+                executable
+            );
             assert_eq!(command_help_tier(display), tier);
+            assert_eq!(command_surface(display), surface);
+            assert_eq!(command_help_visibility(display), visibility);
+            assert_eq!(command_canonical_command(display), canonical);
+        }
+        for (display, canonical, kind) in [
+            ("branch", "thread", "command_family"),
+            ("stash pop", "undo", "conceptual_home"),
+            ("fetch", "pull", "workflow"),
+        ] {
+            let entry = catalog
+                .commands
+                .iter()
+                .find(|entry| entry.display == display)
+                .unwrap_or_else(|| panic!("missing command catalog entry for `{display}`"));
+            let action = entry
+                .canonical_action
+                .as_ref()
+                .unwrap_or_else(|| panic!("`{display}` should expose a canonical action"));
+            assert_eq!(action.command, canonical);
+            assert_eq!(action.kind, kind);
+            assert!(
+                !action.executable,
+                "`{display}` is not a direct command replacement"
+            );
+            assert!(!action.note.is_empty());
         }
         assert_eq!(command_help_tier("transaction"), "hidden");
 
@@ -1189,11 +3979,43 @@ mod tests {
     }
 
     #[test]
+    fn parsed_command_runtime_contract_exposes_catalog_fields() {
+        let cli = Cli::try_parse_from(["heddle", "thread", "drop", "feature"])
+            .expect("thread drop should parse");
+        let runtime = command_runtime_contract_for_command(&cli.command);
+        let catalog = build_command_catalog();
+        let entry = catalog
+            .commands
+            .iter()
+            .find(|entry| entry.display == runtime.display)
+            .expect("runtime command should be present in catalog");
+
+        assert_eq!(runtime.path, vec!["thread", "drop"]);
+        assert_eq!(runtime.supports_json, entry.supports_json);
+        assert_eq!(runtime.supports_op_id, entry.supports_op_id);
+        assert_eq!(runtime.persists_op_id, entry.persists_op_id);
+        assert_eq!(runtime.help_visibility, entry.help_visibility);
+        assert_eq!(runtime.help_rank, entry.help_rank);
+        assert_eq!(runtime.surface, entry.surface);
+        assert_eq!(runtime.side_effect_class, entry.side_effect_class);
+        assert_eq!(
+            runtime.side_effects,
+            entry
+                .side_effects
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert!(runtime.destructive_requires_force);
+        assert!(runtime.writes_worktree);
+    }
+
+    #[test]
     fn op_id_persistence_reads_contract_table() {
         let catalog = build_command_catalog();
         for (display, persists) in [
-            ("capture", true),
-            ("review sign", true),
+            ("capture", false),
+            ("review sign", false),
             ("commit", false),
             ("status", false),
         ] {
@@ -1224,11 +4046,12 @@ mod tests {
 pub fn command_path(command: &Commands) -> Vec<&'static str> {
     match command {
         Commands::Init(_) => vec!["init"],
+        Commands::Adopt(_) => vec!["adopt"],
         Commands::Help { .. } => vec!["help"],
         Commands::Status { .. } => vec!["status"],
         Commands::Watch(_) => vec!["watch"],
         Commands::Diagnose(_) => vec!["diagnose"],
-        Commands::Trust => vec!["trust"],
+        Commands::Verify => vec!["verify"],
         Commands::Doctor(args) => match &args.command {
             None => vec!["doctor"],
             Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
@@ -1238,7 +4061,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::GitOverlay => vec!["git-overlay"],
         Commands::Schemas { .. } => vec!["schemas"],
         Commands::Version => vec!["version"],
-        Commands::Commands => vec!["commands"],
+        Commands::Commands(_) => vec!["commands"],
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
         Commands::Attempt(_) => vec!["attempt"],

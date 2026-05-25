@@ -11,7 +11,9 @@ use serde_json::json;
 use super::{
     advice::RecoveryAdvice,
     ff_record::record_ff_advance,
-    git_overlay_health::{RepositoryTrustState, build_repository_trust_state},
+    git_overlay_health::{
+        RepositoryVerificationState, action_argv, build_repository_verification_state,
+    },
     snapshot::ensure_current_state,
     worktree_safety::ensure_worktree_clean,
 };
@@ -246,8 +248,8 @@ fn emit_up_to_date_if_trusted(repo: &Repository, cli: Option<&Cli>) -> Result<()
     let Some(cli) = cli else {
         return Ok(());
     };
-    let trust = build_repository_trust_state(repo);
-    if trust.trusted {
+    let trust = build_repository_verification_state(repo);
+    if trust.verified {
         if should_output_json(cli, Some(repo.config())) {
             println!("{{\"status\": \"up_to_date\"}}");
         } else {
@@ -262,10 +264,10 @@ fn emit_up_to_date_if_trusted(repo: &Repository, cli: Option<&Cli>) -> Result<()
 fn emit_up_to_date_blocked_by_trust(
     repo: &Repository,
     cli: &Cli,
-    trust: RepositoryTrustState,
+    trust: RepositoryVerificationState,
 ) -> Result<()> {
     let recommended_action = if trust.recommended_action.is_empty() {
-        "heddle trust".to_string()
+        "heddle verify".to_string()
     } else {
         trust.recommended_action.clone()
     };
@@ -274,16 +276,17 @@ fn emit_up_to_date_blocked_by_trust(
             "{}",
             serde_json::to_string(&json!({
                 "status": "blocked",
-                "reason": "repository_trust",
+                "reason": "repository_verification",
                 "summary": trust.summary,
-                "recommended_action": recommended_action,
+                "recommended_action": recommended_action.clone(),
+                "recommended_action_argv": action_argv(&recommended_action),
                 "recovery_commands": trust.recovery_commands,
-                "trust": trust,
+                "verification": trust,
             }))?
         );
     } else {
         println!(
-            "Rebase is up to date, but repository trust is blocked: {}",
+            "Rebase is up to date, but repository verification is blocked: {}",
             trust.summary
         );
         println!("Next step: {recommended_action}");

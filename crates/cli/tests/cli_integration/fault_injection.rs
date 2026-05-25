@@ -185,7 +185,11 @@ fn snapshot_atomicity_under_simulated_sigkill() {
     heddle(&["capture", "-m", "baseline"], Some(temp.path())).expect("baseline snapshot");
 
     let log_before: Value = serde_json::from_str(
-        &heddle(&["--json", "log", "main", "-n", "5"], Some(temp.path())).expect("log"),
+        &heddle(
+            &["--output", "json", "log", "main", "-n", "5"],
+            Some(temp.path()),
+        )
+        .expect("log"),
     )
     .unwrap();
     let baseline_tip = log_before["states"][0]["change_id"]
@@ -223,7 +227,11 @@ fn snapshot_atomicity_under_simulated_sigkill() {
     //              but no ref advanced and no thread is in a
     //              half-applied state.
     let log_after: Value = serde_json::from_str(
-        &heddle(&["--json", "log", "main", "-n", "5"], Some(temp.path())).expect("post-crash log"),
+        &heddle(
+            &["--output", "json", "log", "main", "-n", "5"],
+            Some(temp.path()),
+        )
+        .expect("post-crash log"),
     )
     .unwrap();
     let post_crash_tip = log_after["states"][0]["change_id"]
@@ -240,7 +248,7 @@ fn snapshot_atomicity_under_simulated_sigkill() {
     //              content; we just need to make sure we can record
     //              it now.
     let recovered_capture = heddle(
-        &["--json", "capture", "-m", "post-recovery capture"],
+        &["--output", "json", "capture", "-m", "post-recovery capture"],
         Some(temp.path()),
     )
     .expect("post-recovery capture succeeds");

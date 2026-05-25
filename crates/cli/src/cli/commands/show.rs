@@ -6,7 +6,7 @@ use repo::{Repository, format_confidence};
 use serde::Serialize;
 
 use super::{
-    git_overlay_health::{PlainGitTrustProbe, build_plain_git_trust_probe},
+    git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     history_target::resolve_state_id,
     snapshot::ensure_current_state,
 };
@@ -48,7 +48,9 @@ struct PrincipalInfo {
 struct AgentInfo {
     provider: String,
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     policy_id: Option<String>,
 }
 
@@ -72,7 +74,7 @@ struct ShowGitOverlayImportHintOutput {
 pub fn cmd_show(cli: &Cli, state_spec: String) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
-    if let Some(probe) = build_plain_git_trust_probe(start)? {
+    if let Some(probe) = build_plain_git_verification_probe(start)? {
         return render_plain_git_show(cli, &probe, &state_spec);
     }
 
@@ -138,13 +140,17 @@ pub fn cmd_show(cli: &Cli, state_spec: String) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print_state(&output, cli.verbose > 0);
+        render_state(&output, cli.verbose > 0);
     }
 
     Ok(())
 }
 
-fn render_plain_git_show(cli: &Cli, probe: &PlainGitTrustProbe, state_spec: &str) -> Result<()> {
+fn render_plain_git_show(
+    cli: &Cli,
+    probe: &PlainGitVerificationProbe,
+    state_spec: &str,
+) -> Result<()> {
     if should_output_json(cli, None) {
         println!(
             "{}",
@@ -153,7 +159,7 @@ fn render_plain_git_show(cli: &Cli, probe: &PlainGitTrustProbe, state_spec: &str
                 "storage_model": "git",
                 "requested": state_spec,
                 "state": null,
-                "trust": &probe.trust,
+                "verification": &probe.trust,
                 "recommended_action": &probe.trust.recommended_action,
                 "recovery_commands": &probe.trust.recovery_commands,
             }))?
@@ -168,23 +174,30 @@ fn render_plain_git_show(cli: &Cli, probe: &PlainGitTrustProbe, state_spec: &str
         if let Some(branch) = &probe.git_branch {
             println!(
                 "Then: {}",
-                style::bold(&format!("heddle bridge git import --ref {branch}"))
+                style::bold(&super::git_overlay_health::canonical_adopt_ref_command(
+                    branch
+                ))
             );
         }
     }
     Ok(())
 }
 
-fn print_state(output: &ShowOutput, verbose: bool) {
+fn render_state(output: &ShowOutput, verbose: bool) {
     println!(
-        "Repository mode: {} ({})",
-        output.repository_capability, output.storage_model
+        "Repository: {}",
+        crate::cli::render::repository_mode_label(
+            &output.repository_capability,
+            &output.storage_model
+        )
     );
     if let Some(hint) = &output.git_overlay_import_hint {
         println!(
-            "Git import: {} other branch(es) still live only in Git ({})",
-            hint.missing_branch_count,
-            crate::cli::render::preview_list(&hint.missing_branches, hint.missing_branch_count,)
+            "{}",
+            crate::cli::render::git_only_branch_summary(
+                &hint.missing_branches,
+                hint.missing_branch_count,
+            )
         );
         println!("Next step: {}", style::dim(&hint.recommended_command));
     }

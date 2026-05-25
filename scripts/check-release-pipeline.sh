@@ -39,7 +39,7 @@ else
   err "missing strict-semver tag-push trigger ('v[0-9]+.[0-9]+.[0-9]+') in $WF"
 fi
 
-# Trust gate: a validate-tag job must run before build/release and
+# Verification gate: a validate-tag job must run before build/release and
 # enforce (a) tag existence, (b) ancestry on origin/main, (c) pattern
 # classification. We assert the structural pieces here; the rule
 # content lives in the workflow itself.

@@ -136,12 +136,12 @@ fn kill_pid(pid: u32, signal: i32) {
     }
 }
 
-/// Pull `thread.path` (the FUSE mount point) out of `start --json`
+/// Pull `thread.path` (the FUSE mount point) out of `start --output json`
 /// output. Identical helper lives in `virtualized_mount.rs`; we
 /// duplicate rather than hoist to keep the test files independently
 /// readable.
 fn mount_path_from_start(raw: &str) -> String {
-    let out: Value = serde_json::from_str(raw).expect("start --json output");
+    let out: Value = serde_json::from_str(raw).expect("start --output json output");
     out.get("thread")
         .and_then(|t| t.get("path"))
         .and_then(Value::as_str)
@@ -151,8 +151,9 @@ fn mount_path_from_start(raw: &str) -> String {
 
 /// Capture a snapshot in `cwd` and return its short change_id.
 fn capture_short(cwd: &Path, msg: &str) -> String {
-    let out = heddle(&["--json", "capture", "-m", msg], Some(cwd)).expect("snapshot succeeded");
-    let v: Value = serde_json::from_str(&out).expect("snapshot --json is valid JSON");
+    let out =
+        heddle(&["--output", "json", "capture", "-m", msg], Some(cwd)).expect("snapshot succeeded");
+    let v: Value = serde_json::from_str(&out).expect("snapshot --output json is valid JSON");
     v.get("change_id")
         .and_then(Value::as_str)
         .expect("snapshot output exposes change_id")
@@ -197,7 +198,8 @@ fn daemon_mount_survives_cli_exit() {
 
     let raw = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "feature/daemon-survives",
             "--workspace",
@@ -257,7 +259,8 @@ fn daemon_spawns_on_demand_and_status_reports_healthy() {
 
     heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "spawn-test",
             "--workspace",
@@ -309,7 +312,8 @@ fn idempotent_mount_does_not_double_register() {
 
     let first = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "idem-thread",
             "--workspace",
@@ -327,7 +331,8 @@ fn idempotent_mount_does_not_double_register() {
     // be idempotent on the daemon side regardless.
     let second = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "idem-thread",
             "--workspace",
@@ -395,7 +400,8 @@ fn daemon_stop_drains_mounts_and_exits() {
 
     let raw = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "stop-test",
             "--workspace",
@@ -519,7 +525,8 @@ fn stale_endpoint_is_swept_and_daemon_respawns() {
     // mount cleanly.
     let raw = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "post-sweep",
             "--workspace",
@@ -569,7 +576,8 @@ fn daemon_killed_mid_mount_recovers_on_next_invocation() {
 
     let raw = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "kill-test",
             "--workspace",
@@ -613,7 +621,8 @@ fn daemon_killed_mid_mount_recovers_on_next_invocation() {
     // recovered daemon is the path serving the recovered mount.
     let raw_recovery = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "after-kill",
             "--workspace",
@@ -669,7 +678,8 @@ fn daemon_mount_with_from_serves_resolved_state() {
 
     let raw = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "from-daemon",
             "--workspace",
@@ -710,8 +720,8 @@ fn daemon_status_is_noop_success_when_daemon_absent() {
 
     let status = heddle(&["daemon", "status"], Some(main.path()))
         .expect("daemon status must succeed even with no daemon running");
-    assert!(
-        status.contains("not running"),
-        "absent-daemon status must say `not running`; got: {status:?}"
-    );
+    let status: serde_json::Value =
+        serde_json::from_str(&status).expect("captured daemon status should use the JSON contract");
+    assert_eq!(status["status"], "not_running");
+    assert_eq!(status["running"], false);
 }

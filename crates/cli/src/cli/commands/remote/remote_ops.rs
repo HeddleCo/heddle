@@ -8,6 +8,10 @@ use std::{collections::BTreeMap, fs, path::Path};
 use anyhow::{Context, Result};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::PullMaterialization;
+use objects::{
+    fs_atomic::write_file_atomic,
+    object::{ChangeId, Tree},
+};
 #[cfg(feature = "client")]
 use proto::AuthToken;
 use refs::Head;
@@ -15,7 +19,11 @@ use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::super::{
-    advice::RecoveryAdvice, git_overlay_health::build_repository_trust_state,
+    advice::RecoveryAdvice,
+    git_overlay_health::{
+        RepositoryVerificationState, build_plain_git_verification_probe,
+        build_repository_verification_state,
+    },
     worktree_safety::ensure_worktree_clean,
 };
 #[cfg(feature = "client")]
@@ -30,15 +38,31 @@ use crate::{
 
 #[derive(Serialize)]
 struct RemoteListOutput {
+    output_kind: &'static str,
     remotes: Vec<RemoteInfoOutput>,
 }
 
 #[derive(Serialize)]
 struct RemoteInfoOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_kind: Option<&'static str>,
     name: String,
     url: String,
     source: String,
     is_default: bool,
+}
+
+#[derive(Serialize)]
+struct RemoteMutationOutput {
+    output_kind: &'static str,
+    status: &'static str,
+    action: &'static str,
+    name: String,
+    url: Option<String>,
+    default: Option<String>,
+    message: String,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
 }
 
 /// Execute pull command.
@@ -53,27 +77,109 @@ pub async fn cmd_pull(
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         ensure_worktree_clean(&repo, "pull")?;
         let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
+        let branch = repo.git_overlay_current_branch()?;
+        let old_git_head = git_checkout_head_oid(repo.root());
+        let old_state = repo.head()?;
         let mut bridge = GitBridge::new(&repo);
-        bridge.pull(&remote_name)?;
+        let outcome = bridge.pull(&remote_name)?;
+        let new_git_head = git_checkout_head_oid(repo.root());
+        let new_state = repo.head()?;
+        let changed_paths =
+            changed_paths_between_states(&repo, old_state.as_ref(), new_state.as_ref())?;
+        let verification = build_repository_verification_state(&repo);
+        let status = if outcome.changed {
+            "updated"
+        } else {
+            "up_to_date"
+        };
         if should_output_json(cli, Some(repo.config())) {
             println!(
                 "{}",
                 serde_json::json!({
-                    "pulled": true,
+                    "output_kind": "pull",
+                    "status": status,
+                    "success": true,
+                    "pulled": outcome.changed,
+                    "changed": outcome.changed,
                     "transport": "git",
                     "remote": remote_name,
-                    "trust": build_repository_trust_state(&repo),
+                    "branch": branch,
+                    "old_git_head": old_git_head,
+                    "new_git_head": new_git_head,
+                    "old_state": old_state.as_ref().map(ToString::to_string),
+                    "new_state": new_state.as_ref().map(ToString::to_string),
+                    "states_created": outcome.states_created,
+                    "commits_seen": outcome.commits_seen,
+                    "commits_seen_scope": "branches_and_heddle_notes",
+                    "materialized_checkout": outcome.materialized_checkout,
+                    "changed_path_count": changed_paths.len(),
+                    "changed_paths": changed_paths,
+                    "verification": verification,
                 })
             );
         } else {
+            if outcome.changed {
+                println!(
+                    "{} pulled from {}",
+                    style::ok_marker(),
+                    style::bold(&remote_name)
+                );
+            } else {
+                println!(
+                    "{} already up to date with {}",
+                    style::ok_marker(),
+                    style::bold(&remote_name)
+                );
+            }
+            if let Some(branch) = &branch {
+                if outcome.changed {
+                    println!("Branch: {}", style::bold(branch));
+                } else if let Some(head) = &new_git_head {
+                    println!("Branch: {} at {}", style::bold(branch), short_oid(head));
+                }
+            }
+            match (&old_git_head, &new_git_head) {
+                (Some(old), Some(new)) if old != new => {
+                    println!("Git: {} -> {}", short_oid(old), short_oid(new));
+                }
+                (Some(head), Some(_)) if outcome.changed => {
+                    println!("Git: {}", short_oid(head));
+                }
+                _ => {}
+            }
             println!(
-                "{} pulled Git-overlay refs from {}",
-                style::ok_marker(),
-                style::bold(&remote_name)
+                "Imported: {}",
+                style::count(outcome.states_created, "new state")
             );
+            println!(
+                "Scanned: {} across branches + refs/notes/heddle",
+                style::count(outcome.commits_seen, "Git commit object")
+            );
+            if outcome.materialized_checkout {
+                println!("Worktree: materialized checkout");
+            }
+            if outcome.changed {
+                println!("Changed paths: {}", changed_paths.len());
+                for path in changed_paths.iter().take(8) {
+                    println!("  - {path}");
+                }
+                if changed_paths.len() > 8 {
+                    println!("  - ... {} more", changed_paths.len() - 8);
+                }
+            }
+            if !verification.verified {
+                println!("Workspace: {}", style::warn(&verification.status));
+                if !verification.recommended_action.is_empty() {
+                    println!("Next: {}", style::bold(&verification.recommended_action));
+                }
+            } else {
+                println!("Workspace: verified");
+            }
         }
         return Ok(());
     }
+
+    super::preflight_native_remote_transport(&repo, remote.as_deref(), "pull")?;
 
     let user_config = UserConfig::load_default().unwrap_or_default();
     #[cfg(feature = "client")]
@@ -183,6 +289,7 @@ async fn pull_local(
     // post-pull state and silently strand the thread on undo —
     // exactly the bug we're closing.
     let pre_target = repo.refs().get_thread(track_to_update)?;
+    let changed = pre_target.as_ref() != Some(&state_id) || objects_copied > 0;
     repo.refs().set_thread(track_to_update, &state_id)?;
 
     // Preserve attached-HEAD semantics only when the pull target is the
@@ -218,10 +325,17 @@ async fn pull_local(
         println!(
             "{}",
             serde_json::json!({
+                "output_kind": "pull",
+                "status": if changed { "updated" } else { "up_to_date" },
                 "success": true,
+                "pulled": changed,
+                "changed": changed,
+                "transport": "heddle",
+                "remote": source_path.display().to_string(),
+                "thread": track_to_update,
                 "state": state_id.to_string(),
                 "objects": objects_copied,
-                "trust": build_repository_trust_state(repo),
+                "verification": build_repository_verification_state(repo),
             })
         );
     } else {
@@ -235,6 +349,48 @@ async fn pull_local(
     }
 
     Ok(())
+}
+
+fn git_checkout_head_oid(root: &Path) -> Option<String> {
+    let git = gix::discover(root).ok()?;
+    Some(git.head_id().ok()?.detach().to_string())
+}
+
+fn short_oid(oid: &str) -> String {
+    oid.chars().take(12).collect()
+}
+
+fn changed_paths_between_states(
+    repo: &Repository,
+    old_state: Option<&ChangeId>,
+    new_state: Option<&ChangeId>,
+) -> Result<Vec<String>> {
+    if old_state == new_state {
+        return Ok(Vec::new());
+    }
+    let Some(new_state) = new_state else {
+        return Ok(Vec::new());
+    };
+    let new_state = repo
+        .store()
+        .get_state(new_state)?
+        .context("new pulled state was not found in Heddle storage")?;
+    let old_tree = match old_state {
+        Some(old_state) => repo
+            .store()
+            .get_state(old_state)?
+            .map(|state| state.tree)
+            .unwrap_or_else(|| Tree::new().hash()),
+        None => Tree::new().hash(),
+    };
+    let mut paths = repo
+        .diff_trees(&old_tree, &new_state.tree)?
+        .iter()
+        .map(|change| change.path.clone())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 fn local_lazy_pull_advice(source_path: &Path) -> RecoveryAdvice {
@@ -296,16 +452,24 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         .await?;
 
     if result.success {
+        let changed = result.final_state.is_some();
         if should_output_json(options.cli, Some(repo.config())) {
             println!(
                 "{}",
                 serde_json::json!({
+                    "output_kind": "pull",
+                    "status": if changed { "updated" } else { "up_to_date" },
                     "success": true,
+                    "pulled": changed,
+                    "changed": changed,
+                    "transport": "heddle",
+                    "remote": options.remote_thread,
+                    "thread": options.local_thread.unwrap_or(options.remote_thread),
                     "state": result
                         .final_state
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
-                    "trust": build_repository_trust_state(repo),
+                    "verification": build_repository_verification_state(repo),
                 })
             );
         } else {
@@ -323,26 +487,108 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         }
     } else {
         let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        return Err(anyhow::anyhow!("Pull failed: {}", err));
+        return Err(anyhow::anyhow!(network_pull_failed_advice(
+            options.remote_thread,
+            options.local_thread,
+            &err,
+        )));
     }
 
     Ok(())
 }
 
+#[cfg(feature = "client")]
+fn network_pull_failed_advice(
+    remote_thread: &str,
+    local_thread: Option<&str>,
+    error: &str,
+) -> RecoveryAdvice {
+    let primary_command = if let Some(local_thread) = local_thread {
+        format!("heddle pull {remote_thread} {local_thread}")
+    } else {
+        format!("heddle pull {remote_thread}")
+    };
+    RecoveryAdvice::safety_refusal(
+        "remote_pull_failed",
+        format!("Pull failed from {remote_thread}: {error}"),
+        format!(
+            "Inspect `heddle verify`, then retry with `{primary_command}` after fixing the remote."
+        ),
+        format!("remote pull from {remote_thread} failed: {error}"),
+        "the local thread was not confirmed updated from the remote",
+        "local Heddle state, Git refs, and worktree files were left unchanged by the failed pull result",
+        primary_command.clone(),
+        vec![primary_command, "heddle verify".to_string()],
+    )
+}
+
 /// Execute remote command.
 pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let cwd = std::env::current_dir()?;
+    let start = cli.repo.as_ref().unwrap_or(&cwd);
+    match &command {
+        RemoteCommands::List => {
+            if let Some(probe) = build_plain_git_verification_probe(start)? {
+                let items = plain_git_remote_items(&probe.root);
+                let default = default_remote_from_items(&items);
+                let output = RemoteListOutput {
+                    output_kind: "remote_list",
+                    remotes: items
+                        .into_iter()
+                        .map(|(name, url)| {
+                            let is_default = default.as_deref() == Some(name.as_str());
+                            RemoteInfoOutput {
+                                output_kind: None,
+                                name,
+                                url,
+                                source: "git".to_string(),
+                                is_default,
+                            }
+                        })
+                        .collect(),
+                };
+                render_remote_list(&output, should_output_json(cli, None))?;
+                return Ok(());
+            }
+        }
+        RemoteCommands::Show { name } => {
+            if let Some(probe) = build_plain_git_verification_probe(start)? {
+                let items = plain_git_remote_items(&probe.root);
+                let default = default_remote_from_items(&items);
+                let url = items
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| remote_not_found_advice(name))?;
+                let output = RemoteInfoOutput {
+                    output_kind: Some("remote_show"),
+                    name: name.clone(),
+                    url,
+                    source: "git".to_string(),
+                    is_default: default.as_deref() == Some(name.as_str()),
+                };
+                render_remote_info(&output, should_output_json(cli, None))?;
+                return Ok(());
+            }
+        }
+        RemoteCommands::Add { .. }
+        | RemoteCommands::Remove { .. }
+        | RemoteCommands::SetDefault { .. } => {}
+    }
+
+    let repo = Repository::open(start)?;
 
     match command {
         RemoteCommands::List => {
             let items = merged_remote_items(&repo)?;
             let default = resolved_default_remote_name(&repo)?;
             let output = RemoteListOutput {
+                output_kind: "remote_list",
                 remotes: items
                     .into_iter()
                     .map(|(name, (url, source))| {
                         let is_default = default.as_deref() == Some(name.as_str());
                         RemoteInfoOutput {
+                            output_kind: None,
                             name,
                             url,
                             source,
@@ -355,38 +601,73 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             Ok(())
         }
         RemoteCommands::Add { name, url } => {
+            super::preflight_native_remote_transport(&repo, Some(&url), "remote add")?;
+            let git_overlay_default_before = (repo.capability()
+                == RepositoryCapability::GitOverlay)
+                .then(|| git_overlay_default_remote_name(&repo))
+                .flatten();
+            sync_git_overlay_remote_add(&repo, &name, &url)?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
-            cfg.add(&name, Remote { url }).map_err(anyhow::Error::msg)?;
-            println!("{} added remote {}", style::ok_marker(), style::bold(&name));
+            let default_was_empty = cfg.default_name().is_none();
+            cfg.add(&name, Remote { url: url.clone() })
+                .map_err(anyhow::Error::msg)?;
+            if default_was_empty
+                && git_overlay_default_before
+                    .as_deref()
+                    .is_some_and(|default| default != name)
+            {
+                cfg.clear_default().map_err(anyhow::Error::msg)?;
+            }
+            let default = resolved_default_remote_name(&repo)?;
+            render_remote_mutation(
+                RemoteMutationOutput {
+                    output_kind: "remote_add",
+                    status: "completed",
+                    action: "remote_add",
+                    name,
+                    url: Some(url),
+                    default,
+                    message: "Added remote".to_string(),
+                    trust: build_repository_verification_state(&repo),
+                },
+                should_output_json(cli, Some(repo.config())),
+            )?;
             Ok(())
         }
         RemoteCommands::Remove { name } => {
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
             cfg.remove(&name).map_err(anyhow::Error::msg)?;
-            println!(
-                "{} removed remote {}",
-                style::ok_marker(),
-                style::bold(&name)
-            );
+            render_remote_mutation(
+                RemoteMutationOutput {
+                    output_kind: "remote_remove",
+                    status: "completed",
+                    action: "remote_remove",
+                    name,
+                    url: None,
+                    default: resolved_default_remote_name(&repo)?,
+                    message: "Removed remote".to_string(),
+                    trust: build_repository_verification_state(&repo),
+                },
+                should_output_json(cli, Some(repo.config())),
+            )?;
             Ok(())
         }
         RemoteCommands::SetDefault { name } => {
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
             cfg.set_default(&name).map_err(anyhow::Error::msg)?;
-            if should_output_json(cli, Some(repo.config())) {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "default": name,
-                    })
-                );
-            } else {
-                println!(
-                    "{} set default remote to {}",
-                    style::ok_marker(),
-                    style::bold(&name)
-                );
-            }
+            render_remote_mutation(
+                RemoteMutationOutput {
+                    output_kind: "remote_set_default",
+                    status: "completed",
+                    action: "remote_set_default",
+                    name: name.clone(),
+                    url: None,
+                    default: Some(name),
+                    message: "Set default remote".to_string(),
+                    trust: build_repository_verification_state(&repo),
+                },
+                should_output_json(cli, Some(repo.config())),
+            )?;
             Ok(())
         }
         RemoteCommands::Show { name } => {
@@ -398,6 +679,7 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
                 .ok_or_else(|| remote_not_found_advice(&name))?;
             let is_default = default.as_deref() == Some(name.as_str());
             let output = RemoteInfoOutput {
+                output_kind: Some("remote_show"),
                 name,
                 url,
                 source,
@@ -423,6 +705,23 @@ fn remote_not_found_advice(name: &str) -> RecoveryAdvice {
             "heddle remote add <name> <url>".to_string(),
         ],
     )
+}
+
+fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!(
+            "{} {} {}",
+            style::ok_marker(),
+            output.message.to_lowercase(),
+            style::bold(&output.name)
+        );
+        if !output.trust.recommended_action.is_empty() {
+            println!("Next: {}", style::bold(&output.trust.recommended_action));
+        }
+    }
+    Ok(())
 }
 
 fn render_remote_list(output: &RemoteListOutput, json: bool) -> Result<()> {
@@ -479,42 +778,128 @@ pub(crate) fn resolve_default_remote_name(
         return Ok(default.to_string());
     }
     if repo.capability() == RepositoryCapability::GitOverlay {
-        let git_remotes = git_overlay_config_remotes(repo);
-        if git_remotes.contains_key("origin") {
-            return Ok("origin".to_string());
+        if let Some(default) = git_overlay_default_remote_name(repo) {
+            return Ok(default);
         }
     }
     Ok("origin".to_string())
 }
 
-fn resolved_default_remote_name(repo: &Repository) -> Result<Option<String>> {
+pub(crate) fn resolved_default_remote_name(repo: &Repository) -> Result<Option<String>> {
     let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
     if let Some(default) = cfg.default_name() {
         return Ok(Some(default.to_string()));
     }
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && git_overlay_config_remotes(repo).contains_key("origin")
-    {
-        return Ok(Some("origin".to_string()));
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        return Ok(git_overlay_default_remote_name(repo));
     }
     Ok(None)
 }
 
+fn git_overlay_default_remote_name(repo: &Repository) -> Option<String> {
+    let git_remotes = git_overlay_config_remotes(repo);
+    if let Some(upstream_remote) = git_upstream_remote_name(repo) {
+        return Some(upstream_remote);
+    }
+    if git_remotes.contains_key("origin") {
+        return Some("origin".to_string());
+    }
+    if git_remotes.len() == 1 {
+        return git_remotes.keys().next().cloned();
+    }
+    None
+}
+
+fn git_upstream_remote_name(repo: &Repository) -> Option<String> {
+    let branch = repo.git_overlay_current_branch().ok().flatten()?;
+    let git = gix::discover(repo.root()).ok()?;
+    let local = git
+        .find_reference(format!("refs/heads/{branch}").as_str())
+        .ok()?;
+    local
+        .remote_name(gix::remote::Direction::Fetch)
+        .and_then(|name| name.as_symbol().map(str::to_string))
+        .filter(|remote| !remote.is_empty())
+}
+
 fn merged_remote_items(repo: &Repository) -> Result<BTreeMap<String, (String, String)>> {
     let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
+    let git_overlay_remotes = if repo.capability() == RepositoryCapability::GitOverlay {
+        git_overlay_config_remotes(repo)
+    } else {
+        BTreeMap::new()
+    };
     let mut items: BTreeMap<String, (String, String)> = cfg
         .list()
         .into_iter()
-        .map(|(name, remote)| (name, (remote.url, "heddle".to_string())))
+        .map(|(name, remote)| {
+            let source = configured_remote_source(repo, &remote.url);
+            (name, (remote.url, source.to_string()))
+        })
         .collect();
     if repo.capability() == RepositoryCapability::GitOverlay {
-        for (name, url) in git_overlay_config_remotes(repo) {
+        for (name, url) in git_overlay_remotes {
             items
                 .entry(name)
                 .or_insert_with(|| (url, "git-overlay".to_string()));
         }
     }
     Ok(items)
+}
+
+fn configured_remote_source(repo: &Repository, url: &str) -> &'static str {
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && local_remote_path(url).is_some_and(|path| is_local_git_repository(&path))
+    {
+        "git-overlay"
+    } else {
+        "heddle"
+    }
+}
+
+fn local_remote_path(url: &str) -> Option<std::path::PathBuf> {
+    match RemoteTarget::parse(url).ok()? {
+        RemoteTarget::Local(path) => Some(path),
+        RemoteTarget::Network { .. } => None,
+    }
+}
+
+fn is_local_git_repository(path: &Path) -> bool {
+    if path.join(".git").exists() {
+        return true;
+    }
+    path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir()
+}
+
+fn plain_git_remote_items(root: &Path) -> BTreeMap<String, String> {
+    let mut remotes = BTreeMap::new();
+    for config_path in plain_git_config_paths(root) {
+        parse_git_config_remotes(&config_path, &mut remotes);
+    }
+    remotes
+}
+
+fn plain_git_config_paths(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    let dot_git = root.join(".git");
+    paths.push(dot_git.join("config"));
+    if let Some(git_dir) = pointed_git_dir(&dot_git) {
+        paths.push(git_dir.join("config"));
+        if let Some(common_dir) = common_git_dir(&git_dir) {
+            paths.push(common_dir.join("config"));
+        }
+    }
+    paths
+}
+
+fn default_remote_from_items(items: &BTreeMap<String, String>) -> Option<String> {
+    if items.contains_key("origin") {
+        Some("origin".to_string())
+    } else if items.len() == 1 {
+        items.keys().next().cloned()
+    } else {
+        None
+    }
 }
 
 fn git_overlay_config_remotes(repo: &Repository) -> BTreeMap<String, String> {
@@ -589,6 +974,126 @@ fn parse_git_config_remotes(path: &Path, remotes: &mut BTreeMap<String, String>)
                 .or_insert_with(|| value.trim().to_string());
         }
     }
+}
+
+fn sync_git_overlay_remote_add(repo: &Repository, name: &str, url: &str) -> Result<()> {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Ok(());
+    }
+    validate_git_overlay_remote_name(name)?;
+    let config_path = git_overlay_config_path_for_write(repo)
+        .context("Git-overlay remote add requires a writable Git config")?;
+    upsert_git_remote_config(&config_path, name, url)
+}
+
+fn git_overlay_config_path_for_write(repo: &Repository) -> Option<std::path::PathBuf> {
+    let dot_git = repo.root().join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git.join("config"));
+    }
+    let git_dir = pointed_git_dir(&dot_git)?;
+    Some(common_git_dir(&git_dir).unwrap_or(git_dir).join("config"))
+}
+
+fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
+    if name.trim().is_empty()
+        || name.starts_with('-')
+        || name.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+        || name
+            .chars()
+            .any(|ch| matches!(ch, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
+        || name.contains("..")
+        || name.contains("//")
+        || name.starts_with('/')
+        || name.ends_with('/')
+        || name.starts_with('.')
+        || name.ends_with(".lock")
+    {
+        anyhow::bail!("invalid Git remote name for Git-overlay repository: {name}");
+    }
+    Ok(())
+}
+
+fn upsert_git_remote_config(config_path: &Path, name: &str, url: &str) -> Result<()> {
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let original = fs::read_to_string(config_path).unwrap_or_default();
+    let mut rewritten = String::new();
+    let mut skipping_remote = false;
+    for line in original.lines() {
+        if let Some(section_name) = parse_git_remote_section_name(line) {
+            skipping_remote = section_name == name;
+            if skipping_remote {
+                continue;
+            }
+        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
+            skipping_remote = false;
+        }
+        if !skipping_remote {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+    }
+    if !rewritten.is_empty() && !rewritten.ends_with("\n\n") {
+        rewritten.push('\n');
+    }
+    rewritten.push_str(&format!(
+        "[remote \"{}\"]\n\turl = {}\n\tfetch = {}\n",
+        git_config_quoted_section(name),
+        git_config_quoted_value(url),
+        git_config_quoted_value(&format!("+refs/heads/*:refs/remotes/{name}/*"))
+    ));
+    write_file_atomic(config_path, rewritten.as_bytes())?;
+    Ok(())
+}
+
+fn parse_git_remote_section_name(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let inner = trimmed.strip_prefix("[remote \"")?.strip_suffix("\"]")?;
+    unescape_git_config_string(inner)
+}
+
+fn unescape_git_config_string(value: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'b' => out.push('\u{0008}'),
+            escaped => out.push(escaped),
+        }
+    }
+    Some(out)
+}
+
+fn git_config_quoted_section(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn git_config_quoted_value(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\t' => quoted.push_str("\\t"),
+            '\r' => quoted.push_str("\\r"),
+            '\u{0008}' => quoted.push_str("\\b"),
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 #[cfg(feature = "client")]

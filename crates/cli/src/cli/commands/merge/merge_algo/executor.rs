@@ -13,8 +13,11 @@ use objects::{
 };
 use repo::Repository;
 
-use crate::cli::commands::merge::{
-    merge_algo::ConflictLabels, merge_renames::MergeRenameMap, rename_matcher::flatten_tree,
+use crate::cli::commands::{
+    RecoveryAdvice,
+    merge::{
+        merge_algo::ConflictLabels, merge_renames::MergeRenameMap, rename_matcher::flatten_tree,
+    },
 };
 
 pub(super) fn merge_with_renames(
@@ -313,10 +316,13 @@ fn text_hunk_merge_blobs(
 /// so the user sees the corruption instead of inheriting a silent rewrite.
 fn load_blob_content(store: &dyn ObjectStore, hash: &ContentHash, path: &str) -> Result<Vec<u8>> {
     let blob = store.get_blob(hash)?.ok_or_else(|| {
-        anyhow!(
+        anyhow!(RecoveryAdvice::merge_integrity_refusal(
             "merge input blob {hash} for path {path:?} is missing from the object store; \
-             aborting to avoid silently merging against empty content"
-        )
+             aborting to avoid silently merging against empty content",
+            format!("merge input path {path:?} references missing blob {hash} in the object store"),
+            "the merge would use empty bytes for the missing blob and could choose the other side cleanly, committing silent content loss without conflict markers",
+            "HEAD, refs, and worktree were left unchanged; any merge scratch objects written before this refusal are unreachable until a successful capture",
+        ))
     })?;
     Ok(blob.content().to_vec())
 }
@@ -335,11 +341,13 @@ fn load_blob_content(store: &dyn ObjectStore, hash: &ContentHash, path: &str) ->
 /// merge-side entry name.
 fn require_subtree(store: &dyn ObjectStore, hash: &ContentHash, label: &str) -> Result<Tree> {
     store.get_tree(hash)?.ok_or_else(|| {
-        anyhow!(
+        anyhow!(RecoveryAdvice::merge_integrity_refusal(
             "merge input subtree {hash} for {label} is missing from the object store; \
-             aborting to avoid silently merging against an empty subtree. \
-             Run `heddle fsck --full` to inspect store integrity."
-        )
+             aborting to avoid silently merging against an empty subtree",
+            format!("merge input {label} references missing subtree {hash} in the object store"),
+            "the recursive merge would use an empty subtree and could silently delete every tracked file below that path",
+            "HEAD, refs, and worktree were left unchanged; any merge scratch objects written before this refusal are unreachable until a successful capture",
+        ))
     })
 }
 
@@ -756,6 +764,12 @@ mod tests {
 
     use super::*;
 
+    fn advice_from(err: &anyhow::Error) -> &RecoveryAdvice {
+        err.chain()
+            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
+            .expect("merge integrity guard should use typed RecoveryAdvice")
+    }
+
     /// A missing blob during the three-way text merge must surface as an
     /// error, not be silently coerced to empty bytes. The pre-fix code
     /// `unwrap_or_default()`-ed the load and would produce a "clean" merge
@@ -783,6 +797,24 @@ mod tests {
             msg.contains("src/foo.rs"),
             "error must mention the affected path so operators can locate \
              the corrupt entry; got: {msg}"
+        );
+        let advice = advice_from(&err);
+        assert_eq!(advice.kind, "repository_integrity_error");
+        assert_eq!(advice.primary_command, "heddle fsck --full");
+        assert!(
+            advice.unsafe_condition.contains("src/foo.rs")
+                && advice.unsafe_condition.contains(&missing_hash.to_hex()),
+            "unsafe condition must name the path and missing blob hash: {advice}"
+        );
+        assert!(
+            advice.would_change.contains("empty bytes")
+                && advice.would_change.contains("silent content loss"),
+            "would-change text must describe the loss mode: {advice}"
+        );
+        assert!(
+            advice.preserved.contains("HEAD")
+                && advice.preserved.contains("worktree were left unchanged"),
+            "preserved-state text must say what remained untouched: {advice}"
         );
     }
 
@@ -839,6 +871,24 @@ mod tests {
             msg.contains("heddle fsck"),
             "error must point at the recovery command so operators have a \
              next step instead of just a stack trace; got: {msg}"
+        );
+        let advice = advice_from(&err);
+        assert_eq!(advice.kind, "repository_integrity_error");
+        assert_eq!(advice.primary_command, "heddle fsck --full");
+        assert!(
+            advice.unsafe_condition.contains("src/sub")
+                && advice.unsafe_condition.contains(&phantom_hash.to_hex()),
+            "unsafe condition must name the label and missing subtree hash: {advice}"
+        );
+        assert!(
+            advice.would_change.contains("empty subtree")
+                && advice.would_change.contains("silently delete"),
+            "would-change text must describe the loss mode: {advice}"
+        );
+        assert!(
+            advice.preserved.contains("HEAD")
+                && advice.preserved.contains("worktree were left unchanged"),
+            "preserved-state text must say what remained untouched: {advice}"
         );
     }
 

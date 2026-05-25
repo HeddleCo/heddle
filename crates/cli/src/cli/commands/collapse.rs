@@ -9,6 +9,7 @@ use refs::Head;
 use repo::Repository;
 use serde::Serialize;
 
+use super::advice::RecoveryAdvice;
 use crate::{
     cli::{Cli, commands::snapshot::resolve_attribution, should_output_json},
     config::UserConfig,
@@ -42,7 +43,7 @@ pub fn cmd_collapse(
     let json = should_output_json(cli, Some(repo.config()));
 
     if states.is_empty() {
-        return Err(anyhow::anyhow!("No states specified to collapse"));
+        return Err(anyhow::anyhow!(collapse_requires_states_advice()));
     }
 
     let started = Instant::now();
@@ -135,4 +136,37 @@ pub fn cmd_collapse(
     }
 
     Ok(())
+}
+
+fn collapse_requires_states_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "collapse_states_required",
+        "No states specified to collapse",
+        "List recent states with `heddle log`, then rerun `heddle collapse <state> --into <intent>` with at least one source state.",
+        "collapse was invoked without any source state ids",
+        "collapsing without source states would have to guess which history range should be replaced",
+        "no collapsed state was written; HEAD, refs, oplog, and worktree files were left unchanged",
+        "heddle log",
+        vec![
+            "heddle log".to_string(),
+            "heddle collapse <state> --into <intent>".to_string(),
+        ],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapse_requires_states_advice_is_typed() {
+        let advice = collapse_requires_states_advice();
+
+        assert_eq!(advice.kind, "collapse_states_required");
+        assert_eq!(advice.primary_command, "heddle log");
+        assert!(advice.primary_hint().contains("heddle collapse"));
+        assert!(advice.unsafe_condition.contains("without any source"));
+        assert!(advice.would_change.contains("guess"));
+        assert!(advice.preserved.contains("HEAD"));
+    }
 }

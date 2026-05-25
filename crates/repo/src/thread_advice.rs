@@ -70,6 +70,14 @@ pub fn describe_thread_advice_with_initial(
     clean_ready_merges_to_apply: bool,
     initial_state: bool,
 ) -> ThreadAdvice {
+    if matches!(thread.state, ThreadState::Abandoned | ThreadState::Merged) {
+        return ThreadAdvice {
+            thread_health: thread.state.to_string(),
+            blockers: Vec::new(),
+            recommended_action: String::new(),
+        };
+    }
+
     // A freshly-initialized active thread with no work, no conflicts, no
     // merges pending, and no promotion warning is healthy. The advice
     // cascade below otherwise falls through to a misleading
@@ -82,7 +90,7 @@ pub fn describe_thread_advice_with_initial(
         && thread.freshness != ThreadFreshness::Stale
         && thread.changed_paths.is_empty()
         && !thread.promotion_suggested;
-    if fresh_and_idle && thread.freshness != ThreadFreshness::Current {
+    if fresh_and_idle {
         return ThreadAdvice {
             thread_health: "clean".to_string(),
             blockers: Vec::new(),
@@ -119,6 +127,15 @@ pub fn describe_thread_advice_with_initial(
             blockers.push("Thread needs attention before integration".to_string());
         }
         RecommendedAction::Resolve
+    } else if thread.state == ThreadState::Ready
+        && thread.integration_policy_result.status.as_deref() == Some("previewed")
+    {
+        let thread_health = "ready".to_string();
+        return ThreadAdvice {
+            thread_health,
+            blockers,
+            recommended_action: format!("heddle ship --thread {} --no-push", thread.id),
+        };
     } else if clean_ready_merges_to_apply {
         RecommendedAction::MergeApply
     } else if thread.state == ThreadState::Ready {

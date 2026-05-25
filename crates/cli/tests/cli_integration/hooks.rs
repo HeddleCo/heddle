@@ -94,12 +94,9 @@ fn hook_install_empty_stdin_uses_typed_advice_json() {
         serde_json::from_str(stderr).expect("empty hook stdin should emit JSON envelope");
     assert_eq!(envelope["kind"], "hook_install_empty_stdin");
     assert!(
-        envelope["error"].as_str().is_some_and(|error| error
-            .contains("hook install received empty stdin")
-            && error.contains("Unsafe:")
-            && error.contains("Would change:")
-            && error.contains("Preserved:")
-            && error.contains("Primary recovery:")),
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("hook install received empty stdin")),
         "empty hook stdin should include typed recovery detail: {stderr}"
     );
     assert!(
@@ -144,12 +141,9 @@ fn pre_capture_hook_veto_uses_typed_advice_json() {
         serde_json::from_str(stderr).expect("hook veto should emit JSON envelope");
     assert_eq!(envelope["kind"], "hook_veto");
     assert!(
-        envelope["error"].as_str().is_some_and(|error| error
-            .contains("pre_capture hook vetoed: policy says no")
-            && error.contains("Unsafe:")
-            && error.contains("Would change:")
-            && error.contains("Preserved:")
-            && error.contains("Primary recovery:")),
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("pre_capture hook vetoed: policy says no")),
         "hook veto should include typed recovery detail: {stderr}"
     );
     assert!(

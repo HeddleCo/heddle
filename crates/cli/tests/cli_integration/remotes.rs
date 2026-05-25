@@ -1,13 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 
+fn heddle_without_git_for_remote_tests(args: &[&str], cwd: &std::path::Path) -> String {
+    let output = heddle_output_with_env(args, Some(cwd), &[("PATH", ""), ("NO_COLOR", "1")])
+        .expect("invoke heddle without git on PATH");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "heddle {args:?} should succeed without git on PATH\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    stdout
+}
+
+fn verify_json(cwd: &std::path::Path) -> Value {
+    let output =
+        heddle_output(&["--output", "json", "verify"], Some(cwd)).expect("invoke verify JSON");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        return serde_json::from_str(&stdout).expect("verify JSON should parse");
+    }
+    let envelope: Value =
+        serde_json::from_str(&stderr).expect("verify failure envelope should parse");
+    assert_eq!(envelope["kind"], "verify_failed", "{envelope}");
+    envelope["verification"].clone()
+}
+
 #[test]
 fn test_cli_remote_operations() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let result = heddle(
-        &["remote", "add", "origin", "localhost:8421"],
+        &[
+            "--output",
+            "text",
+            "remote",
+            "add",
+            "origin",
+            "localhost:8421",
+        ],
         Some(temp.path()),
     );
     assert!(result.is_ok(), "Remote add failed: {:?}", result.err());
@@ -17,14 +50,18 @@ fn test_cli_remote_operations() {
         result.as_ref().ok()
     );
 
-    let output = heddle(&["remote", "list"], Some(temp.path())).unwrap();
+    let output = heddle(&["--output", "text", "remote", "list"], Some(temp.path())).unwrap();
     assert!(
         output.contains("origin") && output.contains("localhost:8421"),
         "Should list added remote: {}",
         output
     );
 
-    let output = heddle(&["remote", "show", "origin"], Some(temp.path())).unwrap();
+    let output = heddle(
+        &["--output", "text", "remote", "show", "origin"],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         output.contains("origin") && output.contains("localhost:8421"),
         "Remote show should include details: {}",
@@ -32,13 +69,25 @@ fn test_cli_remote_operations() {
     );
 
     heddle(
-        &["remote", "add", "backup", "localhost:8422"],
+        &[
+            "--output",
+            "text",
+            "remote",
+            "add",
+            "backup",
+            "localhost:8422",
+        ],
         Some(temp.path()),
     )
     .unwrap();
-    heddle(&["remote", "set-default", "backup"], Some(temp.path())).unwrap();
+    heddle(
+        &["--output", "text", "remote", "set-default", "backup"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let json = heddle(&["--output", "json", "remote", "list"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&json).expect("remote list JSON should parse");
+    assert_eq!(parsed["output_kind"], "remote_list");
     let remotes = parsed["remotes"].as_array().unwrap();
     assert!(
         remotes
@@ -52,17 +101,24 @@ fn test_cli_remote_operations() {
     )
     .unwrap();
     let parsed: Value = serde_json::from_str(&json).expect("remote show JSON should parse");
+    assert_eq!(parsed["output_kind"], "remote_show");
     assert_eq!(parsed["is_default"], true);
 
-    let trust_json = heddle(&["--output", "json", "trust"], Some(temp.path())).unwrap();
-    let trust: Value = serde_json::from_str(&trust_json).expect("trust JSON should parse");
+    let verify = verify_json(temp.path());
     assert_eq!(
-        trust["trust"]["default_remote"], "backup",
-        "trust should report the configured default remote: {trust}"
+        verify["default_remote"], "backup",
+        "verify should report the configured default remote: {verify}"
     );
 
-    heddle(&["remote", "remove", "backup"], Some(temp.path())).unwrap();
-    let result = heddle(&["remote", "remove", "origin"], Some(temp.path()));
+    heddle(
+        &["--output", "text", "remote", "remove", "backup"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let result = heddle(
+        &["--output", "text", "remote", "remove", "origin"],
+        Some(temp.path()),
+    );
     assert!(result.is_ok(), "Remote remove failed: {:?}", result.err());
     assert!(
         result.as_ref().unwrap().contains("removed remote origin"),
@@ -77,7 +133,93 @@ fn test_cli_remote_operations() {
     );
     let json = heddle(&["--output", "json", "remote", "list"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&json).expect("empty remote list JSON should parse");
+    assert_eq!(parsed["output_kind"], "remote_list");
     assert_eq!(parsed["remotes"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn native_remote_add_rejects_local_git_remote_before_configuring_default() {
+    let temp = TempDir::new().unwrap();
+    let bare = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    gix::init_bare(bare.path()).expect("init bare Git remote");
+
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "remote",
+            "add",
+            "origin",
+            bare.path().to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke remote add");
+    assert!(
+        !output.status.success(),
+        "remote add should reject Git remote"
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("transport mismatch should emit JSON");
+    assert_eq!(envelope["kind"], "remote_transport_mismatch");
+    assert_json_recovery_advice_fields(&envelope, stderr);
+    assert_eq!(
+        envelope["primary_command"], "heddle clone <remote> <fresh-path>",
+        "Git remote mismatch should point to a Git-overlay checkout, not retry native remote add: {envelope}"
+    );
+    assert_eq!(
+        envelope["recovery_commands"],
+        serde_json::json!([
+            "heddle clone <remote> <fresh-path>",
+            "heddle remote add <name> <url>",
+        ]),
+        "Git remote mismatch should offer clone/adopt path before native remote setup: {envelope}"
+    );
+
+    let remotes = heddle(&["--output", "json", "remote", "list"], Some(temp.path())).unwrap();
+    let remotes: Value = serde_json::from_str(&remotes).expect("remote list JSON");
+    assert_eq!(remotes["remotes"].as_array().unwrap().len(), 0);
+    let verify = verify_json(temp.path());
+    assert_eq!(verify["default_remote"], Value::Null);
+}
+
+#[test]
+fn native_push_and_pull_reject_direct_git_remote_before_native_sync() {
+    let temp = TempDir::new().unwrap();
+    let bare = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    gix::init_bare(bare.path()).expect("init bare Git remote");
+
+    for command in ["push", "pull"] {
+        let output = heddle_output(
+            &["--output", "json", command, bare.path().to_str().unwrap()],
+            Some(temp.path()),
+        )
+        .unwrap_or_else(|err| panic!("invoke heddle {command}: {err}"));
+        assert!(
+            !output.status.success(),
+            "{command} should reject Git remote before native sync"
+        );
+        assert!(output.stdout.is_empty());
+        let stderr = std::str::from_utf8(&output.stderr).unwrap();
+        let envelope: Value =
+            serde_json::from_str(stderr).expect("transport mismatch should emit JSON");
+        assert_eq!(envelope["kind"], "remote_transport_mismatch");
+        assert_eq!(
+            envelope["primary_command"], "heddle clone <remote> <fresh-path>",
+            "{command} mismatch should point to Git-overlay clone/adopt path: {envelope}"
+        );
+        assert!(
+            !envelope["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("repository_not_found"),
+            "{command} should not fall through to Repository::open: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -101,12 +243,9 @@ fn test_cli_remote_show_missing_uses_typed_advice() {
         serde_json::from_str(stderr).expect("missing remote should emit JSON envelope");
     assert_eq!(envelope["kind"], "remote_not_found");
     assert!(
-        envelope["error"].as_str().is_some_and(|error| error
-            .contains("Remote 'missing' not found")
-            && error.contains("Unsafe:")
-            && error.contains("Would change:")
-            && error.contains("Preserved:")
-            && error.contains("Primary recovery:")),
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("Remote 'missing' not found")),
         "missing remote refusal should include typed recovery detail: {stderr}"
     );
     assert!(
@@ -150,14 +289,14 @@ fn test_cli_pull_local_updates_requested_track() {
             .filter(|line| !line.trim().is_empty())
             .count(),
         1,
-        "pull --json must emit exactly one JSON value: {output}"
+        "pull --output json must emit exactly one JSON value: {output}"
     );
     let parsed: Value = serde_json::from_str(&output).expect("pull JSON should parse");
     assert_eq!(
         parsed["success"], true,
         "pull should report success: {parsed}"
     );
-    assert_eq!(parsed["trust"]["status"], "clean");
+    assert_eq!(parsed["verification"]["status"], "clean");
 
     let target_repo = Repository::open(target.path()).unwrap();
     assert!(
@@ -170,21 +309,263 @@ fn test_cli_pull_local_updates_requested_track() {
 }
 
 #[test]
-fn test_cli_clone_help_lists_lazy_flag() {
+fn test_cli_clone_help_hides_planned_lazy_flag() {
     let output = heddle(&["clone", "--help"], None).unwrap();
     assert!(
-        output.contains("--lazy"),
-        "clone help should advertise first-class lazy clone support: {output}"
+        !output.contains("--lazy") && !output.contains("--filter"),
+        "clone help should keep planned lazy/partial clone flags out of first-run help: {output}"
     );
 }
 
 #[test]
-fn test_cli_pull_help_lists_lazy_flag() {
+fn test_cli_pull_help_hides_planned_lazy_flag() {
     let output = heddle(&["pull", "--help"], None).unwrap();
     assert!(
-        output.contains("--lazy"),
-        "pull help should advertise first-class lazy pull support: {output}"
+        !output.contains("--lazy"),
+        "pull help should keep planned lazy pull out of first-run help: {output}"
     );
+}
+
+#[test]
+fn git_overlay_push_help_names_git_tag_scope_explicitly() {
+    let help = heddle(&["push", "--help"], None).expect("push help should render");
+    assert!(
+        help.contains("Git tag visible to this checkout")
+            && help.contains("skips Git tags")
+            && !help.contains("including tags"),
+        "push help should make default/all-threads tag behavior concrete: {help}"
+    );
+}
+
+#[test]
+fn git_overlay_push_defaults_to_current_thread_branch() {
+    let (work, _remote, remote_repo) = setup_git_overlay_push_fixture();
+
+    let output = heddle(&["--output", "json", "push", "origin"], Some(work.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
+    assert_eq!(parsed["push_scope"], "current_thread");
+    assert_eq!(parsed["ref_scope"], "branch_and_heddle_notes");
+    assert_eq!(parsed["tags_included"], false);
+    assert_eq!(parsed["thread"], "main");
+
+    assert!(
+        remote_repo.find_reference("refs/heads/main").is_ok(),
+        "default push should push the current branch"
+    );
+    assert!(
+        remote_repo.find_reference("refs/heads/side").is_err(),
+        "default push must not push sibling Heddle threads"
+    );
+    assert!(
+        remote_repo.find_reference("refs/tags/v1.0").is_err(),
+        "default push must not push tags"
+    );
+    assert!(
+        remote_repo
+            .find_reference(cli::bridge::git_notes::NOTES_REF)
+            .is_ok(),
+        "default push must carry Heddle notes so clones preserve state identity"
+    );
+}
+
+#[test]
+fn git_overlay_push_all_threads_preserves_all_refs_behavior() {
+    let (work, _remote, remote_repo) = setup_git_overlay_push_fixture();
+
+    let output = heddle(
+        &["--output", "json", "push", "origin", "--all-threads"],
+        Some(work.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
+    assert_eq!(parsed["push_scope"], "all_threads");
+    assert_eq!(parsed["ref_scope"], "all_threads_tags_and_heddle_notes");
+    assert_eq!(parsed["tags_included"], true);
+    assert!(parsed["thread"].is_null());
+
+    assert!(remote_repo.find_reference("refs/heads/main").is_ok());
+    assert!(remote_repo.find_reference("refs/heads/side").is_ok());
+    assert!(remote_repo.find_reference("refs/tags/v1.0").is_ok());
+}
+
+#[test]
+fn git_overlay_push_all_threads_does_not_promote_remote_tracking_threads() {
+    let (work, _remote, remote_repo) = setup_git_overlay_push_fixture();
+    let repo = Repository::open(work.path()).expect("open work repo");
+    let main = repo
+        .refs()
+        .get_thread("main")
+        .expect("read main thread")
+        .expect("main thread exists");
+    repo.refs()
+        .set_thread("origin/remote-only", &main)
+        .expect("seed remote-tracking-shaped Heddle thread");
+
+    let output = heddle(
+        &["--output", "json", "push", "origin", "--all-threads"],
+        Some(work.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
+    assert_eq!(parsed["push_scope"], "all_threads");
+
+    assert!(
+        remote_repo.find_reference("refs/heads/main").is_ok(),
+        "all-threads push should still publish owned local threads"
+    );
+    assert!(
+        remote_repo
+            .find_reference("refs/heads/origin/remote-only")
+            .is_err(),
+        "all-threads push must not promote remote-tracking-shaped threads into remote heads"
+    );
+}
+
+#[test]
+fn git_overlay_push_all_threads_skips_threads_pruned_by_cleanup() {
+    let (work, _remote, remote_repo) = setup_git_overlay_push_fixture();
+    let checkout = work.path().parent().unwrap().join(format!(
+        "{}-heddle-cleaned-thread",
+        work.path().file_name().unwrap().to_string_lossy()
+    ));
+    let checkout_arg = checkout.to_str().expect("checkout path utf8");
+
+    heddle(
+        &["start", "feature/cleaned", "--path", checkout_arg],
+        Some(work.path()),
+    )
+    .unwrap();
+    std::fs::write(checkout.join("cleaned.txt"), "cleaned\n").unwrap();
+    heddle(
+        &["ready", "-m", "cleaned feature"],
+        Some(checkout.as_path()),
+    )
+    .unwrap();
+    heddle(
+        &["ship", "--thread", "feature/cleaned", "--no-push"],
+        Some(work.path()),
+    )
+    .unwrap();
+    heddle(&["thread", "cleanup", "--merged"], Some(work.path())).unwrap();
+
+    let list = heddle(&["thread", "list", "--output", "json"], Some(work.path())).unwrap();
+    let list: Value = serde_json::from_str(&list).expect("thread list JSON should parse");
+    let threads = list["threads"].as_array().expect("threads array");
+    assert!(
+        !threads
+            .iter()
+            .any(|thread| thread["name"] == "feature/cleaned"),
+        "cleanup should remove the merged thread from default thread surfaces: {list}"
+    );
+
+    let output = heddle(
+        &["--output", "json", "push", "origin", "--all-threads"],
+        Some(work.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
+    assert_eq!(parsed["push_scope"], "all_threads");
+
+    assert!(
+        remote_repo.find_reference("refs/heads/main").is_ok(),
+        "all-threads push should still publish the active main thread"
+    );
+    assert!(
+        remote_repo
+            .find_reference("refs/heads/feature/cleaned")
+            .is_err(),
+        "all-threads push must not recreate a Git branch for a cleaned merged thread"
+    );
+}
+
+#[test]
+fn git_overlay_push_all_threads_includes_checkout_tags_created_after_adopt() {
+    let (work, _remote, remote_repo) = setup_git_overlay_push_fixture();
+    git_ok(&["tag", "v2-local"], work.path());
+
+    let output = heddle(
+        &["--output", "json", "push", "origin", "--all-threads"],
+        Some(work.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
+    assert_eq!(parsed["tags_included"], true);
+
+    assert!(
+        remote_repo.find_reference("refs/tags/v2-local").is_ok(),
+        "all-threads push should include raw checkout tags created after Heddle adoption"
+    );
+}
+
+#[test]
+fn git_overlay_remote_list_show_labels_local_bare_git_remote_as_git_overlay() {
+    let work = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+    gix::init(work.path()).expect("init git worktree");
+    gix::init_bare(remote.path()).expect("init bare git remote");
+
+    heddle(&["init"], Some(work.path())).unwrap();
+    let remote_path = remote.path().to_str().expect("remote path utf8");
+    heddle(&["remote", "add", "origin", remote_path], Some(work.path())).unwrap();
+
+    let list_json = heddle(&["--output", "json", "remote", "list"], Some(work.path())).unwrap();
+    let list: Value = serde_json::from_str(&list_json).expect("remote list JSON parses");
+    let origin = list["remotes"]
+        .as_array()
+        .expect("remotes array")
+        .iter()
+        .find(|remote| remote["name"] == "origin")
+        .expect("origin listed");
+    assert_eq!(
+        origin["source"], "git-overlay",
+        "local bare Git remotes in a Git-overlay repo should not be labeled as native Heddle remotes: {list}"
+    );
+
+    let show_json = heddle(
+        &["--output", "json", "remote", "show", "origin"],
+        Some(work.path()),
+    )
+    .unwrap();
+    let show: Value = serde_json::from_str(&show_json).expect("remote show JSON parses");
+    assert_eq!(show["source"], "git-overlay", "{show}");
+
+    let show_text = heddle(
+        &["--output", "text", "remote", "show", "origin"],
+        Some(work.path()),
+    )
+    .unwrap();
+    assert!(
+        show_text.contains("git-overlay") && !show_text.contains("source: heddle"),
+        "remote show text should reflect Git-overlay transport: {show_text}"
+    );
+}
+
+fn setup_git_overlay_push_fixture() -> (TempDir, TempDir, gix::Repository) {
+    let work = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+    let remote_repo = gix::init_bare(remote.path()).expect("init bare remote");
+    let git_repo = gix::init(work.path()).expect("init git repo");
+    let tree = git_empty_tree_oid(&git_repo);
+    let main = git_commit_with_tree(&git_repo, Some("refs/heads/main"), tree, "main", &[]);
+    let side = git_commit_with_tree(&git_repo, Some("refs/heads/side"), tree, "side", &[main]);
+    git_set_reference(&git_repo, "refs/tags/v1.0", side);
+    std::fs::write(
+        work.path().join(".git").join("HEAD"),
+        "ref: refs/heads/main\n",
+    )
+    .unwrap();
+    std::fs::write(
+        work.path().join(".git").join("config"),
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n[user]\n\tname = Heddle Test\n\temail = heddle@example.com\n[remote \"origin\"]\n\turl = {}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+            remote.path().display()
+        ),
+    )
+    .unwrap();
+
+    heddle(&["init"], Some(work.path())).unwrap();
+    heddle(&["bridge", "git", "import"], Some(work.path())).unwrap();
+    (work, remote, remote_repo)
 }
 
 #[test]
@@ -231,11 +612,7 @@ fn test_cli_clone_local_lazy_is_rejected() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("--lazy is only supported")
-                && error.contains("Unsafe:")
-                && error.contains("Would change:")
-                && error.contains("Preserved:")
-                && error.contains("Primary recovery:")),
+            .is_some_and(|error| error.contains("--lazy is only supported")),
         "local lazy clone should include typed recovery detail: {stderr}"
     );
     assert!(
@@ -243,6 +620,115 @@ fn test_cli_clone_local_lazy_is_rejected() {
             .as_str()
             .is_some_and(|hint| hint.contains("without lazy/filter")),
         "local lazy clone hint should name the safe retry: {stderr}"
+    );
+}
+
+#[test]
+fn test_cli_clone_local_attaches_head_to_cloned_thread() {
+    let source = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+    let clone_dir = target.path().join("clone");
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("hello.txt"), "from source").unwrap();
+    heddle(&["capture", "-m", "Source state"], Some(source.path())).unwrap();
+
+    let source_path = source.path().to_string_lossy().to_string();
+    let clone_path = clone_dir.to_string_lossy().to_string();
+    heddle(&["clone", &source_path, &clone_path], None).expect("local clone succeeds");
+
+    let head = std::fs::read_to_string(clone_dir.join(".heddle").join("HEAD"))
+        .expect("read cloned Heddle HEAD");
+    assert_eq!(
+        head.trim(),
+        "ref: main",
+        "native clone should attach Heddle HEAD to the cloned thread, not leave a detached checkout"
+    );
+    let status_json =
+        heddle(&["status", "--output", "json"], Some(&clone_dir)).expect("clone status JSON");
+    let status: Value = serde_json::from_str(&status_json).expect("status JSON parses");
+    assert_eq!(
+        status["thread"], "main",
+        "fresh native clone status should identify the active thread: {status_json}"
+    );
+}
+
+#[test]
+fn test_cli_clone_local_bare_git_heddle_remote_skips_admin_files_and_sets_origin() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    let remote = temp.path().join("remote.git");
+    let clone = temp.path().join("clone");
+    std::fs::create_dir_all(&source).unwrap();
+
+    heddle_without_git_for_remote_tests(&["init"], &source);
+    std::fs::write(source.join("app.txt"), "from source\n").unwrap();
+    heddle_without_git_for_remote_tests(&["capture", "-m", "seed app"], &source);
+
+    gix::init_bare(&remote).expect("init local bare Git remote");
+    heddle_without_git_for_remote_tests(&["init"], &remote);
+    heddle_without_git_for_remote_tests(
+        &["push", remote.to_str().expect("remote path utf8")],
+        &source,
+    );
+
+    heddle_without_git_for_remote_tests(
+        &[
+            "clone",
+            remote.to_str().expect("remote path utf8"),
+            clone.to_str().expect("clone path utf8"),
+        ],
+        temp.path(),
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(clone.join("app.txt")).unwrap(),
+        "from source\n",
+        "clone should materialize the Heddle state from the bare remote"
+    );
+    for admin_path in [
+        "HEAD",
+        "config",
+        "hooks",
+        "info",
+        "objects",
+        "refs",
+        "branches",
+        "packed-refs",
+    ] {
+        assert!(
+            !clone.join(admin_path).exists(),
+            "clone must not materialize bare Git admin path `{admin_path}` as a worktree file"
+        );
+    }
+
+    let list = heddle_without_git_for_remote_tests(&["--output", "json", "remote", "list"], &clone);
+    let list: Value = serde_json::from_str(&list).expect("remote list JSON should parse");
+    let origin = list["remotes"]
+        .as_array()
+        .expect("remotes array")
+        .iter()
+        .find(|remote| remote["name"] == "origin")
+        .expect("clone should configure origin");
+    assert_eq!(origin["source"], "heddle");
+    assert_eq!(origin["is_default"], true);
+    assert_eq!(
+        origin["url"],
+        format!("file://{}", remote.canonicalize().unwrap().display())
+    );
+
+    std::fs::write(clone.join("app.txt"), "from clone\n").unwrap();
+    heddle_without_git_for_remote_tests(&["capture", "-m", "clone update"], &clone);
+    let push = heddle_without_git_for_remote_tests(&["--output", "json", "push"], &clone);
+    let push: Value = serde_json::from_str(&push).expect("push JSON should parse");
+    assert_eq!(push["status"], "pushed");
+
+    let clone_repo = Repository::open(&clone).expect("open clone repo");
+    let remote_repo = Repository::open(&remote).expect("open remote repo");
+    assert_eq!(
+        remote_repo.refs().get_thread("main").unwrap(),
+        clone_repo.refs().get_thread("main").unwrap(),
+        "default origin should let a later `heddle push` update the cloned remote"
     );
 }
 
@@ -277,14 +763,9 @@ fn test_cli_clone_missing_local_remote_uses_typed_advice() {
         serde_json::from_str(stderr).expect("missing local remote should emit JSON envelope");
     assert_eq!(envelope["kind"], "clone_remote_not_found");
     assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("Remote repository")
-                && error.contains("does not exist")
-                && error.contains("Unsafe:")
-                && error.contains("Would change:")
-                && error.contains("Preserved:")
-                && error.contains("Primary recovery:")),
+        envelope["error"].as_str().is_some_and(
+            |error| error.contains("Remote repository") && error.contains("does not exist")
+        ),
         "missing local remote should include typed recovery detail: {stderr}"
     );
     assert!(
@@ -430,13 +911,35 @@ fn test_cli_clone_git_overlay_missing_requested_branch_uses_typed_advice() {
     let envelope: Value =
         serde_json::from_str(stderr).expect("missing Git branch should emit JSON envelope");
     assert_eq!(envelope["kind"], "git_overlay_clone_import_failed");
+    let expected_action = format!(
+        "heddle clone {} <path> --thread missing",
+        source.to_str().expect("source path utf8")
+    );
+    assert_eq!(envelope["primary_command"], expected_action);
+    assert_eq!(
+        envelope["primary_command_argv"],
+        Value::Null,
+        "display-only clone recovery must wait for a destination path: {stderr}"
+    );
+    assert_eq!(
+        envelope["primary_command_template"]["argv_template"],
+        heddle_argv_json([
+            "clone",
+            source.to_str().expect("source path utf8"),
+            "<path>",
+            "--thread",
+            "missing"
+        ]),
+        "dynamic clone recovery should expose a central template for agents: {stderr}"
+    );
+    assert_eq!(
+        envelope["primary_command_template"]["required_inputs"],
+        serde_json::json!(["path"])
+    );
     assert!(
-        envelope["error"].as_str().is_some_and(|error| error
-            .contains("requested ref(s) not found")
-            && error.contains("Unsafe:")
-            && error.contains("Would change:")
-            && error.contains("Preserved:")
-            && error.contains("Primary recovery:")),
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("requested ref(s) not found")),
         "missing Git branch should include typed recovery detail: {stderr}"
     );
     assert!(
@@ -597,6 +1100,1174 @@ fn test_cli_clone_git_overlay_lands_on_remote_default_branch_and_log_walks_histo
     );
 }
 
+fn git_tree_with_file(repo: &gix::Repository, path: &str, content: &[u8]) -> gix::hash::ObjectId {
+    let blob = repo.write_blob(content).expect("write git blob").detach();
+    let empty = git_empty_tree_oid(repo);
+    let mut editor = repo.edit_tree(empty).expect("edit git tree");
+    editor
+        .upsert(path, gix::object::tree::EntryKind::Blob, blob)
+        .expect("add file to git tree");
+    editor.write().expect("write git tree").detach()
+}
+
+fn git_ok(args: &[&str], cwd: &std::path::Path) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_stdout_trimmed(args: &[&str], cwd: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+fn test_cli_clone_git_overlay_sets_origin_tracking_for_selected_branch() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.git");
+    let work = temp.path().join("work");
+    let src = gix::init_bare(&source).expect("init bare source");
+
+    let tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
+    let main = git_commit_with_tree(&src, Some("refs/heads/main"), tree, "one", &[]);
+    std::fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let source_arg = source.to_str().expect("source path utf8");
+    let work_arg = work.to_str().expect("work path utf8");
+    heddle(&["clone", source_arg, work_arg], Some(temp.path())).expect("clone succeeds");
+
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/remotes/origin/main"], &work),
+        main.to_string(),
+        "Git-overlay clone should seed origin/main at the cloned remote tip"
+    );
+    let branch_status = git_stdout_trimmed(&["status", "--short", "--branch"], &work);
+    assert!(
+        branch_status.contains("## main...origin/main"),
+        "git status should show local main tracking origin/main after clone: {branch_status}"
+    );
+}
+
+#[test]
+fn test_cli_clone_git_overlay_rewrites_origin_and_default_pull_keeps_git_clean() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.git");
+    let stale_origin = temp.path().join("stale-origin.git");
+    let work = temp.path().join("work");
+    let src = gix::init_bare(&source).expect("init bare source");
+
+    let first_tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
+    let first = git_commit_with_tree(&src, Some("refs/heads/main"), first_tree, "one", &[]);
+    std::fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let mut source_config = std::fs::read_to_string(source.join("config")).unwrap();
+    source_config.push_str(&format!(
+        "\n[remote \"origin\"]\n\turl = {}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+        stale_origin.display()
+    ));
+    std::fs::write(source.join("config"), source_config).unwrap();
+
+    let source_arg = "source.git";
+    let canonical_source = source.canonicalize().expect("canonical source");
+    let canonical_source_arg = canonical_source
+        .to_str()
+        .expect("canonical source path utf8");
+    let work_arg = work.to_str().expect("work path utf8");
+    heddle(&["clone", source_arg, work_arg], Some(temp.path())).expect("clone succeeds");
+
+    let origin = Command::new("git")
+        .args(["-C", work_arg, "config", "--get", "remote.origin.url"])
+        .output()
+        .expect("read clone origin");
+    assert!(
+        origin.status.success(),
+        "git config should read clone origin: {}",
+        String::from_utf8_lossy(&origin.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&origin.stdout).trim(),
+        canonical_source_arg,
+        "heddle clone must point origin at the cloned source, not inherit the source repo's stale origin"
+    );
+
+    let second_tree = git_tree_with_file(&src, "tracked.txt", b"two\n");
+    let second = git_commit_with_tree(&src, Some("refs/heads/main"), second_tree, "two", &[first]);
+
+    let pull_json =
+        heddle(&["--output", "json", "pull"], Some(&work)).expect("default pull succeeds");
+    let pull: Value = serde_json::from_str(&pull_json).expect("pull JSON parses");
+    assert_eq!(pull["remote"], "origin");
+    assert_eq!(pull["branch"], "main");
+    assert_eq!(pull["old_git_head"], first.to_string());
+    assert_eq!(pull["new_git_head"], second.to_string());
+    assert_eq!(pull["changed_path_count"], 1);
+    assert_eq!(pull["changed_paths"], serde_json::json!(["tracked.txt"]));
+    assert_eq!(pull["states_created"], 1);
+    assert_eq!(pull["materialized_checkout"], true);
+    assert_eq!(
+        pull["verification"]["worktree_state"], "clean",
+        "pull should write through to Git instead of leaving a checkpoint-needed checkout: {pull_json}"
+    );
+    assert_ne!(pull["verification"]["status"], "needs_checkpoint");
+
+    assert_eq!(
+        std::fs::read_to_string(work.join("tracked.txt")).unwrap(),
+        "two\n"
+    );
+
+    let git_head = Command::new("git")
+        .args(["-C", work_arg, "rev-parse", "HEAD"])
+        .output()
+        .expect("git rev-parse HEAD");
+    assert!(
+        git_head.status.success(),
+        "git rev-parse HEAD should succeed: {}",
+        String::from_utf8_lossy(&git_head.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&git_head.stdout).trim(),
+        second.to_string(),
+        "Git HEAD should advance to the pulled commit"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/remotes/origin/main"], &work),
+        second.to_string(),
+        "pull must refresh the checkout's remote-tracking ref so Git does not report stale upstream drift"
+    );
+
+    let git_branch_status = Command::new("git")
+        .args(["-C", work_arg, "status", "-sb"])
+        .output()
+        .expect("git status -sb");
+    assert!(
+        git_branch_status.status.success(),
+        "git status -sb should succeed after pull: {}",
+        String::from_utf8_lossy(&git_branch_status.stderr)
+    );
+    let branch_status = String::from_utf8_lossy(&git_branch_status.stdout);
+    assert!(
+        !branch_status.contains("[ahead"),
+        "pull should not leave Git believing local main is ahead of origin/main: {branch_status}"
+    );
+
+    let git_status = Command::new("git")
+        .args(["-C", work_arg, "status", "--short"])
+        .output()
+        .expect("git status");
+    assert!(
+        git_status.status.success(),
+        "git status should succeed after pull: {}",
+        String::from_utf8_lossy(&git_status.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&git_status.stdout),
+        "",
+        "default pull should leave the Git checkout clean"
+    );
+
+    let verify = verify_json(&work);
+    assert_eq!(
+        verify["status"], "clean",
+        "verify should be clean: {verify}"
+    );
+    assert_eq!(
+        verify["remote_drift"], "clean",
+        "verify must not recommend push after a successful pull: {verify}"
+    );
+
+    let pull_text =
+        heddle(&["pull", "--output", "text"], Some(&work)).expect("up-to-date pull text succeeds");
+    assert!(
+        pull_text.contains("already up to date with")
+            && pull_text.contains("Branch:")
+            && pull_text.contains("Imported:")
+            && pull_text.contains("Workspace: verified"),
+        "pull text should explain branch/import/verification context even when up to date: {pull_text}"
+    );
+}
+
+#[test]
+fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.git");
+    let work = temp.path().join("work");
+    let src = gix::init_bare(&source).expect("init bare source");
+
+    let first_tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
+    let first = git_commit_with_tree(&src, Some("refs/heads/main"), first_tree, "one", &[]);
+    std::fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let source_arg = source.to_str().expect("source path utf8");
+    let work_arg = work.to_str().expect("work path utf8");
+    heddle(&["clone", source_arg, work_arg], Some(temp.path())).expect("clone succeeds");
+
+    let second_tree = git_tree_with_file(&src, "tracked.txt", b"two\n");
+    let second = git_commit_with_tree(&src, Some("refs/heads/main"), second_tree, "two", &[first]);
+    git_set_reference(&src, "refs/tags/v2.0", second);
+    git_set_reference(&src, cli::bridge::git_notes::NOTES_REF, second);
+
+    let fetch_json =
+        heddle(&["--output", "json", "fetch", "origin"], Some(&work)).expect("fetch succeeds");
+    let fetch: Value = serde_json::from_str(&fetch_json).expect("fetch JSON parses");
+    assert_eq!(fetch["ref_scope"], "branches_and_heddle_notes", "{fetch}");
+    assert_eq!(fetch["tags_included"], false, "{fetch}");
+    assert_eq!(
+        fetch["verification"]["remote_drift"], "remote_behind",
+        "fetch should immediately surface fetched upstream drift: {fetch}"
+    );
+    assert_eq!(
+        fetch["verification"]["recommended_action"], "heddle pull",
+        "fetched behind state should recommend a Heddle pull: {fetch}"
+    );
+
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/remotes/origin/main"], &work),
+        second.to_string(),
+        "fetch must refresh the checkout's remote-tracking ref so verify/status can see behind drift"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "HEAD"], &work),
+        first.to_string(),
+        "fetch must not move the local checkout HEAD"
+    );
+
+    let mirror = gix::open(work.join(".heddle").join("git")).expect("open Git-overlay mirror");
+    assert!(
+        mirror
+            .find_reference(cli::bridge::git_notes::NOTES_REF)
+            .is_ok(),
+        "fetch should carry refs/notes/heddle for Heddle identity metadata"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", cli::bridge::git_notes::NOTES_REF], &work),
+        second.to_string(),
+        "fetch should refresh the checkout's refs/notes/heddle when it reports fetching Heddle notes"
+    );
+    assert!(
+        mirror.find_reference("refs/tags/v2.0").is_err(),
+        "default Git-overlay fetch should not import arbitrary Git tags"
+    );
+
+    let status_json = heddle(&["--output", "json", "status"], Some(&work)).unwrap();
+    let status: Value = serde_json::from_str(&status_json).expect("status JSON parses");
+    assert_eq!(
+        status["verification"]["remote_drift"], "remote_behind",
+        "status should not report clean once fetched upstream is ahead: {status}"
+    );
+
+    let verify = verify_json(&work);
+    assert_eq!(verify["status"], "remote_behind", "{verify}");
+    assert_eq!(verify["verified"], false, "{verify}");
+    assert_eq!(verify["remote_drift"], "remote_behind", "{verify}");
+    assert_eq!(verify["recommended_action"], "heddle pull", "{verify}");
+}
+
+#[test]
+fn test_cli_git_overlay_fetch_resolves_relative_local_git_remote_from_checkout_root() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    let other = temp.path().join("other");
+    gix::init_bare(&origin).expect("init bare origin");
+    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    std::fs::create_dir_all(&work).unwrap();
+    git_ok(&["init", "-b", "main"], &work);
+    git_ok(&["config", "user.name", "Heddle Test"], &work);
+    git_ok(&["config", "user.email", "heddle@example.com"], &work);
+    std::fs::write(work.join("README.md"), "one\n").unwrap();
+    git_ok(&["add", "README.md"], &work);
+    git_ok(&["commit", "-m", "initial"], &work);
+    heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt succeeds");
+    heddle(&["remote", "add", "origin", "../origin.git"], Some(&work))
+        .expect("remote add succeeds");
+    heddle(&["push"], Some(&work)).expect("push to relative local git remote succeeds");
+
+    git_ok(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            other.to_str().expect("other path utf8"),
+        ],
+        temp.path(),
+    );
+    git_ok(&["config", "user.name", "Remote Test"], &other);
+    git_ok(&["config", "user.email", "remote@example.com"], &other);
+    std::fs::write(other.join("remote.txt"), "two\n").unwrap();
+    git_ok(&["add", "remote.txt"], &other);
+    git_ok(&["commit", "-m", "remote advance"], &other);
+    git_ok(&["push", "origin", "main"], &other);
+    let remote_tip = git_stdout_trimmed(&["rev-parse", "origin/main"], &other);
+
+    let fetch_json =
+        heddle(&["--output", "json", "fetch", "origin"], Some(&work)).expect("fetch succeeds");
+    let fetch: Value = serde_json::from_str(&fetch_json).expect("fetch JSON parses");
+    assert_eq!(
+        fetch["verification"]["remote_drift"], "remote_behind",
+        "fetch should resolve ../origin.git relative to the checkout root and surface behind drift: {fetch}"
+    );
+    assert_eq!(
+        fetch["verification"]["recommended_action"], "heddle pull",
+        "fetched behind state should recommend Heddle pull: {fetch}"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/remotes/origin/main"], &work),
+        remote_tip,
+        "fetch should refresh the checkout remote-tracking ref from the relative local remote"
+    );
+}
+
+#[test]
+fn test_cli_git_overlay_fetch_uses_configured_default_not_origin_fallback() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source.git");
+    let work = temp.path().join("work");
+    let missing_origin = temp.path().join("missing-origin.git");
+    let src = gix::init_bare(&source).expect("init bare source");
+
+    let first_tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
+    let first = git_commit_with_tree(&src, Some("refs/heads/main"), first_tree, "one", &[]);
+    std::fs::write(source.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    heddle(
+        &[
+            "clone",
+            source.to_str().expect("source path utf8"),
+            work.to_str().expect("work path utf8"),
+        ],
+        Some(temp.path()),
+    )
+    .expect("clone succeeds");
+    heddle(
+        &[
+            "remote",
+            "add",
+            "backup",
+            source.to_str().expect("source path utf8"),
+        ],
+        Some(&work),
+    )
+    .expect("add backup remote");
+    heddle(&["remote", "set-default", "backup"], Some(&work)).expect("set backup default");
+
+    git_ok(
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            missing_origin.to_str().expect("missing path utf8"),
+        ],
+        &work,
+    );
+
+    let second_tree = git_tree_with_file(&src, "tracked.txt", b"two\n");
+    let second = git_commit_with_tree(&src, Some("refs/heads/main"), second_tree, "two", &[first]);
+
+    let fetch_json = heddle(&["--output", "json", "fetch"], Some(&work))
+        .expect("bare fetch should use configured default backup, not bad origin");
+    let fetch: Value = serde_json::from_str(&fetch_json).expect("fetch JSON parses");
+    assert_eq!(
+        fetch["remote"], "backup",
+        "no-arg Git-overlay fetch should honor Heddle's configured default remote: {fetch}"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/remotes/backup/main"], &work),
+        second.to_string(),
+        "fetch should refresh the selected default remote's tracking ref"
+    );
+    assert_eq!(
+        fetch["verification"]["default_remote"], "backup",
+        "post-fetch verification should carry the same configured default remote: {fetch}"
+    );
+    assert!(
+        !missing_origin.exists(),
+        "test fixture should keep origin broken so an origin fallback would fail"
+    );
+}
+
+#[test]
+fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let backup = temp.path().join("backup.git");
+    let work = temp.path().join("work");
+    gix::init_bare(&origin).expect("init bare origin");
+    gix::init_bare(&backup).expect("init bare backup");
+    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(backup.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    std::fs::create_dir_all(&work).unwrap();
+    git_ok(&["init", "-b", "main"], &work);
+    git_ok(&["config", "user.name", "Heddle Test"], &work);
+    git_ok(&["config", "user.email", "heddle@example.com"], &work);
+    git_ok(
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path utf8"),
+        ],
+        &work,
+    );
+    std::fs::write(work.join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], &work);
+    git_ok(&["commit", "-m", "seed"], &work);
+    git_ok(&["push", "-u", "origin", "main"], &work);
+    heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt succeeds");
+
+    heddle(
+        &[
+            "remote",
+            "add",
+            "backup",
+            backup.to_str().expect("backup path utf8"),
+        ],
+        Some(&work),
+    )
+    .expect("add backup remote");
+    let list_json = heddle(&["remote", "list", "--output", "json"], Some(&work)).unwrap();
+    let list: Value = serde_json::from_str(&list_json).expect("remote list JSON parses");
+    assert!(
+        list["remotes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|remote| remote["name"] == "origin" && remote["is_default"] == true),
+        "tracked Git upstream should remain the default after adding backup: {list}"
+    );
+    assert!(
+        list["remotes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|remote| remote["name"] == "backup" && remote["is_default"] == false),
+        "new backup remote should not silently become default: {list}"
+    );
+
+    std::fs::write(work.join("README.md"), "seed\nlocal heddle\n").unwrap();
+    let commit_json = heddle(
+        &["commit", "-m", "local heddle", "--output", "json"],
+        Some(&work),
+    )
+    .expect("heddle commit succeeds");
+    let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
+    let git_oid = commit["git_commit"]
+        .as_str()
+        .expect("commit should report Git OID")
+        .to_string();
+
+    let push_json = heddle(&["push", "--output", "json"], Some(&work)).expect("push succeeds");
+    let push: Value = serde_json::from_str(&push_json).expect("push JSON parses");
+    assert_eq!(
+        push["remote"], "origin",
+        "bare push should use tracked origin: {push}"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/heads/main"], &origin),
+        git_oid,
+        "origin should receive the default push"
+    );
+    assert!(
+        !Command::new("git")
+            .args([
+                "--git-dir",
+                backup.to_str().unwrap(),
+                "show-ref",
+                "--verify",
+                "refs/heads/main"
+            ])
+            .status()
+            .expect("inspect backup ref")
+            .success(),
+        "backup should not receive a bare push unless selected explicitly"
+    );
+}
+
+#[test]
+fn test_cli_git_overlay_current_push_carries_notes_for_cross_clone_identity() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    let clone = temp.path().join("clone");
+    gix::init_bare(&origin).expect("init bare origin");
+    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    std::fs::create_dir_all(&work).unwrap();
+    git_ok(&["init", "-b", "main"], &work);
+    git_ok(&["config", "user.name", "Heddle Test"], &work);
+    git_ok(&["config", "user.email", "heddle@example.com"], &work);
+    git_ok(
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path utf8"),
+        ],
+        &work,
+    );
+    std::fs::write(work.join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], &work);
+    git_ok(&["commit", "-m", "seed"], &work);
+
+    heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt seeded Git repo");
+    std::fs::write(work.join("README.md"), "seed\nfirst heddle change\n").unwrap();
+    let commit_json = heddle(
+        &["--output", "json", "commit", "-m", "First Heddle change"],
+        Some(&work),
+    )
+    .expect("heddle commit succeeds");
+    let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
+    let first_state = commit["change_id"]
+        .as_str()
+        .expect("commit should report change_id")
+        .to_string();
+
+    let push_text = heddle(&["push", "origin"], Some(&work)).expect("current-thread push succeeds");
+    assert!(
+        push_text.contains("refs/notes/heddle")
+            && push_text.contains("git log --all")
+            && push_text.contains("Heddle metadata commits"),
+        "push text should disclose the Git-visible notes ref Heddle publishes: {push_text}"
+    );
+    git_ok(&["show-ref", "--verify", "refs/notes/heddle"], &origin);
+
+    heddle(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            clone.to_str().expect("clone path utf8"),
+        ],
+        None,
+    )
+    .expect("clone succeeds");
+    let clone_status_json = heddle(&["--output", "json", "status"], Some(&clone)).unwrap();
+    let clone_status: Value = serde_json::from_str(&clone_status_json).expect("status JSON parses");
+    assert_eq!(
+        clone_status["state"]["change_id"], first_state,
+        "clone should preserve the note-backed Heddle state id instead of deriving a second id"
+    );
+
+    std::fs::write(
+        work.join("README.md"),
+        "seed\nfirst heddle change\nsecond heddle change\n",
+    )
+    .unwrap();
+    heddle(
+        &["--output", "json", "commit", "-m", "Second Heddle change"],
+        Some(&work),
+    )
+    .expect("second heddle commit succeeds");
+    heddle(&["push", "origin"], Some(&work)).expect("second current-thread push succeeds");
+
+    let pull_json = heddle(&["--output", "json", "pull", "origin"], Some(&clone))
+        .expect("clone pull should not hit mapping conflict");
+    let pull: Value = serde_json::from_str(&pull_json).expect("pull JSON parses");
+    assert_eq!(
+        pull["verification"]["status"], "clean",
+        "pull should preserve cross-clone Git/Heddle mapping agreement: {pull}"
+    );
+}
+
+#[test]
+fn test_cli_git_overlay_explicit_path_push_discloses_configured_git_tracking_remote() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    gix::init_bare(&origin).expect("init bare origin");
+    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    std::fs::create_dir_all(&work).unwrap();
+    git_ok(&["init", "-b", "main"], &work);
+    git_ok(&["config", "user.name", "Heddle Test"], &work);
+    git_ok(&["config", "user.email", "heddle@example.com"], &work);
+    std::fs::write(work.join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], &work);
+    git_ok(&["commit", "-m", "seed"], &work);
+
+    heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt seeded Git repo");
+    std::fs::write(work.join("README.md"), "seed\nlocal heddle\n").unwrap();
+    heddle(&["commit", "-m", "local heddle"], Some(&work)).expect("heddle commit succeeds");
+
+    let origin_arg = origin.to_str().expect("origin path utf8");
+    let push_text = heddle(&["--output", "text", "push", origin_arg], Some(&work))
+        .expect("explicit path push succeeds");
+    assert!(
+        push_text.contains("configured remote origin")
+            && push_text.contains(origin_arg)
+            && push_text.contains("branch main tracks origin/main"),
+        "explicit-path push should disclose the Git config side effect: {push_text}"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["config", "--get", "remote.origin.url"], &work),
+        origin_arg,
+        "push should have configured the same remote it disclosed"
+    );
+}
+
+#[test]
+fn test_cli_raw_git_clone_adopt_fetches_notes_before_import() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    let raw_clone = temp.path().join("raw-clone");
+    gix::init_bare(&origin).expect("init bare origin");
+    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    std::fs::create_dir_all(&work).unwrap();
+    git_ok(&["init", "-b", "main"], &work);
+    git_ok(&["config", "user.name", "Heddle Test"], &work);
+    git_ok(&["config", "user.email", "heddle@example.com"], &work);
+    git_ok(
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path utf8"),
+        ],
+        &work,
+    );
+    std::fs::write(work.join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], &work);
+    git_ok(&["commit", "-m", "seed"], &work);
+
+    heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt seeded Git repo");
+    std::fs::write(work.join("README.md"), "seed\npublished by heddle\n").unwrap();
+    let first_commit_json = heddle(
+        &[
+            "--output",
+            "json",
+            "commit",
+            "-m",
+            "Publish Heddle identity",
+        ],
+        Some(&work),
+    )
+    .expect("first Heddle commit succeeds");
+    let first_commit: Value = serde_json::from_str(&first_commit_json).expect("commit JSON parses");
+    let first_state = first_commit["change_id"]
+        .as_str()
+        .expect("commit reports change id")
+        .to_string();
+    heddle(&["push", "origin"], Some(&work)).expect("current-thread push succeeds");
+    git_ok(&["show-ref", "--verify", "refs/notes/heddle"], &origin);
+
+    git_ok(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            raw_clone.to_str().expect("raw clone path utf8"),
+        ],
+        temp.path(),
+    );
+    git_ok(&["config", "user.name", "Raw Clone"], &raw_clone);
+    git_ok(&["config", "user.email", "raw@example.com"], &raw_clone);
+    assert!(
+        !Command::new("git")
+            .args(["show-ref", "--verify", "refs/notes/heddle"])
+            .current_dir(&raw_clone)
+            .output()
+            .expect("inspect raw clone notes ref")
+            .status
+            .success(),
+        "plain git clone should start without the Heddle notes ref; adopt must fetch it"
+    );
+
+    heddle(&["adopt", "--ref", "main"], Some(&raw_clone))
+        .expect("raw Git clone adopt should fetch notes before importing");
+    let raw_status_json = heddle(&["--output", "json", "status"], Some(&raw_clone)).unwrap();
+    let raw_status: Value = serde_json::from_str(&raw_status_json).expect("status JSON parses");
+    assert_eq!(
+        raw_status["state"]["change_id"], first_state,
+        "raw Git clone adoption should reuse note-backed Heddle identity instead of deriving a second id"
+    );
+    git_ok(&["show-ref", "--verify", "refs/notes/heddle"], &raw_clone);
+
+    std::fs::write(
+        raw_clone.join("README.md"),
+        "seed\npublished by heddle\nraw clone follow-up\n",
+    )
+    .unwrap();
+    heddle(
+        &["--output", "json", "commit", "-m", "Raw clone follow-up"],
+        Some(&raw_clone),
+    )
+    .expect("raw clone Heddle commit succeeds");
+    heddle(&["push", "origin"], Some(&raw_clone)).expect("raw clone push succeeds");
+
+    heddle(&["fetch", "origin"], Some(&work)).expect("original fetch succeeds");
+    let pull_json = heddle(&["--output", "json", "pull", "origin"], Some(&work))
+        .expect("original pull should not hit a mapping conflict");
+    let pull: Value = serde_json::from_str(&pull_json).expect("pull JSON parses");
+    assert_eq!(
+        pull["verification"]["status"], "clean",
+        "pull should preserve cross-clone Git/Heddle mapping agreement after raw clone adoption: {pull}"
+    );
+}
+
+#[test]
+fn test_cli_git_overlay_push_refuses_to_rewrite_remote_heddle_notes() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    let raw_clone = temp.path().join("raw-clone");
+    let missing_remote = temp.path().join("missing.git");
+    gix::init_bare(&origin).expect("init bare origin");
+    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    std::fs::create_dir_all(&work).unwrap();
+    git_ok(&["init", "-b", "main"], &work);
+    git_ok(&["config", "user.name", "Heddle Test"], &work);
+    git_ok(&["config", "user.email", "heddle@example.com"], &work);
+    git_ok(
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path utf8"),
+        ],
+        &work,
+    );
+    std::fs::write(work.join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], &work);
+    git_ok(&["commit", "-m", "seed"], &work);
+    heddle(&["adopt", "--ref", "main"], Some(&work)).expect("adopt seeded Git repo");
+    std::fs::write(work.join("README.md"), "seed\npublished by heddle\n").unwrap();
+    heddle(
+        &[
+            "--output",
+            "json",
+            "commit",
+            "-m",
+            "Publish Heddle identity",
+        ],
+        Some(&work),
+    )
+    .expect("first Heddle commit succeeds");
+    heddle(&["push", "origin"], Some(&work)).expect("initial push succeeds");
+    let remote_notes_before = git_stdout_trimmed(&["rev-parse", "refs/notes/heddle"], &origin);
+
+    git_ok(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            raw_clone.to_str().expect("raw clone path utf8"),
+        ],
+        temp.path(),
+    );
+    git_ok(&["config", "user.name", "Raw Clone"], &raw_clone);
+    git_ok(&["config", "user.email", "raw@example.com"], &raw_clone);
+
+    git_ok(
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            missing_remote.to_str().expect("missing path utf8"),
+        ],
+        &raw_clone,
+    );
+    heddle(&["adopt", "--ref", "main"], Some(&raw_clone))
+        .expect("offline raw Git clone adopt can still import local Git history");
+    git_ok(
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            origin.to_str().expect("origin path utf8"),
+        ],
+        &raw_clone,
+    );
+
+    let output = heddle_output(&["--output", "json", "push", "origin"], Some(&raw_clone))
+        .expect("invoke push with mismatched local notes");
+    assert!(
+        !output.status.success(),
+        "push must fail closed instead of rewriting remote Heddle notes"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode push refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("notes conflict should emit JSON envelope");
+    assert_eq!(envelope["kind"], "git_overlay_note_ref_conflict");
+    assert_eq!(
+        envelope["primary_command"], "heddle fetch",
+        "notes conflict should first refresh remote Heddle notes before asking for a fresh clone: {stderr}"
+    );
+    assert_ne!(
+        envelope["primary_command"], "heddle pull",
+        "notes conflict must not recommend retrying the operation that cannot repair identity"
+    );
+    assert_eq!(
+        envelope["recovery_commands"],
+        serde_json::json!([
+            "heddle fetch",
+            "heddle push",
+            "heddle clone <remote> <fresh-path>"
+        ]),
+        "notes conflict should keep fresh clone as the fallback after fetch/retry: {stderr}"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/notes/heddle"], &origin),
+        remote_notes_before,
+        "failed push must leave remote refs/notes/heddle unchanged"
+    );
+}
+
+#[test]
+fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let local = temp.path().join("local");
+    let peer = temp.path().join("peer");
+    gix::init_bare(&origin).expect("init bare origin");
+    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    git_ok(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            local.to_str().expect("local path utf8"),
+        ],
+        temp.path(),
+    );
+    git_ok(&["config", "user.name", "Heddle Test"], &local);
+    git_ok(&["config", "user.email", "heddle@example.com"], &local);
+    git_ok(&["checkout", "-b", "main"], &local);
+    std::fs::write(local.join("file.txt"), "base\n").unwrap();
+    git_ok(&["add", "file.txt"], &local);
+    git_ok(&["commit", "-m", "seed"], &local);
+    git_ok(&["push", "-u", "origin", "main"], &local);
+    heddle(&["adopt", "--ref", "main"], Some(&local)).expect("adopt local");
+
+    git_ok(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            peer.to_str().expect("peer path utf8"),
+        ],
+        temp.path(),
+    );
+    git_ok(&["config", "user.name", "Peer"], &peer);
+    git_ok(&["config", "user.email", "peer@example.com"], &peer);
+    git_ok(&["checkout", "main"], &peer);
+
+    std::fs::write(local.join("file.txt"), "local heddle\n").unwrap();
+    heddle(
+        &["--output", "json", "commit", "-m", "local heddle commit"],
+        Some(&local),
+    )
+    .expect("local Heddle commit");
+    let head_before = git_stdout_trimmed(&["rev-parse", "HEAD"], &local);
+
+    std::fs::write(peer.join("file.txt"), "remote git\n").unwrap();
+    git_ok(&["add", "file.txt"], &peer);
+    git_ok(&["commit", "-m", "remote git commit"], &peer);
+    git_ok(&["push", "origin", "main"], &peer);
+
+    let push = heddle_output(&["push", "--output", "json"], Some(&local)).expect("invoke push");
+    assert!(
+        !push.status.success(),
+        "diverged push should fail before rewriting remote work"
+    );
+    assert!(
+        push.stdout.is_empty(),
+        "JSON refusal should keep stdout quiet: {}",
+        String::from_utf8_lossy(&push.stdout)
+    );
+    let push_stderr = std::str::from_utf8(&push.stderr).expect("push stderr utf8");
+    let push_envelope: Value = serde_json::from_str(push_stderr).expect("push refusal JSON parses");
+    assert_eq!(
+        push_envelope["kind"], "git_overlay_remote_diverged",
+        "{push_envelope}"
+    );
+    assert_eq!(
+        push_envelope["primary_command"], "heddle fetch",
+        "push should guide users to refresh the remote proof before choosing an integration path: {push_envelope}"
+    );
+
+    heddle(&["fetch", "origin"], Some(&local)).expect("fetch remote divergence");
+
+    let verify = verify_json(&local);
+    assert_eq!(verify["remote_drift"], "remote_diverged", "{verify}");
+    assert_eq!(
+        verify["recommended_action"], "heddle bridge git import --ref origin/main",
+        "diverged verify should recommend importing the fetched upstream tip before previewing integration: {verify}"
+    );
+    let short_status = heddle(&["status", "--short", "--output", "text"], Some(&local))
+        .expect("short status should render");
+    assert!(
+        short_status.contains("remote_diverged")
+            && !short_status.contains("repository clean")
+            && !short_status.contains("main clean"),
+        "short status must not claim clean when remote drift blocks verification: {short_status}"
+    );
+
+    let sync_json = heddle(&["--output", "json", "sync"], Some(&local)).unwrap();
+    let sync: Value = serde_json::from_str(&sync_json).expect("sync JSON parses");
+    assert_eq!(sync["status"], "blocked", "{sync}");
+    assert_eq!(
+        sync["recommended_action"], "heddle bridge git import --ref origin/main",
+        "sync should fail closed before invoking raw git rebase and point at remote integration: {sync}"
+    );
+    let neutral_preview_json = heddle(
+        &[
+            "--output",
+            "json",
+            "bridge",
+            "git",
+            "reconcile",
+            "--ref",
+            "main",
+            "--preview",
+        ],
+        Some(&local),
+    )
+    .expect("neutral reconcile preview should succeed");
+    let neutral_preview: Value =
+        serde_json::from_str(&neutral_preview_json).expect("neutral preview JSON parses");
+    assert_eq!(neutral_preview["status"], "preview", "{neutral_preview}");
+    assert_eq!(neutral_preview["prefer"], Value::Null, "{neutral_preview}");
+    assert_eq!(
+        neutral_preview["recommended_action"],
+        Value::Null,
+        "neutral local reconcile preview must not bias automation toward one side: {neutral_preview}"
+    );
+    assert!(
+        neutral_preview["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("does not push")
+                && summary.contains("move refs")
+                && summary.contains("change worktree files")),
+        "neutral preview should explain that it is inspection-only: {neutral_preview}"
+    );
+    assert_eq!(
+        neutral_preview["recovery_commands"],
+        serde_json::json!([
+            "heddle bridge git reconcile --prefer heddle --ref main --preview",
+            "heddle bridge git reconcile --prefer git --ref main --preview"
+        ]),
+        "{neutral_preview}"
+    );
+    let no_direction = heddle_output(
+        &[
+            "--output",
+            "json",
+            "bridge",
+            "git",
+            "reconcile",
+            "--ref",
+            "main",
+        ],
+        Some(&local),
+    )
+    .expect("invoke non-preview reconcile without --prefer");
+    assert!(
+        !no_direction.status.success(),
+        "non-preview reconcile without --prefer should fail"
+    );
+    assert!(
+        no_direction.stdout.is_empty(),
+        "JSON refusal should keep stdout quiet: {}",
+        String::from_utf8_lossy(&no_direction.stdout)
+    );
+    let no_direction_stderr = std::str::from_utf8(&no_direction.stderr).expect("stderr utf8");
+    let no_direction_envelope: Value =
+        serde_json::from_str(no_direction_stderr).expect("no-direction envelope parses");
+    assert_eq!(
+        no_direction_envelope["kind"], "reconcile_direction_required",
+        "{no_direction_envelope}"
+    );
+    assert_eq!(
+        no_direction_envelope["primary_command"],
+        "heddle bridge git reconcile --ref main --preview",
+        "{no_direction_envelope}"
+    );
+    let import_remote_json = heddle(
+        &[
+            "--output",
+            "json",
+            "bridge",
+            "git",
+            "import",
+            "--ref",
+            "origin/main",
+        ],
+        Some(&local),
+    )
+    .expect("import fetched upstream branch");
+    let import_remote: Value =
+        serde_json::from_str(&import_remote_json).expect("remote import JSON parses");
+    assert_eq!(import_remote["branches_synced"], 1, "{import_remote}");
+    let after_import = verify_json(&local);
+    assert_eq!(
+        after_import["recommended_action"], "heddle merge origin/main --preview",
+        "after importing the upstream tip, verify should recommend upstream integration, not local Git/Heddle reconcile: {after_import}"
+    );
+    let thread_list_json = heddle(&["thread", "list", "--output", "json"], Some(&local))
+        .expect("thread list should render after remote-tracking import");
+    let thread_list: Value =
+        serde_json::from_str(&thread_list_json).expect("thread list JSON parses");
+    let origin_main = thread_list["threads"]
+        .as_array()
+        .expect("threads array")
+        .iter()
+        .find(|thread| thread["name"] == "origin/main")
+        .unwrap_or_else(|| {
+            panic!("imported origin/main should be listed as an imported ref: {thread_list}")
+        });
+    assert_eq!(
+        origin_main["thread_health"], "remote_tracking",
+        "{thread_list}"
+    );
+    assert_eq!(
+        origin_main["recommended_action"], "heddle merge origin/main --preview",
+        "remote-tracking refs should be presented as upstream integration previews: {thread_list}"
+    );
+    assert!(
+        origin_main["recommended_action"]
+            .as_str()
+            .is_some_and(|action| !action.contains("ship") && action.contains("merge origin/main")),
+        "remote-tracking refs must avoid dead-end ship/reconcile advice: {thread_list}"
+    );
+    let merge_preview = heddle(
+        &["merge", "origin/main", "--preview", "--output", "text"],
+        Some(&local),
+    )
+    .expect("remote-tracking merge preview should render");
+    assert!(
+        merge_preview.contains("Would merge origin/main")
+            && !merge_preview.contains("Preview complete"),
+        "merge preview should explain the upstream integration, not emit a generic completion line: {merge_preview}"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "--abbrev-ref", "HEAD"], &local),
+        "main",
+        "sync refusal must not detach the Git checkout"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "HEAD"], &local),
+        head_before,
+        "sync refusal must not move the local branch"
+    );
+    assert_eq!(
+        std::fs::read_to_string(local.join("file.txt")).unwrap(),
+        "local heddle\n",
+        "sync refusal must not write conflict markers or remote content into the worktree"
+    );
+}
+
+#[test]
+fn test_cli_git_overlay_pull_refuses_diverged_branch_before_visible_git_updates() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let local = temp.path().join("local");
+    let peer = temp.path().join("peer");
+    gix::init_bare(&origin).expect("init bare origin");
+    std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    git_ok(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            local.to_str().expect("local path utf8"),
+        ],
+        temp.path(),
+    );
+    git_ok(&["config", "user.name", "Heddle Test"], &local);
+    git_ok(&["config", "user.email", "heddle@example.com"], &local);
+    git_ok(&["checkout", "-b", "main"], &local);
+    std::fs::write(local.join("file.txt"), "base\n").unwrap();
+    git_ok(&["add", "file.txt"], &local);
+    git_ok(&["commit", "-m", "seed"], &local);
+    git_ok(&["push", "-u", "origin", "main"], &local);
+    let tracking_before = git_stdout_trimmed(&["rev-parse", "refs/remotes/origin/main"], &local);
+    heddle(&["adopt", "--ref", "main"], Some(&local)).expect("adopt local");
+
+    git_ok(
+        &[
+            "clone",
+            origin.to_str().expect("origin path utf8"),
+            peer.to_str().expect("peer path utf8"),
+        ],
+        temp.path(),
+    );
+    git_ok(&["config", "user.name", "Peer"], &peer);
+    git_ok(&["config", "user.email", "peer@example.com"], &peer);
+    git_ok(&["checkout", "main"], &peer);
+
+    std::fs::write(local.join("file.txt"), "local heddle\n").unwrap();
+    heddle(
+        &["--output", "json", "commit", "-m", "local heddle commit"],
+        Some(&local),
+    )
+    .expect("local Heddle commit");
+    let head_before = git_stdout_trimmed(&["rev-parse", "HEAD"], &local);
+
+    std::fs::write(peer.join("file.txt"), "remote git\n").unwrap();
+    git_ok(&["add", "file.txt"], &peer);
+    git_ok(&["commit", "-m", "remote git commit"], &peer);
+    git_ok(&["push", "origin", "main"], &peer);
+
+    let pull = heddle_output(&["pull", "--output", "json"], Some(&local)).expect("invoke pull");
+    assert!(!pull.status.success(), "diverged pull should fail closed");
+    assert!(
+        pull.stdout.is_empty(),
+        "JSON refusal should keep stdout quiet: {}",
+        String::from_utf8_lossy(&pull.stdout)
+    );
+    let stderr = std::str::from_utf8(&pull.stderr).expect("stderr utf8");
+    let envelope: Value = serde_json::from_str(stderr).expect("pull refusal JSON parses");
+    assert_eq!(
+        envelope["kind"], "git_overlay_remote_diverged",
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["primary_command"], "heddle bridge git import --ref origin/main",
+        "{envelope}"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "refs/remotes/origin/main"], &local),
+        tracking_before,
+        "failed pull must not refresh the visible checkout's remote-tracking ref"
+    );
+    assert_eq!(
+        git_stdout_trimmed(&["rev-parse", "HEAD"], &local),
+        head_before,
+        "failed pull must not move the local branch"
+    );
+    assert_eq!(
+        std::fs::read_to_string(local.join("file.txt")).unwrap(),
+        "local heddle\n",
+        "failed pull must not write remote content or conflict markers into the worktree"
+    );
+}
+
 #[test]
 fn test_cli_clone_git_overlay_filter_is_rejected() {
     // Issue 49 / 20b: same shape as --depth / --lazy — `--filter` is
@@ -696,12 +2367,9 @@ fn test_cli_pull_local_lazy_is_rejected() {
         serde_json::from_str(stderr).expect("local lazy pull should emit JSON envelope");
     assert_eq!(envelope["kind"], "local_lazy_pull_unsupported");
     assert!(
-        envelope["error"].as_str().is_some_and(|error| error
-            .contains("lazy materialization requires a hosted or network remote")
-            && error.contains("Unsafe:")
-            && error.contains("Would change:")
-            && error.contains("Preserved:")
-            && error.contains("Primary recovery:")),
+        envelope["error"].as_str().is_some_and(
+            |error| error.contains("lazy materialization requires a hosted or network remote")
+        ),
         "local lazy pull should include typed recovery detail: {stderr}"
     );
     assert!(
@@ -732,11 +2400,7 @@ fn test_cli_fetch_requires_remote_without_all() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("remote name required")
-                && error.contains("Unsafe:")
-                && error.contains("Would change:")
-                && error.contains("Preserved:")
-                && error.contains("Primary recovery:")),
+            .is_some_and(|error| error.contains("remote name required")),
         "fetch should explain the typed missing-remote refusal: {stderr}"
     );
     assert!(
@@ -779,6 +2443,37 @@ fn test_cli_fetch_local_creates_remote_thread_and_marker() {
 }
 
 #[test]
+fn test_cli_fetch_uses_default_remote_and_emits_single_json_value() {
+    let remote = TempDir::new().unwrap();
+    let local = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(remote.path())).unwrap();
+    std::fs::write(remote.path().join("file.txt"), "content").unwrap();
+    heddle(&["capture", "-m", "Initial"], Some(remote.path())).unwrap();
+
+    heddle(&["init"], Some(local.path())).unwrap();
+    let remote_path = remote.path().to_string_lossy().to_string();
+    heddle(
+        &["remote", "add", "origin", &remote_path],
+        Some(local.path()),
+    )
+    .unwrap();
+
+    let stdout = heddle(&["--output", "json", "fetch"], Some(local.path())).unwrap();
+    let parsed: Value =
+        serde_json::from_str(&stdout).expect("fetch JSON should be exactly one JSON value");
+    assert_eq!(parsed["output_kind"], "fetch");
+    assert_eq!(parsed["remote"], "origin");
+    assert_eq!(parsed["refs_fetched"], 1);
+    assert!(
+        parsed["objects_fetched"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "fetch should copy remote objects: {parsed}"
+    );
+}
+
+#[test]
 fn test_cli_fetch_all_uses_discovered_remotes() {
     let remote = TempDir::new().unwrap();
     let local = TempDir::new().unwrap();
@@ -816,7 +2511,8 @@ fn test_cli_push_defaults_to_current_attached_thread() {
     let started: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "start",
                 "feature/push-default",
                 "--workspace",
@@ -839,14 +2535,14 @@ fn test_cli_push_defaults_to_current_attached_thread() {
             .filter(|line| !line.trim().is_empty())
             .count(),
         1,
-        "push --json must emit exactly one JSON value: {output}"
+        "push --output json must emit exactly one JSON value: {output}"
     );
     let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
     assert_eq!(
         parsed["success"], true,
         "push should report success: {parsed}"
     );
-    assert_eq!(parsed["trust"]["status"], "clean");
+    assert_eq!(parsed["verification"]["status"], "clean");
 
     let remote_repo = Repository::open(remote.path()).unwrap();
     assert!(
@@ -856,5 +2552,64 @@ fn test_cli_push_defaults_to_current_attached_thread() {
             .unwrap()
             .is_some(),
         "push without --thread should update the current attached thread"
+    );
+}
+
+#[test]
+fn test_cli_git_overlay_push_to_native_heddle_local_path_uses_heddle_sync() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    git_ok(&["init", "-b", "main"], source.path());
+    git_ok(&["config", "user.name", "Heddle Test"], source.path());
+    git_ok(
+        &["config", "user.email", "heddle@example.com"],
+        source.path(),
+    );
+    std::fs::write(source.path().join("README.md"), "seed\n").unwrap();
+    git_ok(&["add", "README.md"], source.path());
+    git_ok(&["commit", "-m", "seed"], source.path());
+    heddle(&["adopt", "--ref", "main"], Some(source.path())).expect("adopt source Git repo");
+
+    std::fs::write(
+        source.path().join("README.md"),
+        "seed\nnative remote push\n",
+    )
+    .unwrap();
+    let commit_json = heddle(
+        &["--output", "json", "commit", "-m", "Native local push"],
+        Some(source.path()),
+    )
+    .expect("heddle commit succeeds");
+    let commit: Value = serde_json::from_str(&commit_json).expect("commit JSON parses");
+    let source_state = commit["change_id"]
+        .as_str()
+        .expect("commit should report change_id")
+        .to_string();
+
+    heddle(&["init"], Some(remote.path())).expect("init native target");
+    let remote_path = remote.path().to_str().expect("remote path utf8");
+    let push_json = heddle(
+        &["--output", "json", "push", remote_path],
+        Some(source.path()),
+    )
+    .expect("push to native Heddle path should use local Heddle sync");
+    let push: Value = serde_json::from_str(&push_json).expect("push JSON parses");
+    assert_eq!(push["success"], true, "push should succeed: {push}");
+
+    let remote_repo = Repository::open(remote.path()).expect("open native target");
+    let remote_state = remote_repo
+        .refs()
+        .get_thread("main")
+        .expect("read target main")
+        .expect("target main should be updated");
+    assert_eq!(
+        remote_state.short().to_string(),
+        source_state,
+        "native Heddle local path push should preserve the Heddle state id"
+    );
+    assert!(
+        !remote.path().join(".git").exists(),
+        "push to a native Heddle path must not turn the target into a Git remote"
     );
 }
