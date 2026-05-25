@@ -224,13 +224,13 @@ impl NfsSession {
 
 impl Drop for NfsSession {
     fn drop(&mut self) {
-        if !self.unmounted {
-            if let Err(e) = invoke_unmount(&self.mountpoint) {
-                warn!(
-                    mountpoint = %self.mountpoint.display(),
-                    "nfs unmount on drop failed: {e}",
-                );
-            }
+        if !self.unmounted
+            && let Err(e) = invoke_unmount(&self.mountpoint)
+        {
+            warn!(
+                mountpoint = %self.mountpoint.display(),
+                "nfs unmount on drop failed: {e}",
+            );
         }
         if let Some(rt) = self.runtime.take() {
             rt.shutdown_background();
