@@ -24,7 +24,8 @@ use serde_json::{Map, Value};
 use super::{
     RecoveryAdvice,
     command_catalog::{
-        CommandCatalogOption, CommandCatalogOutput, build_command_catalog, normalize_heddle_argv,
+        CommandCatalogOption, CommandCatalogOutput, build_command_catalog,
+        feature_gated_command_roots, normalize_heddle_argv,
     },
 };
 use crate::cli::{Cli, DoctorDocsArgs, should_output_json};
@@ -519,7 +520,7 @@ fn check_invocation(
     // Cargo feature aren't visible on `Cli::command()` here. Don't
     // false-positive on docs that describe them — agents and humans
     // both reach for these surfaces in real builds.
-    if FEATURE_GATED_VERBS.contains(&verb) {
+    if feature_gated_command_roots().contains(&verb) {
         return;
     }
 
@@ -679,18 +680,6 @@ fn collect_catalog_options<'a>(
         })
         .collect()
 }
-
-/// Verbs that exist in the source tree but only when an opt-in Cargo
-/// feature is enabled. The default `cargo install --path crates/cli`
-/// build doesn't include them, so `Cli::command()` here can't see
-/// them — but they're still real surfaces docs talk about.
-///
-/// Keep this list short and grounded in the cli crate's feature
-/// table.
-const FEATURE_GATED_VERBS: &[&str] = &[
-    // `presence publish` and `support` — gated behind `client`.
-    "presence", "support",
-];
 
 fn suggest_known_alt(parent: &ClapCommand, _wrong: &str) -> Option<String> {
     // Cheap "did you mean" surface: just list a couple of close hits.

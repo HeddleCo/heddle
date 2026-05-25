@@ -309,6 +309,11 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle merge <thread> --git-commit",
 ];
 
+const FEATURE_GATED_COMMAND_ROOTS: &[&str] = &[
+    // `presence publish` and `support` are gated behind `client`.
+    "presence", "support",
+];
+
 const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
     (
         "heddle capture -m \"...\"",
@@ -2722,6 +2727,10 @@ pub fn command_uses_bootstrap_op_id_store(command_name: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn feature_gated_command_roots() -> &'static [&'static str] {
+    FEATURE_GATED_COMMAND_ROOTS
+}
+
 pub fn command_supports_op_id_for_command(command: &Commands) -> bool {
     command_runtime_contract_for_command(command).supports_op_id
 }
@@ -4356,6 +4365,11 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn feature_gated_command_roots_are_catalog_owned() {
+        assert_eq!(feature_gated_command_roots(), &["presence", "support"]);
     }
 }
 
