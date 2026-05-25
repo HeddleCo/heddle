@@ -1249,7 +1249,12 @@ fn render_status_operation(output: &StatusOutput) {
         );
     }
     if let Some(remote_tracking) = &output.remote_tracking {
-        if remote_tracking.behind == 0 && remote_tracking.ahead > 0 {
+        if remote_tracking.upstream.is_empty() {
+            println!(
+                "Remote publication: {}",
+                style::accent(&remote_tracking.message)
+            );
+        } else if remote_tracking.behind == 0 && remote_tracking.ahead > 0 {
             println!("Remote sync: {}", style::accent(&remote_tracking.message));
         } else {
             println!("Remote drift: {}", style::warn(&remote_tracking.message));

@@ -3555,7 +3555,7 @@ fn git_overlay_matrix_push_defaults_to_branch_upstream_remote() {
 }
 
 #[test]
-fn git_overlay_matrix_remote_without_upstream_is_not_verified_until_push_sets_tracking() {
+fn git_overlay_matrix_local_only_branch_is_clean_until_push_sets_tracking() {
     let temp = TempDir::new().unwrap();
     let upstream = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
@@ -3576,9 +3576,28 @@ fn git_overlay_matrix_remote_without_upstream_is_not_verified_until_push_sets_tr
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
     json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     let before_push = json(temp.path(), &["--output", "json", "verify"]);
-    assert_eq!(before_push["verified"], false);
-    assert_eq!(before_push["status"], "remote_untracked");
+    assert_eq!(before_push["verified"], true);
+    assert_eq!(before_push["status"], "clean");
+    assert_eq!(before_push["remote_drift"], "remote_untracked");
     assert_eq!(before_push["recommended_action"], "heddle push");
+    assert_eq!(before_push["recovery_commands"], Value::Array(vec![]));
+
+    let status_json = json(temp.path(), &["--output", "json", "status"]);
+    assert_eq!(status_json["verification"]["verified"], true);
+    assert_eq!(status_json["verification"]["status"], "clean");
+    assert_eq!(
+        status_json["verification"]["remote_drift"],
+        "remote_untracked"
+    );
+    assert_ne!(status_json["coordination_status"], "blocked");
+    assert_ne!(status_json["thread_state"], "blocked");
+
+    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    assert!(!status_text.contains("Remote drift:"), "{status_text}");
+    assert!(
+        !status_text.contains("Coordination: blocked"),
+        "{status_text}"
+    );
 
     let push = json(temp.path(), &["--output", "json", "push"]);
     assert_eq!(push["pushed"], true);
@@ -3613,8 +3632,10 @@ fn git_overlay_matrix_remote_add_configures_default_push_remote() {
     assert_eq!(added["output_kind"], "remote_add");
     assert_eq!(added["default"], "audit");
     assert_eq!(added["verification"]["default_remote"], "audit");
-    assert_eq!(added["verification"]["verified"], false);
-    assert_eq!(added["verification"]["status"], "remote_untracked");
+    assert_eq!(added["verification"]["verified"], true);
+    assert_eq!(added["verification"]["status"], "clean");
+    assert_eq!(added["verification"]["remote_drift"], "remote_untracked");
+    assert_eq!(added["verification"]["recommended_action"], "heddle push");
     assert_eq!(
         git_stdout(temp.path(), &["remote", "get-url", "audit"]),
         audit_arg

@@ -2280,8 +2280,10 @@ fn machine_contract_verified_scope(command: &super::command_catalog::CommandCata
 }
 
 fn remote_sync_action(health: &GitOverlayHealth) -> Option<String> {
-    find_health_check(health, "remote_tracking")
-        .and_then(|check| (check.status == "remote_ahead").then(|| "heddle push".to_string()))
+    find_health_check(health, "remote_tracking").and_then(|check| {
+        matches!(check.status.as_str(), "remote_ahead" | "remote_untracked")
+            .then(|| "heddle push".to_string())
+    })
 }
 
 pub(crate) fn remote_tracking_status(remote: &GitRemoteTrackingStatus) -> &'static str {
@@ -2342,9 +2344,9 @@ pub(crate) fn remote_drift_decision(
         },
         "remote_untracked" => RemoteDriftDecision {
             status,
-            verified_as_clean: false,
+            verified_as_clean: true,
             primary_action: Some(remote_untracked_action(remote)),
-            recovery_commands: vec![remote_untracked_action(remote)],
+            recovery_commands: Vec::new(),
             requires_clean_worktree: false,
         },
         "remote_ahead" => RemoteDriftDecision {
@@ -3209,11 +3211,12 @@ fn remote_drift(
         return GitOverlayHealth {
             status: "clean".to_string(),
             clean: true,
-            summary: if decision.status == "remote_ahead" {
-                "Git and Heddle agree; local commits are ready to push".to_string()
-            } else {
-                "Git and Heddle agree".to_string()
-            },
+            summary: match decision.status {
+                "remote_ahead" => "Git and Heddle agree; local commits are ready to push",
+                "remote_untracked" => "Git and Heddle agree; branch is local-only until pushed",
+                _ => "Git and Heddle agree",
+            }
+            .to_string(),
             recovery_commands: Vec::new(),
             checks,
         };
@@ -3576,6 +3579,19 @@ mod tests {
             imported.recovery_commands,
             vec!["heddle merge origin/main --preview"]
         );
+    }
+
+    #[test]
+    fn remote_drift_decision_treats_local_only_branch_as_clean_publishable_state() {
+        let (_temp, repo) = test_repo();
+        let untracked = remote("scratch", "", 0, 0, "heddle push");
+
+        let decision = remote_drift_decision(&repo, &untracked);
+        assert_eq!(decision.status, "remote_untracked");
+        assert!(decision.verified_as_clean);
+        assert_eq!(decision.primary_action.as_deref(), Some("heddle push"));
+        assert!(decision.recovery_commands.is_empty());
+        assert!(!decision.requires_clean_worktree);
     }
 
     fn remote(
