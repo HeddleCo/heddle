@@ -19,6 +19,7 @@ use serde::Serialize;
 use tracing::{debug, info};
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     error_envelope::print_error_with_hint,
@@ -213,12 +214,12 @@ pub async fn cmd_snapshot(
             );
         }
         if let Some(next) = output.recommended_action.as_deref() {
-            println!("Next: {}", style::bold(next));
+            print_next(next);
         } else if !git_overlay
             && let Ok(Some(thread)) = current_thread(&repo)
             && thread.target_thread.is_some()
         {
-            println!("Next: {}", style::bold("heddle ready"));
+            print_next("heddle ready");
         }
     }
 

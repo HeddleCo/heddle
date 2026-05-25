@@ -2085,9 +2085,9 @@ fn git_overlay_commit_respects_staged_index_and_leaves_extra_work() {
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains("Git index and worktree")
-            && status_text.contains("staged for commit")
-            && status_text.contains("unstaged after commit")
-            && status_text.contains("untracked after commit")
+            && status_text.contains("will commit staged paths")
+            && status_text.contains("will leave unstaged paths")
+            && status_text.contains("will leave untracked paths")
             && status_text.contains("plain `heddle commit` checkpoints staged paths only")
             && status_text.contains("heddle commit --all -m \"...\""),
         "status text should explain staged-index commit scope before the user commits: {status_text}"

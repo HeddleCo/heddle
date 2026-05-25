@@ -6,6 +6,7 @@ use repo::{Repository, format_confidence};
 use serde::Serialize;
 
 use super::{
+    action_line::{print_next_step, print_next_step_dim},
     git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     history_target::{require_resolved_state, resolve_state_id},
     snapshot::ensure_current_state,
@@ -167,7 +168,7 @@ fn render_plain_git_show(
             println!("Git branch: {}", style::bold(branch));
         }
         println!("State: unavailable until this Git repo is initialized and imported");
-        println!("Next step: {}", style::bold("heddle init"));
+        print_next_step("heddle init");
         if let Some(branch) = &probe.git_branch {
             println!(
                 "Then: {}",
@@ -196,7 +197,7 @@ fn render_state(output: &ShowOutput, verbose: bool) {
                 hint.missing_branch_count,
             )
         );
-        println!("Next step: {}", style::dim(&hint.recommended_command));
+        print_next_step_dim(&hint.recommended_command);
     }
     println!();
     // Identifiers are dimmed: structurally important but not the

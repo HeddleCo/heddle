@@ -18,6 +18,7 @@ use repo::{GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     git_overlay_health::{
@@ -92,7 +93,7 @@ pub async fn run(cli: &Cli, args: &CheckpointArgs) -> Result<()> {
         if output.trust.verified {
             println!("Verification: {}", style::accent("clean"));
         } else if !output.trust.recommended_action.is_empty() {
-            println!("Next: {}", style::bold(&output.trust.recommended_action));
+            print_next(&output.trust.recommended_action);
         }
     }
 

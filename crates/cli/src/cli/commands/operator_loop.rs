@@ -3,6 +3,7 @@ use anyhow::Result;
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationStatus};
 
 use super::{
+    action_line::print_next_step,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     next_action::{NextActionInput, effective_next_action},
     operator_core::{
@@ -152,7 +153,7 @@ fn emit(cli: &Cli, output: OperatorCommandOutput) -> Result<()> {
             }
         }
         if let Some(next) = output.recommended_action.or(output.next_action) {
-            println!("Next step: {}", style::bold(&next));
+            print_next_step(&next);
         }
     }
     Ok(())

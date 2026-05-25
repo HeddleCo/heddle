@@ -13,6 +13,7 @@ use repo::Repository;
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     git_overlay_health::{
@@ -518,7 +519,7 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
                 thread.name, thread.coordination_status
             );
             if let Some(action) = recommended_action {
-                println!("Next: {action}");
+                print_next(&action);
             }
         }
     }
@@ -671,9 +672,9 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
             println!("Environment signals: {}", env_signals.join(", "));
         }
         if let Some(action) = next_action {
-            println!("Next: {action}");
+            print_next(&action);
         } else {
-            println!("Next: heddle actor spawn");
+            print_next("heddle actor spawn");
         }
     }
 

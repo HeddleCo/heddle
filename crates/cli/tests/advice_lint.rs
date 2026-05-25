@@ -261,40 +261,44 @@ fn next_action_priority_lives_in_shared_selector() {
 }
 
 #[test]
-fn high_visibility_human_action_lines_use_shared_renderer() {
+fn human_action_lines_use_shared_renderer() {
     let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut violations = Vec::new();
-    for file in [
-        "cli/commands/status.rs",
-        "cli/commands/verify.rs",
-        "cli/commands/ready_cmd.rs",
-        "cli/commands/thread.rs",
-        "cli/commands/workspace.rs",
-    ] {
-        let path = src_dir.join(file);
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    walk_rust_files(&src_dir, &mut |path| {
+        let rel = path.strip_prefix(&src_dir).unwrap_or(path);
+        if rel == Path::new(ALLOWED_ACTION_LINE_FILE) || rel == Path::new(ALLOWED_ENVELOPE_FILE) {
+            return;
+        }
+        let Ok(source) = fs::read_to_string(path) else {
+            return;
+        };
         for (line_index, line) in source.lines().enumerate() {
+            let trimmed = line.trim_start();
             for fragment in [
                 "println!(\"Next:",
                 "println!(\"Next step:",
+                "println!(\"Optional:",
                 "println!(\"  command:",
+                "println!(\"  Next:",
                 "println!(\"    next step:",
                 "println!(\"    optional:",
+                "writeln!(out, \"Next step:",
+                "format!(\"  Next:",
             ] {
-                if line.contains(fragment) {
+                if trimmed.starts_with(fragment) {
                     violations.push(format!(
-                        "{file}:{} renders action line `{fragment}` outside {ALLOWED_ACTION_LINE_FILE}",
+                        "{}:{} renders action line `{fragment}` outside {ALLOWED_ACTION_LINE_FILE}",
+                        rel.display(),
                         line_index + 1
                     ));
                 }
             }
         }
-    }
+    });
 
     assert!(
         violations.is_empty(),
-        "high-visibility human action lines should use {ALLOWED_ACTION_LINE_FILE}; violations:\n{}",
+        "human action lines should use {ALLOWED_ACTION_LINE_FILE}; violations:\n{}",
         violations.join("\n")
     );
 }

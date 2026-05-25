@@ -19,6 +19,7 @@ use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     git_overlay_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
@@ -274,7 +275,7 @@ pub async fn cmd_pull(
             if !verification.verified {
                 println!("Workspace: {}", style::warn(&verification.status));
                 if !verification.recommended_action.is_empty() {
-                    println!("Next: {}", style::bold(&verification.recommended_action));
+                    print_next(&verification.recommended_action);
                 }
             } else {
                 println!("Workspace: verified");
@@ -750,7 +751,7 @@ fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()
             style::bold(&output.name)
         );
         if !output.trust.recommended_action.is_empty() {
-            println!("Next: {}", style::bold(&output.trust.recommended_action));
+            print_next(&output.trust.recommended_action);
         }
     }
     Ok(())

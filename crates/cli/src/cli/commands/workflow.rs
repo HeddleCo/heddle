@@ -6,6 +6,7 @@ use repo::{Repository, Thread, ThreadIntegrationPolicy};
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     checkpoint::create_git_checkpoint,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
@@ -1385,7 +1386,7 @@ fn write_ship_output(cli: &Cli, output: &ShipOutput) -> Result<()> {
             .as_ref()
             .or(output.operator.next_action.as_ref())
         {
-            println!("Next: {}", style::bold(next));
+            print_next(next);
         }
     }
     exit_if_blocked_operator_status(&output.operator.status);

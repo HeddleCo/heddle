@@ -8,6 +8,7 @@ use repo::{Repository, ThreadManager};
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
@@ -454,7 +455,7 @@ fn print_head(repo: &Repository) -> Result<()> {
 fn print_post_undo_trust(trust: &RepositoryVerificationState) {
     println!("Verification: {}", human_post_undo_trust_status(trust));
     if !trust.recommended_action.trim().is_empty() {
-        println!("Next: {}", style::bold(&trust.recommended_action));
+        print_next(&trust.recommended_action);
     }
 }
 

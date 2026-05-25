@@ -896,7 +896,8 @@ fn format_clone_completion_lines(
             "  {}",
             style::field("current thread", &style::bold(thread_name))
         ),
-        format!("  Next: {}", style::bold("heddle status")),
+        super::action_line::format_next("heddle status", 2)
+            .expect("static clone next action is non-empty"),
     ]
 }
 

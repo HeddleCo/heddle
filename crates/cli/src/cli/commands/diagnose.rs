@@ -14,6 +14,7 @@ use repo::{
 use serde::Serialize;
 
 use super::{
+    action_line::print_next_step,
     git_overlay_health::{
         GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_argv,
         action_template, build_git_overlay_health, build_plain_git_verification_probe,
@@ -687,10 +688,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
         println!("Blocked by: {}", output.health.blockers.join(" | "));
     }
     if !output.health.recommended_action.is_empty() {
-        println!(
-            "Next step: {}",
-            style::bold(&output.health.recommended_action)
-        );
+        print_next_step(&output.health.recommended_action);
     }
     if let Some(profile) = &output.profile {
         println!(

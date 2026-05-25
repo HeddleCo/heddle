@@ -18,6 +18,7 @@ use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     checkpoint::{
         create_git_checkpoint, create_git_checkpoint_from_index_snapshot,
@@ -1068,7 +1069,7 @@ fn render_commit_compat(output: &CommitCompatOutput, json: bool) -> Result<()> {
             }
         }
         if let Some(next) = &output.next_action {
-            println!("Next: {}", next);
+            print_next(next);
         } else if output.trust.verified {
             println!("Verification: clean");
         }

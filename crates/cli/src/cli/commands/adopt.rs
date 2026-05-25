@@ -9,6 +9,7 @@ use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
@@ -322,7 +323,7 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
         );
     }
     if !output.trust.recommended_action.is_empty() {
-        println!("Next: {}", style::bold(&output.trust.recommended_action));
+        print_next(&output.trust.recommended_action);
     }
     Ok(())
 }
