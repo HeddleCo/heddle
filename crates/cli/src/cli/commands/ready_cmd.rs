@@ -17,8 +17,8 @@ use super::{
         build_repository_verification_state, override_trust_recommended_action,
     },
     merge::{ThreadPreviewReport, build_thread_preview_report},
+    next_action::{NextActionInput, effective_next_action},
     operator_core::{OperatorCommandOutput, exit_if_blocked_operator_status},
-    operator_loop::primary_next_action,
     snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread::contextual_thread_action,
     thread_cmd::{current_thread, load_thread, thread_manager, thread_not_found_advice},
@@ -352,13 +352,9 @@ fn ready_scoped_next_action(
     import_hint: Option<&GitOverlayImportHint>,
     thread_action: Option<&str>,
 ) -> String {
-    if let Some(operation) = operation {
-        return operation.next_action.clone();
-    }
-    if let Some(action) = thread_action.filter(|action| !action.trim().is_empty()) {
-        return action.to_string();
-    }
-    primary_next_action(None, remote_tracking, import_hint, None)
+    effective_next_action(
+        NextActionInput::default(operation, remote_tracking, import_hint, thread_action).ready(),
+    )
 }
 
 fn ready_verification_preflight_blocks(trust: &RepositoryVerificationState) -> bool {

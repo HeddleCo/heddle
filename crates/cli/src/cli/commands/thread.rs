@@ -33,6 +33,10 @@ use super::{
         serialize_empty_action_as_null,
     },
     mount_lifecycle,
+    next_action::{
+        NextActionInput, effective_next_action,
+        thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
+    },
     operator_loop::{primary_next_action, primary_next_action_with_verification},
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
@@ -1051,17 +1055,12 @@ pub(crate) fn current_thread_next_action_with_verification(
     thread_action: Option<&str>,
     trust: &RepositoryVerificationState,
 ) -> String {
-    if !trust.verified {
-        return trust.recommended_action.clone();
-    }
     let fallback = non_empty_action_ref(thread_action)
         .or_else(|| non_empty_action_ref(Some(trust.recommended_action.as_str())));
-    current_thread_next_action(
-        operation,
-        remote_tracking,
-        import_hint,
-        thread_health,
-        fallback,
+    effective_next_action(
+        NextActionInput::default(operation, remote_tracking, import_hint, fallback)
+            .current_thread(thread_health)
+            .with_verification(trust),
     )
 }
 
@@ -1072,43 +1071,17 @@ pub(crate) fn current_thread_next_action(
     thread_health: Option<&str>,
     thread_action: Option<&str>,
 ) -> String {
-    let thread_action = non_empty_action_ref(thread_action);
-    if operation.is_none()
-        && thread_recovery_precedes_publish(remote_tracking, thread_health, thread_action)
-    {
-        return thread_action.unwrap_or_default().to_string();
-    }
-    primary_next_action(operation, remote_tracking, import_hint, thread_action)
-}
-
-pub(crate) fn thread_recovery_precedes_publish(
-    remote_tracking: Option<&GitRemoteTrackingStatus>,
-    thread_health: Option<&str>,
-    thread_action: Option<&str>,
-) -> bool {
-    let Some(remote_tracking) = remote_tracking else {
-        return false;
-    };
-    if remote_tracking.ahead == 0 || remote_tracking.behind > 0 {
-        return false;
-    }
-    let Some(thread_action) = thread_action else {
-        return false;
-    };
-    thread_recovery_action_is_primary(thread_health, thread_action)
+    effective_next_action(
+        NextActionInput::default(operation, remote_tracking, import_hint, thread_action)
+            .current_thread(thread_health),
+    )
 }
 
 pub(crate) fn thread_recovery_action_is_primary(
     thread_health: Option<&str>,
     thread_action: &str,
 ) -> bool {
-    matches!(
-        thread_health.unwrap_or_default(),
-        "blocked" | "dirty_worktree" | "uncaptured"
-    ) || thread_action == "heddle capture"
-        || thread_action.starts_with("heddle thread refresh ")
-        || thread_action.starts_with("heddle thread resolve ")
-        || thread_action.starts_with("heddle thread promote ")
+    shared_thread_recovery_action_is_primary(thread_health, thread_action)
 }
 
 fn non_empty_action_ref(action: Option<&str>) -> Option<&str> {

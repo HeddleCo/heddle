@@ -13,9 +13,9 @@ use super::{
     bisect::reset_bisect_state,
     git_overlay_health::{
         RepositoryVerificationState, action_argv, action_template,
-        import_hint_includes_active_branch, repository_verification_blockers,
-        repository_verification_primary_command,
+        repository_verification_blockers, repository_verification_primary_command,
     },
+    next_action::{NextActionInput, effective_next_action},
     rebase::{
         OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
         has_persisted_rebase_state,
@@ -391,36 +391,12 @@ pub(crate) fn recommend_next_action(
     import_hint: Option<&GitOverlayImportHint>,
     fallback: Option<&str>,
 ) -> String {
-    if let Some(operation) = operation {
-        return operation.next_action.clone();
-    }
-    if let Some(remote_tracking) = remote_tracking {
-        if remote_tracking.behind > 0 {
-            return if remote_tracking.ahead > 0 {
-                if remote_tracking.upstream.is_empty() {
-                    "heddle fetch".to_string()
-                } else {
-                    format!(
-                        "heddle bridge git import --ref {}",
-                        remote_tracking.upstream
-                    )
-                }
-            } else {
-                "heddle pull".to_string()
-            };
-        }
-        return "heddle push".to_string();
-    }
-    let fallback = fallback.unwrap_or_default();
-    if !fallback.is_empty() {
-        return fallback.to_string();
-    }
-    if let Some(hint) = import_hint {
-        if import_hint_includes_active_branch(hint) {
-            return hint.recommended_command.clone();
-        }
-    }
-    String::new()
+    effective_next_action(NextActionInput::default(
+        operation,
+        remote_tracking,
+        import_hint,
+        fallback,
+    ))
 }
 
 fn git_unmerged_paths(repo: &Repository) -> Result<Vec<String>> {

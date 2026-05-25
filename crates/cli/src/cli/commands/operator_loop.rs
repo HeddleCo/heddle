@@ -4,6 +4,7 @@ use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationSta
 
 use super::{
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    next_action::{NextActionInput, effective_next_action},
     operator_core::{
         OperatorCommandOutput, abort_operator, exit_if_blocked_operator_status,
         open_operator_repo_from_path, recommend_next_action,
@@ -173,12 +174,12 @@ pub(crate) fn primary_next_action_with_verification(
     fallback: Option<&str>,
     trust: &RepositoryVerificationState,
 ) -> String {
-    if !trust.verified {
-        return trust.recommended_action.clone();
-    }
     let fallback = non_empty_action(fallback)
         .or_else(|| non_empty_action(Some(trust.recommended_action.as_str())));
-    recommend_next_action(operation, remote_tracking, import_hint, fallback)
+    effective_next_action(
+        NextActionInput::default(operation, remote_tracking, import_hint, fallback)
+            .with_verification(trust),
+    )
 }
 
 fn non_empty_action(action: Option<&str>) -> Option<&str> {

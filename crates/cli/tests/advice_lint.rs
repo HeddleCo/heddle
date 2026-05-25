@@ -13,6 +13,7 @@ use std::{
 const ALLOWED_ENVELOPE_FILE: &str = "cli/commands/error_envelope.rs";
 const ALLOWED_ADVICE_FILE: &str = "cli/commands/advice.rs";
 const ALLOWED_HISTORY_TARGET_FILE: &str = "cli/commands/history_target.rs";
+const ALLOWED_NEXT_ACTION_FILE: &str = "cli/commands/next_action.rs";
 
 const RAW_RECOVERY_PHRASES: &[&str] = &[
     "State not found:",
@@ -218,6 +219,42 @@ fn verification_blocked_outputs_use_shared_action_policy() {
     assert!(
         violations.is_empty(),
         "repository-verification blocked outputs should use repository_verification_primary_command or OperatorCommandOutput::blocked_by_repository_verification:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn next_action_priority_lives_in_shared_selector() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+    walk_rust_files(&src_dir, &mut |path| {
+        let rel = path.strip_prefix(&src_dir).unwrap_or(path);
+        if rel == Path::new(ALLOWED_NEXT_ACTION_FILE) {
+            return;
+        }
+        let Ok(source) = fs::read_to_string(path) else {
+            return;
+        };
+        for (line_index, line) in source.lines().enumerate() {
+            for fragment in [
+                "remote_tracking.behind > 0",
+                "heddle bridge git import --ref {}",
+                "thread_action.filter(|action| !action.trim().is_empty())",
+            ] {
+                if line.contains(fragment) {
+                    violations.push(format!(
+                        "{}:{} reimplements next-action priority fragment `{fragment}`",
+                        rel.display(),
+                        line_index + 1
+                    ));
+                }
+            }
+        }
+    });
+
+    assert!(
+        violations.is_empty(),
+        "next-action priority should be selected through {ALLOWED_NEXT_ACTION_FILE}; violations:\n{}",
         violations.join("\n")
     );
 }
