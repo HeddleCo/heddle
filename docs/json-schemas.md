@@ -1991,6 +1991,7 @@ the same ready envelope.
     "remote": "origin"
   },
   "tags_included": false,
+  "force": false,
   "thread": "main",
   "next_action": null,
   "next_action_argv": null,
@@ -2037,6 +2038,7 @@ the same ready envelope.
 | `branch`, `old_git_head`, `new_git_head`, `old_state`, `new_state`, `states_created`, `commits_seen`, `commits_seen_scope`, `materialized_checkout`, `changed_path_count`, `changed_paths` | mixed | Git-overlay pull only | Concrete Git/Heddle movement proof for a pull, including imported commit scope and materialized path changes. |
 | `state`, `objects` | string/int \| null | native Heddle pull/push only | Resulting native Heddle state and transferred object count. Git-overlay transfers report Git ref publication details instead. |
 | `push_scope`, `ref_scope`, `tags_included`, `thread` | string/bool \| null | Git-overlay push only | Whether the push published only the current thread or all threads, the concrete Git ref scope, whether tags were included, and the thread whose branch was pushed. |
+| `force`, `force_discard_warning` | bool/string \| null | Git-overlay push only | Present for Git-overlay push. `force_discard_warning` is non-null when `--force` may move remote refs backward or discard remote-only commits. |
 | `git_notes_ref`, `git_notes_visibility_warning` | string \| null | Git-overlay push only | Heddle metadata notes ref carried with the push and the human-visible Git disclosure for that ref. |
 | `git_tracking_remote`, `git_remote_configured`, `git_upstream_configured` | mixed | Git-overlay push only | Git config side effects when Heddle configures a remote or branch upstream during push. |
 | `next_action`, `recommended_action`, `next_action_argv`, `recommended_action_argv`, `next_action_template`, `recommended_action_template` | mixed | required for push | Post-push action metadata promoted from verification; all are `null` when the push closes the remote loop. |

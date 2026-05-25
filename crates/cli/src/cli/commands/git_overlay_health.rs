@@ -2288,6 +2288,9 @@ pub(crate) fn remote_tracking_status(remote: &GitRemoteTrackingStatus) -> &'stat
     if remote.upstream.is_empty() {
         return "remote_untracked";
     }
+    if remote.upstream_is_undone_checkpoint && remote.ahead == 0 && remote.behind > 0 {
+        return "remote_contains_undone_checkpoint";
+    }
     match (remote.ahead, remote.behind) {
         (0, 0) => "clean",
         (0, _) => "remote_behind",
@@ -2309,6 +2312,7 @@ pub(crate) fn remote_tracking_next_action(remote: &GitRemoteTrackingStatus) -> O
     match remote_tracking_status(remote) {
         "clean" => None,
         "remote_untracked" => Some(remote_untracked_action(remote)),
+        "remote_contains_undone_checkpoint" => Some(heddle_action(["push", "--force"])),
         "remote_behind" => Some("heddle pull".to_string()),
         "remote_ahead" => Some("heddle push".to_string()),
         "remote_diverged" => {
@@ -2349,6 +2353,16 @@ pub(crate) fn remote_drift_decision(
             primary_action: Some("heddle push".to_string()),
             recovery_commands: Vec::new(),
             requires_clean_worktree: false,
+        },
+        "remote_contains_undone_checkpoint" => RemoteDriftDecision {
+            status,
+            verified_as_clean: false,
+            primary_action: Some(heddle_action(["push", "--force"])),
+            recovery_commands: vec![
+                heddle_action(["push", "--force"]),
+                "heddle redo".to_string(),
+            ],
+            requires_clean_worktree: true,
         },
         "remote_behind" => RemoteDriftDecision {
             status,
@@ -3173,6 +3187,18 @@ fn remote_drift(
     details.insert("upstream".to_string(), remote.upstream.clone());
     details.insert("ahead".to_string(), remote.ahead.to_string());
     details.insert("behind".to_string(), remote.behind.to_string());
+    if let Some(local_oid) = &remote.local_oid {
+        details.insert("local_oid".to_string(), local_oid.clone());
+    }
+    if let Some(upstream_oid) = &remote.upstream_oid {
+        details.insert("upstream_oid".to_string(), upstream_oid.clone());
+    }
+    if remote.upstream_is_undone_checkpoint {
+        details.insert(
+            "upstream_is_undone_checkpoint".to_string(),
+            "true".to_string(),
+        );
+    }
     checks.push(GitOverlayHealthCheck {
         name: "remote_tracking".to_string(),
         status: decision.status.to_string(),
@@ -3564,6 +3590,9 @@ mod tests {
             upstream: upstream.to_string(),
             ahead,
             behind,
+            local_oid: None,
+            upstream_oid: None,
+            upstream_is_undone_checkpoint: false,
             message: "remote fixture".to_string(),
             next_action: next_action.to_string(),
         }

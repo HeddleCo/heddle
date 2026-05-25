@@ -76,7 +76,7 @@ use objects::{
     store::{FsStore, ObjectStore, ShallowInfo},
     worktree::{WorktreeStatus, should_ignore as should_ignore_path},
 };
-use oplog::{OpLog, OpLogBackend};
+use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefManager};
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
@@ -205,8 +205,18 @@ pub struct GitRemoteTrackingStatus {
     pub upstream: String,
     pub ahead: usize,
     pub behind: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub upstream_is_undone_checkpoint: bool,
     pub message: String,
     pub next_action: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Deserialize)]
@@ -787,13 +797,33 @@ impl Repository {
                         return Ok(None);
                     }
                     let upstream = git_remote_tracking_display_name(&tracking_name);
+                    let local_oid = head.to_string();
+                    let upstream_oid = upstream_head.to_string();
+                    let upstream_is_undone_checkpoint = self.remote_tracks_undone_git_checkpoint(
+                        &branch,
+                        &local_oid,
+                        &upstream_oid,
+                    )?;
                     return Ok(Some(GitRemoteTrackingStatus {
                         branch: branch.clone(),
                         upstream: upstream.clone(),
                         ahead,
                         behind,
-                        message: git_remote_tracking_message(&branch, &upstream, ahead, behind),
-                        next_action: git_remote_tracking_next_action(ahead, behind),
+                        local_oid: Some(local_oid),
+                        upstream_oid: Some(upstream_oid),
+                        upstream_is_undone_checkpoint,
+                        message: git_remote_tracking_message(
+                            &branch,
+                            &upstream,
+                            ahead,
+                            behind,
+                            upstream_is_undone_checkpoint,
+                        ),
+                        next_action: git_remote_tracking_next_action(
+                            ahead,
+                            behind,
+                            upstream_is_undone_checkpoint,
+                        ),
                     }));
                 }
             }
@@ -812,13 +842,33 @@ impl Repository {
                 let (ahead, behind) = git_ahead_behind(&self.root, &git, remote_head, head)?;
                 if behind > 0 {
                     let upstream = format!("{remote}/{branch}");
+                    let local_oid = head.to_string();
+                    let upstream_oid = remote_head.to_string();
+                    let upstream_is_undone_checkpoint = self.remote_tracks_undone_git_checkpoint(
+                        &branch,
+                        &local_oid,
+                        &upstream_oid,
+                    )?;
                     return Ok(Some(GitRemoteTrackingStatus {
                         branch: branch.clone(),
                         upstream: upstream.clone(),
                         ahead,
                         behind,
-                        message: git_remote_tracking_message(&branch, &upstream, ahead, behind),
-                        next_action: git_remote_tracking_next_action(ahead, behind),
+                        local_oid: Some(local_oid),
+                        upstream_oid: Some(upstream_oid),
+                        upstream_is_undone_checkpoint,
+                        message: git_remote_tracking_message(
+                            &branch,
+                            &upstream,
+                            ahead,
+                            behind,
+                            upstream_is_undone_checkpoint,
+                        ),
+                        next_action: git_remote_tracking_next_action(
+                            ahead,
+                            behind,
+                            upstream_is_undone_checkpoint,
+                        ),
                     }));
                 }
             }
@@ -829,8 +879,39 @@ impl Repository {
             upstream: String::new(),
             ahead: 0,
             behind: 0,
+            local_oid: Some(head.to_string()),
+            upstream_oid: None,
+            upstream_is_undone_checkpoint: false,
             message: format!("Git branch '{branch}' has no upstream tracking branch"),
             next_action: "heddle push".to_string(),
+        }))
+    }
+
+    fn remote_tracks_undone_git_checkpoint(
+        &self,
+        branch: &str,
+        local_oid: &str,
+        upstream_oid: &str,
+    ) -> Result<bool> {
+        let scope = self.op_scope();
+        let batches = self.oplog().redo_batches_scoped(64, Some(&scope))?;
+        Ok(batches.iter().any(|batch| {
+            batch.entries.iter().any(|entry| {
+                if !entry.undone {
+                    return false;
+                }
+                matches!(
+                    &entry.operation,
+                    OpRecord::GitCheckpoint {
+                        branch: checkpoint_branch,
+                        previous_git_oid: Some(previous_git_oid),
+                        new_git_oid,
+                        ..
+                    } if checkpoint_branch == branch
+                        && previous_git_oid == local_oid
+                        && new_git_oid == upstream_oid
+                )
+            })
         }))
     }
 
@@ -2226,7 +2307,13 @@ fn git_remote_tracking_message(
     upstream: &str,
     ahead: usize,
     behind: usize,
+    upstream_is_undone_checkpoint: bool,
 ) -> String {
+    if upstream_is_undone_checkpoint && ahead == 0 && behind > 0 {
+        return format!(
+            "Upstream '{upstream}' still points at a Git commit that was undone locally on branch '{branch}'"
+        );
+    }
     match (ahead, behind) {
         (0, behind) => format!(
             "Git branch '{}' is behind upstream '{}' by {} commit(s)",
@@ -2243,7 +2330,14 @@ fn git_remote_tracking_message(
     }
 }
 
-fn git_remote_tracking_next_action(ahead: usize, behind: usize) -> String {
+fn git_remote_tracking_next_action(
+    ahead: usize,
+    behind: usize,
+    upstream_is_undone_checkpoint: bool,
+) -> String {
+    if upstream_is_undone_checkpoint && ahead == 0 && behind > 0 {
+        return "heddle push --force".to_string();
+    }
     match (ahead, behind) {
         (0, _) => "heddle pull".to_string(),
         (_, 0) => "heddle push".to_string(),

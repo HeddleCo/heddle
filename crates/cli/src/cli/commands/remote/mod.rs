@@ -45,6 +45,7 @@ pub(crate) fn push_git_overlay_refs(
     repo: &Repository,
     remote: Option<&str>,
     all_threads: bool,
+    force: bool,
 ) -> Result<(
     String,
     GitPushScope,
@@ -67,7 +68,7 @@ pub(crate) fn push_git_overlay_refs(
         None
     };
     let mut bridge = GitBridge::new(repo);
-    bridge.push_with_scope(&remote_name, scope)?;
+    bridge.push_with_scope_force(&remote_name, scope, force)?;
     let tracking_refresh = refresh_git_tracking_after_overlay_push(repo, &remote_name)?;
     let trust = build_repository_verification_state(repo);
     Ok((remote_name, scope, current_thread, tracking_refresh, trust))
@@ -113,6 +114,10 @@ struct PushOutput {
     git_upstream_configured: Option<GitUpstreamConfiguredOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tags_included: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    force: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    force_discard_warning: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,13 +188,14 @@ pub async fn cmd_push(
             return Ok(());
         }
         let (remote_name, scope, current_thread, tracking_refresh, trust) =
-            push_git_overlay_refs(&repo, remote.as_deref(), all_threads)?;
+            push_git_overlay_refs(&repo, remote.as_deref(), all_threads, force)?;
         if should_output_json(cli, Some(repo.config())) {
             let output = git_overlay_push_output(
                 remote_name,
                 scope,
                 current_thread,
                 tracking_refresh,
+                force,
                 trust,
             );
             crate::cli::render::write_json_stdout(&output)?;
@@ -210,6 +216,11 @@ pub async fn cmd_push(
                     GitPushScope::AllThreads => "all threads + Git tags + refs/notes/heddle",
                 }
             );
+            if force {
+                println!(
+                    "Force: remote refs may be moved back to match local Heddle state; remote commits not reachable from this checkout can be discarded."
+                );
+            }
             println!(
                 "Git interop: published {}; ordinary `git log --all` may show Heddle metadata commits.",
                 style::bold("refs/notes/heddle")
@@ -361,6 +372,7 @@ fn git_overlay_push_output(
     scope: GitPushScope,
     current_thread: Option<String>,
     tracking_refresh: Option<GitOverlayTrackingRefresh>,
+    force: bool,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
     let action = ActionFields::from_action(&trust.recommended_action);
@@ -408,6 +420,10 @@ fn git_overlay_push_output(
         git_remote_configured: configured_remote,
         git_upstream_configured: upstream_configured,
         tags_included: Some(matches!(scope, GitPushScope::AllThreads)),
+        force: Some(force),
+        force_discard_warning: force.then_some(
+            "remote refs may be moved back to match local Heddle state; remote commits not reachable from this checkout can be discarded",
+        ),
         thread: current_thread,
         state: None,
         objects: None,
@@ -444,6 +460,8 @@ fn heddle_push_output(
         git_remote_configured: None,
         git_upstream_configured: None,
         tags_included: None,
+        force: None,
+        force_discard_warning: None,
         thread: None,
         state,
         objects,
