@@ -1914,7 +1914,11 @@ the same ready envelope.
 
 ```json
 {
+  "output_kind": "pull",
+  "action": "pull",
+  "status": "updated",
   "pulled": true,
+  "changed": true,
   "success": true,
   "transport": "git",
   "remote": "origin",
@@ -1925,6 +1929,7 @@ the same ready envelope.
   "new_state": "hd-head456",
   "states_created": 1,
   "commits_seen": 1,
+  "commits_seen_scope": "branches_and_heddle_notes",
   "materialized_checkout": true,
   "changed_path_count": 1,
   "changed_paths": ["src/app.rs"],
@@ -2021,8 +2026,9 @@ the same ready envelope.
 | `name`, `url`, `source`, `is_default` | string/string/string/bool | required for `remote show` and remote entries | Remote identity and default marker. |
 | `refs_fetched`, `objects_fetched` | int | required for `fetch` | Fetch transfer counts. |
 | `pulled`, `pushed`, `success` | bool \| null | required when present | Transport result booleans. Pull reports `pulled`; push reports `pushed`. |
-| `action`, `status`, `transport` | string \| null | required for push | Stable action name, outcome status, and transport kind. Git-overlay pushes report `transport: "git"`; native Heddle pushes report `transport: "heddle"`. |
-| `state`, `objects` | string/int \| null | native Heddle push only | Resulting native Heddle state and transferred object count. Git-overlay pushes report Git ref publication details instead. |
+| `action`, `status`, `transport` | string \| null | required for pull/push | Stable action name, outcome status, and transport kind. Git-overlay transfers report `transport: "git"`; native Heddle transfers report `transport: "heddle"`. |
+| `branch`, `old_git_head`, `new_git_head`, `old_state`, `new_state`, `states_created`, `commits_seen`, `commits_seen_scope`, `materialized_checkout`, `changed_path_count`, `changed_paths` | mixed | Git-overlay pull only | Concrete Git/Heddle movement proof for a pull, including imported commit scope and materialized path changes. |
+| `state`, `objects` | string/int \| null | native Heddle pull/push only | Resulting native Heddle state and transferred object count. Git-overlay transfers report Git ref publication details instead. |
 | `push_scope`, `ref_scope`, `tags_included`, `thread` | string/bool \| null | Git-overlay push only | Whether the push published only the current thread or all threads, the concrete Git ref scope, whether tags were included, and the thread whose branch was pushed. |
 | `git_notes_ref`, `git_notes_visibility_warning` | string \| null | Git-overlay push only | Heddle metadata notes ref carried with the push and the human-visible Git disclosure for that ref. |
 | `git_tracking_remote`, `git_remote_configured`, `git_upstream_configured` | mixed | Git-overlay push only | Git config side effects when Heddle configures a remote or branch upstream during push. |

@@ -292,9 +292,22 @@ fn test_cli_pull_local_updates_requested_track() {
         "pull --output json must emit exactly one JSON value: {output}"
     );
     let parsed: Value = serde_json::from_str(&output).expect("pull JSON should parse");
+    assert_eq!(parsed["output_kind"], "pull");
+    assert_eq!(parsed["action"], "pull");
     assert_eq!(
         parsed["success"], true,
         "pull should report success: {parsed}"
+    );
+    assert_eq!(parsed["status"], "updated");
+    assert_eq!(parsed["transport"], "heddle");
+    assert_eq!(parsed["thread"], "imported");
+    assert!(
+        parsed["state"].is_string(),
+        "pull should report state: {parsed}"
+    );
+    assert!(
+        parsed["objects"].is_number(),
+        "pull should report objects: {parsed}"
     );
     assert_eq!(parsed["verification"]["status"], "clean");
 
@@ -1218,6 +1231,10 @@ fn test_cli_clone_git_overlay_rewrites_origin_and_default_pull_keeps_git_clean()
     let pull_json =
         heddle(&["--output", "json", "pull"], Some(&work)).expect("default pull succeeds");
     let pull: Value = serde_json::from_str(&pull_json).expect("pull JSON parses");
+    assert_eq!(pull["output_kind"], "pull");
+    assert_eq!(pull["action"], "pull");
+    assert_eq!(pull["status"], "updated");
+    assert_eq!(pull["transport"], "git");
     assert_eq!(pull["remote"], "origin");
     assert_eq!(pull["branch"], "main");
     assert_eq!(pull["old_git_head"], first.to_string());
@@ -1225,6 +1242,7 @@ fn test_cli_clone_git_overlay_rewrites_origin_and_default_pull_keeps_git_clean()
     assert_eq!(pull["changed_path_count"], 1);
     assert_eq!(pull["changed_paths"], serde_json::json!(["tracked.txt"]));
     assert_eq!(pull["states_created"], 1);
+    assert_eq!(pull["commits_seen_scope"], "branches_and_heddle_notes");
     assert_eq!(pull["materialized_checkout"], true);
     assert_eq!(
         pull["verification"]["worktree_state"], "clean",
