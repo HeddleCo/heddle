@@ -6363,6 +6363,24 @@ fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
             .contains("thread refresh"),
         "manual conflict resolution should not leave parent thread advice stuck on refresh: {after_continue}"
     );
+    let resolved_again = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "thread",
+            "resolve",
+            "feature/manual-recover",
+        ],
+    );
+    assert_eq!(resolved_again["status"], "completed", "{resolved_again}");
+    assert!(
+        resolved_again["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("manual resolution recorded")
+                && !message.contains("requires a manual follow-up")),
+        "completed thread resolve should not read like it is still blocked: {resolved_again}"
+    );
 
     let retry_ship = json(
         temp.path(),
