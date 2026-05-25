@@ -23,6 +23,7 @@ use super::{
     git_overlay_health::{
         RepositoryVerificationState, action_argv, action_template,
         build_repository_verification_state, override_trust_recommended_action,
+        repository_verification_blocked_advice,
     },
     operator_core::{OperatorCommandOutput, blocked_operator_exit_code},
     ready_cmd::{worktree_dirty, worktree_dirty_paths},
@@ -2414,10 +2415,22 @@ fn merge_preview_blocked_advice(output: &MergeOutput) -> RecoveryAdvice {
     } else {
         output.operator.blockers.join("; ")
     };
+    if let Some(trust) = output.trust.as_ref() {
+        return repository_verification_blocked_advice(
+            "merge_preview_blocked",
+            output.operator.message.clone(),
+            "retrying the merge preview",
+            trust,
+            blockers,
+            "the merge preview would otherwise describe a stale or unverifiable integration path",
+            "repository state, refs, and worktree files were left unchanged",
+            Some(primary_command.to_string()),
+        );
+    }
     RecoveryAdvice::safety_refusal(
         "merge_preview_blocked",
         output.operator.message.clone(),
-        format!("Run `{primary_command}`, then retry the merge preview."),
+        format!("Run `{primary_command}` before retrying the merge preview."),
         blockers,
         "the merge preview would otherwise describe a stale or unverifiable integration path",
         "repository state, refs, and worktree files were left unchanged",

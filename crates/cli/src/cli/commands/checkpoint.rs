@@ -23,8 +23,8 @@ use super::{
     git_overlay_health::{
         RepositoryVerificationState, build_plain_git_verification_probe,
         build_repository_verification_state, detached_git_head_mutation_advice,
-        plain_git_mutation_advice, unimported_git_history_advice,
-        verification_blocking_mutation_advice,
+        plain_git_mutation_advice, repository_verification_blocked_advice,
+        unimported_git_history_advice, verification_blocking_mutation_advice,
     },
     snapshot::ensure_current_state,
     worktree_safety::dirty_worktree_advice,
@@ -236,17 +236,11 @@ fn git_checkpoint_preflight_advice(
                 trust.recommended_action.clone()
             }
         });
-    let recovery_commands = if primary_command != trust.recommended_action {
-        vec![primary_command.clone(), "heddle verify".to_string()]
-    } else if trust.recovery_commands.is_empty() {
-        vec![primary_command.clone()]
-    } else {
-        trust.recovery_commands.clone()
-    };
-    RecoveryAdvice::safety_refusal(
+    repository_verification_blocked_advice(
         "git_checkpoint_preflight_blocked",
         format!("Refusing to {action}: Git checkpoint preflight is blocked"),
-        format!("Run `{primary_command}` before retrying `heddle {action}`."),
+        format!("retrying `heddle {action}`"),
+        trust,
         format!(
             "repository verification status is {}; remote drift is {}: {}",
             trust.status, trust.remote_drift, trust.summary
@@ -255,8 +249,7 @@ fn git_checkpoint_preflight_advice(
             "{action} would capture Heddle state before the Git checkpoint ref update is known to be safe"
         ),
         "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
-        primary_command,
-        recovery_commands,
+        Some(primary_command),
     )
 }
 
