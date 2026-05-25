@@ -58,12 +58,12 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
     }
 
     if let Some(remote) = repo.git_remote_tracking_status()? {
-        if remote.ahead > 0 && remote.behind > 0 {
-            let recommended_action =
-                super::git_overlay_health::remote_drift_recovery_commands(&repo, &remote)
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| "heddle verify".to_string());
+        let remote_decision = super::git_overlay_health::remote_drift_decision(&repo, &remote);
+        if remote_decision.status == "remote_diverged" {
+            let recommended_action = remote_decision
+                .primary_action
+                .clone()
+                .unwrap_or_else(|| "heddle verify".to_string());
             return emit(
                 cli,
                 OperatorCommandOutput {
@@ -80,7 +80,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                 },
             );
         }
-        if remote.behind > 0 {
+        if remote_decision.status == "remote_behind" {
             ensure_worktree_clean(&repo, "sync")?;
             let remote_name = resolve_default_remote_name(&repo, None)?;
             let mut bridge = GitBridge::new(&repo);
@@ -105,7 +105,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                 },
             );
         }
-        if remote.ahead > 0 {
+        if remote_decision.status == "remote_ahead" {
             return emit(
                 cli,
                 OperatorCommandOutput {

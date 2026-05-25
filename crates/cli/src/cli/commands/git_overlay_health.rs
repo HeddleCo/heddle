@@ -2205,7 +2205,7 @@ fn remote_sync_action(health: &GitOverlayHealth) -> Option<String> {
         .and_then(|check| (check.status == "remote_ahead").then(|| "heddle push".to_string()))
 }
 
-fn remote_tracking_status(remote: &GitRemoteTrackingStatus) -> &'static str {
+pub(crate) fn remote_tracking_status(remote: &GitRemoteTrackingStatus) -> &'static str {
     if remote.upstream.is_empty() {
         return "remote_untracked";
     }
@@ -2215,6 +2215,122 @@ fn remote_tracking_status(remote: &GitRemoteTrackingStatus) -> &'static str {
         (_, 0) => "remote_ahead",
         _ => "remote_diverged",
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteDriftDecision {
+    pub status: &'static str,
+    pub verified_as_clean: bool,
+    pub primary_action: Option<String>,
+    pub recovery_commands: Vec<String>,
+    pub requires_clean_worktree: bool,
+}
+
+pub(crate) fn remote_tracking_next_action(remote: &GitRemoteTrackingStatus) -> Option<String> {
+    match remote_tracking_status(remote) {
+        "clean" => None,
+        "remote_untracked" => Some(remote_untracked_action(remote)),
+        "remote_behind" => Some("heddle pull".to_string()),
+        "remote_ahead" => Some("heddle push".to_string()),
+        "remote_diverged" => {
+            let upstream = remote.upstream.trim();
+            if upstream.is_empty() {
+                Some("heddle fetch".to_string())
+            } else {
+                Some(format!("heddle bridge git import --ref {upstream}"))
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn remote_drift_decision(
+    repo: &Repository,
+    remote: &GitRemoteTrackingStatus,
+) -> RemoteDriftDecision {
+    let status = remote_tracking_status(remote);
+    match status {
+        "clean" => RemoteDriftDecision {
+            status,
+            verified_as_clean: true,
+            primary_action: None,
+            recovery_commands: Vec::new(),
+            requires_clean_worktree: false,
+        },
+        "remote_untracked" => RemoteDriftDecision {
+            status,
+            verified_as_clean: false,
+            primary_action: Some(remote_untracked_action(remote)),
+            recovery_commands: vec![remote_untracked_action(remote)],
+            requires_clean_worktree: false,
+        },
+        "remote_ahead" => RemoteDriftDecision {
+            status,
+            verified_as_clean: true,
+            primary_action: Some("heddle push".to_string()),
+            recovery_commands: Vec::new(),
+            requires_clean_worktree: false,
+        },
+        "remote_behind" => RemoteDriftDecision {
+            status,
+            verified_as_clean: false,
+            primary_action: Some("heddle pull".to_string()),
+            recovery_commands: vec!["heddle pull".to_string()],
+            requires_clean_worktree: true,
+        },
+        "remote_diverged" => {
+            let upstream = remote.upstream.trim();
+            if upstream.is_empty() {
+                return RemoteDriftDecision {
+                    status,
+                    verified_as_clean: false,
+                    primary_action: Some("heddle fetch".to_string()),
+                    recovery_commands: vec!["heddle fetch".to_string()],
+                    requires_clean_worktree: false,
+                };
+            }
+            let import = format!("heddle bridge git import --ref {upstream}");
+            let merge_preview = format!("heddle merge {upstream} --preview");
+            let imported = repo.refs().get_thread(upstream).ok().flatten().is_some();
+            RemoteDriftDecision {
+                status,
+                verified_as_clean: false,
+                primary_action: Some(if imported {
+                    merge_preview.clone()
+                } else {
+                    import.clone()
+                }),
+                recovery_commands: if imported {
+                    vec![merge_preview]
+                } else {
+                    vec![import, merge_preview]
+                },
+                requires_clean_worktree: false,
+            }
+        }
+        _ => RemoteDriftDecision {
+            status,
+            verified_as_clean: false,
+            primary_action: Some("heddle verify".to_string()),
+            recovery_commands: vec!["heddle verify".to_string()],
+            requires_clean_worktree: false,
+        },
+    }
+}
+
+fn remote_untracked_action(remote: &GitRemoteTrackingStatus) -> String {
+    if remote.next_action.trim().is_empty() {
+        "heddle push".to_string()
+    } else {
+        remote.next_action.clone()
+    }
+}
+
+pub(crate) fn remote_drift_primary_action(repo: &Repository) -> Option<String> {
+    repo.git_remote_tracking_status()
+        .ok()
+        .flatten()
+        .and_then(|remote| remote_drift_decision(repo, &remote).primary_action)
 }
 
 fn default_remote_name(repo: &Repository) -> Option<String> {
@@ -2937,71 +3053,37 @@ fn remote_drift(
     mut checks: Vec<GitOverlayHealthCheck>,
     remote: GitRemoteTrackingStatus,
 ) -> GitOverlayHealth {
+    let decision = remote_drift_decision(repo, &remote);
     let mut details = BTreeMap::new();
     details.insert("branch".to_string(), remote.branch.clone());
     details.insert("upstream".to_string(), remote.upstream.clone());
     details.insert("ahead".to_string(), remote.ahead.to_string());
     details.insert("behind".to_string(), remote.behind.to_string());
-    if remote.upstream.is_empty() {
-        checks.push(GitOverlayHealthCheck {
-            name: "remote_tracking".to_string(),
-            status: "remote_untracked".to_string(),
-            summary: remote.message.clone(),
-            details,
-        });
-        return GitOverlayHealth {
-            status: "remote_untracked".to_string(),
-            clean: false,
-            summary: remote.message,
-            recovery_commands: vec![remote.next_action],
-            checks,
-        };
-    }
-    let status = remote_tracking_status(&remote);
-    let recovery_commands = remote_drift_recovery_commands(repo, &remote);
     checks.push(GitOverlayHealthCheck {
         name: "remote_tracking".to_string(),
-        status: status.to_string(),
+        status: decision.status.to_string(),
         summary: remote.message.clone(),
         details,
     });
-    if status == "remote_ahead" {
+    if decision.verified_as_clean {
         return GitOverlayHealth {
             status: "clean".to_string(),
             clean: true,
-            summary: "Git and Heddle agree; local commits are ready to push".to_string(),
+            summary: if decision.status == "remote_ahead" {
+                "Git and Heddle agree; local commits are ready to push".to_string()
+            } else {
+                "Git and Heddle agree".to_string()
+            },
             recovery_commands: Vec::new(),
             checks,
         };
     }
     GitOverlayHealth {
-        status: status.to_string(),
+        status: decision.status.to_string(),
         clean: false,
         summary: remote.message,
-        recovery_commands,
+        recovery_commands: decision.recovery_commands,
         checks,
-    }
-}
-
-pub(crate) fn remote_drift_recovery_commands(
-    repo: &Repository,
-    remote: &GitRemoteTrackingStatus,
-) -> Vec<String> {
-    match (remote.ahead, remote.behind) {
-        (0, _) => vec!["heddle pull".to_string()],
-        (_, 0) => vec!["heddle push".to_string()],
-        _ => {
-            let upstream = remote.upstream.trim();
-            if upstream.is_empty() {
-                return vec!["heddle fetch".to_string()];
-            }
-            let import = format!("heddle bridge git import --ref {upstream}");
-            let merge_preview = format!("heddle merge {upstream} --preview");
-            match repo.refs().get_thread(upstream) {
-                Ok(Some(_)) => vec![merge_preview],
-                _ => vec![import, merge_preview],
-            }
-        }
     }
 }
 
@@ -3123,9 +3205,12 @@ fn mapped_change_relation(
 
 #[cfg(test)]
 mod tests {
+    use repo::{GitRemoteTrackingStatus, Repository};
+    use tempfile::TempDir;
+
     use super::{
-        RepositoryVerificationState, machine_contract_coverage,
-        repository_verification_blocked_advice,
+        RepositoryVerificationState, machine_contract_coverage, remote_drift_decision,
+        remote_tracking_next_action, repository_verification_blocked_advice,
     };
     use crate::cli::commands::build_command_catalog;
 
@@ -3237,6 +3322,84 @@ mod tests {
             advice.recovery_commands,
             vec!["heddle pull origin main --preview", "heddle verify"]
         );
+    }
+
+    #[test]
+    fn remote_tracking_next_action_covers_basic_git_states_without_repo_context() {
+        assert_eq!(
+            remote_tracking_next_action(&remote("main", "origin/main", 0, 1, "heddle pull"))
+                .as_deref(),
+            Some("heddle pull")
+        );
+        assert_eq!(
+            remote_tracking_next_action(&remote("main", "origin/main", 1, 0, "heddle push"))
+                .as_deref(),
+            Some("heddle push")
+        );
+        assert_eq!(
+            remote_tracking_next_action(&remote("main", "origin/main", 1, 1, "heddle fetch"))
+                .as_deref(),
+            Some("heddle bridge git import --ref origin/main")
+        );
+        assert_eq!(
+            remote_tracking_next_action(&remote("main", "", 1, 0, "heddle push")).as_deref(),
+            Some("heddle push")
+        );
+    }
+
+    #[test]
+    fn remote_drift_decision_prefers_import_until_upstream_thread_exists() {
+        let (_temp, repo) = test_repo();
+        let diverged = remote("main", "origin/main", 1, 1, "heddle fetch");
+
+        let unimported = remote_drift_decision(&repo, &diverged);
+        assert_eq!(unimported.status, "remote_diverged");
+        assert_eq!(
+            unimported.primary_action.as_deref(),
+            Some("heddle bridge git import --ref origin/main")
+        );
+        assert_eq!(
+            unimported.recovery_commands,
+            vec![
+                "heddle bridge git import --ref origin/main",
+                "heddle merge origin/main --preview"
+            ]
+        );
+
+        let head = repo.head().unwrap().expect("test repo should have a head");
+        repo.refs().set_thread("origin/main", &head).unwrap();
+        let imported = remote_drift_decision(&repo, &diverged);
+        assert_eq!(
+            imported.primary_action.as_deref(),
+            Some("heddle merge origin/main --preview")
+        );
+        assert_eq!(
+            imported.recovery_commands,
+            vec!["heddle merge origin/main --preview"]
+        );
+    }
+
+    fn remote(
+        branch: &str,
+        upstream: &str,
+        ahead: usize,
+        behind: usize,
+        next_action: &str,
+    ) -> GitRemoteTrackingStatus {
+        GitRemoteTrackingStatus {
+            branch: branch.to_string(),
+            upstream: upstream.to_string(),
+            ahead,
+            behind,
+            message: "remote fixture".to_string(),
+            next_action: next_action.to_string(),
+        }
+    }
+
+    fn test_repo() -> (TempDir, Repository) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        (temp, repo)
     }
 
     #[test]

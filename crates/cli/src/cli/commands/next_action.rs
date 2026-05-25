@@ -3,7 +3,9 @@
 
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationStatus};
 
-use super::git_overlay_health::{RepositoryVerificationState, import_hint_includes_active_branch};
+use super::git_overlay_health::{
+    RepositoryVerificationState, import_hint_includes_active_branch, remote_tracking_next_action,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NextActionScope {
@@ -116,21 +118,9 @@ fn default_next_action(input: NextActionInput<'_>) -> String {
         return operation.next_action.clone();
     }
     if let Some(remote_tracking) = input.remote_tracking {
-        if remote_tracking.behind > 0 {
-            return if remote_tracking.ahead > 0 {
-                if remote_tracking.upstream.is_empty() {
-                    "heddle fetch".to_string()
-                } else {
-                    format!(
-                        "heddle bridge git import --ref {}",
-                        remote_tracking.upstream
-                    )
-                }
-            } else {
-                "heddle pull".to_string()
-            };
+        if let Some(action) = remote_tracking_next_action(remote_tracking) {
+            return action;
         }
-        return "heddle push".to_string();
     }
     if let Some(action) = non_empty_action(input.fallback) {
         return action.to_string();
