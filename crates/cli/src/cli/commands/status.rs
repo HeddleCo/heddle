@@ -190,6 +190,7 @@ struct GitOverlayImportHintOutput {
 
 #[derive(Serialize)]
 struct PlainGitStatusOutput {
+    output_kind: &'static str,
     repository_capability: String,
     repository_label: String,
     storage_model: String,
@@ -320,6 +321,7 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
     let trust = probe.trust;
     let git_index = git_index_plan_for_root(&probe.root)?;
     Ok(Some(PlainGitStatusOutput {
+        output_kind: "status",
         repository_capability: "plain-git".to_string(),
         repository_label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
         storage_model: "git-only".to_string(),

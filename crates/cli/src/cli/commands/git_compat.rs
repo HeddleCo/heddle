@@ -138,6 +138,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     if let Some(advice) = verification_blocking_mutation_advice(&repo, "commit") {
         return Err(anyhow!(advice));
     }
+    let user_config = UserConfig::load_default().unwrap_or_default();
     if let Some(state) = repo.current_state()? {
         let tree = repo.require_tree(&state.tree)?;
         let status = repo.compare_worktree_cached_with_options(
@@ -146,13 +147,44 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         )?;
         if status.is_clean() {
             let trust = build_repository_verification_state(&repo);
+            if trust.status == "needs_checkpoint" {
+                preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
+                let record = create_git_checkpoint(
+                    &repo,
+                    Some(message.as_str()),
+                    worktree_status_options(Some(repo.config())),
+                )?;
+                let trust = build_repository_verification_state(&repo);
+                let output = CommitCompatOutput {
+                    output_kind: "commit",
+                    status: "committed",
+                    action: "commit",
+                    change_id: state.change_id.short(),
+                    git_commit: Some(record.git_commit),
+                    summary: record.summary,
+                    confidence: state.confidence,
+                    git_index: None,
+                    included_pending_capture: Some(state.change_id.short()),
+                    principal: state.attribution.principal.into(),
+                    agent: state.attribution.agent.map(CommitAgentOutput::from),
+                    next_action: commit_next_action(&trust),
+                    next_action_argv: None,
+                    next_action_template: None,
+                    recommended_action: None,
+                    recommended_action_argv: None,
+                    recommended_action_template: None,
+                    trust,
+                };
+                let output = with_commit_action_metadata(output);
+                render_commit_compat(&output, should_output_json(cli, Some(repo.config())))?;
+                return Ok(());
+            }
             if !trust.verified {
                 return Err(anyhow!(commit_blocked_by_trust_advice(&trust)));
             }
             return Err(anyhow!(nothing_to_commit_advice()));
         }
     }
-    let user_config = UserConfig::load_default().unwrap_or_default();
     if repo.capability() != RepositoryCapability::GitOverlay {
         let snapshot = create_snapshot(
             &repo,
