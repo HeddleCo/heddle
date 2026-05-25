@@ -116,20 +116,14 @@ fn test_cli_push_mirror_dual_push_to_weft_and_git_remote() {
 
     let weft_path = weft_target.path().to_string_lossy().to_string();
     let git_path = git_remote.path().to_string_lossy().to_string();
+    let mirror_arg = format!("--mirror={}", git_path);
     let result = heddle(
-        &[
-            "push",
-            &weft_path,
-            "--thread",
-            "main",
-            "--mirror",
-            &git_path,
-        ],
+        &["push", &weft_path, "--thread", "main", &mirror_arg],
         Some(source.path()),
     );
     assert!(
         result.is_ok(),
-        "dual push (--mirror) should succeed: {:?}",
+        "dual push (--mirror=<remote>) should succeed: {:?}",
         result.err()
     );
 
@@ -167,15 +161,9 @@ fn test_cli_push_mirror_failure_does_not_abort_primary_push() {
         .join("does-not-exist-mirror")
         .to_string_lossy()
         .to_string();
+    let mirror_arg = format!("--mirror={}", bogus_mirror);
     let result = heddle(
-        &[
-            "push",
-            &weft_path,
-            "--thread",
-            "main",
-            "--mirror",
-            &bogus_mirror,
-        ],
+        &["push", &weft_path, "--thread", "main", &mirror_arg],
         Some(source.path()),
     );
     assert!(
@@ -238,5 +226,131 @@ fn test_cli_push_mirror_requires_equals_does_not_swallow_positional() {
         threads.contains("main"),
         "primary push should land at the positional remote, not be swallowed by --mirror: {}",
         threads
+    );
+}
+
+/// `--mirror=<name>` parses the explicit value and `--mirror` alone
+/// takes the `default_missing_value`. Pins both forms in one test
+/// so the parse table is asserted from end to end.
+#[test]
+fn test_cli_push_mirror_explicit_equals_form_parses_value() {
+    let source = TempDir::new().unwrap();
+    let weft_target = TempDir::new().unwrap();
+    let git_remote = TempDir::new().unwrap();
+    let mirror_repo = gix::init_bare(git_remote.path()).unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(weft_target.path())).unwrap();
+    std::fs::write(source.path().join("file.txt"), "explicit eq").unwrap();
+    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
+
+    let weft_path = weft_target.path().to_string_lossy().to_string();
+    let git_path = git_remote.path().to_string_lossy().to_string();
+    let mirror_arg = format!("--mirror={}", git_path);
+    // Flag-before-positional ordering — the form Codex's finding said
+    // the original parse table mishandled.
+    let result = heddle(
+        &["push", &mirror_arg, "--thread", "main", &weft_path],
+        Some(source.path()),
+    );
+    assert!(
+        result.is_ok(),
+        "--mirror=<remote> followed by positional must parse cleanly: {:?}",
+        result.err()
+    );
+
+    let threads = heddle(&["thread", "list"], Some(weft_target.path())).unwrap();
+    assert!(threads.contains("main"));
+    assert!(
+        mirror_repo.find_reference("refs/heads/main").is_ok(),
+        "mirror push should land at the explicit <git_path>"
+    );
+}
+
+/// JSON output path on mirror success: covers the `mirrored:true`
+/// branch of `render_mirror_outcome`.
+#[test]
+fn test_cli_push_mirror_json_success_emits_mirrored_true() {
+    let source = TempDir::new().unwrap();
+    let weft_target = TempDir::new().unwrap();
+    let git_remote = TempDir::new().unwrap();
+    gix::init_bare(git_remote.path()).unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(weft_target.path())).unwrap();
+    std::fs::write(source.path().join("file.txt"), "json ok").unwrap();
+    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
+
+    let weft_path = weft_target.path().to_string_lossy().to_string();
+    let git_path = git_remote.path().to_string_lossy().to_string();
+    let mirror_arg = format!("--mirror={}", git_path);
+    let stdout = heddle(
+        &[
+            "--output",
+            "json",
+            "push",
+            &weft_path,
+            "--thread",
+            "main",
+            &mirror_arg,
+        ],
+        Some(source.path()),
+    )
+    .expect("push --output json --mirror=<remote> must succeed");
+
+    assert!(
+        stdout.contains("\"mirrored\":true"),
+        "JSON success line missing: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains(&git_path),
+        "JSON output must echo the mirror remote: {}",
+        stdout
+    );
+}
+
+/// JSON output path on mirror failure: covers the `mirrored:false`
+/// + `error` branch of `render_mirror_outcome`.
+#[test]
+fn test_cli_push_mirror_json_failure_emits_mirrored_false_with_error() {
+    let source = TempDir::new().unwrap();
+    let weft_target = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(weft_target.path())).unwrap();
+    std::fs::write(source.path().join("file.txt"), "json err").unwrap();
+    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
+
+    let weft_path = weft_target.path().to_string_lossy().to_string();
+    let bogus = source
+        .path()
+        .join("nope-mirror")
+        .to_string_lossy()
+        .to_string();
+    let mirror_arg = format!("--mirror={}", bogus);
+    let stdout = heddle(
+        &[
+            "--output",
+            "json",
+            "push",
+            &weft_path,
+            "--thread",
+            "main",
+            &mirror_arg,
+        ],
+        Some(source.path()),
+    )
+    .expect("primary push must succeed even when mirror push fails");
+
+    assert!(
+        stdout.contains("\"mirrored\":false"),
+        "JSON failure line missing: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("\"error\""),
+        "JSON failure must include error field: {}",
+        stdout
     );
 }
