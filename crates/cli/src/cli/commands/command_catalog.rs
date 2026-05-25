@@ -134,6 +134,38 @@ pub struct ActionTemplate {
     pub agent_may_fill: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ActionFields {
+    pub action: Option<String>,
+    pub argv: Option<Vec<String>>,
+    pub template: Option<ActionTemplate>,
+}
+
+impl ActionFields {
+    pub(crate) fn from_optional_action(action: Option<String>) -> Self {
+        let Some(action) = action.filter(|action| !action.trim().is_empty()) else {
+            return Self::none();
+        };
+        Self {
+            argv: recommended_action_argv(&action).ok().flatten(),
+            template: recommended_action_template(&action),
+            action: Some(action),
+        }
+    }
+
+    pub(crate) fn from_action(action: &str) -> Self {
+        Self::from_optional_action(Some(action.to_string()))
+    }
+
+    pub(crate) fn none() -> Self {
+        Self {
+            action: None,
+            argv: None,
+            template: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct CommandJsonDiscriminator {
     pub path: Vec<String>,

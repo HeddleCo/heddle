@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    command_catalog::{ActionTemplate, recommended_action_argv, recommended_action_template},
+    command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     undo_apply::{
         apply_redo_batch, apply_undo_batch, preflight_redo_batches, preflight_undo_batches,
@@ -157,7 +157,7 @@ pub fn cmd_undo(
 
     let post_undo_repo = Repository::open(repo.root())?;
     let post_undo_trust = build_repository_verification_state(&post_undo_repo);
-    let recommended_action = optional_action(&post_undo_trust.recommended_action);
+    let recommended_action = ActionFields::from_action(&post_undo_trust.recommended_action);
     let output = UndoRedoOutput {
         output_kind: "undo",
         status: "completed",
@@ -168,12 +168,12 @@ pub fn cmd_undo(
             if updated_batches.len() == 1 { "" } else { "es" }
         ),
         batches: updated_batches.iter().map(build_batch_output).collect(),
-        next_action: recommended_action.clone(),
-        next_action_argv: action_argv(&recommended_action),
-        next_action_template: action_template(&recommended_action),
-        recommended_action: recommended_action.clone(),
-        recommended_action_argv: action_argv(&recommended_action),
-        recommended_action_template: action_template(&recommended_action),
+        next_action: recommended_action.action.clone(),
+        next_action_argv: recommended_action.argv.clone(),
+        next_action_template: recommended_action.template.clone(),
+        recommended_action: recommended_action.action,
+        recommended_action_argv: recommended_action.argv,
+        recommended_action_template: recommended_action.template,
         trust: Some(post_undo_trust),
     };
 
@@ -262,7 +262,7 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     }
 
     let post_redo_trust = build_repository_verification_state(&repo);
-    let recommended_action = optional_action(&post_redo_trust.recommended_action);
+    let recommended_action = ActionFields::from_action(&post_redo_trust.recommended_action);
     let output = UndoRedoOutput {
         output_kind: "redo",
         status: "completed",
@@ -273,12 +273,12 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
             if updated_batches.len() == 1 { "" } else { "es" }
         ),
         batches: updated_batches.iter().map(build_batch_output).collect(),
-        next_action: recommended_action.clone(),
-        next_action_argv: action_argv(&recommended_action),
-        next_action_template: action_template(&recommended_action),
-        recommended_action: recommended_action.clone(),
-        recommended_action_argv: action_argv(&recommended_action),
-        recommended_action_template: action_template(&recommended_action),
+        next_action: recommended_action.action.clone(),
+        next_action_argv: recommended_action.argv.clone(),
+        next_action_template: recommended_action.template.clone(),
+        recommended_action: recommended_action.action,
+        recommended_action_argv: recommended_action.argv,
+        recommended_action_template: recommended_action.template,
         trust: Some(post_redo_trust),
     };
 
@@ -360,20 +360,6 @@ fn build_batch_output(batch: &OpBatch) -> OpBatchOutput {
             })
             .collect(),
     }
-}
-
-fn optional_action(action: &str) -> Option<String> {
-    (!action.trim().is_empty()).then(|| action.to_string())
-}
-
-fn action_argv(action: &Option<String>) -> Option<Vec<String>> {
-    action
-        .as_deref()
-        .and_then(|action| recommended_action_argv(action).ok().flatten())
-}
-
-fn action_template(action: &Option<String>) -> Option<ActionTemplate> {
-    action.as_deref().and_then(recommended_action_template)
 }
 
 fn batch_status(batch: &OpBatch) -> (bool, bool) {
