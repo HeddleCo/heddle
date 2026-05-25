@@ -1764,35 +1764,35 @@ mod tests {
             }
         }
 
-        /// **DELIBERATELY BROKEN property** (red commit, heddle#212).
-        ///
-        /// Asserts every surviving entry has `open_count > 0`. The §1
-        /// FSM permits `Live { 0 }` (post-Release of a Live{1} before
-        /// Drain retires it) — so this property is wrong. Proptest
-        /// shrinks to the two-op minimum reproducer `[Open(0),
-        /// Release(0)]` (or sometimes `[Open(0), Unlink(0),
-        /// Release(0)]` for the Orphan-side mirror), proving the
-        /// harness catches divergence and shrinks counterexamples to
-        /// their smallest form.
-        ///
-        /// The green commit removes this property; the captured
-        /// counterexample lives on in the module-level comment as
-        /// documented bug-catching evidence.
+        /// Property 3: at any post-sequence instant the four witness
+        /// constructors classify each NodeId into exactly one bucket
+        /// — i.e. the FSM is a partition of the per-NodeId state
+        /// space (LiveNonZero | LiveZero | Orphan | Released). A
+        /// regression that widened or narrowed any constructor's
+        /// accepting set (e.g. `witness_live_nonzero` returning `Some`
+        /// for `Live { 0 }`) would surface as a multi-bit mask here.
         #[test]
-        fn fsm_open_count_strictly_positive_red_commit(
+        fn fsm_witness_constructors_mutually_exclusive(
             ops in proptest::collection::vec(op_strategy(), 0..32),
         ) {
             let mut p = Pending::default();
             for op in &ops {
                 apply_to_pending(&mut p, op);
             }
-            for (id, state) in p.lifecycle_iter() {
-                let open_count = match state {
-                    NodeState::Live { open_count } | NodeState::Orphan { open_count } => open_count,
-                };
-                proptest::prop_assert!(
-                    open_count > 0,
-                    "open_count for id {} is {}, expected > 0", id, open_count
+            for id in 0u8..8u8 {
+                let id64 = id as u64;
+                let mask = p.with_brand(|bp| {
+                    let mut m = 0u8;
+                    if bp.witness_live_nonzero(id64).is_some() { m |= 1 << 0; }
+                    if bp.witness_live_zero(id64).is_some()    { m |= 1 << 1; }
+                    if bp.witness_orphan(id64).is_some()       { m |= 1 << 2; }
+                    if bp.witness_released(id64).is_some()     { m |= 1 << 3; }
+                    m
+                });
+                proptest::prop_assert_eq!(
+                    mask.count_ones(), 1u32,
+                    "witness mask for id {} is 0b{:04b} after {:?}; expected exactly one bit",
+                    id, mask, ops
                 );
             }
         }
