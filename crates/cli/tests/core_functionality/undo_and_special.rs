@@ -84,7 +84,7 @@ fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
         "target/\nnode_modules/\n",
     )
     .unwrap();
-    heddle_must_succeed(&["capture", "-m", "empty"], temp.path());
+    heddle_must_succeed(&["capture", "-m", "ignore colocated git"], temp.path());
 
     std::fs::write(temp.path().join("main.rs"), "fn main() {}").unwrap();
     std::fs::create_dir_all(temp.path().join("web")).unwrap();
@@ -399,12 +399,15 @@ fn test_rebase_force_proceeds_and_destroys_edit() {
 fn test_undo_with_dotgit_directory_present() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join(".heddleignore"), ".git/\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "empty"], temp.path());
 
     std::fs::write(temp.path().join("file.txt"), "v1").unwrap();
     heddle_must_succeed(&["capture", "-m", "v1"], temp.path());
 
-    // Simulate a co-located git repo: `.git` is heddle-ignored by default.
+    // Simulate a co-located git repo. `.git` is preserved only because this
+    // test explicitly names it in `.heddleignore`; Heddle's only built-in
+    // ignore is `.heddle` itself.
     std::fs::create_dir_all(temp.path().join(".git/objects/01")).unwrap();
     std::fs::write(temp.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::write(temp.path().join(".git/objects/01/abc"), "fake git object").unwrap();

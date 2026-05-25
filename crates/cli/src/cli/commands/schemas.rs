@@ -864,6 +864,7 @@ pub struct CommitSchema {
     pub action: String,
     pub change_id: String,
     pub git_commit: Option<String>,
+    pub git_previous_commit: Option<String>,
     pub summary: String,
     pub confidence: Option<f32>,
     pub git_index: Option<GitIndexInfoSchema>,

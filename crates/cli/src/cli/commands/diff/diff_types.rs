@@ -219,6 +219,8 @@ pub struct SemanticChangeEntry {
     pub old_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub importance: Option<String>,
 }
 
 impl From<SemanticChange> for SemanticChangeEntry {
@@ -237,7 +239,48 @@ impl From<SemanticChangeEntryFields> for SemanticChangeEntry {
             to_path: fields.to_path,
             old_name: fields.old_name,
             new_name: fields.new_name,
+            importance: fields.importance,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use objects::object::{ChangeImportance, SemanticChange};
+    use serde_json::Value;
+
+    use super::SemanticChangeEntry;
+
+    #[test]
+    fn semantic_change_json_uses_importance_field_not_old_name() {
+        let entry = SemanticChangeEntry::from(SemanticChange::FileModified {
+            path: PathBuf::from("src/lib.rs"),
+            classification: None,
+            importance: Some(ChangeImportance::Medium),
+            confidence: None,
+        });
+        let json = serde_json::to_value(entry).expect("semantic entry serializes");
+
+        assert_eq!(json["importance"], "medium");
+        assert!(json.get("old_name").is_none(), "{json}");
+    }
+
+    #[test]
+    fn semantic_rename_json_uses_path_fields() {
+        let entry = SemanticChangeEntry::from(SemanticChange::FileRenamed {
+            from: PathBuf::from("src/old.rs"),
+            to: PathBuf::from("src/new.rs"),
+        });
+        let json = serde_json::to_value(entry).expect("semantic rename serializes");
+
+        assert_eq!(json["change_type"], "file_renamed");
+        assert_eq!(json["from_path"], "src/old.rs");
+        assert_eq!(json["to_path"], "src/new.rs");
+        assert!(json.get("old_name").is_none(), "{json}");
+        assert!(matches!(json["from_path"], Value::String(_)));
+        assert!(matches!(json["to_path"], Value::String(_)));
     }
 }
 

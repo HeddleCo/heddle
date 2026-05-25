@@ -303,6 +303,20 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 );
             }
             Err(err) => {
+                if rebase_state_path.exists() {
+                    let operator = thread_resolve_rebase_followup_operator(
+                        &source_repo,
+                        &rebase_state_path,
+                        &thread.id,
+                    )?;
+                    return emit_thread_resolve(
+                        cli,
+                        &ThreadResolveOutput {
+                            operator,
+                            thread: thread_id,
+                        },
+                    );
+                }
                 if let Some(operator) =
                     thread_resolve_conflict_recovery_operator(&source_repo, &thread.id)?
                 {
@@ -457,7 +471,7 @@ fn thread_resolve_rebase_followup_operator(
     let current_state = source_repo
         .current_state()?
         .ok_or_else(|| anyhow!("Thread '{}' has no current state", thread_id))?;
-    let next_action = "heddle rebase --continue".to_string();
+    let next_action = "heddle continue".to_string();
     let mut blockers = Vec::new();
     if !rebase_state
         .pre_conflict_head

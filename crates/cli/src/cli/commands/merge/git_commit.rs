@@ -7,7 +7,7 @@
 //! merge introduced. The default (`--git-commit` not set) is preserved
 //! — heddle state advances and git is unaware.
 
-use std::{path::Path, time::SystemTime};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
 use gix::{
@@ -17,10 +17,7 @@ use gix::{
         transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
     },
 };
-use objects::{
-    object::{Attribution, ChangeId},
-    worktree::WorktreeStatus,
-};
+use objects::object::{Attribution, ChangeId};
 use repo::Repository;
 use serde::Serialize;
 
@@ -106,24 +103,16 @@ pub(super) fn validate_git_state(
         blockers.push("git HEAD is detached (--git-commit requires an attached branch)".into());
     }
 
-    let status = match repo.git_overlay_worktree_status() {
-        Ok(Some(status)) => status,
-        Ok(None) => {
-            blockers.push(format!(
-                "failed to inspect git worktree at {}",
-                repo_root.display()
-            ));
-            return Err(GitCommitBlocked { blockers });
-        }
+    let expected: std::collections::HashSet<&str> =
+        expected_paths.iter().map(|p| p.as_str()).collect();
+    let git_intent = match super::super::git_compat::git_index_intent_for_root(repo_root) {
+        Ok(intent) => intent,
         Err(err) => {
             blockers.push(format!("failed to inspect git worktree status: {err}"));
             return Err(GitCommitBlocked { blockers });
         }
     };
-
-    let expected: std::collections::HashSet<&str> =
-        expected_paths.iter().map(|p| p.as_str()).collect();
-    let unrelated = unrelated_git_overlay_status_paths(&status, &expected);
+    let unrelated = unrelated_git_index_intent_paths(&git_intent, &expected);
 
     if !unrelated.is_empty() {
         // Cap the rendered list — the user gets the count and a few
@@ -164,20 +153,18 @@ pub(super) fn validate_git_state(
     }
 }
 
-fn unrelated_git_overlay_status_paths(
-    status: &WorktreeStatus,
+fn unrelated_git_index_intent_paths(
+    intent: &super::super::git_compat::GitIndexIntent,
     expected: &std::collections::HashSet<&str>,
 ) -> Vec<String> {
     let mut unrelated = Vec::new();
-    for path in status
-        .modified
-        .iter()
-        .chain(status.added.iter())
-        .chain(status.deleted.iter())
-    {
-        let path = git_path_from_path(path);
-        if !expected.contains(path.as_str()) {
-            unrelated.push(path);
+    for path in intent.staged_paths.iter().chain(intent.extra_paths.iter()) {
+        let comparison_path = path
+            .strip_prefix("unstaged: ")
+            .or_else(|| path.strip_prefix("untracked: "))
+            .unwrap_or(path);
+        if !expected.contains(comparison_path) {
+            unrelated.push(path.clone());
         }
     }
     unrelated
@@ -340,13 +327,6 @@ fn update_head_ref(
     git.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
         .context("failed to update Git HEAD")?;
     Ok(())
-}
-
-fn git_path_from_path(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 fn merge_git_commit_empty_advice() -> RecoveryAdvice {

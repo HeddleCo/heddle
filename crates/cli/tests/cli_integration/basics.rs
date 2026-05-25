@@ -145,6 +145,112 @@ fn seed_git_history(path: &std::path::Path, commit_count: usize) {
 }
 
 #[test]
+fn test_cli_adopt_human_progress_and_json_cleanliness() {
+    let human = TempDir::new().unwrap();
+    init_git_repo(human.path());
+    seed_git_history(human.path(), 3);
+
+    let output = heddle(&["--output", "text", "adopt"], Some(human.path())).unwrap();
+    assert!(
+        output.contains("Importing Git history:")
+            && output.contains("[1/3] scanning refs")
+            && output.contains("[2/3] importing commits")
+            && output.contains("[3/3] writing refs")
+            && output.contains("[done] imported Git history"),
+        "human adopt should show import phases: {output}"
+    );
+
+    let json = TempDir::new().unwrap();
+    init_git_repo(json.path());
+    seed_git_history(json.path(), 3);
+    let output = heddle_output(&["--output", "json", "adopt"], Some(json.path()))
+        .expect("json adopt should run");
+    assert!(output.status.success());
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+    assert!(
+        !stdout.contains("Importing Git history") && !stdout.contains("[1/3]"),
+        "json adopt stdout should not include human progress: {stdout}"
+    );
+    let parsed = json_stdout(&output, "adopt json");
+    assert_eq!(parsed["output_kind"], "adopt");
+    assert_eq!(parsed["status"], "completed");
+}
+
+#[test]
+fn test_cli_adopt_tag_output_does_not_claim_branch_adoption() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
+    git_commit_all(temp.path(), "seed branch");
+    git(&["tag", "v1.0.0"], temp.path());
+
+    let output = heddle(
+        &["--output", "text", "adopt", "--ref", "v1.0.0"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(
+        output.contains("Heddle imported the requested Git history")
+            && output.contains("Imported refs: v1.0.0")
+            && output.contains("Branches ready: 0")
+            && output.contains("Tags ready: 1"),
+        "tag-scoped adoption should describe a tag import: {output}"
+    );
+    assert!(
+        !output.contains("Heddle adopted the requested Git history")
+            && !output.contains("Adopted: v1.0.0")
+            && !output.contains("Branches ready: 1"),
+        "tag-scoped adoption should not imply branch adoption: {output}"
+    );
+}
+
+#[test]
+fn test_cli_adopt_partial_divergence_failure_preserves_state_and_one_recovery() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
+    git_commit_all(temp.path(), "base");
+    heddle(&["adopt", "--ref", "feature/drop-in"], Some(temp.path())).unwrap();
+
+    std::fs::write(temp.path().join("tracked.txt"), "heddle side\n").unwrap();
+    heddle(&["capture", "-m", "heddle side"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("tracked.txt"), "git side\n").unwrap();
+    git_commit_all(temp.path(), "git side");
+
+    let output = heddle_output(
+        &["--output", "json", "adopt", "--ref", "feature/drop-in"],
+        Some(temp.path()),
+    )
+    .expect("diverged adopt should run and fail");
+    assert!(!output.status.success(), "diverged adopt should fail");
+    let stdout = str::from_utf8(&output.stdout).unwrap();
+    assert!(
+        !stdout.contains("Importing Git history") && !stdout.contains("[1/3]"),
+        "json failure should not include human progress on stdout: {stdout}"
+    );
+    let stderr = str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|err| {
+        panic!("adopt failure should emit JSON recovery advice: {err}; stderr={stderr}")
+    });
+    assert_eq!(envelope["kind"], "git_heddle_thread_diverged");
+    assert!(
+        envelope["preserved"]
+            .as_str()
+            .is_some_and(|preserved| preserved.contains("imported commit states")
+                && preserved.contains("Git/Heddle mapping records")),
+        "partial import failure should disclose preserved partial state: {envelope}"
+    );
+    assert_eq!(
+        envelope["primary_command"],
+        "heddle bridge git reconcile --ref feature/drop-in --preview"
+    );
+    assert_eq!(
+        envelope["recovery_commands"],
+        serde_json::json!(["heddle bridge git reconcile --ref feature/drop-in --preview"])
+    );
+}
+
+#[test]
 fn test_cli_init_creates_repository() {
     let temp = TempDir::new().unwrap();
 
@@ -1077,7 +1183,7 @@ fn test_cli_bridge_git_import_clears_import_hint_for_existing_branches() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(before["git_overlay_import_hint"]["missing_branch_count"], 1);
+    assert_eq!(before["git_overlay_import_hint"]["missing_branch_count"], 2);
 
     let import_output = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
     let parsed_import: serde_json::Value =

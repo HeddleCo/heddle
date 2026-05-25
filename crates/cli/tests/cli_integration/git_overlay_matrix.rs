@@ -179,6 +179,84 @@ fn assert_operator_json_contract(parsed: &Value, output_kind: &str) {
     }
 }
 
+fn assert_action_is_argv_or_template(label: &str, output: &Value, action: &str) {
+    let concrete = !action.contains("...") && !action.contains('<');
+    if concrete {
+        assert!(
+            output["recommended_action_argv"]
+                .as_array()
+                .is_some_and(|argv| !argv.is_empty()),
+            "{label} concrete recommended action should expose executable argv: {output}"
+        );
+        assert!(
+            output["recommended_action_template"].is_null(),
+            "{label} concrete recommended action should not also expose a template: {output}"
+        );
+    } else {
+        assert_eq!(
+            output["recommended_action_argv"],
+            Value::Null,
+            "{label} templated recommended action must not masquerade as executable argv: {output}"
+        );
+        assert!(
+            output["recommended_action_template"]["argv_template"]
+                .as_array()
+                .is_some_and(|argv| !argv.is_empty()),
+            "{label} templated recommended action should expose argv_template: {output}"
+        );
+    }
+}
+
+fn assert_remote_divergence_surface(
+    label: &str,
+    output: &Value,
+    expected_status: &str,
+    expected_remote_drift: &str,
+    expected_action: &str,
+    expected_argv: Option<Value>,
+) {
+    let verification = if output.get("verification").is_some() {
+        &output["verification"]
+    } else {
+        output
+    };
+    assert_eq!(
+        verification["status"], expected_status,
+        "{label} should report the same primary blocker: {output}"
+    );
+    assert_eq!(
+        verification["remote_drift"], expected_remote_drift,
+        "{label} should report the same remote drift: {output}"
+    );
+    assert_eq!(
+        output["recommended_action"], expected_action,
+        "{label} top-level action should match verification: {output}"
+    );
+    assert_eq!(
+        verification["recommended_action"], expected_action,
+        "{label} verification action should match top-level action: {output}"
+    );
+    if output.get("health").is_some() {
+        assert_eq!(
+            output["health"]["recommended_action"], expected_action,
+            "{label} health action should match verification action: {output}"
+        );
+    }
+    match expected_argv {
+        Some(argv) => {
+            assert_eq!(
+                output["recommended_action_argv"], argv,
+                "{label} should expose executable argv for the primary action: {output}"
+            );
+            assert!(
+                output["recommended_action_template"].is_null(),
+                "{label} concrete action should not expose a template: {output}"
+            );
+        }
+        None => assert_action_is_argv_or_template(label, output, expected_action),
+    }
+}
+
 #[test]
 fn git_overlay_imported_ref_preview_diff_uses_merge_tree() {
     let temp = TempDir::new().unwrap();
@@ -3526,6 +3604,151 @@ fn git_overlay_matrix_checkpoint_closes_imported_remote_divergence_after_merge()
     );
     assert_eq!(checkpoint["verification"]["remote_drift"], "remote_ahead");
     assert_eq!(checkpoint["recommended_action"], "heddle push");
+}
+
+#[test]
+fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action() {
+    let temp = TempDir::new().unwrap();
+    let origin = TempDir::new().unwrap();
+    let peer = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    git(&["init", "--bare", "--initial-branch=main"], origin.path());
+    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
+    git(&["remote", "add", "origin", origin_arg], temp.path());
+    git(&["push", "-u", "origin", "main"], temp.path());
+    heddle_adopt(temp.path());
+
+    let peer_arg = peer.path().to_str().expect("peer path should be utf8");
+    git(&["clone", origin_arg, peer_arg], temp.path());
+    git(&["config", "user.name", "Peer"], peer.path());
+    git(&["config", "user.email", "peer@example.com"], peer.path());
+
+    std::fs::write(temp.path().join("local.txt"), "local\n").unwrap();
+    json(
+        temp.path(),
+        &["--output", "json", "commit", "-m", "local checkpoint"],
+    );
+
+    std::fs::write(peer.path().join("remote.txt"), "remote\n").unwrap();
+    git_commit_all(peer.path(), "remote checkpoint");
+    git(&["push", "origin", "main"], peer.path());
+    heddle(&["fetch", "origin"], Some(temp.path())).expect("fetch remote divergence");
+
+    json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "bridge",
+            "git",
+            "import",
+            "--ref",
+            "origin/main",
+        ],
+    );
+
+    let merge_action = "heddle merge origin/main --preview";
+    let merge_argv = Some(heddle_argv_json(["merge", "origin/main", "--preview"]));
+    for (label, output) in [
+        ("status", json(temp.path(), &["--output", "json", "status"])),
+        ("verify", json(temp.path(), &["--output", "json", "verify"])),
+        ("doctor", json(temp.path(), &["--output", "json", "doctor"])),
+        (
+            "bridge git status",
+            json(
+                temp.path(),
+                &["--output", "json", "bridge", "git", "status"],
+            ),
+        ),
+    ] {
+        assert_remote_divergence_surface(
+            label,
+            &output,
+            "remote_diverged",
+            "remote_diverged",
+            merge_action,
+            merge_argv.clone(),
+        );
+        assert_ne!(
+            output["recommended_action"], "heddle ship",
+            "{label} must not recommend ship for imported remote divergence: {output}"
+        );
+    }
+
+    let status = json(temp.path(), &["--output", "json", "status"]);
+    assert_eq!(
+        status["remote_tracking"]["next_action"], merge_action,
+        "status remote tracking action should not contradict the primary blocker: {status}"
+    );
+    let doctor = json(temp.path(), &["--output", "json", "doctor"]);
+    assert_eq!(
+        doctor["remote_tracking"]["next_action"], merge_action,
+        "doctor remote tracking action should not contradict the primary blocker: {doctor}"
+    );
+
+    json(
+        temp.path(),
+        &["--output", "json", "merge", "origin/main", "--preview"],
+    );
+    json(temp.path(), &["--output", "json", "merge", "origin/main"]);
+
+    let checkpoint_action = "heddle checkpoint -m \"...\"";
+    for (label, output) in [
+        ("status", json(temp.path(), &["--output", "json", "status"])),
+        ("verify", json(temp.path(), &["--output", "json", "verify"])),
+        ("doctor", json(temp.path(), &["--output", "json", "doctor"])),
+        (
+            "bridge git status",
+            json(
+                temp.path(),
+                &["--output", "json", "bridge", "git", "status"],
+            ),
+        ),
+    ] {
+        assert_remote_divergence_surface(
+            label,
+            &output,
+            "needs_checkpoint",
+            "remote_diverged",
+            checkpoint_action,
+            None,
+        );
+    }
+
+    let checkpoint = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "checkpoint",
+            "-m",
+            "checkpoint integrated remote",
+        ],
+    );
+    assert_eq!(checkpoint["verification"]["remote_drift"], "remote_ahead");
+    for (label, output) in [
+        ("status", json(temp.path(), &["--output", "json", "status"])),
+        ("verify", json(temp.path(), &["--output", "json", "verify"])),
+        ("doctor", json(temp.path(), &["--output", "json", "doctor"])),
+        (
+            "bridge git status",
+            json(
+                temp.path(),
+                &["--output", "json", "bridge", "git", "status"],
+            ),
+        ),
+    ] {
+        assert_remote_divergence_surface(
+            label,
+            &output,
+            "clean",
+            "remote_ahead",
+            "heddle push",
+            Some(heddle_argv_json(["push"])),
+        );
+    }
 }
 
 #[test]

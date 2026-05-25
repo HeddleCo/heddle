@@ -432,6 +432,10 @@ fn native_dirty_status_blocks_verification_without_git_overlay_language() {
         !text.contains("Git overlay:"),
         "native Heddle status should not use Git-overlay labeling: {text}"
     );
+    assert!(
+        text.contains("commit captures them as a Heddle state") && !text.contains("Git checkpoint"),
+        "native Heddle status should not describe native commits as Git checkpoints: {text}"
+    );
 }
 
 #[test]
@@ -740,6 +744,60 @@ fn global_repo_short_flag_runs_from_outside_repo_without_initializing() {
         .expect("global -C without a verb should still render the command catalog");
     let catalog: Value = serde_json::from_str(&catalog).expect("command catalog should parse");
     assert_eq!(catalog["kind"], "command_catalog");
+}
+
+#[test]
+fn plain_git_diff_and_inspect_path_route_to_adoption_guidance() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("README.md"), "# project\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed readme");
+
+    let diff = heddle_output(&["diff", "--output", "json"], Some(temp.path()))
+        .expect("invoke pre-adoption diff");
+    assert!(
+        !diff.status.success(),
+        "clean pre-adoption diff should refuse instead of emitting an empty success payload"
+    );
+    assert!(
+        diff.stdout.is_empty(),
+        "diff refusal should not emit a blank-success diff payload: {}",
+        String::from_utf8_lossy(&diff.stdout)
+    );
+    let diff_stderr = String::from_utf8_lossy(&diff.stderr);
+    let envelope: Value =
+        serde_json::from_str(&diff_stderr).expect("diff refusal should be JSON advice");
+    assert_eq!(envelope["kind"], "plain_git_not_adopted");
+    assert_eq!(envelope["primary_command"], "heddle adopt --ref main");
+    assert_eq!(envelope["repository_capability"], "plain-git");
+    assert_eq!(envelope["verification"]["repository_mode"], "plain-git");
+    assert_eq!(
+        envelope["verification"]["recommended_action"],
+        "heddle adopt --ref main"
+    );
+
+    let inspect = heddle_output(
+        &["inspect", "README.md", "--output", "text"],
+        Some(temp.path()),
+    )
+    .expect("invoke pre-adoption inspect path");
+    assert!(
+        inspect.status.success(),
+        "pre-adoption inspect should render setup guidance: stderr={}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+    let inspect_text = String::from_utf8_lossy(&inspect.stdout);
+    assert!(
+        inspect_text.contains("Git repo, Heddle not initialized")
+            && inspect_text.contains("heddle adopt --ref main")
+            && !inspect_text.contains("heddle log")
+            && !inspect_text.contains("state_not_found"),
+        "inspect path should route to adoption guidance, not Heddle state lookup advice: {inspect_text}"
+    );
+    assert!(
+        !temp.path().join(".heddle").exists(),
+        "pre-adoption inspect/diff guidance must remain observe-only"
+    );
 }
 
 #[test]
@@ -2280,6 +2338,7 @@ fn git_overlay_commit_discloses_pending_capture_when_checkpointing_later_delta()
         .as_str()
         .expect("capture should report change id")
         .to_string();
+    let previous_git = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
 
     std::fs::write(temp.path().join("file.txt"), "captured\nthen committed\n").unwrap();
     let commit = json_value(
@@ -2290,6 +2349,14 @@ fn git_overlay_commit_discloses_pending_capture_when_checkpointing_later_delta()
     assert_eq!(
         commit["included_pending_capture"], captured_state,
         "commit should disclose that it checkpointed work on top of an earlier Heddle-only save: {commit}"
+    );
+    assert_eq!(
+        commit["git_previous_commit"], previous_git,
+        "commit should expose the Git commit that HEAD moved from: {commit}"
+    );
+    assert_ne!(
+        commit["git_commit"], commit["git_previous_commit"],
+        "commit should expose Git commit movement when checkpointing: {commit}"
     );
     assert_eq!(commit["git_index"]["commit_mode"], "worktree_all");
     assert_eq!(
@@ -3072,6 +3139,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     let stdout = String::from_utf8_lossy(&commit.stdout);
     assert!(
         stdout.contains("Included prior Heddle-only save")
+            && stdout.contains("Git HEAD moved:")
             && stdout.contains("Verification: clean"),
         "captured-but-not-checkpointed commit should complete the checkpoint: {stdout}"
     );
@@ -11102,11 +11170,14 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!([
-            "heddle bridge git reconcile --ref main --preview",
-            "heddle bridge git reconcile --prefer heddle --ref main --preview",
-            "heddle bridge git reconcile --prefer git --ref main --preview"
-        ])
+        serde_json::json!(["heddle bridge git reconcile --ref main --preview"])
+    );
+    assert!(
+        envelope["preserved"]
+            .as_str()
+            .is_some_and(|preserved| preserved.contains("imported commit states")
+                && preserved.contains("Git/Heddle mapping records")),
+        "diverged import should describe preserved partial state: {envelope}"
     );
     assert_eq!(
         envelope["primary_command_argv"],

@@ -42,6 +42,14 @@ fn refresh_thread_expect_conflict(temp: &TempDir, thread: &str) -> String {
     err
 }
 
+fn sibling_checkout_path(repo: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let repo_name = repo
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repo");
+    repo.with_file_name(format!("{repo_name}-{suffix}"))
+}
+
 #[test]
 fn test_merge_fast_forward() {
     let temp = TempDir::new().unwrap();
@@ -57,6 +65,129 @@ fn test_merge_fast_forward() {
     assert!(result.is_ok());
     let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
     assert_eq!(content, "v2");
+}
+
+#[test]
+fn test_merge_preview_counts_match_isolated_added_file_materialization() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+
+    let checkout = sibling_checkout_path(temp.path(), "preview-counts");
+    let checkout_arg = checkout.to_str().expect("checkout path utf8");
+    heddle(
+        &["start", "feature/preview-counts", "--path", checkout_arg],
+        Some(temp.path()),
+    )
+    .unwrap();
+    fs::write(
+        checkout.join("preview-added.txt"),
+        "added from isolated thread\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "add isolated file"], Some(&checkout)).unwrap();
+    heddle(&["ready"], Some(&checkout)).unwrap();
+
+    let before_preview_status = status_json(temp.path());
+    assert_eq!(
+        before_preview_status["worktree_changed_path_count"], 0,
+        "parent worktree should be clean before preview: {before_preview_status}"
+    );
+    assert!(
+        !temp.path().join("preview-added.txt").exists(),
+        "source file should not exist in the parent before preview"
+    );
+
+    let preview_out = heddle(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature/preview-counts",
+            "--preview",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let preview: Value = serde_json::from_str(&preview_out).expect("preview JSON");
+    assert_eq!(preview["status"], "preview", "{preview}");
+    assert_eq!(preview["preview_only"], true, "{preview}");
+    assert_eq!(preview["would_merge"], true, "{preview}");
+    assert_eq!(
+        preview["changed_path_count"], 1,
+        "preview must count the file a real materialization will add: {preview}"
+    );
+    assert_eq!(
+        preview["changed_paths"],
+        serde_json::json!(["preview-added.txt"]),
+        "preview must list the file a real materialization will add: {preview}"
+    );
+
+    let text_preview = heddle(
+        &[
+            "merge",
+            "feature/preview-counts",
+            "--preview",
+            "--output",
+            "text",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(
+        text_preview.contains("changed paths: preview-added.txt")
+            && !text_preview.contains("Already up to date")
+            && !text_preview.contains("0 changed path"),
+        "human preview must not imply there is nothing to materialize: {text_preview}"
+    );
+
+    let after_preview_status = status_json(temp.path());
+    assert_eq!(
+        after_preview_status["current_state"], before_preview_status["current_state"],
+        "preview must not advance the parent state: before={before_preview_status} after={after_preview_status}"
+    );
+    assert_eq!(
+        after_preview_status["worktree_changed_path_count"], 0,
+        "preview must not dirty the parent worktree: {after_preview_status}"
+    );
+    assert_eq!(
+        after_preview_status["thread_changed_path_count"],
+        before_preview_status["thread_changed_path_count"],
+        "preview should not change the captured source-thread path count: before={before_preview_status} after={after_preview_status}"
+    );
+    assert!(
+        !temp.path().join("preview-added.txt").exists(),
+        "preview must not materialize the source file in the parent"
+    );
+    let verify_after_preview: Value =
+        serde_json::from_str(&heddle(&["--output", "json", "verify"], Some(temp.path())).unwrap())
+            .expect("verify JSON");
+    assert_eq!(
+        verify_after_preview["clean"], true,
+        "verify should remain clean after preview: {verify_after_preview}"
+    );
+
+    let merged_out = heddle(
+        &["--output", "json", "merge", "feature/preview-counts"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let merged: Value = serde_json::from_str(&merged_out).expect("merge JSON");
+    assert_eq!(merged["status"], "completed", "{merged}");
+    assert_eq!(merged["preview_only"], false, "{merged}");
+    assert_eq!(
+        merged["changed_path_count"], preview["changed_path_count"],
+        "materialized merge count must match preview: preview={preview} merged={merged}"
+    );
+    assert_eq!(
+        merged["changed_paths"], preview["changed_paths"],
+        "materialized merge paths must match preview: preview={preview} merged={merged}"
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("preview-added.txt")).unwrap(),
+        "added from isolated thread\n"
+    );
 }
 #[test]
 fn test_merge_creates_merge_state() {

@@ -1014,6 +1014,7 @@ mod tests {
             to_path: None,
             old_name: old_name.map(ToString::to_string),
             new_name: new_name.map(ToString::to_string),
+            importance: None,
         }
     }
 

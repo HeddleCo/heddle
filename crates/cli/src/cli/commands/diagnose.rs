@@ -18,8 +18,8 @@ use super::{
     git_overlay_health::{
         GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_argv,
         action_template, build_git_overlay_health, build_plain_git_verification_probe,
-        build_repository_verification_state, serialize_empty_action_as_null,
-        trust_visible_worktree_status,
+        build_repository_verification_state, remote_tracking_with_verification_action,
+        serialize_empty_action_as_null, trust_visible_worktree_status,
     },
     operator_loop::primary_next_action,
     thread::{
@@ -255,6 +255,8 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     let import_hint = repo.git_overlay_import_hint()?;
     let git_overlay_health = build_git_overlay_health(&repo);
     let trust = build_repository_verification_state(&repo);
+    let remote_tracking =
+        remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
     let current_state_ms = current_state_start.elapsed().as_millis();
 
     let status_start = Instant::now();

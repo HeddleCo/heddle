@@ -34,7 +34,8 @@ use super::{
     git_overlay_health::{
         GitOverlayHealth, RepositoryVerificationState, build_git_overlay_health,
         build_plain_git_verification_probe, command_argvs, override_trust_recommended_action,
-        repository_setup_guidance, serialize_empty_action_as_null,
+        remote_tracking_with_verification_action, repository_setup_guidance,
+        serialize_empty_action_as_null,
     },
     operator_loop::primary_next_action_with_verification,
     snapshot::resolve_principal,
@@ -426,6 +427,8 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let import_hint_ms = import_hint_start.elapsed().as_millis();
     let git_overlay_health = build_git_overlay_health(&repo);
     let trust = RepositoryVerificationState::from_health(&repo, git_overlay_health.clone());
+    let remote_tracking =
+        remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
     let status_options = worktree_status_options(Some(repo.config()));
     let git_worktree_status = repo.git_overlay_worktree_status().unwrap_or(None);
     let git_index = git_index_plan_for_repo(&repo)?;
@@ -1697,6 +1700,9 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
         return "connect this Git branch to Heddle before using history-oriented commands";
     }
     if output.changed_path_count > 0 && output.recommended_action.contains("commit") {
+        if output.repository_capability != "git-overlay" {
+            return "there are uncommitted worktree changes; commit captures them as a Heddle state";
+        }
         return "there are uncommitted worktree changes; commit captures them and writes the Git checkpoint";
     }
     if output.changed_path_count > 0 && output.recommended_action.contains("capture") {
