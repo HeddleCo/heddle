@@ -2875,6 +2875,9 @@ pub(crate) fn recommended_action_template(action: &str) -> Option<ActionTemplate
 
 fn dynamic_recommended_action_template(action: &str) -> Option<ActionTemplate> {
     let argv = split_recommended_action(action).ok()?;
+    if let Some(template) = dynamic_message_recommended_action_template(action, &argv) {
+        return Some(template);
+    }
     match argv.as_slice() {
         [heddle, clone, remote, path]
             if heddle == "heddle" && clone == "clone" && is_placeholder_arg(path) =>
@@ -2913,6 +2916,92 @@ fn dynamic_recommended_action_template(action: &str) -> Option<ActionTemplate> {
         }
         _ => None,
     }
+}
+
+fn dynamic_message_recommended_action_template(
+    action: &str,
+    argv: &[String],
+) -> Option<ActionTemplate> {
+    match argv {
+        [heddle, command, message_flag, message]
+            if heddle == "heddle"
+                && matches!(
+                    command.as_str(),
+                    "capture" | "checkpoint" | "commit" | "ready"
+                )
+                && is_message_flag(message_flag)
+                && is_message_placeholder_arg(message) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    command.clone(),
+                    "-m".to_string(),
+                    "<message>".to_string(),
+                ],
+                vec!["message".to_string()],
+                true,
+            ))
+        }
+        [
+            heddle,
+            capture,
+            message_flag,
+            message,
+            confidence_flag,
+            confidence,
+        ] if heddle == "heddle"
+            && capture == "capture"
+            && is_message_flag(message_flag)
+            && is_message_placeholder_arg(message)
+            && confidence_flag == "--confidence"
+            && is_placeholder_arg(confidence) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    "capture".to_string(),
+                    "-m".to_string(),
+                    "<message>".to_string(),
+                    "--confidence".to_string(),
+                    confidence.clone(),
+                ],
+                vec!["message".to_string(), placeholder_input_name(confidence)],
+                true,
+            ))
+        }
+        [heddle, stash, push, message_flag, message]
+            if heddle == "heddle"
+                && stash == "stash"
+                && push == "push"
+                && is_message_flag(message_flag)
+                && is_message_placeholder_arg(message) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    "stash".to_string(),
+                    "push".to_string(),
+                    "-m".to_string(),
+                    "<message>".to_string(),
+                ],
+                vec!["message".to_string()],
+                true,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn is_message_flag(value: &str) -> bool {
+    value == "-m" || value == "--message"
+}
+
+fn is_message_placeholder_arg(value: &str) -> bool {
+    matches!(value, "..." | "…") || value == "<message>"
 }
 
 fn is_placeholder_arg(value: &str) -> bool {
@@ -3608,6 +3697,68 @@ mod tests {
         );
         assert_eq!(merge.required_inputs, vec!["thread"]);
         assert!(!merge.agent_may_fill);
+    }
+
+    #[test]
+    fn action_fields_template_dirty_worktree_message_placeholders() {
+        for (action, expected_argv_template) in [
+            (
+                "heddle commit -m \"...\"",
+                vec!["heddle", "commit", "-m", "<message>"],
+            ),
+            (
+                "heddle capture -m \"...\"",
+                vec!["heddle", "capture", "-m", "<message>"],
+            ),
+            (
+                "heddle stash push -m \"...\"",
+                vec!["heddle", "stash", "push", "-m", "<message>"],
+            ),
+        ] {
+            let fields = ActionFields::from_action(action);
+            assert_eq!(fields.action.as_deref(), Some(action));
+            assert_eq!(
+                fields.argv, None,
+                "`{action}` must not expose the literal ellipsis as executable argv"
+            );
+            let template = fields
+                .template
+                .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
+            assert_eq!(template.argv_template, expected_argv_template);
+            assert_eq!(template.required_inputs, vec!["message"]);
+            assert!(template.agent_may_fill);
+        }
+    }
+
+    #[test]
+    fn action_fields_template_argv_normalized_message_placeholders() {
+        for (action, expected_argv_template) in [
+            (
+                "heddle commit -m ...",
+                vec!["heddle", "commit", "-m", "<message>"],
+            ),
+            (
+                "heddle capture -m ...",
+                vec!["heddle", "capture", "-m", "<message>"],
+            ),
+            (
+                "heddle stash push -m ...",
+                vec!["heddle", "stash", "push", "-m", "<message>"],
+            ),
+        ] {
+            let fields = ActionFields::from_action(action);
+            assert_eq!(fields.action.as_deref(), Some(action));
+            assert_eq!(
+                fields.argv, None,
+                "`{action}` must not expose the literal ellipsis as executable argv"
+            );
+            let template = fields
+                .template
+                .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
+            assert_eq!(template.argv_template, expected_argv_template);
+            assert_eq!(template.required_inputs, vec!["message"]);
+            assert!(template.agent_may_fill);
+        }
     }
 
     #[test]

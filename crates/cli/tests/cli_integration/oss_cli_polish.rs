@@ -7427,6 +7427,14 @@ fn isolated_thread_status_and_diff_report_untracked_only_work() {
         "isolated status must not report clean when the only change is a new file: {status}"
     );
     assert_eq!(
+        status["worktree_changed_path_count"], 1,
+        "isolated status should expose dirty worktree path count separately: {status}"
+    );
+    assert_eq!(
+        status["thread_changed_path_count"], 0,
+        "unsaved isolated work is not yet captured thread delta: {status}"
+    );
+    assert_eq!(
         status["changes"]["added"],
         serde_json::json!(["docs/new.md"]),
         "isolated status should surface untracked-only work as added: {status}"
@@ -10350,6 +10358,50 @@ fn push_without_default_remote_uses_typed_json_recovery() {
             .as_array()
             .is_some_and(|commands| commands.contains(&serde_json::json!("heddle remote list"))),
         "push remote setup should include remote inspection recovery: {envelope}"
+    );
+}
+
+#[test]
+fn push_with_unknown_remote_uses_typed_json_recovery() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &["--output", "json", "push", "missing-remote"],
+        Some(temp.path()),
+    )
+    .expect("invoke push with unknown remote");
+    assert!(!output.status.success(), "unknown remote push should fail");
+    assert!(
+        output.stdout.is_empty(),
+        "JSON failure must not pollute stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr)
+        .unwrap_or_else(|err| panic!("push failure should emit JSON: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "remote_not_found");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("missing-remote")),
+        "unknown remote error should name the requested remote: {envelope}"
+    );
+    assert_eq!(envelope["primary_command"], "heddle remote list");
+    assert_eq!(
+        envelope["primary_command_argv"],
+        heddle_argv_json(["remote", "list"]),
+        "{envelope}"
+    );
+    assert!(
+        envelope["recovery_action_templates"]
+            .as_array()
+            .is_some_and(
+                |templates| templates.iter().any(|template| template["argv_template"]
+                    == heddle_argv_json(["remote", "add", "<name>", "<url>"]))
+            ),
+        "unknown remote recovery should include structured remote add template: {envelope}"
     );
 }
 

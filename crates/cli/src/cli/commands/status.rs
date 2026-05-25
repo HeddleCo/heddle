@@ -102,6 +102,8 @@ pub(crate) struct StatusOutput {
     impact_categories: Vec<ThreadImpactCategory>,
     heavy_impact_paths: Vec<String>,
     changed_path_count: usize,
+    worktree_changed_path_count: usize,
+    thread_changed_path_count: usize,
     blockers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     identity_notice: Option<String>,
@@ -542,6 +544,8 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             impact_categories: Vec::new(),
             heavy_impact_paths: Vec::new(),
             changed_path_count: 0,
+            worktree_changed_path_count: changes_path_count(&changes),
+            thread_changed_path_count: 0,
             blockers: if trust.verified {
                 Vec::new()
             } else {
@@ -767,6 +771,8 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             .as_ref()
             .map(|thread| thread.changed_paths.len())
             .unwrap_or_default(),
+        worktree_changed_path_count: changes_path_count(&changes),
+        thread_changed_path_count: captured_thread_path_count(thread_summary.as_ref(), &changes),
         blockers: Vec::new(),
         identity_notice,
         recommended_action: String::new(),
@@ -932,6 +938,9 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     if blocked_by_trust && trust_blockers.is_empty() && !trust.summary.trim().is_empty() {
         trust_blockers.push(format!("Verification: {}", trust.summary));
     }
+    let worktree_changed_path_count = changes_path_count(&output.changes);
+    let thread_changed_path_count =
+        captured_thread_path_count(thread_summary.as_ref(), &output.changes);
     let output = StatusOutput {
         blockers: if blocked_by_trust {
             trust_blockers
@@ -964,6 +973,8 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         } else {
             changes_path_count(&output.changes)
         },
+        worktree_changed_path_count,
+        thread_changed_path_count,
         trust,
         ..output
     };
@@ -1836,11 +1847,30 @@ fn changed_path_count(
 }
 
 fn changes_path_count(changes: &ChangesInfo) -> usize {
+    changes_paths(changes).len()
+}
+
+fn captured_thread_path_count(
+    thread: Option<&super::thread::ThreadSummary>,
+    changes: &ChangesInfo,
+) -> usize {
+    let Some(thread) = thread else {
+        return 0;
+    };
+    let dirty_paths = changes_paths(changes);
+    thread
+        .changed_paths
+        .iter()
+        .filter(|path| !dirty_paths.contains(*path))
+        .count()
+}
+
+fn changes_paths(changes: &ChangesInfo) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
     paths.extend(changes.modified.iter().cloned());
     paths.extend(changes.added.iter().cloned());
     paths.extend(changes.deleted.iter().cloned());
-    paths.len()
+    paths
 }
 
 fn render_status_changes(output: &StatusOutput) {

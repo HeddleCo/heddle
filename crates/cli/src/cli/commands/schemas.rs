@@ -492,9 +492,9 @@ fn normalize_schema_verb_parts(parts: &[String]) -> Result<Vec<String>> {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadModeSchema {
-    Lightweight,
     Materialized,
     Virtualized,
+    Solid,
 }
 
 #[allow(dead_code)]
@@ -1921,8 +1921,10 @@ pub struct StatusSchema {
     pub impact_categories: Vec<ThreadImpactCategorySchema>,
     pub heavy_impact_paths: Vec<String>,
     pub changed_path_count: usize,
+    pub worktree_changed_path_count: usize,
+    pub thread_changed_path_count: usize,
     pub blockers: Vec<String>,
-    pub recommended_action: String,
+    pub recommended_action: NullableStringSchema,
     pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
@@ -2717,6 +2719,14 @@ pub enum NullableStringArraySchema {
     Null(()),
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum NullableStringSchema {
+    Value(String),
+    Null(()),
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2733,6 +2743,72 @@ mod tests {
             .iter()
             .map(|value| value.as_str().expect("required field is a string"))
             .collect()
+    }
+
+    fn property_schema<'a>(schema: &'a Value, property: &str) -> &'a Value {
+        schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .and_then(|properties| properties.get(property))
+            .unwrap_or_else(|| panic!("schema has `{property}` property"))
+    }
+
+    fn schema_allows_null(root: &Value, schema: &Value) -> bool {
+        if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
+            let definition = reference
+                .strip_prefix("#/definitions/")
+                .and_then(|name| root.get("definitions").and_then(|defs| defs.get(name)))
+                .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"));
+            return schema_allows_null(root, definition);
+        }
+
+        if schema.get("type") == Some(&Value::String("null".to_string())) {
+            return true;
+        }
+        if schema
+            .get("type")
+            .and_then(|value| value.as_array())
+            .is_some_and(|types| types.contains(&Value::String("null".to_string())))
+        {
+            return true;
+        }
+
+        ["anyOf", "oneOf", "allOf"].iter().any(|combinator| {
+            schema
+                .get(*combinator)
+                .and_then(|value| value.as_array())
+                .is_some_and(|schemas| {
+                    schemas
+                        .iter()
+                        .any(|schema| schema_allows_null(root, schema))
+                })
+        })
+    }
+
+    fn collect_string_enums<'a>(root: &'a Value, schema: &'a Value, values: &mut Vec<&'a str>) {
+        if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
+            let definition = reference
+                .strip_prefix("#/definitions/")
+                .and_then(|name| root.get("definitions").and_then(|defs| defs.get(name)))
+                .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"));
+            collect_string_enums(root, definition, values);
+        }
+
+        if let Some(enum_values) = schema.get("enum").and_then(|value| value.as_array()) {
+            for value in enum_values {
+                if let Some(value) = value.as_str() {
+                    values.push(value);
+                }
+            }
+        }
+
+        for combinator in ["anyOf", "oneOf", "allOf"] {
+            if let Some(schemas) = schema.get(combinator).and_then(|value| value.as_array()) {
+                for schema in schemas {
+                    collect_string_enums(root, schema, values);
+                }
+            }
+        }
     }
 
     /// Every schema verb advertised by the command contract table must
@@ -2887,6 +2963,44 @@ mod tests {
                 "status schema missing property '{required}'"
             );
         }
+    }
+
+    #[test]
+    fn status_schema_allows_null_recommended_action() {
+        let schema = schema_for_verb("status").expect("status schema");
+        let recommended_action = property_schema(&schema, "recommended_action");
+        assert!(
+            schema_allows_null(&schema, recommended_action),
+            "status recommended_action must allow null because empty actions serialize as null: {recommended_action}"
+        );
+
+        let required = required_fields(&schema);
+        assert!(
+            required.contains(&"recommended_action"),
+            "status recommended_action should remain a stable emitted field: {schema}"
+        );
+    }
+
+    #[test]
+    fn status_thread_mode_schema_matches_observed_modes() {
+        let schema = schema_for_verb("status").expect("status schema");
+        let mut values = Vec::new();
+        collect_string_enums(
+            &schema,
+            property_schema(&schema, "thread_mode"),
+            &mut values,
+        );
+
+        for expected in ["materialized", "virtualized", "solid"] {
+            assert!(
+                values.contains(&expected),
+                "status thread_mode schema missing observed mode `{expected}`: {values:?}"
+            );
+        }
+        assert!(
+            !values.contains(&"lightweight"),
+            "status thread_mode schema must not advertise removed mode `lightweight`: {values:?}"
+        );
     }
 
     #[test]
