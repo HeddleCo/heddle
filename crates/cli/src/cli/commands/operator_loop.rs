@@ -123,29 +123,14 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
 }
 
 fn sync_blocked_by_trust(trust: RepositoryVerificationState) -> OperatorCommandOutput {
-    let recommended_action = if trust.recommended_action.is_empty() {
-        "heddle verify".to_string()
-    } else {
-        trust.recommended_action.clone()
-    };
-    let blockers = trust
-        .checks
-        .iter()
-        .filter(|check| !check.clean)
-        .map(|check| format!("{}: {}", check.name, check.summary))
-        .collect::<Vec<_>>();
-    OperatorCommandOutput {
-        status: "blocked".to_string(),
-        action: "sync".to_string(),
-        message: format!(
+    OperatorCommandOutput::blocked_by_repository_verification(
+        "sync",
+        format!(
             "Sync changed the checkout, but repository verification is still blocked: {}",
             trust.summary
         ),
-        blockers,
-        warnings: Vec::new(),
-        next_action: Some(recommended_action.clone()),
-        recommended_action: Some(recommended_action),
-    }
+        &trust,
+    )
 }
 
 fn emit(cli: &Cli, output: OperatorCommandOutput) -> Result<()> {

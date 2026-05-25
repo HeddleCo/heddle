@@ -11,7 +11,11 @@ use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use super::{
     bisect::reset_bisect_state,
-    git_overlay_health::{action_argv, action_template, import_hint_includes_active_branch},
+    git_overlay_health::{
+        RepositoryVerificationState, action_argv, action_template,
+        import_hint_includes_active_branch, repository_verification_blockers,
+        repository_verification_primary_command,
+    },
     rebase::{
         OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
         has_persisted_rebase_state,
@@ -37,6 +41,25 @@ pub(crate) struct OperatorCommandOutput {
     pub warnings: Vec<String>,
     pub next_action: Option<String>,
     pub recommended_action: Option<String>,
+}
+
+impl OperatorCommandOutput {
+    pub(crate) fn blocked_by_repository_verification(
+        action: impl Into<String>,
+        message: impl Into<String>,
+        trust: &RepositoryVerificationState,
+    ) -> Self {
+        let recommended_action = repository_verification_primary_command(trust);
+        Self {
+            status: "blocked".to_string(),
+            action: action.into(),
+            message: message.into(),
+            blockers: repository_verification_blockers(trust),
+            warnings: Vec::new(),
+            next_action: Some(recommended_action.clone()),
+            recommended_action: Some(recommended_action),
+        }
+    }
 }
 
 pub(crate) fn blocked_operator_exit_code(status: &str) -> Option<i32> {

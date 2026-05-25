@@ -462,29 +462,14 @@ fn thread_resolve_refresh_operator(
         };
     }
 
-    let recommended_action = if trust.recommended_action.is_empty() {
-        "heddle verify".to_string()
-    } else {
-        trust.recommended_action.clone()
-    };
-    let blockers = trust
-        .checks
-        .iter()
-        .filter(|check| !check.clean)
-        .map(|check| format!("{}: {}", check.name, check.summary))
-        .collect::<Vec<_>>();
-    OperatorCommandOutput {
-        status: "blocked".to_string(),
-        action: "resolve".to_string(),
-        message: format!(
+    OperatorCommandOutput::blocked_by_repository_verification(
+        "resolve",
+        format!(
             "Thread refreshed cleanly, but repository verification is blocked: {}",
             trust.summary
         ),
-        blockers,
-        warnings: Vec::new(),
-        next_action: Some(recommended_action.clone()),
-        recommended_action: Some(recommended_action),
-    }
+        trust,
+    )
 }
 
 fn no_paths_matched_advice(
