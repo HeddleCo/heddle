@@ -60,7 +60,10 @@ mod linux {
     };
 
     use anyhow::{anyhow, Context, Result};
-    use mount::{ContentAddressedMount, FuseShell, NfsSession, NfsShell};
+    use mount::{
+        worker::{default_worker_binary, Supervisor},
+        ContentAddressedMount, NfsSession, NfsShell,
+    };
     use repo::Repository;
     use tracing::warn;
 
@@ -68,24 +71,30 @@ mod linux {
 
     /// Which backend is actually live behind a [`MountHandle`].
     ///
-    /// The CLI prefers FUSE (unprivileged, zero install on a host
-    /// with `CONFIG_FUSE_FS` + `fusermount`). It falls back to NFS
-    /// when FUSE isn't available — typically a container or
-    /// minimal-userland Linux without `fusermount` on PATH.
+    /// The CLI prefers FUSE-via-`heddle-fuse-worker` (unprivileged,
+    /// zero install on a host with `CONFIG_FUSE_FS` + `fusermount`,
+    /// **crash-isolated** because the FUSE callbacks run in their
+    /// own process). It falls back to NFS when FUSE isn't available
+    /// — typically a container or minimal-userland Linux without
+    /// `fusermount` on PATH.
+    ///
+    /// **heddle#190 cutover.** Before this change `Fuse` was an
+    /// in-process `mount::BackgroundSession` and a panic in a FUSE
+    /// callback could corrupt the CLI's heap before the panic
+    /// guard caught it. The new variant wraps a
+    /// `mount::worker::Supervisor` instead: panics escape the
+    /// worker process cleanly, the kernel auto-unmounts on `/dev/fuse`
+    /// close, and the CLI surfaces the exit via
+    /// `tracing::warn!("FUSE worker exited unexpectedly: …")`.
     enum BackingSession {
-        Fuse(mount::BackgroundSession),
+        FuseWorker(Supervisor),
         Nfs(NfsSession),
     }
 
     impl BackingSession {
         fn unmount(self) -> Result<()> {
             match self {
-                // `BackgroundSession`'s Drop sends the unmount to
-                // the kernel; an explicit `drop` runs it now.
-                Self::Fuse(s) => {
-                    drop(s);
-                    Ok(())
-                }
+                Self::FuseWorker(s) => s.unmount(),
                 Self::Nfs(s) => s.unmount().map_err(|e| anyhow!("nfs unmount: {e}")),
             }
         }
@@ -115,9 +124,11 @@ mod linux {
 
     static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();
 
-    /// Mount `thread_id` into `mountpoint`. Tries FUSE first; on
-    /// failure, falls back to the NFS shell so the feature still
-    /// works on hosts that don't ship FUSE.
+    /// Mount `thread_id` into `mountpoint`. Tries the FUSE worker
+    /// subprocess first; on failure (worker binary missing, host
+    /// without `/dev/fuse`, kernel module unloaded, etc.), falls
+    /// back to the NFS shell so the feature still works on hosts
+    /// that don't ship FUSE.
     pub fn spawn_mount_for_thread(
         repo: Repository,
         thread_id: &str,
@@ -127,22 +138,29 @@ mod linux {
             .with_context(|| format!("create mount point {}", mountpoint.display()))?;
 
         let root = repo.root().to_path_buf();
-        let mount = ContentAddressedMount::new(repo, thread_id)
-            .map_err(|e| anyhow!("open content-addressed mount for {thread_id}: {e}"))?;
+        // We may need to construct a fresh `ContentAddressedMount`
+        // for the NFS fallback; drop the FUSE-side `repo` first so
+        // the fallback's `Repository::open` doesn't conflict with
+        // a still-open handle.
+        drop(repo);
 
-        let session = match FuseShell::new(mount).mount_background(mountpoint) {
-            Ok(s) => BackingSession::Fuse(s),
+        let session = match spawn_fuse_worker(&root, thread_id, mountpoint) {
+            Ok(sup) => BackingSession::FuseWorker(sup),
             Err(native_err) => {
                 warn!(
                     thread = thread_id,
-                    "FUSE mount failed ({native_err}); falling back to NFS"
+                    "heddle-fuse-worker spawn failed ({native_err}); falling back to NFS"
                 );
                 let reopened = Repository::open(&root)
                     .map_err(|e| anyhow!("reopen repo for NFS fallback: {e}"))?;
                 let mount = ContentAddressedMount::new(reopened, thread_id)
                     .map_err(|e| anyhow!("open mount for {thread_id} (NFS fallback): {e}"))?;
                 BackingSession::Nfs(NfsShell::new(mount).mount_background(mountpoint).map_err(
-                    |e| anyhow!("FUSE mount failed ({native_err}); NFS fallback also failed: {e}"),
+                    |e| {
+                        anyhow!(
+                            "FUSE worker spawn failed ({native_err}); NFS fallback also failed: {e}"
+                        )
+                    },
                 )?)
             }
         };
@@ -153,6 +171,19 @@ mod linux {
         });
         REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
         Ok(handle)
+    }
+
+    /// Resolve the worker binary, then drive
+    /// [`Supervisor::spawn`]. Factored out so the
+    /// `spawn_mount_for_thread` match arm stays readable.
+    fn spawn_fuse_worker(
+        repo_root: &Path,
+        thread_id: &str,
+        mountpoint: &Path,
+    ) -> Result<Supervisor> {
+        let bin = default_worker_binary().context("locate heddle-fuse-worker")?;
+        Supervisor::spawn(&bin, repo_root, thread_id, mountpoint)
+            .with_context(|| format!("spawn heddle-fuse-worker for thread {thread_id}"))
     }
 
     pub fn unmount_thread_if_mounted(thread_id: &str) -> bool {

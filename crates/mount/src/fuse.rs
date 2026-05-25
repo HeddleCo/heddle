@@ -38,6 +38,72 @@
 //! `crates/mount/README.md` ("Per-thread overlay semantics") for
 //! the matching write-side state model.
 //!
+//! ## Process model — the `heddle-fuse-worker` subprocess (heddle#190)
+//!
+//! On Linux + `--features mount`, the CLI's mount lifecycle no
+//! longer holds the FUSE session in-process. Instead it
+//! `Command::new("heddle-fuse-worker").spawn()`s a small Linux-only
+//! binary that owns the kernel-side mount and exchanges control-
+//! plane messages with the supervisor (CLI today; daemon in the
+//! follow-up tracked by spike heddle#88 §4) over an inherited Unix
+//! socketpair. See `crates/mount/src/worker.rs` for the runtime
+//! and `crates/mount/src/bin/heddle-fuse-worker.rs` for the binary's
+//! `main` shim.
+//!
+//! Why subprocess: the panic guard documented below catches a
+//! callback panic at the C ABI, but the panicking callback may have
+//! already corrupted the *parent's* heap (poisoned mutex, partially
+//! mutated cache) before the guard fired. Putting FUSE dispatch in
+//! its own address space makes that class of bug impossible —
+//! a panic in a FUSE callback aborts only the worker, the kernel
+//! auto-unmounts when `/dev/fuse` closes, and the parent's heap
+//! stays intact. The two red-commit tests in
+//! `crates/mount/tests/fuse_worker_crash.rs` lock that contract in.
+//!
+//! ### IPC protocol — minimal-by-design
+//!
+//! The spike's locked decision is gRPC-over-UDS (heddle#88 §3) for
+//! the *daemon-supervisor* shape. heddle#190 ships the
+//! CLI-dispatched variant the issue AC requires — the daemon
+//! follow-up adds gRPC + per-mount sockets — and a single
+//! inherited socketpair carrying length-prefixed JSON frames is
+//! the right shape for the CLI variant: no proto crate, no
+//! `tokio` in the worker, no UDS discovery file. Each frame is a
+//! [`worker::SupervisorCommand`] (parent → worker; today
+//! `Stop` + `Status`, with `Capture` + `Invalidate` joining when
+//! the daemon-side surface lands) or a [`worker::WorkerEvent`]
+//! (worker → parent; `MountReady` / `MountError` / `StatusOk` /
+//! `Stopping`). The framing is defined in
+//! [`worker::framing`]; the wire format is u32 LE length followed
+//! by the JSON body.
+//!
+//! [`worker::SupervisorCommand`]: crate::worker::SupervisorCommand
+//! [`worker::WorkerEvent`]: crate::worker::WorkerEvent
+//! [`worker::framing`]: crate::worker::framing
+//!
+//! ### What still runs in this process
+//!
+//! Everything in this file runs **inside the worker process** —
+//! the [`Filesystem`] trait impl, the panic guard, the entire
+//! callback dispatch surface, [`ContentAddressedMount::read`] /
+//! `write` / `unlink` / etc. The supervisor (CLI / daemon) does
+//! NOT see individual kernel callbacks; only the high-level
+//! lifecycle events on the IPC socket. That keeps the per-syscall
+//! cost at FUSE-native latency, which is the whole point of the
+//! spike's "stateful worker" decision (heddle#88 §1 Decision B).
+//!
+//! ### Crash recovery — current state
+//!
+//! heddle#190 ships only the **propagate cleanly** half of the
+//! crash story: a worker exit is observed by the supervisor's
+//! watcher thread and surfaced via `tracing::warn`. The
+//! 3-strikes RestartBudget + SCM_RIGHTS-respawn the spike's §5
+//! describes lands with the daemon-supervisor follow-up; under
+//! the current CLI dispatch a worker crash is a terminal mount
+//! failure for that thread. See
+//! `docs/design/fuse-worker-ipc-decision.md` §5–§7 for the
+//! restart shape that the daemon will eventually implement.
+//!
 //! ## Panic safety
 //!
 //! Every callback body runs inside [`std::panic::catch_unwind`] via

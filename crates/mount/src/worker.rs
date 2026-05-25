@@ -342,9 +342,13 @@ pub fn run_worker(args: WorkerArgs) -> Result<()> {
         }
     };
 
-    // (Crash-injection env handling lives in the worker once the
-    // crash-isolation impl lands — see the green commit
-    // referenced from the PR description.)
+    // Test crash injection — see [`PANIC_ON_INIT_ENV`]. Production
+    // never sets this; tests set it to assert the supervisor sees
+    // a worker that panics before MountReady as a clean `Err` and
+    // keeps the parent's heap intact.
+    if std::env::var(PANIC_ON_INIT_ENV).is_ok() {
+        panic!("heddle-fuse-worker: panic injected by {PANIC_ON_INIT_ENV}");
+    }
 
     // Background-mount so the FUSE session runs on its own thread
     // and this thread can serve the IPC loop.
@@ -722,14 +726,13 @@ impl Drop for Supervisor {
     }
 }
 
-fn watch_child(mut child: Child, _liveness: Arc<AtomicU8>, mountpoint: PathBuf) {
-    // Skeleton watcher: reaps the child but does not flip
-    // [`Liveness::Exited`]. The real liveness signal lands with
-    // the crash-isolation impl PR; until then, [`Supervisor::is_alive`]
-    // will return `true` even after the worker has gone — so
-    // unmount() still falls through to its SIGTERM/SIGKILL ladder
-    // and Drop is correct, just slower.
+fn watch_child(mut child: Child, liveness: Arc<AtomicU8>, mountpoint: PathBuf) {
     let result = child.wait();
+    // Flip liveness BEFORE logging so [`Supervisor::is_alive`]
+    // observes the exit immediately. A delayed flip would race
+    // with `Supervisor::wait_for_exit`'s polling loop and risk
+    // a spurious timeout under load.
+    liveness.store(Liveness::Exited as u8, Ordering::SeqCst);
     match result {
         Ok(s) if s.success() => {
             debug!(mountpoint = %mountpoint.display(), "FUSE worker exited cleanly");
