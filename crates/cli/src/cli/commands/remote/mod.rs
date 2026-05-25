@@ -14,7 +14,7 @@ use super::snapshot::ensure_current_state;
 #[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 use crate::{
-    bridge::GitBridge,
+    bridge::{GitBridge, GitResult},
     cli::{Cli, should_output_json, style},
     client::LocalSync,
     config::UserConfig,
@@ -32,6 +32,7 @@ pub async fn cmd_push(
     thread: Option<String>,
     state: Option<String>,
     force: bool,
+    mirror: Option<String>,
 ) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
@@ -39,16 +40,25 @@ pub async fn cmd_push(
         let mut bridge = GitBridge::new(&repo);
         bridge.push(remote_name)?;
         if should_output_json(cli, Some(repo.config())) {
-            println!(
-                "{{\"pushed\":true,\"transport\":\"git\",\"remote\":{:?}}}",
-                remote_name
-            );
+            let record = serde_json::json!({
+                "pushed": true,
+                "transport": "git",
+                "remote": remote_name,
+            });
+            println!("{}", record);
         } else {
             println!(
                 "{} pushed Git-overlay refs to {}",
                 style::ok_marker(),
                 style::bold(remote_name)
             );
+        }
+        // Ad-hoc dual-push parity for the GitOverlay drop-in branch:
+        // `--mirror` must fire here too, with the same best-effort
+        // (warn-don't-abort) semantics as the hosted/native path.
+        if let Some(mirror_remote) = mirror.as_deref() {
+            let outcome = bridge.push(mirror_remote);
+            render_mirror_outcome(cli, &repo, mirror_remote, outcome);
         }
         return Ok(());
     }
@@ -144,6 +154,15 @@ pub async fn cmd_push(
         }
     }
 
+    // Ad-hoc dual-push: also push to the configured git mirror
+    // (default `origin`). Best-effort — mirror failure does not
+    // abort the primary push.
+    if let Some(mirror_remote) = mirror.as_deref() {
+        let mut bridge = GitBridge::new(&repo);
+        let outcome = bridge.push(mirror_remote);
+        render_mirror_outcome(cli, &repo, mirror_remote, outcome);
+    }
+
     // `post_push` JSON-protocol hook. Best-effort; fires after
     // a successful push.
     let post_push_payload = serde_json::json!({
@@ -159,6 +178,49 @@ pub async fn cmd_push(
     }
 
     Ok(())
+}
+
+fn render_mirror_outcome(
+    cli: &Cli,
+    repo: &Repository,
+    mirror_remote: &str,
+    outcome: GitResult<()>,
+) {
+    let json = should_output_json(cli, Some(repo.config()));
+    match outcome {
+        Ok(()) => {
+            if json {
+                let record = serde_json::json!({
+                    "mirrored": true,
+                    "remote": mirror_remote,
+                });
+                println!("{}", record);
+            } else {
+                println!(
+                    "{} mirrored to {}",
+                    style::ok_marker(),
+                    style::bold(mirror_remote)
+                );
+            }
+        }
+        Err(err) => {
+            if json {
+                let record = serde_json::json!({
+                    "mirrored": false,
+                    "remote": mirror_remote,
+                    "error": err.to_string(),
+                });
+                println!("{}", record);
+            } else {
+                eprintln!(
+                    "{} mirror push to {} failed: {}",
+                    style::warn_marker(),
+                    style::bold(mirror_remote),
+                    err
+                );
+            }
+        }
+    }
 }
 
 fn resolve_default_push_thread(repo: &Repository, requested: Option<&str>) -> Result<String> {

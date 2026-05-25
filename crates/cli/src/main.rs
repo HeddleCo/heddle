@@ -525,6 +525,7 @@ async fn main() -> Result<()> {
                 args.remote_op.thread.clone(),
                 args.state.clone(),
                 args.force,
+                args.mirror.clone(),
             )
             .await
         }
