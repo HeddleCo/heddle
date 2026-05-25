@@ -327,14 +327,22 @@ fn test_cli_status_surfaces_git_import_hint_for_other_branches() {
     )
     .unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
-    assert_eq!(bridge["git_overlay_import_hint"]["missing_branch_count"], 1);
-    assert_eq!(
-        bridge["git_overlay_import_hint"]["missing_branches"][0],
-        "support/import-me"
+    assert_eq!(bridge["git_overlay_import_hint"]["missing_branch_count"], 2);
+    let missing = bridge["git_overlay_import_hint"]["missing_branches"]
+        .as_array()
+        .unwrap();
+    assert!(
+        missing
+            .iter()
+            .any(|branch| branch.as_str() == Some("feature/drop-in"))
+            && missing
+                .iter()
+                .any(|branch| branch.as_str() == Some("support/import-me")),
+        "first-run bridge import hint should include the active branch and the other local branch: {bridge}"
     );
     assert_eq!(
         bridge["git_overlay_import_hint"]["recommended_command"],
-        "heddle adopt --ref support/import-me"
+        "heddle adopt"
     );
 }
 
@@ -450,14 +458,22 @@ fn test_cli_status_surfaces_git_import_hint_for_many_branches() {
 
     assert_eq!(
         parsed["git_overlay_import_hint"]["missing_branch_count"],
-        12
+        13
     );
     assert_eq!(
         parsed["git_overlay_import_hint"]["missing_branches"]
             .as_array()
             .unwrap()
             .len(),
-        12
+        13
+    );
+    assert!(
+        parsed["git_overlay_import_hint"]["missing_branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| branch.as_str() == Some("feature/drop-in")),
+        "first-run bridge import hint should include the active branch: {parsed}"
     );
 }
 
