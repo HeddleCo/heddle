@@ -3684,7 +3684,19 @@ fn git_overlay_matrix_branch_lifecycle_refreshes_import_hints() {
         &["bridge", "git", "status", "--output", "json"],
     );
     assert_eq!(
-        bridge_before["git_overlay_import_hint"]["missing_branches"][0],
+        bridge_before["git_overlay_import_hint"]["missing_branch_count"],
+        2
+    );
+    assert!(
+        bridge_before["git_overlay_import_hint"]["missing_branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| branch == "feature/drop-in"),
+        "plain Git active branch should stay visible as unimported before adoption: {bridge_before}"
+    );
+    assert_eq!(
+        bridge_before["git_overlay_import_hint"]["missing_branches"][1],
         "support/original"
     );
 
@@ -3697,7 +3709,7 @@ fn git_overlay_matrix_branch_lifecycle_refreshes_import_hints() {
         &["bridge", "git", "status", "--output", "json"],
     );
     assert_eq!(
-        bridge_after_rename["git_overlay_import_hint"]["missing_branches"][0],
+        bridge_after_rename["git_overlay_import_hint"]["missing_branches"][1],
         "support/renamed"
     );
 
@@ -3706,9 +3718,10 @@ fn git_overlay_matrix_branch_lifecycle_refreshes_import_hints() {
         temp.path(),
         &["bridge", "git", "status", "--output", "json"],
     );
-    assert!(
-        bridge_after_delete["git_overlay_import_hint"].is_null(),
-        "deleting the extra branch should clear the import hint: {bridge_after_delete}"
+    assert_eq!(
+        bridge_after_delete["git_overlay_import_hint"]["missing_branches"],
+        serde_json::json!(["feature/drop-in"]),
+        "deleting the extra branch should leave only the active plain-Git branch to adopt: {bridge_after_delete}"
     );
 
     git(&["branch", "support/recreated"], temp.path());
@@ -3717,7 +3730,7 @@ fn git_overlay_matrix_branch_lifecycle_refreshes_import_hints() {
         &["bridge", "git", "status", "--output", "json"],
     );
     assert_eq!(
-        bridge_after_recreate["git_overlay_import_hint"]["missing_branches"][0],
+        bridge_after_recreate["git_overlay_import_hint"]["missing_branches"][1],
         "support/recreated"
     );
 }
@@ -4143,7 +4156,15 @@ fn git_overlay_matrix_imported_branch_evolution_after_bridge_import() {
         temp.path(),
         &["bridge", "git", "status", "--output", "json"],
     );
-    assert_eq!(before["git_overlay_import_hint"]["missing_branch_count"], 2);
+    assert_eq!(before["git_overlay_import_hint"]["missing_branch_count"], 3);
+    assert!(
+        before["git_overlay_import_hint"]["missing_branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|branch| branch == "feature/drop-in"),
+        "plain Git active branch should be counted until bridge import runs: {before}"
+    );
 
     let import_output = heddle(&["bridge", "import", "--path", "."], Some(temp.path())).unwrap();
     assert!(
@@ -4322,7 +4343,8 @@ fn git_overlay_matrix_conflicted_merge_exits_nonzero_after_writing_markers() {
     let parsed: Value = serde_json::from_slice(&merge.stdout)
         .unwrap_or_else(|err| panic!("conflicted merge should emit JSON on stdout: {err}"));
     assert_eq!(parsed["status"], "blocked", "{parsed}");
-    assert_eq!(parsed["conflict_count"], 0, "{parsed}");
+    assert_eq!(parsed["conflict_count"], 1, "{parsed}");
+    assert_eq!(parsed["conflicts"], serde_json::json!(["conflict.txt"]));
     assert!(
         parsed["recommended_action"]
             .as_str()
@@ -4333,6 +4355,104 @@ fn git_overlay_matrix_conflicted_merge_exits_nonzero_after_writing_markers() {
     assert!(
         !conflict_file.contains("<<<<<<<") && conflict_file == "main\n",
         "stale merge refusal must not materialize conflict markers"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_stale_conflict_thread_resolve_enters_conflict_recovery() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "feature/drop-in");
+    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
+    git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
+
+    let started = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "feature/resolve-conflict",
+            "--workspace",
+            "materialized",
+        ],
+    );
+    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+
+    std::fs::write(thread_path.join("conflict.txt"), "thread change\n").unwrap();
+    heddle(&["capture", "-m", "thread change"], Some(&thread_path)).unwrap();
+
+    std::fs::write(temp.path().join("conflict.txt"), "main change\n").unwrap();
+    json(
+        temp.path(),
+        &["--output", "json", "commit", "-m", "main change"],
+    );
+
+    let preview_output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature/resolve-conflict",
+            "--preview",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke stale conflict merge preview");
+    assert!(
+        !preview_output.status.success(),
+        "stale conflict preview should exit nonzero"
+    );
+    assert!(
+        preview_output.stdout.is_empty(),
+        "strict JSON preview refusal should emit the envelope on stderr"
+    );
+    let preview_stderr = std::str::from_utf8(&preview_output.stderr).unwrap();
+    let preview: Value = serde_json::from_str(preview_stderr)
+        .unwrap_or_else(|err| panic!("expected JSON stderr: {err}: {preview_stderr}"));
+    assert_eq!(preview["kind"], "merge_preview_blocked", "{preview}");
+    assert_eq!(
+        preview["primary_command"],
+        "heddle thread refresh feature/resolve-conflict"
+    );
+    assert_eq!(preview["conflict_count"], 1, "{preview}");
+    assert_eq!(preview["conflicts"], serde_json::json!(["conflict.txt"]));
+    assert_eq!(preview["semantic_result"], "path_conflicts", "{preview}");
+
+    let resolved = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "thread",
+            "resolve",
+            "feature/resolve-conflict",
+        ],
+    );
+    assert_eq!(resolved["status"], "blocked", "{resolved}");
+    assert!(
+        resolved["next_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("conflict list")),
+        "thread resolve should point at materialized conflict state: {resolved}"
+    );
+    assert!(
+        resolved["recommended_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("resolve conflict.txt")),
+        "thread resolve should make the next file resolution executable: {resolved}"
+    );
+    assert!(
+        !resolved["recommended_action"]
+            .as_str()
+            .unwrap_or("")
+            .contains("thread refresh"),
+        "thread resolve must not loop back to refresh after writing conflict state: {resolved}"
+    );
+    let conflict_file = std::fs::read_to_string(thread_path.join("conflict.txt")).unwrap();
+    assert!(
+        conflict_file.contains("<<<<<<<"),
+        "thread resolve should materialize conflict markers in the isolated checkout"
     );
 }
 
@@ -6193,6 +6313,36 @@ fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
     let continued = json(&thread_path, &["--output", "json", "continue"]);
     assert_eq!(continued["status"], "continued");
     assert_operator_json_contract(&continued, "merge");
+    assert!(
+        continued["recommended_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("ship")),
+        "continue should hand the operator back to the parent ship flow: {continued}"
+    );
+
+    let after_continue = json(
+        temp.path(),
+        &[
+            "thread",
+            "show",
+            "feature/manual-recover",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(after_continue["freshness"], "current", "{after_continue}");
+    assert_eq!(after_continue["thread_state"], "ready", "{after_continue}");
+    assert_eq!(
+        after_continue["integration_policy_result"]["status"], "manual_resolved",
+        "{after_continue}"
+    );
+    assert!(
+        !after_continue["recommended_action"]
+            .as_str()
+            .unwrap_or("")
+            .contains("thread refresh"),
+        "manual conflict resolution should not leave parent thread advice stuck on refresh: {after_continue}"
+    );
 
     let retry_ship = json(
         temp.path(),

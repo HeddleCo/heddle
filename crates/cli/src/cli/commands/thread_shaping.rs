@@ -23,7 +23,7 @@ use super::{
     thread_cmd::{load_thread, refresh_thread, refresh_thread_freshness, thread_not_found_advice},
 };
 use crate::{
-    cli::{Cli, should_output_json, style, worktree_status_options},
+    cli::{Cli, render::shell_quote, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
 
@@ -265,37 +265,58 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     let source_repo = Repository::open(&source_root)?;
     let rebase_state_path = source_repo.heddle_dir().join("REBASE_STATE");
 
-    if thread.freshness == repo::ThreadFreshness::Stale
-        && refresh_thread(&repo, &thread_id, cli).is_ok()
-    {
-        let manager = super::thread_cmd::thread_manager(&repo);
-        let mut refreshed_thread = manager
-            .load(&thread_id)?
-            .ok_or_else(|| anyhow!(thread_not_found_advice(&thread_id, "resolve thread")))?;
-        let resolved_state = repo
-            .refs()
-            .get_thread(&refreshed_thread.thread)?
-            .map(|id| id.short());
-        refreshed_thread.integration_policy_result.status = Some("manual_resolved".to_string());
-        refreshed_thread.integration_policy_result.reason =
-            Some("manual integration resolution captured".to_string());
-        refreshed_thread
-            .integration_policy_result
-            .manual_resolution_state = resolved_state;
-        manager.save(&refreshed_thread)?;
-        let operator = if rebase_state_path.exists() {
-            thread_resolve_rebase_followup_operator(&source_repo, &rebase_state_path, &thread.id)?
-        } else {
-            let trust = build_repository_verification_state(&repo);
-            thread_resolve_refresh_operator(&thread.id, &trust)
-        };
-        return emit_thread_resolve(
-            cli,
-            &ThreadResolveOutput {
-                operator,
-                thread: thread_id,
-            },
-        );
+    if thread.freshness == repo::ThreadFreshness::Stale {
+        match refresh_thread(&repo, &thread_id, cli) {
+            Ok(_) => {
+                let manager = super::thread_cmd::thread_manager(&repo);
+                let mut refreshed_thread = manager.load(&thread_id)?.ok_or_else(|| {
+                    anyhow!(thread_not_found_advice(&thread_id, "resolve thread"))
+                })?;
+                let resolved_state = repo
+                    .refs()
+                    .get_thread(&refreshed_thread.thread)?
+                    .map(|id| id.short());
+                refreshed_thread.integration_policy_result.status =
+                    Some("manual_resolved".to_string());
+                refreshed_thread.integration_policy_result.reason =
+                    Some("manual integration resolution captured".to_string());
+                refreshed_thread
+                    .integration_policy_result
+                    .manual_resolution_state = resolved_state;
+                manager.save(&refreshed_thread)?;
+                let operator = if rebase_state_path.exists() {
+                    thread_resolve_rebase_followup_operator(
+                        &source_repo,
+                        &rebase_state_path,
+                        &thread.id,
+                    )?
+                } else {
+                    let trust = build_repository_verification_state(&repo);
+                    thread_resolve_refresh_operator(&thread.id, &trust)
+                };
+                return emit_thread_resolve(
+                    cli,
+                    &ThreadResolveOutput {
+                        operator,
+                        thread: thread_id,
+                    },
+                );
+            }
+            Err(err) => {
+                if let Some(operator) =
+                    thread_resolve_conflict_recovery_operator(&source_repo, &thread.id)?
+                {
+                    return emit_thread_resolve(
+                        cli,
+                        &ThreadResolveOutput {
+                            operator,
+                            thread: thread_id,
+                        },
+                    );
+                }
+                return Err(err);
+            }
+        }
     }
 
     let summary = super::thread::find_thread_summary(&repo, &thread.id)?
@@ -443,6 +464,41 @@ fn thread_resolve_rebase_followup_operator(
         next_action: Some(next_action.clone()),
         recommended_action: Some(next_action),
     })
+}
+
+fn thread_resolve_conflict_recovery_operator(
+    source_repo: &Repository,
+    thread_id: &str,
+) -> Result<Option<OperatorCommandOutput>> {
+    if !source_repo.merge_state_manager().is_merge_in_progress() {
+        return Ok(None);
+    }
+    let unresolved = source_repo.merge_state_manager().unresolved()?;
+    let repo_arg = shell_quote(&source_repo.root().display().to_string());
+    let conflict_list_command = format!("heddle --repo {repo_arg} conflict list");
+    let recommended_action = unresolved
+        .first()
+        .map(|path| format!("heddle --repo {repo_arg} resolve {}", shell_quote(path)))
+        .unwrap_or_else(|| format!("heddle --repo {repo_arg} continue"));
+    let blockers = if unresolved.is_empty() {
+        Vec::new()
+    } else {
+        unresolved
+            .iter()
+            .map(|path| format!("Resolve conflict marker path: {path}"))
+            .collect()
+    };
+    Ok(Some(OperatorCommandOutput {
+        status: "blocked".to_string(),
+        action: "resolve".to_string(),
+        message: format!(
+            "Thread '{thread_id}' has conflict markers in its checkout; resolve them there, then continue"
+        ),
+        blockers,
+        warnings: Vec::new(),
+        next_action: Some(conflict_list_command),
+        recommended_action: Some(recommended_action),
+    }))
 }
 
 fn thread_resolve_refresh_operator(
