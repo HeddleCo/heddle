@@ -1953,6 +1953,9 @@ the same ready envelope.
 
 `heddle push --output json` emits:
 
+`heddle push <remote> <thread>` is accepted as a Git-shaped alias for
+`heddle push <remote> --thread <thread>`; the JSON output contract is the same.
+
 ```json
 {
   "output_kind": "push",

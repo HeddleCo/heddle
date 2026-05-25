@@ -1155,10 +1155,8 @@ pub struct ResolveArgs {
     pub abort: bool,
 }
 
-/// The `(remote, thread)` pair shared by every command that targets a
-/// remote: `push`, `pull`, `fetch`. Flattening once keeps the field
-/// docstrings consistent and lets a future "add `--token` to all three"
-/// land in a single place.
+/// The `(remote, thread)` pair shared by remote commands that use an
+/// option-only thread selector.
 #[derive(Clone, Debug, clap::Args)]
 pub struct RemoteOperationArgs {
     /// Remote name, local path, URL, or hosted address.
@@ -1172,8 +1170,16 @@ pub struct RemoteOperationArgs {
 /// Arguments for the `push` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct PushArgs {
-    #[command(flatten)]
-    pub remote_op: RemoteOperationArgs,
+    /// Remote name, local path, URL, or hosted address.
+    pub remote: Option<String>,
+
+    /// Thread to push.
+    #[arg(short, long, conflicts_with = "thread_arg")]
+    pub thread: Option<String>,
+
+    /// Thread to push; alias for `--thread`.
+    #[arg(value_name = "THREAD")]
+    pub thread_arg: Option<String>,
 
     /// State to push (default: HEAD).
     #[arg(short, long)]
@@ -1189,6 +1195,12 @@ pub struct PushArgs {
     /// refs/notes/heddle and skips Git tags.
     #[arg(long)]
     pub all_threads: bool,
+}
+
+impl PushArgs {
+    pub fn thread_name(&self) -> Option<String> {
+        self.thread.clone().or_else(|| self.thread_arg.clone())
+    }
 }
 
 /// Arguments for the `pull` command.

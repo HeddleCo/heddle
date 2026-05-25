@@ -557,8 +557,8 @@ async fn async_main() -> Result<()> {
         Commands::Push(args) => {
             cmd_push(
                 &cli,
-                args.remote_op.remote.clone(),
-                args.remote_op.thread.clone(),
+                args.remote.clone(),
+                args.thread_name(),
                 args.state.clone(),
                 args.force,
                 args.all_threads,

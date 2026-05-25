@@ -96,7 +96,7 @@ hosted serve --bind 127.0.0.1 --port 8421
 Push/pull:
 
 ```bash
-heddle push origin --thread main
+heddle push origin main
 heddle pull origin --thread main --local-thread main
 ```
 
@@ -107,7 +107,7 @@ export HEDDLE_SERVER_REQUIRE_AUTH=1
 export HEDDLE_SERVER_TOKEN=devtoken
 
 export HEDDLE_REMOTE_TOKEN=devtoken
-heddle push origin --thread main
+heddle push origin main
 heddle pull origin --thread main --local-thread main
 ```
 
