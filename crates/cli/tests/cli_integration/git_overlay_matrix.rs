@@ -2949,7 +2949,14 @@ fn git_overlay_matrix_bridge_push_pull_report_verification_state() {
         temp.path(),
         &["--output", "json", "bridge", "git", "push", origin_arg],
     );
+    assert_eq!(push["output_kind"], "bridge_git_push");
+    assert_eq!(push["action"], "bridge git push");
+    assert_eq!(push["status"], "pushed");
+    assert_eq!(push["success"], true);
     assert_eq!(push["pushed"], true);
+    assert_eq!(push["changed"], true);
+    assert_eq!(push["transport"], "git");
+    assert_eq!(push["remote"], origin_arg);
     assert_eq!(push["verification"]["verified"], true);
     assert_eq!(push["verification"]["status"], "clean");
     assert_verify_check_rows(&push["verification"]);
@@ -2958,9 +2965,14 @@ fn git_overlay_matrix_bridge_push_pull_report_verification_state() {
         temp.path(),
         &["--output", "json", "bridge", "git", "pull", origin_arg],
     );
+    assert_eq!(pull["output_kind"], "bridge_git_pull");
+    assert_eq!(pull["action"], "bridge git pull");
     assert_eq!(pull["status"], "up_to_date");
+    assert_eq!(pull["success"], true);
     assert_eq!(pull["pulled"], false);
     assert_eq!(pull["changed"], false);
+    assert_eq!(pull["transport"], "git");
+    assert_eq!(pull["remote"], origin_arg);
     assert_eq!(pull["verification"]["verified"], true);
     assert_eq!(pull["verification"]["status"], "clean");
     assert_verify_check_rows(&pull["verification"]);

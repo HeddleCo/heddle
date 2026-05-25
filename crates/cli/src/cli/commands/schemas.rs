@@ -2546,7 +2546,13 @@ pub struct BridgeGitReconcileSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BridgePushSchema {
+    pub output_kind: Option<String>,
+    pub action: Option<String>,
+    pub status: Option<String>,
+    pub success: Option<bool>,
     pub pushed: bool,
+    pub changed: Option<bool>,
+    pub transport: Option<String>,
     pub remote: String,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
@@ -2554,9 +2560,13 @@ pub struct BridgePushSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BridgePullSchema {
+    pub output_kind: Option<String>,
+    pub action: Option<String>,
     pub status: Option<String>,
+    pub success: Option<bool>,
     pub pulled: bool,
     pub changed: Option<bool>,
+    pub transport: Option<String>,
     pub remote: String,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
