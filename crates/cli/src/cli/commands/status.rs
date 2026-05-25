@@ -30,7 +30,7 @@ use tracing::debug;
 use super::{
     action_line::print_command,
     command_catalog::ActionFields,
-    git_compat::{GitIndexPlan, git_index_plan_for_root},
+    git_compat::{GitIndexPlan, git_index_plan_for_repo, git_index_plan_for_root},
     git_overlay_health::{
         GitOverlayHealth, RepositoryVerificationState, build_git_overlay_health,
         build_plain_git_verification_probe, command_argvs, override_trust_recommended_action,
@@ -426,7 +426,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let trust = RepositoryVerificationState::from_health(&repo, git_overlay_health.clone());
     let status_options = worktree_status_options(Some(repo.config()));
     let git_worktree_status = repo.git_overlay_worktree_status().unwrap_or(None);
-    let git_index = git_index_plan_for_root(repo.root())?;
+    let git_index = git_index_plan_for_repo(&repo)?;
     let identity_notice = first_capture_identity_notice(&repo, current_state.as_ref())?;
     let git_clean_mapping_blocker = matches!(
         trust.status.as_str(),

@@ -2148,6 +2148,58 @@ fn git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop() {
 }
 
 #[test]
+fn git_overlay_matrix_commit_ignores_default_python_generated_noise() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(temp.path().join("src/__pycache__")).unwrap();
+    std::fs::write(
+        temp.path().join("src/__pycache__/app.cpython-312.pyc"),
+        "cache",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("src/app.pyc"), "cache").unwrap();
+
+    let status_output = heddle_output(&["--output", "json", "status"], Some(temp.path()))
+        .expect("status should run");
+    assert!(status_output.status.success());
+    let status: serde_json::Value =
+        serde_json::from_slice(&status_output.stdout).expect("status should be JSON");
+    assert_eq!(status["verification"]["status"], "clean");
+    assert_eq!(status["git_index"]["commit_mode"], "none");
+    assert_eq!(
+        status["git_index"]["will_commit"]
+            .as_array()
+            .expect("will_commit array")
+            .len(),
+        0,
+        "default ignored generated noise must not appear in the Git index plan: {status}"
+    );
+
+    let output = heddle_output(
+        &["--output", "json", "commit", "-m", "noop"],
+        Some(temp.path()),
+    )
+    .expect("commit should run");
+    assert!(
+        !output.status.success(),
+        "default ignored generated-only commit should fail"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: serde_json::Value =
+        serde_json::from_str(stderr).expect("no-op commit should emit JSON envelope");
+    assert_eq!(envelope["kind"], "nothing_to_commit");
+}
+
+#[test]
 fn git_overlay_matrix_commit_noop_fails_closed_when_verification_blocked() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");

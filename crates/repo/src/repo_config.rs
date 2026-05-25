@@ -261,6 +261,11 @@ fn default_ignore() -> Vec<String> {
         ".git".to_string(),
         "target".to_string(),
         "node_modules".to_string(),
+        "__pycache__".to_string(),
+        "*.pyc".to_string(),
+        ".pytest_cache".to_string(),
+        ".mypy_cache".to_string(),
+        ".ruff_cache".to_string(),
     ]
 }
 

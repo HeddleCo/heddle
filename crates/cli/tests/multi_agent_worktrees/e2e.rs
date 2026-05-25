@@ -1492,6 +1492,70 @@ fn undo_is_scoped_to_the_current_thread() {
 }
 
 #[test]
+fn thread_and_workspace_json_match_dirty_current_checkout() {
+    let main = setup_repo("base.txt", "base");
+    let start_json = heddle(
+        &[
+            "--output",
+            "json",
+            "start",
+            "feature/dirty-json",
+            "--workspace",
+            "auto",
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+    let started: Value = serde_json::from_str(&start_json).unwrap();
+    let thread = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+    fs::write(thread.join("README.md"), "dirty before ready\n").unwrap();
+
+    let threads: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "thread", "list"], Some(&thread)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(threads["current"].as_str(), Some("feature/dirty-json"));
+    let current_thread = threads["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|thread| thread["is_current"] == true)
+        .expect("thread list should mark the current checkout");
+    assert!(
+        current_thread["changed_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path.as_str() == Some("README.md")),
+        "thread list should include live dirty paths for the current checkout: {threads}"
+    );
+
+    let workspace: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "workspace", "show"], Some(&thread)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        workspace["current_thread"].as_str(),
+        Some("feature/dirty-json")
+    );
+    let current_workspace_thread = workspace["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| group["threads"].as_array().unwrap())
+        .find(|thread| thread["is_current"] == true)
+        .expect("workspace should mark the current checkout");
+    assert!(
+        current_workspace_thread["changed_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|path| path.as_str() == Some("README.md")),
+        "workspace should include live dirty paths for the current checkout: {workspace}"
+    );
+}
+
+#[test]
 fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() {
     let main = setup_repo("base.txt", "base");
 
