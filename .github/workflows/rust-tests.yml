@@ -79,6 +79,16 @@ jobs:
       - name: Check native-only
         run: cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
 
+      # Cross-check the FUSE worker on a non-Linux mount target.
+      # `[[bin]] heddle-fuse-worker`'s `required-features = ["mount"]`
+      # are met whenever someone runs `cargo install heddle-cli
+      # --features mount` on macOS or Windows, so its `main` must
+      # exist on every target the `mount` feature compiles for.
+      # See `scripts/check-fuse-worker-cross-platform.sh` for the
+      # rationale (heddle#190 r5 / Codex PR #225 P1).
+      - name: Cross-check FUSE worker on non-Linux mount target
+        run: bash scripts/check-fuse-worker-cross-platform.sh
+
       - name: sccache stats
         run: sccache --show-stats
 
