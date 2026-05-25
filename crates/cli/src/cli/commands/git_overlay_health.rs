@@ -184,6 +184,20 @@ pub(crate) struct PlainGitImportHint {
     pub recommended_command: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepositorySetupActionKind {
+    Init,
+    Adopt,
+    BridgeImport,
+    Other,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RepositorySetupGuidance {
+    pub setup_line: String,
+    pub effect: String,
+}
+
 #[derive(Debug, Clone)]
 struct WorkflowThreadAction {
     recommended_action: String,
@@ -1273,6 +1287,70 @@ pub(crate) fn repository_verification_recovery_commands(
         vec![primary_command.to_string()]
     } else {
         trust.recovery_commands.clone()
+    }
+}
+
+pub(crate) fn repository_setup_guidance(
+    trust: &RepositoryVerificationState,
+) -> Option<RepositorySetupGuidance> {
+    if !matches!(trust.status.as_str(), "needs_init" | "needs_import") {
+        return None;
+    }
+    let action = trust.recommended_action.trim();
+    if action.is_empty() {
+        return None;
+    }
+    let kind = repository_setup_action_kind(action);
+    let setup_line = match kind {
+        RepositorySetupActionKind::Init => {
+            format!("Git repo detected; initialize Heddle with {action}")
+        }
+        RepositorySetupActionKind::Adopt => {
+            format!("Git repo detected; connect this branch with {action}")
+        }
+        RepositorySetupActionKind::BridgeImport => {
+            format!("Git history not imported; import it with {action}")
+        }
+        RepositorySetupActionKind::Other => {
+            format!("Run {action} to clear the primary setup blocker")
+        }
+    };
+    let worktree_tail = if trust.worktree_state == "clean" {
+        "and the Git worktree stays clean"
+    } else {
+        "and existing Git worktree changes stay untouched"
+    };
+    let effect = match kind {
+        RepositorySetupActionKind::Init => format!(
+            ".heddle metadata will be created; there are no Git commits to import yet, {worktree_tail}."
+        ),
+        RepositorySetupActionKind::Adopt
+            if trust.repository_mode == "plain-git" && !trust.heddle_initialized =>
+        {
+            format!(".heddle metadata will be created, Git history imported, {worktree_tail}.")
+        }
+        RepositorySetupActionKind::Adopt => {
+            format!(".heddle metadata is present; adoption imports Git history {worktree_tail}.")
+        }
+        RepositorySetupActionKind::BridgeImport => {
+            format!(".heddle metadata is present; Git history import runs {worktree_tail}.")
+        }
+        RepositorySetupActionKind::Other => {
+            format!("The recommended setup command runs {worktree_tail}.")
+        }
+    };
+    Some(RepositorySetupGuidance { setup_line, effect })
+}
+
+fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
+    if action == "heddle init" {
+        RepositorySetupActionKind::Init
+    } else if action.starts_with("heddle adopt") {
+        RepositorySetupActionKind::Adopt
+    } else if action.starts_with("heddle bridge git import") {
+        RepositorySetupActionKind::BridgeImport
+    } else {
+        RepositorySetupActionKind::Other
     }
 }
 
@@ -3210,7 +3288,8 @@ mod tests {
 
     use super::{
         RepositoryVerificationState, machine_contract_coverage, remote_drift_decision,
-        remote_tracking_next_action, repository_verification_blocked_advice,
+        remote_tracking_next_action, repository_setup_guidance,
+        repository_verification_blocked_advice,
     };
     use crate::cli::commands::build_command_catalog;
 
@@ -3246,6 +3325,38 @@ mod tests {
             recovery_action_templates: Vec::new(),
             checks: Vec::new(),
         }
+    }
+
+    #[test]
+    fn repository_setup_guidance_distinguishes_init_from_adopt() {
+        let mut init = verification_state("heddle init", vec!["heddle init".to_string()]);
+        init.status = "needs_init".to_string();
+        init.repository_mode = "plain-git".to_string();
+        init.heddle_initialized = false;
+        init.import_state = "no_commits".to_string();
+        init.mapping_state = "no_commits".to_string();
+
+        let guidance = repository_setup_guidance(&init).expect("init guidance");
+        assert!(guidance.setup_line.contains("initialize Heddle"));
+        assert!(guidance.setup_line.contains("heddle init"));
+        assert!(guidance.effect.contains("no Git commits to import yet"));
+
+        let mut adopt = verification_state(
+            "heddle adopt --ref main",
+            vec!["heddle adopt --ref main".to_string()],
+        );
+        adopt.status = "needs_import".to_string();
+        adopt.repository_mode = "git-overlay".to_string();
+        adopt.import_state = "needs_import".to_string();
+        adopt.mapping_state = "needs_import".to_string();
+
+        let guidance = repository_setup_guidance(&adopt).expect("adopt guidance");
+        assert!(
+            guidance
+                .setup_line
+                .contains("connect this branch with heddle adopt --ref main")
+        );
+        assert!(guidance.effect.contains("adoption imports Git history"));
     }
 
     #[test]
