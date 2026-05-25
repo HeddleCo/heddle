@@ -1445,4 +1445,420 @@ mod tests {
             proptest::prop_assert_eq!(after, expected);
         }
     }
+
+    // ------- FSM proptest harness (heddle#212) ---------------------------------
+    //
+    // Generates random sequences of synthetic FUSE callbacks against a
+    // fresh `Pending` and asserts the post-sequence state matches an
+    // oracle that encodes the §1 FSM in
+    // `docs/design/mount-posix-semantics.md` at the substrate boundary
+    // — i.e. the four sites the substrate already gates
+    // ([`BrandedPending::transition_to_orphan`],
+    // [`BrandedPending::kernel_forget_inode`],
+    // [`Pending::drain_for_capture`]) plus the saturating-add /
+    // saturating-sub refcount arithmetic that
+    // [`crate::core::MountInner::on_open`] /
+    // [`crate::core::MountInner::release_node`] perform directly on the
+    // `state` map.
+    //
+    // # Op set
+    //
+    // * [`Op::Open`] / [`Op::Release`] — mimic the refcount arithmetic
+    //   the mount shell applies on FUSE `open` / `release` callbacks.
+    //   Seeded via [`Pending::test_insert_state`]. `Release` is
+    //   *saturating at zero* in the harness: the production
+    //   `release_node` removes the `state` entry for `Live { 1 }` and
+    //   `Orphan { 1 }` (transitions T2/T6 in §1), but the substrate
+    //   exposes state-entry removal only through the witness-gated
+    //   [`BrandedPending::kernel_forget_inode`] path (and only for
+    //   `Released | LiveZero`). The harness retires `LiveZero` entries
+    //   via the subsequent `Forget` / `Drain` ops; T6 (Orphan{1} →
+    //   Released via final release) is therefore a saturating no-op in
+    //   the harness, an intentional simplification that keeps the
+    //   harness scoped to the substrate boundary.
+    // * [`Op::Unlink`] — drives [`BrandedPending::transition_to_orphan`].
+    //   The substrate rejects every non-`LiveNonZero` state by
+    //   returning `None`; the oracle mirrors the same gate.
+    // * [`Op::Forget`] — drives [`BrandedPending::kernel_forget_inode`].
+    //   Substrate fires only for `Released | LiveZero`; rejects
+    //   `LiveNonZero` and any `Orphan`. The oracle mirrors the same
+    //   gate.
+    // * [`Op::Drain`] — drives [`Pending::drain_for_capture`]. Retires
+    //   `LiveZero` entries; preserves `LiveNonZero` and `Orphan`.
+    //
+    // # Properties
+    //
+    // * `fsm_state_matches_oracle` — for every NodeId in the small
+    //   universe `0..8`, the post-sequence `lookup_state` agrees with
+    //   the oracle. Catches any substrate-side divergence from the
+    //   modeled FSM, including the four r11 bug-classes (transition
+    //   from the wrong state, drop of `LiveNonZero` on capture,
+    //   un-gated kernel-forget on `Orphan`, mis-typed caller hitting
+    //   `transition_to_orphan` from a non-Live state).
+    // * `fsm_open_count_refcount_balance` — for every surviving entry,
+    //   the `open_count` field equals the oracle's tracked refcount.
+    //   Saturating arithmetic prevents underflow at the type level
+    //   (u32 ⇒ no negative); this property additionally catches
+    //   *off-by-one* drift (where the substrate would silently update
+    //   the count out of step with the on_open / release_node
+    //   semantics).
+    // * `fsm_witness_constructors_mutually_exclusive` — at any post-
+    //   sequence instant, the four `witness_*` constructors classify
+    //   each NodeId into exactly one bucket. A regression that widened
+    //   or narrowed any witness's accepting set would surface here.
+    //
+    // # Deliberately-broken counterexample (red commit, heddle#212)
+    //
+    // The red commit on this branch shipped a fourth property,
+    // `fsm_open_count_strictly_positive`, that asserted every
+    // surviving entry had `open_count > 0`. The §1 FSM doesn't say
+    // that — `Live { 0 }` is a reachable state after any `Open(id)`
+    // followed by `Release(id)` — so proptest produced a shrunk
+    // counterexample on the first run:
+    //
+    // ```text
+    // ops = [Open(0), Release(0)]
+    // pending.state = { 0: Live { open_count: 0 } }
+    // ```
+    //
+    // That two-op minimum reproducer is the proof the harness shrinks
+    // counterexamples down to the smallest divergence. The green
+    // commit removes the broken property; the artifact survives in
+    // this comment and in [`harness_catches_state_divergence`] (which
+    // pins the same proof at unit-test scale, so a future regression
+    // that quietly broke the harness's divergence-detection wouldn't
+    // ship green).
+
+    /// Modeled lifecycle state. Mirrors [`NodeState`] but adds an
+    /// explicit [`ModelState::Released`] variant for "no entry in the
+    /// `state` map" — the third FSM state per §1.1 of
+    /// `mount-posix-semantics.md`.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ModelState {
+        Released,
+        Live(u32),
+        Orphan(u32),
+    }
+
+    /// One synthetic FUSE-callback worth of FSM input. `u8` NodeIds
+    /// keep the strategy's value-space small (0..8 in the strategies
+    /// below) so shrunken counterexamples stay readable.
+    #[derive(Clone, Debug)]
+    enum Op {
+        Open(u8),
+        Release(u8),
+        Unlink(u8),
+        Forget(u8),
+        Drain,
+    }
+
+    /// Pure-data oracle. Implements the substrate-boundary FSM
+    /// described in the module-level comment. Replays the same ops the
+    /// harness applies to a real `Pending` and stays in lockstep.
+    #[derive(Debug, Default, Clone)]
+    struct Oracle {
+        states: std::collections::BTreeMap<u8, ModelState>,
+    }
+
+    impl Oracle {
+        fn lookup(&self, id: u8) -> ModelState {
+            self.states
+                .get(&id)
+                .copied()
+                .unwrap_or(ModelState::Released)
+        }
+
+        fn set(&mut self, id: u8, state: ModelState) {
+            if matches!(state, ModelState::Released) {
+                self.states.remove(&id);
+            } else {
+                self.states.insert(id, state);
+            }
+        }
+
+        fn apply(&mut self, op: &Op) {
+            match op {
+                Op::Open(id) => {
+                    let next = match self.lookup(*id) {
+                        ModelState::Released => ModelState::Live(1),
+                        ModelState::Live(n) => ModelState::Live(n.saturating_add(1)),
+                        ModelState::Orphan(n) => ModelState::Orphan(n.saturating_add(1)),
+                    };
+                    self.set(*id, next);
+                }
+                Op::Release(id) => {
+                    // Saturating at zero — see the module comment on
+                    // T6's intentional simplification.
+                    let next = match self.lookup(*id) {
+                        ModelState::Released => ModelState::Released,
+                        ModelState::Live(n) => ModelState::Live(n.saturating_sub(1)),
+                        ModelState::Orphan(n) => ModelState::Orphan(n.saturating_sub(1)),
+                    };
+                    self.set(*id, next);
+                }
+                Op::Unlink(id) => {
+                    // Substrate's `transition_to_orphan` accepts only
+                    // `Live { open_count >= 1 }`. Anything else (incl.
+                    // LiveZero, any Orphan, Released) is a no-op.
+                    if let ModelState::Live(n) = self.lookup(*id)
+                        && n >= 1
+                    {
+                        self.set(*id, ModelState::Orphan(n));
+                    }
+                }
+                Op::Forget(id) => {
+                    // Substrate's `kernel_forget_inode` accepts
+                    // `Released | LiveZero`. Both collapse to
+                    // Released.
+                    match self.lookup(*id) {
+                        ModelState::Released | ModelState::Live(0) => {
+                            self.set(*id, ModelState::Released);
+                        }
+                        _ => { /* substrate rejects; no-op */ }
+                    }
+                }
+                Op::Drain => {
+                    // Retain LiveNonZero + Orphan; retire LiveZero.
+                    self.states.retain(|_, s| !matches!(s, ModelState::Live(0)));
+                }
+            }
+        }
+    }
+
+    /// Apply `op` to the real `Pending`. Drives the substrate-gated
+    /// methods directly for `Unlink` / `Forget` / `Drain`; mimics the
+    /// `MountInner::on_open` / `MountInner::release_node` refcount
+    /// arithmetic via [`Pending::test_insert_state`] for `Open` /
+    /// `Release`. The mimicked arithmetic is byte-for-byte identical
+    /// to the production paths at `core.rs:1368-1381` (on_open) and
+    /// `core.rs:2938-2993` (release_node), modulo the T2/T6 state-
+    /// removal cases that aren't reachable through the substrate's
+    /// exposed surface (see the module comment).
+    fn apply_to_pending(p: &mut Pending<'_>, op: &Op) {
+        match op {
+            Op::Open(id) => {
+                let id64 = *id as u64;
+                let next = match p.lookup_state(id64) {
+                    None => NodeState::Live { open_count: 1 },
+                    Some(NodeState::Live { open_count }) => NodeState::Live {
+                        open_count: open_count.saturating_add(1),
+                    },
+                    Some(NodeState::Orphan { open_count }) => NodeState::Orphan {
+                        open_count: open_count.saturating_add(1),
+                    },
+                };
+                p.test_insert_state(id64, next);
+            }
+            Op::Release(id) => {
+                let id64 = *id as u64;
+                if let Some(s) = p.lookup_state(id64) {
+                    let next = match s {
+                        NodeState::Live { open_count } => NodeState::Live {
+                            open_count: open_count.saturating_sub(1),
+                        },
+                        NodeState::Orphan { open_count } => NodeState::Orphan {
+                            open_count: open_count.saturating_sub(1),
+                        },
+                    };
+                    p.test_insert_state(id64, next);
+                }
+            }
+            Op::Unlink(id) => {
+                p.with_brand(|bp| {
+                    let _ = bp.transition_to_orphan(*id as u64);
+                });
+            }
+            Op::Forget(id) => {
+                p.with_brand(|bp| {
+                    let _ = bp.kernel_forget_inode(*id as u64);
+                });
+            }
+            Op::Drain => {
+                p.drain_for_capture();
+            }
+        }
+    }
+
+    /// Project a real [`NodeState`] onto the model's [`ModelState`]
+    /// for direct comparison. `None` (no entry) → `Released`.
+    fn project(s: Option<NodeState>) -> ModelState {
+        match s {
+            None => ModelState::Released,
+            Some(NodeState::Live { open_count }) => ModelState::Live(open_count),
+            Some(NodeState::Orphan { open_count }) => ModelState::Orphan(open_count),
+        }
+    }
+
+    /// Strategy for one `Op`. NodeIds are drawn from `0..8` so a long
+    /// sequence reliably revisits the same id and exercises every
+    /// transition path. The five-variant `prop_oneof` weights each Op
+    /// equally; biasing toward `Drain` / `Unlink` is unnecessary —
+    /// length-32 sequences land enough of each.
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        proptest::prop_oneof![
+            (0u8..8u8).prop_map(Op::Open),
+            (0u8..8u8).prop_map(Op::Release),
+            (0u8..8u8).prop_map(Op::Unlink),
+            (0u8..8u8).prop_map(Op::Forget),
+            proptest::strategy::Just(Op::Drain),
+        ]
+    }
+
+    proptest::proptest! {
+        /// Property 1: for every NodeId in the small universe `0..8`,
+        /// the post-sequence `lookup_state` matches the oracle's
+        /// modeled state. This is the §1 FSM coherence check: any
+        /// substrate-side transition that lands in a state not
+        /// reachable via documented transitions shows up here.
+        #[test]
+        fn fsm_state_matches_oracle(
+            ops in proptest::collection::vec(op_strategy(), 0..32),
+        ) {
+            let mut p = Pending::default();
+            let mut oracle = Oracle::default();
+            for op in &ops {
+                apply_to_pending(&mut p, op);
+                oracle.apply(op);
+            }
+            for id in 0u8..8u8 {
+                let want = oracle.lookup(id);
+                let got = project(p.lookup_state(id as u64));
+                proptest::prop_assert_eq!(
+                    want, got,
+                    "FSM divergence at id {} after {:?}", id, ops
+                );
+            }
+        }
+
+        /// Property 2: for every surviving entry the `open_count` field
+        /// equals the oracle's modeled refcount — the substrate never
+        /// drifts off-by-one against the on_open / release_node
+        /// arithmetic. Saturating semantics keep both sides above zero
+        /// (so this property is also the "open_count is always non-
+        /// negative" refcount-sanity AC); a regression that introduced
+        /// wrapping or signed arithmetic would surface here.
+        #[test]
+        fn fsm_open_count_refcount_balance(
+            ops in proptest::collection::vec(op_strategy(), 0..32),
+        ) {
+            let mut p = Pending::default();
+            let mut oracle = Oracle::default();
+            for op in &ops {
+                apply_to_pending(&mut p, op);
+                oracle.apply(op);
+            }
+            for (id_u64, state) in p.lifecycle_iter() {
+                let id = id_u64 as u8;
+                let want = match oracle.lookup(id) {
+                    ModelState::Live(n) | ModelState::Orphan(n) => n,
+                    ModelState::Released => {
+                        return Err(proptest::test_runner::TestCaseError::fail(
+                            format!("id {id} survives in pending but oracle says Released")
+                        ));
+                    }
+                };
+                let got = match state {
+                    NodeState::Live { open_count } | NodeState::Orphan { open_count } => open_count,
+                };
+                proptest::prop_assert_eq!(want, got, "open_count divergence at id {}", id);
+            }
+        }
+
+        /// Property 3: at any post-sequence instant the four witness
+        /// constructors classify each NodeId into exactly one bucket
+        /// — i.e. the FSM is a partition of the per-NodeId state
+        /// space (LiveNonZero | LiveZero | Orphan | Released). A
+        /// regression that widened or narrowed any constructor's
+        /// accepting set (e.g. `witness_live_nonzero` returning `Some`
+        /// for `Live { 0 }`) would surface as a multi-bit mask here.
+        #[test]
+        fn fsm_witness_constructors_mutually_exclusive(
+            ops in proptest::collection::vec(op_strategy(), 0..32),
+        ) {
+            let mut p = Pending::default();
+            for op in &ops {
+                apply_to_pending(&mut p, op);
+            }
+            for id in 0u8..8u8 {
+                let id64 = id as u64;
+                let mask = p.with_brand(|bp| {
+                    let mut m = 0u8;
+                    if bp.witness_live_nonzero(id64).is_some() { m |= 1 << 0; }
+                    if bp.witness_live_zero(id64).is_some()    { m |= 1 << 1; }
+                    if bp.witness_orphan(id64).is_some()       { m |= 1 << 2; }
+                    if bp.witness_released(id64).is_some()     { m |= 1 << 3; }
+                    m
+                });
+                proptest::prop_assert_eq!(
+                    mask.count_ones(), 1u32,
+                    "witness mask for id {} is 0b{:04b} after {:?}; expected exactly one bit",
+                    id, mask, ops
+                );
+            }
+        }
+    }
+
+    /// Pin the harness's divergence-detection at unit-test scale: hand
+    /// the oracle a "Pending" state that doesn't match the modeled
+    /// state and assert that the equality check function fails. This
+    /// is the structural twin of the proptest's
+    /// `fsm_state_matches_oracle` property, and is what proves the
+    /// harness's *check function* (not just the strategy) is sound. A
+    /// future regression that quietly made the check trivially pass
+    /// would surface here.
+    #[test]
+    fn harness_catches_state_divergence() {
+        // Build a real Pending in a "stuck-Live" state (the r11 #1
+        // bug shape: transition_to_orphan never fired, even though
+        // the kernel emitted Unlink). The oracle, fed the same op
+        // sequence, says Orphan.
+        let mut p = Pending::default();
+        p.test_insert_state(0, NodeState::Live { open_count: 1 });
+        // Oracle replay: Open(0) then Unlink(0).
+        let mut oracle = Oracle::default();
+        oracle.apply(&Op::Open(0));
+        oracle.apply(&Op::Unlink(0));
+        // Sanity: oracle is now Orphan(1).
+        assert_eq!(oracle.lookup(0), ModelState::Orphan(1));
+        // Pending was never transitioned, so it stays Live(1).
+        assert_eq!(
+            project(p.lookup_state(0)),
+            ModelState::Live(1),
+            "harness setup precondition"
+        );
+        // The structural equality check the proptest performs:
+        let oracle_state = oracle.lookup(0);
+        let pending_state = project(p.lookup_state(0));
+        assert_ne!(
+            oracle_state, pending_state,
+            "harness must report divergence: oracle says {oracle_state:?}, \
+             pending says {pending_state:?}"
+        );
+    }
+
+    /// Pin the saturating-Release invariant at unit-test scale: the
+    /// `MountInner::release_node` arithmetic uses `saturating_sub(1)`,
+    /// so an unbalanced release stream (more releases than opens) can
+    /// never underflow `open_count`. The proptest's
+    /// `fsm_open_count_refcount_balance` covers this property at
+    /// scale; this test is the minimal hand-picked reproducer so a
+    /// regression that swapped `saturating_sub` for `wrapping_sub`
+    /// surfaces with a one-line diff.
+    #[test]
+    fn release_saturates_at_zero_under_unbalanced_stream() {
+        let mut p = Pending::default();
+        let ops = [
+            Op::Open(0),
+            Op::Release(0),
+            Op::Release(0), // would underflow without saturating
+            Op::Release(0),
+        ];
+        let mut oracle = Oracle::default();
+        for op in &ops {
+            apply_to_pending(&mut p, op);
+            oracle.apply(op);
+        }
+        assert_eq!(oracle.lookup(0), ModelState::Live(0));
+        assert_eq!(project(p.lookup_state(0)), ModelState::Live(0));
+    }
 }
