@@ -146,6 +146,21 @@ jobs:
         run: |
           cargo test --locked -p heddle-mount --features fuse --lib fuse::
 
+      # FUSE worker resource-cleanup tests (Codex r2 P2 findings on
+      # heddle#190): assert that a failed `Command::spawn` doesn't
+      # leak the child IPC fd, and that a failed watcher-thread
+      # spawn still reaps the started worker. Neither test needs
+      # `/dev/fuse` — the failures are before the mount — so they
+      # run as plain (non-`--ignored`) tests under the fuse feature.
+      - name: FUSE worker resource-cleanup tests
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        run: |
+          cargo test --locked -p heddle-mount --features fuse \
+            --test fuse_worker_resource_cleanup \
+            --lib worker::tests::supervise_watcher_spawn_reaps_child_on_failure
+
       - name: sccache stats
         run: sccache --show-stats
 

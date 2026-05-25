@@ -598,12 +598,30 @@ impl Supervisor {
 
         // Hand the child off to the watcher thread. The watcher
         // is the unique reaper; the supervisor signals via pid.
+        //
+        // The `Child` is parked in an `Arc<Mutex<Option<Child>>>`
+        // so that, if `thread::Builder::spawn` fails (resource
+        // exhaustion: EAGAIN from `pthread_create`), we can still
+        // retrieve it from this side and reap it — without the
+        // slot the failed-to-call closure drops the moved-in
+        // `Child`, which closes its pipes but does NOT signal or
+        // wait the worker process. See [`supervise_watcher_spawn`].
         let liveness = Arc::new(AtomicU8::new(Liveness::Running as u8));
         let watcher_liveness = Arc::clone(&liveness);
         let watcher_mount = mountpoint.to_path_buf();
-        let watcher = thread::Builder::new()
+        let child_slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
+        let watcher_child_slot = Arc::clone(&child_slot);
+        let spawn_result = thread::Builder::new()
             .name(format!("fuse-worker-watcher:{thread_id}"))
-            .spawn(move || watch_child(child, watcher_liveness, watcher_mount))
+            .spawn(move || {
+                let c = watcher_child_slot
+                    .lock()
+                    .expect("watcher child slot lock")
+                    .take()
+                    .expect("watcher closure ran without a child in the slot");
+                watch_child(c, watcher_liveness, watcher_mount);
+            });
+        let watcher = supervise_watcher_spawn(child_slot, spawn_result)
             .context("spawn watcher thread")?;
 
         Ok(Supervisor {
@@ -774,6 +792,39 @@ fn send_signal(pid: i32, sig: i32) {
     }
 }
 
+/// Reconcile the result of spawning the watcher thread with the
+/// `Child` that closure was supposed to take ownership of.
+///
+/// On success the spawned closure will pull the child out of
+/// `child_slot` and run [`watch_child`] against it; the caller
+/// just unwraps the handle.
+///
+/// On failure the closure was dropped without running, so the
+/// `Child` is still parked in `child_slot`. Without recovery,
+/// returning the error to the caller would leave a started
+/// `heddle-fuse-worker` running with no supervisor and no
+/// reaper — the kernel would keep the mount up until the worker
+/// exited on its own, and the CLI would proceed to the NFS
+/// fallback while the orphan worker held FUSE state. We take the
+/// child back and reap it (`kill` + `wait`) before propagating
+/// the error so the failure path matches what callers expect:
+/// "no worker is running."
+fn supervise_watcher_spawn(
+    child_slot: Arc<Mutex<Option<Child>>>,
+    spawn_result: io::Result<JoinHandle<()>>,
+) -> io::Result<JoinHandle<()>> {
+    match spawn_result {
+        Ok(handle) => Ok(handle),
+        Err(e) => {
+            // RED-COMMIT STUB: propagates the error without reaping
+            // the child. The unit test asserts kill+wait happens;
+            // this path makes it fail.
+            let _ = child_slot;
+            Err(e)
+        }
+    }
+}
+
 fn stop_grace_from_env() -> Option<Duration> {
     std::env::var(STOP_GRACE_ENV)
         .ok()
@@ -888,6 +939,66 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    /// **Codex P2 — watcher-spawn failure must reap the worker.**
+    ///
+    /// `Supervisor::spawn` calls `thread::Builder::spawn` to launch
+    /// the watcher thread *after* the worker has handshake-confirmed
+    /// the mount. If thread creation fails (EAGAIN on
+    /// `pthread_create` under resource pressure), the unsupervised
+    /// worker is still running with the FUSE mount alive. The
+    /// supervisor must reap it before returning the spawn error.
+    ///
+    /// We drive [`supervise_watcher_spawn`] directly: park a real
+    /// long-running child (`sleep 60`) in the slot, hand the helper
+    /// a forged `Err`, and assert the child is no longer in the
+    /// process table afterwards.
+    ///
+    /// On the red-commit stub (the helper is a no-op on the error
+    /// branch), the child stays alive → `kill(pid, 0)` returns 0
+    /// and the assertion fires.
+    #[test]
+    fn supervise_watcher_spawn_reaps_child_on_failure() {
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let slot: Arc<Mutex<Option<Child>>> = Arc::new(Mutex::new(Some(child)));
+
+        let forged: io::Result<JoinHandle<()>> =
+            Err(io::Error::other("forced watcher-spawn failure"));
+        let result = supervise_watcher_spawn(Arc::clone(&slot), forged);
+        assert!(result.is_err(), "helper must propagate the spawn error");
+
+        assert!(
+            slot.lock().expect("slot lock").is_none(),
+            "child must be taken out of the slot so it can be reaped"
+        );
+
+        // After kill+wait the kernel removes the entry; `kill(pid, 0)`
+        // returns -1 with ESRCH. (If the helper skipped the reap,
+        // the child is alive and `kill(pid, 0)` returns 0 — and we
+        // also leak a real `sleep 60` process for the next minute.)
+        let raw = unsafe { libc::kill(pid as i32, 0) };
+        let errno = io::Error::last_os_error().raw_os_error();
+        if raw == 0 {
+            // Best-effort cleanup so we don't leak `sleep` if the
+            // assertion below is what trips. `SIGKILL` is unblockable.
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+        assert_eq!(
+            raw, -1,
+            "child pid {pid} should have been reaped (kill 0 returned {raw})"
+        );
+        assert_eq!(
+            errno,
+            Some(libc::ESRCH),
+            "expected ESRCH after reap, got errno={errno:?}"
+        );
     }
 
     #[test]
