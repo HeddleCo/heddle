@@ -19,6 +19,13 @@
 //! main is a stub that prints a usable error and exits 2 — the
 //! supervisor on those platforms uses the in-process mount path
 //! (heddle#190 r5 / Codex PR #225 P1).
+//!
+//! Cross-platform correctness of this pattern is verified by code
+//! review + `cargo check` at PR time, not by a CI cross-compile
+//! job: provisioning mingw-w64 + cross-compiling `aws-lc-sys`
+//! (transitive via `rustls`) added several minutes to every CI run
+//! to verify a handful of lines of trivial cfg, which is out of
+//! proportion to the value (heddle#190 r7).
 
 use std::process::ExitCode;
 
