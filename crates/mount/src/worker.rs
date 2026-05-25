@@ -507,11 +507,16 @@ impl Supervisor {
         clear_cloexec(child_end.as_raw_fd())?;
 
         // We need the raw fd to survive the `Stdio` redirections
-        // and the exec. Forget the wrapper so its `Drop` doesn't
-        // close the fd in the parent before the child can pick it
-        // up; the worker takes ownership inside the child via
-        // `OwnedFd::from_raw_fd`.
-        let child_raw = child_end.into_raw_fd();
+        // and the exec. Hold the fd in an `OwnedFd` until the spawn
+        // result is in hand so an early-return from `Command::spawn`
+        // (missing binary, EACCES) drops the guard and closes the
+        // fd — without the guard, the raw fd leaks once per failed
+        // attempt and repeated mount fallbacks march toward EMFILE.
+        // SAFETY: `child_end` was just constructed via `UnixStream::pair`
+        // and uniquely owned; `into_raw_fd` transfers that ownership
+        // to us, which we immediately re-wrap.
+        let child_owned: OwnedFd = unsafe { OwnedFd::from_raw_fd(child_end.into_raw_fd()) };
+        let child_raw: RawFd = child_owned.as_raw_fd();
 
         let mut command = Command::new(worker_binary);
         command
@@ -553,15 +558,12 @@ impl Supervisor {
             .spawn()
             .with_context(|| format!("spawn {}", worker_binary.display()))?;
 
-        // The child took its dup of `child_raw` via fork. We can
-        // close the parent's copy now — the parent's IPC end is
-        // `parent_end`.
-        //
-        // SAFETY: child_raw was a `into_raw_fd`-extracted UDS fd
-        // we explicitly own. Closing it is fine; the child has
-        // its own descriptor pointing at the same socket via fork
-        // semantics.
-        unsafe { libc::close(child_raw) };
+        // The child took its dup of `child_raw` via fork. Drop the
+        // parent's `OwnedFd` to close the parent's copy — the
+        // parent's IPC end is `parent_end`. On the error branch
+        // above, the `?` returns early and `child_owned` drops on
+        // the way out, closing the fd without the explicit step.
+        drop(child_owned);
 
         let pid = child.id();
 
