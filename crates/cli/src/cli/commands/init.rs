@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Initialize command.
 
-use std::{fs::OpenOptions, io::Write, path::PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use objects::object::Principal;
@@ -81,18 +81,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     debug!(heddle_dir = %repo.heddle_dir().display(), "Repository initialized");
 
-    // Install the default `.heddleignore` if the repo doesn't ship
-    // one yet. Auto-install (no prompt) is the explicit UX call: the
-    // friction we're paying is `heddle merge` refusals on day-one
-    // `.DS_Store` / `xcuserdata/` noise, and a prompt would just
-    // delay that suppression to whenever the user noticed. The file
-    // is plain text the user can edit or delete afterwards, so the
-    // blast radius of "wrong choice" is small.
-    let installed_heddleignore = if has_git {
-        false
-    } else {
-        maybe_install_default_heddleignore(repo.root())?
-    };
+    let installed_heddleignore = false;
 
     let mut user_config = UserConfig::load_default()?;
     let mut principal_configured = false;
@@ -116,7 +105,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     super::maybe_prompt_init_install(cli, &repo, &args)?;
 
-    let mut message = if has_git {
+    let message = if has_git {
         format!(
             "Initialized Heddle data in {} for Git-overlay workflows",
             repo.heddle_dir().display()
@@ -127,9 +116,6 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
             repo.heddle_dir().display()
         )
     };
-    if installed_heddleignore {
-        message.push_str("\nWrote default .heddleignore (edit to customize)");
-    }
 
     let trust = build_repository_verification_state(&repo);
     let next_action =
@@ -148,7 +134,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         principal_source: principal_status.source,
         principal: principal_status.principal,
         principal_recommended_action: principal_status.recommended_action,
-        side_effects: init_side_effects(has_git, installed_heddleignore, principal_configured),
+        side_effects: init_side_effects(has_git, principal_configured),
         message,
         next_action: next_action.clone(),
         recommended_action: next_action,
@@ -165,53 +151,6 @@ fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
         Ok(std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("Failed to determine current directory: {}", e))?
             .join(path))
-    }
-}
-
-/// Write the bundled default `.heddleignore` into the worktree root
-/// if (and only if) no `.heddleignore` already exists there. Returns
-/// whether a write actually happened so the caller can surface a
-/// single-line notice to the user.
-///
-/// Failure to write is non-fatal: a freshly-initialized repo without
-/// the default template is still a valid Heddle repo, and a noisy
-/// failure here would block init for paths the user can recreate by
-/// hand. We propagate I/O errors only for the genuinely unexpected
-/// cases (permission denied with the file *not* present, etc.).
-pub(crate) fn maybe_install_default_heddleignore(root: &std::path::Path) -> Result<bool> {
-    let path = root.join(".heddleignore");
-    // Atomic create-or-fail: the prior `path.exists()` + `fs::write`
-    // shape was a TOCTOU window where a concurrent `heddle init` (or
-    // a user dropping their own `.heddleignore` between the two
-    // syscalls) could see "absent" and then have its file silently
-    // overwritten. `O_CREAT | O_EXCL` collapses the check and the
-    // write into one kernel-enforced step.
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut f) => {
-            // If `write_all` fails after `create_new` already
-            // landed an empty file (ENOSPC, EIO, ...), a naïve
-            // bail-out would leave the zero-byte file on disk —
-            // and a retried `heddle init` would then hit the
-            // `AlreadyExists` arm and silently report success
-            // without ever installing the template. Remove the
-            // partial file so the retry path can recreate it.
-            if let Err(e) =
-                f.write_all(super::heddleignore_defaults::DEFAULT_HEDDLEIGNORE.as_bytes())
-            {
-                drop(f);
-                let _ = std::fs::remove_file(&path);
-                return Err(anyhow::anyhow!(
-                    "failed to write default .heddleignore: {}",
-                    e
-                ));
-            }
-            Ok(true)
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(anyhow::anyhow!(
-            "failed to create default .heddleignore: {}",
-            e
-        )),
     }
 }
 
@@ -320,60 +259,17 @@ fn set_principal_command() -> &'static str {
     "heddle init --principal-name <name> --principal-email <email>"
 }
 
-fn init_side_effects(
-    has_git: bool,
-    installed_heddleignore: bool,
-    principal_configured: bool,
-) -> Vec<String> {
+fn init_side_effects(has_git: bool, principal_configured: bool) -> Vec<String> {
     let mut side_effects = Vec::new();
     if has_git {
         side_effects.push("created Heddle sidecar for the existing Git repository".to_string());
-        side_effects.push(
-            "updated .git/info/exclude for Heddle metadata and default generated noise".to_string(),
-        );
+        side_effects.push("updated .git/info/exclude for Heddle metadata".to_string());
         side_effects.push("left Git-tracked files untouched".to_string());
     } else {
         side_effects.push("created Heddle repository metadata".to_string());
-        if installed_heddleignore {
-            side_effects.push("wrote default .heddleignore".to_string());
-        }
     }
     if principal_configured {
         side_effects.push("updated default principal attribution".to_string());
     }
     side_effects
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn install_writes_when_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let wrote = maybe_install_default_heddleignore(dir.path()).unwrap();
-        assert!(wrote);
-        let body = std::fs::read_to_string(dir.path().join(".heddleignore")).unwrap();
-        assert_eq!(
-            body,
-            super::super::heddleignore_defaults::DEFAULT_HEDDLEIGNORE
-        );
-    }
-
-    #[test]
-    fn install_preserves_existing_via_create_new() {
-        // The atomic `O_CREAT | O_EXCL` path must NOT overwrite a
-        // curated `.heddleignore`. Pre-create one with custom content,
-        // then confirm `maybe_install_default_heddleignore` returns
-        // `false` and leaves the body untouched.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".heddleignore");
-        let curated = "# curated\nsecrets/\n";
-        std::fs::write(&path, curated).unwrap();
-
-        let wrote = maybe_install_default_heddleignore(dir.path()).unwrap();
-        assert!(!wrote);
-        let body = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(body, curated);
-    }
 }

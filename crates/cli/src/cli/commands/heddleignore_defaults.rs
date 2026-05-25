@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Default `.heddleignore` template + common-noise classifier.
+//! Suggested `.heddleignore` template + common-noise classifier.
 //!
-//! The template is installed by `heddle init` on a fresh repo (no
-//! `.heddleignore` present) so day-one users don't have to discover
-//! the file's existence before macOS Finder writes `.DS_Store` or
-//! Xcode drops `xcuserdata/` next to their source. Patterns are kept
-//! conservative: only paths the entire team is overwhelmingly likely
-//! to want suppressed. Anything project-specific (build outputs,
-//! per-IDE preferences, `.env*`) is left to the user.
+//! Heddle does not auto-install this template. It remains available as
+//! reference material and as the source of common-noise hints that turn stray
+//! untracked paths into one-line suggestions.
 //!
 //! The same per-category pattern list also backs [`noise_hint_for`],
 //! which other commands (merge refusal, capture preflight) use to
@@ -15,19 +11,18 @@
 
 use std::path::Path;
 
-/// Default `.heddleignore` written by `heddle init` when no file is
-/// present. Mirrors the per-category patterns enumerated in this
-/// module so the two stay in sync — editing either side here also
-/// edits the user-facing template.
+/// Suggested `.heddleignore` content. Mirrors the per-category patterns
+/// enumerated in this module so the two stay in sync.
+#[allow(dead_code)]
 pub const DEFAULT_HEDDLEIGNORE: &str = "\
-# Default .heddleignore — installed by `heddle init`.
+# Suggested .heddleignore template.
 #
 # Syntax matches `.gitignore` (globs, negation with `!`, leading `/`
 # for root-anchored, trailing `/` for directory-only). See
-# `docs/heddleignore.md` for the full divergence from `.gitignore` —
-# in particular, heddle does NOT read `.gitignore` itself, so any
-# patterns you want suppressed during `heddle capture` must live
-# here.
+# `docs/heddleignore.md` for details. In Git-overlay repositories,
+# Heddle reads `.gitignore` first; use this file only for Heddle-only
+# excludes. In native Heddle repositories, patterns you want
+# suppressed during `heddle capture` must live here.
 
 # macOS Finder / Spotlight noise
 .DS_Store
@@ -431,7 +426,7 @@ mod tests {
 
     #[test]
     fn icon_glob_not_in_default_template() {
-        // Regression: the default template must not re-introduce
+        // Regression: the suggested template must not re-introduce
         // `Icon?` (or a bare `Icon` line). Both are too broad and
         // would silently hide legitimate basenames like `Icons` or
         // an `Icon` source file from `status` / `capture`.

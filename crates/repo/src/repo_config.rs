@@ -255,18 +255,7 @@ impl Default for WorktreeConfig {
 }
 
 fn default_ignore() -> Vec<String> {
-    vec![
-        ".heddle".to_string(),
-        ".heddleignore".to_string(),
-        ".git".to_string(),
-        "target".to_string(),
-        "node_modules".to_string(),
-        "__pycache__".to_string(),
-        "*.pyc".to_string(),
-        ".pytest_cache".to_string(),
-        ".mypy_cache".to_string(),
-        ".ruff_cache".to_string(),
-    ]
+    vec![".heddle".to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,16 +418,7 @@ mod tests {
     fn test_default_config_values() {
         let config = RepoConfig::default();
 
-        assert_eq!(
-            config.worktree.ignore,
-            vec![
-                ".heddle".to_string(),
-                ".heddleignore".to_string(),
-                ".git".to_string(),
-                "target".to_string(),
-                "node_modules".to_string(),
-            ]
-        );
+        assert_eq!(config.worktree.ignore, vec![".heddle".to_string()]);
         assert_eq!(config.worktree.fsmonitor.mode, crate::FsMonitorMode::Off);
         assert_eq!(config.output.format, OutputFormat::Auto);
         assert!(config.policies.default_policy.is_none());

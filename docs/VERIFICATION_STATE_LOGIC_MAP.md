@@ -38,7 +38,7 @@ A clean verification report means all applicable dimensions agree:
 | Operation | No Git or Heddle operation is in progress. | Rebase, cherry-pick, merge, bisect, or bridge operation needs continue, abort, resolve, or raw-Git handoff. |
 | Workflow | Ready work is reported as workflow guidance after repository safety is known. | `workflow_status: blocked` when ready work exists but a repository blocker prevents preview or ship. |
 | Machine contract | Command catalog, JSON error envelopes, op-id metadata, schema introspection, docs drift, and schema coverage agree. | `machine_contract_gaps`, command contract drift, schema/doc validation failures. |
-| Generated and ignored artifacts | Ignore rules suppress known noise, generated-only noise does not fabricate a commit, and meaningful generated paths are surfaced as impact. | Unignored generated output is ordinary worktree dirt; large captures/deletions require explicit force; redaction/purge flows must not rely on Git ignore state. |
+| Generated and ignored artifacts | Heddle auto-ignores only its own `.heddle/` metadata. Everything else is ignored only when the repo explicitly says so. In Git-overlay mode, `.gitignore` is the preferred source of ignored-worktree truth; `.heddleignore` is reserved for Heddle-specific or native-Heddle excludes. | Unignored generated output is ordinary worktree dirt; large captures/deletions require explicit force; redaction/purge flows must name the ignore file that Heddle will actually consult. |
 | Persona/output contract | TTY text is human-facing, piped/explicit JSON is machine-facing, and both carry the same next action semantics. | Prose on JSON stdout, missing error envelopes, stale help/schema metadata, narrow/no-color output that hides the action. |
 | Clone/adoption | Git checkout and Heddle mapping agree after clone/adoption. | Clone verification blocked by any verification blocker above. |
 
@@ -80,7 +80,7 @@ flowchart TD
 | Command family | Gate |
 |---|---|
 | Observe-only commands | `status`, strict `verify`, `diagnose`, `doctor`, `bridge git status`, `thread list/show`, `workspace show`, `log`, `show`, `diff`, `commands`, and `schemas` may probe plain Git, but must not create `.heddle`, write refs, or change `git status --short`. Blocked `verify` exits nonzero and carries the proof in the JSON error envelope. |
-| First-run adoption | `adopt` is the guided path that initializes Heddle, imports Git branch tips, and returns post-adoption verification. Plain Git with one active branch recommends `heddle adopt --ref <branch>`; multi-ref repos may recommend `heddle adopt`; unborn Git recommends `heddle init`. `init` in Git leaves Git-tracked files untouched, updates local `.git/info/exclude` for Heddle metadata and default generated noise, does not install a tracked root `.heddleignore`, and exposes `needs_import` until adoption/import completes. |
+| First-run adoption | `adopt` is the guided path that initializes Heddle, imports Git branch tips, and returns post-adoption verification. Plain Git with one active branch recommends `heddle adopt --ref <branch>`; multi-ref repos may recommend `heddle adopt`; unborn Git recommends `heddle init`. `init` leaves project files untouched, may protect only Heddle metadata with local Git excludes in Git-overlay mode, does not install `.heddleignore`, does not add broad generated-noise patterns, and exposes `needs_import` until adoption/import completes. |
 | Active branch import | Mutating commands that could capture, checkpoint, move refs, materialize work, or claim up-to-date must refuse while the active Git branch needs import or mapping repair. |
 | Side-branch import | Missing side-branch tips are surfaced as available import work, but do not make the current checkout unverified and must not replace the active repair action. |
 | Dirty materialization | `switch`, `checkout`, `goto`, `pull`, `thread drop`, `branch -d/-D`, `thread promote`, `start --path`, `merge`, `rebase`, `cherry-pick`, and `undo` must refuse dirty work unless a command has an explicit safe preview or force path. |
@@ -89,7 +89,7 @@ flowchart TD
 | Resolve | `resolve` and `thread resolve` must distinguish no operation, no conflicts, conflict resolution, and thread-review resolution. No-op resolve failures use typed errors and should point back to `status` rather than leaking object lookup internals. |
 | Undo | `undo --preview` and real `undo` share safety refusals. Both refuse dirty worktree and active-operation states before moving refs or worktree bytes. Post-undo text must report the current verification state and next action instead of claiming clean by default. |
 | Remote push/pull | Transfer commands refresh tracking and return post-transfer verification. Local-ahead is verified clean but recommends `push`; no upstream tracking, behind, and diverged states are blockers. A command may not claim synced while blocking remote drift remains. |
-| Generated artifact safety | `status`, `capture`, `commit`, and `merge` must respect Heddle ignore rules for noise, keep generated-only ignored changes from becoming fake work, and surface meaningful generated/vendor/dist/build paths as `generated_outputs` or heavy-impact work when captured. Git-overlay init/clone also installs local Git excludes for the same default noise so raw `git status --short` does not contradict Heddle. Large captures and deletions require explicit force. |
+| Generated artifact safety | `status`, `capture`, `commit`, and `merge` must respect explicit ignore rules, keep explicitly ignored changes from becoming fake work, and surface unignored generated/vendor/dist/build paths as ordinary dirty work or heavy-impact work when captured. Git-overlay mode prefers `.gitignore` for shared ignore policy so raw `git status --short` and Heddle agree by construction; `.heddleignore` remains available for Heddle-only excludes. Heddle must not install or assume default generated-noise patterns beyond `.heddle/`. Large captures and deletions require explicit force. |
 | JSON and op-id | Runtime command surfaces, command catalog output, schemas, JSON envelopes, and op-id support are derived from the command contract table. No current command advertises generated-resume op-id persistence; agents that need replay must supply an explicit id only to commands with `supports_op_id: true`. |
 | Persona-driven UX | Human text answers what happened, current state, and next step. Agent/script JSON keeps stdout parseable, stderr reserved for error envelopes, and action metadata executable or explicitly templated. Support/maintainer diagnostics live in `doctor`, `diagnose`, and verbose/version surfaces. |
 
@@ -115,7 +115,7 @@ the new behavior.
 | No command claims up to date while verification is blocked | `git_overlay_matrix_local_ahead_noop_merge_preserves_semantic_result`; `git_overlay_matrix_rebase_noop_defers_up_to_date_claim_to_verification` |
 | Operation continue/abort advice is consistent | `git_overlay_matrix_in_progress_operations_surface_consistently`; `git_overlay_matrix_continue_and_abort_unify_operator_flow`; `git_overlay_matrix_operator_states_survive_reopen_and_keep_guidance_consistent`; `git_overlay_matrix_continue_retry_loops_block_then_succeed_after_resolution` |
 | Ready/preview/ship/resolve/undo workflow is explicit | `start_merge_undo_json_workflow_keeps_machine_streams_clean`; `ready_text_names_ready_and_already_ready_noop_states`; `resolve_without_merge_emits_actionable_json_error`; `git_overlay_matrix_undo_preview_refuses_active_operation_like_real_undo` |
-| Generated and ignored artifacts are safe | `git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop`; `git_overlay_matrix_commit_ignores_default_python_generated_noise`; `test_cli_capture_blocks_large_git_overlay_deletion_without_force`; `.heddleignore` file-operation tests |
+| Generated and ignored artifacts are safe | `git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop`; `git_overlay_matrix_commit_requires_explicit_ignore_for_python_generated_noise`; `git_overlay_matrix_init_excludes_only_heddle_metadata`; `test_cli_capture_blocks_large_git_overlay_deletion_without_force`; `.heddleignore` file-operation tests |
 | Persona/output contracts stay coherent | `default_auto_output_is_json_when_stdout_is_piped_and_text_when_forced`; `tty_auto_mode_renders_text_and_explicit_json_stays_json`; `quiet_no_color_and_narrow_text_outputs_preserve_global_contract`; `narrow_no_color_text_outputs_cover_everyday_read_surfaces` |
 | Machine contracts stay single-sourced | `op_id_coverage`; `doctor_schemas_reports_runtime_and_documented_coverage`; `public_command_paths_have_command_contract_metadata`; `target/debug/heddle doctor schemas --output json`; `target/debug/heddle doctor docs --all --output json` |
 
@@ -149,10 +149,10 @@ the new behavior.
   previewing a merge when an upstream thread exists. The map does not yet have a
   formal proof that every diverged topology picks the least surprising recovery
   path.
-- Generated artifact handling is split between ignore rules, generated-path
-  impact classification, large-capture safety, and redaction hints. The safety
-  story is covered by tests, but there is no single formal state model for
-  "ignored noise" versus "meaningful generated output".
+- Generated artifact handling is split between explicit ignore rules,
+  generated-path impact classification, large-capture safety, and redaction
+  hints. The intended model is now simple: only `.heddle/` is auto-ignored;
+  every other ignored path must be named by `.gitignore` or `.heddleignore`.
 - Persona-driven UX is enforced by CLI regression tests and command-contract
   metadata, not a formal specification. The strongest proof remains docs/schema
   drift plus text/JSON integration coverage.

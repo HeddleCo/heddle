@@ -103,17 +103,7 @@ pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeSta
 use serde::{Deserialize, Serialize};
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
-const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[
-    ".heddle/",
-    ".heddleignore",
-    "target",
-    "node_modules",
-    "__pycache__",
-    "*.pyc",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-];
+const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryCapability {
@@ -504,8 +494,8 @@ impl Repository {
     }
 
     /// Install local, untracked Git exclude rules Heddle needs for Git-overlay
-    /// repos. This keeps raw Git status aligned with Heddle's default ignore
-    /// policy without writing project-tracked sidecars.
+    /// repos. Only Heddle's sidecar is excluded automatically; project
+    /// artifacts must be covered by `.gitignore` or `.heddleignore`.
     pub fn ensure_git_overlay_local_excludes(path: impl AsRef<Path>) -> Result<()> {
         ensure_git_overlay_exclude(path.as_ref())
     }
@@ -1561,11 +1551,8 @@ impl Repository {
     pub fn ignore_patterns(&self) -> Result<Vec<String>> {
         let mut patterns = self.config.worktree.ignore.clone();
         if self.capability() == RepositoryCapability::GitOverlay {
+            patterns.push(".git".to_string());
             append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;
-            append_ignore_file_patterns(
-                &mut patterns,
-                &self.root.join(".git").join("info").join("exclude"),
-            )?;
         }
         let path = self.root.join(".heddleignore");
 
@@ -1937,7 +1924,7 @@ fn ensure_git_overlay_exclude(root: &Path) -> Result<()> {
     if !contents.is_empty() && !contents.ends_with('\n') {
         contents.push('\n');
     }
-    contents.push_str("# Heddle local metadata and generated-noise defaults\n");
+    contents.push_str("# Heddle local metadata\n");
     for pattern in missing {
         contents.push_str(pattern);
         contents.push('\n');

@@ -24,7 +24,7 @@ use objects::{
     object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature},
     worktree::should_ignore,
 };
-use repo::Repository;
+use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::advice::RecoveryAdvice;
@@ -187,16 +187,11 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
     emit_apply(cli, &output)
 }
 
-/// Suggestion to add a redacted path to `.heddleignore` so it doesn't
+/// Suggestion to add a redacted path to an ignore file so it doesn't
 /// get re-captured on the next `heddle capture`. Returned as `None`
 /// when the path is already covered by heddle's *effective* ignore
 /// set — i.e. `Repository::ignore_patterns()`, which is what the
-/// capture/walker actually consults: `.heddleignore` + the
-/// `worktree.ignore` patterns in `.heddle/config.toml`.
-///
-/// Crucially we do NOT treat `.gitignore` coverage as suppression:
-/// `heddle capture` never reads `.gitignore`, so a path covered only
-/// there can still be re-captured. The hint must surface in that case.
+/// capture/walker actually consults.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct IgnoreHint {
     /// Path to the ignore file we'd append to, relative to the repo
@@ -217,12 +212,9 @@ pub(crate) struct IgnoreHint {
     pub message: String,
 }
 
-/// If `path` is not yet covered by heddle's effective ignore set,
-/// return a hint pointing at `.heddleignore`. Suppression mirrors the
-/// exact patterns `heddle capture` consults
-/// (`Repository::ignore_patterns()` = `.heddleignore` + repo config
-/// `worktree.ignore`), so the hint never gives a false sense of
-/// safety just because `.gitignore` happens to mention the path.
+/// If `path` is not yet covered by Heddle's effective ignore set,
+/// return a hint pointing at the preferred ignore file for this repo:
+/// `.gitignore` in Git-overlay mode, `.heddleignore` in native mode.
 pub(crate) fn ignore_hint_for_path(repo: &Repository, path: &str) -> Result<Option<IgnoreHint>> {
     let patterns = repo
         .ignore_patterns()
@@ -231,20 +223,23 @@ pub(crate) fn ignore_hint_for_path(repo: &Repository, path: &str) -> Result<Opti
         return Ok(None);
     }
 
-    let heddleignore = repo.root().join(".heddleignore");
-    let exists = heddleignore.is_file();
+    let ignore_file = match repo.capability() {
+        RepositoryCapability::GitOverlay => ".gitignore",
+        RepositoryCapability::NativeHeddle => ".heddleignore",
+    };
+    let exists = repo.root().join(ignore_file).is_file();
     let message = if exists {
         format!(
-            "hint: add `{path}` to .heddleignore so the next `heddle capture` doesn't re-import the leaked bytes"
+            "hint: add `{path}` to {ignore_file} so the next `heddle capture` doesn't re-import the leaked bytes"
         )
     } else {
         format!(
-            "hint: create .heddleignore with `{path}` so the next `heddle capture` doesn't re-import the leaked bytes"
+            "hint: create {ignore_file} with `{path}` so the next `heddle capture` doesn't re-import the leaked bytes"
         )
     };
 
     Ok(Some(IgnoreHint {
-        ignore_file: ".heddleignore".to_string(),
+        ignore_file: ignore_file.to_string(),
         already_exists: exists,
         suggested_pattern: path.to_string(),
         message,

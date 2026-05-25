@@ -4,17 +4,20 @@
 `heddle status`, and `heddle merge` which paths to ignore. It lives at
 the worktree root, next to your code.
 
-## Default template
+## Suggested template
 
-`heddle init` writes a starter `.heddleignore` covering the
-overwhelmingly-common cross-platform noise — macOS Finder metadata
-(`.DS_Store`, `._*`), Xcode user state (`xcuserdata/`,
-`*.xcuserstate`), JetBrains / VS Code / Fleet caches (`.idea/`,
-`.vscode/`, `.fleet/`, `*.iml`), Vim/Emacs swap and backup files
-(`*.swp`, `*.swo`, `*~`), Windows shell metadata (`Thumbs.db`,
-`desktop.ini`), LibreOffice locks (`.~lock.*`), and the two
-shell-redirect typo artifacts that periodically show up (`-r`,
-`-rv` — unanchored, so a `src/-r` typo is suppressed too).
+`heddle init` does not write `.heddleignore`. Heddle auto-ignores only
+its own `.heddle/` metadata; every project artifact must be named by an
+explicit ignore file.
+
+The source tree includes a suggested `.heddleignore` template covering
+common cross-platform noise — macOS Finder metadata (`.DS_Store`,
+`._*`), Xcode user state (`xcuserdata/`, `*.xcuserstate`), JetBrains /
+VS Code / Fleet caches (`.idea/`, `.vscode/`, `.fleet/`, `*.iml`),
+Vim/Emacs swap and backup files (`*.swp`, `*.swo`, `*~`), Windows shell
+metadata (`Thumbs.db`, `desktop.ini`), LibreOffice locks (`.~lock.*`),
+and the two shell-redirect typo artifacts that periodically show up
+(`-r`, `-rv` — unanchored, so a `src/-r` typo is suppressed too).
 
 The template is intentionally conservative: only patterns the entire
 team is overwhelmingly likely to want suppressed. Project-specific
@@ -31,25 +34,18 @@ a previous rule ignored. The same rules apply as in `.gitignore`.
 
 ## Relationship to `.gitignore`
 
-**Heddle does not read `.gitignore`.** `.heddleignore` and
-`.gitignore` are independent files. If you keep both Git and Heddle
-in the same repository (the git-overlay workflow), patterns that
-should suppress both walks must appear in both files. We considered
-auto-reading `.gitignore`, but kept them separate because:
+In Git-overlay repositories, Heddle reads `.gitignore` first and
+treats it as the preferred shared ignore policy so raw `git status`
+and Heddle agree. Use `.heddleignore` only for Heddle-specific
+excludes that should not affect Git.
 
-- Heddle is a different VCS with its own capture semantics —
-  `heddle capture` snapshots the worktree directly, so what you
-  want suppressed during capture may not match what Git ignores
-  during `git add`.
-- Some teams want one file checked into Git and the other left
-  uncommitted as a local override.
-- A surprising auto-merge of `.gitignore` rules would make heddle's
-  behavior depend on a file it does not otherwise own.
+In native Heddle repositories, `.heddleignore` is the ignore policy.
+Heddle does not auto-ignore project artifacts such as build outputs,
+dependency folders, caches, or generated files unless they are named
+in `.heddleignore`.
 
-If your team's `.gitignore` and `.heddleignore` should track the
-same content, symlink one to the other locally — heddle reads
-`.heddleignore` directly off disk every walk, so a symlink is
-transparent.
+Heddle always protects its own `.heddle/` metadata. Other paths must
+be explicit in `.gitignore` or `.heddleignore`.
 
 ## Common-noise hints
 
@@ -72,7 +68,7 @@ as noise.
 
 macOS Finder stores custom-folder icon metadata in a file whose
 basename is literally `Icon` followed by a carriage return (`Icon\r`
-— four chars + the `\r` byte). The default template does **not**
+— four chars + the `\r` byte). The suggested template does **not**
 suppress this. The only glob that targets it without an awkward
 literal control-char (`Icon?`) also matches legitimate basenames
 like `Icons`, `Icon1`, or an `Icons/` directory full of real
@@ -90,16 +86,16 @@ level instead: delete the custom folder icon, or set Finder's
 
 ## Local-tool state (`.claude/`, etc.)
 
-The default template leaves `.claude/` commented out. Some teams
+The suggested template leaves `.claude/` commented out. Some teams
 version their tool prompts (`.claude/CLAUDE.md`, agent definitions);
 others don't. If your `.claude/` directory only carries local state
 (`scheduled_tasks.lock`, ephemeral chat history), uncomment the line
-in the default template or add the specific paths.
+in the suggested template or add the specific paths.
 
 ## Editing
 
 `.heddleignore` is read fresh on every walk — no daemon restart, no
-re-init. Add, remove, or reorder rules as needed. The bundled
-default template is shipped in
+re-init. Add, remove, or reorder rules as needed. The suggested
+template is shipped in
 `crates/cli/src/cli/commands/heddleignore_defaults.rs` if you want
 to copy patterns back in after editing.
