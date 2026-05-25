@@ -14,6 +14,7 @@ const ALLOWED_ENVELOPE_FILE: &str = "cli/commands/error_envelope.rs";
 const ALLOWED_ADVICE_FILE: &str = "cli/commands/advice.rs";
 const ALLOWED_HISTORY_TARGET_FILE: &str = "cli/commands/history_target.rs";
 const ALLOWED_NEXT_ACTION_FILE: &str = "cli/commands/next_action.rs";
+const ALLOWED_ACTION_LINE_FILE: &str = "cli/commands/action_line.rs";
 
 const RAW_RECOVERY_PHRASES: &[&str] = &[
     "State not found:",
@@ -255,6 +256,45 @@ fn next_action_priority_lives_in_shared_selector() {
     assert!(
         violations.is_empty(),
         "next-action priority should be selected through {ALLOWED_NEXT_ACTION_FILE}; violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn high_visibility_human_action_lines_use_shared_renderer() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+    for file in [
+        "cli/commands/status.rs",
+        "cli/commands/verify.rs",
+        "cli/commands/ready_cmd.rs",
+        "cli/commands/thread.rs",
+        "cli/commands/workspace.rs",
+    ] {
+        let path = src_dir.join(file);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        for (line_index, line) in source.lines().enumerate() {
+            for fragment in [
+                "println!(\"Next:",
+                "println!(\"Next step:",
+                "println!(\"  command:",
+                "println!(\"    next step:",
+                "println!(\"    optional:",
+            ] {
+                if line.contains(fragment) {
+                    violations.push(format!(
+                        "{file}:{} renders action line `{fragment}` outside {ALLOWED_ACTION_LINE_FILE}",
+                        line_index + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "high-visibility human action lines should use {ALLOWED_ACTION_LINE_FILE}; violations:\n{}",
         violations.join("\n")
     );
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! CLI command implementations.
 
+mod action_line;
 mod actor_cmd;
 mod adopt;
 mod advice;
