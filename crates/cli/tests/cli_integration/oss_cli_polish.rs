@@ -992,6 +992,7 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     assert_eq!(status["side_effects"], serde_json::json!(["observe_only"]));
     assert_eq!(status["first_run_behavior"], "observe_only_no_init");
     assert_eq!(status["json_kind"], "json_or_jsonl");
+    assert_eq!(status["op_id_store_scope"], "none");
     assert_eq!(status["schema_verbs"], serde_json::json!(["status"]));
     assert_eq!(
         status["documented_schema_verbs"],
@@ -1013,6 +1014,7 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     assert_eq!(commit["supports_op_id"], true);
     assert_eq!(commit["persists_op_id"], false);
     assert_eq!(commit["op_id_behavior"], "explicit_replay");
+    assert_eq!(commit["op_id_store_scope"], "repository");
     assert_eq!(commit["side_effect_class"], "ref_mutation");
     assert_eq!(commit["writes_heddle_refs"], true);
     assert_eq!(commit["writes_git_refs"], true);
@@ -1029,6 +1031,7 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     assert_eq!(capture["supports_op_id"], true);
     assert_eq!(capture["persists_op_id"], false);
     assert_eq!(capture["op_id_behavior"], "explicit_replay");
+    assert_eq!(capture["op_id_store_scope"], "repository");
     assert_eq!(capture["side_effect_class"], "ref_mutation");
     assert_eq!(capture["writes_heddle_refs"], true);
     assert_eq!(capture["writes_git_refs"], false);
@@ -1045,6 +1048,7 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     assert_eq!(init["mutates"], true);
     assert_eq!(init["supports_op_id"], true);
     assert_eq!(init["op_id_behavior"], "explicit_replay");
+    assert_eq!(init["op_id_store_scope"], "bootstrap");
     assert_eq!(init["side_effect_class"], "initialize");
     assert_eq!(init["writes_config"], true);
     assert_eq!(
@@ -7630,6 +7634,10 @@ fn command_catalog_exposes_public_surface_for_agents() {
         assert_eq!(
             entry["op_id_behavior"], "explicit_replay",
             "{display} should make its op-id contract explicit: {entry}"
+        );
+        assert_eq!(
+            entry["op_id_store_scope"], "bootstrap",
+            "{display} should advertise bootstrap op-id scope: {entry}"
         );
     }
     let push = commands

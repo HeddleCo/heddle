@@ -272,7 +272,7 @@ fn request_hash_for_op_id(
 }
 
 fn uses_bootstrap_op_id_store(command_name: &str) -> bool {
-    matches!(command_name, "init" | "adopt" | "clone")
+    crate::cli::commands::command_uses_bootstrap_op_id_store(command_name)
 }
 
 struct BootstrapOpIdScope {

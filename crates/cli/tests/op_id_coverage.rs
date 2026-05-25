@@ -14,7 +14,10 @@
 use std::path::PathBuf;
 
 use cli::{
-    cli::commands::{build_command_catalog, command_persists_op_id, observe_only_root_commands},
+    cli::commands::{
+        build_command_catalog, command_persists_op_id, command_uses_bootstrap_op_id_store,
+        observe_only_root_commands,
+    },
     operation_id::supports_local_op_id,
 };
 
@@ -91,6 +94,11 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
             command_persists_op_id(root),
             "op-id persistence for `{root}` must come from the command contract table"
         );
+        assert_eq!(
+            entry.op_id_store_scope == "bootstrap",
+            command_uses_bootstrap_op_id_store(root),
+            "op-id store scope for `{root}` must come from the command contract table"
+        );
         if entry.persists_op_id {
             assert!(
                 entry.supports_op_id,
@@ -134,6 +142,10 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
             !entry.supports_op_id,
             "`{read_only}` must not reserve local op-id slots"
         );
+        assert_eq!(
+            entry.op_id_store_scope, "none",
+            "`{read_only}` must not use an op-id store"
+        );
         assert!(
             !supports_local_op_id(read_only),
             "runtime op-id support for `{read_only}` must come from the exact command contract"
@@ -165,6 +177,15 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
         assert!(
             supports_local_op_id(mutating),
             "runtime op-id support for `{mutating}` must come from the exact command contract"
+        );
+        let expected_scope = if entry.may_initialize {
+            "bootstrap"
+        } else {
+            "repository"
+        };
+        assert_eq!(
+            entry.op_id_store_scope, expected_scope,
+            "`{mutating}` op-id store scope must come from the exact command contract"
         );
     }
 }
