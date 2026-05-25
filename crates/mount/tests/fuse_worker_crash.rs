@@ -21,6 +21,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::Once,
     thread,
     time::{Duration, Instant},
@@ -156,4 +157,71 @@ fn panic_kills_only_worker_not_parent() {
     assert_eq!(read, "world");
 
     sup.unmount().expect("clean unmount");
+}
+
+/// **Red-commit 2 — SIGKILL → kernel auto-unmount.**
+///
+/// Spawn a healthy worker, SIGKILL it, then assert:
+///   (a) the supervisor's `is_alive()` flips to false within a
+///       bounded window (the watcher thread observed the child
+///       exit),
+///   (b) the kernel auto-unmounts: the fixture file is no longer
+///       visible under the mountpoint after the SIGKILL.
+///
+/// On the **pre-impl tree** the watcher does not flip
+/// `Liveness::Exited` (it reaps the child but doesn't store), so
+/// `wait_for_exit` times out and assertion (a) fails. The green
+/// commit wires the `liveness.store(Exited, ...)` in `watch_child`
+/// and the test passes.
+#[test]
+#[ignore = "requires FUSE + heddle-fuse-worker binary on host; opt-in via --ignored"]
+fn sigkill_worker_auto_unmounts() {
+    if skip_if_no_fuse() {
+        return;
+    }
+    shrink_stop_grace();
+
+    let (repo_dir, _repo) = build_fixture();
+    let mountpoint = TempDir::new().expect("mountpoint tempdir");
+
+    let bin = worker_binary();
+    let sup = Supervisor::spawn(&bin, repo_dir.path(), "main", mountpoint.path())
+        .expect("spawn worker");
+
+    // Pre-condition: mountpoint serves the fixture file.
+    let target = mountpoint.path().join("hello.txt");
+    wait_for_path(&target, true, Duration::from_secs(5));
+    assert!(target.exists(), "fixture file must be visible before SIGKILL");
+
+    // SIGKILL the worker.
+    let pid = sup.pid();
+    let kill_status = Command::new("kill")
+        .arg("-KILL")
+        .arg(pid.to_string())
+        .status()
+        .expect("invoke kill -KILL");
+    assert!(kill_status.success(), "kill -KILL exited non-zero");
+
+    // (a) supervisor's watcher must flip is_alive() to false
+    //     within the grace window.
+    let killed = sup.wait_for_exit(Duration::from_secs(5));
+    assert!(
+        killed,
+        "supervisor never observed worker exit after SIGKILL (is_alive still true)"
+    );
+    assert!(!sup.is_alive(), "is_alive must be false after watcher reaps");
+
+    // (b) kernel must auto-unmount. The fixture file should no
+    //     longer be visible (either the path resolves to the empty
+    //     backing dir, or the dentry has gone stale).
+    wait_for_path(&target, false, Duration::from_secs(5));
+    assert!(
+        !target.exists(),
+        "kernel did not auto-unmount after SIGKILL: {} still visible",
+        target.display(),
+    );
+
+    // The supervisor's unmount() call should be idempotent and
+    // succeed even though the worker is already gone.
+    sup.unmount().expect("idempotent unmount after SIGKILL");
 }
