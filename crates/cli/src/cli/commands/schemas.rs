@@ -26,65 +26,7 @@ use crate::cli::{Cli, should_output_json};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
-
-const OPAQUE_JSON_OBJECT_SCHEMA_VERBS: &[&str] = &[
-    "gc",
-    "monitor",
-    "harness-bridge",
-    "conflict list",
-    "conflict show",
-    "redact apply",
-    "redact list",
-    "redact show",
-    "redact trust add",
-    "redact trust list",
-    "redact trust remove",
-    "purge apply",
-    "purge list",
-    "fork",
-    "collapse",
-    "compare",
-    "context set",
-    "context get",
-    "context list",
-    "context history",
-    "context edit",
-    "context supersede",
-    "context rm",
-    "context check",
-    "context suggest",
-    "context audit",
-    "integration list",
-    "integration install",
-    "integration doctor",
-    "integration uninstall",
-    "integration upgrade",
-    "integration relay",
-    "bridge git ingest",
-    "bridge git reason",
-    "semantic hot",
-    "daemon serve",
-    "daemon status",
-    "daemon stop",
-    "maintenance inspect",
-    "maintenance run",
-    "maintenance gc",
-    "maintenance monitor",
-    "store warm",
-    "bisect start",
-    "bisect good",
-    "bisect bad",
-    "bisect reset",
-    "cherry-pick",
-    "rebase",
-    "hook list",
-    "hook install",
-    "hook uninstall",
-    "hook events",
-    "transaction begin",
-    "transaction abort",
-    "transaction status",
-];
+static OPAQUE_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 
 macro_rules! schema_registry {
     ($(($verbs:expr, $schema:ty)),+ $(,)?) => {
@@ -215,7 +157,6 @@ schema_registry! {
     (&["fsck"], FsckSchema),
     (&["resolve"], ResolveSchema),
     (&["index", "maintenance index"], IndexSchema),
-    (OPAQUE_JSON_OBJECT_SCHEMA_VERBS, GenericJsonObjectSchema),
     (&["error"], ErrorEnvelopeSchema),
 }
 
@@ -239,7 +180,9 @@ pub fn documented_schema_verbs() -> &'static [&'static str] {
 /// object shape. Coverage reports count these separately from
 /// concrete schema mirrors.
 pub(crate) fn opaque_schema_verbs() -> &'static [&'static str] {
-    OPAQUE_JSON_OBJECT_SCHEMA_VERBS
+    OPAQUE_SCHEMA_VERBS
+        .get_or_init(command_catalog::opaque_schema_verbs)
+        .as_slice()
 }
 
 /// Generate the schema for `verb`. Returns `None` if no schema is registered.
@@ -248,7 +191,12 @@ pub fn schema_for_verb(verb: &str) -> Option<Value> {
     if !schema_verbs().contains(&verb) {
         return None;
     }
-    let mut schema = schema_for_registered_verb(verb)?;
+    let mut schema = schema_for_registered_verb(verb).or_else(|| {
+        opaque_schema_verbs()
+            .contains(&verb)
+            .then(|| serde_json::to_value(schema_for!(GenericJsonObjectSchema)).ok())
+            .flatten()
+    })?;
     add_op_id_replay_fields_if_supported(verb, &mut schema);
     Some(schema)
 }
@@ -2713,7 +2661,16 @@ mod tests {
     #[test]
     fn implementation_registry_matches_command_contract_registry() {
         let advertised = schema_verbs();
-        let implemented = schema_implementation_verbs();
+        let mut implemented = schema_implementation_verbs();
+        for verb in opaque_schema_verbs() {
+            if !implemented.contains(verb) {
+                implemented.push(*verb);
+            }
+            assert!(
+                advertised.contains(verb),
+                "opaque schema verb '{verb}' must also be advertised by active command contracts"
+            );
+        }
         for verb in advertised {
             assert!(
                 implemented.contains(verb),

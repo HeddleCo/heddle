@@ -11,6 +11,17 @@ use std::{
 };
 
 const ALLOWED_ENVELOPE_FILE: &str = "cli/commands/error_envelope.rs";
+const ALLOWED_ADVICE_FILE: &str = "cli/commands/advice.rs";
+
+const RAW_RECOVERY_PHRASES: &[&str] = &[
+    "network fetch support is not available",
+    "network push support is not available",
+    "network pull support is not available",
+    "invalid Git remote name for Git-overlay repository",
+    "Use one path.",
+    "--principal-name is required",
+    "--principal-email is required",
+];
 
 #[test]
 fn error_envelopes_stay_centralized() {
@@ -40,6 +51,38 @@ fn error_envelopes_stay_centralized() {
     assert!(
         violations.is_empty(),
         "error envelope rendering must stay centralized in {ALLOWED_ENVELOPE_FILE}; violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn known_recovery_phrases_stay_in_typed_advice() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+    walk_rust_files(&src_dir, &mut |path| {
+        let rel = path.strip_prefix(&src_dir).unwrap_or(path);
+        if rel == Path::new(ALLOWED_ADVICE_FILE) || rel == Path::new(ALLOWED_ENVELOPE_FILE) {
+            return;
+        }
+        let Ok(source) = fs::read_to_string(path) else {
+            return;
+        };
+        for (line_index, line) in source.lines().enumerate() {
+            for phrase in RAW_RECOVERY_PHRASES {
+                if line.contains(phrase) {
+                    violations.push(format!(
+                        "{}:{} contains raw recovery phrase `{phrase}`",
+                        rel.display(),
+                        line_index + 1
+                    ));
+                }
+            }
+        }
+    });
+
+    assert!(
+        violations.is_empty(),
+        "recovery phrases must be emitted through typed RecoveryAdvice constructors; violations:\n{}",
         violations.join("\n")
     );
 }

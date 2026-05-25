@@ -9,7 +9,10 @@ use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 use tracing::{debug, info};
 
-use super::git_overlay_health::{RepositoryVerificationState, build_repository_verification_state};
+use super::{
+    RecoveryAdvice,
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+};
 use crate::{
     cli::{Cli, InitArgs, should_output_json},
     config::UserConfig,
@@ -47,11 +50,10 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     let path = match (args.path.clone(), cli.repo.clone()) {
         (Some(positional), Some(repo_path)) => {
             if absolute_path(&positional)? != absolute_path(&repo_path)? {
-                bail!(
-                    "`heddle init` received both a positional path ({}) and --repo ({}). Use one path.",
-                    positional.display(),
-                    repo_path.display()
-                );
+                bail!(RecoveryAdvice::init_path_conflict(
+                    &positional.display().to_string(),
+                    &repo_path.display().to_string(),
+                ));
             }
             positional
         }
@@ -94,14 +96,16 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     let mut user_config = UserConfig::load_default()?;
     let mut principal_configured = false;
     if args.principal_name.is_some() || args.principal_email.is_some() {
-        let name = args
-            .principal_name
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("--principal-name is required"))?;
-        let email = args
-            .principal_email
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("--principal-email is required"))?;
+        let name = args.principal_name.clone().ok_or_else(|| {
+            anyhow::anyhow!(RecoveryAdvice::init_principal_field_required(
+                "--principal-name"
+            ))
+        })?;
+        let email = args.principal_email.clone().ok_or_else(|| {
+            anyhow::anyhow!(RecoveryAdvice::init_principal_field_required(
+                "--principal-email"
+            ))
+        })?;
         user_config.set_principal(name.clone(), email.clone());
         let config_path = user_config.save_default()?;
         info!(principal_name = %name, principal_email = %email, "Principal configured");

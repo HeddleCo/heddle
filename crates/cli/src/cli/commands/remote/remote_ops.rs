@@ -240,9 +240,7 @@ pub async fn cmd_pull(
             #[cfg(not(feature = "client"))]
             let _ = (addr, repo_path, token);
             #[cfg(not(feature = "client"))]
-            anyhow::bail!(
-                "network pull support is not available in this build; enable the `client` feature"
-            );
+            anyhow::bail!(RecoveryAdvice::network_feature_unavailable("pull"));
         }
     }
 
@@ -1009,7 +1007,7 @@ fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
         || name.starts_with('.')
         || name.ends_with(".lock")
     {
-        anyhow::bail!("invalid Git remote name for Git-overlay repository: {name}");
+        anyhow::bail!(RecoveryAdvice::git_remote_name_invalid(name));
     }
     Ok(())
 }

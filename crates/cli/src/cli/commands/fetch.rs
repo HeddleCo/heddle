@@ -159,9 +159,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                 #[cfg(not(feature = "client"))]
                 {
                     let _ = (addr, repo_path, token);
-                    anyhow::bail!(
-                        "network fetch support is not available in this build; enable the `client` feature"
-                    );
+                    anyhow::bail!(RecoveryAdvice::network_feature_unavailable("fetch"));
                 }
             }
         }
