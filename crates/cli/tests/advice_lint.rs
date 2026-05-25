@@ -299,6 +299,50 @@ fn high_visibility_human_action_lines_use_shared_renderer() {
     );
 }
 
+#[test]
+fn git_overlay_mutation_preflight_stays_shared() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+    for (file, forbidden) in [
+        (
+            "cli/commands/git_compat.rs",
+            &[
+                "plain_git_mutation_advice(",
+                "detached_git_head_mutation_advice(",
+                "unimported_git_history_advice(&repo, \"commit\")",
+                "raw_git_operation_mutation_advice(",
+                "verification_blocking_mutation_advice(",
+            ][..],
+        ),
+        (
+            "cli/commands/checkpoint.rs",
+            &[
+                "plain_git_mutation_advice(",
+                "detached_git_head_mutation_advice(",
+                "unimported_git_history_advice(repo, \"checkpoint\")",
+                "verification_blocking_mutation_advice(",
+            ][..],
+        ),
+    ] {
+        let path = src_dir.join(file);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        for fragment in forbidden {
+            if source.contains(fragment) {
+                violations.push(format!(
+                    "{file} reimplements mutation preflight `{fragment}`"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Git-overlay mutation safety preflight should flow through git_overlay_mutation_preflight_advice/plain_git_mutation_preflight_advice:\n{}",
+        violations.join("\n")
+    );
+}
+
 fn recovery_phrase_allowed(rel: &Path, phrase: &str) -> bool {
     rel == Path::new(ALLOWED_ADVICE_FILE)
         || rel == Path::new(ALLOWED_ENVELOPE_FILE)

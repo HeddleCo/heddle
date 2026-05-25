@@ -21,10 +21,9 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     git_overlay_health::{
-        RepositoryVerificationState, build_plain_git_verification_probe,
-        build_repository_verification_state, detached_git_head_mutation_advice,
-        plain_git_mutation_advice, repository_verification_blocked_advice,
-        unimported_git_history_advice, verification_blocking_mutation_advice,
+        GitOverlayMutationPreflight, RepositoryVerificationState,
+        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        plain_git_mutation_preflight_advice, repository_verification_blocked_advice,
     },
     snapshot::ensure_current_state,
     worktree_safety::dirty_worktree_advice,
@@ -67,8 +66,8 @@ pub async fn run(cli: &Cli, args: &CheckpointArgs) -> Result<()> {
         cwd = std::env::current_dir()?;
         &cwd
     };
-    if let Some(probe) = build_plain_git_verification_probe(start)? {
-        return Err(anyhow!(plain_git_mutation_advice(&probe, "checkpoint")));
+    if let Some(advice) = plain_git_mutation_preflight_advice(start, "checkpoint")? {
+        return Err(anyhow!(advice));
     }
 
     let repo = Repository::open(start)?;
@@ -126,16 +125,11 @@ fn create_git_checkpoint_inner(
         return Err(anyhow!(native_checkpoint_unavailable_advice(repo)));
     }
     preflight_git_checkpoint_ref_update(repo, "checkpoint")?;
-    if repo.git_overlay_head_is_detached()? {
-        return Err(anyhow!(detached_git_head_mutation_advice(
-            repo,
-            "checkpoint"
-        )));
-    }
-    if let Some(advice) = unimported_git_history_advice(repo, "checkpoint")? {
-        return Err(anyhow!(advice));
-    }
-    if let Some(advice) = verification_blocking_mutation_advice(repo, "checkpoint") {
+    if let Some(advice) = git_overlay_mutation_preflight_advice(
+        repo,
+        "checkpoint",
+        GitOverlayMutationPreflight::checkpoint_like(),
+    )? {
         return Err(anyhow!(advice));
     }
     let state_id = ensure_current_state(

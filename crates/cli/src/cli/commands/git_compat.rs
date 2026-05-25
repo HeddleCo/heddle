@@ -25,11 +25,9 @@ use super::{
     },
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{
-        RepositoryVerificationState, build_plain_git_verification_probe,
-        build_repository_verification_state, detached_git_head_mutation_advice,
-        plain_git_mutation_advice, raw_git_operation_mutation_advice,
-        repository_verification_blocked_advice, unimported_git_history_advice,
-        verification_blocking_mutation_advice,
+        GitOverlayMutationPreflight, RepositoryVerificationState,
+        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        plain_git_mutation_preflight_advice, repository_verification_blocked_advice,
     },
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
@@ -119,23 +117,16 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         cwd = std::env::current_dir()?;
         &cwd
     };
-    if let Some(probe) = build_plain_git_verification_probe(start)? {
-        return Err(anyhow!(plain_git_mutation_advice(&probe, "commit")));
+    if let Some(advice) = plain_git_mutation_preflight_advice(start, "commit")? {
+        return Err(anyhow!(advice));
     }
 
     let repo = Repository::open(start)?;
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && repo.git_overlay_head_is_detached()?
-    {
-        return Err(anyhow!(detached_git_head_mutation_advice(&repo, "commit")));
-    }
-    if let Some(advice) = unimported_git_history_advice(&repo, "commit")? {
-        return Err(anyhow!(advice));
-    }
-    if let Some(advice) = raw_git_operation_mutation_advice(&repo, "commit")? {
-        return Err(anyhow!(advice));
-    }
-    if let Some(advice) = verification_blocking_mutation_advice(&repo, "commit") {
+    if let Some(advice) = git_overlay_mutation_preflight_advice(
+        &repo,
+        "commit",
+        GitOverlayMutationPreflight::commit_like(),
+    )? {
         return Err(anyhow!(advice));
     }
     let user_config = UserConfig::load_default().unwrap_or_default();

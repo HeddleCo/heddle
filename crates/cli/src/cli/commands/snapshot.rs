@@ -23,10 +23,9 @@ use super::{
     command_catalog::ActionTemplate,
     error_envelope::print_error_with_hint,
     git_overlay_health::{
-        RepositoryVerificationState, action_template, build_plain_git_verification_probe,
-        build_repository_verification_state, plain_git_mutation_advice,
-        raw_git_operation_mutation_advice, unimported_git_history_advice,
-        verification_blocking_mutation_advice,
+        GitOverlayMutationPreflight, RepositoryVerificationState, action_template,
+        build_repository_verification_state, git_overlay_mutation_preflight_advice,
+        plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
     thread::find_active_thread_entry,
     thread_cmd::current_thread,
@@ -141,8 +140,8 @@ pub async fn cmd_snapshot(
         cwd = std::env::current_dir()?;
         &cwd
     };
-    if let Some(probe) = build_plain_git_verification_probe(start)? {
-        return Err(anyhow!(plain_git_mutation_advice(&probe, "capture")));
+    if let Some(advice) = plain_git_mutation_preflight_advice(start, "capture")? {
+        return Err(anyhow!(advice));
     }
 
     let repo = Repository::open(start)?;
@@ -431,13 +430,11 @@ pub(crate) fn create_snapshot_profiled(
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     info!("Creating snapshot");
 
-    if let Some(advice) = unimported_git_history_advice(repo, "capture")? {
-        return Err(anyhow!(advice));
-    }
-    if let Some(advice) = raw_git_operation_mutation_advice(repo, "capture")? {
-        return Err(anyhow!(advice));
-    }
-    if let Some(advice) = verification_blocking_mutation_advice(repo, "capture") {
+    if let Some(advice) = git_overlay_mutation_preflight_advice(
+        repo,
+        "capture",
+        GitOverlayMutationPreflight::capture_like(),
+    )? {
         return Err(anyhow!(advice));
     }
 
@@ -558,13 +555,11 @@ pub(crate) fn create_snapshot_from_tree_profiled(
 ) -> Result<(SnapshotOutput, SnapshotCommandProfile)> {
     info!("Creating snapshot from supplied tree");
 
-    if let Some(advice) = unimported_git_history_advice(repo, "capture")? {
-        return Err(anyhow!(advice));
-    }
-    if let Some(advice) = raw_git_operation_mutation_advice(repo, "capture")? {
-        return Err(anyhow!(advice));
-    }
-    if let Some(advice) = verification_blocking_mutation_advice(repo, "capture") {
+    if let Some(advice) = git_overlay_mutation_preflight_advice(
+        repo,
+        "capture",
+        GitOverlayMutationPreflight::capture_like(),
+    )? {
         return Err(anyhow!(advice));
     }
 
