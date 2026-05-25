@@ -86,6 +86,19 @@ jobs:
       # exist on every target the `mount` feature compiles for.
       # See `scripts/check-fuse-worker-cross-platform.sh` for the
       # rationale (heddle#190 r5 / Codex PR #225 P1).
+      #
+      # `aws-lc-sys` (transitive via `rustls`) is a `*-sys` crate
+      # whose `build.rs` invokes the C compiler even under `cargo
+      # check`, so we have to provision the mingw-w64 cross-toolchain
+      # before the step can succeed. `cargo check` was the natural
+      # first try; it doesn't elide build-script C compilation
+      # (heddle#190 r6).
+      - name: Install mingw-w64 cross-toolchain (for cross-check)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64
+          x86_64-w64-mingw32-gcc --version
+
       - name: Cross-check FUSE worker on non-Linux mount target
         run: bash scripts/check-fuse-worker-cross-platform.sh
 

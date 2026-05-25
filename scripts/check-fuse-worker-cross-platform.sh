@@ -14,6 +14,13 @@
 # pulls in the `windows` crate behind a target-cfg). The macOS targets
 # would catch the same bug, but require Xcode tooling that GitHub-hosted
 # Linux runners don't ship.
+#
+# Prereq: `x86_64-w64-mingw32-gcc` must be on PATH. `aws-lc-sys` (pulled
+# in transitively via `rustls`) is a `*-sys` crate whose `build.rs`
+# invokes the C compiler even under `cargo check`, so the cross-toolchain
+# is required despite this being a check-only run. On Debian/Ubuntu:
+# `sudo apt-get install -y --no-install-recommends mingw-w64`
+# (heddle#190 r6).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
