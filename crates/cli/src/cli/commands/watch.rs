@@ -50,10 +50,9 @@ use oplog::{OpEntry, OpLog, OpRecord};
 use repo::Repository;
 use serde::Serialize;
 
-use super::advice::RecoveryAdvice;
+use super::{advice::RecoveryAdvice, command_runtime_contract};
 use crate::cli::{
-    Cli, WatchArgs,
-    cli_args::OutputMode,
+    Cli, JsonOutputMode, WatchArgs, json_output_mode_for_kind,
     style::{accent, change_id as style_change_id, confidence as style_confidence, dim, warn},
 };
 
@@ -178,13 +177,16 @@ fn oplog_file_path(heddle_dir: &Path) -> PathBuf {
     heddle_dir.join("oplog").join("oplog.bin")
 }
 
-/// Resolve JSON-vs-text mode. Explicit `--output json` opts in. We deliberately *don't* call `should_output_json`
-/// here because that helper auto-flips to JSON on a non-TTY, which
-/// would make `heddle watch | tee log.txt` silently change format.
-/// `watch` is opinionated: human-readable by default, JSON only when
-/// the user asks.
+/// Resolve JSON-vs-text mode from the command contract. `watch`
+/// advertises `jsonl`, so the shared resolver keeps the stream
+/// human-readable unless the user explicitly asks for JSON.
 fn json_mode(cli: &Cli, _args: &WatchArgs) -> bool {
-    matches!(cli.output, Some(OutputMode::Json))
+    let contract =
+        command_runtime_contract("watch").expect("watch command contract should be registered");
+    matches!(
+        json_output_mode_for_kind(cli, None, contract.json_kind),
+        JsonOutputMode::Jsonl
+    )
 }
 
 /// Parse `--filter snapshot,merge,thread_create` into a set of kinds.

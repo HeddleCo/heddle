@@ -88,6 +88,74 @@ pub fn should_output_json(cli: &Cli, config: Option<&Config>) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonOutputMode {
+    Text,
+    Json,
+    Jsonl,
+}
+
+/// Resolve the runtime JSON mode promised by a command contract's
+/// `json_kind`.
+///
+/// JSONL commands are stream-shaped and opt into machine output only
+/// when explicitly requested. That prevents commands like `watch` from
+/// silently changing format when piped through human tools.
+pub fn json_output_mode_for_kind(
+    cli: &Cli,
+    config: Option<&Config>,
+    json_kind: &str,
+) -> JsonOutputMode {
+    match json_kind {
+        "jsonl" => {
+            if matches!(cli.output, Some(OutputMode::Json)) {
+                JsonOutputMode::Jsonl
+            } else {
+                JsonOutputMode::Text
+            }
+        }
+        "json" | "json_or_jsonl" => {
+            if should_output_json(cli, config) {
+                JsonOutputMode::Json
+            } else {
+                JsonOutputMode::Text
+            }
+        }
+        "none" => JsonOutputMode::Text,
+        _ => JsonOutputMode::Text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn jsonl_commands_require_explicit_json_output() {
+        let auto = Cli::try_parse_from(["heddle", "watch"]).expect("watch should parse");
+        assert_eq!(
+            json_output_mode_for_kind(&auto, None, "jsonl"),
+            JsonOutputMode::Text
+        );
+
+        let json = Cli::try_parse_from(["heddle", "--output", "json", "watch"])
+            .expect("watch --output json should parse");
+        assert_eq!(
+            json_output_mode_for_kind(&json, None, "jsonl"),
+            JsonOutputMode::Jsonl
+        );
+
+        let text = Cli::try_parse_from(["heddle", "--output", "text", "watch"])
+            .expect("watch --output text should parse");
+        assert_eq!(
+            json_output_mode_for_kind(&text, None, "jsonl"),
+            JsonOutputMode::Text
+        );
+    }
+}
+
 impl weft_client_shim::CliContext for Cli {
     fn repo_path(&self) -> Option<&std::path::Path> {
         self.repo.as_deref()
