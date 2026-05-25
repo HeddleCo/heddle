@@ -14,7 +14,7 @@
 
 use anyhow::{Result, anyhow};
 use oplog::OpRecord;
-use repo::{GitCheckpointRecord, Repository, RepositoryCapability};
+use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::{
@@ -198,7 +198,9 @@ pub(crate) fn preflight_git_checkpoint_ref_update(repo: &Repository, action: &st
         return Ok(());
     }
     let trust = build_repository_verification_state(repo);
-    if git_checkpoint_trust_allows_ref_update(&trust) {
+    if git_checkpoint_trust_allows_ref_update(&trust)
+        || git_checkpoint_can_close_integrated_remote_gap(repo, &trust)
+    {
         return Ok(());
     }
     Err(anyhow!(git_checkpoint_preflight_advice(
@@ -216,6 +218,37 @@ fn git_checkpoint_trust_allows_ref_update(trust: &RepositoryVerificationState) -
         "clean" | "remote_ahead" | "remote_untracked"
     );
     status_allows_checkpoint && remote_allows_checkpoint
+}
+
+fn git_checkpoint_can_close_integrated_remote_gap(
+    repo: &Repository,
+    trust: &RepositoryVerificationState,
+) -> bool {
+    if trust.status != "needs_checkpoint"
+        || !matches!(
+            trust.remote_drift.as_str(),
+            "remote_behind" | "remote_diverged"
+        )
+    {
+        return false;
+    }
+    let Some(remote) = repo.git_remote_tracking_status().ok().flatten() else {
+        return false;
+    };
+    let upstream = remote.upstream.trim();
+    if upstream.is_empty() {
+        return false;
+    }
+    let Ok(Some(upstream_state)) = repo.refs().get_thread(upstream) else {
+        return false;
+    };
+    let Ok(Some(current_state)) = repo.head() else {
+        return false;
+    };
+    let mut graph = CommitGraphIndex::new(repo);
+    graph
+        .is_ancestor(&upstream_state, &current_state)
+        .unwrap_or(false)
 }
 
 fn git_checkpoint_preflight_advice(

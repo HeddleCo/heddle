@@ -356,6 +356,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     // Remote setup requires filling in a real name and URL after
     // inspecting current configuration.
     "heddle remote add <name> <url>",
+    "heddle remote set-default <name>",
     // Clone recovery commands must name a real remote and an empty
     // destination path chosen by the operator.
     "heddle clone <local-path> <path>",
@@ -474,6 +475,12 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         "heddle remote add <name> <url>",
         &["heddle", "remote", "add", "<name>", "<url>"],
         &["name", "url"],
+        false,
+    ),
+    (
+        "heddle remote set-default <name>",
+        &["heddle", "remote", "set-default", "<name>"],
+        &["name"],
         false,
     ),
     (

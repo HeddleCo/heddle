@@ -3417,6 +3417,105 @@ fn git_overlay_matrix_commit_refuses_remote_divergence_before_capture() {
 }
 
 #[test]
+fn git_overlay_matrix_checkpoint_closes_imported_remote_divergence_after_merge() {
+    let temp = TempDir::new().unwrap();
+    let origin = TempDir::new().unwrap();
+    let peer = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    git(&["init", "--bare", "--initial-branch=main"], origin.path());
+    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
+    git(&["remote", "add", "origin", origin_arg], temp.path());
+    git(&["push", "-u", "origin", "main"], temp.path());
+    heddle_adopt(temp.path());
+
+    let peer_arg = peer.path().to_str().expect("peer path should be utf8");
+    git(&["clone", origin_arg, peer_arg], temp.path());
+    git(&["config", "user.name", "Peer"], peer.path());
+    git(&["config", "user.email", "peer@example.com"], peer.path());
+
+    std::fs::write(temp.path().join("local.txt"), "local\n").unwrap();
+    json(
+        temp.path(),
+        &["--output", "json", "commit", "-m", "local checkpoint"],
+    );
+
+    std::fs::write(peer.path().join("remote.txt"), "remote\n").unwrap();
+    git_commit_all(peer.path(), "remote checkpoint");
+    git(&["push", "origin", "main"], peer.path());
+    heddle(&["fetch", "origin"], Some(temp.path())).expect("fetch remote divergence");
+
+    let before_import = json(temp.path(), &["--output", "json", "verify"]);
+    assert_eq!(
+        before_import["remote_drift"], "remote_diverged",
+        "{before_import}"
+    );
+    assert_eq!(
+        before_import["recommended_action"], "heddle bridge git import --ref origin/main",
+        "{before_import}"
+    );
+
+    let import = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "bridge",
+            "git",
+            "import",
+            "--ref",
+            "origin/main",
+        ],
+    );
+    assert_eq!(import["branches_synced"], 1, "{import}");
+    assert_eq!(import["states_created"], 1, "{import}");
+
+    let preview = json(
+        temp.path(),
+        &["--output", "json", "merge", "origin/main", "--preview"],
+    );
+    assert_eq!(preview["preview_only"], true, "{preview}");
+    assert_eq!(preview["conflict_count"], 0, "{preview}");
+
+    let merged = json(temp.path(), &["--output", "json", "merge", "origin/main"]);
+    assert_eq!(merged["status"], "completed", "{merged}");
+    assert_eq!(merged["preview_only"], false, "{merged}");
+
+    let needs_checkpoint = json(temp.path(), &["--output", "json", "status"]);
+    assert_eq!(
+        needs_checkpoint["verification"]["status"], "needs_checkpoint",
+        "{needs_checkpoint}"
+    );
+    assert_eq!(
+        needs_checkpoint["verification"]["remote_drift"], "remote_diverged",
+        "{needs_checkpoint}"
+    );
+    assert_eq!(
+        needs_checkpoint["recommended_action"], "heddle checkpoint -m \"...\"",
+        "after integrating upstream into Heddle, checkpoint must remain the primary way out: {needs_checkpoint}"
+    );
+
+    let checkpoint = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "checkpoint",
+            "-m",
+            "checkpoint integrated remote",
+        ],
+    );
+    assert_eq!(checkpoint["status"], "checkpointed", "{checkpoint}");
+    assert_eq!(
+        checkpoint["verification"]["status"], "clean",
+        "checkpoint should write a Git merge commit that can be pushed normally: {checkpoint}"
+    );
+    assert_eq!(checkpoint["verification"]["remote_drift"], "remote_ahead");
+    assert_eq!(checkpoint["recommended_action"], "heddle push");
+}
+
+#[test]
 fn git_overlay_matrix_push_defaults_to_branch_upstream_remote() {
     let temp = TempDir::new().unwrap();
     let upstream = TempDir::new().unwrap();
