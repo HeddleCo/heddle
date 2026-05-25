@@ -5,7 +5,7 @@ use clap::error::Error as ClapError;
 
 use super::{
     RecoveryAdvice,
-    command_catalog::{ActionTemplate, recommended_action_template},
+    command_catalog::{ActionTemplate, recommended_action_template, validate_recommended_action},
     recommended_action_argv,
 };
 use crate::cli::{Cli, render::shell_quote, should_output_json};
@@ -183,6 +183,30 @@ struct ErrorClassification {
 
 impl ErrorClassification {
     fn from_advice(advice: &RecoveryAdvice) -> Self {
+        let validation =
+            AdviceActionValidation::new(&advice.primary_command, &advice.recovery_commands);
+        let mut extra_json_fields = advice.extra_json_fields.clone();
+        if !validation.violations.is_empty() {
+            extra_json_fields.insert(
+                "advice_contract_valid".to_string(),
+                serde_json::Value::Bool(false),
+            );
+            extra_json_fields.insert(
+                "advice_contract_violations".to_string(),
+                serde_json::Value::Array(
+                    validation
+                        .violations
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+            extra_json_fields.insert(
+                "original_primary_command".to_string(),
+                serde_json::Value::String(advice.primary_command.clone()),
+            );
+        }
         Self {
             kind: advice.kind.to_string(),
             human_error: Some(advice.error.clone()),
@@ -190,9 +214,9 @@ impl ErrorClassification {
             unsafe_condition: advice.unsafe_condition.clone(),
             would_change: advice.would_change.clone(),
             preserved: advice.preserved.clone(),
-            primary_command: advice.primary_command.clone(),
-            recovery_commands: advice.recovery_commands.clone(),
-            extra_json_fields: advice.extra_json_fields.clone(),
+            primary_command: validation.primary_command,
+            recovery_commands: validation.recovery_commands,
+            extra_json_fields,
         }
     }
 
@@ -230,8 +254,65 @@ impl ErrorClassification {
     }
 }
 
+struct AdviceActionValidation {
+    primary_command: String,
+    recovery_commands: Vec<String>,
+    violations: Vec<String>,
+}
+
+impl AdviceActionValidation {
+    fn new(primary_command: &str, recovery_commands: &[String]) -> Self {
+        let mut violations = Vec::new();
+        if let Err(error) = validate_recommended_action(primary_command) {
+            violations.push(format!(
+                "primary_command `{primary_command}` is not a registered action: {error}"
+            ));
+        }
+
+        let mut valid_recovery_commands = Vec::new();
+        for command in recovery_commands {
+            match validate_recommended_action(command) {
+                Ok(()) => valid_recovery_commands.push(command.clone()),
+                Err(error) => violations.push(format!(
+                    "recovery_command `{command}` is not a registered action: {error}"
+                )),
+            }
+        }
+
+        if violations.is_empty() {
+            return Self {
+                primary_command: primary_command.to_string(),
+                recovery_commands: if recovery_commands.is_empty() {
+                    vec![primary_command.to_string()]
+                } else {
+                    recovery_commands.to_vec()
+                },
+                violations,
+            };
+        }
+
+        let fallback = "heddle commands --output json".to_string();
+        valid_recovery_commands.retain(|command| command != &fallback);
+        valid_recovery_commands.insert(0, fallback.clone());
+        Self {
+            primary_command: fallback,
+            recovery_commands: valid_recovery_commands,
+            violations,
+        }
+    }
+}
+
 fn command_argv(command: &str) -> Option<Vec<String>> {
-    recommended_action_argv(command).ok().flatten()
+    match recommended_action_argv(command) {
+        Ok(argv) => argv,
+        Err(error) => {
+            debug_assert!(
+                false,
+                "invalid command action reached error envelope: {command}: {error}"
+            );
+            None
+        }
+    }
 }
 
 fn command_template(command: &str) -> Option<ActionTemplate> {
@@ -481,4 +562,44 @@ fn classify_error(err: &anyhow::Error) -> ErrorClassification {
         );
     }
     ErrorClassification::runtime()
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    use super::{RecoveryAdvice, classify_error};
+
+    #[test]
+    fn recovery_advice_with_invalid_actions_falls_back_to_contract_catalog() {
+        let err = anyhow!(RecoveryAdvice::safety_refusal(
+            "bad_advice_fixture",
+            "bad advice",
+            "bad hint",
+            "unsafe",
+            "would change",
+            "nothing changed",
+            "git status",
+            vec!["git status".to_string()],
+        ));
+
+        let classified = classify_error(&err);
+        assert_eq!(classified.kind, "bad_advice_fixture");
+        assert_eq!(classified.primary_command, "heddle commands --output json");
+        assert_eq!(
+            classified.recovery_commands,
+            vec!["heddle commands --output json"]
+        );
+        assert_eq!(
+            classified.extra_json_fields["advice_contract_valid"],
+            serde_json::Value::Bool(false)
+        );
+        assert!(
+            classified
+                .extra_json_fields
+                .get("advice_contract_violations")
+                .and_then(|value| value.as_array())
+                .is_some_and(|violations| violations.len() == 2)
+        );
+    }
 }
