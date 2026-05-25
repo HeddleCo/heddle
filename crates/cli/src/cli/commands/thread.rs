@@ -30,8 +30,8 @@ use super::{
     command_catalog::{ActionTemplate, recommended_action_template},
     git_overlay_health::{
         RepositoryVerificationState, action_argv, build_repository_verification_state,
-        canonical_adopt_ref_command, command_argvs, override_trust_recommended_action,
-        serialize_empty_action_as_null,
+        canonical_adopt_ref_command, canonical_bridge_reconcile_ref_preview_command, command_argvs,
+        override_trust_recommended_action, serialize_empty_action_as_null,
     },
     mount_lifecycle,
     next_action::{
@@ -2584,8 +2584,7 @@ fn thread_switch_would_overwrite_worktree_advice(thread: &str) -> RecoveryAdvice
 }
 
 fn thread_switch_git_checkout_skipped_advice(thread: &str, reason: String) -> RecoveryAdvice {
-    let primary_command =
-        format!("heddle bridge git reconcile --prefer heddle --ref {thread} --preview");
+    let primary_command = canonical_bridge_reconcile_ref_preview_command(Some("heddle"), thread);
     RecoveryAdvice::safety_refusal(
         "thread_switch_git_checkout_skipped",
         format!("switched Heddle to '{thread}', but could not update Git checkout: {reason}"),

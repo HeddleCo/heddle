@@ -19,7 +19,8 @@ use super::{
         GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_argv,
         action_template, build_git_overlay_health, build_plain_git_verification_probe,
         build_repository_verification_state, canonical_adopt_ref_command,
-        serialize_empty_action_as_null,
+        canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_command,
+        canonical_bridge_reconcile_ref_preview_command, serialize_empty_action_as_null,
     },
     remote::resolve_default_remote_name,
 };
@@ -805,14 +806,12 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             preview,
         } => {
             let heddle_preview =
-                format!("heddle bridge git reconcile --prefer heddle --ref {ref_name} --preview");
+                canonical_bridge_reconcile_ref_preview_command(Some("heddle"), &ref_name);
             let git_preview =
-                format!("heddle bridge git reconcile --prefer git --ref {ref_name} --preview");
+                canonical_bridge_reconcile_ref_preview_command(Some("git"), &ref_name);
             let recovery_commands = match prefer.as_deref() {
-                Some("git") => vec![format!("heddle bridge git import --ref {ref_name}")],
-                Some("heddle") => vec![format!(
-                    "heddle bridge git reconcile --prefer heddle --ref {ref_name}"
-                )],
+                Some("git") => vec![canonical_bridge_import_ref_command(&ref_name)],
+                Some("heddle") => vec![canonical_bridge_reconcile_ref_command("heddle", &ref_name)],
                 None if preview => vec![heddle_preview.clone(), git_preview.clone()],
                 None => return Err(anyhow!(reconcile_direction_required_advice(&ref_name))),
                 _ => unreachable!("clap restricts --prefer values"),
@@ -1007,8 +1006,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
 
 fn reconcile_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
     let import_command = canonical_adopt_ref_command(ref_name);
-    let reconcile_git_command =
-        format!("heddle bridge git reconcile --prefer git --ref {ref_name}");
+    let reconcile_git_command = canonical_bridge_reconcile_ref_command("git", ref_name);
 
     RecoveryAdvice::safety_refusal(
         "reconcile_missing_heddle_thread",
@@ -1029,7 +1027,7 @@ fn reconcile_missing_heddle_thread_advice(ref_name: &str) -> RecoveryAdvice {
 }
 
 fn reconcile_direction_required_advice(ref_name: &str) -> RecoveryAdvice {
-    let preview_command = format!("heddle bridge git reconcile --ref {ref_name} --preview");
+    let preview_command = canonical_bridge_reconcile_ref_preview_command(None, ref_name);
     RecoveryAdvice::safety_refusal(
         "reconcile_direction_required",
         format!("Refusing to reconcile '{ref_name}': choose a local side before applying"),
@@ -1042,8 +1040,8 @@ fn reconcile_direction_required_advice(ref_name: &str) -> RecoveryAdvice {
         preview_command.clone(),
         vec![
             preview_command,
-            format!("heddle bridge git reconcile --prefer heddle --ref {ref_name} --preview"),
-            format!("heddle bridge git reconcile --prefer git --ref {ref_name} --preview"),
+            canonical_bridge_reconcile_ref_preview_command(Some("heddle"), ref_name),
+            canonical_bridge_reconcile_ref_preview_command(Some("git"), ref_name),
         ],
     )
 }
@@ -1064,8 +1062,7 @@ fn reconcile_preview_summary(ref_name: &str, prefer: Option<&str>) -> String {
 }
 
 fn reconcile_write_through_skipped_advice(ref_name: &str, reason: String) -> RecoveryAdvice {
-    let preview_command =
-        format!("heddle bridge git reconcile --prefer heddle --ref {ref_name} --preview");
+    let preview_command = canonical_bridge_reconcile_ref_preview_command(Some("heddle"), ref_name);
 
     RecoveryAdvice::safety_refusal(
         "reconcile_write_through_skipped",

@@ -26,7 +26,10 @@ use super::{
     },
     schemas::opaque_schema_verbs,
 };
-use crate::{cli::worktree_status_options, remote::RemoteConfig};
+use crate::{
+    cli::{render::shell_quote, worktree_status_options},
+    remote::RemoteConfig,
+};
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub(crate) struct GitOverlayHealth {
@@ -2316,7 +2319,7 @@ pub(crate) fn remote_tracking_next_action(remote: &GitRemoteTrackingStatus) -> O
             if upstream.is_empty() {
                 Some("heddle fetch".to_string())
             } else {
-                Some(format!("heddle bridge git import --ref {upstream}"))
+                Some(canonical_bridge_import_ref_command(upstream))
             }
         }
         _ => None,
@@ -2368,7 +2371,7 @@ pub(crate) fn remote_drift_decision(
                     requires_clean_worktree: false,
                 };
             }
-            let import = format!("heddle bridge git import --ref {upstream}");
+            let import = canonical_bridge_import_ref_command(upstream);
             let merge_preview = super::thread_landing::merge_preview_command(upstream);
             let imported = repo.refs().get_thread(upstream).ok().flatten().is_some();
             RemoteDriftDecision {
@@ -3118,7 +3121,36 @@ fn needs_import(
 }
 
 pub(crate) fn canonical_adopt_ref_command(ref_name: &str) -> String {
-    format!("heddle adopt --ref {ref_name}")
+    format!("heddle adopt --ref {}", shell_quote(ref_name))
+}
+
+pub(crate) fn canonical_bridge_import_ref_command(ref_name: &str) -> String {
+    format!("heddle bridge git import --ref {}", shell_quote(ref_name))
+}
+
+pub(crate) fn canonical_bridge_reconcile_ref_preview_command(
+    prefer: Option<&str>,
+    ref_name: &str,
+) -> String {
+    match prefer {
+        Some(prefer) => format!(
+            "heddle bridge git reconcile --prefer {} --ref {} --preview",
+            shell_quote(prefer),
+            shell_quote(ref_name)
+        ),
+        None => format!(
+            "heddle bridge git reconcile --ref {} --preview",
+            shell_quote(ref_name)
+        ),
+    }
+}
+
+pub(crate) fn canonical_bridge_reconcile_ref_command(prefer: &str, ref_name: &str) -> String {
+    format!(
+        "heddle bridge git reconcile --prefer {} --ref {}",
+        shell_quote(prefer),
+        shell_quote(ref_name)
+    )
 }
 
 pub(crate) fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) -> bool {
@@ -3288,8 +3320,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        RepositoryVerificationState, machine_contract_coverage, remote_drift_decision,
-        remote_tracking_next_action, repository_setup_guidance,
+        RepositoryVerificationState, action_argv, canonical_bridge_import_ref_command,
+        canonical_bridge_reconcile_ref_preview_command, machine_contract_coverage,
+        remote_drift_decision, remote_tracking_next_action, repository_setup_guidance,
         repository_verification_blocked_advice,
     };
     use crate::cli::commands::build_command_catalog;
@@ -3358,6 +3391,31 @@ mod tests {
                 .contains("connect this branch with heddle adopt --ref main")
         );
         assert!(guidance.effect.contains("adoption imports Git history"));
+    }
+
+    #[test]
+    fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
+        let import = canonical_bridge_import_ref_command("feature with spaces");
+        assert_eq!(
+            action_argv(&import).expect("import command should expose argv")[1..],
+            ["bridge", "git", "import", "--ref", "feature with spaces"]
+        );
+
+        let reconcile =
+            canonical_bridge_reconcile_ref_preview_command(Some("heddle"), "feature 'quoted'");
+        assert_eq!(
+            action_argv(&reconcile).expect("reconcile command should expose argv")[1..],
+            [
+                "bridge",
+                "git",
+                "reconcile",
+                "--prefer",
+                "heddle",
+                "--ref",
+                "feature 'quoted'",
+                "--preview"
+            ]
+        );
     }
 
     #[test]
