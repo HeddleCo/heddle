@@ -156,10 +156,15 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
+        # Split into two invocations: a positional TESTNAME filter applies
+        # to every selected target, so combining `--test ...` with `--lib
+        # <name-filter>` would silently filter the integration target down
+        # to zero tests. Run each target with its own filter.
         run: |
           cargo test --locked -p heddle-mount --features fuse \
-            --test fuse_worker_resource_cleanup \
             --lib worker::tests::supervise_watcher_spawn_reaps_child_on_failure
+          cargo test --locked -p heddle-mount --features fuse \
+            --test fuse_worker_resource_cleanup
 
       - name: sccache stats
         run: sccache --show-stats
