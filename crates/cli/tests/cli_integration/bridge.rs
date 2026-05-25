@@ -326,6 +326,149 @@ fn test_cli_push_mirror_json_success_emits_mirrored_true() {
     );
 }
 
+/// `heddle push --mirror=<git-remote>` in a Git-overlay (non-hosted)
+/// repo must push to BOTH the primary and the mirror. The cmd_push
+/// early-return for the `GitOverlay && !hosted_enabled` branch
+/// previously skipped the mirror block entirely, silently ignoring
+/// `--mirror` for the overlay drop-in case.
+#[test]
+fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
+    let source = TempDir::new().unwrap();
+    let primary_remote = TempDir::new().unwrap();
+    let mirror_remote = TempDir::new().unwrap();
+    let primary_repo = gix::init_bare(primary_remote.path()).unwrap();
+    let mirror_repo = gix::init_bare(mirror_remote.path()).unwrap();
+
+    // Plain `git init` → RepositoryCapability::GitOverlay,
+    // hosted_enabled() == false. This is the drop-in case the
+    // early-return in cmd_push handles.
+    assert!(
+        Command::new("git")
+            .arg("init")
+            .current_dir(source.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    for (k, v) in [
+        ("user.name", "Heddle Test"),
+        ("user.email", "heddle@example.com"),
+        ("init.defaultBranch", "main"),
+    ] {
+        Command::new("git")
+            .args(["config", k, v])
+            .current_dir(source.path())
+            .status()
+            .unwrap();
+    }
+    Command::new("git")
+        .args(["checkout", "-B", "main"])
+        .current_dir(source.path())
+        .status()
+        .unwrap();
+    std::fs::write(source.path().join("file.txt"), "overlay dual push").unwrap();
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(source.path())
+        .status()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(source.path())
+        .status()
+        .unwrap();
+
+    // Bootstrap the heddle overlay sidecar so the bridge has content
+    // to push. Without an imported state, `bridge.push` silently
+    // succeeds but copies nothing — masking the real --mirror bug.
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(source.path()),
+    )
+    .expect("bridge git import should bootstrap the overlay sidecar");
+
+    let primary_path = primary_remote.path().to_string_lossy().to_string();
+    let mirror_path = mirror_remote.path().to_string_lossy().to_string();
+    let mirror_arg = format!("--mirror={}", mirror_path);
+    heddle(
+        &["push", &primary_path, &mirror_arg],
+        Some(source.path()),
+    )
+    .expect("push --mirror in GitOverlay repo should succeed");
+
+    assert!(
+        primary_repo.find_reference("refs/heads/main").is_ok(),
+        "primary remote should have refs/heads/main after overlay push"
+    );
+    assert!(
+        mirror_repo.find_reference("refs/heads/main").is_ok(),
+        "mirror remote MUST ALSO have refs/heads/main — the GitOverlay early-return previously bypassed --mirror"
+    );
+}
+
+/// `render_mirror_outcome` JSON must use RFC 8259 escaping — not
+/// Rust's `Debug` format. A remote name containing U+2028
+/// (LINE SEPARATOR) round-trips through `{:?}` as `"\u{2028}"`
+/// (Rust syntax), which is NOT valid JSON. With proper serde
+/// serialization the output parses and the field round-trips.
+#[test]
+fn test_cli_push_mirror_json_uses_rfc8259_escaping_for_unicode() {
+    let source = TempDir::new().unwrap();
+    let weft_target = TempDir::new().unwrap();
+    let mirror_parent = TempDir::new().unwrap();
+    // A real bare git repo at a path containing U+2028, so the mirror
+    // push succeeds and the `"remote"` field carries the bad codepoint.
+    let mirror_dir = mirror_parent.path().join("mirror\u{2028}suffix");
+    std::fs::create_dir_all(&mirror_dir).unwrap();
+    let mirror_repo = gix::init_bare(&mirror_dir).unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(weft_target.path())).unwrap();
+    std::fs::write(source.path().join("file.txt"), "u+2028").unwrap();
+    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
+
+    let weft_path = weft_target.path().to_string_lossy().to_string();
+    let mirror_path = mirror_dir.to_string_lossy().to_string();
+    let mirror_arg = format!("--mirror={}", mirror_path);
+    let stdout = heddle(
+        &[
+            "--output",
+            "json",
+            "push",
+            &weft_path,
+            "--thread",
+            "main",
+            &mirror_arg,
+        ],
+        Some(source.path()),
+    )
+    .expect("push --output json --mirror=<U+2028> must succeed");
+
+    let mirror_line = stdout
+        .lines()
+        .find(|line| line.contains("\"mirrored\""))
+        .unwrap_or_else(|| panic!("mirror outcome JSON line missing in stdout: {}", stdout));
+
+    // The Debug-format bug emits `"\u{2028}"` (literal braces), which
+    // is not valid JSON — `serde_json::from_str` rejects it.
+    let parsed: serde_json::Value = serde_json::from_str(mirror_line).unwrap_or_else(|err| {
+        panic!(
+            "mirror outcome must be RFC 8259 JSON, got {}: {:?}",
+            err, mirror_line
+        )
+    });
+    assert_eq!(
+        parsed["remote"].as_str(),
+        Some(mirror_path.as_str()),
+        "remote field must round-trip the U+2028 codepoint exactly"
+    );
+    // Sanity: mirror push landed too.
+    assert!(
+        mirror_repo.find_reference("refs/heads/main").is_ok(),
+        "mirror push should have landed at the U+2028 path"
+    );
+}
+
 /// JSON output path on mirror failure: covers the `mirrored:false`
 /// + `error` branch of `render_mirror_outcome`.
 #[test]
