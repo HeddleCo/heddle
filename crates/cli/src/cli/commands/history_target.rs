@@ -24,7 +24,10 @@
 //! representation (e.g. when handing it to a gRPC service stub).
 
 use anyhow::{Result, anyhow};
-use objects::object::ChangeId;
+use objects::{
+    error::HeddleError,
+    object::{ChangeId, State},
+};
 use repo::Repository;
 
 use super::advice::RecoveryAdvice;
@@ -54,6 +57,19 @@ pub(crate) fn resolve_state_id(repo: &Repository, spec: &str) -> Result<ChangeId
             Err(anyhow!(state_not_found_advice(spec)))
         }
     }
+}
+
+/// Load a state after its ID has already resolved.
+///
+/// A missing object at this point is an integrity/storage problem, not
+/// a user-supplied state-spec lookup failure.
+pub(crate) fn require_resolved_state(repo: &Repository, id: &ChangeId) -> Result<State> {
+    repo.store().get_state(id)?.ok_or_else(|| {
+        anyhow::Error::new(HeddleError::MissingObject {
+            object_type: "state".to_string(),
+            id: id.to_string_full(),
+        })
+    })
 }
 
 fn state_not_found_advice(spec: &str) -> RecoveryAdvice {

@@ -354,7 +354,7 @@ async fn watch_thread_show(
     let mut iterations = 0usize;
     loop {
         let summary = find_thread_summary(repo, thread_id)?
-            .ok_or_else(|| anyhow!("Thread not found: {}", thread_id))?;
+            .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "watch thread")))?;
         show_thread_summary(cli, repo, &summary)?;
         iterations += 1;
         if watch_iterations.is_some_and(|limit| iterations >= limit) {
@@ -505,7 +505,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     let target_state = repo
         .refs()
         .get_thread(&target_thread)?
-        .ok_or_else(|| anyhow!("Target thread '{}' not found", target_thread))?;
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&target_thread, "refresh thread")))?;
     let target_state_obj = repo
         .store()
         .get_state(&target_state)?
@@ -904,11 +904,21 @@ fn preflight_three_way_refresh_conflict(
     let target_tip = parent_repo
         .refs()
         .get_thread(target_thread_name)?
-        .ok_or_else(|| anyhow!("Target thread '{}' not found", target_thread_name))?;
+        .ok_or_else(|| {
+            anyhow!(thread_not_found_advice(
+                target_thread_name,
+                "preflight thread refresh",
+            ))
+        })?;
     let thread_tip = parent_repo
         .refs()
         .get_thread(&thread.thread)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread.thread))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "managed thread '{}' is missing its ref during refresh preflight",
+                thread.thread
+            )
+        })?;
     let current_label = format!("CURRENT ({})", thread.thread);
     let incoming_label = format!("INCOMING ({})", target_thread_name);
 
@@ -965,11 +975,21 @@ fn try_three_way_merge_refresh(
     let target_tip = parent_repo
         .refs()
         .get_thread(target_thread_name)?
-        .ok_or_else(|| anyhow!("Target thread '{}' not found", target_thread_name))?;
+        .ok_or_else(|| {
+            anyhow!(thread_not_found_advice(
+                target_thread_name,
+                "refresh thread",
+            ))
+        })?;
     let thread_tip = parent_repo
         .refs()
         .get_thread(&thread.thread)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread.thread))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "managed thread '{}' is missing its ref during refresh",
+                thread.thread
+            )
+        })?;
 
     let current_label = format!("CURRENT ({})", thread.thread);
     let incoming_label = format!("INCOMING ({})", target_thread_name);
@@ -1063,11 +1083,13 @@ fn cmd_thread_promote(
     let manager = thread_manager(repo);
     let mut thread = manager
         .load(thread_id)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread_id))?;
-    let state_id = repo
-        .refs()
-        .get_thread(&thread.thread)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread.thread))?;
+        .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "promote thread")))?;
+    let state_id = repo.refs().get_thread(&thread.thread)?.ok_or_else(|| {
+        anyhow!(
+            "managed thread '{}' is missing its ref during promote",
+            thread.thread
+        )
+    })?;
     if !force {
         if thread.execution_path.exists()
             && thread.execution_path != *repo.root()

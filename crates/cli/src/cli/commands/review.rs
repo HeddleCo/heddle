@@ -314,10 +314,11 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
 async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
     let svc = open_state_review_service(cli)?;
     let repo = open_repo(cli)?;
-    let head = repo
-        .head()
-        .context("read HEAD")?
-        .ok_or_else(|| anyhow!("repository has no HEAD; capture a state first"))?;
+    let head = repo.head().context("read HEAD")?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::repository_no_head_capture_first(
+            "review next"
+        ))
+    })?;
 
     let actor_email = args
         .mine_only
@@ -517,7 +518,7 @@ fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
     let head = repo
         .head()
         .context("read HEAD")?
-        .ok_or_else(|| anyhow!("repository has no HEAD; capture a state first"))?;
+        .ok_or_else(|| anyhow!(RecoveryAdvice::repository_no_head_capture_first("review")))?;
     Ok(head.as_bytes().to_vec())
 }
 

@@ -12,15 +12,28 @@ use std::{
 
 const ALLOWED_ENVELOPE_FILE: &str = "cli/commands/error_envelope.rs";
 const ALLOWED_ADVICE_FILE: &str = "cli/commands/advice.rs";
+const ALLOWED_HISTORY_TARGET_FILE: &str = "cli/commands/history_target.rs";
 
 const RAW_RECOVERY_PHRASES: &[&str] = &[
+    "State not found:",
     "network fetch support is not available",
     "network push support is not available",
     "network pull support is not available",
     "invalid Git remote name for Git-overlay repository",
+    "repository has no HEAD; capture a state first",
+    "Repository has no HEAD state - take a snapshot first",
     "Use one path.",
     "--principal-name is required",
     "--principal-email is required",
+];
+
+const RAW_THREAD_NOT_FOUND_PHRASES: &[&str] = &[
+    "Thread not found: {thread}",
+    "Thread not found: {}",
+    "Thread '{}' not found",
+    "Target thread '{}' not found",
+    "Thread '{}' not found after capture",
+    "Thread '{}' not found after refresh",
 ];
 
 #[test]
@@ -61,17 +74,29 @@ fn known_recovery_phrases_stay_in_typed_advice() {
     let mut violations = Vec::new();
     walk_rust_files(&src_dir, &mut |path| {
         let rel = path.strip_prefix(&src_dir).unwrap_or(path);
-        if rel == Path::new(ALLOWED_ADVICE_FILE) || rel == Path::new(ALLOWED_ENVELOPE_FILE) {
-            return;
-        }
         let Ok(source) = fs::read_to_string(path) else {
             return;
         };
         for (line_index, line) in source.lines().enumerate() {
             for phrase in RAW_RECOVERY_PHRASES {
+                if recovery_phrase_allowed(rel, phrase) {
+                    continue;
+                }
                 if line.contains(phrase) {
                     violations.push(format!(
                         "{}:{} contains raw recovery phrase `{phrase}`",
+                        rel.display(),
+                        line_index + 1
+                    ));
+                }
+            }
+            for phrase in RAW_THREAD_NOT_FOUND_PHRASES {
+                if recovery_phrase_allowed(rel, phrase) {
+                    continue;
+                }
+                if line.contains(phrase) {
+                    violations.push(format!(
+                        "{}:{} contains raw missing-thread phrase `{phrase}`",
                         rel.display(),
                         line_index + 1
                     ));
@@ -85,6 +110,12 @@ fn known_recovery_phrases_stay_in_typed_advice() {
         "recovery phrases must be emitted through typed RecoveryAdvice constructors; violations:\n{}",
         violations.join("\n")
     );
+}
+
+fn recovery_phrase_allowed(rel: &Path, phrase: &str) -> bool {
+    rel == Path::new(ALLOWED_ADVICE_FILE)
+        || rel == Path::new(ALLOWED_ENVELOPE_FILE)
+        || (phrase == "State not found:" && rel == Path::new(ALLOWED_HISTORY_TARGET_FILE))
 }
 
 fn walk_rust_files(dir: &Path, visit: &mut dyn FnMut(&Path)) {

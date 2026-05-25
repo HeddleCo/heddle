@@ -9,7 +9,8 @@ use repo::{DiffKind, Repository};
 use serde::Serialize;
 
 use super::{
-    advice::RecoveryAdvice, history_target::resolve_state_id,
+    advice::RecoveryAdvice,
+    history_target::{require_resolved_state, resolve_state_id},
     worktree_safety::ensure_worktree_clean,
 };
 use crate::cli::{Cli, should_output_json};
@@ -32,16 +33,10 @@ pub fn cmd_revert(
 
     let target_id = resolve_state_id(&repo, &state_spec)?;
 
-    let target_state = repo
-        .store()
-        .get_state(&target_id)?
-        .ok_or_else(|| anyhow!("State not found: {}", state_spec))?;
+    let target_state = require_resolved_state(&repo, &target_id)?;
 
     let parent_tree = if let Some(parent_id) = target_state.first_parent() {
-        let parent_state = repo
-            .store()
-            .get_state(parent_id)?
-            .ok_or_else(|| anyhow!("Parent state not found"))?;
+        let parent_state = require_resolved_state(&repo, parent_id)?;
         repo.require_tree(&parent_state.tree)?
     } else {
         Tree::new()

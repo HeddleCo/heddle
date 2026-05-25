@@ -23,7 +23,7 @@ use repo::{
     ThreadState, refresh_thread_freshness,
 };
 
-use super::advice::RecoveryAdvice;
+use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
 use crate::bridge::git_core::{open_repo as open_git_repo, set_reference};
 
 pub(super) fn apply_undo_batch(repo: &Repository, batch: &OpBatch) -> Result<()> {
@@ -731,7 +731,7 @@ fn delete_thread_safely(repo: &Repository, name: &str) -> Result<()> {
         let state = repo
             .refs()
             .get_thread(name)?
-            .ok_or_else(|| anyhow!("Thread not found: {}", name))?;
+            .ok_or_else(|| anyhow!(thread_not_found_advice(name, "delete thread")))?;
         repo.refs().write_head(&Head::Detached { state })?;
     }
 

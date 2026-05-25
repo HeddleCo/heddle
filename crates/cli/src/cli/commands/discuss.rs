@@ -18,7 +18,7 @@ use grpc::heddle::v1::{
 use repo::{Repository, operation_dedup::OperationDedupStore};
 use serde::Serialize;
 
-use super::history_target::resolve_state_id;
+use super::{advice::RecoveryAdvice, history_target::resolve_state_id};
 use crate::cli::{
     cli_args::{
         Cli, DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
@@ -357,7 +357,7 @@ fn resolve_state(explicit: Option<&str>) -> Result<Vec<u8>> {
     let head = repo
         .head()
         .context("read HEAD")?
-        .ok_or_else(|| anyhow!("repository has no HEAD; capture a state first"))?;
+        .ok_or_else(|| anyhow!(RecoveryAdvice::repository_no_head_capture_first("discuss")))?;
     Ok(head.as_bytes().to_vec())
 }
 
