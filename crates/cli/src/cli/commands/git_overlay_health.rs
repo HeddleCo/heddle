@@ -204,6 +204,15 @@ struct WorkflowThreadAction {
     actionable_from_current_thread: bool,
 }
 
+#[derive(Debug, Clone)]
+struct VerificationActionPlan {
+    primary_action: String,
+    recovery_commands: Vec<String>,
+    remote_action: Option<String>,
+    workflow_action: Option<String>,
+    machine_contract_action: Option<String>,
+}
+
 impl GitOverlayHealth {
     pub(crate) fn clean(summary: impl Into<String>, checks: Vec<GitOverlayHealthCheck>) -> Self {
         Self {
@@ -280,33 +289,16 @@ impl RepositoryVerificationState {
         let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
         let machine_contract_action =
             (!machine_contract_clean).then(|| "heddle doctor schemas --output json".to_string());
-        let remote_action = if health.clean {
-            remote_sync_action(&health)
-        } else {
-            None
-        };
-        let recommended_action = if health.clean {
-            remote_action
-                .or(workflow_action.clone())
-                .or(machine_contract_action.clone())
-                .unwrap_or_default()
-        } else {
-            health
-                .primary_recovery_command()
-                .unwrap_or("heddle doctor")
-                .to_string()
-        };
-        let recovery_commands = if health.clean && machine_contract_clean {
-            Vec::new()
-        } else if health.clean {
-            machine_contract_action.iter().cloned().collect()
-        } else {
-            health.recovery_commands.clone()
-        };
+        let action_plan = VerificationActionPlan::from_parts(
+            &health,
+            remote_sync_action(&health),
+            workflow_action,
+            machine_contract_action,
+        );
         let is_git_overlay = repo.capability() == repo::RepositoryCapability::GitOverlay;
         let checks = verification_checks_from_health(
             &health,
-            &recommended_action,
+            &action_plan,
             is_git_overlay,
             &ready_threads,
             &machine_contract_coverage,
@@ -372,7 +364,7 @@ impl RepositoryVerificationState {
         } else {
             health.summary.clone()
         };
-        let recommended_action_fields = ActionFields::from_action(&recommended_action);
+        let recommended_action_fields = ActionFields::from_action(&action_plan.primary_action);
         Self {
             verified,
             status,
@@ -395,12 +387,61 @@ impl RepositoryVerificationState {
             summary,
             recommended_action_argv: recommended_action_fields.argv,
             recommended_action_template: recommended_action_fields.template,
-            recovery_command_argv: command_argvs(&recovery_commands),
-            recovery_action_templates: action_templates(&recovery_commands),
-            recommended_action,
-            recovery_commands,
+            recovery_command_argv: command_argvs(&action_plan.recovery_commands),
+            recovery_action_templates: action_templates(&action_plan.recovery_commands),
+            recommended_action: action_plan.primary_action,
+            recovery_commands: action_plan.recovery_commands,
             checks,
         }
+    }
+}
+
+impl VerificationActionPlan {
+    fn from_parts(
+        health: &GitOverlayHealth,
+        remote_action: Option<String>,
+        workflow_action: Option<String>,
+        machine_contract_action: Option<String>,
+    ) -> Self {
+        if !health.clean {
+            let primary_action = health
+                .primary_recovery_command()
+                .unwrap_or("heddle doctor")
+                .to_string();
+            return Self {
+                primary_action,
+                recovery_commands: health.recovery_commands.clone(),
+                remote_action: None,
+                workflow_action,
+                machine_contract_action,
+            };
+        }
+
+        if let Some(machine_contract_action) = machine_contract_action {
+            return Self {
+                primary_action: machine_contract_action.clone(),
+                recovery_commands: vec![machine_contract_action.clone()],
+                remote_action,
+                workflow_action,
+                machine_contract_action: Some(machine_contract_action),
+            };
+        }
+
+        let primary_action = workflow_action
+            .clone()
+            .or_else(|| remote_action.clone())
+            .unwrap_or_default();
+        Self {
+            primary_action,
+            recovery_commands: Vec::new(),
+            remote_action,
+            workflow_action,
+            machine_contract_action: None,
+        }
+    }
+
+    fn blocking_action(&self) -> &str {
+        &self.primary_action
     }
 }
 
@@ -484,7 +525,7 @@ fn ready_thread_actions(repo: &Repository) -> Vec<WorkflowThreadAction> {
 
 fn verification_checks_from_health(
     health: &GitOverlayHealth,
-    recommended_action: &str,
+    action_plan: &VerificationActionPlan,
     is_git_overlay: bool,
     ready_threads: &[WorkflowThreadAction],
     machine_contract_coverage: &MachineContractCoverage,
@@ -517,17 +558,20 @@ fn verification_checks_from_health(
             None,
             Vec::new(),
         ),
-        mapping_verification_check(health, recommended_action, is_git_overlay),
-        worktree_verification_check(health, recommended_action),
-        remote_verification_check(health, recommended_action),
-        operation_verification_check(health, recommended_action),
-        workflow_verification_check(health, recommended_action, ready_threads),
-        machine_contract_verification_check(machine_contract_coverage),
-        clone_verification_check(health, recommended_action, is_git_overlay),
+        mapping_verification_check(health, action_plan.blocking_action(), is_git_overlay),
+        worktree_verification_check(health, action_plan.blocking_action()),
+        remote_verification_check(health, action_plan),
+        operation_verification_check(health, action_plan.blocking_action()),
+        workflow_verification_check(health, action_plan, ready_threads),
+        machine_contract_verification_check(machine_contract_coverage, Some(action_plan)),
+        clone_verification_check(health, action_plan.blocking_action(), is_git_overlay),
     ]
 }
 
-fn machine_contract_verification_check(coverage: &MachineContractCoverage) -> VerificationCheck {
+fn machine_contract_verification_check(
+    coverage: &MachineContractCoverage,
+    action_plan: Option<&VerificationActionPlan>,
+) -> VerificationCheck {
     let mut details = BTreeMap::new();
     details.insert("coverage_status".to_string(), coverage.status.clone());
     details.insert("coverage_summary".to_string(), coverage.summary.clone());
@@ -656,8 +700,11 @@ fn machine_contract_verification_check(coverage: &MachineContractCoverage) -> Ve
         machine_contract_is_clean(coverage),
         machine_contract_status(coverage),
         &machine_contract_summary(coverage),
-        (!machine_contract_is_clean(coverage))
-            .then(|| "heddle doctor schemas --output json".to_string()),
+        (!machine_contract_is_clean(coverage)).then(|| {
+            action_plan
+                .and_then(|plan| plan.machine_contract_action.clone())
+                .unwrap_or_else(|| "heddle doctor schemas --output json".to_string())
+        }),
         if machine_contract_is_clean(coverage) {
             Vec::new()
         } else {
@@ -728,13 +775,18 @@ fn machine_contract_summary(coverage: &MachineContractCoverage) -> String {
 
 fn workflow_verification_check(
     health: &GitOverlayHealth,
-    recommended_action: &str,
+    action_plan: &VerificationActionPlan,
     ready_threads: &[WorkflowThreadAction],
 ) -> VerificationCheck {
     if let Some(check) = find_health_check(health, "thread_integration_metadata")
         && check.status != "clean"
     {
-        return verification_check_from_health("Workflow", check, recommended_action, health);
+        return verification_check_from_health(
+            "Workflow",
+            check,
+            action_plan.blocking_action(),
+            health,
+        );
     }
     if !health.clean {
         let summary = if ready_threads.is_empty() {
@@ -751,7 +803,8 @@ fn workflow_verification_check(
             false,
             "blocked",
             &summary,
-            (!recommended_action.is_empty()).then(|| recommended_action.to_string()),
+            (!action_plan.blocking_action().is_empty())
+                .then(|| action_plan.blocking_action().to_string()),
             health.recovery_commands.clone(),
         );
     }
@@ -791,7 +844,7 @@ fn workflow_verification_check(
             "{} ready thread(s) are waiting for the next workflow action",
             actionable_ready_threads.len()
         ),
-        Some(action.clone()),
+        action_plan.workflow_action.clone().or(Some(action)),
         Vec::new(),
     )
 }
@@ -943,7 +996,7 @@ fn worktree_verification_check(
 
 fn remote_verification_check(
     health: &GitOverlayHealth,
-    recommended_action: &str,
+    action_plan: &VerificationActionPlan,
 ) -> VerificationCheck {
     if let Some(check) = find_health_check(health, "remote_tracking") {
         if check.status == "remote_ahead" {
@@ -952,13 +1005,30 @@ fn remote_verification_check(
                 true,
                 &check.status,
                 &check.summary,
-                Some(recommended_action.to_string()),
+                action_plan.remote_action.clone(),
                 Vec::new(),
             );
             trust.details = check.details.clone();
             return trust;
         }
-        return verification_check_from_health("Remote", check, recommended_action, health);
+        if check.status == "remote_untracked" {
+            let mut trust = verification_check(
+                "Remote",
+                true,
+                &check.status,
+                &check.summary,
+                action_plan.remote_action.clone(),
+                Vec::new(),
+            );
+            trust.details = check.details.clone();
+            return trust;
+        }
+        return verification_check_from_health(
+            "Remote",
+            check,
+            action_plan.blocking_action(),
+            health,
+        );
     }
     if !health.clean {
         return verification_check(
@@ -966,7 +1036,8 @@ fn remote_verification_check(
             false,
             "not_checked",
             "remote drift is checked after the primary verification blocker is resolved",
-            (!recommended_action.is_empty()).then(|| recommended_action.to_string()),
+            (!action_plan.blocking_action().is_empty())
+                .then(|| action_plan.blocking_action().to_string()),
             health.recovery_commands.clone(),
         );
     }
@@ -1601,6 +1672,15 @@ pub(crate) fn build_plain_git_verification_probe(
         }
     });
     let machine_contract_coverage = machine_contract_coverage();
+    let machine_contract_clean = machine_contract_is_clean(&machine_contract_coverage);
+    let action_plan = VerificationActionPlan {
+        primary_action: setup_action.clone(),
+        recovery_commands: setup_recovery_commands.clone(),
+        remote_action: None,
+        workflow_action: None,
+        machine_contract_action: (!machine_contract_clean)
+            .then(|| "heddle doctor schemas --output json".to_string()),
+    };
     let mut details = BTreeMap::new();
     details.insert("path".to_string(), root.display().to_string());
     if let Some(branch) = &git_branch {
@@ -1715,6 +1795,7 @@ pub(crate) fn build_plain_git_verification_probe(
     ));
     checks.push(machine_contract_verification_check(
         &machine_contract_coverage,
+        Some(&action_plan),
     ));
     checks.push(verification_check(
         "Clone",
@@ -3421,10 +3502,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        RepositoryVerificationState, action_argv, canonical_bridge_import_ref_command,
-        canonical_bridge_reconcile_ref_preview_command, machine_contract_coverage,
-        remote_drift_decision, remote_tracking_next_action, repository_setup_guidance,
-        repository_verification_blocked_advice,
+        GitOverlayHealth, RepositoryVerificationState, VerificationActionPlan, action_argv,
+        canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
+        machine_contract_coverage, remote_drift_decision, remote_tracking_next_action,
+        repository_setup_guidance, repository_verification_blocked_advice,
     };
     use crate::cli::commands::build_command_catalog;
 
@@ -3593,6 +3674,50 @@ mod tests {
             advice.recovery_commands,
             vec!["heddle pull origin main --preview", "heddle verify"]
         );
+    }
+
+    #[test]
+    fn verification_action_plan_keeps_blockers_above_guidance() {
+        let clean_health = GitOverlayHealth::clean("clean", Vec::new());
+
+        let machine_gap = VerificationActionPlan::from_parts(
+            &clean_health,
+            Some("heddle push".to_string()),
+            Some("heddle merge feature --preview".to_string()),
+            Some("heddle doctor schemas --output json".to_string()),
+        );
+        assert_eq!(
+            machine_gap.primary_action,
+            "heddle doctor schemas --output json"
+        );
+        assert_eq!(
+            machine_gap.recovery_commands,
+            vec!["heddle doctor schemas --output json"]
+        );
+        assert_eq!(machine_gap.remote_action.as_deref(), Some("heddle push"));
+        assert_eq!(
+            machine_gap.workflow_action.as_deref(),
+            Some("heddle merge feature --preview")
+        );
+
+        let workflow_waiting = VerificationActionPlan::from_parts(
+            &clean_health,
+            Some("heddle push".to_string()),
+            Some("heddle merge feature --preview".to_string()),
+            None,
+        );
+        assert_eq!(
+            workflow_waiting.primary_action,
+            "heddle merge feature --preview"
+        );
+
+        let publish_guidance = VerificationActionPlan::from_parts(
+            &clean_health,
+            Some("heddle push".to_string()),
+            None,
+            None,
+        );
+        assert_eq!(publish_guidance.primary_action, "heddle push");
     }
 
     #[test]

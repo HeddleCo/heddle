@@ -362,6 +362,125 @@ fn git_replacement_matrix_raw_git_operation_handoff_without_git_on_path() {
 }
 
 #[test]
+fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
+    let temp = TempDir::new().unwrap();
+
+    let init = assert_clean_json_without_git(&["--output", "json", "init"], temp.path());
+    assert_eq!(init["repository_mode"], "native-heddle", "{init}");
+    assert_eq!(init["git_detected"], false, "{init}");
+
+    std::fs::write(temp.path().join("story.txt"), "one\n").unwrap();
+    let first = assert_clean_json_without_git(
+        &[
+            "--output",
+            "json",
+            "capture",
+            "-m",
+            "native seed",
+            "--confidence",
+            "0.9",
+        ],
+        temp.path(),
+    );
+    let first_id = first["change_id"]
+        .as_str()
+        .expect("first capture id")
+        .to_string();
+    assert!(
+        first_id.starts_with("hd-"),
+        "native capture should produce Heddle state ids: {first}"
+    );
+
+    std::fs::write(temp.path().join("story.txt"), "one\ntwo\n").unwrap();
+
+    let diff_text = heddle_output_without_git(&["--output", "text", "diff"], temp.path());
+    let diff_stdout = str::from_utf8(&diff_text.stdout).unwrap_or("");
+    let diff_stderr = str::from_utf8(&diff_text.stderr).unwrap_or("");
+    assert!(
+        diff_text.status.success(),
+        "native diff should not require git on PATH; stdout={diff_stdout} stderr={diff_stderr}"
+    );
+    assert!(
+        diff_stderr.is_empty(),
+        "native diff success should keep stderr quiet: {diff_stderr}"
+    );
+    assert!(
+        diff_stdout.contains("+two"),
+        "native diff should render worktree additions: {diff_stdout}"
+    );
+
+    let second = assert_clean_json_without_git(
+        &[
+            "--output",
+            "json",
+            "capture",
+            "-m",
+            "native update",
+            "--confidence",
+            "0.9",
+        ],
+        temp.path(),
+    );
+    let second_id = second["change_id"]
+        .as_str()
+        .expect("second capture id")
+        .to_string();
+
+    let state_show =
+        assert_clean_json_without_git(&["--output", "json", "show", "HEAD"], temp.path());
+    assert_eq!(
+        state_show["repository_capability"], "native-heddle",
+        "{state_show}"
+    );
+    assert_eq!(
+        state_show["change_id"], second_id,
+        "show HEAD should inspect the latest native Heddle state: {state_show}"
+    );
+
+    let state_inspect =
+        assert_clean_json_without_git(&["--output", "json", "inspect", &first_id], temp.path());
+    assert_eq!(
+        state_inspect["change_id"], first_id,
+        "inspect <state> should route to native state show without git: {state_inspect}"
+    );
+
+    let thread_inspect =
+        assert_clean_json_without_git(&["--output", "json", "inspect", "main"], temp.path());
+    assert_eq!(
+        thread_inspect["output_kind"], "thread_show",
+        "{thread_inspect}"
+    );
+    assert_eq!(
+        thread_inspect["current_state"], second_id,
+        "inspect <thread> should route to thread show without git: {thread_inspect}"
+    );
+
+    let state_diff = assert_clean_json_without_git(
+        &["--output", "json", "diff", &first_id, &second_id],
+        temp.path(),
+    );
+    assert_eq!(state_diff["output_kind"], "diff", "{state_diff}");
+    assert_eq!(state_diff["changed_path_count"], 1, "{state_diff}");
+    assert_eq!(
+        state_diff["changes"][0]["path"], "story.txt",
+        "{state_diff}"
+    );
+
+    for args in [
+        &["--output", "json", "status"][..],
+        &["--output", "json", "log"],
+        &["--output", "json", "thread", "show", "main"],
+        &["--output", "json", "workspace", "show"],
+    ] {
+        let parsed = assert_clean_json_without_git(args, temp.path());
+        assert!(
+            parsed.is_object(),
+            "{args:?} should stay machine-readable without git on PATH: {parsed}"
+        );
+    }
+}
+
+#[test]
 fn git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     gix::init(temp.path()).expect("init git worktree");
