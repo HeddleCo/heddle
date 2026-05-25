@@ -41,6 +41,7 @@ use repo::{Repository, ThreadManager};
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{action_templates, command_argvs},
@@ -531,7 +532,7 @@ fn emit(cli: &Cli, repo: &Repository, output: &TryOutput) -> Result<()> {
         };
         println!("{}", painted);
         if let Some(next) = &output.next_action {
-            println!("Next: {}", style::bold(next));
+            print_next(next);
         }
         if let Some(discard) = output.recovery_commands.first() {
             println!("Discard: {}", style::bold(discard));

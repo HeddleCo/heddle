@@ -9,6 +9,7 @@ use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, Repository
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::{
@@ -680,7 +681,7 @@ fn emit_thread_resolve(cli: &Cli, output: &ThreadResolveOutput) -> Result<()> {
             .as_ref()
             .or(output.operator.next_action.as_ref())
         {
-            println!("Next: {}", style::bold(next));
+            print_next(next);
         }
     }
     Ok(())

@@ -14,6 +14,7 @@ use repo::{ChangedPathFilters, HistoryQuery, Repository, format_confidence, is_s
 use serde::Serialize;
 
 use super::{
+    action_line::{format_next_step_dim, print_next_step},
     git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     history_target::resolve_state_id,
     snapshot::ensure_current_state,
@@ -267,7 +268,7 @@ fn render_plain_git_log(cli: &Cli, probe: &PlainGitVerificationProbe, oneline: b
             println!("Git branch: {}", style::bold(branch));
         }
         println!("History: unavailable until this Git repo is initialized and imported");
-        println!("Next step: {}", style::bold("heddle init"));
+        print_next_step("heddle init");
         if let Some(branch) = &probe.git_branch {
             println!(
                 "Then: {}",
@@ -453,11 +454,12 @@ fn write_reflog_full<W: std::io::Write>(out: &mut W, output: &ReflogOutput) -> s
     )?;
     writeln!(out, "Reflog: {} entrie(s)", output.entries.len())?;
     if output.entries.is_empty() {
-        writeln!(
-            out,
-            "Next step: {}",
-            style::dim("make a checkpoint, fetch, pull, push, or run `heddle adopt`")
-        )?;
+        if let Some(line) = format_next_step_dim(
+            "make a checkpoint, fetch, pull, push, or run `heddle adopt`",
+            0,
+        ) {
+            writeln!(out, "{line}")?;
+        }
         return Ok(());
     }
 
@@ -557,7 +559,9 @@ fn write_full<W: std::io::Write>(
                 hint.missing_branch_count,
             )
         )?;
-        writeln!(out, "Next step: {}", style::dim(&hint.recommended_command))?;
+        if let Some(line) = format_next_step_dim(&hint.recommended_command, 0) {
+            writeln!(out, "{line}")?;
+        }
     }
     writeln!(out)?;
     for (i, entry) in output.states.iter().enumerate() {

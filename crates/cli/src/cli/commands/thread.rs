@@ -25,7 +25,7 @@ use repo::{
 use serde::Serialize;
 
 use super::{
-    action_line::{print_nested_next_step, print_nested_optional, print_next_step},
+    action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, recommended_action_template},
     git_overlay_health::{
@@ -1340,7 +1340,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
                 )
             );
             if output.available_git_refs.is_empty() {
-                println!("Optional: {}", style::dim(&hint.recommended_command));
+                print_optional(&hint.recommended_command);
             }
         }
         render_thread_sections(&output.threads, cli.verbose > 0);

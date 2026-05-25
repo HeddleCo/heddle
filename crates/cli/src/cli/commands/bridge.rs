@@ -13,6 +13,7 @@ use repo::Repository;
 use serde::Serialize;
 
 use super::{
+    action_line::{print_next, print_next_step, print_optional},
     advice::RecoveryAdvice,
     git_overlay_health::{
         GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_argv,
@@ -378,7 +379,7 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
                     "{}",
                     git_import_required_summary(&hint.missing_branches, hint.missing_branch_count,)
                 );
-                println!("Next step: {}", style::bold(&hint.recommended_command));
+                print_next_step(&hint.recommended_command);
             } else {
                 println!(
                     "{}",
@@ -387,7 +388,7 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
                         hint.missing_branch_count,
                     )
                 );
-                println!("Optional: {}", style::dim(&hint.recommended_command));
+                print_optional(&hint.recommended_command);
             }
         }
         None => println!(
@@ -793,7 +794,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 }
                 if !sync_output.recommended_action.is_empty() {
                     println!();
-                    println!("Next: {}", style::bold(&sync_output.recommended_action));
+                    print_next(&sync_output.recommended_action);
                 }
             }
         }

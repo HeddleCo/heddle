@@ -11,6 +11,7 @@ use tracing::{debug, info};
 
 use super::{
     RecoveryAdvice,
+    action_line::print_next,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
 };
 use crate::{
@@ -245,7 +246,7 @@ fn render_init(output: &InitOutput, json: bool) -> Result<()> {
             }
         }
         if let Some(next) = output.recommended_action.as_deref() {
-            println!("Next: {next}");
+            print_next(next);
         }
     }
     Ok(())

@@ -17,6 +17,7 @@ use repo::{
 use serde::Serialize;
 
 use super::{
+    action_line::print_nested_next,
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     diff::{DiffOutput, SemanticChangeEntry, compute_state_diff, compute_tree_diff},
@@ -2486,7 +2487,7 @@ fn render_merge_output(cli: &Cli, output: MergeOutput) -> Result<()> {
             .as_ref()
             .or(output.operator.next_action.as_ref())
         {
-            println!("  Next: {}", style::bold(next));
+            print_nested_next(next);
         }
     }
     Ok(())

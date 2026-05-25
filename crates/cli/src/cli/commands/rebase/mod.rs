@@ -9,6 +9,7 @@ use repo::Repository;
 use serde_json::json;
 
 use super::{
+    action_line::print_next_step,
     advice::RecoveryAdvice,
     ff_record::record_ff_advance,
     git_overlay_health::{
@@ -286,7 +287,7 @@ fn emit_up_to_date_blocked_by_trust(
             "Rebase is up to date, but repository verification is blocked: {}",
             trust.summary
         );
-        println!("Next step: {recommended_action}");
+        print_next_step(&recommended_action);
     }
     Ok(())
 }

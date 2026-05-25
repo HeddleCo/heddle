@@ -1937,19 +1937,19 @@ fn git_index_has_paths(index: &GitIndexPlan) -> bool {
 fn render_git_index_status(index: &GitIndexPlan) {
     println!("{}", style::bold("Git index and worktree"));
     if !index.staged_paths.is_empty() {
-        println!("  staged for commit:");
+        println!("  will commit staged paths:");
         for path in &index.staged_paths {
             println!("    {}", path);
         }
     }
     if !index.unstaged_paths.is_empty() {
-        println!("  unstaged after commit:");
+        println!("  {}:", git_index_extra_path_label(index, "unstaged"));
         for path in &index.unstaged_paths {
             println!("    {}", path);
         }
     }
     if !index.untracked_paths.is_empty() {
-        println!("  untracked after commit:");
+        println!("  {}:", git_index_extra_path_label(index, "untracked"));
         for path in &index.untracked_paths {
             println!("    {}", path);
         }
@@ -1960,6 +1960,14 @@ fn render_git_index_status(index: &GitIndexPlan) {
             "  include the rest with: {}",
             style::bold("heddle commit --all -m \"...\"")
         );
+    }
+}
+
+fn git_index_extra_path_label(index: &GitIndexPlan, kind: &'static str) -> String {
+    if index.commit_mode == "staged_index" {
+        format!("will leave {kind} paths")
+    } else {
+        format!("will commit {kind} paths")
     }
 }
 

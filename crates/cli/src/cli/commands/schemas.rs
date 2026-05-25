@@ -1102,8 +1102,8 @@ pub struct ReadySchema {
     pub status: String,
     pub action: String,
     pub message: String,
-    pub blockers: Vec<String>,
-    pub warnings: Vec<String>,
+    pub blockers: Option<Vec<String>>,
+    pub warnings: Option<Vec<String>>,
     pub next_action: Option<String>,
     pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
@@ -1798,13 +1798,13 @@ pub struct PullSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PushSchema {
-    pub output_kind: Option<String>,
-    pub action: Option<String>,
-    pub status: Option<String>,
-    pub pushed: Option<bool>,
-    pub changed: Option<bool>,
-    pub success: Option<bool>,
-    pub transport: Option<String>,
+    pub output_kind: String,
+    pub action: String,
+    pub status: String,
+    pub pushed: bool,
+    pub changed: bool,
+    pub success: bool,
+    pub transport: String,
     pub remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_scope: Option<String>,
@@ -1826,11 +1826,17 @@ pub struct PushSchema {
     pub thread: Option<String>,
     pub state: Option<String>,
     pub objects: Option<usize>,
+    #[schemars(required)]
     pub next_action: Option<String>,
+    #[schemars(required)]
     pub next_action_argv: Option<Vec<String>>,
+    #[schemars(required)]
     pub next_action_template: Option<ActionTemplateSchema>,
+    #[schemars(required)]
     pub recommended_action: Option<String>,
+    #[schemars(required)]
     pub recommended_action_argv: Option<Vec<String>>,
+    #[schemars(required)]
     pub recommended_action_template: Option<ActionTemplateSchema>,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
@@ -2712,6 +2718,16 @@ pub enum NullableStringArraySchema {
 mod tests {
     use super::*;
 
+    fn required_fields(schema: &Value) -> Vec<&str> {
+        schema
+            .get("required")
+            .and_then(|value| value.as_array())
+            .expect("schema has required fields")
+            .iter()
+            .map(|value| value.as_str().expect("required field is a string"))
+            .collect()
+    }
+
     /// Every schema verb advertised by the command contract table must
     /// produce a schema.
     /// Otherwise `heddle doctor schemas` would silently miss drift on
@@ -2862,6 +2878,78 @@ mod tests {
             assert!(
                 properties.contains_key(*required),
                 "status schema missing property '{required}'"
+            );
+        }
+    }
+
+    #[test]
+    fn ready_schema_does_not_require_omitted_empty_operator_lists() {
+        let schema = schema_for_verb("ready").expect("ready schema");
+        let properties = schema
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("ready schema has properties");
+        assert!(
+            properties.contains_key("blockers"),
+            "ready schema should still document blockers when emitted"
+        );
+        assert!(
+            properties.contains_key("warnings"),
+            "ready schema should still document warnings when emitted"
+        );
+
+        let required = required_fields(&schema);
+        for omitted_when_empty in ["blockers", "warnings"] {
+            assert!(
+                !required.contains(&omitted_when_empty),
+                "ready schema must not require `{omitted_when_empty}` because successful JSON output omits empty operator lists: {schema}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_schema_requires_stable_runtime_fields() {
+        let schema = schema_for_verb("push").expect("push schema");
+        let required = required_fields(&schema);
+        for stable_field in [
+            "output_kind",
+            "action",
+            "status",
+            "pushed",
+            "changed",
+            "success",
+            "transport",
+            "next_action",
+            "next_action_argv",
+            "next_action_template",
+            "recommended_action",
+            "recommended_action_argv",
+            "recommended_action_template",
+            "verification",
+        ] {
+            assert!(
+                required.contains(&stable_field),
+                "push schema must require stable emitted field `{stable_field}`: {schema}"
+            );
+        }
+
+        for skipped_when_none in [
+            "remote",
+            "push_scope",
+            "ref_scope",
+            "git_notes_ref",
+            "git_notes_visibility_warning",
+            "git_tracking_remote",
+            "git_remote_configured",
+            "git_upstream_configured",
+            "tags_included",
+            "thread",
+            "state",
+            "objects",
+        ] {
+            assert!(
+                !required.contains(&skipped_when_none),
+                "push schema must not require conditionally omitted field `{skipped_when_none}`: {schema}"
             );
         }
     }

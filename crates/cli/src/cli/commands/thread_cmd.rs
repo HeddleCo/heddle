@@ -18,6 +18,7 @@ use serde::Serialize;
 use tokio::time::{Duration, sleep};
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     mount_lifecycle,
@@ -1315,7 +1316,7 @@ fn print_thread_output(
             }
         }
         if let Some(recommended_action) = &recommended_action {
-            println!("Next: {}", recommended_action);
+            print_next(recommended_action);
         }
     }
     Ok(())

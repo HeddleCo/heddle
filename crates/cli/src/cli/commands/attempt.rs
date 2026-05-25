@@ -45,6 +45,7 @@ use repo::Repository;
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::{ActionFields, ActionTemplate},
     diff::compute_state_diff,
@@ -824,7 +825,7 @@ fn emit(cli: &Cli, repo: &Repository, output: &AttemptOutput) -> Result<()> {
     };
     println!("{}", painted);
     if let Some(next) = &output.next_action {
-        println!("Next: {}", style::bold(next));
+        print_next(next);
     }
     Ok(())
 }

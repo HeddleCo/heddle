@@ -17,6 +17,7 @@ use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
@@ -239,7 +240,7 @@ pub async fn cmd_push(
                 }
             );
             if !trust.recommended_action.is_empty() {
-                println!("Next: {}", style::bold(&trust.recommended_action));
+                print_next(&trust.recommended_action);
             }
         }
         return Ok(());
