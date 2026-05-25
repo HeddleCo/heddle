@@ -3792,6 +3792,7 @@ fn assert_runtime_actions_parse(
     placeholders: &std::collections::BTreeSet<String>,
     source_args: &[&str],
 ) {
+    assert_action_sidecars_match(value, placeholders, source_args);
     let mut actions = Vec::new();
     collect_runtime_actions(value, &mut actions);
     assert!(
@@ -3819,6 +3820,109 @@ fn assert_runtime_actions_parse(
                 )
             });
     }
+}
+
+fn assert_action_sidecars_match(
+    value: &Value,
+    placeholders: &std::collections::BTreeSet<String>,
+    source_args: &[&str],
+) {
+    match value {
+        Value::Object(map) => {
+            for field in ["recommended_action", "next_action"] {
+                let argv_key = format!("{field}_argv");
+                let template_key = format!("{field}_template");
+                let action = map.get(field);
+                let argv = map.get(&argv_key);
+                let template = map.get(&template_key);
+                if action.is_none() && argv.is_none() && template.is_none() {
+                    continue;
+                }
+                match action {
+                    Some(Value::String(action)) if !action.trim().is_empty() => {
+                        if let Some(argv) = argv {
+                            assert_eq!(
+                                argv.clone(),
+                                expected_action_argv_json(action, placeholders, source_args),
+                                "{source_args:?} {argv_key} should match {field}: {action}; object={value}"
+                            );
+                        }
+                        if let Some(template) = template {
+                            let display_only = is_display_only_action(action)
+                                || placeholders.contains(action.trim());
+                            if display_only {
+                                assert!(
+                                    !template.is_null(),
+                                    "{source_args:?} {template_key} should describe display-only action `{action}`; object={value}"
+                                );
+                            }
+                        }
+                    }
+                    Some(Value::Null) | None => {
+                        if let Some(argv) = argv {
+                            assert!(
+                                argv.is_null(),
+                                "{source_args:?} {argv_key} must be null when {field} is null/missing: object={value}"
+                            );
+                        }
+                        if let Some(template) = template {
+                            assert!(
+                                template.is_null(),
+                                "{source_args:?} {template_key} must be null when {field} is null/missing: object={value}"
+                            );
+                        }
+                    }
+                    Some(other) => panic!(
+                        "{source_args:?} {field} should be string or null, got {other}: object={value}"
+                    ),
+                }
+            }
+            for child in map.values() {
+                assert_action_sidecars_match(child, placeholders, source_args);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                assert_action_sidecars_match(value, placeholders, source_args);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn expected_action_argv_json(
+    action: &str,
+    placeholders: &std::collections::BTreeSet<String>,
+    source_args: &[&str],
+) -> Value {
+    let trimmed = action.trim();
+    if trimmed.is_empty() || placeholders.contains(trimmed) || is_display_only_action(trimmed) {
+        return Value::Null;
+    }
+    let argv = split_recommended_action_for_test(trimmed)
+        .unwrap_or_else(|err| panic!("{source_args:?} action should split: {err}: {trimmed}"));
+    assert_eq!(
+        argv.first().map(String::as_str),
+        Some("heddle"),
+        "{source_args:?} action should use heddle or a registered placeholder: {trimmed}"
+    );
+    Cli::command()
+        .try_get_matches_from(argv.clone())
+        .unwrap_or_else(|err| {
+            panic!(
+                "{source_args:?} action should parse through clap: {err}: {}",
+                argv.join(" ")
+            )
+        });
+    serde_json::json!(
+        std::iter::once(env!("CARGO_BIN_EXE_heddle").to_string())
+            .chain(argv.into_iter().skip(1))
+            .collect::<Vec<_>>()
+    )
+}
+
+fn is_display_only_action(action: &str) -> bool {
+    action.contains("...") || action.contains('…') || (action.contains('<') && action.contains('>'))
 }
 
 fn collect_runtime_actions(value: &Value, out: &mut Vec<String>) {

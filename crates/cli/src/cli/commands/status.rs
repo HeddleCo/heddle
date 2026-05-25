@@ -28,11 +28,12 @@ use tokio_tungstenite::{
 use tracing::debug;
 
 use super::{
+    command_catalog::ActionFields,
     git_compat::{GitIndexPlan, git_index_plan_for_root},
     git_overlay_health::{
-        GitOverlayHealth, RepositoryVerificationState, action_argv, action_template,
-        build_git_overlay_health, build_plain_git_verification_probe, command_argvs,
-        override_trust_recommended_action, serialize_empty_action_as_null,
+        GitOverlayHealth, RepositoryVerificationState, build_git_overlay_health,
+        build_plain_git_verification_probe, command_argvs, override_trust_recommended_action,
+        serialize_empty_action_as_null,
     },
     operator_loop::primary_next_action_with_verification,
     snapshot::resolve_principal,
@@ -501,6 +502,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             );
         }
         let presentation = crate::cli::render::repository_presentation(&repo, None, None);
+        let recommended_action_fields = ActionFields::from_action(&recommended_action);
         return Ok(StatusOutput {
             output_kind: "status",
             repository_capability: repo.capability_label().to_string(),
@@ -563,8 +565,8 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
                     .collect()
             },
             identity_notice: identity_notice.clone(),
-            recommended_action_argv: action_argv(&recommended_action),
-            recommended_action_template: action_template(&recommended_action),
+            recommended_action_argv: recommended_action_fields.argv,
+            recommended_action_template: recommended_action_fields.template,
             recommended_action,
             recovery_commands: trust.recovery_commands.clone(),
             recovery_command_argv: command_argvs(&trust.recovery_commands),
@@ -909,6 +911,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     {
         override_trust_recommended_action(&mut trust, recommended_action.clone());
     }
+    let recommended_action_fields = ActionFields::from_action(&recommended_action);
     let thread_health = if trust.verified {
         advice
             .as_ref()
@@ -946,8 +949,8 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         },
         identity_notice: output.identity_notice,
         recommended_action: recommended_action.clone(),
-        recommended_action_argv: action_argv(&recommended_action),
-        recommended_action_template: action_template(&recommended_action),
+        recommended_action_argv: recommended_action_fields.argv,
+        recommended_action_template: recommended_action_fields.template,
         recovery_commands: trust.recovery_commands.clone(),
         recovery_command_argv: command_argvs(&trust.recovery_commands),
         recovery_action_templates: trust.recovery_action_templates.clone(),

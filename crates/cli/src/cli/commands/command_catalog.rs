@@ -153,8 +153,12 @@ impl ActionFields {
         }
     }
 
+    pub(crate) fn from_optional_action_ref(action: Option<&str>) -> Self {
+        Self::from_optional_action(action.map(str::to_string))
+    }
+
     pub(crate) fn from_action(action: &str) -> Self {
-        Self::from_optional_action(Some(action.to_string()))
+        Self::from_optional_action_ref(Some(action))
     }
 
     pub(crate) fn none() -> Self {

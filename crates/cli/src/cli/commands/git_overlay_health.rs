@@ -21,7 +21,8 @@ use serde::{Serialize, Serializer};
 use super::{
     advice::RecoveryAdvice,
     command_catalog::{
-        ActionTemplate, build_command_catalog, recommended_action_argv, recommended_action_template,
+        ActionFields, ActionTemplate, build_command_catalog, recommended_action_argv,
+        recommended_action_template,
     },
     schemas::opaque_schema_verbs,
 };
@@ -357,6 +358,7 @@ impl RepositoryVerificationState {
         } else {
             health.summary.clone()
         };
+        let recommended_action_fields = ActionFields::from_action(&recommended_action);
         Self {
             verified,
             status,
@@ -377,8 +379,8 @@ impl RepositoryVerificationState {
             workflow_status,
             workflow_summary,
             summary,
-            recommended_action_argv: action_argv(&recommended_action),
-            recommended_action_template: action_template(&recommended_action),
+            recommended_action_argv: recommended_action_fields.argv,
+            recommended_action_template: recommended_action_fields.template,
             recovery_command_argv: command_argvs(&recovery_commands),
             recovery_action_templates: action_templates(&recovery_commands),
             recommended_action,
@@ -393,16 +395,17 @@ pub(crate) fn override_trust_recommended_action(
     action: impl Into<String>,
 ) {
     let action = action.into();
-    trust.recommended_action_argv = action_argv(&action);
-    trust.recommended_action_template = action_template(&action);
+    let action_fields = ActionFields::from_action(&action);
+    trust.recommended_action_argv = action_fields.argv.clone();
+    trust.recommended_action_template = action_fields.template.clone();
     trust.recommended_action = action.clone();
     if let Some(check) = trust
         .checks
         .iter_mut()
         .find(|check| check.name == "Workflow")
     {
-        check.recommended_action_argv = action_argv(&action);
-        check.recommended_action_template = action_template(&action);
+        check.recommended_action_argv = action_fields.argv;
+        check.recommended_action_template = action_fields.template;
         check.recommended_action = Some(action);
     }
 }
@@ -1018,8 +1021,7 @@ fn verification_check(
     recommended_action: Option<String>,
     recovery_commands: Vec<String>,
 ) -> VerificationCheck {
-    let recommended_action_argv = recommended_action.as_deref().and_then(action_argv);
-    let recommended_action_template = recommended_action.as_deref().and_then(action_template);
+    let action = ActionFields::from_optional_action_ref(recommended_action.as_deref());
     let recovery_command_argv = command_argvs(&recovery_commands);
     let recovery_action_templates = action_templates(&recovery_commands);
     VerificationCheck {
@@ -1028,8 +1030,8 @@ fn verification_check(
         clean,
         summary: summary.to_string(),
         recommended_action,
-        recommended_action_argv,
-        recommended_action_template,
+        recommended_action_argv: action.argv,
+        recommended_action_template: action.template,
         recovery_commands,
         recovery_command_argv,
         recovery_action_templates,
@@ -1393,6 +1395,8 @@ pub(crate) fn build_plain_git_verification_probe(
         git_branches.len().to_string(),
     );
     details.insert("git_tag_count".to_string(), git_tags.len().to_string());
+    let setup_action_fields = ActionFields::from_action(&setup_action);
+    let import_action_fields = ActionFields::from_action(&import);
     let mut checks = vec![
         VerificationCheck {
             name: "Git".to_string(),
@@ -1413,8 +1417,8 @@ pub(crate) fn build_plain_git_verification_probe(
             clean: false,
             summary: "Heddle data is not initialized".to_string(),
             recommended_action: Some(setup_action.clone()),
-            recommended_action_argv: action_argv(&setup_action),
-            recommended_action_template: action_template(&setup_action),
+            recommended_action_argv: setup_action_fields.argv.clone(),
+            recommended_action_template: setup_action_fields.template.clone(),
             recovery_commands: setup_recovery_commands.clone(),
             recovery_command_argv: command_argvs(&setup_recovery_commands),
             recovery_action_templates: action_templates(&setup_recovery_commands),
@@ -1427,8 +1431,8 @@ pub(crate) fn build_plain_git_verification_probe(
                 clean: false,
                 summary: "Git history has not been imported into Heddle".to_string(),
                 recommended_action: Some(import.clone()),
-                recommended_action_argv: action_argv(&import),
-                recommended_action_template: action_template(&import),
+                recommended_action_argv: import_action_fields.argv,
+                recommended_action_template: import_action_fields.template,
                 recovery_commands: vec![import.clone()],
                 recovery_command_argv: command_argvs(std::slice::from_ref(&import)),
                 recovery_action_templates: action_templates(std::slice::from_ref(&import)),
@@ -1501,6 +1505,7 @@ pub(crate) fn build_plain_git_verification_probe(
         None,
         Vec::new(),
     ));
+    let setup_action_fields = ActionFields::from_action(&setup_action);
     let trust = RepositoryVerificationState {
         verified: false,
         status: "needs_init".to_string(),
@@ -1531,8 +1536,8 @@ pub(crate) fn build_plain_git_verification_probe(
         workflow_status: "not_checked".to_string(),
         workflow_summary: "workflow readiness is checked after Heddle initialization".to_string(),
         summary: "Git repository has not been initialized for Heddle".to_string(),
-        recommended_action_argv: action_argv(&setup_action),
-        recommended_action_template: action_template(&setup_action),
+        recommended_action_argv: setup_action_fields.argv,
+        recommended_action_template: setup_action_fields.template,
         recovery_command_argv: command_argvs(&setup_recovery_commands),
         recovery_action_templates: action_templates(&setup_recovery_commands),
         recommended_action: setup_action,
