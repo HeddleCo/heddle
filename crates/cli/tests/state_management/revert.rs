@@ -90,7 +90,7 @@ fn test_revert_invalid_state() {
 }
 
 /// Regression: reverting an "Added" tracked directory must not recursively
-/// destroy heddle-ignored content the user dropped beside it. Pre-fix,
+/// destroy explicitly ignored content the user dropped beside it. Pre-fix,
 /// `apply_inverse_changes` called `remove_path_recursively`, nuking
 /// `web/node_modules/` along with the tracked `web/index.html`. Post-fix,
 /// only tracked descendants are removed and ignored siblings survive.
@@ -98,6 +98,7 @@ fn test_revert_invalid_state() {
 fn test_revert_preserves_ignored_siblings_in_added_tracked_dir() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join(".heddleignore"), "node_modules/\n").unwrap();
     heddle(&["capture", "-m", "empty"], Some(temp.path())).unwrap();
 
     // Snapshot adds a tracked directory.
@@ -105,9 +106,9 @@ fn test_revert_preserves_ignored_siblings_in_added_tracked_dir() {
     fs::write(temp.path().join("web/index.html"), "<html/>").unwrap();
     heddle(&["capture", "-m", "add web"], Some(temp.path())).unwrap();
 
-    // User drops heddle-ignored content alongside the tracked file. This
-    // is invisible to status (default ignore list covers `node_modules`)
-    // but lives on disk.
+    // User drops explicitly ignored content alongside the tracked file.
+    // This is invisible to status because `.heddleignore` names
+    // `node_modules/`, but it still lives on disk.
     fs::create_dir_all(temp.path().join("web/node_modules/lodash")).unwrap();
     fs::write(
         temp.path().join("web/node_modules/lodash/index.js"),
@@ -116,7 +117,7 @@ fn test_revert_preserves_ignored_siblings_in_added_tracked_dir() {
     .unwrap();
 
     // Reverting the "add web" snapshot should remove `web/index.html` but
-    // leave the heddle-ignored sibling in place.
+    // leave the ignored sibling in place.
     heddle(&["revert", "HEAD"], Some(temp.path())).expect("revert must succeed");
 
     assert_file_not_exists(
@@ -125,6 +126,6 @@ fn test_revert_preserves_ignored_siblings_in_added_tracked_dir() {
     );
     assert_file_exists(
         temp.path().join("web/node_modules/lodash/index.js"),
-        "heddle-ignored content must survive revert",
+        "ignored content must survive revert",
     );
 }
