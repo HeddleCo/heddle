@@ -1292,6 +1292,33 @@ mod local_sync {
     }
 
     #[test]
+    fn test_push_local_accepts_git_shaped_remote_thread_alias() {
+        let repo_a = TempDir::new().unwrap();
+        let repo_b = TempDir::new().unwrap();
+
+        heddle(&["init"], Some(repo_a.path())).unwrap();
+        fs::write(repo_a.path().join("file.txt"), "content").unwrap();
+        heddle(&["capture", "-m", "Initial"], Some(repo_a.path())).unwrap();
+
+        heddle(&["init"], Some(repo_b.path())).unwrap();
+
+        let b_path = repo_b.path().to_string_lossy().to_string();
+        let result = heddle(&["push", &b_path, "feature"], Some(repo_a.path()));
+        assert!(
+            result.is_ok(),
+            "Git-shaped push local alias should succeed: {:?}",
+            result.err()
+        );
+
+        let threads = heddle(&["thread", "list"], Some(repo_b.path())).unwrap();
+        assert!(
+            threads.contains("feature"),
+            "pushed thread should be visible in target repo: {}",
+            threads
+        );
+    }
+
+    #[test]
     fn test_fetch_then_merge_remote_content() {
         let source = TempDir::new().unwrap();
         let dest = TempDir::new().unwrap();
