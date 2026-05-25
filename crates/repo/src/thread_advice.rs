@@ -110,6 +110,12 @@ pub fn describe_thread_advice_with_initial(
                 .as_deref()
                 .unwrap_or("its target thread")
         ));
+        if conflicts > 0 {
+            blockers.push(format!(
+                "{} path conflict(s) need manual resolution after refresh",
+                conflicts
+            ));
+        }
         RecommendedAction::Refresh
     } else if thread.promotion_suggested && !thread.heavy_impact_paths.is_empty() {
         blockers.push(format!(

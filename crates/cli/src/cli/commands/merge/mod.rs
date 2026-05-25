@@ -15,6 +15,7 @@ use repo::{
     ThreadManager, ThreadState, describe_thread_advice,
 };
 use serde::Serialize;
+use serde_json::Value;
 
 use super::{
     action_line::print_nested_next,
@@ -2317,14 +2318,23 @@ fn stale_thread_merge_blocked_output(
     } else {
         preview_report.blockers.clone()
     };
+    let conflict_suffix = if preview_report.conflict_count > 0 {
+        format!(
+            " and has {} path conflict(s)",
+            preview_report.conflict_count
+        )
+    } else {
+        String::new()
+    };
 
     MergeOutput {
         operator: OperatorCommandOutput {
             status: "blocked".to_string(),
             action: "merge".to_string(),
             message: format!(
-                "Thread '{}' is stale; merge {}did not run",
+                "Thread '{}' is stale{}; merge {}did not run",
                 preview_report.thread,
+                conflict_suffix,
                 if preview_only { "preview " } else { "" }
             ),
             blockers,
@@ -2336,20 +2346,17 @@ fn stale_thread_merge_blocked_output(
         fast_forward: false,
         preview_only,
         merge_state: None,
-        conflicts: Vec::new(),
+        conflicts: preview_report.conflicts.clone(),
         preview_summary: build_stale_preview_summary(preview_report),
         thread_state: thread.as_ref().map(|thread| thread.state.to_string()),
         freshness: Some(preview_report.freshness.clone()),
-        changed_paths: thread_paths(thread),
-        changed_path_count: thread_path_count(thread),
-        impact_categories: thread_impacts(thread),
-        promotion_suggested: thread
-            .as_ref()
-            .map(|thread| thread.promotion_suggested)
-            .unwrap_or(false),
-        heavy_impact_paths: thread_heavy_paths(thread),
-        semantic_result: None,
-        conflict_count: 0,
+        changed_paths: preview_report.changed_paths.clone(),
+        changed_path_count: preview_report.changed_path_count,
+        impact_categories: preview_report.impact_categories.clone(),
+        promotion_suggested: !preview_report.heavy_impact_paths.is_empty(),
+        heavy_impact_paths: preview_report.heavy_impact_paths.clone(),
+        semantic_result: Some(preview_report.semantic_result.clone()),
+        conflict_count: preview_report.conflict_count,
         thread_health: "blocked".to_string(),
         renames: Vec::new(),
         directory_renames: Vec::new(),
@@ -2401,8 +2408,8 @@ fn merge_preview_blocked_advice(output: &MergeOutput) -> RecoveryAdvice {
     } else {
         output.operator.blockers.join("; ")
     };
-    if let Some(trust) = output.trust.as_ref() {
-        return repository_verification_blocked_advice(
+    let mut advice = if let Some(trust) = output.trust.as_ref() {
+        repository_verification_blocked_advice(
             "merge_preview_blocked",
             output.operator.message.clone(),
             "retrying the merge preview",
@@ -2411,18 +2418,43 @@ fn merge_preview_blocked_advice(output: &MergeOutput) -> RecoveryAdvice {
             "the merge preview would otherwise describe a stale or unverifiable integration path",
             "repository state, refs, and worktree files were left unchanged",
             Some(primary_command.to_string()),
+        )
+    } else {
+        RecoveryAdvice::safety_refusal(
+            "merge_preview_blocked",
+            output.operator.message.clone(),
+            format!("Run `{primary_command}` before retrying the merge preview."),
+            blockers,
+            "the merge preview would otherwise describe a stale or unverifiable integration path",
+            "repository state, refs, and worktree files were left unchanged",
+            primary_command.to_string(),
+            vec![primary_command.to_string()],
+        )
+    };
+    if output.conflict_count > 0 {
+        advice.extra_json_fields.insert(
+            "conflict_count".to_string(),
+            Value::Number(output.conflict_count.into()),
+        );
+        advice.extra_json_fields.insert(
+            "conflicts".to_string(),
+            Value::Array(
+                output
+                    .conflicts
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
         );
     }
-    RecoveryAdvice::safety_refusal(
-        "merge_preview_blocked",
-        output.operator.message.clone(),
-        format!("Run `{primary_command}` before retrying the merge preview."),
-        blockers,
-        "the merge preview would otherwise describe a stale or unverifiable integration path",
-        "repository state, refs, and worktree files were left unchanged",
-        primary_command.to_string(),
-        vec![primary_command.to_string()],
-    )
+    if let Some(semantic_result) = output.semantic_result.as_ref() {
+        advice.extra_json_fields.insert(
+            "semantic_result".to_string(),
+            Value::String(semantic_result.clone()),
+        );
+    }
+    advice
 }
 
 fn render_merge_output(cli: &Cli, output: MergeOutput) -> Result<()> {
@@ -2630,6 +2662,16 @@ fn build_stale_preview_summary(report: &ThreadPreviewReport) -> Vec<String> {
                 &report.heavy_impact_paths,
                 report.heavy_impact_paths.len(),
             )
+        ));
+    }
+    lines.push(format!(
+        "merge type: {}",
+        semantic_result_summary(&report.semantic_result)
+    ));
+    if report.conflict_count > 0 {
+        lines.push(format!(
+            "conflicts: {} path conflict(s)",
+            report.conflict_count
         ));
     }
     lines
