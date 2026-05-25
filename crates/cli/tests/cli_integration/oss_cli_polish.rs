@@ -2985,7 +2985,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
         &[
             "commit",
             "-m",
-            "do not recapture already captured work",
+            "checkpoint captured work",
             "--output",
             "text",
         ],
@@ -2993,20 +2993,37 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     )
     .expect("commit should run");
     assert!(
-        !commit.status.success(),
-        "commit should refuse while captured work still needs checkpointing"
+        commit.status.success(),
+        "commit should checkpoint already captured work: stdout={} stderr={}",
+        String::from_utf8_lossy(&commit.stdout),
+        String::from_utf8_lossy(&commit.stderr)
     );
-    let stderr = String::from_utf8_lossy(&commit.stderr);
+    let stdout = String::from_utf8_lossy(&commit.stdout);
     assert!(
-        stderr.contains("Next: heddle checkpoint -m \"...\"")
-            && !stderr.contains("Other recovery:"),
-        "captured-but-not-checkpointed commit refusal should not recommend commit again: {stderr}"
+        stdout.contains("Included prior Heddle-only save")
+            && stdout.contains("Verification: clean"),
+        "captured-but-not-checkpointed commit should complete the checkpoint: {stdout}"
     );
+    let clean_after_commit = json_value(temp.path(), &["verify", "--output", "json"]);
+    assert_eq!(
+        clean_after_commit["verified"], true,
+        "commit should restore verify after checkpointing captured work: {clean_after_commit}"
+    );
+
+    std::fs::write(temp.path().join("tracked.txt"), "captured again\n").unwrap();
+    let capture_again = json_value(
+        temp.path(),
+        &["capture", "-m", "captured again", "--output", "json"],
+    );
+    let captured_again = capture_again["change_id"]
+        .as_str()
+        .expect("capture should report a change id")
+        .to_string();
     let commit_json = heddle_output(
         &[
             "commit",
             "-m",
-            "json refusal keeps checkpoint template",
+            "json checkpoint captured work",
             "--output",
             "json",
         ],
@@ -3014,29 +3031,23 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     )
     .expect("commit json should run");
     assert!(
-        !commit_json.status.success(),
-        "json commit should refuse while checkpoint is required"
+        commit_json.status.success(),
+        "json commit should checkpoint already captured work"
     );
-    let commit_stderr = String::from_utf8_lossy(&commit_json.stderr);
-    let envelope: serde_json::Value = serde_json::from_str(&commit_stderr)
-        .expect("captured-but-not-checkpointed commit refusal should be JSON");
-    assert_eq!(envelope["kind"], "commit_blocked_by_verification");
-    assert_eq!(envelope["primary_command"], "heddle checkpoint -m \"...\"");
+    let committed: serde_json::Value = serde_json::from_slice(&commit_json.stdout)
+        .expect("captured-but-not-checkpointed commit should emit JSON success");
+    assert_eq!(committed["included_pending_capture"], captured_again);
+    assert_eq!(committed["verification"]["verified"], true);
     assert_eq!(
-        envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["checkpoint", "-m", "<message>"]),
-        "templated checkpoint recovery should be machine-fillable: {envelope}"
+        committed["git_index"],
+        serde_json::Value::Null,
+        "checkpointing a captured-clean state should not claim a new Git index capture: {committed}"
     );
 
-    heddle(
-        &["checkpoint", "-m", "write captured work to git"],
-        Some(temp.path()),
-    )
-    .unwrap();
     let clean = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(
         clean["verified"], true,
-        "checkpoint should restore verify: {clean}"
+        "commit should restore verify: {clean}"
     );
     let git_short = std::process::Command::new("git")
         .args(["status", "--short"])
@@ -3050,7 +3061,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     assert!(
         String::from_utf8_lossy(&git_short.stdout).trim().is_empty(),
-        "checkpoint should leave Git clean: {}",
+        "commit should leave Git clean: {}",
         String::from_utf8_lossy(&git_short.stdout)
     );
 }
