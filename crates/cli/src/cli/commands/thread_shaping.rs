@@ -399,7 +399,11 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                     "blocked".to_string()
                 },
                 action: "resolve".to_string(),
-                message: "Thread requires a manual follow-up".to_string(),
+                message: if blockers.is_empty() {
+                    "Thread manual resolution recorded".to_string()
+                } else {
+                    "Thread requires a manual follow-up".to_string()
+                },
                 blockers: blockers.clone(),
                 warnings: Vec::new(),
                 next_action: recommended_action.clone(),
@@ -455,7 +459,7 @@ fn thread_resolve_rebase_followup_operator(
         },
         action: "resolve".to_string(),
         message: if blockers.is_empty() {
-            "Thread requires a manual follow-up".to_string()
+            "Thread manual resolution recorded; continue the rebase".to_string()
         } else {
             "Thread still requires a manual rebase resolution".to_string()
         },
