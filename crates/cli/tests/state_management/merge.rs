@@ -1041,7 +1041,7 @@ fn test_thread_switch_to_thread_with_missing_worktree_handles_gracefully() {
     );
 }
 
-/// Regression: `heddle merge` must not silently destroy heddle-ignored
+/// Regression: `heddle merge` must not silently destroy explicitly ignored
 /// content under a tracked top-level directory it drops. Pre-fix,
 /// `apply_merged_tree` called `remove_path_recursively` on entries the
 /// merged tree no longer contained, recursively nuking `web/node_modules/`
@@ -1051,6 +1051,7 @@ fn test_thread_switch_to_thread_with_missing_worktree_handles_gracefully() {
 fn test_merge_preserves_ignored_siblings_in_dropped_tracked_dir() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join(".heddleignore"), "node_modules/\n").unwrap();
 
     // Base state on `main`: tracked `web/index.html` exists.
     fs::create_dir_all(temp.path().join("web")).unwrap();
@@ -1063,9 +1064,9 @@ fn test_merge_preserves_ignored_siblings_in_dropped_tracked_dir() {
     fs::remove_dir_all(temp.path().join("web")).unwrap();
     heddle(&["capture", "-m", "drop web"], Some(temp.path())).unwrap();
 
-    // Back on `main`, drop the heddle-ignored sibling. The default ignore
-    // list (`target`, `node_modules`, `.git`) skips this — invisible to
-    // status, present on disk.
+    // Back on `main`, drop the explicitly heddle-ignored sibling.
+    // `.heddleignore` names `node_modules/`, so status ignores it while the
+    // filesystem still holds it.
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
     fs::create_dir_all(temp.path().join("web/node_modules/lodash")).unwrap();
     fs::write(
@@ -1085,7 +1086,7 @@ fn test_merge_preserves_ignored_siblings_in_dropped_tracked_dir() {
     // Ignored sibling preserved.
     assert_file_exists(
         temp.path().join("web/node_modules/lodash/index.js"),
-        "heddle-ignored content must survive merge that drops the tracked dir",
+        "ignored content must survive merge that drops the tracked dir",
     );
 }
 

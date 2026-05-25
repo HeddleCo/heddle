@@ -726,9 +726,9 @@ fn prepare_parent_directories(writes: &[WorktreeWriteOp]) -> Result<()> {
 /// become a symlink in the new tree).
 ///
 /// Tolerates `ENOTEMPTY` from `remove_dir` for the same reason the
-/// incremental apply path does: heddle-ignored siblings (`.git/`,
-/// `target/`, `node_modules/`) may still occupy the directory after
-/// the planner has cleaned out the tracked children. Without this
+/// incremental apply path does: untracked or explicitly ignored siblings
+/// may still occupy the directory after the planner has cleaned out the
+/// tracked children. Without this
 /// tolerance, a `goto` over a real-world worktree that mutates a
 /// tracked directory into a symlink aborts mid-apply with `os error
 /// 66`, leaving HEAD stuck and disk diverged from state.
@@ -816,10 +816,9 @@ mod tests {
     /// Regression: `remove_materialized_leaf` must tolerate `ENOTEMPTY` on
     /// the directory branch, mirroring `remove_existing_path` in the
     /// incremental apply path. Both tolerances are needed because the
-    /// apply planner intentionally skips heddle-ignored entries — when
-    /// the planner asks the materializer to clear a directory whose
-    /// tracked children are gone but whose ignored children
-    /// (`.git/`, `target/`, `node_modules/`) remain, `remove_dir` errors
+    /// apply planner only removes tracked descendants — when the planner asks
+    /// the materializer to clear a directory whose tracked children are gone
+    /// but whose untracked or explicitly ignored children remain, `remove_dir` errors
     /// with `os error 66` (macOS/BSD) / `39` (Linux). Pre-fix the
     /// materialization branch propagated that error and aborted apply
     /// mid-walk, leaving HEAD stuck and disk diverged from state.

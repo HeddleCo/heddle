@@ -69,16 +69,21 @@ fn test_unicode_filename() {
     assert!(temp.path().join("emoji_😀.txt").exists());
 }
 
-/// Regression: `heddle undo` on a real-world worktree (with `target/`,
-/// `node_modules/`, `.git/`, etc.) must not abort with `os error 66` after
-/// destroying tracked files. The planner asks `remove_dir` to drop the parent
-/// of an ignored child; that fails with ENOTEMPTY. Pre-fix this left the
+/// Regression: `heddle undo` on a worktree with explicitly ignored build or
+/// dependency output must not abort with `os error 66` after destroying tracked
+/// files. The planner asks `remove_dir` to drop the parent of an ignored child;
+/// that fails with ENOTEMPTY. Pre-fix this left the
 /// worktree gutted with HEAD stuck at the old state. Post-fix the directory
 /// is left in place and undo completes transactionally.
 #[test]
 fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(
+        temp.path().join(".heddleignore"),
+        "target/\nnode_modules/\n",
+    )
+    .unwrap();
     heddle_must_succeed(&["capture", "-m", "empty"], temp.path());
 
     std::fs::write(temp.path().join("main.rs"), "fn main() {}").unwrap();
@@ -86,10 +91,10 @@ fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
     std::fs::write(temp.path().join("web/index.html"), "<html/>").unwrap();
     heddle_must_succeed(&["capture", "-m", "tracked"], temp.path());
 
-    // Drop ignored siblings into tracked directories — these would otherwise
-    // be present from `bun install`, `cargo build`, `git init`, etc. Heddle's
-    // default ignore list (`target`, `node_modules`, `.git`) skips them, so
-    // they are invisible to status — but they still occupy the filesystem.
+    // Drop explicitly ignored siblings into tracked directories — these would
+    // otherwise be present from `bun install`, `cargo build`, `git init`, etc.
+    // They are invisible to status because this test named them in
+    // `.heddleignore`, but they still occupy the filesystem.
     std::fs::create_dir_all(temp.path().join("web/node_modules/lodash")).unwrap();
     std::fs::write(
         temp.path().join("web/node_modules/lodash/index.js"),
@@ -388,7 +393,7 @@ fn test_rebase_force_proceeds_and_destroys_edit() {
 
 /// Regression: a Repository-level test that `clear_worktree` and the
 /// incremental remove path both tolerate ENOTEMPTY when the directory holds
-/// heddle-ignored content. This is the unit-level companion to the CLI test
+/// local-only content. This is the unit-level companion to the CLI test
 /// above.
 #[test]
 fn test_undo_with_dotgit_directory_present() {

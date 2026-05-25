@@ -682,9 +682,9 @@ mod cherry_pick {
         assert!(!status["changes"]["added"].as_array().unwrap().is_empty());
     }
 
-    /// Regression: `heddle cherry-pick` must not silently destroy
-    /// heddle-ignored content under a tracked top-level directory it
-    /// drops. Pre-fix, `apply_tree_to_worktree` called
+    /// Regression: `heddle cherry-pick` must not silently destroy explicitly
+    /// ignored content under a tracked top-level directory it drops. Pre-fix,
+    /// `apply_tree_to_worktree` called
     /// `remove_path_recursively` on entries the cherry-picked tree no
     /// longer contained, recursively nuking `web/node_modules/` alongside
     /// the tracked `web/index.html`. Post-fix, only tracked descendants
@@ -693,6 +693,7 @@ mod cherry_pick {
     fn test_cherry_pick_preserves_ignored_siblings_in_dropped_tracked_dir() {
         let temp = TempDir::new().unwrap();
         heddle(&["init"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join(".heddleignore"), "node_modules/\n").unwrap();
 
         // Snapshot 1 (BASE): empty.
         heddle(&["capture", "-m", "empty"], Some(temp.path())).unwrap();
@@ -722,9 +723,9 @@ mod cherry_pick {
         // Move back to WITH_WEB so cherry-pick has work to do.
         heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
 
-        // User drops heddle-ignored content alongside the tracked dir.
-        // Default ignore list (`node_modules`) covers this; status hides
-        // it but the filesystem still holds it.
+        // User drops explicitly heddle-ignored content alongside the tracked
+        // dir. `.heddleignore` names `node_modules/`, so status hides it while
+        // the filesystem still holds it.
         fs::create_dir_all(temp.path().join("web/node_modules/lodash")).unwrap();
         fs::write(
             temp.path().join("web/node_modules/lodash/index.js"),
@@ -744,7 +745,7 @@ mod cherry_pick {
         );
         assert_file_exists(
             temp.path().join("web/node_modules/lodash/index.js"),
-            "heddle-ignored content must survive cherry-pick that drops the tracked dir",
+            "ignored content must survive cherry-pick that drops the tracked dir",
         );
     }
 }

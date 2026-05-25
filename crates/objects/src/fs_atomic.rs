@@ -65,11 +65,10 @@ pub fn is_out_of_space(err: &io::Error) -> bool {
 }
 
 /// Returns true when an `io::Error` indicates a directory could not be
-/// removed because it still contained entries. The apply planner
-/// intentionally skips heddle-ignored entries (`.git/`, `target/`,
-/// `node_modules/`, etc.); when tracked content is removed and the parent
-/// directory still holds those ignored siblings, `remove_dir` returns
-/// this signal. We need both `ErrorKind::DirectoryNotEmpty` and the raw
+/// removed because it still contained entries. The apply planner only removes
+/// tracked descendants; when tracked content is removed and the parent
+/// directory still holds untracked or explicitly ignored siblings, `remove_dir`
+/// returns this signal. We need both `ErrorKind::DirectoryNotEmpty` and the raw
 /// codes — Linux=39, macOS/BSD=66, Windows=145 — because Rust does not
 /// always translate every kernel surface into the portable `ErrorKind`.
 pub fn is_directory_not_empty(err: &io::Error) -> bool {
@@ -200,7 +199,7 @@ fn enrich_write_error(path: &Path, err: io::Error) -> io::Error {
 /// The mapping covers the cases users actually hit and the messages we
 /// promise from heddle's CLI surface:
 /// - **ENOTEMPTY** — usually `remove_dir` against a directory that still
-///   holds heddle-ignored content (`.git/`, `target/`, `node_modules/`).
+///   holds untracked or explicitly ignored content, such as build output.
 ///   The high-level fix is to leave the directory in place, but when the
 ///   error does surface (e.g. a path the planner *did* expect to remove),
 ///   the message names the path so the user can investigate.
