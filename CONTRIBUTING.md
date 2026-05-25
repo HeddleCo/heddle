@@ -4,6 +4,88 @@ Heddle is alpha software with strong opinions about its CLI surface, its
 output contracts, and its render discipline. This file is the on-ramp:
 read it, follow the reading order, and your first PR will land cleanly.
 
+## Contributing across HeddleCo
+
+Heddle the CLI is one of three repos. The hosted server
+([weft](https://github.com/HeddleCo/weft)) and the web app
+([tapestry](https://github.com/HeddleCo/tapestry)) sit alongside it,
+and a single identity + permission model governs participation across
+all three. The substrate and the three grant flows are designed in
+[`docs/spikes/contribution-grant-flows.md`](docs/spikes/contribution-grant-flows.md);
+that doc is the source of truth for any claim made here.
+
+### What you can do without an account
+
+Anonymous callers (anon biscuit only, per spike §2) can **read public
+state**: clone public repos, view public reviews, browse the docs
+site. They cannot sign reviews, post discussion turns, comment, or
+otherwise mutate anything. The substrate gates writes via
+`require_user_subject` (spike §2) — anon callers receive
+`failed_precondition` from every write RPC.
+
+### Getting an authorized identity
+
+Writes require a hosted account. Sign up through the tapestry
+frontend; the flow uses passkey registration plus email
+verification (the hardened path tracked under
+`HeddleCo/weft#181`). After signup you have a hosted account but no
+repo permissions yet — that's the next step.
+
+### Getting repo permissions
+
+Three flows produce the same `(subject_user_uuid, resource, role)`
+substrate triple (spike §3):
+
+1. **Maintainer-initiated invite.** A maintainer (>= `Admin` on the
+   target repo or any ancestor namespace) invites you from the repo
+   or namespace settings page, by handle or by email. Handle →
+   `CreateGrant`; email → `CreateInvitation` redeemed on signup.
+2. **User-initiated request-to-contribute.** A signed-in user without
+   a role on a public resource sees a "Request access" affordance
+   and submits a justification. A maintainer reviews from the
+   pending-requests inbox and approves (optionally counter-offering
+   a lower role) or denies. Spec lives in spike §3.2; the RPCs
+   (`GetMyEffectiveRole`, `RequestRoleGrant`,
+   `ListPendingGrantRequests`, `RespondToGrantRequest`) are the
+   sub-impl batch listed in spike §5 — **planned, not yet shipped**.
+3. **Namespace-level inheritance.** A grant on a parent namespace
+   (e.g. `org/acme`) flows down to its child repos automatically.
+   The substrate already walks ancestors via
+   `effective_role_for_repository` (spike §1); the repo-settings UI
+   surfaces direct and inherited grants in separate sections (spike
+   §3.3, also a planned sub-impl).
+
+There is **no "guest contributor" tier**. You are either anonymous
+(read-only-public) or you have a hosted account plus a role grant.
+That's the entire model.
+
+### What you can do once you have a role
+
+Roles are ordinal — `Reader < Developer < Maintainer < Admin <
+Owner` (defined in `weft/crates/weft-server/src/access/enforce.rs:5`;
+12-capability enumeration in `access/scope.rs:34-48`). The role you
+hold on a repo (direct or inherited) determines which RPCs are
+admitted on its resources. See spike §1 for the capability table; the
+short version is that higher roles strictly add capabilities to the
+lower roles below them.
+
+### The PR shape
+
+- Link the issue you're closing (`Closes HeddleCo/<repo>#<n>`).
+- For Rust changes, follow the red-commit-first discipline: failing
+  test, then implementation. Note the red commit SHA in the PR body.
+- Match the repo's coverage rules (see this file's "Coverage gate"
+  section for heddle; equivalents in the other repos).
+- Run the repo's local CI parity commands before pushing — listed in
+  this file's "PR checklist" section.
+
+### Where to ask questions
+
+- Bugs and regressions: GitHub Issues on the relevant repo.
+- Quick how-to: GitHub Discussions on `HeddleCo/heddle`.
+- Larger design questions: draft a markdown doc under `docs/` and
+  reference it from the issue or PR.
+
 ## Reading order
 
 Three files, in order, before touching code that changes behavior or
