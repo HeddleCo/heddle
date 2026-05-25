@@ -22,7 +22,10 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    git_overlay_health::{
+        RepositoryVerificationState, build_repository_verification_state,
+        canonical_bridge_import_ref_command,
+    },
 };
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
@@ -539,7 +542,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             format!("clone verification failed: selected Git branch '{branch}' is missing: {err}"),
             format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
             "Git status would report upstream tracking for a branch whose local ref is absent",
-            format!("heddle bridge git import --ref {branch}"),
+            canonical_bridge_import_ref_command(branch),
         ))
     })?;
     let target = reference.peel_to_id().map_err(|err| {
@@ -549,7 +552,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             ),
             format!("Git ref '{branch_ref}' could not be peeled to a commit"),
             "Git status would report upstream tracking for an unreadable branch",
-            format!("heddle bridge git import --ref {branch}"),
+            canonical_bridge_import_ref_command(branch),
         ))
     })?;
     set_reference(
@@ -614,7 +617,7 @@ fn verify_git_overlay_clone(
             "clone verification failed: .git/HEAD is not attached to a branch",
             "Git HEAD is detached after clone verification",
             "Heddle cannot prove which Git branch should map to the imported thread",
-            format!("heddle bridge git import --ref {track_name}"),
+            canonical_bridge_import_ref_command(track_name),
         ))
     })?;
     if git_head != track_name {
@@ -624,7 +627,7 @@ fn verify_git_overlay_clone(
             ),
             format!("Git HEAD branch '{git_head}' does not match Heddle thread '{track_name}'"),
             "continuing would leave Git and Heddle attached to different active names",
-            format!("heddle bridge git import --ref {git_head}"),
+            canonical_bridge_import_ref_command(&git_head),
         )));
     }
 
@@ -660,7 +663,7 @@ fn verify_git_overlay_clone(
             ),
             format!("Git branch '{track_name}' does not map to imported Heddle state {state_id}"),
             "continuing would leave the Git/Heddle mapping unproven for this clone",
-            format!("heddle bridge git import --ref {track_name}"),
+            canonical_bridge_import_ref_command(track_name),
         )));
     }
 
