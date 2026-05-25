@@ -56,6 +56,7 @@ pub struct CommandCatalogEntry {
     pub supports_op_id: bool,
     pub persists_op_id: bool,
     pub op_id_behavior: String,
+    pub op_id_store_scope: String,
     pub observe_only: bool,
     pub may_initialize: bool,
     pub may_import_git: bool,
@@ -225,6 +226,7 @@ pub struct CommandRuntimeContract {
     pub supports_json: bool,
     pub supports_op_id: bool,
     pub persists_op_id: bool,
+    pub uses_bootstrap_op_id_store: bool,
     pub mutates: bool,
     pub observe_only: bool,
     pub help_visibility: &'static str,
@@ -2064,6 +2066,7 @@ fn catalog_entry(command: &clap::Command, path: &[String]) -> CommandCatalogEntr
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
         op_id_behavior: op_id_behavior(contract).to_string(),
+        op_id_store_scope: op_id_store_scope(contract).to_string(),
         observe_only: contract.observe_only,
         may_initialize: contract.may_initialize,
         may_import_git: contract.may_import_git,
@@ -2408,6 +2411,20 @@ fn op_id_behavior(contract: CommandContract) -> &'static str {
     }
 }
 
+fn uses_bootstrap_op_id_store(contract: CommandContract) -> bool {
+    contract.supports_op_id && contract.may_initialize
+}
+
+fn op_id_store_scope(contract: CommandContract) -> &'static str {
+    if !contract.supports_op_id {
+        "none"
+    } else if uses_bootstrap_op_id_store(contract) {
+        "bootstrap"
+    } else {
+        "repository"
+    }
+}
+
 fn first_run_behavior(contract: CommandContract) -> &'static str {
     if contract.observe_only {
         "observe_only_no_init"
@@ -2656,6 +2673,7 @@ fn runtime_contract(
         supports_json: contract.supports_json,
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
+        uses_bootstrap_op_id_store: uses_bootstrap_op_id_store(contract),
         mutates: contract.mutates,
         observe_only: contract.observe_only,
         help_visibility: contract.help_visibility,
@@ -2700,6 +2718,12 @@ pub fn command_supports_op_id(command_name: &str) -> bool {
 pub fn command_persists_op_id(command_name: &str) -> bool {
     command_runtime_contract(command_name)
         .map(|contract| contract.persists_op_id)
+        .unwrap_or(false)
+}
+
+pub fn command_uses_bootstrap_op_id_store(command_name: &str) -> bool {
+    command_runtime_contract(command_name)
+        .map(|contract| contract.uses_bootstrap_op_id_store)
         .unwrap_or(false)
 }
 
@@ -4274,6 +4298,10 @@ mod tests {
         assert_eq!(runtime.supports_json, entry.supports_json);
         assert_eq!(runtime.supports_op_id, entry.supports_op_id);
         assert_eq!(runtime.persists_op_id, entry.persists_op_id);
+        assert_eq!(
+            runtime.uses_bootstrap_op_id_store,
+            entry.op_id_store_scope == "bootstrap"
+        );
         assert_eq!(runtime.help_visibility, entry.help_visibility);
         assert_eq!(runtime.help_rank, entry.help_rank);
         assert_eq!(runtime.surface, entry.surface);
@@ -4293,11 +4321,15 @@ mod tests {
     #[test]
     fn op_id_persistence_reads_contract_table() {
         let catalog = build_command_catalog();
-        for (display, persists) in [
-            ("capture", false),
-            ("review sign", false),
-            ("commit", false),
-            ("status", false),
+        for (display, persists, store_scope) in [
+            ("capture", false, "repository"),
+            ("review sign", false, "repository"),
+            ("commit", false, "repository"),
+            ("status", false, "none"),
+            ("init", false, "bootstrap"),
+            ("adopt", false, "bootstrap"),
+            ("clone", false, "bootstrap"),
+            ("bridge git init", false, "bootstrap"),
         ] {
             let entry = catalog
                 .commands
@@ -4309,9 +4341,18 @@ mod tests {
                 "`{display}` op-id persistence must be cataloged"
             );
             assert_eq!(
+                entry.op_id_store_scope, store_scope,
+                "`{display}` op-id store scope must be cataloged"
+            );
+            assert_eq!(
                 command_persists_op_id(display),
                 persists,
                 "`{display}` runtime op-id persistence must come from the contract table"
+            );
+            assert_eq!(
+                command_uses_bootstrap_op_id_store(display),
+                store_scope == "bootstrap",
+                "`{display}` runtime op-id store scope must come from the contract table"
             );
             if persists {
                 assert!(
