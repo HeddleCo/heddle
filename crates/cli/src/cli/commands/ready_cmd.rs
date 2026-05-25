@@ -21,7 +21,7 @@ use super::{
     operator_loop::primary_next_action,
     snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread::contextual_thread_action,
-    thread_cmd::{current_thread, load_thread, thread_manager},
+    thread_cmd::{current_thread, load_thread, thread_manager, thread_not_found_advice},
 };
 use crate::{
     cli::{Cli, ReadyArgs, should_output_json, style, worktree_status_options},
@@ -177,7 +177,9 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         thread = manager
             .load(&thread.id)?
             .or_else(|| current_thread(&repo).ok().flatten())
-            .ok_or_else(|| anyhow::anyhow!("Thread '{}' not found after capture", thread.id))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(thread_not_found_advice(&thread.id, "ready after capture"))
+            })?;
         captured = true;
     }
 

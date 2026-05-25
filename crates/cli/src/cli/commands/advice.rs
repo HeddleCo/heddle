@@ -492,6 +492,19 @@ impl RecoveryAdvice {
         )
     }
 
+    pub(crate) fn repository_no_head_capture_first(action: &str) -> Self {
+        Self::safety_refusal(
+            "repository_no_head",
+            format!("Repository has no HEAD state for {action}"),
+            "Capture the current worktree with `heddle capture -m \"...\"`, then retry.",
+            "the repository has no current HEAD state",
+            format!("`{action}` needs a concrete state id and cannot safely infer one"),
+            "no repository objects, refs, metadata, or worktree files were changed",
+            DIRTY_WORKTREE_CAPTURE_COMMAND,
+            vec![DIRTY_WORKTREE_CAPTURE_COMMAND.to_string()],
+        )
+    }
+
     pub(crate) fn context_empty() -> Self {
         Self::safety_refusal(
             "context_annotations_empty",

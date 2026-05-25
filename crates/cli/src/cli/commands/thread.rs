@@ -424,7 +424,7 @@ fn collect_thread_captures(
     let current = repo
         .refs()
         .get_thread(thread)?
-        .ok_or_else(|| anyhow!("Thread not found: {thread}"))?;
+        .ok_or_else(|| anyhow!(thread_not_found_advice(thread, "list thread captures")))?;
     let base = ThreadManager::new(repo.heddle_dir())
         .load(thread)?
         .map(|thread| thread.base_state);
@@ -3018,7 +3018,7 @@ pub(crate) fn cmd_thread_rename(
     let state = repo
         .refs()
         .get_thread(&old)?
-        .ok_or_else(|| anyhow!("Thread not found: {}", old))?;
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&old, "rename thread")))?;
 
     let mut updates = vec![
         RefUpdate::Thread {

@@ -19,7 +19,7 @@ use super::{
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
-    thread_cmd::{load_thread, refresh_thread, refresh_thread_freshness},
+    thread_cmd::{load_thread, refresh_thread, refresh_thread_freshness, thread_not_found_advice},
 };
 use crate::{
     cli::{Cli, should_output_json, style, worktree_status_options},
@@ -270,7 +270,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         let manager = super::thread_cmd::thread_manager(&repo);
         let mut refreshed_thread = manager
             .load(&thread_id)?
-            .ok_or_else(|| anyhow!("Thread '{}' not found after refresh", thread_id))?;
+            .ok_or_else(|| anyhow!(thread_not_found_advice(&thread_id, "resolve thread")))?;
         let resolved_state = repo
             .refs()
             .get_thread(&refreshed_thread.thread)?
@@ -298,7 +298,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     }
 
     let summary = super::thread::find_thread_summary(&repo, &thread.id)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread.id))?;
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&thread.id, "resolve thread")))?;
     let mut blockers = if rebase_state_path.exists() {
         Vec::new()
     } else {

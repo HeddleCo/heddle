@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Show command.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use repo::{Repository, format_confidence};
 use serde::Serialize;
 
 use super::{
     git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
-    history_target::resolve_state_id,
+    history_target::{require_resolved_state, resolve_state_id},
     snapshot::ensure_current_state,
 };
 use crate::{
@@ -88,10 +88,7 @@ pub fn cmd_show(cli: &Cli, state_spec: String) -> Result<()> {
     }
     let id = resolve_state_id(&repo, &state_spec)?;
 
-    let state = repo
-        .store()
-        .get_state(&id)?
-        .ok_or_else(|| anyhow!("State not found: {}", state_spec))?;
+    let state = require_resolved_state(&repo, &id)?;
 
     let output = ShowOutput {
         repository_capability: repo.capability_label().to_string(),

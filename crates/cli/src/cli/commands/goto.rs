@@ -3,13 +3,14 @@
 
 use std::time::Instant;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use repo::Repository;
 use serde::Serialize;
 use tracing::debug;
 
 use super::{
-    history_target::resolve_state_id, snapshot::ensure_current_state,
+    history_target::{require_resolved_state, resolve_state_id},
+    snapshot::ensure_current_state,
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
@@ -61,10 +62,7 @@ pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
         false
     };
 
-    let target_state = repo
-        .store()
-        .get_state(&target_id)?
-        .ok_or_else(|| anyhow!("State not found: {}", target))?;
+    let target_state = require_resolved_state(&repo, &target_id)?;
 
     if current_worktree_verified_clean {
         repo.goto_verified_clean(&target_id)?;

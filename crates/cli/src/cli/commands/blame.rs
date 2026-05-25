@@ -10,7 +10,11 @@ use objects::object::{
 use repo::Repository;
 use serde::Serialize;
 
-use super::{advice::RecoveryAdvice, snapshot::ensure_current_state};
+use super::{
+    advice::RecoveryAdvice,
+    history_target::{require_resolved_state, resolve_state_id},
+    snapshot::ensure_current_state,
+};
 use crate::{
     cli::{Cli, should_output_json},
     config::UserConfig,
@@ -71,8 +75,7 @@ pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: b
                 Some(format!("Bootstrap git-overlay before blaming {}", file)),
             )?;
         }
-        repo.resolve_state(&state_id)?
-            .ok_or_else(|| anyhow!("State not found: {}", state_id))?
+        resolve_state_id(&repo, &state_id)?
     } else {
         ensure_current_state(
             &repo,
@@ -81,10 +84,7 @@ pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: b
         )?
     };
 
-    let state_obj = repo
-        .store()
-        .get_state(&target_state_id)?
-        .ok_or_else(|| anyhow!("State not found"))?;
+    let state_obj = require_resolved_state(&repo, &target_state_id)?;
 
     let tree = repo
         .store()

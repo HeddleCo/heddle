@@ -9,7 +9,10 @@ use refs::Head;
 use repo::Repository;
 use serde::Serialize;
 
-use super::advice::RecoveryAdvice;
+use super::{
+    advice::RecoveryAdvice,
+    history_target::{require_resolved_state, resolve_state_id},
+};
 use crate::{
     cli::{Cli, commands::snapshot::resolve_attribution, should_output_json},
     config::UserConfig,
@@ -54,13 +57,8 @@ pub fn cmd_collapse(
     // Resolve all state specifiers to actual states
     let mut resolved_states = Vec::new();
     for state_spec in &states {
-        let change_id = repo
-            .resolve_state(state_spec)?
-            .ok_or_else(|| anyhow::anyhow!("State not found: {}", state_spec))?;
-        let state = repo
-            .store()
-            .get_state(&change_id)?
-            .ok_or_else(|| anyhow::anyhow!("State not found: {}", state_spec))?;
+        let change_id = resolve_state_id(&repo, state_spec)?;
+        let state = require_resolved_state(&repo, &change_id)?;
         resolved_states.push(state);
     }
 

@@ -15,7 +15,9 @@ use super::{
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread::start_thread,
-    thread_cmd::{current_thread, load_thread, refresh_thread, thread_manager},
+    thread_cmd::{
+        current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
+    },
 };
 use crate::{
     cli::{
@@ -1059,9 +1061,12 @@ fn update_integration_policy(
     reason: impl Into<String>,
 ) -> Result<()> {
     let manager = thread_manager(repo);
-    let mut thread = manager
-        .load(thread_id)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread_id))?;
+    let mut thread = manager.load(thread_id)?.ok_or_else(|| {
+        anyhow!(thread_not_found_advice(
+            thread_id,
+            "update integration policy"
+        ))
+    })?;
     let prior_status = thread.integration_policy_result.status.clone();
     let reason = reason.into();
     let keep_previewed = status == "blocked" && prior_status.as_deref() == Some("previewed");
@@ -1082,9 +1087,12 @@ fn update_integration_policy(
 
 fn clear_manual_resolution_state(repo: &Repository, thread_id: &str) -> Result<()> {
     let manager = thread_manager(repo);
-    let mut thread = manager
-        .load(thread_id)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread_id))?;
+    let mut thread = manager.load(thread_id)?.ok_or_else(|| {
+        anyhow!(thread_not_found_advice(
+            thread_id,
+            "clear manual resolution"
+        ))
+    })?;
     thread.integration_policy_result.manual_resolution_state = None;
     Ok(manager.save(&thread)?)
 }
@@ -1155,9 +1163,12 @@ fn change_id_matches_display(id: &ChangeId, display: &str) -> bool {
 
 fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String> {
     let manager = thread_manager(repo);
-    let mut thread = manager
-        .load(thread_id)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread_id))?;
+    let mut thread = manager.load(thread_id)?.ok_or_else(|| {
+        anyhow!(thread_not_found_advice(
+            thread_id,
+            "adopt manual resolution"
+        ))
+    })?;
     let target = repo.refs().get_thread(&thread.thread)?.ok_or_else(|| {
         anyhow!(
             "Thread '{}' has no current state to integrate",

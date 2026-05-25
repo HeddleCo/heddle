@@ -20,7 +20,7 @@ use super::{
             PlainGitVerificationProbe, build_plain_git_verification_probe,
             build_repository_verification_state, trust_visible_worktree_status,
         },
-        history_target::resolve_state_id,
+        history_target::{require_resolved_state, resolve_state_id},
     },
     diff_output::{print_context, print_diff, print_semantic_changes, print_stat},
     diff_types::{
@@ -100,7 +100,7 @@ pub fn cmd_diff(
     };
 
     let from_state = if let Some(id) = from_id {
-        repo.store().get_state(&id)?
+        Some(require_resolved_state(&repo, &id)?)
     } else {
         None
     };
@@ -126,10 +126,7 @@ pub fn cmd_diff(
 
             if let Some(ref to_spec) = to {
                 let to_id = resolve_state_id(&repo, to_spec)?;
-                let to_state = repo
-                    .store()
-                    .get_state(&to_id)?
-                    .ok_or_else(|| anyhow!("State not found: {}", to_spec))?;
+                let to_state = require_resolved_state(&repo, &to_id)?;
 
                 let from_hash = from_state
                     .as_ref()
@@ -162,20 +159,14 @@ pub fn cmd_diff(
     let mut to_tree: Option<Tree> = None;
     if let Some(ref to_spec) = to {
         let to_id = resolve_state_id(&repo, to_spec)?;
-        let to_state = repo
-            .store()
-            .get_state(&to_id)?
-            .ok_or_else(|| anyhow!("State not found: {}", to_spec))?;
+        let to_state = require_resolved_state(&repo, &to_id)?;
         to_tree = repo.store().get_tree(&to_state.tree)?;
     }
     let changes: FileChangeSet = if let Some(ref result) = semantic_result {
         result.file_changes.clone()
     } else if let Some(ref to_spec) = to {
         let to_id = resolve_state_id(&repo, to_spec)?;
-        let to_state = repo
-            .store()
-            .get_state(&to_id)?
-            .ok_or_else(|| anyhow!("State not found: {}", to_spec))?;
+        let to_state = require_resolved_state(&repo, &to_id)?;
 
         let from_hash = from_state
             .as_ref()
@@ -281,7 +272,7 @@ pub fn cmd_diff(
     let context_state = if show_context {
         if let Some(ref to_spec) = to {
             let to_id = resolve_state_id(&repo, to_spec)?;
-            repo.store().get_state(&to_id)?
+            Some(require_resolved_state(&repo, &to_id)?)
         } else if let Some(state) = from_state.clone() {
             Some(state)
         } else {
@@ -424,10 +415,7 @@ pub fn compute_state_diff(
         None
     };
 
-    let to_state = repo
-        .store()
-        .get_state(to_change_id)?
-        .ok_or_else(|| anyhow!("State not found: {}", to_change_id.short()))?;
+    let to_state = require_resolved_state(repo, to_change_id)?;
     let to_tree = repo
         .store()
         .get_tree(&to_state.tree)?

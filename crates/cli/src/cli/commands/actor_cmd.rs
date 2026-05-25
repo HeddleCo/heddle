@@ -264,9 +264,11 @@ pub async fn cmd_actor_spawn(
 ) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
 
-    let base_state = repo
-        .head()?
-        .ok_or_else(|| anyhow!("Repository has no HEAD state - take a snapshot first"))?;
+    let base_state = repo.head()?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::repository_no_head_capture_first(
+            "actor spawn"
+        ))
+    })?;
 
     let explicit_identity = provider
         .as_ref()

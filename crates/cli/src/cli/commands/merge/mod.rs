@@ -1241,7 +1241,7 @@ fn mark_merge_previewed(repo: &Repository, thread_id: &str) -> Result<()> {
     let manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = manager
         .load(thread_id)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread_id))?;
+        .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "mark merge previewed")))?;
     thread.integration_policy_result = ThreadIntegrationPolicy {
         status: Some("previewed".to_string()),
         reason: Some("clean merge preview established ship path".to_string()),
