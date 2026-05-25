@@ -46,6 +46,69 @@ impl ResolvedSource {
     }
 }
 
+#[derive(Serialize)]
+struct BridgeGitPushOutput {
+    output_kind: &'static str,
+    action: &'static str,
+    status: &'static str,
+    success: bool,
+    pushed: bool,
+    changed: bool,
+    transport: &'static str,
+    remote: String,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize)]
+struct BridgeGitPullOutput {
+    output_kind: &'static str,
+    action: &'static str,
+    status: &'static str,
+    success: bool,
+    pulled: bool,
+    changed: bool,
+    transport: &'static str,
+    remote: String,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+}
+
+fn bridge_git_push_output(
+    remote: String,
+    trust: RepositoryVerificationState,
+) -> BridgeGitPushOutput {
+    BridgeGitPushOutput {
+        output_kind: "bridge_git_push",
+        action: "bridge git push",
+        status: "pushed",
+        success: true,
+        pushed: true,
+        changed: true,
+        transport: "git",
+        remote,
+        trust,
+    }
+}
+
+fn bridge_git_pull_output(
+    remote: String,
+    changed: bool,
+    trust: RepositoryVerificationState,
+) -> BridgeGitPullOutput {
+    BridgeGitPullOutput {
+        output_kind: "bridge_git_pull",
+        action: "bridge git pull",
+        status: if changed { "updated" } else { "up_to_date" },
+        success: true,
+        pulled: changed,
+        changed,
+        transport: "git",
+        remote,
+        trust,
+    }
+}
+
 /// Owned scratch directory that removes itself on drop. Hand-rolled rather
 /// than pulling `tempfile` into the cli's runtime deps just for this.
 struct ScratchDir {
@@ -868,12 +931,9 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             bridge.push(&remote_name)?;
 
             if should_output_json(cli, Some(repo.config())) {
-                let out = serde_json::json!({
-                    "pushed": true,
-                    "remote": remote_name,
-                    "verification": build_repository_verification_state(&repo),
-                });
-                println!("{out}");
+                let output =
+                    bridge_git_push_output(remote_name, build_repository_verification_state(&repo));
+                crate::cli::render::write_json_stdout(&output)?;
             } else {
                 println!(
                     "{} pushed to remote {}",
@@ -886,21 +946,14 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
         GitCommands::Pull { remote } => {
             let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
             let outcome = bridge.pull(&remote_name)?;
-            let status = if outcome.changed {
-                "updated"
-            } else {
-                "up_to_date"
-            };
 
             if should_output_json(cli, Some(repo.config())) {
-                let out = serde_json::json!({
-                    "status": status,
-                    "pulled": outcome.changed,
-                    "changed": outcome.changed,
-                    "remote": remote_name,
-                    "verification": build_repository_verification_state(&repo),
-                });
-                println!("{out}");
+                let output = bridge_git_pull_output(
+                    remote_name,
+                    outcome.changed,
+                    build_repository_verification_state(&repo),
+                );
+                crate::cli::render::write_json_stdout(&output)?;
             } else {
                 if outcome.changed {
                     println!(

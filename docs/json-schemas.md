@@ -2847,8 +2847,8 @@ key naming:
 | `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
 | `import` | `{"commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N}` |
 | `sync` | `{"states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
-| `push` | `{"pushed": true, "remote": "origin", "verification": {...}}` |
-| `pull` | `{"pulled": true, "remote": "origin", "verification": {...}}` |
+| `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin", "verification": {...}}` |
+| `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin", "verification": {...}}` |
 
 `heddle bridge git init --output json` emits:
 
@@ -2877,13 +2877,13 @@ key naming:
 `heddle bridge git push --output json` emits:
 
 ```json
-{"pushed": true, "remote": "origin", "verification": {}}
+{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin", "verification": {}}
 ```
 
 `heddle bridge git pull --output json` emits:
 
 ```json
-{"pulled": true, "remote": "origin", "verification": {}}
+{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin", "verification": {}}
 ```
 
 ---
