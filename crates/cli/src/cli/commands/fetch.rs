@@ -58,7 +58,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
             } else if let Some(default) = resolved_default_remote_name(&repo)? {
                 default
             } else {
-                return Err(fetch_remote_required_advice().into());
+                return Err(RecoveryAdvice::remote_name_required_for_fetch().into());
             };
             vec![selected]
         };
@@ -109,7 +109,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
     } else if let Some(default) = resolved_default_remote_name(&repo)? {
         vec![default]
     } else {
-        return Err(fetch_remote_required_advice().into());
+        return Err(RecoveryAdvice::remote_name_required_for_fetch().into());
     };
 
     let mut total_refs = 0;
@@ -195,22 +195,6 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
     }
 
     Ok(())
-}
-
-fn fetch_remote_required_advice() -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "remote_name_required",
-        "Refusing to fetch: remote name required unless --all is set",
-        "Run `heddle fetch <remote>` for one remote, or `heddle fetch --all` for every configured remote.",
-        "fetch was requested without a remote name and without --all",
-        "fetch updates remote refs and object storage, so the target remote set must be explicit",
-        "no remote refs or objects were written",
-        "heddle fetch --all",
-        vec![
-            "heddle fetch --all".to_string(),
-            "heddle remote list".to_string(),
-        ],
-    )
 }
 
 async fn fetch_local(

@@ -151,7 +151,7 @@ pub async fn cmd_push(
 ) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
-        return Err(anyhow!(remote_not_configured_advice("push")));
+        return Err(anyhow!(RecoveryAdvice::remote_not_configured("push")));
     }
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         let default_remote_name = if remote.is_none() {
@@ -510,7 +510,7 @@ pub(super) fn preflight_native_remote_transport(
     }
     match classify_remote_spec(repo, remote_arg) {
         Some(RemoteTransportKind::LocalGit | RemoteTransportKind::GitUrl) => Err(anyhow!(
-            remote_transport_mismatch_advice(action, remote_arg.unwrap_or("<default>"))
+            RecoveryAdvice::remote_transport_mismatch(action, remote_arg.unwrap_or("<default>"))
         )),
         _ => Ok(()),
     }
@@ -582,45 +582,6 @@ fn looks_like_git_remote_url(value: &str) -> bool {
         || (value.contains('@') && value.contains(':'))
 }
 
-fn remote_transport_mismatch_advice(action: &str, remote: &str) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "remote_transport_mismatch",
-        format!(
-            "Refusing to {action}: remote '{remote}' is a Git remote, not a Heddle-native remote"
-        ),
-        "Use a Heddle-native remote here, or clone/adopt that Git remote in a Git-overlay checkout.",
-        format!("remote '{remote}' resolves to Git storage"),
-        format!(
-            "{action} would route a Git repository through Heddle-native sync and fail after setup work"
-        ),
-        "remote configuration, Heddle refs, Git refs, and worktree files were left unchanged",
-        "heddle clone <remote> <fresh-path>",
-        vec![
-            "heddle clone <remote> <fresh-path>".to_string(),
-            "heddle remote add <name> <url>".to_string(),
-        ],
-    )
-}
-
-fn remote_not_configured_advice(action: &str) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "remote_not_configured",
-        format!("No default remote is configured for {action}"),
-        "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`.",
-        "the command did not receive a remote argument and no default remote is configured",
-        format!(
-            "{action} needs a concrete remote target before it can move remote refs or transfer objects"
-        ),
-        "repository state, refs, remote configuration, and worktree files were left unchanged",
-        "heddle remote add <name> <url>",
-        vec![
-            "heddle remote add <name> <url>".to_string(),
-            "heddle remote list".to_string(),
-            "heddle remote set-default <name>".to_string(),
-        ],
-    )
-}
-
 fn refresh_git_tracking_after_overlay_push(
     repo: &Repository,
     remote_name: &str,
@@ -676,11 +637,13 @@ fn refresh_git_tracking_after_overlay_push(
         PreviousValue::Any,
         &format!("heddle: push to {remote_name}"),
     ) {
-        return Err(anyhow!(git_tracking_refresh_failed_advice(
-            remote_name,
-            &full_ref,
-            Some(error.to_string()),
-        )));
+        return Err(anyhow!(
+            RecoveryAdvice::git_overlay_tracking_refresh_failed(
+                remote_name,
+                &full_ref,
+                Some(error.to_string()),
+            )
+        ));
     }
 
     write_git_overlay_branch_upstream(repo.root(), &branch, &tracking_remote.name)?;
@@ -690,36 +653,6 @@ fn refresh_git_tracking_after_overlay_push(
         configured_remote: tracking_remote.configured_remote,
         upstream_branch: Some(branch),
     }))
-}
-
-fn git_tracking_refresh_failed_advice(
-    remote_name: &str,
-    full_ref: &str,
-    cause: Option<String>,
-) -> RecoveryAdvice {
-    let fetch_command = format!("heddle fetch {remote_name}");
-    let error = match cause {
-        Some(cause) => format!(
-            "Pushed to {remote_name}, but could not refresh local tracking ref {full_ref}: {cause}"
-        ),
-        None => {
-            format!("Pushed to {remote_name}, but could not refresh local tracking ref {full_ref}")
-        }
-    };
-    RecoveryAdvice::safety_refusal(
-        "git_overlay_tracking_refresh_failed",
-        error,
-        format!(
-            "Run `{fetch_command}` if `heddle verify` still reports remote drift after the push."
-        ),
-        format!("remote push completed, but local Git tracking ref {full_ref} was not updated"),
-        format!(
-            "updating {full_ref} would record the pushed HEAD as the local tracking view of {remote_name}"
-        ),
-        "the remote push completed; the failed tracking-ref refresh did not make additional local tracking changes",
-        fetch_command.clone(),
-        vec![fetch_command, "heddle verify".to_string()],
-    )
 }
 
 #[derive(Debug, Clone)]
@@ -1085,30 +1018,13 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         }
     } else {
         let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        return Err(anyhow::anyhow!(network_push_failed_advice(
+        return Err(anyhow::anyhow!(RecoveryAdvice::remote_push_failed(
             options.track_name,
             &err
         )));
     }
 
     Ok(())
-}
-
-#[cfg(feature = "client")]
-fn network_push_failed_advice(track_name: &str, error: &str) -> RecoveryAdvice {
-    let primary_command = format!("heddle push {track_name}");
-    RecoveryAdvice::safety_refusal(
-        "remote_push_failed",
-        format!("Push failed for {track_name}: {error}"),
-        format!(
-            "Inspect `heddle verify`, then retry with `{primary_command}` after fixing the remote."
-        ),
-        format!("remote push to {track_name} failed: {error}"),
-        "the remote branch was not confirmed updated",
-        "local Heddle state, Git refs, and worktree files were left unchanged by the failed push result",
-        primary_command.clone(),
-        vec![primary_command, "heddle verify".to_string()],
-    )
 }
 
 #[cfg(feature = "client")]

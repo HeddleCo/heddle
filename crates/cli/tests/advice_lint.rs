@@ -145,6 +145,54 @@ fn git_bridge_recovery_policy_stays_out_of_error_renderer() {
     }
 }
 
+#[test]
+fn remote_recovery_policy_uses_typed_advice_constructors() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+    for (file, forbidden) in [
+        (
+            "cli/commands/remote/mod.rs",
+            &[
+                "remote_transport_mismatch_advice",
+                "remote_not_configured_advice",
+                "git_tracking_refresh_failed_advice",
+                "network_push_failed_advice",
+            ][..],
+        ),
+        (
+            "cli/commands/remote/remote_ops.rs",
+            &[
+                "local_lazy_pull_advice",
+                "network_pull_failed_advice",
+                "remote_not_found_advice",
+            ][..],
+        ),
+        (
+            "cli/commands/fetch.rs",
+            &["fetch_remote_required_advice"][..],
+        ),
+        (
+            "cli/commands/clone.rs",
+            &["network_clone_failed_advice"][..],
+        ),
+    ] {
+        let path = src_dir.join(file);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        for symbol in forbidden {
+            if source.contains(symbol) {
+                violations.push(format!("{file} contains `{symbol}`"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "remote recovery policy should live on RecoveryAdvice constructors:\n{}",
+        violations.join("\n")
+    );
+}
+
 fn recovery_phrase_allowed(rel: &Path, phrase: &str) -> bool {
     rel == Path::new(ALLOWED_ADVICE_FILE)
         || rel == Path::new(ALLOWED_ENVELOPE_FILE)
