@@ -2413,6 +2413,99 @@ fn git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe() {
 }
 
 #[test]
+fn git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull() {
+    let origin = TempDir::new().unwrap();
+    git(&["init", "--bare", "--initial-branch=main"], origin.path());
+
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    git(
+        &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        temp.path(),
+    );
+    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    let base_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    git(&["push", "-u", "origin", "main"], temp.path());
+    heddle_adopt(temp.path());
+
+    std::fs::write(temp.path().join("tracked.txt"), "published change\n").unwrap();
+    let commit = json(
+        temp.path(),
+        &["--output", "json", "commit", "-m", "published change"],
+    );
+    let published_git = commit["git_commit"].as_str().unwrap().to_string();
+    assert_ne!(published_git, base_git);
+
+    let push = json(temp.path(), &["--output", "json", "push", "origin"]);
+    assert_eq!(push["verification"]["verified"], true, "{push}");
+    assert_eq!(
+        git_stdout(origin.path(), &["rev-parse", "refs/heads/main"]),
+        published_git
+    );
+
+    let undo = json(temp.path(), &["--output", "json", "undo"]);
+    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), base_git);
+    assert_eq!(
+        undo["verification"]["status"], "remote_contains_undone_checkpoint",
+        "undo should classify the upstream as the just-undone checkpoint: {undo}"
+    );
+    assert_eq!(
+        undo["verification"]["recommended_action"], "heddle push --force",
+        "undo must not recommend pulling the change the user just undid: {undo}"
+    );
+    assert_eq!(
+        undo["verification"]["recommended_action_argv"],
+        heddle_argv_json(["push", "--force"]),
+        "agents should receive the same publish-undo action as structured argv: {undo}"
+    );
+    assert!(
+        undo["verification"]["recovery_commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|command| command == "heddle redo"),
+        "undo should also name the restore-the-work option: {undo}"
+    );
+
+    let status = json(temp.path(), &["--output", "json", "status"]);
+    assert_eq!(
+        status["remote_tracking"]["next_action"], "heddle push --force",
+        "raw remote tracking guidance must agree with verification: {status}"
+    );
+    assert_eq!(
+        status["verification"]["remote_drift"],
+        "remote_contains_undone_checkpoint"
+    );
+    assert_eq!(status["recommended_action"], "heddle push --force");
+    assert_eq!(
+        status["recommended_action_argv"],
+        heddle_argv_json(["push", "--force"])
+    );
+
+    let publish_undo = json(
+        temp.path(),
+        &["--output", "json", "push", "origin", "--force"],
+    );
+    assert_eq!(publish_undo["force"], true);
+    assert!(
+        publish_undo["force_discard_warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("discarded")),
+        "force push should state the remote discard risk: {publish_undo}"
+    );
+    assert_eq!(
+        publish_undo["verification"]["verified"], true,
+        "{publish_undo}"
+    );
+    assert_eq!(
+        git_stdout(origin.path(), &["rev-parse", "refs/heads/main"]),
+        base_git,
+        "force-publishing the undo should move the remote back to the local branch"
+    );
+}
+
+#[test]
 fn git_overlay_matrix_merge_git_commit_fast_forward_records_checkpoint_and_undoes_together() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");

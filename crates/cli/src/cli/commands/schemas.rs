@@ -1823,6 +1823,10 @@ pub struct PushSchema {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags_included: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_discard_warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread: Option<String>,
     pub state: Option<String>,
     pub objects: Option<usize>,
@@ -2946,6 +2950,8 @@ mod tests {
             "git_remote_configured",
             "git_upstream_configured",
             "tags_included",
+            "force",
+            "force_discard_warning",
             "thread",
             "state",
             "objects",

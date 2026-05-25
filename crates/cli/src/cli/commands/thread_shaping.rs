@@ -888,6 +888,9 @@ mod tests {
             upstream: "origin/main".to_string(),
             ahead: 1,
             behind: 0,
+            local_oid: None,
+            upstream_oid: None,
+            upstream_is_undone_checkpoint: false,
             message: "branch is ahead".to_string(),
             next_action: "heddle push".to_string(),
         };
@@ -913,6 +916,9 @@ mod tests {
             upstream: "origin/main".to_string(),
             ahead: 1,
             behind: 0,
+            local_oid: None,
+            upstream_oid: None,
+            upstream_is_undone_checkpoint: false,
             message: "branch is ahead".to_string(),
             next_action: "heddle push".to_string(),
         };

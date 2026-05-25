@@ -510,6 +510,17 @@ impl<'a> GitBridge<'a> {
 
     /// Push to a Git remote with an explicit ref scope.
     pub fn push_with_scope(&mut self, remote_name: &str, scope: GitPushScope) -> GitResult<()> {
+        self.push_with_scope_force(remote_name, scope, false)
+    }
+
+    /// Push to a Git remote with an explicit ref scope and optional
+    /// non-fast-forward ref movement.
+    pub fn push_with_scope_force(
+        &mut self,
+        remote_name: &str,
+        scope: GitPushScope,
+        force: bool,
+    ) -> GitResult<()> {
         self.init_mirror()?;
         let current_branch = match scope {
             GitPushScope::CurrentThread => Some(self.current_attached_thread_for_push()?),
@@ -537,13 +548,14 @@ impl<'a> GitBridge<'a> {
                     &log_message,
                     /* init_if_missing */ false,
                     &updates,
+                    force,
                 )
             }
             ResolvedRemote::Url(url) => {
                 let mirror_repo = self.open_git_repo()?;
                 let updates =
                     collect_ref_updates_for_push(&mirror_repo, scope, current_branch.as_deref())?;
-                push_network_remote_with_updates(&mirror_repo, &url, &updates)
+                push_network_remote_with_updates(&mirror_repo, &url, &updates, force)
             }
         }
     }
@@ -591,7 +603,13 @@ impl<'a> GitBridge<'a> {
     ) -> GitResult<()> {
         let mirror_repo = self.open_git_repo()?;
         let updates = collect_ref_updates(&mirror_repo)?;
-        self.copy_mirror_to_path_with_updates(target_path, log_message, init_if_missing, &updates)
+        self.copy_mirror_to_path_with_updates(
+            target_path,
+            log_message,
+            init_if_missing,
+            &updates,
+            false,
+        )
     }
 
     fn copy_mirror_to_path_with_updates(
@@ -600,6 +618,7 @@ impl<'a> GitBridge<'a> {
         log_message: &str,
         init_if_missing: bool,
         updates: &[RefUpdate],
+        force: bool,
     ) -> GitResult<()> {
         let mirror_repo = self.open_git_repo()?;
         let target_repo = if target_path.exists() {
@@ -620,7 +639,9 @@ impl<'a> GitBridge<'a> {
             &target_repo,
             updates.iter().map(|update| update.target),
         )?;
-        validate_ref_updates_fast_forward(&target_repo, updates)?;
+        if !force {
+            validate_ref_updates_fast_forward(&target_repo, updates)?;
+        }
         apply_ref_updates(&target_repo, &updates, log_message)?;
         Ok(())
     }
@@ -2401,6 +2422,7 @@ fn push_network_remote_with_updates(
     mirror_repo: &gix::Repository,
     url: &gix::Url,
     updates: &[RefUpdate],
+    force: bool,
 ) -> GitResult<()> {
     if updates.is_empty() {
         return Ok(());
@@ -2438,7 +2460,7 @@ fn push_network_remote_with_updates(
         if old == update.target {
             continue;
         }
-        if matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
+        if !force && matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
             ensure_commit_update_fast_forward(mirror_repo, &full_name, old, update.target)?;
         }
         commands.push((full_name, old, update.target));
