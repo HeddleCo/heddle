@@ -3037,8 +3037,24 @@ fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
 
     let push = json(temp.path(), &["--output", "json", "push"]);
     assert_eq!(push["output_kind"], "push");
+    assert_eq!(push["action"], "push");
     assert_eq!(push["success"], true);
     assert_eq!(push["pushed"], true);
+    assert_eq!(push["transport"], "git");
+    assert_eq!(push["push_scope"], "current_thread");
+    assert_eq!(push["ref_scope"], "branch_and_heddle_notes");
+    assert_eq!(push["git_notes_ref"], "refs/notes/heddle");
+    assert!(
+        push["git_notes_visibility_warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("refs/notes/heddle")),
+        "push should disclose the Git-visible Heddle notes ref: {push}"
+    );
+    assert_eq!(push["git_tracking_remote"], "origin");
+    assert_eq!(push["git_remote_configured"], Value::Null);
+    assert_eq!(push["git_upstream_configured"]["branch"], "main");
+    assert_eq!(push["git_upstream_configured"]["remote"], "origin");
+    assert_eq!(push["tags_included"], false);
     assert_eq!(push["next_action"], Value::Null);
     assert_eq!(push["next_action_argv"], Value::Null);
     assert_eq!(push["next_action_template"], Value::Null);
@@ -3166,8 +3182,12 @@ fn git_overlay_matrix_push_defaults_to_branch_upstream_remote() {
 
     let push = json(temp.path(), &["--output", "json", "push"]);
     assert_eq!(push["output_kind"], "push");
+    assert_eq!(push["action"], "push");
     assert_eq!(push["pushed"], true);
     assert_eq!(push["remote"], "upstream");
+    assert_eq!(push["git_tracking_remote"], "upstream");
+    assert_eq!(push["git_upstream_configured"]["branch"], "main");
+    assert_eq!(push["git_upstream_configured"]["remote"], "upstream");
     assert_eq!(push["verification"]["verified"], true);
     assert_eq!(push["verification"]["status"], "clean");
 }
@@ -3201,6 +3221,10 @@ fn git_overlay_matrix_remote_without_upstream_is_not_verified_until_push_sets_tr
     let push = json(temp.path(), &["--output", "json", "push"]);
     assert_eq!(push["pushed"], true);
     assert_eq!(push["remote"], "upstream");
+    assert_eq!(push["action"], "push");
+    assert_eq!(push["git_tracking_remote"], "upstream");
+    assert_eq!(push["git_upstream_configured"]["branch"], "main");
+    assert_eq!(push["git_upstream_configured"]["remote"], "upstream");
     assert_eq!(push["verification"]["verified"], true);
     assert_eq!(push["verification"]["status"], "clean");
     assert_eq!(
