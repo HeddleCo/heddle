@@ -2235,27 +2235,12 @@ fn merge_blocked_by_trust_output(
     preview_only: bool,
     semantic_result: Option<String>,
 ) -> MergeOutput {
-    let recommended_action = if trust.recommended_action.is_empty() {
-        "heddle verify".to_string()
-    } else {
-        trust.recommended_action.clone()
-    };
-    let blockers = trust
-        .checks
-        .iter()
-        .filter(|check| !check.clean)
-        .map(|check| format!("{}: {}", check.name, check.summary))
-        .collect::<Vec<_>>();
     MergeOutput {
-        operator: OperatorCommandOutput {
-            status: "blocked".to_string(),
-            action: "merge".to_string(),
-            message: trust_blocked_merge_message(&trust, preview_only),
-            blockers,
-            warnings: Vec::new(),
-            next_action: Some(recommended_action.clone()),
-            recommended_action: Some(recommended_action),
-        },
+        operator: OperatorCommandOutput::blocked_by_repository_verification(
+            "merge",
+            trust_blocked_merge_message(&trust, preview_only),
+            &trust,
+        ),
         would_merge: false,
         fast_forward: false,
         preview_only,

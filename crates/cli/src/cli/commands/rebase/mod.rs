@@ -13,6 +13,7 @@ use super::{
     ff_record::record_ff_advance,
     git_overlay_health::{
         RepositoryVerificationState, action_argv, build_repository_verification_state,
+        repository_verification_primary_command,
     },
     snapshot::ensure_current_state,
     worktree_safety::ensure_worktree_clean,
@@ -266,11 +267,7 @@ fn emit_up_to_date_blocked_by_trust(
     cli: &Cli,
     trust: RepositoryVerificationState,
 ) -> Result<()> {
-    let recommended_action = if trust.recommended_action.is_empty() {
-        "heddle verify".to_string()
-    } else {
-        trust.recommended_action.clone()
-    };
+    let recommended_action = repository_verification_primary_command(&trust);
     if should_output_json(cli, Some(repo.config())) {
         println!(
             "{}",

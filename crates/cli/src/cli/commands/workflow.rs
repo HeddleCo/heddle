@@ -738,24 +738,15 @@ fn block_operator_claim_if_trust_blocked(
         return;
     }
 
-    operator.status = "blocked".to_string();
-    operator.message = format!(
-        "{} reached its local state checks, but repository verification is blocked: {}",
-        operator.action, trust.summary
+    let blocked = OperatorCommandOutput::blocked_by_repository_verification(
+        operator.action.clone(),
+        format!(
+            "{} reached its local state checks, but repository verification is blocked: {}",
+            operator.action, trust.summary
+        ),
+        trust,
     );
-    operator.blockers = trust
-        .checks
-        .iter()
-        .filter(|check| !check.clean)
-        .map(|check| format!("{}: {}", check.name, check.summary))
-        .collect();
-    let recommended_action = if trust.recommended_action.is_empty() {
-        "heddle verify".to_string()
-    } else {
-        trust.recommended_action.clone()
-    };
-    operator.next_action = Some(recommended_action.clone());
-    operator.recommended_action = Some(recommended_action);
+    *operator = blocked;
 }
 
 fn ship_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Option<RecoveryAdvice> {

@@ -193,6 +193,35 @@ fn remote_recovery_policy_uses_typed_advice_constructors() {
     );
 }
 
+#[test]
+fn verification_blocked_outputs_use_shared_action_policy() {
+    let src_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut violations = Vec::new();
+    for file in [
+        "cli/commands/operator_loop.rs",
+        "cli/commands/thread_shaping.rs",
+        "cli/commands/merge/mod.rs",
+        "cli/commands/ready_cmd.rs",
+        "cli/commands/workflow.rs",
+        "cli/commands/rebase/mod.rs",
+    ] {
+        let path = src_dir.join(file);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        if source.contains("trust.recommended_action.is_empty()") {
+            violations.push(format!(
+                "{file} reimplements repository verification recommended-action fallback"
+            ));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "repository-verification blocked outputs should use repository_verification_primary_command or OperatorCommandOutput::blocked_by_repository_verification:\n{}",
+        violations.join("\n")
+    );
+}
+
 fn recovery_phrase_allowed(rel: &Path, phrase: &str) -> bool {
     rel == Path::new(ALLOWED_ADVICE_FILE)
         || rel == Path::new(ALLOWED_ENVELOPE_FILE)

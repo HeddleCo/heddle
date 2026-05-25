@@ -1180,6 +1180,15 @@ pub(crate) fn repository_verification_primary_command(
     }
 }
 
+pub(crate) fn repository_verification_blockers(trust: &RepositoryVerificationState) -> Vec<String> {
+    trust
+        .checks
+        .iter()
+        .filter(|check| !check.clean)
+        .map(|check| format!("{}: {}", check.name, check.summary))
+        .collect()
+}
+
 pub(crate) fn repository_verification_recovery_commands(
     trust: &RepositoryVerificationState,
     primary_command: &str,

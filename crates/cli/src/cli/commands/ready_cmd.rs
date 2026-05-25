@@ -448,31 +448,18 @@ fn trust_blocked_ready_output(
         .or_else(|| trust.heddle_thread.clone())
         .or_else(|| trust.git_branch.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let recommended_action = if trust.recommended_action.is_empty() {
-        "heddle verify".to_string()
-    } else {
-        trust.recommended_action.clone()
-    };
-    let trust_blockers = trust
-        .checks
-        .iter()
-        .filter(|check| !check.clean)
-        .map(|check| format!("{}: {}", check.name, check.summary))
-        .collect::<Vec<_>>();
     let message = format!(
         "Thread '{thread}' cannot run readiness checks until repository verification is restored: {}",
         trust.summary
     );
+    let operator =
+        OperatorCommandOutput::blocked_by_repository_verification("ready", message, &trust);
+    let recommended_action = operator
+        .recommended_action
+        .clone()
+        .unwrap_or_else(|| "heddle verify".to_string());
     ReadyOutput {
-        operator: OperatorCommandOutput {
-            status: "blocked".to_string(),
-            action: "ready".to_string(),
-            message,
-            blockers: trust_blockers,
-            warnings: Vec::new(),
-            next_action: Some(recommended_action.clone()),
-            recommended_action: Some(recommended_action.clone()),
-        },
+        operator,
         captured: false,
         captured_state: None,
         thread_state: "blocked".to_string(),
