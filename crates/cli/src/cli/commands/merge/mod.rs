@@ -31,6 +31,7 @@ use super::{
     ready_cmd::{worktree_dirty, worktree_dirty_paths},
     snapshot::ensure_current_state,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
+    thread_landing::{ship_command_for_thread, ship_local_command},
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
@@ -51,29 +52,6 @@ use merge_algo::{apply_merged_tree, three_way_merge};
 use merge_plan::MergePlan;
 use merge_relation::MergeRelationKind;
 use repo::{CommitGraphIndex, find_merge_base};
-
-pub(crate) fn ship_command_for_thread(repo: &Repository, thread_id: &str) -> String {
-    let has_push_target = super::remote::resolved_default_remote_name(repo)
-        .ok()
-        .flatten()
-        .is_some();
-    ship_command_for_thread_with_push_target(thread_id, has_push_target)
-}
-
-pub(crate) fn ship_command_for_thread_with_push_target(
-    thread_id: &str,
-    has_push_target: bool,
-) -> String {
-    if has_push_target {
-        format!("heddle ship --thread {thread_id} --push")
-    } else {
-        format!("heddle ship --thread {thread_id} --no-push")
-    }
-}
-
-fn preview_ship_command_for_thread(thread_id: &str) -> String {
-    ship_command_for_thread_with_push_target(thread_id, false)
-}
 
 #[derive(Clone, Debug, Serialize)]
 struct RenameEntry {
@@ -742,7 +720,7 @@ pub(crate) fn merge_thread_into_current(
                 if thread.state == ThreadState::Ready {
                     mark_merge_previewed(repo, &thread.id)?;
                 }
-                Some(preview_ship_command_for_thread(&thread.id))
+                Some(ship_local_command(&thread.id))
             } else {
                 None
             }
@@ -1983,10 +1961,7 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
         // command. `ship` keeps capture, merge, checkpoint, push, and
         // verification in one loop, so the preview does not bounce users back
         // to the lower-level merge apply command.
-        input
-            .thread
-            .as_ref()
-            .map(|t| preview_ship_command_for_thread(&t.id))
+        input.thread.as_ref().map(|t| ship_local_command(&t.id))
     } else {
         // Clean apply: nothing to do.
         None

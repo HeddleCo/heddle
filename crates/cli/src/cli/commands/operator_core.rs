@@ -345,7 +345,7 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
     let target = thread.target_thread.clone();
     manager.save(&thread)?;
 
-    let action = super::merge::ship_command_for_thread(repo, &thread_id);
+    let action = super::thread_landing::ship_command_for_thread(repo, &thread_id);
     Ok(Some(super::thread::contextual_thread_action(
         repo,
         &thread_id,

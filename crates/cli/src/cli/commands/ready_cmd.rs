@@ -25,6 +25,7 @@ use super::{
     snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread::contextual_thread_action,
     thread_cmd::{current_thread, load_thread, thread_manager, thread_not_found_advice},
+    thread_landing::{merge_preview_command, ship_local_command},
 };
 use crate::{
     cli::{Cli, ReadyArgs, should_output_json, style, worktree_status_options},
@@ -237,9 +238,9 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         report.thread_health = "ready".to_string();
         report.recommended_action =
             if thread.integration_policy_result.status.as_deref() == Some("previewed") {
-                format!("heddle ship --thread {} --no-push", thread.id)
+                ship_local_command(&thread.id)
             } else {
-                format!("heddle merge {} --preview", thread.id)
+                merge_preview_command(&thread.id)
             };
         report.refresh_recommended_action_metadata();
     }

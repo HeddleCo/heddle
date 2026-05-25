@@ -440,7 +440,7 @@ fn ready_thread_actions(repo: &Repository) -> Vec<WorkflowThreadAction> {
                 .map(|mut thread| {
                     // Ready manifests can go stale when their target advances.
                     let _ = refresh_thread_freshness(repo, &mut thread);
-                    let fallback = format!("heddle merge {} --preview", thread.id);
+                    let fallback = super::thread_landing::merge_preview_command(&thread.id);
                     let advice = describe_thread_advice(&thread, false, 0, false);
                     // A dedicated checkout can safely print a parent-repo
                     // merge command; the main checkout must be on the
@@ -2290,7 +2290,7 @@ pub(crate) fn remote_drift_decision(
                 };
             }
             let import = format!("heddle bridge git import --ref {upstream}");
-            let merge_preview = format!("heddle merge {upstream} --preview");
+            let merge_preview = super::thread_landing::merge_preview_command(upstream);
             let imported = repo.refs().get_thread(upstream).ok().flatten().is_some();
             RemoteDriftDecision {
                 status,

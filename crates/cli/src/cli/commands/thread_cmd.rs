@@ -692,7 +692,7 @@ fn thread_refresh_conflicted_advice(
         )
     });
     let continue_command = format!("heddle --repo {repo_arg} continue");
-    let preview_command = format!("heddle merge {thread_id} --preview");
+    let preview_command = super::thread_landing::merge_preview_command(thread_id);
 
     let mut recovery_commands = vec![conflict_list_command.clone()];
     if let Some(show) = first_conflict_command.clone() {
@@ -793,7 +793,7 @@ pub(crate) fn thread_not_found_advice(thread_id: &str, action: &str) -> Recovery
 }
 
 fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice {
-    let merge_preview = format!("heddle merge {thread_id} --preview");
+    let merge_preview = super::thread_landing::merge_preview_command(thread_id);
     RecoveryAdvice::safety_refusal(
         "imported_git_ref_not_managed_thread",
         format!("'{thread_id}' is an imported Git ref, not a managed Heddle thread"),

@@ -740,26 +740,24 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn ship_push_remote_missing(thread: &str) -> Self {
+        let local_command = super::thread_landing::ship_local_command(thread);
         Self::safety_refusal(
             "ship_push_remote_missing",
             format!("Refusing to ship thread `{thread}` with --push: no push remote is configured"),
             format!(
-                "Run `heddle ship --thread {thread} --no-push` to land locally, or configure a remote and retry with `--push`."
+                "Run `{local_command}` to land locally, or configure a remote and retry with `--push`."
             ),
             "no default Git or Heddle remote is configured for push",
             "shipping with --push would merge and checkpoint before discovering there is nowhere to push",
             "repository state, refs, metadata, and worktree files were left unchanged",
-            format!("heddle ship --thread {thread} --no-push"),
-            vec![
-                format!("heddle ship --thread {thread} --no-push"),
-                "heddle remote add <name> <url>".to_string(),
-            ],
+            local_command.clone(),
+            vec![local_command, "heddle remote add <name> <url>".to_string()],
         )
     }
 
     pub(crate) fn ship_remote_requires_push(thread: &str, remote: &str) -> Self {
-        let push_command = format!("heddle ship --thread {thread} --push --remote {remote}");
-        let local_command = format!("heddle ship --thread {thread} --no-push");
+        let push_command = super::thread_landing::ship_push_remote_command(thread, remote);
+        let local_command = super::thread_landing::ship_local_command(thread);
         Self::safety_refusal(
             "ship_remote_requires_push",
             format!("Ship remote `{remote}` was provided without --push"),
@@ -775,8 +773,8 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn ship_push_option_conflict(thread: &str) -> Self {
-        let push_command = format!("heddle ship --thread {thread} --push");
-        let local_command = format!("heddle ship --thread {thread} --no-push");
+        let push_command = super::thread_landing::ship_push_command(thread);
+        let local_command = super::thread_landing::ship_local_command(thread);
         Self::safety_refusal(
             "ship_push_option_conflict",
             "Ship was asked to both push and not push",
@@ -971,7 +969,7 @@ impl RecoveryAdvice {
 
     pub(crate) fn git_overlay_remote_diverged(branch: &str, upstream: &str) -> Self {
         let import_command = format!("heddle bridge git import --ref {upstream}");
-        let merge_preview = format!("heddle merge {upstream} --preview");
+        let merge_preview = super::thread_landing::merge_preview_command(upstream);
         Self::safety_refusal(
             "git_overlay_remote_diverged",
             "Remote branch does not fast-forward the local Git checkpoint",

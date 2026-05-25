@@ -362,7 +362,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     }
 
     let next_action = if !args.auto_merge {
-        Some(format!("heddle merge {thread_name} --preview"))
+        Some(super::thread_landing::merge_preview_command(&thread_name))
     } else {
         None
     };
@@ -398,11 +398,11 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     } else {
         match &captured_state {
             Some(state) => format!(
-                "`{}` succeeded; thread '{}' ready (state {}). Preview with `heddle merge {} --preview` before landing.",
+                "`{}` succeeded; thread '{}' ready (state {}). Preview with `{}` before landing.",
                 display_cmd(&args.command),
                 thread_name,
                 state,
-                thread_name
+                super::thread_landing::merge_preview_command(&thread_name)
             ),
             None => format!(
                 "`{}` succeeded; thread '{}' ready (no capture).",
