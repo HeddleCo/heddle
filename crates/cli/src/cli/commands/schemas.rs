@@ -1755,6 +1755,7 @@ pub struct FetchSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PullSchema {
     pub output_kind: Option<String>,
+    pub action: Option<String>,
     pub status: Option<String>,
     pub pulled: Option<bool>,
     pub changed: Option<bool>,
@@ -1779,6 +1780,8 @@ pub struct PullSchema {
     pub objects: Option<usize>,
     pub states_created: Option<usize>,
     pub commits_seen: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits_seen_scope: Option<String>,
     pub materialized_checkout: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_path_count: Option<usize>,
