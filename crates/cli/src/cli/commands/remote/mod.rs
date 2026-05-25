@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    command_catalog::{ActionTemplate, recommended_action_argv, recommended_action_template},
+    command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     snapshot::ensure_current_state,
 };
@@ -138,32 +138,6 @@ struct GitRemoteConfiguredOutput {
 struct GitUpstreamConfiguredOutput {
     branch: String,
     remote: String,
-}
-
-#[derive(Debug, Clone)]
-struct PushActionFields {
-    action: Option<String>,
-    argv: Option<Vec<String>>,
-    template: Option<ActionTemplate>,
-}
-
-fn push_action_fields(trust: &RepositoryVerificationState) -> PushActionFields {
-    let recommended_action = trust.recommended_action.trim();
-    if recommended_action.is_empty() {
-        return PushActionFields {
-            action: None,
-            argv: None,
-            template: None,
-        };
-    }
-
-    PushActionFields {
-        action: Some(trust.recommended_action.clone()),
-        argv: recommended_action_argv(&trust.recommended_action)
-            .ok()
-            .flatten(),
-        template: recommended_action_template(&trust.recommended_action),
-    }
 }
 
 /// Execute push command.
@@ -388,7 +362,7 @@ fn git_overlay_push_output(
     tracking_refresh: Option<GitOverlayTrackingRefresh>,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
-    let action = push_action_fields(&trust);
+    let action = ActionFields::from_action(&trust.recommended_action);
     let tracking_remote = tracking_refresh
         .as_ref()
         .map(|refresh| refresh.remote_name.clone());
@@ -451,7 +425,7 @@ fn heddle_push_output(
     objects: Option<usize>,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
-    let action = push_action_fields(&trust);
+    let action = ActionFields::from_action(&trust.recommended_action);
     PushOutput {
         output_kind: "push",
         action: "push",

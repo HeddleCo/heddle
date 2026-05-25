@@ -46,9 +46,8 @@ use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    command_catalog::ActionTemplate,
+    command_catalog::{ActionFields, ActionTemplate},
     diff::compute_state_diff,
-    git_overlay_health::{action_argv, action_template},
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread::start_thread,
     thread_cmd::drop_thread_silent,
@@ -501,11 +500,8 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
     let next_action = recommended
         .as_deref()
         .map(|name| format!("heddle merge {name} --preview --with-diff"));
-    let next_action_argv = next_action.as_deref().and_then(action_argv);
-    let next_action_template = next_action.as_deref().and_then(action_template);
+    let next_action = ActionFields::from_optional_action(next_action);
     let recommended_action = next_action.clone();
-    let recommended_action_argv = recommended_action.as_deref().and_then(action_argv);
-    let recommended_action_template = recommended_action.as_deref().and_then(action_template);
 
     let message = match &recommended {
         Some(thread) if attempts_succeeded > 0 => format!(
@@ -534,12 +530,12 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
         attempts_dropped: dropped,
         attempts: all_results,
         recommended,
-        next_action,
-        next_action_argv,
-        next_action_template,
-        recommended_action,
-        recommended_action_argv,
-        recommended_action_template,
+        next_action: next_action.action,
+        next_action_argv: next_action.argv,
+        next_action_template: next_action.template,
+        recommended_action: recommended_action.action,
+        recommended_action_argv: recommended_action.argv,
+        recommended_action_template: recommended_action.template,
     };
 
     emit(cli, &repo, &output)
