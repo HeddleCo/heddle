@@ -744,17 +744,28 @@ fn ship_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
         trust.remote_drift.as_str(),
         "remote_behind" | "remote_diverged"
     ) {
-        let primary_command = if trust.recommended_action.trim().is_empty() {
-            "heddle pull".to_string()
-        } else {
-            trust.recommended_action.clone()
-        };
+        let remote_decision = repo
+            .git_remote_tracking_status()
+            .ok()
+            .flatten()
+            .map(|remote| super::git_overlay_health::remote_drift_decision(repo, &remote));
+        let primary_command = remote_decision
+            .as_ref()
+            .and_then(|decision| decision.primary_action.clone())
+            .unwrap_or_else(|| {
+                if trust.recommended_action.trim().is_empty() {
+                    "heddle pull".to_string()
+                } else {
+                    trust.recommended_action.clone()
+                }
+            });
         let recovery_commands = if trust.recovery_commands.is_empty() {
-            vec![
-                primary_command.clone(),
-                format!("heddle merge {thread_id} --preview"),
-                format!("heddle ship --thread {thread_id} --no-push"),
-            ]
+            let mut commands = remote_decision
+                .map(|decision| decision.recovery_commands)
+                .unwrap_or_else(|| vec![primary_command.clone()]);
+            commands.push(format!("heddle merge {thread_id} --preview"));
+            commands.push(format!("heddle ship --thread {thread_id} --no-push"));
+            commands
         } else {
             trust.recovery_commands.clone()
         };

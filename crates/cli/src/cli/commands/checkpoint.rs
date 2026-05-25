@@ -223,8 +223,8 @@ fn git_checkpoint_preflight_advice(
     trust: &RepositoryVerificationState,
     action: &str,
 ) -> RecoveryAdvice {
-    let primary_command =
-        git_checkpoint_remote_recovery_command(repo, trust).unwrap_or_else(|| {
+    let primary_command = super::git_overlay_health::remote_drift_primary_action(repo)
+        .unwrap_or_else(|| {
             if trust.recommended_action.trim().is_empty() {
                 "heddle verify".to_string()
             } else {
@@ -246,25 +246,6 @@ fn git_checkpoint_preflight_advice(
         "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
         Some(primary_command),
     )
-}
-
-fn git_checkpoint_remote_recovery_command(
-    repo: &Repository,
-    trust: &RepositoryVerificationState,
-) -> Option<String> {
-    match trust.remote_drift.as_str() {
-        "remote_behind" => Some("heddle pull".to_string()),
-        "remote_diverged" => repo
-            .git_remote_tracking_status()
-            .ok()
-            .flatten()
-            .and_then(|remote| {
-                let upstream = remote.upstream.trim();
-                (!upstream.is_empty()).then(|| format!("heddle bridge git import --ref {upstream}"))
-            })
-            .or_else(|| Some("heddle fetch".to_string())),
-        _ => None,
-    }
 }
 
 fn native_checkpoint_unavailable_advice(repo: &Repository) -> RecoveryAdvice {
