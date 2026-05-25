@@ -138,7 +138,20 @@ mount = { path = "../mount", package = "heddle-mount", version = "0.2", optional
 # (Rust/Python/JS/TS) — a small fraction of the existing footprint
 # from tonic + server.  `semantic-extended` (Go/C/C++/Java) stays
 # opt-in.
-default = ["git-overlay", "native", "local", "semantic", "zstd"]
+# `mount` is in the default set so a stock `cargo install heddle-cli`
+# (or `cargo install --path crates/cli`) ships `heddle-fuse-worker`
+# next to `heddle`. Without it, the sibling-binary lookup in
+# `mount::worker::default_worker_binary` doesn't resolve and the
+# mount lifecycle silently falls back to NFS on every Linux user
+# who installed via the documented flow (heddle#190 r5 / Codex PR
+# #225 P2). The platform-specific backends (`fuser` on Linux,
+# `windows` on Windows, `cbindgen`/Swift on macOS) are target-gated
+# inside `heddle-mount`, so default-on is platform-blind: each host
+# pulls only its own native adapter plus the platform-agnostic NFS
+# fallback (`nfsserve` + `tokio` async-trait). The OSS feature
+# subsets that explicitly want a slim build (`--no-default-features
+# --features git-overlay,...`) opt out the same way they do today.
+default = ["git-overlay", "native", "local", "mount", "semantic", "zstd"]
 local = []
 # Repository mode features. At least one must be enabled. Released as
 # three OSS CLI flavors: `git-overlay` only (works on top of existing
@@ -214,6 +227,19 @@ uuid.workspace = true
 [[bin]]
 name = "heddle"
 path = "src/main.rs"
+
+# Linux-only crash-isolation worker. Co-located in the CLI package
+# so `cargo install --path crates/cli` (and `cargo install heddle`
+# from crates.io) installs both `heddle` and `heddle-fuse-worker`
+# into the same bin dir — the sibling-binary lookup in
+# `mount::worker::default_worker_binary` only resolves when the two
+# ship together. The file itself is `cfg(target_os = "linux",
+# feature = "mount")`, so non-Linux and mount-less builds compile to
+# nothing here.
+[[bin]]
+name = "heddle-fuse-worker"
+path = "src/bin/heddle-fuse-worker.rs"
+required-features = ["mount"]
 
 [lib]
 name = "cli"

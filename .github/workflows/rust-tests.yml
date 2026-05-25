@@ -79,6 +79,14 @@ jobs:
       - name: Check native-only
         run: cargo check --locked -p heddle-cli --no-default-features --features native,semantic,zstd
 
+      # Assert the default `cargo install -p heddle-cli` flow produces
+      # `heddle-fuse-worker` so the sibling-binary lookup in
+      # `mount::worker::default_worker_binary` resolves on a stock
+      # install; otherwise Linux mounts silently fall back to NFS
+      # (heddle#190 r5 / Codex PR #225 P2).
+      - name: Default install ships heddle-fuse-worker
+        run: bash scripts/check-default-install-ships-worker.sh
+
       - name: sccache stats
         run: sccache --show-stats
 
@@ -145,6 +153,26 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
         run: |
           cargo test --locked -p heddle-mount --features fuse --lib fuse::
+
+      # FUSE worker resource-cleanup tests (Codex r2 P2 findings on
+      # heddle#190): assert that a failed `Command::spawn` doesn't
+      # leak the child IPC fd, and that a failed watcher-thread
+      # spawn still reaps the started worker. Neither test needs
+      # `/dev/fuse` — the failures are before the mount — so they
+      # run as plain (non-`--ignored`) tests under the fuse feature.
+      - name: FUSE worker resource-cleanup tests
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        # Split into two invocations: a positional TESTNAME filter applies
+        # to every selected target, so combining `--test ...` with `--lib
+        # <name-filter>` would silently filter the integration target down
+        # to zero tests. Run each target with its own filter.
+        run: |
+          cargo test --locked -p heddle-mount --features fuse \
+            --lib worker::tests::supervise_watcher_spawn_reaps_child_on_failure
+          cargo test --locked -p heddle-mount --features fuse \
+            --test fuse_worker_resource_cleanup
 
       - name: sccache stats
         run: sccache --show-stats

@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 bytes.workspace = true
 libc.workspace = true
 # Bounded LRU cache for materialised blob bytes. Read benchmarks
@@ -20,8 +21,19 @@ lru = { workspace = true }
 objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
 refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.2" }
+# `serde`/`serde_json` carry the framed control-plane messages between
+# the `heddle-fuse-worker` subprocess and its supervisor (CLI or
+# daemon). The framing lives in `src/worker.rs`; both ends of the
+# Unix socketpair encode/decode the same `WorkerEvent` / `Supervisor
+# Command` enum. JSON is the pragmatic first-cut transport — gRPC is
+# the spike's recommendation but it pulls tonic + a proto into the
+# `heddle-mount` build for what is currently a four-message surface;
+# we revisit when the daemon-supervisor (heddle#88 §4) lands.
+serde = { workspace = true }
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber = { workspace = true }
 
 # NFS fallback adapter — only built when the `nfs` feature is on.
 # Unlike `fuse`/`fskit`/`projfs` (which target one OS each), the
@@ -89,6 +101,16 @@ name = "fuse_e2e"
 harness = false
 required-features = ["fuse"]
 
+# Worker-supervisor control-plane RTT. Spawns `heddle-fuse-worker`
+# under a real FUSE mount, measures the round-trip cost of the
+# `Status` IPC roundtrip from the parent, and asserts the budget
+# in `crates/mount/src/worker.rs` stays inside the spike's
+# < 1 ms ceiling for non-callback control surfaces (heddle#88 §7).
+[[bench]]
+name = "fuse_worker_ipc"
+harness = false
+required-features = ["fuse"]
+
 [features]
 default = []
 # Enable the FUSE shell. Linux-only; on other platforms the
@@ -129,6 +151,18 @@ nfs = ["dep:nfsserve", "dep:tokio", "dep:async-trait"]
 # entirely, and `--all-features` on Linux still compiles cleanly
 # because the build-script no-ops on non-macOS targets.
 cbindgen = { version = "0.29", default-features = false, optional = true }
+
+# The `heddle-fuse-worker` binary lives in `crates/cli` (see
+# `crates/cli/Cargo.toml`'s `[[bin]]` for it). The mount crate exposes
+# the worker entry points (`worker::run_worker`, `worker::WorkerArgs`)
+# as a public API; the binary in cli is the thin `main` shim. This
+# split is deliberate — `cargo install --path crates/cli` (the
+# documented install flow) needs to drop both `heddle` and
+# `heddle-fuse-worker` into the same bin dir for the sibling-binary
+# lookup in `worker::default_worker_binary` to resolve. Registering
+# the bin only in cli (rather than here) is what makes that work
+# without changing the install command (heddle#190 r4 / Codex PR
+# #225 P1).
 
 [lib]
 path = "src/lib.rs"

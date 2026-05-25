@@ -224,13 +224,13 @@ impl NfsSession {
 
 impl Drop for NfsSession {
     fn drop(&mut self) {
-        if !self.unmounted {
-            if let Err(e) = invoke_unmount(&self.mountpoint) {
-                warn!(
-                    mountpoint = %self.mountpoint.display(),
-                    "nfs unmount on drop failed: {e}",
-                );
-            }
+        if !self.unmounted
+            && let Err(e) = invoke_unmount(&self.mountpoint)
+        {
+            warn!(
+                mountpoint = %self.mountpoint.display(),
+                "nfs unmount on drop failed: {e}",
+            );
         }
         if let Some(rt) = self.runtime.take() {
             rt.shutdown_background();
@@ -672,11 +672,19 @@ fn system_time_to_nfstime(t: SystemTime) -> nfstime3 {
 }
 
 fn mount_err_to_nfs(err: &MountError) -> nfsstat3 {
+    // Write-side variants joined the enum with heddle#180; this
+    // map gained the matching arms during heddle#190 once the
+    // CLI's `--features mount` path started getting exercised
+    // through the FUSE-worker dispatch.
     match err {
         MountError::NotFound(_) | MountError::UnknownThread(_) => nfsstat3::NFS3ERR_NOENT,
         MountError::Stale(_) => nfsstat3::NFS3ERR_STALE,
         MountError::NotADirectory(_) => nfsstat3::NFS3ERR_NOTDIR,
         MountError::ReadOnly => nfsstat3::NFS3ERR_ROFS,
+        MountError::AlreadyExists(_) => nfsstat3::NFS3ERR_EXIST,
+        MountError::IsADirectory(_) => nfsstat3::NFS3ERR_ISDIR,
+        MountError::NotEmpty(_) => nfsstat3::NFS3ERR_NOTEMPTY,
+        MountError::InvalidArgument(_) => nfsstat3::NFS3ERR_INVAL,
         MountError::Store(_) => nfsstat3::NFS3ERR_IO,
     }
 }

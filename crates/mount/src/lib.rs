@@ -36,6 +36,15 @@ pub mod shell;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 pub mod fuse;
 
+// Out-of-process FUSE worker (heddle#190 / spike heddle#88).
+// `worker` exports the [`worker::Supervisor`] type the CLI's mount
+// lifecycle uses to spawn `heddle-fuse-worker` subprocesses, plus
+// the [`worker::run_worker`] entrypoint the binary calls. Linux +
+// `fuse` only — the feature gate matches the binary's
+// `required-features`.
+#[cfg(all(target_os = "linux", feature = "fuse"))]
+pub mod worker;
+
 #[cfg(all(target_os = "macos", feature = "fskit"))]
 pub mod fskit;
 

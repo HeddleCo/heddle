@@ -139,7 +139,11 @@ impl MountRegistry {
     }
 
     /// Share the daemon's blob cache pool with other in-process
-    /// consumers (e.g. a future direct-RPC read endpoint).
+    /// consumers (e.g. a future direct-RPC read endpoint). Tagged
+    /// `#[allow]` so `-D dead-code` doesn't reject the workspace
+    /// build until that direct-RPC consumer lands; mirrors the
+    /// adjacent `is_empty()` shim.
+    #[allow(dead_code)]
     pub fn blob_cache_pool(&self) -> &Arc<BlobCachePool> {
         &self.blob_cache
     }
