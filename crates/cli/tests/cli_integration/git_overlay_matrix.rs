@@ -834,6 +834,16 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
         !temp.path().join(".heddle").exists(),
         "verify in a plain Git repo must be observe-only"
     );
+    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    assert_eq!(
+        status_text.matches("Setup needed:").count(),
+        1,
+        "plain Git status should print one setup line, not duplicate import/setup advice: {status_text}"
+    );
+    assert!(
+        status_text.contains("heddle adopt --ref main"),
+        "plain Git status should still name the exact adoption command: {status_text}"
+    );
 
     let bridge = json(
         temp.path(),
@@ -873,6 +883,16 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
     assert_eq!(status["recommended_action"], "heddle adopt --ref main");
     assert_eq!(status["recovery_commands"][0], "heddle adopt --ref main");
     assert_verify_check_rows(&status["verification"]);
+    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    assert_eq!(
+        status_text.matches("Setup needed:").count(),
+        1,
+        "initialized-but-unimported status should print one setup line, not duplicate import/setup advice: {status_text}"
+    );
+    assert!(
+        status_text.contains("heddle adopt --ref main"),
+        "initialized-but-unimported status should still name the exact adoption command: {status_text}"
+    );
     let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
     assert_eq!(workspace["verification"]["verified"], false);
     assert_eq!(workspace["verification"]["status"], "needs_import");

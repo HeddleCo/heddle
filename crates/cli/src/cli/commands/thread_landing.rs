@@ -3,10 +3,10 @@
 
 use repo::Repository;
 
-use crate::cli::render::shell_quote;
+use super::command_catalog::heddle_action;
 
 pub(crate) fn merge_preview_command(thread_id: &str) -> String {
-    format!("heddle merge {} --preview", shell_quote(thread_id))
+    heddle_action(["merge", thread_id, "--preview"])
 }
 
 pub(crate) fn ship_command_for_thread(repo: &Repository, thread_id: &str) -> String {
@@ -26,19 +26,15 @@ pub(crate) fn ship_command_with_push_target(thread_id: &str, has_push_target: bo
 }
 
 pub(crate) fn ship_push_command(thread_id: &str) -> String {
-    format!("heddle ship --thread {} --push", shell_quote(thread_id))
+    heddle_action(["ship", "--thread", thread_id, "--push"])
 }
 
 pub(crate) fn ship_push_remote_command(thread_id: &str, remote: &str) -> String {
-    format!(
-        "heddle ship --thread {} --push --remote {}",
-        shell_quote(thread_id),
-        shell_quote(remote)
-    )
+    heddle_action(["ship", "--thread", thread_id, "--push", "--remote", remote])
 }
 
 pub(crate) fn ship_local_command(thread_id: &str) -> String {
-    format!("heddle ship --thread {} --no-push", shell_quote(thread_id))
+    heddle_action(["ship", "--thread", thread_id, "--no-push"])
 }
 
 pub(crate) fn contextual_thread_action(
@@ -53,16 +49,34 @@ pub(crate) fn contextual_thread_action(
     if main_root == repo.root() || target_thread.is_none() {
         return action.to_string();
     }
-    let repo_arg = shell_quote(&main_root.display().to_string());
-    let thread_arg = shell_quote(thread_id);
     if action == merge_preview_command(thread_id) {
-        return format!("heddle --repo {repo_arg} merge {thread_arg} --preview");
+        return heddle_action(vec![
+            "--repo".to_string(),
+            main_root.display().to_string(),
+            "merge".to_string(),
+            thread_id.to_string(),
+            "--preview".to_string(),
+        ]);
     }
     if action == ship_local_command(thread_id) {
-        return format!("heddle --repo {repo_arg} ship --thread {thread_arg} --no-push");
+        return heddle_action(vec![
+            "--repo".to_string(),
+            main_root.display().to_string(),
+            "ship".to_string(),
+            "--thread".to_string(),
+            thread_id.to_string(),
+            "--no-push".to_string(),
+        ]);
     }
     if action == ship_push_command(thread_id) {
-        return format!("heddle --repo {repo_arg} ship --thread {thread_arg} --push");
+        return heddle_action(vec![
+            "--repo".to_string(),
+            main_root.display().to_string(),
+            "ship".to_string(),
+            "--thread".to_string(),
+            thread_id.to_string(),
+            "--push".to_string(),
+        ]);
     }
     action.to_string()
 }

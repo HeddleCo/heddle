@@ -720,7 +720,14 @@ pub(crate) fn merge_thread_into_current(
                 if thread.state == ThreadState::Ready {
                     mark_merge_previewed(repo, &thread.id)?;
                 }
-                Some(ship_local_command(&thread.id))
+                if let Some(report) = preview_report.as_ref()
+                    && !report.blockers.is_empty()
+                    && !report.recommended_action.trim().is_empty()
+                {
+                    Some(report.recommended_action.clone())
+                } else {
+                    Some(ship_local_command(&thread.id))
+                }
             } else {
                 None
             }

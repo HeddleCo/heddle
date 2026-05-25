@@ -1256,21 +1256,11 @@ fn render_status_operation(output: &StatusOutput) {
         }
     }
     if let Some(hint) = &output.git_overlay_import_hint {
-        if hint
+        if !hint
             .missing_branches
             .iter()
             .any(|branch| branch == &hint.current_branch)
         {
-            if matches!(
-                output.git_overlay_health.status.as_str(),
-                "needs_init" | "needs_import"
-            ) {
-                println!(
-                    "Setup needed: Git repo detected; connect this branch with {}",
-                    style::bold(&hint.recommended_command)
-                );
-            }
-        } else {
             println!(
                 "{}",
                 crate::cli::render::git_only_branch_summary(
@@ -1353,7 +1343,7 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
             if verbose {
                 println!("Intent: \"{}\"", style::bold(intent));
             } else {
-                println!("Last save: {}", style::bold(intent));
+                println!("Change message: {}", style::bold(intent));
             }
         }
         if verbose && let Some(checkpoint) = &output.git_checkpoint {

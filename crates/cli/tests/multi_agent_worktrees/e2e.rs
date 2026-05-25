@@ -1053,7 +1053,34 @@ fn ready_blocks_stale_or_heavy_impact_threads_and_status_reports_next_step() {
     assert_eq!(ready["thread_state"], "blocked");
     assert_eq!(
         ready["report"]["recommended_action"].as_str(),
-        Some("heddle thread promote feature/dep")
+        Some("heddle thread resolve feature/dep")
+    );
+    assert_eq!(
+        ready["recommended_action"].as_str(),
+        Some("heddle thread resolve feature/dep")
+    );
+
+    let reviewed: Value = serde_json::from_str(
+        &heddle(
+            &["--output", "json", "thread", "resolve", "feature/dep"],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reviewed["status"], "completed");
+    assert_eq!(
+        reviewed["message"].as_str(),
+        Some("Thread manual review recorded")
+    );
+    assert!(
+        reviewed["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .unwrap_or_default()
+                .contains("Heavy-impact change"))),
+        "thread resolve should preserve what was manually reviewed: {reviewed}"
     );
 
     std::fs::write(main.path().join("base.txt"), "base changed").unwrap();
@@ -1514,6 +1541,11 @@ fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() 
     assert_eq!(preview["preview_only"], true);
     assert_eq!(preview["promotion_suggested"], true);
     assert_eq!(preview["heavy_impact_paths"][0], "Cargo.toml");
+    assert_eq!(
+        preview["recommended_action"].as_str(),
+        Some("heddle thread resolve feature/deps"),
+        "merge preview should not recommend ship while heavy-impact review is still blocked: {preview}"
+    );
 }
 
 #[test]

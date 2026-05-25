@@ -14,6 +14,7 @@ pub enum RecommendedAction {
     MergePreview,
     MergeApply,
     Resolve,
+    Review,
     Promote,
 }
 
@@ -26,6 +27,7 @@ impl RecommendedAction {
             Self::MergePreview => Some(format!("heddle merge {thread_id} --preview")),
             Self::MergeApply => Some(format!("heddle merge {thread_id}")),
             Self::Resolve => Some(format!("heddle thread resolve {thread_id}")),
+            Self::Review => Some(format!("heddle thread resolve {thread_id}")),
             Self::Promote => Some(format!("heddle thread promote {thread_id}")),
         }
     }
@@ -122,7 +124,7 @@ pub fn describe_thread_advice_with_initial(
             "Heavy-impact change: {} — review broader impact before merging",
             preview_paths(&thread.heavy_impact_paths)
         ));
-        RecommendedAction::Promote
+        RecommendedAction::Review
     } else if conflicts > 0 || thread.state == ThreadState::Blocked {
         if conflicts > 0 {
             blockers.push(format!(
