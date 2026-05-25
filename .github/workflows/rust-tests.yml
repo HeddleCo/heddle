@@ -89,6 +89,14 @@ jobs:
       - name: Cross-check FUSE worker on non-Linux mount target
         run: bash scripts/check-fuse-worker-cross-platform.sh
 
+      # Assert the default `cargo install -p heddle-cli` flow produces
+      # `heddle-fuse-worker` so the sibling-binary lookup in
+      # `mount::worker::default_worker_binary` resolves on a stock
+      # install; otherwise Linux mounts silently fall back to NFS
+      # (heddle#190 r5 / Codex PR #225 P2).
+      - name: Default install ships heddle-fuse-worker
+        run: bash scripts/check-default-install-ships-worker.sh
+
       - name: sccache stats
         run: sccache --show-stats
 
