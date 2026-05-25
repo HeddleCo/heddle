@@ -1992,7 +1992,8 @@ fn plain_git_head_has_commit(
 }
 
 pub(crate) fn action_argv(action: &str) -> Option<Vec<String>> {
-    recommended_action_argv(action).ok().flatten()
+    recommended_action_argv(action)
+        .unwrap_or_else(|err| panic!("invalid recommended action `{action}`: {err}"))
 }
 
 pub(crate) fn action_template(action: &str) -> Option<ActionTemplate> {

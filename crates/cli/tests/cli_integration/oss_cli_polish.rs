@@ -9820,6 +9820,9 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
         "exit_code",
         "hint",
         "kind",
+        "op_id",
+        "idempotency_status",
+        "replayed",
         "unsafe_condition",
         "would_change",
         "preserved",
@@ -9900,6 +9903,17 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
         envelope["primary_command_argv"],
         heddle_argv_json(["init", temp.path().to_str().expect("temp path utf8")])
     );
+
+    let op_id = "550e8400-e29b-41d4-a716-446655440099";
+    let output = heddle_output(&["--output", "json", "--op-id", op_id, "status"], None)
+        .expect("invoke op-id decorated failure");
+    assert!(!output.status.success());
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("stderr is a JSON object");
+    assert_eq!(envelope["op_id"], op_id);
+    assert!(envelope["idempotency_status"].as_str().is_some());
+    assert_eq!(envelope["replayed"], false);
 }
 
 #[test]
