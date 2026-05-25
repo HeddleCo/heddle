@@ -17,6 +17,16 @@ fn status_text_counts_dirty_worktree_paths() {
         "status should still list the dirty file: {text}"
     );
     assert!(
+        text.contains("Health: work in progress")
+            && text.contains("Coordination: work in progress")
+            && text.contains("Lifecycle: active")
+            && text.contains("Work in progress")
+            && !text.contains("Coordination: blocked")
+            && !text.contains("Lifecycle: blocked")
+            && !text.contains("Blocked by"),
+        "ordinary dirty work should read like work in progress, not failure: {text}"
+    );
+    assert!(
         !text.contains("Tracked changes: 0"),
         "old contradictory label should not appear: {text}"
     );

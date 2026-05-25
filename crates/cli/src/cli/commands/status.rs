@@ -1329,7 +1329,7 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
         "Health: {}",
         style::thread_state(&human_thread_health(&output.thread_health))
     );
-    println!("Coordination: {}", output.coordination_status);
+    println!("Coordination: {}", human_coordination_status(output));
     if verbose && let Some(base) = &output.base_state {
         println!("Base: {}", style::dim(base));
     }
@@ -1413,7 +1413,10 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
             println!("{}", style::dim("Worktree"));
             emitted = true;
         }
-        println!("Lifecycle: {}", style::thread_state(&state.to_string()));
+        println!(
+            "Lifecycle: {}",
+            style::thread_state(&human_thread_state(output, state))
+        );
     }
     if let Some(freshness) = &output.freshness
         && *freshness != ThreadFreshness::Unknown
@@ -1645,6 +1648,8 @@ fn render_status_advice(output: &StatusOutput) {
     if !output.blockers.is_empty() {
         if checkpoint_needed {
             println!("{}", style::bold("Saved in Heddle"));
+        } else if local_work_in_progress(output) {
+            println!("{}", style::bold("Work in progress"));
         } else {
             println!("{}", style::warn("Blocked by"));
         }
@@ -1654,7 +1659,7 @@ fn render_status_advice(output: &StatusOutput) {
             } else {
                 human_status_blocker_text(blocker)
             };
-            if checkpoint_needed {
+            if checkpoint_needed || local_work_in_progress(output) {
                 println!("  - {}", style::dim(&blocker));
             } else {
                 println!("  - {}", style::warn(&blocker));
@@ -1688,14 +1693,14 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
     {
         return "connect this Git branch to Heddle before using history-oriented commands";
     }
-    if !output.blockers.is_empty() {
-        return "the current thread has blockers that must be cleared before integration";
-    }
     if output.changed_path_count > 0 && output.recommended_action.contains("commit") {
         return "there are uncommitted worktree changes; commit captures them and writes the Git checkpoint";
     }
     if output.changed_path_count > 0 && output.recommended_action.contains("capture") {
         return "there are uncaptured worktree changes; capture records a recoverable state";
+    }
+    if !output.blockers.is_empty() {
+        return "the current thread has blockers that must be cleared before integration";
     }
     if let Some(remote_tracking) = &output.remote_tracking {
         if remote_tracking.behind == 0 && remote_tracking.ahead > 0 {
@@ -1975,8 +1980,34 @@ fn human_thread_health(status: &str) -> String {
         "git_branch_advanced" => "Git branch advanced outside Heddle".to_string(),
         "needs_reconcile" => "Git/Heddle mismatch".to_string(),
         "needs_checkpoint" => "checkpoint needed".to_string(),
+        "dirty_worktree" | "uncaptured" => "work in progress".to_string(),
         other => other.to_string(),
     }
+}
+
+fn human_coordination_status(output: &StatusOutput) -> String {
+    if local_work_in_progress(output)
+        && matches!(output.coordination_status, CoordinationStatus::Blocked)
+    {
+        "work in progress".to_string()
+    } else {
+        output.coordination_status.to_string()
+    }
+}
+
+fn human_thread_state(output: &StatusOutput, state: &ThreadState) -> String {
+    if local_work_in_progress(output) && matches!(state, ThreadState::Blocked) {
+        "active".to_string()
+    } else {
+        state.to_string()
+    }
+}
+
+fn local_work_in_progress(output: &StatusOutput) -> bool {
+    matches!(
+        output.thread_health.as_str(),
+        "dirty_worktree" | "uncaptured"
+    )
 }
 
 fn has_status_changes(output: &StatusOutput) -> bool {
