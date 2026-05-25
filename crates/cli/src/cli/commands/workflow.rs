@@ -11,7 +11,9 @@ use super::{
     checkpoint::create_git_checkpoint,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::{build_thread_preview_report, merge_thread_into_current},
-    operator_core::{OperatorCommandOutput, exit_if_blocked_operator_status},
+    operator_core::{
+        OperatorCommandOutput, VerificationClaimPolicy, exit_if_blocked_operator_status,
+    },
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
@@ -170,7 +172,11 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             chosen_path: "refresh".to_string(),
         }
     };
-    block_operator_claim_if_trust_blocked(&mut output.operator, &output.trust);
+    output.operator.block_success_claim_if_verification_blocked(
+        &output.trust,
+        "sync",
+        VerificationClaimPolicy::strict(),
+    );
 
     emit(cli, &output)
 }
@@ -427,7 +433,11 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             next_action: post_ship_action.clone(),
             recommended_action: post_ship_action,
         };
-        block_operator_claim_if_trust_blocked(&mut operator, &trust);
+        operator.block_success_claim_if_verification_blocked(
+            &trust,
+            "ship",
+            VerificationClaimPolicy::strict().allow_ship_publish_followup(),
+        );
         return write_ship_output(
             cli,
             &ShipOutput {
@@ -601,7 +611,11 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             merge_output.operator.recommended_action.clone()
         },
     };
-    block_operator_claim_if_trust_blocked(&mut operator, &trust);
+    operator.block_success_claim_if_verification_blocked(
+        &trust,
+        "ship",
+        VerificationClaimPolicy::strict().allow_ship_publish_followup(),
+    );
 
     write_ship_output(
         cli,
@@ -719,35 +733,6 @@ fn integrated_ship_next_action(
     } else {
         Some("heddle thread cleanup --merged --dry-run".to_string())
     }
-}
-
-fn block_operator_claim_if_trust_blocked(
-    operator: &mut OperatorCommandOutput,
-    trust: &RepositoryVerificationState,
-) {
-    if trust.verified || operator.status == "blocked" || operator.status == "failed" {
-        return;
-    }
-    if operator.action == "ship"
-        && operator.status == "shipped"
-        && trust.recommended_action == "heddle push"
-        && matches!(
-            trust.remote_drift.as_str(),
-            "remote_untracked" | "remote_ahead"
-        )
-    {
-        return;
-    }
-
-    let blocked = OperatorCommandOutput::blocked_by_repository_verification(
-        operator.action.clone(),
-        format!(
-            "{} reached its local state checks, but repository verification is blocked: {}",
-            operator.action, trust.summary
-        ),
-        trust,
-    );
-    *operator = blocked;
 }
 
 fn ship_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Option<RecoveryAdvice> {
