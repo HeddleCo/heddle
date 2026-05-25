@@ -34,7 +34,7 @@ use super::{
     git_overlay_health::{
         GitOverlayHealth, RepositoryVerificationState, build_git_overlay_health,
         build_plain_git_verification_probe, command_argvs, override_trust_recommended_action,
-        serialize_empty_action_as_null,
+        repository_setup_guidance, serialize_empty_action_as_null,
     },
     operator_loop::primary_next_action_with_verification,
     snapshot::resolve_principal,
@@ -367,17 +367,10 @@ fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool
         "Heddle setup: {}",
         style::warn("not set up for this Git repo yet")
     );
-    println!(
-        "Setup needed: Git repo detected; connect this branch with {}",
-        style::bold(&output.recommended_action)
-    );
-    println!(
-        "{}",
-        style::dim(&plain_git_setup_effects(
-            output.changes.is_empty(),
-            &output.recommended_action
-        ))
-    );
+    if let Some(setup) = repository_setup_guidance(&output.trust) {
+        println!("Setup needed: {}", style::warn(&setup.setup_line));
+        println!("{}", style::dim(&setup.effect));
+    }
     println!();
     println!(
         "Changed paths: {}",
@@ -1780,36 +1773,7 @@ fn human_status_blocker_text(blocker: &str) -> String {
 }
 
 fn git_setup_line(output: &StatusOutput) -> Option<String> {
-    if !matches!(
-        output.git_overlay_health.status.as_str(),
-        "needs_init" | "needs_import"
-    ) || output.recommended_action.is_empty()
-    {
-        return None;
-    }
-    if !output.recommended_action.starts_with("heddle adopt") {
-        return None;
-    }
-    Some(format!(
-        "Git repo detected; connect this branch with {}",
-        output.recommended_action
-    ))
-}
-
-fn plain_git_setup_effects(git_clean: bool, recommended_action: &str) -> String {
-    if recommended_action == "heddle init" {
-        if git_clean {
-            return ".heddle metadata will be created; there are no Git commits to import yet, and the Git worktree stays clean.".to_string();
-        }
-        return ".heddle metadata will be created; there are no Git commits to import yet, and existing Git worktree changes stay untouched.".to_string();
-    }
-    if git_clean {
-        ".heddle metadata will be created, Git history imported, and the Git worktree stays clean."
-            .to_string()
-    } else {
-        ".heddle metadata will be created, Git history imported, and existing Git worktree changes stay untouched."
-            .to_string()
-    }
+    repository_setup_guidance(&output.trust).map(|setup| setup.setup_line)
 }
 
 /// Walk `<heddle_dir>/threads/` and decorate each manifest with a

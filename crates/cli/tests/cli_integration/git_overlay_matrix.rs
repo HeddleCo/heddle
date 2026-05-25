@@ -694,6 +694,26 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
         !temp.path().join(".heddle").exists(),
         "status in a plain Git repo must be probe-only"
     );
+    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    assert!(
+        status_text.contains("initialize Heddle with heddle init")
+            && status_text.contains("no Git commits to import yet")
+            && !status_text.contains("connect this branch with heddle adopt"),
+        "unborn status text should describe initialization, not adoption: {status_text}"
+    );
+    let verify_text = heddle_output(&["verify", "--output", "text"], Some(temp.path()))
+        .expect("verify should run");
+    assert!(
+        !verify_text.status.success(),
+        "unborn verify should fail until init"
+    );
+    let verify_text = String::from_utf8_lossy(&verify_text.stdout);
+    assert!(
+        verify_text.contains("initialize Heddle with heddle init")
+            && verify_text.contains("no Git commits to import yet")
+            && !verify_text.contains("connect this branch with heddle adopt"),
+        "unborn verify text should describe initialization, not adoption: {verify_text}"
+    );
     let bridge = json(
         temp.path(),
         &["bridge", "git", "status", "--output", "json"],

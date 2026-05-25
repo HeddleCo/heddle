@@ -10,7 +10,7 @@ use super::{
     action_line::print_next,
     git_overlay_health::{
         RepositoryVerificationState, VerificationCheck, build_plain_git_verification_probe,
-        build_repository_verification_state,
+        build_repository_verification_state, repository_setup_guidance,
     },
 };
 use crate::cli::{Cli, should_output_json, style};
@@ -272,7 +272,7 @@ fn human_check_status(check: &VerificationCheck) -> String {
 
 fn human_output_summary(output: &VerifyOutput) -> String {
     if let Some(check) = output.trust.checks.iter().find(|check| !check.clean) {
-        if setup_needed_action(output).is_some() {
+        if setup_needed_guidance(output).is_some() {
             return String::new();
         }
         if is_worktree_save_blocker(check)
@@ -384,34 +384,21 @@ fn human_summary(
 }
 
 fn render_compact_setup_needed(output: &VerifyOutput) -> bool {
-    let Some(action) = setup_needed_action(output) else {
+    let Some(setup) = setup_needed_guidance(output) else {
         return false;
     };
     println!();
-    println!(
-        "Setup needed: Git repo detected; connect this branch with {}",
-        style::bold(action)
-    );
-    let effect = if output.trust.repository_mode == "plain-git" {
-        if output.trust.worktree_state == "clean" {
-            ".heddle metadata will be created, Git history imported, and the Git worktree stays clean."
-        } else {
-            ".heddle metadata will be created, Git history imported, and existing Git worktree changes stay untouched."
-        }
-    } else if output.trust.worktree_state == "clean" {
-        ".heddle metadata is present; adoption imports Git history and the Git worktree stays clean."
-    } else {
-        ".heddle metadata is present; adoption imports Git history and existing Git worktree changes stay untouched."
-    };
-    println!("{}", style::dim(effect));
+    println!("Setup needed: {}", style::warn(&setup.setup_line));
+    println!("{}", style::dim(&setup.effect));
     true
 }
 
-fn setup_needed_action(output: &VerifyOutput) -> Option<&str> {
+fn setup_needed_guidance(
+    output: &VerifyOutput,
+) -> Option<super::git_overlay_health::RepositorySetupGuidance> {
     let blocker = output.trust.checks.iter().find(|check| !check.clean)?;
     if !is_import_setup_blocker(blocker) {
         return None;
     }
-    let action = output.trust.recommended_action.as_str();
-    action.starts_with("heddle adopt").then_some(action)
+    repository_setup_guidance(&output.trust)
 }
