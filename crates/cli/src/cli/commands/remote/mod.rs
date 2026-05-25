@@ -40,16 +40,25 @@ pub async fn cmd_push(
         let mut bridge = GitBridge::new(&repo);
         bridge.push(remote_name)?;
         if should_output_json(cli, Some(repo.config())) {
-            println!(
-                "{{\"pushed\":true,\"transport\":\"git\",\"remote\":{:?}}}",
-                remote_name
-            );
+            let record = serde_json::json!({
+                "pushed": true,
+                "transport": "git",
+                "remote": remote_name,
+            });
+            println!("{}", record);
         } else {
             println!(
                 "{} pushed Git-overlay refs to {}",
                 style::ok_marker(),
                 style::bold(remote_name)
             );
+        }
+        // Ad-hoc dual-push parity for the GitOverlay drop-in branch:
+        // `--mirror` must fire here too, with the same best-effort
+        // (warn-don't-abort) semantics as the hosted/native path.
+        if let Some(mirror_remote) = mirror.as_deref() {
+            let outcome = bridge.push(mirror_remote);
+            render_mirror_outcome(cli, &repo, mirror_remote, outcome);
         }
         return Ok(());
     }
@@ -181,10 +190,11 @@ fn render_mirror_outcome(
     match outcome {
         Ok(()) => {
             if json {
-                println!(
-                    "{{\"mirrored\":true,\"remote\":{:?}}}",
-                    mirror_remote
-                );
+                let record = serde_json::json!({
+                    "mirrored": true,
+                    "remote": mirror_remote,
+                });
+                println!("{}", record);
             } else {
                 println!(
                     "{} mirrored to {}",
@@ -195,11 +205,12 @@ fn render_mirror_outcome(
         }
         Err(err) => {
             if json {
-                println!(
-                    "{{\"mirrored\":false,\"remote\":{:?},\"error\":{:?}}}",
-                    mirror_remote,
-                    err.to_string()
-                );
+                let record = serde_json::json!({
+                    "mirrored": false,
+                    "remote": mirror_remote,
+                    "error": err.to_string(),
+                });
+                println!("{}", record);
             } else {
                 eprintln!(
                     "{} mirror push to {} failed: {}",
