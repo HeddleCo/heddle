@@ -3454,7 +3454,9 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     .unwrap();
     assert!(
         bridge_text.contains("Git branch 'feature/drop-in' advanced outside Heddle")
+            && bridge_text.contains("Git branch waiting for Heddle import: feature/drop-in")
             && bridge_text.contains("Recovery: heddle adopt --ref feature/drop-in")
+            && !bridge_text.contains("Optional Git-only branch available: feature/drop-in")
             && !bridge_text.contains("Setup needed"),
         "bridge git status text should identify mapping drift and exact recovery: {bridge_text}"
     );

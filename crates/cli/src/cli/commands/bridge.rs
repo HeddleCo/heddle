@@ -306,20 +306,24 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
     }
     match &output.git_overlay_import_hint {
         Some(hint) => {
-            println!(
-                "{}",
-                crate::cli::render::git_only_branch_summary(
-                    &hint.missing_branches,
-                    hint.missing_branch_count,
-                )
-            );
-            if hint
+            let current_branch_needs_import = hint
                 .missing_branches
                 .iter()
-                .any(|branch| branch == &hint.current_branch)
-            {
+                .any(|branch| branch == &hint.current_branch);
+            if current_branch_needs_import {
+                println!(
+                    "{}",
+                    git_import_required_summary(&hint.missing_branches, hint.missing_branch_count,)
+                );
                 println!("Next step: {}", style::bold(&hint.recommended_command));
             } else {
+                println!(
+                    "{}",
+                    crate::cli::render::git_only_branch_summary(
+                        &hint.missing_branches,
+                        hint.missing_branch_count,
+                    )
+                );
                 println!("Optional: {}", style::dim(&hint.recommended_command));
             }
         }
@@ -370,6 +374,14 @@ fn render_bridge_git_reconcile(
         }
     }
     Ok(())
+}
+
+fn git_import_required_summary(branches: &[String], total: usize) -> String {
+    let noun = if total == 1 { "branch" } else { "branches" };
+    format!(
+        "Git {noun} waiting for Heddle import: {}",
+        crate::cli::render::preview_list(branches, total)
+    )
 }
 
 /// Execute bridge subcommands.
