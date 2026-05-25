@@ -101,8 +101,9 @@ that downstream verbs consume.
 ## `heddle init --output json`
 
 Initialize Heddle metadata. In a plain Git repository this creates the
-`.heddle` sidecar only; it does not import Git history or write
-Git-tracked files.
+`.heddle` sidecar and updates the local `.git/info/exclude` file for Heddle
+metadata and default generated-noise patterns; it does not import Git history
+or write Git-tracked files.
 
 ### Sample
 
@@ -118,7 +119,8 @@ Git-tracked files.
   "principal_configured": false,
   "side_effects": [
     "created Heddle sidecar for the existing Git repository",
-    "left Git-tracked files and `git status --short` untouched"
+    "updated .git/info/exclude for Heddle metadata and default generated noise",
+    "left Git-tracked files untouched"
   ],
   "message": "Initialized Heddle data in /repo/.heddle for Git-overlay workflows",
   "next_action": "heddle adopt --ref main",
@@ -154,7 +156,7 @@ Git-tracked files.
 | `path` | string | required | Path to the initialized `.heddle` metadata directory. |
 | `repository_mode` | string | required | Repository capability after init, e.g. `git-overlay` or native Heddle storage. |
 | `git_detected`, `heddle_initialized` | bool | required | Whether init detected an existing Git repo, and whether Heddle metadata is now present. |
-| `installed_heddleignore`, `principal_configured` | bool | required | Side effects outside `.heddle`, if any. Git-overlay init leaves these false unless principal flags are passed. |
+| `installed_heddleignore`, `principal_configured` | bool | required | Side effects outside `.heddle`, if any. Git-overlay init leaves `installed_heddleignore` false unless principal flags are passed, and uses local Git excludes instead of a tracked `.heddleignore`. |
 | `side_effects` | array<string> | required | Human-readable, machine-preserved list of what init changed or intentionally left untouched. |
 | `message` | string | required | Human summary. |
 | `next_action`, `recommended_action` | string \| null | required | Primary verification-guided next command. In a Git repo this is the explicit `heddle adopt --ref <branch>` command. |

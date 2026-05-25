@@ -2020,6 +2020,65 @@ fn git_overlay_matrix_init_in_git_repo_keeps_git_status_clean() {
 }
 
 #[test]
+fn git_overlay_matrix_init_installs_local_git_excludes_for_heddle_noise() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    std::fs::create_dir_all(temp.path().join("src/__pycache__")).unwrap();
+    std::fs::write(
+        temp.path().join("src/__pycache__/app.cpython-312.pyc"),
+        "cache",
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("src/app.pyc"), "cache").unwrap();
+
+    let before = Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git status should run");
+    assert!(
+        String::from_utf8_lossy(&before.stdout).contains("src/"),
+        "fixture should start with raw Git reporting generated noise"
+    );
+
+    heddle(&["init"], Some(temp.path())).unwrap();
+    assert!(
+        !temp.path().join(".heddleignore").exists(),
+        "git-overlay init should not create a tracked root .heddleignore"
+    );
+
+    let exclude = std::fs::read_to_string(temp.path().join(".git/info/exclude")).unwrap();
+    for pattern in [
+        ".heddle/",
+        ".heddleignore",
+        "__pycache__",
+        "*.pyc",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    ] {
+        assert!(
+            exclude.lines().any(|line| line.trim() == pattern),
+            "local Git exclude should contain {pattern:?}: {exclude}"
+        );
+    }
+
+    let after = Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git status should run");
+    assert!(after.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&after.stdout).trim(),
+        "",
+        "Heddle default generated noise should not make raw Git look dirty after init"
+    );
+}
+
+#[test]
 fn git_overlay_matrix_reconcile_apply_imports_current_git_branch() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
