@@ -11,16 +11,21 @@
 //! nothing on a standard install and the mount lifecycle silently
 //! falls back to NFS (heddle#190 r4 / Codex PR #225 P1).
 //!
-//! Linux-only, gated behind the CLI's `mount` feature (which
-//! propagates to `mount?/fuse`). The file is `cfg`-gated so
-//! non-Linux or mount-less builds skip it cleanly.
-
-#![cfg(all(target_os = "linux", feature = "mount"))]
+//! Per-function cfg (not crate-level) so the binary still compiles
+//! on macOS/Windows when someone runs `cargo install heddle-cli
+//! --features mount` there: `required-features = ["mount"]` selects
+//! the `[[bin]]` on all three platforms, so `main` must exist on
+//! every target the `mount` feature compiles for. The non-Linux
+//! main is a stub that prints a usable error and exits 2 — the
+//! supervisor on those platforms uses the in-process mount path
+//! (heddle#190 r5 / Codex PR #225 P1).
 
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
 use mount::worker::{run_worker, WorkerArgs};
 
+#[cfg(target_os = "linux")]
 fn main() -> ExitCode {
     // Tracing subscriber: ENV-controlled like the rest of heddle.
     // `RUST_LOG=heddle=debug heddle-fuse-worker ...` works the same
@@ -68,4 +73,19 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// Non-Linux stub. The crash-isolation worker is FUSE-specific and
+// only meaningful on Linux; FSKit and ProjFS run their callbacks
+// in-process via their own platform sandboxes. We still ship the
+// binary on macOS/Windows so `cargo install` produces the same
+// file set everywhere (avoids "missing binary" surprises in
+// scripts and packagers); invoking it exits with a clear error.
+#[cfg(not(target_os = "linux"))]
+fn main() -> ExitCode {
+    eprintln!(
+        "heddle-fuse-worker: only supported on Linux; \
+         use the in-process mount path on macOS/Windows"
+    );
+    ExitCode::from(2)
 }
