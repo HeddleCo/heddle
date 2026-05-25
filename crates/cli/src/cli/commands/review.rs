@@ -259,7 +259,7 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
             .map(|s| {
                 let (file, symbol) = s
                     .split_once(':')
-                    .ok_or_else(|| anyhow!("--symbols expects 'file:symbol', got '{s}'"))?;
+                    .ok_or_else(|| anyhow!(RecoveryAdvice::review_symbols_malformed(s)))?;
                 Ok(PathSymbolRef {
                     file: file.to_string(),
                     symbol: symbol.to_string(),

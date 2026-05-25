@@ -8554,6 +8554,175 @@ fn context_invalid_scope_uses_typed_advice_json() {
 }
 
 #[test]
+fn discuss_resolve_conditional_options_use_typed_advice_json() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    for (args, expected_kind, expected_error, expected_hint) in [
+        (
+            vec![
+                "--output",
+                "json",
+                "discuss",
+                "resolve",
+                "d1",
+                "--mode",
+                "into-annotation",
+            ],
+            "discuss_resolve_missing_annotation_kind",
+            "--annotation-kind is required for into-annotation",
+            "--annotation-kind",
+        ),
+        (
+            vec![
+                "--output",
+                "json",
+                "discuss",
+                "resolve",
+                "d1",
+                "--mode",
+                "into-annotation",
+                "--annotation-kind",
+                "rationale",
+            ],
+            "discuss_resolve_missing_annotation_content",
+            "--annotation-content is required for into-annotation",
+            "--annotation-content",
+        ),
+        (
+            vec![
+                "--output", "json", "discuss", "resolve", "d1", "--mode", "dismiss",
+            ],
+            "discuss_resolve_missing_dismiss_reason",
+            "--reason is required for dismiss",
+            "--reason",
+        ),
+    ] {
+        let output = heddle_output(&args, Some(temp.path())).expect("invoke discuss resolve");
+        assert!(
+            !output.status.success(),
+            "conditional discuss resolve option should fail"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "JSON-mode discuss refusal must keep stdout quiet: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = std::str::from_utf8(&output.stderr).unwrap();
+        let envelope: Value =
+            serde_json::from_str(stderr).expect("discuss refusal should emit JSON envelope");
+        assert_eq!(envelope["kind"], expected_kind);
+        assert_json_recovery_advice_fields(&envelope, stderr);
+        assert!(
+            envelope["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(expected_error)),
+            "discuss refusal should keep the centralized error: {stderr}"
+        );
+        assert!(
+            envelope["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains(expected_hint)),
+            "discuss refusal hint should name the missing flag: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn review_sign_malformed_symbols_uses_typed_advice_json() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "review",
+            "sign",
+            "HEAD",
+            "--kind",
+            "read",
+            "--symbols",
+            "main.rs",
+            "--public-key",
+            "00",
+            "--signature",
+            "00",
+            "--signed-at-unix",
+            "0",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke review sign");
+    assert!(!output.status.success(), "malformed symbol should fail");
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode review refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("review refusal should emit JSON envelope");
+    assert_eq!(envelope["kind"], "review_symbols_malformed");
+    assert_json_recovery_advice_fields(&envelope, stderr);
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("--symbols expects 'file:symbol', got 'main.rs'")),
+        "review refusal should keep the centralized error: {stderr}"
+    );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("--symbols")),
+        "review refusal hint should name the valid flag form: {stderr}"
+    );
+}
+
+#[test]
+fn thread_absorb_missing_parent_uses_typed_advice_json() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "orphan"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &["--output", "json", "thread", "absorb", "orphan"],
+        Some(temp.path()),
+    )
+    .expect("invoke thread absorb");
+    assert!(
+        !output.status.success(),
+        "absorb without a parent should fail"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode absorb refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("absorb refusal should emit JSON envelope");
+    assert_eq!(envelope["kind"], "thread_absorb_parent_required");
+    assert_json_recovery_advice_fields(&envelope, stderr);
+    assert!(
+        envelope["error"].as_str().is_some_and(
+            |error| error.contains("Thread 'orphan' has no recorded parent; pass --into")
+        ),
+        "absorb refusal should keep the centralized error: {stderr}"
+    );
+    assert!(
+        envelope["primary_command"]
+            .as_str()
+            .is_some_and(|command| command == "heddle thread absorb orphan --into <parent-thread>"),
+        "absorb refusal should name the exact retry command: {stderr}"
+    );
+}
+
+#[test]
 fn integration_invalid_harness_uses_typed_advice_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
