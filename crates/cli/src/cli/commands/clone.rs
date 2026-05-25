@@ -796,23 +796,6 @@ fn clone_git_overlay_no_branch_refs_advice(remote_label: &str) -> RecoveryAdvice
     )
 }
 
-#[cfg(feature = "client")]
-fn network_clone_failed_advice(error: &str, local_path: &Path) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "network_clone_failed",
-        format!("Clone failed: {error}"),
-        "Check the remote, credentials, and requested ref, then retry `heddle clone`.",
-        format!(
-            "network clone reported failure for '{}': {error}",
-            local_path.display()
-        ),
-        "clone cannot prove that all requested remote objects and refs were materialized",
-        "any created destination files or metadata were left for inspection",
-        "heddle clone <remote> <path>",
-        vec!["heddle clone <remote> <path>".to_string()],
-    )
-}
-
 #[cfg(not(feature = "client"))]
 fn network_clone_unavailable_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
@@ -1313,7 +1296,9 @@ async fn clone_network(
         }
     } else {
         let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        return Err(anyhow!(network_clone_failed_advice(&err, local_path)));
+        return Err(anyhow!(RecoveryAdvice::network_clone_failed(
+            &err, local_path
+        )));
     }
 
     Ok(())

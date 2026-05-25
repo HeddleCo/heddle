@@ -988,6 +988,185 @@ impl RecoveryAdvice {
         )
     }
 
+    pub(crate) fn remote_transport_mismatch(action: &str, remote: &str) -> Self {
+        Self::safety_refusal(
+            "remote_transport_mismatch",
+            format!(
+                "Refusing to {action}: remote '{remote}' is a Git remote, not a Heddle-native remote"
+            ),
+            "Use a Heddle-native remote here, or clone/adopt that Git remote in a Git-overlay checkout.",
+            format!("remote '{remote}' resolves to Git storage"),
+            format!(
+                "{action} would route a Git repository through Heddle-native sync and fail after setup work"
+            ),
+            "remote configuration, Heddle refs, Git refs, and worktree files were left unchanged",
+            "heddle clone <remote> <fresh-path>",
+            vec![
+                "heddle clone <remote> <fresh-path>".to_string(),
+                "heddle remote add <name> <url>".to_string(),
+            ],
+        )
+    }
+
+    pub(crate) fn remote_not_configured(action: &str) -> Self {
+        Self::safety_refusal(
+            "remote_not_configured",
+            format!("No default remote is configured for {action}"),
+            "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`.",
+            "the command did not receive a remote argument and no default remote is configured",
+            format!(
+                "{action} needs a concrete remote target before it can move remote refs or transfer objects"
+            ),
+            "repository state, refs, remote configuration, and worktree files were left unchanged",
+            "heddle remote add <name> <url>",
+            vec![
+                "heddle remote add <name> <url>".to_string(),
+                "heddle remote list".to_string(),
+                "heddle remote set-default <name>".to_string(),
+            ],
+        )
+    }
+
+    pub(crate) fn remote_not_found(name: &str) -> Self {
+        Self::safety_refusal(
+            "remote_not_found",
+            format!("Remote '{name}' not found"),
+            "Inspect configured remotes with `heddle remote list`, or add one with `heddle remote add <name> <url>`.",
+            format!("no configured Heddle or Git remote named '{name}' was found"),
+            "the command cannot inspect, fetch, pull, or push a remote until the remote name is resolved",
+            "remote configuration, refs, objects, and worktree files were left unchanged",
+            "heddle remote list",
+            vec![
+                "heddle remote list".to_string(),
+                "heddle remote add <name> <url>".to_string(),
+            ],
+        )
+    }
+
+    pub(crate) fn remote_name_required_for_fetch() -> Self {
+        Self::safety_refusal(
+            "remote_name_required",
+            "Refusing to fetch: remote name required unless --all is set",
+            "Run `heddle fetch <remote>` for one remote, or `heddle fetch --all` for every configured remote.",
+            "fetch was requested without a remote name and without --all",
+            "fetch updates remote refs and object storage, so the target remote set must be explicit",
+            "no remote refs or objects were written",
+            "heddle fetch --all",
+            vec![
+                "heddle fetch --all".to_string(),
+                "heddle remote list".to_string(),
+            ],
+        )
+    }
+
+    pub(crate) fn git_overlay_tracking_refresh_failed(
+        remote_name: &str,
+        full_ref: &str,
+        cause: Option<String>,
+    ) -> Self {
+        let fetch_command = format!("heddle fetch {remote_name}");
+        let error = match cause {
+            Some(cause) => format!(
+                "Pushed to {remote_name}, but could not refresh local tracking ref {full_ref}: {cause}"
+            ),
+            None => {
+                format!(
+                    "Pushed to {remote_name}, but could not refresh local tracking ref {full_ref}"
+                )
+            }
+        };
+        Self::safety_refusal(
+            "git_overlay_tracking_refresh_failed",
+            error,
+            format!(
+                "Run `{fetch_command}` if `heddle verify` still reports remote drift after the push."
+            ),
+            format!("remote push completed, but local Git tracking ref {full_ref} was not updated"),
+            format!(
+                "updating {full_ref} would record the pushed HEAD as the local tracking view of {remote_name}"
+            ),
+            "the remote push completed; the failed tracking-ref refresh did not make additional local tracking changes",
+            fetch_command.clone(),
+            vec![fetch_command, "heddle verify".to_string()],
+        )
+    }
+
+    pub(crate) fn local_lazy_pull_unsupported(source_path: &std::path::Path) -> Self {
+        let source = source_path.display().to_string();
+        let pull_without_lazy = format!("heddle pull {source}");
+        Self::safety_refusal(
+            "local_lazy_pull_unsupported",
+            "Refusing lazy pull from local remote: lazy materialization requires a hosted or network remote",
+            format!(
+                "Run `{pull_without_lazy}` without `--lazy`, or configure a hosted remote and retry lazy pull there."
+            ),
+            format!("selected remote resolves to local path file://{source}"),
+            "lazy pull would leave the worktree depending on on-demand object fetches that the local transport does not provide",
+            "repository state was left unchanged",
+            pull_without_lazy.clone(),
+            vec![pull_without_lazy, "heddle remote list".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub(crate) fn remote_push_failed(track_name: &str, error: &str) -> Self {
+        let primary_command = format!("heddle push {track_name}");
+        Self::safety_refusal(
+            "remote_push_failed",
+            format!("Push failed for {track_name}: {error}"),
+            format!(
+                "Inspect `heddle verify`, then retry with `{primary_command}` after fixing the remote."
+            ),
+            format!("remote push to {track_name} failed: {error}"),
+            "the remote branch was not confirmed updated",
+            "local Heddle state, Git refs, and worktree files were left unchanged by the failed push result",
+            primary_command.clone(),
+            vec![primary_command, "heddle verify".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub(crate) fn remote_pull_failed(
+        remote_thread: &str,
+        local_thread: Option<&str>,
+        error: &str,
+    ) -> Self {
+        let primary_command = if let Some(local_thread) = local_thread {
+            format!("heddle pull {remote_thread} {local_thread}")
+        } else {
+            format!("heddle pull {remote_thread}")
+        };
+        Self::safety_refusal(
+            "remote_pull_failed",
+            format!("Pull failed from {remote_thread}: {error}"),
+            format!(
+                "Inspect `heddle verify`, then retry with `{primary_command}` after fixing the remote."
+            ),
+            format!("remote pull from {remote_thread} failed: {error}"),
+            "the local thread was not confirmed updated from the remote",
+            "local Heddle state, Git refs, and worktree files were left unchanged by the failed pull result",
+            primary_command.clone(),
+            vec![primary_command, "heddle verify".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub(crate) fn network_clone_failed(error: &str, local_path: &std::path::Path) -> Self {
+        Self::safety_refusal(
+            "network_clone_failed",
+            format!("Clone failed: {error}"),
+            "Check the remote, credentials, and requested ref, then retry `heddle clone`.",
+            format!(
+                "network clone reported failure for '{}': {error}",
+                local_path.display()
+            ),
+            "clone cannot prove that all requested remote objects and refs were materialized",
+            "any created destination files or metadata were left for inspection",
+            "heddle clone <remote> <path>",
+            vec!["heddle clone <remote> <path>".to_string()],
+        )
+    }
+
     pub fn primary_hint(&self) -> &str {
         &self.hint
     }

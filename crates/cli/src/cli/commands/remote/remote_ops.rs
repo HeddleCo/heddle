@@ -360,7 +360,9 @@ async fn pull_local(
     lazy: bool,
 ) -> Result<()> {
     if lazy {
-        return Err(anyhow::anyhow!(local_lazy_pull_advice(source_path)));
+        return Err(anyhow::anyhow!(
+            RecoveryAdvice::local_lazy_pull_unsupported(source_path)
+        ));
     }
 
     if !should_output_json(cli, Some(repo.config())) {
@@ -488,24 +490,6 @@ fn changed_paths_between_states(
     Ok(paths)
 }
 
-fn local_lazy_pull_advice(source_path: &Path) -> RecoveryAdvice {
-    let source = source_path.display().to_string();
-    let pull_without_lazy = format!("heddle pull {source}");
-
-    RecoveryAdvice::safety_refusal(
-        "local_lazy_pull_unsupported",
-        "Refusing lazy pull from local remote: lazy materialization requires a hosted or network remote",
-        format!(
-            "Run `{pull_without_lazy}` without `--lazy`, or configure a hosted remote and retry lazy pull there."
-        ),
-        format!("selected remote resolves to local path file://{source}"),
-        "lazy pull would leave the worktree depending on on-demand object fetches that the local transport does not provide",
-        "repository state was left unchanged",
-        pull_without_lazy.clone(),
-        vec![pull_without_lazy, "heddle remote list".to_string()],
-    )
-}
-
 #[cfg(feature = "client")]
 async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Result<()> {
     let repo_path = options
@@ -576,7 +560,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
         }
     } else {
         let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        return Err(anyhow::anyhow!(network_pull_failed_advice(
+        return Err(anyhow::anyhow!(RecoveryAdvice::remote_pull_failed(
             options.remote_thread,
             options.local_thread,
             &err,
@@ -584,31 +568,6 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
     }
 
     Ok(())
-}
-
-#[cfg(feature = "client")]
-fn network_pull_failed_advice(
-    remote_thread: &str,
-    local_thread: Option<&str>,
-    error: &str,
-) -> RecoveryAdvice {
-    let primary_command = if let Some(local_thread) = local_thread {
-        format!("heddle pull {remote_thread} {local_thread}")
-    } else {
-        format!("heddle pull {remote_thread}")
-    };
-    RecoveryAdvice::safety_refusal(
-        "remote_pull_failed",
-        format!("Pull failed from {remote_thread}: {error}"),
-        format!(
-            "Inspect `heddle verify`, then retry with `{primary_command}` after fixing the remote."
-        ),
-        format!("remote pull from {remote_thread} failed: {error}"),
-        "the local thread was not confirmed updated from the remote",
-        "local Heddle state, Git refs, and worktree files were left unchanged by the failed pull result",
-        primary_command.clone(),
-        vec![primary_command, "heddle verify".to_string()],
-    )
 }
 
 /// Execute remote command.
@@ -647,7 +606,7 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
                 let url = items
                     .get(name)
                     .cloned()
-                    .ok_or_else(|| remote_not_found_advice(name))?;
+                    .ok_or_else(|| RecoveryAdvice::remote_not_found(name))?;
                 let output = RemoteInfoOutput {
                     output_kind: Some("remote_show"),
                     name: name.clone(),
@@ -765,7 +724,7 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             let (url, source) = items
                 .get(&name)
                 .cloned()
-                .ok_or_else(|| remote_not_found_advice(&name))?;
+                .ok_or_else(|| RecoveryAdvice::remote_not_found(&name))?;
             let is_default = default.as_deref() == Some(name.as_str());
             let output = RemoteInfoOutput {
                 output_kind: Some("remote_show"),
@@ -778,22 +737,6 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             Ok(())
         }
     }
-}
-
-fn remote_not_found_advice(name: &str) -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "remote_not_found",
-        format!("Remote '{name}' not found"),
-        "Inspect configured remotes with `heddle remote list`, or add one with `heddle remote add <name> <url>`.",
-        format!("no configured Heddle or Git remote named '{name}' was found"),
-        "the command cannot inspect, fetch, pull, or push a remote until the remote name is resolved",
-        "remote configuration, refs, objects, and worktree files were left unchanged",
-        "heddle remote list",
-        vec![
-            "heddle remote list".to_string(),
-            "heddle remote add <name> <url>".to_string(),
-        ],
-    )
 }
 
 fn render_remote_mutation(output: RemoteMutationOutput, json: bool) -> Result<()> {
