@@ -790,7 +790,8 @@ fn init_json_names_side_effects_next_action_and_schema() {
             effects.iter().any(|effect| {
                 effect.as_str().is_some_and(|effect| {
                     effect.contains(".git/info/exclude")
-                        && effect.contains("default generated noise")
+                        && effect.contains("Heddle metadata")
+                        && !effect.contains("default generated noise")
                 })
             })
         }),
@@ -10886,10 +10887,16 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
         serde_json::json!([])
     );
     let exclude = std::fs::read_to_string(work.join(".git/info/exclude")).unwrap();
-    for pattern in [".heddle/", ".heddleignore", "__pycache__", "*.pyc"] {
+    for pattern in [".heddle/"] {
         assert!(
             exclude.lines().any(|line| line.trim() == pattern),
             "clone should install the same local Git exclude policy as init; missing {pattern:?}: {exclude}"
+        );
+    }
+    for pattern in [".heddleignore", "__pycache__", "*.pyc"] {
+        assert!(
+            !exclude.lines().any(|line| line.trim() == pattern),
+            "clone should not auto-ignore project artifacts; found {pattern:?}: {exclude}"
         );
     }
 

@@ -16,7 +16,7 @@
 //! the full args → handler → repo → materialize stack rather than
 //! poking at internals.
 
-use std::fs;
+use std::{fs, process::Command};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -47,6 +47,55 @@ fn setup_repo_with_secret() -> (TempDir, String) {
         .expect("log --output json should expose change_id")
         .to_string();
     (temp, state)
+}
+
+fn setup_git_overlay_repo_with_secret() -> (TempDir, String) {
+    let temp = TempDir::new().unwrap();
+    git_overlay_fixture_cmd(temp.path(), &["init", "-b", "main"]);
+    git_overlay_fixture_cmd(temp.path(), &["config", "user.name", "Heddle Test"]);
+    git_overlay_fixture_cmd(temp.path(), &["config", "user.email", "heddle@example.com"]);
+    fs::write(temp.path().join("README.md"), "seed\n").unwrap();
+    git_overlay_fixture_cmd(temp.path(), &["add", "."]);
+    git_overlay_fixture_cmd(temp.path(), &["commit", "-m", "seed"]);
+    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+
+    fs::create_dir_all(temp.path().join("config")).unwrap();
+    fs::write(
+        temp.path().join("config/secrets.toml"),
+        b"api_token = \"super-secret-leaked-value\"\n",
+    )
+    .unwrap();
+    heddle(
+        &["--output", "json", "commit", "-m", "leak the secret"],
+        Some(temp.path()),
+    )
+    .expect("heddle commit");
+
+    let raw = heddle(
+        &["--output", "json", "log", "--limit", "1"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    let state = value["states"][0]["change_id"]
+        .as_str()
+        .expect("log --output json should expose change_id")
+        .to_string();
+    (temp, state)
+}
+
+fn git_overlay_fixture_cmd(path: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .unwrap_or_else(|err| panic!("git {args:?} should run: {err}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -782,10 +831,8 @@ fn tampered_redaction_is_refused_at_fetch_boundary() {
 //
 // After a redact/purge, the working tree file is unchanged — the next
 // `heddle capture` would re-snapshot the leaked bytes. The CLI emits a
-// hint pointing at the right ignore file to append the path to. The
-// hint is suppressed when the path is already covered by a gitignore-
-// style glob in either `.heddleignore` or `.gitignore`, so the four
-// cases below pin the matcher's behavior end-to-end.
+// hint pointing at the right ignore file to append the path to. Native
+// Heddle prefers `.heddleignore`; Git-overlay prefers `.gitignore`.
 // ---------------------------------------------------------------------
 
 fn redact_apply_json(temp: &TempDir, state: &str) -> Value {
@@ -809,12 +856,8 @@ fn redact_apply_json(temp: &TempDir, state: &str) -> Value {
 
 #[test]
 fn redact_apply_emits_ignore_hint_when_neither_file_covers_path() {
-    // Fresh repo: `heddle init` ships a default `.heddleignore` now
-    // (heddle#80), but the default template doesn't cover the leaked
-    // `config/secrets.toml` path. The hint must still surface,
-    // pointing at `.heddleignore` with `already_exists: true` (so
-    // the message renders as "add ... to .heddleignore", not
-    // "create ...").
+    // Fresh native repos do not auto-create `.heddleignore`. The hint must
+    // surface, pointing at `.heddleignore` with `already_exists: false`.
     let (temp, state) = setup_repo_with_secret();
     let apply = redact_apply_json(&temp, &state);
     let hint = apply
@@ -822,8 +865,8 @@ fn redact_apply_emits_ignore_hint_when_neither_file_covers_path() {
         .expect("ignore_hint should be present when path is uncovered");
     assert_eq!(hint["ignore_file"].as_str().unwrap(), ".heddleignore");
     assert!(
-        hint["already_exists"].as_bool().unwrap(),
-        "init now installs a default .heddleignore"
+        !hint["already_exists"].as_bool().unwrap(),
+        "init should not install a default .heddleignore"
     );
     assert_eq!(
         hint["suggested_pattern"].as_str().unwrap(),
@@ -833,7 +876,7 @@ fn redact_apply_emits_ignore_hint_when_neither_file_covers_path() {
         hint["message"]
             .as_str()
             .unwrap()
-            .contains("config/secrets.toml")
+            .contains("create .heddleignore")
     );
 }
 
@@ -865,11 +908,8 @@ fn redact_apply_emits_no_hint_when_heddleignore_glob_matches() {
 
 #[test]
 fn redact_apply_emits_hint_when_only_gitignore_covers_the_path() {
-    // `.gitignore` covers `config/*.toml` but `.heddleignore` doesn't.
-    // `heddle capture` reads `.heddleignore` + repo config, NOT
-    // `.gitignore`, so the next snapshot would still re-import the
-    // leaked bytes. The hint must surface, pointing at `.heddleignore`
-    // (the file heddle actually consults).
+    // In a native Heddle repo, `.gitignore` is not the capture policy.
+    // The hint must surface, pointing at `.heddleignore`.
     let (temp, state) = setup_repo_with_secret();
     fs::write(temp.path().join(".gitignore"), "config/*.toml\n").unwrap();
     let apply = redact_apply_json(&temp, &state);
@@ -879,11 +919,32 @@ fn redact_apply_emits_hint_when_only_gitignore_covers_the_path() {
     assert_eq!(
         hint["ignore_file"].as_str().unwrap(),
         ".heddleignore",
-        ".gitignore is not consulted by heddle capture; hint must target .heddleignore"
+        ".gitignore is not consulted by native Heddle capture; hint must target .heddleignore"
     );
     assert!(
-        hint["already_exists"].as_bool().unwrap(),
-        "init installs a default .heddleignore (heddle#80)"
+        !hint["already_exists"].as_bool().unwrap(),
+        "init should not install a default .heddleignore"
+    );
+}
+
+#[test]
+fn redact_apply_git_overlay_prefers_gitignore_hint() {
+    let (temp, state) = setup_git_overlay_repo_with_secret();
+    let apply = redact_apply_json(&temp, &state);
+    let hint = apply
+        .get("ignore_hint")
+        .expect("ignore_hint should be present when path is uncovered");
+    assert_eq!(hint["ignore_file"].as_str().unwrap(), ".gitignore");
+    assert!(
+        !hint["already_exists"].as_bool().unwrap(),
+        "fixture does not create a .gitignore"
+    );
+    assert!(
+        hint["message"]
+            .as_str()
+            .unwrap()
+            .contains("create .gitignore"),
+        "Git-overlay redaction should point at Git's shared ignore file: {hint}"
     );
 }
 
@@ -952,8 +1013,8 @@ fn purge_apply_also_emits_ignore_hint() {
         .expect("purge output must include ignore_hint");
     assert_eq!(hint["ignore_file"].as_str().unwrap(), ".heddleignore");
     assert!(
-        hint["already_exists"].as_bool().unwrap(),
-        "init installs a default .heddleignore (heddle#80)"
+        !hint["already_exists"].as_bool().unwrap(),
+        "init should not install a default .heddleignore"
     );
 }
 

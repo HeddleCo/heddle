@@ -150,30 +150,22 @@ fn test_nested_tracked_heddle_paths_are_not_ignored_by_status_or_snapshot() {
 }
 
 #[test]
-fn init_writes_default_heddleignore() {
-    // Red-commit for heddle#80: fresh `heddle init` must install the
-    // bundled `.heddleignore` so day-one users don't have to discover
-    // the file's existence before macOS noise lands.
+fn init_does_not_write_default_heddleignore() {
+    // Ignore policy must be explicit. Fresh `heddle init` creates Heddle
+    // metadata only; project noise belongs in a user-created `.heddleignore`.
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     let path = temp.path().join(".heddleignore");
     assert!(
-        path.is_file(),
-        ".heddleignore must be installed by `heddle init`"
+        !path.exists(),
+        ".heddleignore must not be installed by `heddle init`"
     );
-    let contents = std::fs::read_to_string(&path).unwrap();
-    // Spot-check a few representative patterns from each family —
-    // template-completeness is unit-tested in the module itself.
-    assert!(contents.contains(".DS_Store"));
-    assert!(contents.contains("xcuserdata/"));
-    assert!(contents.contains("*.swp"));
 }
 
 #[test]
 fn init_preserves_existing_heddleignore() {
     // If the operator already curated a `.heddleignore`, init must
-    // NOT clobber it. The default template is a starter, not a
-    // mandate.
+    // NOT clobber it.
     let temp = TempDir::new().unwrap();
     let path = temp.path().join(".heddleignore");
     std::fs::write(&path, "# my custom rules\n*.private\n").unwrap();
@@ -187,10 +179,9 @@ fn init_preserves_existing_heddleignore() {
 }
 
 #[test]
-fn default_heddleignore_suppresses_common_macos_noise() {
-    // Red-commit: after `heddle init`, dropping `.DS_Store` and an
-    // `xcuserdata/` tree into the worktree must NOT show them as
-    // untracked. This is the day-one friction the issue cites.
+fn common_macos_noise_requires_explicit_heddleignore() {
+    // Heddle auto-ignores only `.heddle/`. Common OS/tool noise should stay
+    // visible until the repo explicitly ignores it.
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("real.txt"), "content").unwrap();
@@ -207,12 +198,12 @@ fn default_heddleignore_suppresses_common_macos_noise() {
         .unwrap_or_default();
     let untracked_paths: Vec<&str> = untracked.iter().filter_map(|v| v.as_str()).collect();
     assert!(
-        !untracked_paths.iter().any(|p| p.contains(".DS_Store")),
-        ".DS_Store must be suppressed by the default .heddleignore; saw: {untracked_paths:?}"
+        untracked_paths.iter().any(|p| p.contains(".DS_Store")),
+        ".DS_Store must stay visible until .heddleignore names it; saw: {untracked_paths:?}"
     );
     assert!(
-        !untracked_paths.iter().any(|p| p.contains("xcuserdata")),
-        "xcuserdata/ must be suppressed by the default .heddleignore; saw: {untracked_paths:?}"
+        untracked_paths.iter().any(|p| p.contains("xcuserdata")),
+        "xcuserdata/ must stay visible until .heddleignore names it; saw: {untracked_paths:?}"
     );
     assert!(
         untracked_paths.iter().any(|p| p.contains("real.txt")),

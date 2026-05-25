@@ -2020,7 +2020,7 @@ fn git_overlay_matrix_init_in_git_repo_keeps_git_status_clean() {
 }
 
 #[test]
-fn git_overlay_matrix_init_installs_local_git_excludes_for_heddle_noise() {
+fn git_overlay_matrix_init_excludes_only_heddle_metadata() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -2050,8 +2050,13 @@ fn git_overlay_matrix_init_installs_local_git_excludes_for_heddle_noise() {
     );
 
     let exclude = std::fs::read_to_string(temp.path().join(".git/info/exclude")).unwrap();
+    for pattern in [".heddle/"] {
+        assert!(
+            exclude.lines().any(|line| line.trim() == pattern),
+            "local Git exclude should contain {pattern:?}: {exclude}"
+        );
+    }
     for pattern in [
-        ".heddle/",
         ".heddleignore",
         "__pycache__",
         "*.pyc",
@@ -2060,8 +2065,8 @@ fn git_overlay_matrix_init_installs_local_git_excludes_for_heddle_noise() {
         ".ruff_cache",
     ] {
         assert!(
-            exclude.lines().any(|line| line.trim() == pattern),
-            "local Git exclude should contain {pattern:?}: {exclude}"
+            !exclude.lines().any(|line| line.trim() == pattern),
+            "local Git exclude should not auto-ignore project artifacts with {pattern:?}: {exclude}"
         );
     }
 
@@ -2071,10 +2076,9 @@ fn git_overlay_matrix_init_installs_local_git_excludes_for_heddle_noise() {
         .output()
         .expect("git status should run");
     assert!(after.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&after.stdout).trim(),
-        "",
-        "Heddle default generated noise should not make raw Git look dirty after init"
+    assert!(
+        String::from_utf8_lossy(&after.stdout).contains("src/"),
+        "unignored generated noise should remain visible to raw Git after init"
     );
 }
 
@@ -2207,7 +2211,7 @@ fn git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop() {
 }
 
 #[test]
-fn git_overlay_matrix_commit_ignores_default_python_generated_noise() {
+fn git_overlay_matrix_commit_requires_explicit_ignore_for_python_generated_noise() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -2232,30 +2236,33 @@ fn git_overlay_matrix_commit_ignores_default_python_generated_noise() {
     assert!(status_output.status.success());
     let status: serde_json::Value =
         serde_json::from_slice(&status_output.stdout).expect("status should be JSON");
-    assert_eq!(status["verification"]["status"], "clean");
-    assert_eq!(status["git_index"]["commit_mode"], "none");
-    assert_eq!(
-        status["git_index"]["will_commit"]
-            .as_array()
-            .expect("will_commit array")
-            .len(),
-        0,
-        "default ignored generated noise must not appear in the Git index plan: {status}"
+    let will_commit = status["git_index"]["will_commit"]
+        .as_array()
+        .expect("will_commit array");
+    assert!(
+        will_commit
+            .iter()
+            .any(|path| path == "src/__pycache__/app.cpython-312.pyc"),
+        "unignored generated noise must stay visible in the Git index plan: {status}"
+    );
+    assert!(
+        will_commit.iter().any(|path| path == "src/app.pyc"),
+        "unignored generated noise must stay visible in the Git index plan: {status}"
     );
 
     let output = heddle_output(
-        &["--output", "json", "commit", "-m", "noop"],
+        &["--output", "json", "commit", "-m", "capture generated"],
         Some(temp.path()),
     )
     .expect("commit should run");
     assert!(
-        !output.status.success(),
-        "default ignored generated-only commit should fail"
+        output.status.success(),
+        "unignored generated files should be committed unless the repo explicitly ignores them: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: serde_json::Value =
-        serde_json::from_str(stderr).expect("no-op commit should emit JSON envelope");
-    assert_eq!(envelope["kind"], "nothing_to_commit");
+    let commit: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("commit should emit JSON");
+    assert_eq!(commit["status"], "committed");
 }
 
 #[test]
