@@ -146,8 +146,10 @@ impl ActionFields {
         let Some(action) = action.filter(|action| !action.trim().is_empty()) else {
             return Self::none();
         };
+        let argv = recommended_action_argv(&action)
+            .unwrap_or_else(|err| panic!("invalid recommended action `{action}`: {err}"));
         Self {
-            argv: recommended_action_argv(&action).ok().flatten(),
+            argv,
             template: recommended_action_template(&action),
             action: Some(action),
         }
@@ -2977,24 +2979,31 @@ fn split_recommended_action(action: &str) -> std::result::Result<Vec<String>, St
     let mut args = Vec::new();
     let mut current = String::new();
     let mut chars = action.chars().peekable();
+    let mut in_single_quote = false;
     let mut in_double_quote = false;
 
     while let Some(ch) = chars.next() {
-        match ch {
-            '"' => in_double_quote = !in_double_quote,
-            '\\' if in_double_quote => match chars.next() {
+        match (ch, in_single_quote, in_double_quote) {
+            ('\'', false, false) => in_single_quote = true,
+            ('\'', true, false) => in_single_quote = false,
+            ('"', false, false) => in_double_quote = true,
+            ('"', false, true) => in_double_quote = false,
+            ('\\', false, _) => match chars.next() {
                 Some(next) => current.push(next),
                 None => current.push('\\'),
             },
-            ch if ch.is_whitespace() && !in_double_quote => {
+            (ch, false, false) if ch.is_whitespace() => {
                 if !current.is_empty() {
                     args.push(std::mem::take(&mut current));
                 }
             }
-            ch => current.push(ch),
+            (ch, _, _) => current.push(ch),
         }
     }
 
+    if in_single_quote {
+        return Err("unterminated single quote in recommended action".to_string());
+    }
     if in_double_quote {
         return Err("unterminated double quote in recommended action".to_string());
     }
@@ -3599,6 +3608,28 @@ mod tests {
             err.contains("registered as a placeholder"),
             "error should explain placeholder registration: {err}"
         );
+    }
+
+    #[test]
+    fn action_fields_fail_loudly_for_invalid_recommendations() {
+        let panic = std::panic::catch_unwind(|| ActionFields::from_action("git status"));
+        assert!(
+            panic.is_err(),
+            "ActionFields must not silently erase invalid action sidecars"
+        );
+    }
+
+    #[test]
+    fn recommended_action_parser_supports_shell_quoted_arguments() {
+        let argv = recommended_action_argv("heddle merge 'feature with spaces' --preview")
+            .expect("single-quoted thread action should parse")
+            .expect("concrete action should expose argv");
+        assert_eq!(argv[1..], ["merge", "feature with spaces", "--preview"]);
+
+        let argv = recommended_action_argv("heddle merge 'feature '\\''quoted'\\''' --preview")
+            .expect("shell-quoted apostrophe should parse")
+            .expect("concrete action should expose argv");
+        assert_eq!(argv[1..], ["merge", "feature 'quoted'", "--preview"]);
     }
 
     #[test]

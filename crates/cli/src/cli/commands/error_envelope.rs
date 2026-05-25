@@ -231,7 +231,8 @@ impl ErrorClassification {
 }
 
 fn command_argv(command: &str) -> Option<Vec<String>> {
-    recommended_action_argv(command).ok().flatten()
+    recommended_action_argv(command)
+        .unwrap_or_else(|err| panic!("invalid recovery command `{command}`: {err}"))
 }
 
 fn command_template(command: &str) -> Option<ActionTemplate> {
