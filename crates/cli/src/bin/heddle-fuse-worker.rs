@@ -4,11 +4,18 @@
 //! See `crates/mount/src/worker.rs` for the architecture; this file
 //! is the thinnest possible `main` shim — argv → [`mount::worker::run_worker`].
 //!
-//! Linux-only. The crate's `Cargo.toml` gates the binary behind
-//! `required-features = ["fuse"]`, and the file itself is
-//! `cfg(target_os = "linux")` so non-Linux builds skip it cleanly.
+//! Co-located in the CLI crate so `cargo install --path crates/cli`
+//! (and `cargo install heddle` from crates.io) ships the worker
+//! binary alongside `heddle` itself. Without that co-location the
+//! sibling lookup in `mount::worker::default_worker_binary` finds
+//! nothing on a standard install and the mount lifecycle silently
+//! falls back to NFS (heddle#190 r4 / Codex PR #225 P1).
+//!
+//! Linux-only, gated behind the CLI's `mount` feature (which
+//! propagates to `mount?/fuse`). The file is `cfg`-gated so
+//! non-Linux or mount-less builds skip it cleanly.
 
-#![cfg(all(target_os = "linux", feature = "fuse"))]
+#![cfg(all(target_os = "linux", feature = "mount"))]
 
 use std::process::ExitCode;
 

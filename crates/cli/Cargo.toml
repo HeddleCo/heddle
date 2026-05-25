@@ -215,6 +215,19 @@ uuid.workspace = true
 name = "heddle"
 path = "src/main.rs"
 
+# Linux-only crash-isolation worker. Co-located in the CLI package
+# so `cargo install --path crates/cli` (and `cargo install heddle`
+# from crates.io) installs both `heddle` and `heddle-fuse-worker`
+# into the same bin dir — the sibling-binary lookup in
+# `mount::worker::default_worker_binary` only resolves when the two
+# ship together. The file itself is `cfg(target_os = "linux",
+# feature = "mount")`, so non-Linux and mount-less builds compile to
+# nothing here.
+[[bin]]
+name = "heddle-fuse-worker"
+path = "src/bin/heddle-fuse-worker.rs"
+required-features = ["mount"]
+
 [lib]
 name = "cli"
 path = "src/lib.rs"

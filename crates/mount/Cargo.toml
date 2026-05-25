@@ -152,23 +152,17 @@ nfs = ["dep:nfsserve", "dep:tokio", "dep:async-trait"]
 # because the build-script no-ops on non-macOS targets.
 cbindgen = { version = "0.29", default-features = false, optional = true }
 
-# Linux-only crash-isolation binary. `heddle-fuse-worker` is the
-# subprocess the CLI's mount lifecycle (and the future daemon-side
-# supervisor; see heddle#88 §4) `Command::new(...).spawn()`s on
-# Linux to drive a FUSE session out-of-process. A panic in a FUSE
-# callback kills only the worker — the parent observes the exit on
-# the IPC socket, the kernel auto-unmounts when the worker's
-# `/dev/fuse` fd closes, and the supervisor's heap stays intact.
-#
-# Gated behind `--features fuse` because the worker needs `fuser`
-# at compile-time (the binary file itself is also `cfg`-gated to
-# Linux). The compile-time gate plus the `required-features` line
-# means a `cargo build` on macOS/Windows skips the binary cleanly
-# rather than emitting a stub.
-[[bin]]
-name = "heddle-fuse-worker"
-path = "src/bin/heddle-fuse-worker.rs"
-required-features = ["fuse"]
+# The `heddle-fuse-worker` binary lives in `crates/cli` (see
+# `crates/cli/Cargo.toml`'s `[[bin]]` for it). The mount crate exposes
+# the worker entry points (`worker::run_worker`, `worker::WorkerArgs`)
+# as a public API; the binary in cli is the thin `main` shim. This
+# split is deliberate — `cargo install --path crates/cli` (the
+# documented install flow) needs to drop both `heddle` and
+# `heddle-fuse-worker` into the same bin dir for the sibling-binary
+# lookup in `worker::default_worker_binary` to resolve. Registering
+# the bin only in cli (rather than here) is what makes that work
+# without changing the install command (heddle#190 r4 / Codex PR
+# #225 P1).
 
 [lib]
 path = "src/lib.rs"

@@ -31,12 +31,31 @@ use mount::worker::{Supervisor, PANIC_ON_INIT_ENV, STOP_GRACE_ENV};
 use repo::Repository;
 use tempfile::TempDir;
 
-/// Path to the `heddle-fuse-worker` artifact `cargo` built for the
-/// integration test. `CARGO_BIN_EXE_heddle-fuse-worker` is set by
-/// the cargo test harness whenever a `[[bin]]` lives in the same
-/// crate as the integration test.
+/// Path to the `heddle-fuse-worker` artifact `cargo` built. The
+/// binary lives in the `heddle-cli` crate (see
+/// `crates/cli/Cargo.toml`'s `[[bin]]`) so it ships alongside
+/// `heddle` from a standard `cargo install --path crates/cli`.
+/// That means `CARGO_BIN_EXE_heddle-fuse-worker` is **not** set for
+/// integration tests in this crate (cargo only sets it for `[[bin]]`s
+/// declared in the same package). Resolve at runtime by walking up
+/// from `current_exe` — same pattern `benches/fuse_worker_ipc.rs`
+/// uses. `HEDDLE_FUSE_WORKER_BIN` overrides the lookup for
+/// out-of-tree test runs.
 fn worker_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_heddle-fuse-worker"))
+    if let Ok(p) = std::env::var("HEDDLE_FUSE_WORKER_BIN") {
+        return PathBuf::from(p);
+    }
+    // `cargo test` puts the integration-test binary at
+    // `<target>/<profile>/deps/<name>-<hash>`. The sibling worker
+    // built by `cargo test -p heddle-cli --features mount` (or any
+    // workspace build that activates the cli's `mount` feature)
+    // lands at `<target>/<profile>/heddle-fuse-worker`.
+    let exe = std::env::current_exe().expect("locate test binary");
+    let target_profile = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("test binary has grandparent");
+    target_profile.join("heddle-fuse-worker")
 }
 
 fn build_fixture() -> (TempDir, Repository) {
