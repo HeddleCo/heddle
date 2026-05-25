@@ -198,6 +198,7 @@ pub fn schema_for_verb(verb: &str) -> Option<Value> {
             .flatten()
     })?;
     add_op_id_replay_fields_if_supported(verb, &mut schema);
+    add_json_discriminator_if_advertised(verb, &mut schema);
     Some(schema)
 }
 
@@ -275,6 +276,43 @@ fn add_op_id_replay_fields_if_supported(verb: &str, schema: &mut Value) {
                 ]
             })
         });
+}
+
+fn add_json_discriminator_if_advertised(verb: &str, schema: &mut Value) {
+    let Some(discriminator) = command_catalog::command_json_discriminator_for_schema_verb(verb)
+    else {
+        return;
+    };
+
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    let properties = object
+        .entry("properties".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(properties) = properties.as_object_mut() else {
+        return;
+    };
+    properties.insert(
+        discriminator.field.clone(),
+        serde_json::json!({
+            "type": "string",
+            "enum": [discriminator.value],
+        }),
+    );
+
+    let required = object
+        .entry("required".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(required) = required.as_array_mut() else {
+        return;
+    };
+    if !required
+        .iter()
+        .any(|field| field.as_str() == Some(discriminator.field.as_str()))
+    {
+        required.push(Value::String(discriminator.field));
+    }
 }
 
 fn schema_verb_supports_op_id(verb: &str) -> bool {
@@ -2783,6 +2821,48 @@ mod tests {
             assert!(
                 properties.contains_key(*required),
                 "status schema missing property '{required}'"
+            );
+        }
+    }
+
+    #[test]
+    fn advertised_json_discriminators_are_reflected_in_schemas() {
+        for discriminator in command_catalog::command_json_discriminators() {
+            let Some(schema_verb) = discriminator.schema_verb.as_deref() else {
+                continue;
+            };
+            let schema =
+                schema_for_verb(schema_verb).unwrap_or_else(|| panic!("{schema_verb} schema"));
+            let properties = schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .unwrap_or_else(|| panic!("{schema_verb} schema has properties"));
+            let property = properties.get(&discriminator.field).unwrap_or_else(|| {
+                panic!(
+                    "{schema_verb} schema missing discriminator field `{}`",
+                    discriminator.field
+                )
+            });
+            let enum_values = property
+                .get("enum")
+                .and_then(|value| value.as_array())
+                .map(Vec::as_slice);
+            assert_eq!(
+                enum_values,
+                Some([Value::String(discriminator.value.clone())].as_slice()),
+                "{schema_verb} schema must narrow `{}` to `{}`",
+                discriminator.field,
+                discriminator.value
+            );
+
+            let required = schema
+                .get("required")
+                .and_then(|value| value.as_array())
+                .unwrap_or_else(|| panic!("{schema_verb} schema has required fields"));
+            assert!(
+                required.contains(&Value::String(discriminator.field.clone())),
+                "{schema_verb} schema must require discriminator field `{}`",
+                discriminator.field
             );
         }
     }
