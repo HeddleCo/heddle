@@ -75,7 +75,7 @@ use objects::{
     lock::{RepoLock, RepositoryLockExt},
     object::{Attribution, ChangeId, ContentHash, Principal, State, Tree},
     store::{FsStore, ObjectStore, ShallowInfo},
-    worktree::WorktreeStatus,
+    worktree::{WorktreeStatus, should_ignore as should_ignore_path},
 };
 use oplog::{OpLog, OpLogBackend};
 pub use refs::RefSummaryIndexInspection;
@@ -1187,8 +1187,9 @@ impl Repository {
             }
         }
 
+        let ignore_patterns = self.ignore_patterns()?;
         let tracked_paths: BTreeSet<&str> = index_entries.keys().map(String::as_str).collect();
-        for path in git_overlay_untracked_paths(&self.root, &tracked_paths)? {
+        for path in git_overlay_untracked_paths(&self.root, &tracked_paths, &ignore_patterns)? {
             added.insert(PathBuf::from(path));
         }
 
@@ -2033,14 +2034,26 @@ fn git_overlay_worktree_entry_state(
     })
 }
 
-fn git_overlay_untracked_paths(root: &Path, tracked_paths: &BTreeSet<&str>) -> Result<Vec<String>> {
+fn git_overlay_untracked_paths(
+    root: &Path,
+    tracked_paths: &BTreeSet<&str>,
+    ignore_patterns: &[String],
+) -> Result<Vec<String>> {
     let mut paths = Vec::new();
+    let filter_root = root.to_path_buf();
+    let filter_ignore_patterns = ignore_patterns.to_vec();
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
         .git_exclude(true)
         .git_global(true)
-        .filter_entry(|entry| !is_git_or_heddle_dir(entry.path()))
+        .filter_entry(move |entry| {
+            should_descend_for_git_overlay_status(
+                &filter_root,
+                entry.path(),
+                &filter_ignore_patterns,
+            )
+        })
         .build();
     for entry in walker {
         let entry = entry.map_err(|error| HeddleError::Config(error.to_string()))?;
@@ -2049,11 +2062,31 @@ fn git_overlay_untracked_paths(root: &Path, tracked_paths: &BTreeSet<&str>) -> R
             continue;
         }
         let path = repo_relative_git_path(root, entry.path())?;
-        if !tracked_paths.contains(path.as_str()) && !ignored_git_overlay_status_path(&path) {
+        if !tracked_paths.contains(path.as_str())
+            && !ignored_git_overlay_status_path(&path)
+            && !should_ignore_path(Path::new(&path), ignore_patterns)
+        {
             paths.push(path);
         }
     }
     Ok(paths)
+}
+
+fn should_descend_for_git_overlay_status(
+    root: &Path,
+    path: &Path,
+    ignore_patterns: &[String],
+) -> bool {
+    if is_git_or_heddle_dir(path) {
+        return false;
+    }
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    if relative.as_os_str().is_empty() {
+        return true;
+    }
+    !should_ignore_path(relative, ignore_patterns)
 }
 
 fn is_git_or_heddle_dir(path: &Path) -> bool {

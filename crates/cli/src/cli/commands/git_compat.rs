@@ -10,8 +10,9 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use gix::bstr::{BStr, ByteSlice};
 use gix_index::entry::{Mode, Stage};
-use objects::object::{
-    Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, Tree, TreeEntry,
+use objects::{
+    object::{Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, Tree, TreeEntry},
+    worktree::should_ignore as should_ignore_path,
 };
 use oplog::{OpBatch, OpRecord};
 use repo::{Repository, RepositoryCapability};
@@ -519,6 +520,16 @@ pub(crate) fn git_index_plan_for_root(root: &Path) -> Result<Option<GitIndexPlan
     )))
 }
 
+pub(crate) fn git_index_plan_for_repo(repo: &Repository) -> Result<Option<GitIndexPlan>> {
+    if gix::discover(repo.root()).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(GitIndexPlan::from_intent(
+        &git_index_intent(repo)?,
+        false,
+    )))
+}
+
 fn split_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
     let mut unstaged_paths = Vec::new();
     let mut untracked_paths = Vec::new();
@@ -533,10 +544,19 @@ fn split_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
 }
 
 fn git_index_intent(repo: &Repository) -> Result<GitIndexIntent> {
-    git_index_intent_for_root(repo.root())
+    let ignore_patterns = repo.ignore_patterns()?;
+    git_index_intent_for_root_with_ignore(repo.root(), &ignore_patterns)
 }
 
 pub(crate) fn git_index_intent_for_root(root: &Path) -> Result<GitIndexIntent> {
+    let ignore_patterns = git_ignore_patterns_for_root(root)?;
+    git_index_intent_for_root_with_ignore(root, &ignore_patterns)
+}
+
+fn git_index_intent_for_root_with_ignore(
+    root: &Path,
+    ignore_patterns: &[String],
+) -> Result<GitIndexIntent> {
     let git = gix::discover(root).context("failed to inspect Git index before commit")?;
     let index = git
         .index_or_empty()
@@ -569,11 +589,37 @@ pub(crate) fn git_index_intent_for_root(root: &Path) -> Result<GitIndexIntent> {
             intent.extra_paths.push(format!("unstaged: {path}"));
         }
     }
-    for path in untracked_worktree_paths(root, &tracked_paths)? {
+    for path in untracked_worktree_paths(root, &tracked_paths, ignore_patterns)? {
         intent.extra_paths.push(format!("untracked: {path}"));
     }
 
     Ok(intent)
+}
+
+fn git_ignore_patterns_for_root(root: &Path) -> Result<Vec<String>> {
+    let git = gix::discover(root).context("failed to inspect Git ignore files before commit")?;
+    let mut patterns = Vec::new();
+    append_ignore_file_patterns(&mut patterns, &root.join(".gitignore"))?;
+    append_ignore_file_patterns(&mut patterns, &git.git_dir().join("info").join("exclude"))?;
+    Ok(patterns)
+}
+
+fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read ignore file {}", path.display()))?;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !patterns.iter().any(|pattern| pattern == trimmed) {
+            patterns.push(trimmed.to_string());
+        }
+    }
+    Ok(())
 }
 
 fn git_index_tree(repo: &Repository) -> Result<Tree> {
@@ -822,11 +868,17 @@ fn symlink_target_bytes(target: &Path) -> Vec<u8> {
     }
 }
 
-fn untracked_worktree_paths(root: &Path, tracked_paths: &BTreeSet<String>) -> Result<Vec<String>> {
+fn untracked_worktree_paths(
+    root: &Path,
+    tracked_paths: &BTreeSet<String>,
+    ignore_patterns: &[String],
+) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
-        .filter_entry(|entry| !is_git_or_heddle_dir(entry.path()))
+        .filter_entry(|entry| {
+            should_descend_for_git_index_intent(root, entry.path(), ignore_patterns)
+        })
     {
         let entry = entry.context("failed to inspect worktree before commit")?;
         let file_type = entry.file_type();
@@ -839,6 +891,23 @@ fn untracked_worktree_paths(root: &Path, tracked_paths: &BTreeSet<String>) -> Re
         }
     }
     Ok(paths)
+}
+
+fn should_descend_for_git_index_intent(
+    root: &Path,
+    path: &Path,
+    ignore_patterns: &[String],
+) -> bool {
+    if is_git_or_heddle_dir(path) {
+        return false;
+    }
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    if relative.as_os_str().is_empty() {
+        return true;
+    }
+    !should_ignore_path(relative, ignore_patterns)
 }
 
 fn is_git_or_heddle_dir(path: &Path) -> bool {
@@ -1153,11 +1222,26 @@ pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
             cli,
             ThreadCommands::Switch {
                 name: args.target,
-                print_cd_path: false,
+                print_cd_path: args.print_cd_path,
                 force: args.force,
             },
         )
         .await;
+    }
+    if args.print_cd_path {
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "switch_print_cd_path_requires_thread",
+            "`--print-cd-path` only applies when switching to a thread",
+            "Use `heddle switch --print-cd-path <thread>` for a materialized thread, or omit `--print-cd-path` when checking out a state.",
+            "the target did not resolve to a Heddle thread with a checkout path",
+            "checking out a state would move the worktree but could not report a thread checkout path",
+            "Heddle did not move HEAD or write the worktree",
+            "heddle switch <thread> --print-cd-path",
+            vec![
+                "heddle switch <thread> --print-cd-path".to_string(),
+                "heddle checkout <state>".to_string(),
+            ],
+        )));
     }
     super::goto::cmd_goto(cli, args.target, args.force)
 }

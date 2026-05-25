@@ -210,6 +210,64 @@ fn switch_dash_c_guides_to_heddle_thread_flow() {
 }
 
 #[test]
+fn switch_print_cd_path_alias_matches_thread_switch() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+
+    let thread = "alias-print-cd";
+    let checkout = temp.path().parent().unwrap().join("alias-print-cd-path");
+    let checkout_str = checkout.to_str().expect("checkout path should be utf-8");
+    heddle(
+        &["start", thread, "--path", checkout_str],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    let direct = heddle_output(
+        &["thread", "switch", thread, "--print-cd-path"],
+        Some(temp.path()),
+    )
+    .expect("invoke thread switch --print-cd-path");
+    assert!(
+        direct.status.success(),
+        "thread switch --print-cd-path should succeed"
+    );
+    let expected = std::str::from_utf8(&direct.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let alias = heddle_output(&["switch", "--print-cd-path", thread], Some(temp.path()))
+        .expect("invoke switch --print-cd-path");
+    assert!(
+        alias.status.success(),
+        "switch --print-cd-path should behave like thread switch; stderr={}",
+        std::str::from_utf8(&alias.stderr).unwrap_or("")
+    );
+    let stdout = std::str::from_utf8(&alias.stdout).unwrap();
+    assert_eq!(
+        stdout.trim(),
+        expected,
+        "switch --print-cd-path should print the thread checkout path"
+    );
+    assert_eq!(
+        stdout.trim().lines().count(),
+        1,
+        "switch --print-cd-path should only print the path"
+    );
+    assert!(
+        !stdout.contains("unexpected argument"),
+        "alias should parse --print-cd-path instead of surfacing clap text: {stdout}"
+    );
+
+    if checkout.exists() {
+        std::fs::remove_dir_all(checkout).unwrap();
+    }
+}
+
+#[test]
 fn log_help_examples_use_singular_path_flag() {
     let help = heddle(&["log", "--help"], None).expect("log help should render");
     assert!(

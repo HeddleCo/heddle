@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use gix::bstr::ByteSlice;
 use objects::{
-    object::{ChangeId, State},
+    object::{ChangeId, State, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, current_boot_id},
 };
 use refs::{Head, RefExpectation, RefUpdate};
@@ -48,7 +48,10 @@ use super::{
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    cli::{Cli, ThreadListArgs, ThreadStartArgs, WorkspaceModeArg, should_output_json, style},
+    cli::{
+        Cli, ThreadListArgs, ThreadStartArgs, WorkspaceModeArg, should_output_json, style,
+        worktree_status_options,
+    },
     config::{UserConfig, UserThreadWorkspaceMode},
 };
 
@@ -628,6 +631,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
                 super::thread_landing::merge_preview_command(&summary.name);
         }
         if summary.is_current {
+            enrich_current_summary_with_dirty_paths(repo, &mut summary)?;
             summary.operation = operation.clone();
             summary.remote_tracking = remote_tracking.clone();
             summary.recommended_action = current_thread_next_action(
@@ -695,6 +699,35 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
 
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(summaries)
+}
+
+fn enrich_current_summary_with_dirty_paths(
+    repo: &Repository,
+    summary: &mut ThreadSummary,
+) -> Result<()> {
+    let baseline = match repo.current_state()? {
+        Some(state) => repo.require_tree(&state.tree)?,
+        None => Tree::new(),
+    };
+    let status = repo.compare_worktree_cached_with_options(
+        &baseline,
+        &worktree_status_options(Some(repo.config())),
+    )?;
+    let mut paths = summary
+        .changed_paths
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    paths.extend(
+        status
+            .modified
+            .iter()
+            .chain(status.added.iter())
+            .chain(status.deleted.iter())
+            .map(|path| path.to_string_lossy().to_string()),
+    );
+    summary.changed_paths = paths.into_iter().collect();
+    Ok(())
 }
 
 pub(crate) fn suppress_thread_actions_while_trust_blocked(
@@ -1247,6 +1280,9 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         current_summary.and_then(|summary| summary.target_thread.as_deref()),
         current_summary.and_then(|summary| summary.parent_thread.as_deref()),
     );
+    let current = current_summary
+        .map(|summary| summary.name.clone())
+        .or(current);
     let output = ThreadListOutput {
         output_kind: "thread_list",
         repository_capability: repo.capability_label().to_string(),

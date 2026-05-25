@@ -265,6 +265,9 @@ pub(crate) fn build_workspace_output(cli: &Cli) -> Result<WorkspaceSummaryOutput
         current_summary.and_then(|summary| summary.parent_thread.as_deref()),
     );
     let recommended_action_fields = ActionFields::from_action(&recommended_action);
+    let current_thread = current_summary
+        .map(|summary| summary.name.clone())
+        .or(current_thread);
 
     Ok(WorkspaceSummaryOutput {
         output_kind: "workspace_summary",

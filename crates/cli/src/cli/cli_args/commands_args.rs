@@ -320,6 +320,10 @@ pub struct SwitchArgs {
     /// Discard uncommitted changes when checking out a state.
     #[arg(short, long)]
     pub force: bool,
+
+    /// Print only the target thread's checkout path on stdout.
+    #[arg(long, hide_short_help = true)]
+    pub print_cd_path: bool,
 }
 
 // `CheckpointArgs` lives in `commands_advanced.rs` (canonical
