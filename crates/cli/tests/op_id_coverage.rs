@@ -1,20 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Every state-changing dispatch arm in [`crates/cli/src/main.rs`] must
-//! call [`cli::operation_id::resolve_operation_id`].
+//! Op-id validation must be driven once from the command contract before
+//! dispatch reaches individual command arms.
 //!
-//! The dedup contract is wire-only without it: an agent passing
-//! `--op-id` to a verb whose arm forgets to plumb the call would silently
-//! lose idempotency. CI fails this test when a new verb is introduced
-//! without explicit classification.
+//! The dedup contract is wire-only without it: an agent passing `--op-id`
+//! needs replay/reservation before dispatch and a final format check in
+//! the child process before any command body starts work. CI fails this
+//! test if validation drifts back into per-arm calls.
 //!
-//! The check is intentionally text-based (no `syn` dep): every match arm
-//! `Commands::<Variant>(...) => { ... }` is parsed by a small balanced-
-//! brace scanner and the body is grep-asserted for the canonical helper
-//! name. Read-only verbs are an explicit allowlist below; everything else
-//! is treated as state-changing. Adding a verb to either list is a
-//! deliberate decision — and one a reviewer can spot at a glance.
+//! The check is intentionally text-based (no `syn` dep): the dispatch
+//! match is parsed by a small balanced-brace scanner and grep-asserted
+//! for the canonical helper name.
 
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
 
 use cli::{
     cli::commands::{build_command_catalog, command_persists_op_id, observe_only_root_commands},
@@ -22,7 +19,7 @@ use cli::{
 };
 
 #[test]
-fn every_state_changing_arm_resolves_op_id() {
+fn op_id_validation_is_centralized_before_dispatch() {
     let main_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("main.rs");
@@ -36,39 +33,37 @@ fn every_state_changing_arm_resolves_op_id() {
         main_rs.display()
     );
 
-    let read_only = read_only_variants_from_contract_table();
-
-    let mut missing = Vec::new();
-    let mut classified = BTreeSet::new();
-    for arm in &arms {
-        classified.insert(arm.variant.as_str());
-        if read_only.contains(&arm.variant) {
-            continue;
-        }
-        if !arm.body.contains("resolve_operation_id(") {
-            missing.push(arm.variant.clone());
-        }
-    }
-
-    assert!(
-        missing.is_empty(),
-        "the following Commands variants are state-changing but their arm in main.rs \
-         doesn't call `resolve_operation_id(&cli)?`: {missing:?}.\n\
-         Either wire the call (add `resolve_operation_id(&cli)?;` at the top of the \
-         arm body) or, if the verb is genuinely read-only, mark its root command \
-         observe_only in the command contract table."
+    let resolver_call = "resolve_operation_id(&cli)?";
+    let resolver_count = source.matches(resolver_call).count();
+    assert_eq!(
+        resolver_count, 1,
+        "`{resolver_call}` must be called exactly once from the command-contract gate before dispatch"
     );
 
-    // Catch command-table entries whose enum spelling drifted from the
-    // dispatch surface. The table is the source of truth for read-only
-    // classification; this check keeps the table wired to runtime arms.
-    for ro in &read_only {
-        assert!(
-            classified.contains(ro.as_str()),
-            "the command contract table marks `{ro}` read-only, but no Commands::{ro} \
-             arm was found in main.rs — update the contract table or command spelling."
-        );
+    let idempotency_gate = source
+        .find("match run_local_idempotency_if_requested")
+        .expect("main.rs must run the local op-id idempotency gate");
+    let centralized_resolver = source
+        .find(resolver_call)
+        .expect("main.rs must centrally validate op-id before dispatch");
+    let dispatch = source
+        .find("let result = match &cli.command")
+        .expect("main.rs must contain command dispatch");
+    assert!(
+        idempotency_gate < centralized_resolver && centralized_resolver < dispatch,
+        "`{resolver_call}` must run after replay/reservation and before command dispatch"
+    );
+
+    let mut offenders = Vec::new();
+    for arm in &arms {
+        if arm.body.contains("resolve_operation_id(") {
+            offenders.push(arm.variant.clone());
+        }
     }
+    assert!(
+        offenders.is_empty(),
+        "op-id validation must stay centralized; remove arm-level resolver calls from: {offenders:?}"
+    );
 }
 
 #[test]
@@ -146,8 +141,13 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
     }
 
     for mutating in [
+        "init",
+        "adopt",
+        "clone",
         "thread switch",
         "thread drop",
+        "bridge git init",
+        "bridge git export",
         "bridge git import",
         "context set",
         "review sign",
@@ -167,25 +167,6 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
             "runtime op-id support for `{mutating}` must come from the exact command contract"
         );
     }
-}
-
-fn read_only_variants_from_contract_table() -> BTreeSet<String> {
-    observe_only_root_commands()
-        .into_iter()
-        .map(root_command_to_variant)
-        .collect()
-}
-
-fn root_command_to_variant(root: &str) -> String {
-    root.split('-')
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
-                None => String::new(),
-            }
-        })
-        .collect()
 }
 
 #[derive(Debug)]

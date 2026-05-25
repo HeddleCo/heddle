@@ -10,8 +10,8 @@
 //! This module provides a single guard that callers invoke before mutating the
 //! worktree. It mirrors `git checkout`'s default of protecting the working copy
 //! and produces a precise error message that points the user at
-//! `heddle capture -m "..."` or `heddle stash push -m "..."` to preserve work
-//! first.
+//! `heddle commit -m "..."`, `heddle capture -m "..."`, or
+//! `heddle stash push -m "..."` to preserve work first.
 
 use anyhow::{Result, anyhow};
 use repo::{Repository, WorktreeStatusDetailed};
@@ -49,7 +49,7 @@ pub(crate) fn ensure_worktree_clean(repo: &Repository, action: &str) -> Result<(
     Err(anyhow!(dirty_worktree_advice(
         action,
         &detailed,
-        "no snapshot has been written for these paths",
+        "repository state and worktree files were left unchanged; no snapshot has been written for these paths",
     )))
 }
 
@@ -66,8 +66,17 @@ fn dirty_paths(detailed: &WorktreeStatusDetailed) -> Vec<String> {
     detailed
         .modified
         .iter()
-        .chain(detailed.deleted.iter())
-        .chain(untracked.iter())
-        .map(|path| path.display().to_string())
+        .map(|path| format!("modified: {}", path.display()))
+        .chain(
+            detailed
+                .deleted
+                .iter()
+                .map(|path| format!("deleted: {}", path.display())),
+        )
+        .chain(
+            untracked
+                .iter()
+                .map(|path| format!("untracked: {}", path.display())),
+        )
         .collect()
 }

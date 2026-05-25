@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread command implementation.
 
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
@@ -16,7 +19,7 @@ use tokio::time::{Duration, sleep};
 
 use super::{
     advice::RecoveryAdvice,
-    git_overlay_health::{PlainGitTrustProbe, build_plain_git_trust_probe},
+    git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     mount_lifecycle,
     operator_core::OperatorCommandOutput,
     operator_loop::primary_next_action,
@@ -67,6 +70,8 @@ pub(crate) fn thread_manager(repo: &Repository) -> ThreadManager {
 pub(crate) fn resolve_thread_name_or_current(
     repo: &Repository,
     name: Option<String>,
+    command: &'static str,
+    primary_command: impl Into<String>,
 ) -> Result<String> {
     if let Some(name) = name {
         return Ok(name);
@@ -77,9 +82,11 @@ pub(crate) fn resolve_thread_name_or_current(
     if let Some(thread) = current_thread(repo)? {
         return Ok(thread.thread);
     }
-    Err(anyhow!(
-        "no thread specified and no current thread; pass <THREAD> explicitly"
-    ))
+    Err(anyhow!(RecoveryAdvice::no_current_thread(
+        command,
+        Some("<THREAD>"),
+        primary_command,
+    )))
 }
 
 pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
@@ -129,12 +136,16 @@ pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
 }
 
 pub(crate) fn load_thread(repo: &Repository, thread_id: &str) -> Result<Thread> {
-    thread_manager(repo)
-        .load(thread_id)?
-        .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "load thread")))
+    match thread_manager(repo).load(thread_id)? {
+        Some(thread) => Ok(thread),
+        None if repo.refs().get_thread(thread_id)?.is_some() => Err(anyhow!(
+            imported_git_ref_not_managed_thread_advice(thread_id)
+        )),
+        None => Err(anyhow!(thread_not_found_advice(thread_id, "load thread"))),
+    }
 }
 
-fn render_plain_git_thread_list(cli: &Cli, probe: &PlainGitTrustProbe) -> Result<()> {
+fn render_plain_git_thread_list(cli: &Cli, probe: &PlainGitVerificationProbe) -> Result<()> {
     if should_output_json(cli, None) {
         println!(
             "{}",
@@ -144,31 +155,30 @@ fn render_plain_git_thread_list(cli: &Cli, probe: &PlainGitTrustProbe) -> Result
                 "hosted_enabled": false,
                 "threads": [],
                 "current": null,
-                "trust": &probe.trust,
+                "verification": &probe.trust,
                 "recommended_action": &probe.trust.recommended_action,
+                "recommended_action_argv": &probe.trust.recommended_action_argv,
                 "recovery_commands": &probe.trust.recovery_commands,
+                "recovery_command_argv": &probe.trust.recovery_command_argv,
             }))?
         );
     } else {
-        println!("Git repo, Heddle not initialized");
+        println!("Git repo, Heddle not adopted");
         if let Some(branch) = &probe.git_branch {
             println!("Git branch: {}", style::bold(branch));
         }
         println!("Threads: none");
-        println!("Next step: {}", style::bold("heddle init"));
-        if let Some(branch) = &probe.git_branch {
-            println!(
-                "Then: {}",
-                style::bold(&format!("heddle bridge git import --ref {branch}"))
-            );
-        }
+        println!(
+            "Next step: {}",
+            style::bold(probe.trust.recommended_action.as_str())
+        );
     }
     Ok(())
 }
 
 fn render_plain_git_thread_show(
     cli: &Cli,
-    probe: &PlainGitTrustProbe,
+    probe: &PlainGitVerificationProbe,
     requested: Option<&str>,
 ) -> Result<()> {
     if should_output_json(cli, None) {
@@ -179,24 +189,23 @@ fn render_plain_git_thread_show(
                 "storage_model": "git",
                 "requested_thread": requested,
                 "thread": null,
-                "trust": &probe.trust,
+                "verification": &probe.trust,
                 "recommended_action": &probe.trust.recommended_action,
+                "recommended_action_argv": &probe.trust.recommended_action_argv,
                 "recovery_commands": &probe.trust.recovery_commands,
+                "recovery_command_argv": &probe.trust.recovery_command_argv,
             }))?
         );
     } else {
-        println!("Git repo, Heddle not initialized");
+        println!("Git repo, Heddle not adopted");
         if let Some(name) = requested {
             println!("Thread: {}", style::bold(name));
         }
-        println!("No Heddle thread is available until this Git repo is initialized and imported.");
-        println!("Next step: {}", style::bold("heddle init"));
-        if let Some(branch) = &probe.git_branch {
-            println!(
-                "Then: {}",
-                style::bold(&format!("heddle bridge git import --ref {branch}"))
-            );
-        }
+        println!("No Heddle thread is available until this Git repo is adopted.");
+        println!(
+            "Next step: {}",
+            style::bold(probe.trust.recommended_action.as_str())
+        );
     }
     Ok(())
 }
@@ -212,12 +221,12 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
     let repo_path = cli.repo.as_ref().unwrap_or(&current_dir);
     match &command {
         ThreadCommands::List(_) => {
-            if let Some(probe) = build_plain_git_trust_probe(repo_path)? {
+            if let Some(probe) = build_plain_git_verification_probe(repo_path)? {
                 return render_plain_git_thread_list(cli, &probe);
             }
         }
         ThreadCommands::Show(args) if !args.watch => {
-            if let Some(probe) = build_plain_git_trust_probe(repo_path)? {
+            if let Some(probe) = build_plain_git_verification_probe(repo_path)? {
                 return render_plain_git_thread_show(cli, &probe, args.thread.as_deref());
             }
         }
@@ -242,7 +251,12 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         ThreadCommands::Cleanup(args) => cmd_thread_cleanup(cli, &repo, args),
         ThreadCommands::Show(args) => {
             if args.watch {
-                let thread = resolve_thread_name_or_current(&repo, args.thread)?;
+                let thread = resolve_thread_name_or_current(
+                    &repo,
+                    args.thread,
+                    "thread show",
+                    "heddle thread show <THREAD>",
+                )?;
                 watch_thread_show(
                     cli,
                     &repo,
@@ -256,12 +270,22 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
             }
         }
         ThreadCommands::Captures(args) => {
-            let thread = resolve_thread_name_or_current(&repo, args.thread)?;
+            let thread = resolve_thread_name_or_current(
+                &repo,
+                args.thread,
+                "thread captures",
+                "heddle thread captures <THREAD>",
+            )?;
             super::thread::cmd_thread_captures(cli, &repo, &thread, args.limit)
         }
         ThreadCommands::Rename(args) => cmd_thread_rename(cli, &repo, args.old, args.new),
         ThreadCommands::Refresh(args) => {
-            let thread = resolve_thread_name_or_current(&repo, args.thread)?;
+            let thread = resolve_thread_name_or_current(
+                &repo,
+                args.thread,
+                "thread refresh",
+                "heddle thread refresh <THREAD>",
+            )?;
             cmd_thread_refresh(cli, &repo, &thread)
         }
         ThreadCommands::Move(args) => {
@@ -355,7 +379,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     let manager = thread_manager(repo);
     let mut thread = manager
         .load(thread_id)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread_id))?;
+        .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "refresh thread")))?;
     let target_thread = thread
         .target_thread
         .clone()
@@ -366,7 +390,42 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
         return Ok(thread);
     }
 
-    let thread_repo = Repository::open(&thread.execution_path)?;
+    let opened_thread_repo;
+    let current_lane = repo.current_lane()?;
+    let thread_repo = if thread.execution_path.as_os_str().is_empty() {
+        if current_lane.as_deref() == Some(thread.thread.as_str()) {
+            repo
+        } else {
+            return Err(anyhow!(thread_refresh_requires_checkout_advice(
+                &thread.thread,
+                current_lane.as_deref(),
+            )));
+        }
+    } else {
+        opened_thread_repo = Repository::open(&thread.execution_path).map_err(|error| {
+            anyhow!(thread_refresh_checkout_unavailable_advice(
+                &thread.thread,
+                &thread.execution_path,
+                error
+            ))
+        })?;
+        &opened_thread_repo
+    };
+    if let Some(ThreeWayMergeRefresh::Conflicted {
+        tree,
+        paths,
+        ours,
+        theirs,
+        base,
+    }) = preflight_three_way_refresh_conflict(repo, thread_repo, &thread, &target_thread)?
+    {
+        persist_refresh_conflict_state(thread_repo, tree, ours, theirs, base, paths.clone())?;
+        return Err(anyhow!(thread_refresh_conflicted_advice(
+            thread_id,
+            &paths,
+            thread_repo.root(),
+        )));
+    }
     let rebase_state_path = thread_repo.heddle_dir().join("REBASE_STATE");
     if rebase_state_path.exists() {
         super::rebase::cmd_rebase_silent(&thread_repo, None, false, true)?;
@@ -402,8 +461,12 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             // paths: try the 3-way merge as a fallback. If it's clean
             // we apply it directly; if it actually conflicts we emit
             // a precise blocker pointing at the conflicting paths.
-            match try_three_way_merge_refresh(repo, &thread_repo, &thread, &target_thread)? {
-                ThreeWayMergeRefresh::Clean { new_state } => {
+            match try_three_way_merge_refresh(repo, &thread_repo, &thread, &target_thread) {
+                Err(error) => {
+                    restore_refresh_rebase_abort(&thread_repo, &rebase_state_path)?;
+                    return Err(error);
+                }
+                Ok(ThreeWayMergeRefresh::Clean { new_state }) => {
                     let _ = fs::remove_file(&rebase_state_path);
                     thread.integration_policy_result.status = Some("manual_resolved".to_string());
                     thread.integration_policy_result.reason =
@@ -411,8 +474,27 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
                     thread.integration_policy_result.manual_resolution_state =
                         Some(new_state.short());
                 }
-                ThreeWayMergeRefresh::Conflicted { paths } => {
-                    return Err(anyhow!(thread_refresh_conflicted_advice(thread_id, &paths)));
+                Ok(ThreeWayMergeRefresh::Conflicted {
+                    tree,
+                    paths,
+                    ours,
+                    theirs,
+                    base,
+                }) => {
+                    restore_refresh_rebase_abort(&thread_repo, &rebase_state_path)?;
+                    persist_refresh_conflict_state(
+                        &thread_repo,
+                        tree,
+                        ours,
+                        theirs,
+                        base,
+                        paths.clone(),
+                    )?;
+                    return Err(anyhow!(thread_refresh_conflicted_advice(
+                        thread_id,
+                        &paths,
+                        thread_repo.root(),
+                    )));
                 }
             }
         }
@@ -442,7 +524,137 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     Ok(thread)
 }
 
-fn thread_refresh_conflicted_advice(thread_id: &str, paths: &[String]) -> RecoveryAdvice {
+fn restore_refresh_rebase_abort(repo: &Repository, rebase_state_path: &Path) -> Result<()> {
+    let rebase_state = super::rebase::load_persisted_rebase_state(rebase_state_path)?;
+    let head_before = repo.head_ref()?;
+    repo.goto_without_record(&rebase_state.original_head)?;
+    if let Head::Attached { thread } = head_before {
+        repo.refs()
+            .set_thread(&thread, &rebase_state.original_head)?;
+        repo.refs().write_head(&Head::Attached {
+            thread: thread.clone(),
+        })?;
+        let manager = thread_manager(repo);
+        if let Some(mut metadata) = manager.find_by_thread(&thread)? {
+            let state = repo
+                .store()
+                .get_state(&rebase_state.original_head)?
+                .ok_or_else(|| anyhow!("Original rebase state not found"))?;
+            repo::update_thread_state_from_state(&mut metadata, &state);
+            refresh_thread_freshness(repo, &mut metadata)?;
+            metadata.updated_at = Utc::now();
+            manager.save(&metadata)?;
+        }
+    }
+    if rebase_state_path.exists() {
+        fs::remove_file(rebase_state_path)?;
+    }
+    Ok(())
+}
+
+fn persist_refresh_conflict_state(
+    thread_repo: &Repository,
+    tree: objects::object::Tree,
+    ours: objects::object::ChangeId,
+    theirs: objects::object::ChangeId,
+    base: Option<objects::object::ChangeId>,
+    paths: Vec<String>,
+) -> Result<()> {
+    super::merge::apply_merged_tree_external(thread_repo, &tree)?;
+    ensure_refresh_conflict_markers_materialized(thread_repo, &ours, &theirs, &paths)?;
+    thread_repo
+        .merge_state_manager()
+        .start(ours, theirs, base, paths)?;
+    Ok(())
+}
+
+fn ensure_refresh_conflict_markers_materialized(
+    repo: &Repository,
+    ours: &objects::object::ChangeId,
+    theirs: &objects::object::ChangeId,
+    paths: &[String],
+) -> Result<()> {
+    let ours_tree = tree_for_state(repo, ours)?;
+    let theirs_tree = tree_for_state(repo, theirs)?;
+    for path in paths {
+        let full_path = repo.root().join(path);
+        let existing = fs::read(&full_path).unwrap_or_default();
+        if contains_conflict_marker_bytes(&existing) {
+            continue;
+        }
+        let ours_content = conflict_side_content(repo, &ours_tree, path)?;
+        let theirs_content = conflict_side_content(repo, &theirs_tree, path)?;
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            full_path,
+            format_refresh_conflict_markers(&ours_content, &theirs_content),
+        )?;
+    }
+    Ok(())
+}
+
+fn tree_for_state(
+    repo: &Repository,
+    state_id: &objects::object::ChangeId,
+) -> Result<objects::object::Tree> {
+    let state = repo
+        .store()
+        .get_state(state_id)?
+        .ok_or_else(|| anyhow!("State '{}' not found", state_id.short()))?;
+    repo.require_tree(&state.tree).map_err(Into::into)
+}
+
+fn conflict_side_content(
+    repo: &Repository,
+    tree: &objects::object::Tree,
+    path: &str,
+) -> Result<Vec<u8>> {
+    let Some(entry) = tree.get(path) else {
+        return Ok(Vec::new());
+    };
+    if entry.entry_type != objects::object::EntryType::Blob
+        && entry.entry_type != objects::object::EntryType::Symlink
+    {
+        return Ok(Vec::new());
+    }
+    Ok(repo.require_blob(&entry.hash)?.content().to_vec())
+}
+
+fn contains_conflict_marker_bytes(content: &[u8]) -> bool {
+    content
+        .windows("<<<<<<<".len())
+        .any(|window| window == b"<<<<<<<")
+        && content
+            .windows("=======".len())
+            .any(|window| window == b"=======")
+        && content
+            .windows(">>>>>>>".len())
+            .any(|window| window == b">>>>>>>")
+}
+
+fn format_refresh_conflict_markers(ours: &[u8], theirs: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"<<<<<<< CURRENT\n");
+    out.extend_from_slice(ours);
+    if !ours.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    out.extend_from_slice(b"=======\n");
+    out.extend_from_slice(theirs);
+    if !theirs.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    out.extend_from_slice(b">>>>>>> INCOMING\n");
+    out
+}
+
+fn thread_refresh_conflicted_advice(
+    thread_id: &str,
+    paths: &[String],
+    conflict_repo: &Path,
+) -> RecoveryAdvice {
     let path_summary = if paths.is_empty() {
         "merge conflict detected".to_string()
     } else {
@@ -464,8 +676,32 @@ fn thread_refresh_conflicted_advice(thread_id: &str, paths: &[String]) -> Recove
             overflow
         )
     };
+    let repo_arg = quote_recommended_action_arg(&conflict_repo.display().to_string());
+    let conflict_list_command = format!("heddle --repo {repo_arg} conflict list");
+    let first_conflict_command = paths.first().map(|path| {
+        format!(
+            "heddle --repo {repo_arg} conflict show {}",
+            quote_recommended_action_arg(path)
+        )
+    });
+    let resolve_command = paths.first().map(|path| {
+        format!(
+            "heddle --repo {repo_arg} resolve {}",
+            quote_recommended_action_arg(path)
+        )
+    });
+    let continue_command = format!("heddle --repo {repo_arg} continue");
     let preview_command = format!("heddle merge {thread_id} --preview");
-    let merge_command = format!("heddle merge {thread_id}");
+
+    let mut recovery_commands = vec![conflict_list_command.clone()];
+    if let Some(show) = first_conflict_command.clone() {
+        recovery_commands.push(show);
+    }
+    if let Some(resolve) = resolve_command.clone() {
+        recovery_commands.push(resolve);
+    }
+    recovery_commands.push(continue_command.clone());
+    recovery_commands.push(preview_command.clone());
 
     RecoveryAdvice::safety_refusal(
         "thread_refresh_conflicted",
@@ -474,17 +710,71 @@ fn thread_refresh_conflicted_advice(thread_id: &str, paths: &[String]) -> Recove
             paths.len(),
         ),
         format!(
-            "Inspect the conflict with `{preview_command}`, then resolve with `{merge_command}` and `heddle continue`, or rebase explicitly."
+            "Refresh wrote conflict markers and merge state in {}. Inspect them with `{conflict_list_command}`, resolve the files, then run `{continue_command}`.",
+            conflict_repo.display()
         ),
         unsafe_condition,
-        "refresh would need to materialize a conflicted merge result before advancing the thread",
-        "the thread refresh did not advance the thread ref beyond the unresolved manual-resolution state",
-        preview_command.clone(),
-        vec![
-            preview_command,
-            merge_command,
-            "heddle continue".to_string(),
-        ],
+        "refresh would need resolved file contents before advancing the thread ref",
+        "the thread ref was left unchanged; conflict markers and merge state were written to the thread checkout for inspection",
+        conflict_list_command,
+        recovery_commands,
+    )
+}
+
+fn quote_recommended_action_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+'))
+    {
+        value.to_string()
+    } else {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
+fn thread_refresh_requires_checkout_advice(
+    thread_id: &str,
+    current: Option<&str>,
+) -> RecoveryAdvice {
+    let switch_command = format!("heddle switch {thread_id}");
+    let retry_command = format!("heddle thread refresh {thread_id}");
+    let current_summary = current
+        .map(|name| format!("current checkout is attached to '{name}'"))
+        .unwrap_or_else(|| "current checkout is not attached to a thread".to_string());
+    RecoveryAdvice::safety_refusal(
+        "thread_refresh_requires_checkout",
+        format!("Thread '{thread_id}' must be the current checkout before refresh"),
+        format!("Run `{switch_command}`, then `{retry_command}`."),
+        format!("thread '{thread_id}' has no dedicated checkout; {current_summary}"),
+        "refresh would update the requested thread checkout and cannot safely do that from another branch-like checkout",
+        "thread refs, checkout files, and Heddle metadata were left unchanged",
+        switch_command.clone(),
+        vec![switch_command, retry_command],
+    )
+}
+
+fn thread_refresh_checkout_unavailable_advice(
+    thread_id: &str,
+    path: &Path,
+    error: impl std::fmt::Display,
+) -> RecoveryAdvice {
+    let inspect_command = format!("heddle thread show {thread_id}");
+    let switch_command = format!("heddle switch {thread_id}");
+    RecoveryAdvice::safety_refusal(
+        "thread_refresh_checkout_unavailable",
+        format!("Thread '{thread_id}' checkout could not be opened"),
+        format!(
+            "Inspect the recorded checkout with `{inspect_command}`. If this is a branch-like thread, run `{switch_command}` from the main checkout before refreshing."
+        ),
+        format!(
+            "recorded checkout path '{}' is unavailable: {error}",
+            path.display()
+        ),
+        "refresh needs a readable Heddle checkout before it can rebase or merge the thread state",
+        "thread refs, checkout files, and Heddle metadata were left unchanged",
+        inspect_command.clone(),
+        vec![inspect_command, switch_command],
     )
 }
 
@@ -495,6 +785,35 @@ pub(crate) fn thread_not_found_advice(thread_id: &str, action: &str) -> Recovery
         "Inspect available threads with `heddle thread list`, then retry with an existing thread.",
         format!("{action} was requested for missing thread '{thread_id}'"),
         "the command cannot safely change or remove thread metadata that does not exist",
+        "no thread refs, checkout directories, mounts, or agent reservations were changed",
+        "heddle thread list",
+        vec!["heddle thread list".to_string()],
+    )
+}
+
+fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice {
+    let merge_preview = format!("heddle merge {thread_id} --preview");
+    RecoveryAdvice::safety_refusal(
+        "imported_git_ref_not_managed_thread",
+        format!("'{thread_id}' is an imported Git ref, not a managed Heddle thread"),
+        format!(
+            "Preview it as an integration source with `{merge_preview}`. Use managed threads for `ready` and `ship`."
+        ),
+        format!("thread ref '{thread_id}' exists, but no managed thread metadata exists for it"),
+        "ready/ship require managed thread metadata and explicit integration authority; treating an imported Git ref as shippable would be ambiguous",
+        "thread refs, Git refs, checkout files, and thread metadata were left unchanged",
+        merge_preview.clone(),
+        vec![merge_preview, "heddle thread list".to_string()],
+    )
+}
+
+fn current_thread_drop_advice(thread_id: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "current_thread_not_droppable",
+        format!("Thread '{thread_id}' is the current checkout thread and cannot be dropped"),
+        "Use `heddle thread list` to inspect isolated threads that can be dropped.",
+        format!("drop thread was requested for the attached checkout thread '{thread_id}'"),
+        "dropping the current checkout would remove the thread that owns this working tree",
         "no thread refs, checkout directories, mounts, or agent reservations were changed",
         "heddle thread list",
         vec!["heddle thread list".to_string()],
@@ -564,8 +883,59 @@ enum ThreeWayMergeRefresh {
         new_state: objects::object::ChangeId,
     },
     Conflicted {
+        tree: objects::object::Tree,
         paths: Vec<String>,
+        ours: objects::object::ChangeId,
+        theirs: objects::object::ChangeId,
+        base: Option<objects::object::ChangeId>,
     },
+}
+
+fn preflight_three_way_refresh_conflict(
+    parent_repo: &Repository,
+    thread_repo: &Repository,
+    thread: &Thread,
+    target_thread_name: &str,
+) -> Result<Option<ThreeWayMergeRefresh>> {
+    use super::merge::{
+        ConflictLabels, MergeStrategy, ThreeWayMergeOutcome, try_three_way_merge_between_tips,
+    };
+
+    let target_tip = parent_repo
+        .refs()
+        .get_thread(target_thread_name)?
+        .ok_or_else(|| anyhow!("Target thread '{}' not found", target_thread_name))?;
+    let thread_tip = parent_repo
+        .refs()
+        .get_thread(&thread.thread)?
+        .ok_or_else(|| anyhow!("Thread '{}' not found", thread.thread))?;
+    let current_label = format!("CURRENT ({})", thread.thread);
+    let incoming_label = format!("INCOMING ({})", target_thread_name);
+
+    match try_three_way_merge_between_tips(
+        parent_repo,
+        &thread_tip,
+        &target_tip,
+        ConflictLabels {
+            current: &current_label,
+            incoming: &incoming_label,
+            strategy: MergeStrategy::Semantic,
+        },
+    )? {
+        ThreeWayMergeOutcome::Conflicted { tree, paths, base } => {
+            let _ = thread_repo;
+            Ok(Some(ThreeWayMergeRefresh::Conflicted {
+                tree,
+                paths,
+                ours: thread_tip,
+                theirs: target_tip,
+                base: Some(base),
+            }))
+        }
+        ThreeWayMergeOutcome::Clean { .. }
+        | ThreeWayMergeOutcome::AlreadyIntegrated { .. }
+        | ThreeWayMergeOutcome::FastForward { .. } => Ok(None),
+    }
 }
 
 /// Try to refresh a thread by performing a 3-way merge between the
@@ -577,9 +947,9 @@ enum ThreeWayMergeRefresh {
 /// and a new merge state is snapshotted as the new thread tip; the
 /// caller advances `thread.current_state` based on the returned id.
 ///
-/// On conflict, returns the list of conflicting paths so the caller
-/// can produce a precise blocker (instead of the historical
-/// misleading "resolve rebase conflicts" message).
+/// On conflict, returns the partial merge tree plus conflict metadata so
+/// the caller can persist durable conflict state before reporting the
+/// blocker.
 fn try_three_way_merge_refresh(
     parent_repo: &Repository,
     thread_repo: &Repository,
@@ -671,8 +1041,14 @@ fn try_three_way_merge_refresh(
                 new_state: new_state.change_id,
             })
         }
-        ThreeWayMergeOutcome::Conflicted { paths } => {
-            Ok(ThreeWayMergeRefresh::Conflicted { paths })
+        ThreeWayMergeOutcome::Conflicted { tree, paths, base } => {
+            Ok(ThreeWayMergeRefresh::Conflicted {
+                tree,
+                paths,
+                ours: thread_tip,
+                theirs: target_tip,
+                base: Some(base),
+            })
         }
     }
 }
@@ -794,6 +1170,9 @@ pub(crate) fn drop_thread_silent(
 ) -> Result<DropOutcome> {
     let manager = thread_manager(repo);
     let Some(mut thread) = manager.load(thread_id)? else {
+        if !delete_thread && repo.current_lane()?.as_deref() == Some(thread_id) {
+            return Err(anyhow!(current_thread_drop_advice(thread_id)));
+        }
         if delete_thread {
             return Ok(DropOutcome::Deleted);
         }
@@ -873,7 +1252,11 @@ fn print_thread_output(
     message: String,
 ) -> Result<()> {
     refresh_thread_freshness(repo, &mut thread)?;
-    let advice = describe_thread_advice(&thread, false, 0, false);
+    let mut advice = describe_thread_advice(&thread, false, 0, false);
+    if matches!(thread.state, ThreadState::Abandoned) {
+        advice.blockers.clear();
+        advice.recommended_action.clear();
+    }
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_overlay_import_hint()?;
@@ -883,6 +1266,7 @@ fn print_thread_output(
         import_hint.as_ref(),
         Some(&advice.recommended_action),
     );
+    let recommended_action = (!recommended_action.trim().is_empty()).then_some(recommended_action);
     if should_output_json(cli, Some(repo.config())) {
         println!(
             "{}",
@@ -893,8 +1277,8 @@ fn print_thread_output(
                     message,
                     blockers: advice.blockers.clone(),
                     warnings: Vec::new(),
-                    next_action: Some(recommended_action.clone()),
-                    recommended_action: Some(recommended_action),
+                    next_action: recommended_action.clone(),
+                    recommended_action: recommended_action.clone(),
                 },
                 changed_path_count: thread.changed_paths.len(),
                 thread,
@@ -908,7 +1292,7 @@ fn print_thread_output(
                 println!("  - {}", blocker);
             }
         }
-        if !recommended_action.is_empty() {
+        if let Some(recommended_action) = &recommended_action {
             println!("Next: {}", recommended_action);
         }
     }
@@ -1327,11 +1711,14 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
     Ok(())
 }
 
-/// Apply a drop to a single thread — the on-disk side of cleanup.
-/// Mirrors the path used by `cmd_thread_drop`: tear down virtualized
-/// mounts, remove the checkout, mark the thread abandoned, prune
-/// matching agent registry entries. The thread ref itself is left
-/// alone so the underlying states stay addressable via `goto`.
+/// Apply a cleanup drop to a single thread.
+///
+/// Cleanup is stronger than an ordinary `thread drop`: once the user
+/// has confirmed a merged/stale sweep, the thread should disappear
+/// from everyday thread and push surfaces. We preserve an abandoned
+/// manager record for audit/debugging, but remove the live thread ref
+/// and manifest so `thread list` and `push --all-threads` no longer
+/// treat the cleaned thread as active work.
 ///
 /// Mounts are keyed by the thread *name* (`thread.thread`) — the same
 /// value passed at mount time via `establish_virtualized_mount`. The
@@ -1356,10 +1743,14 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
     if thread.execution_path.exists() {
         remove_path_recursively(&thread.execution_path)?;
     }
+    repo::thread_manifest::remove_thread_manifest_dir(repo.heddle_dir(), &thread.thread)?;
     let mut updated = thread.clone();
     updated.state = ThreadState::Abandoned;
     updated.updated_at = Utc::now();
     manager.save(&updated)?;
+    if repo.refs().get_thread(&thread.thread)?.is_some() {
+        repo.refs().delete_thread(&thread.thread)?;
+    }
     let registry = AgentRegistry::new(repo.heddle_dir());
     for entry in registry.list()? {
         if entry.thread == thread.thread || entry.thread_id.as_deref() == Some(&thread.id) {

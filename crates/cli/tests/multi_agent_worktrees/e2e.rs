@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 
+fn expect_json_reserve_failure(args: &[&str], cwd: &std::path::Path) -> Value {
+    let output = heddle_output(args, Some(cwd)).expect("invoke reserve failure");
+    assert!(
+        !output.status.success(),
+        "reservation attempt should fail for args {args:?}"
+    );
+    let stdout = str::from_utf8(&output.stdout).unwrap_or("");
+    assert!(
+        stdout.trim().is_empty(),
+        "JSON-mode reservation failures must not emit a success-shaped stdout object: {stdout}"
+    );
+    let stderr = str::from_utf8(&output.stderr).unwrap_or("");
+    serde_json::from_str(stderr.trim()).expect("reservation failure should emit JSON envelope")
+}
+
 #[test]
 fn thread_start_rejects_second_active_writer_for_same_thread() {
     let main = setup_repo("base.txt", "shared base");
@@ -57,9 +72,11 @@ fn agent_api_reserve_heartbeat_release_round_trips_json() {
         .unwrap(),
     )
     .unwrap();
-    let session = reserved["session_id"].as_str().unwrap().to_string();
-    assert_eq!(reserved["thread"], "feature/api");
-    assert!(reserved["reservation_token"].as_str().is_some());
+    let reservation = &reserved["reservation"];
+    let session = reservation["session_id"].as_str().unwrap().to_string();
+    assert_eq!(reservation["thread"], "feature/api");
+    assert!(reservation["reservation_token"].as_str().is_some());
+    assert!(reserved["verification"].is_object());
 
     let heartbeat: Value = serde_json::from_str(
         &heddle(
@@ -69,7 +86,8 @@ fn agent_api_reserve_heartbeat_release_round_trips_json() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(heartbeat["session_id"], session);
+    assert_eq!(heartbeat["reservation"]["session_id"], session);
+    assert!(heartbeat["verification"].is_object());
 
     let released: Value = serde_json::from_str(
         &heddle(
@@ -86,11 +104,13 @@ fn agent_api_reserve_heartbeat_release_round_trips_json() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(released["status"], "complete");
+    assert_eq!(released["reservation"]["status"], "complete");
+    assert!(released["verification"].is_object());
 
     let listed: Value =
         serde_json::from_str(&heddle(&["agent", "list"], Some(main.path())).unwrap()).unwrap();
-    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed["reservations"].as_array().unwrap().len(), 1);
+    assert!(listed["verification"].is_object());
 }
 
 /// `agent reserve` must distinguish three cases:
@@ -123,8 +143,9 @@ fn agent_api_reserve_emits_structured_live_owner_and_anchor_drift_conflicts() {
         .unwrap(),
     )
     .unwrap();
-    let session = reserved["session_id"].as_str().unwrap().to_string();
-    let anchor_state = reserved["anchor_state"].as_str().unwrap().to_string();
+    let reservation = &reserved["reservation"];
+    let session = reservation["session_id"].as_str().unwrap().to_string();
+    let anchor_state = reservation["anchor_state"].as_str().unwrap().to_string();
 
     // Pin the recorded pid to this test-runner process so the live-
     // owner branch fires reliably, and clear boot_id to keep the check
@@ -151,18 +172,29 @@ fn agent_api_reserve_emits_structured_live_owner_and_anchor_drift_conflicts() {
     std::fs::write(&entry_path, lines.join("\n")).unwrap();
 
     // Same-anchor live owner → live_owner conflict.
-    let live_conflict = heddle(
-        &["agent", "reserve", "--thread", "feature/conflict"],
-        Some(main.path()),
-    )
-    .expect_err("second reservation against a live owner must fail");
+    let live_conflict = expect_json_reserve_failure(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "reserve",
+            "--thread",
+            "feature/conflict",
+        ],
+        main.path(),
+    );
+    assert_eq!(live_conflict["kind"], "live_owner");
     assert!(
-        live_conflict.contains("\"kind\":\"live_owner\""),
-        "structured live_owner kind missing: {live_conflict}"
+        live_conflict["error"]
+            .as_str()
+            .is_some_and(|error| error.contains(&session)),
+        "live_owner conflict should name the existing session: {live_conflict}"
     );
     assert!(
-        live_conflict.contains(&session),
-        "live_owner conflict should name the existing session: {live_conflict}"
+        live_conflict["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("heddle thread show feature/conflict")),
+        "live_owner conflict should include a recovery hint: {live_conflict}"
     );
 
     // Different anchor while owner is alive → anchor_drift conflict.
@@ -175,17 +207,22 @@ fn agent_api_reserve_emits_structured_live_owner_and_anchor_drift_conflicts() {
     )
     .unwrap();
 
-    let drift_conflict = heddle(
-        &["agent", "reserve", "--thread", "feature/conflict"],
-        Some(main.path()),
-    )
-    .expect_err("anchor-drift reservation must fail");
-    assert!(
-        drift_conflict.contains("\"kind\":\"anchor_drift\""),
-        "structured anchor_drift kind missing: {drift_conflict}"
+    let drift_conflict = expect_json_reserve_failure(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "reserve",
+            "--thread",
+            "feature/conflict",
+        ],
+        main.path(),
     );
+    assert_eq!(drift_conflict["kind"], "anchor_drift");
     assert!(
-        drift_conflict.contains(&anchor_state),
+        drift_conflict["error"]
+            .as_str()
+            .is_some_and(|error| error.contains(&anchor_state)),
         "anchor_drift conflict should expose reserved anchor: {drift_conflict}"
     );
 
@@ -221,14 +258,81 @@ fn agent_api_reserve_emits_structured_live_owner_and_anchor_drift_conflicts() {
     )
     .expect("dead-owner reservation must succeed after reap");
     let reaped: Value = serde_json::from_str(&reaped).unwrap();
-    assert_ne!(reaped["session_id"], session, "reaped should mint new id");
-    assert_eq!(reaped["status"], "active");
+    assert_ne!(
+        reaped["reservation"]["session_id"], session,
+        "reaped should mint new id"
+    );
+    assert_eq!(reaped["reservation"]["status"], "active");
 
     // Old entry should be marked Abandoned, not deleted.
     let stale = std::fs::read_to_string(&entry_path).unwrap();
     assert!(
         stale.contains("status = \"abandoned\""),
         "reaped entry must record abandoned status: {stale}"
+    );
+}
+
+#[test]
+fn agent_api_reserve_anchor_drift_without_owner_uses_error_envelope_only() {
+    let main = setup_repo("base.txt", "shared base");
+
+    let reserved: Value = serde_json::from_str(
+        &heddle(
+            &["agent", "reserve", "--thread", "feature/no-owner"],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let session = reserved["reservation"]["session_id"].as_str().unwrap();
+    let anchor_state = reserved["reservation"]["anchor_state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    heddle(
+        &[
+            "agent",
+            "release",
+            "--session",
+            session,
+            "--status",
+            "complete",
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+
+    std::fs::write(main.path().join("base.txt"), "advanced base").unwrap();
+    heddle(
+        &["capture", "-m", "advance main for ownerless drift test"],
+        Some(main.path()),
+    )
+    .unwrap();
+
+    let drift_conflict = expect_json_reserve_failure(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "reserve",
+            "--thread",
+            "feature/no-owner",
+        ],
+        main.path(),
+    );
+    assert_eq!(drift_conflict["kind"], "anchor_drift");
+    assert!(
+        drift_conflict["error"]
+            .as_str()
+            .is_some_and(|error| error.contains(&anchor_state)),
+        "anchor_drift conflict should expose the existing anchor: {drift_conflict}"
+    );
+    assert!(
+        drift_conflict["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("Refresh the thread")),
+        "anchor_drift conflict should include a recovery hint: {drift_conflict}"
     );
 }
 
@@ -274,7 +378,10 @@ fn agent_reserve_hold_for_pid_binds_reservation_to_external_process() {
         .unwrap(),
     )
     .unwrap();
-    let session = reserved["session_id"].as_str().unwrap().to_string();
+    let session = reserved["reservation"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // The recorded pid in the .toml entry should be the helper, not
     // the heddle CLI process (which has already exited by now).
@@ -291,17 +398,22 @@ fn agent_reserve_hold_for_pid_binds_reservation_to_external_process() {
 
     // While the helper is alive: a second reserve attempt must see
     // the live owner.
-    let live_conflict = heddle(
-        &["agent", "reserve", "--thread", "feature/held"],
-        Some(main.path()),
-    )
-    .expect_err("second reservation must block while held pid is alive");
-    assert!(
-        live_conflict.contains("\"kind\":\"live_owner\""),
-        "concurrent reservation against an alive held pid must surface live_owner: {live_conflict}"
+    let live_conflict = expect_json_reserve_failure(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "reserve",
+            "--thread",
+            "feature/held",
+        ],
+        main.path(),
     );
+    assert_eq!(live_conflict["kind"], "live_owner");
     assert!(
-        live_conflict.contains(&session),
+        live_conflict["error"]
+            .as_str()
+            .is_some_and(|error| error.contains(&session)),
         "live_owner conflict must point at the held session: {live_conflict}"
     );
 
@@ -319,12 +431,12 @@ fn agent_reserve_hold_for_pid_binds_reservation_to_external_process() {
         .expect("post-SIGKILL reservation must succeed via dead-pid reap"),
     )
     .unwrap();
-    let new_session = recovered["session_id"].as_str().unwrap();
+    let new_session = recovered["reservation"]["session_id"].as_str().unwrap();
     assert_ne!(
         new_session, session,
         "post-reap reservation must mint a fresh session id"
     );
-    assert_eq!(recovered["status"], "active");
+    assert_eq!(recovered["reservation"]["status"], "active");
 
     // The original entry should be marked Abandoned, not silently
     // overwritten.
@@ -346,18 +458,39 @@ fn agent_api_capture_and_ready_require_active_session() {
 
     // Reserve on the main thread so capture/ready have a live owner
     // pointing at a real anchor.
-    let reserved: Value = serde_json::from_str(
-        &heddle(&["agent", "reserve", "--thread", "main"], Some(main.path())).unwrap(),
+    let reserved_output = heddle_output_with_env(
+        &["agent", "reserve", "--thread", "main"],
+        Some(main.path()),
+        &[
+            ("CODEX_THREAD_ID", "thread-agent-api"),
+            ("CODEX_MODEL", "gpt-5.3-codex"),
+            ("CODEX_REASONING_EFFORT", "high"),
+        ],
     )
-    .unwrap();
-    let session = reserved["session_id"].as_str().unwrap().to_string();
+    .expect("agent reserve with ambient harness env should run");
+    assert!(
+        reserved_output.status.success(),
+        "agent reserve should succeed: {}",
+        str::from_utf8(&reserved_output.stderr).unwrap_or("")
+    );
+    let reserved: Value = serde_json::from_slice(&reserved_output.stdout).unwrap();
+    let session = reserved["reservation"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(reserved["reservation"]["harness"], "codex");
+    assert_eq!(reserved["reservation"]["provider"], "openai");
+    assert_eq!(reserved["reservation"]["model"], "gpt-5.3-codex");
+    assert_eq!(reserved["reservation"]["thinking_level"], "high");
+    assert_eq!(reserved["reservation"]["probe_source"], "app_protocol");
 
     // Live session: capture should succeed.
     fs::write(main.path().join("first.txt"), "first").unwrap();
     let capture: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "agent",
                 "capture",
                 "--session",
@@ -372,11 +505,19 @@ fn agent_api_capture_and_ready_require_active_session() {
     .unwrap();
     assert_eq!(capture["intent"], "first agent capture");
     assert!(capture["change_id"].as_str().unwrap().starts_with("hd-"));
+    let log: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "log", "-n", "1"], Some(main.path())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        log["states"][0]["agent"], "openai/gpt-5.3-codex",
+        "agent capture should preserve the reservation's ambient harness model even when the capture process has no model env: {log}"
+    );
 
     // Live session: ready should also succeed.
     let ready: Value = serde_json::from_str(
         &heddle(
-            &["--json", "agent", "ready", "--session", &session],
+            &["--output", "json", "agent", "ready", "--session", &session],
             Some(main.path()),
         )
         .unwrap(),
@@ -466,7 +607,8 @@ fn thread_captures_lists_granular_history_for_thread() {
     let captures: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "thread",
                 "captures",
                 "feature/captures",
@@ -544,7 +686,11 @@ fn capture_inherits_agent_from_thread() {
     .unwrap();
 
     let log: Value = serde_json::from_str(
-        &heddle(&["--json", "log", "modulo", "-n", "1"], Some(main.path())).unwrap(),
+        &heddle(
+            &["--output", "json", "log", "modulo", "-n", "1"],
+            Some(main.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
     let head_state = &log["states"][0];
@@ -554,7 +700,7 @@ fn capture_inherits_agent_from_thread() {
         "preflight: the captured state should be the head of the thread"
     );
 
-    // `heddle --json log` flattens the agent to "provider/model".
+    // `heddle --output json log` flattens the agent to "provider/model".
     // Before the fix this was null on every captured state; after the
     // fix it carries the thread's actor.
     let agent = head_state
@@ -614,11 +760,19 @@ fn parallel_agents_visible_from_main_repo() {
     heddle(&["capture", "-m", "implement search"], Some(dir_b.path())).unwrap();
 
     let auth_log: Value = serde_json::from_str(
-        &heddle(&["--json", "log", "feature/auth"], Some(main.path())).unwrap(),
+        &heddle(
+            &["--output", "json", "log", "feature/auth"],
+            Some(main.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
     let search_log: Value = serde_json::from_str(
-        &heddle(&["--json", "log", "feature/search"], Some(main.path())).unwrap(),
+        &heddle(
+            &["--output", "json", "log", "feature/search"],
+            Some(main.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
 
@@ -631,9 +785,10 @@ fn parallel_agents_visible_from_main_repo() {
         "implement search"
     );
 
-    let thread_list: Value =
-        serde_json::from_str(&heddle(&["--json", "thread", "list"], Some(main.path())).unwrap())
-            .unwrap();
+    let thread_list: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "thread", "list"], Some(main.path())).unwrap(),
+    )
+    .unwrap();
     let threads = thread_list["threads"].as_array().unwrap();
     assert!(
         threads
@@ -689,7 +844,8 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
 
     let start_json = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "feature/native-cli",
             "--workspace",
@@ -733,7 +889,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
 
     let thread_info: Value = serde_json::from_str(
         &heddle(
-            &["--json", "inspect", "feature/native-cli"],
+            &["--output", "json", "inspect", "feature/native-cli"],
             Some(main.path()),
         )
         .unwrap(),
@@ -747,7 +903,13 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
 
     std::fs::write(thread.join("native.txt"), "heddle-native").unwrap();
     let capture_json = heddle(
-        &["--json", "capture", "-m", "native thread snapshot"],
+        &[
+            "--output",
+            "json",
+            "capture",
+            "-m",
+            "native thread snapshot",
+        ],
         Some(&thread),
     )
     .unwrap();
@@ -756,7 +918,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(captured["promotion_suggested"], false);
 
     let inspect_json = heddle(
-        &["--json", "inspect", "feature/native-cli"],
+        &["--output", "json", "inspect", "feature/native-cli"],
         Some(main.path()),
     )
     .unwrap();
@@ -765,7 +927,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(inspected["coordination_status"], "ahead");
 
     let thread_show_json = heddle(
-        &["--json", "thread", "show", "feature/native-cli"],
+        &["--output", "json", "thread", "show", "feature/native-cli"],
         Some(main.path()),
     )
     .unwrap();
@@ -774,7 +936,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(thread_show["thread_mode"], expected_mode);
     assert_eq!(thread_show["thread_state"], "active");
 
-    let status_json = heddle(&["--json", "status"], Some(&thread)).unwrap();
+    let status_json = heddle(&["--output", "json", "status"], Some(&thread)).unwrap();
     let status: Value = serde_json::from_str(&status_json).unwrap();
     assert_eq!(
         status["recommended_action"].as_str(),
@@ -782,7 +944,13 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     );
 
     let ready_json = heddle(
-        &["--json", "ready", "--thread", "feature/native-cli"],
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/native-cli",
+        ],
         Some(main.path()),
     )
     .unwrap();
@@ -791,11 +959,11 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(ready["report"]["semantic_result"], "fast_forward");
     assert_eq!(
         ready["report"]["recommended_action"],
-        "heddle merge feature/native-cli"
+        "heddle merge feature/native-cli --preview"
     );
 
     let thread_show_json = heddle(
-        &["--json", "thread", "show", "feature/native-cli"],
+        &["--output", "json", "thread", "show", "feature/native-cli"],
         Some(main.path()),
     )
     .unwrap();
@@ -805,6 +973,44 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
         thread_show["recommended_action"].as_str(),
         Some("heddle merge feature/native-cli --preview")
     );
+
+    let actor_list_json = heddle(&["--output", "json", "actor", "list"], Some(main.path()))
+        .expect("actor list should succeed");
+    let actor_list: Value = serde_json::from_str(&actor_list_json).unwrap();
+    let actor_session = actor_list["actors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|actor| actor["thread"].as_str() == Some("feature/native-cli"))
+        .and_then(|actor| actor["session_id"].as_str())
+        .expect("feature actor should be registered");
+    let actor_done_json = heddle(
+        &[
+            "--output",
+            "json",
+            "actor",
+            "done",
+            "--session",
+            actor_session,
+        ],
+        Some(main.path()),
+    )
+    .expect("actor done should succeed");
+    let actor_done: Value = serde_json::from_str(&actor_done_json).unwrap();
+    assert_eq!(actor_done["coordination_status"], "merge-ready");
+    assert_eq!(
+        actor_done["recommended_action"], "heddle merge feature/native-cli --preview",
+        "actor completion should keep agents on the preview-first merge path: {actor_done}"
+    );
+    assert_eq!(
+        actor_done["recommended_action_argv"],
+        heddle_argv_json(["merge", "feature/native-cli", "--preview"]),
+        "{actor_done}"
+    );
+    assert!(
+        actor_done["recommended_action_template"].is_null(),
+        "actor done should expose nullable template metadata beside concrete argv: {actor_done}"
+    );
 }
 
 #[test]
@@ -812,7 +1018,8 @@ fn ready_blocks_stale_or_heavy_impact_threads_and_status_reports_next_step() {
     let main = setup_repo("base.txt", "base");
     let start_json = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "feature/dep",
             "--workspace",
@@ -833,12 +1040,16 @@ fn ready_blocks_stale_or_heavy_impact_threads_and_status_reports_next_step() {
     .unwrap();
     heddle(&["capture", "-m", "touch deps"], Some(&thread)).unwrap();
 
-    let ready_json = heddle(
-        &["--json", "ready", "--thread", "feature/dep"],
+    let ready_output = heddle_output(
+        &["--output", "json", "ready", "--thread", "feature/dep"],
         Some(main.path()),
     )
     .unwrap();
-    let ready: Value = serde_json::from_str(&ready_json).unwrap();
+    assert!(
+        !ready_output.status.success(),
+        "heavy-impact ready should fail closed"
+    );
+    let ready: Value = serde_json::from_slice(&ready_output.stdout).unwrap();
     assert_eq!(ready["thread_state"], "blocked");
     assert_eq!(
         ready["report"]["recommended_action"].as_str(),
@@ -848,7 +1059,7 @@ fn ready_blocks_stale_or_heavy_impact_threads_and_status_reports_next_step() {
     std::fs::write(main.path().join("base.txt"), "base changed").unwrap();
     heddle(&["capture", "-m", "main changed"], Some(main.path())).unwrap();
 
-    let status_json = heddle(&["--json", "status"], Some(&thread)).unwrap();
+    let status_json = heddle(&["--output", "json", "status"], Some(&thread)).unwrap();
     let status: Value = serde_json::from_str(&status_json).unwrap();
     assert_eq!(status["thread_health"], "blocked");
     assert_eq!(
@@ -857,7 +1068,7 @@ fn ready_blocks_stale_or_heavy_impact_threads_and_status_reports_next_step() {
     );
 
     let thread_refresh_status = heddle(
-        &["--json", "thread", "show", "feature/dep"],
+        &["--output", "json", "thread", "show", "feature/dep"],
         Some(main.path()),
     )
     .unwrap();
@@ -870,7 +1081,14 @@ fn sync_refreshes_stale_thread_when_replay_is_clean() {
     let main = setup_repo("base.txt", "base");
     let started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/sync-me", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/sync-me",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -885,7 +1103,7 @@ fn sync_refreshes_stale_thread_when_replay_is_clean() {
     heddle(&["capture", "-m", "advance main"], Some(main.path())).unwrap();
 
     let sync_json = heddle(
-        &["--json", "sync", "--thread", "feature/sync-me"],
+        &["--output", "json", "sync", "--thread", "feature/sync-me"],
         Some(main.path()),
     )
     .unwrap();
@@ -895,7 +1113,7 @@ fn sync_refreshes_stale_thread_when_replay_is_clean() {
 
     let thread_show: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "show", "feature/sync-me"],
+            &["--output", "json", "thread", "show", "feature/sync-me"],
             Some(main.path()),
         )
         .unwrap(),
@@ -913,7 +1131,14 @@ fn ship_auto_captures_and_merges_clean_thread() {
     let main = setup_repo("base.txt", "base");
     let started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/ship-it", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/ship-it",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -924,7 +1149,7 @@ fn ship_auto_captures_and_merges_clean_thread() {
     std::fs::write(thread.join("ship.txt"), "ship me").unwrap();
 
     let ship_json = heddle(
-        &["--json", "ship", "--thread", "feature/ship-it"],
+        &["--output", "json", "ship", "--thread", "feature/ship-it"],
         Some(main.path()),
     )
     .unwrap();
@@ -936,7 +1161,7 @@ fn ship_auto_captures_and_merges_clean_thread() {
 
     let thread_show: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "show", "feature/ship-it"],
+            &["--output", "json", "thread", "show", "feature/ship-it"],
             Some(main.path()),
         )
         .unwrap(),
@@ -946,6 +1171,24 @@ fn ship_auto_captures_and_merges_clean_thread() {
     assert_eq!(
         thread_show["integration_policy_result"]["status"],
         "auto_integrated"
+    );
+
+    let actor_show = heddle_output(&["--output", "json", "actor", "show"], Some(main.path()))
+        .expect("invoke actor show after ship");
+    assert!(
+        !actor_show.status.success(),
+        "actor show should not select the merged actor implicitly after ship"
+    );
+    let stderr = str::from_utf8(&actor_show.stderr).unwrap_or("");
+    let envelope: Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("actor show failure should be JSON: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "no_active_actor");
+    assert_eq!(envelope["primary_command"], "heddle actor list");
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("shipped") && hint.contains("session id")),
+        "actor show no-active advice should explain the post-ship transition: {envelope}"
     );
 }
 
@@ -959,7 +1202,14 @@ fn delegate_assigns_per_task_agents_when_spec_includes_them() {
     let main = setup_repo("base.txt", "base");
     let parent_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/race", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/race",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -970,7 +1220,8 @@ fn delegate_assigns_per_task_agents_when_spec_includes_them() {
 
     let _delegate_json = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "delegate",
             "--parent",
             "feature/race",
@@ -997,10 +1248,14 @@ fn delegate_assigns_per_task_agents_when_spec_includes_them() {
     for (slug, expected_provider, expected_model) in triples {
         let full_name = format!("feature/race/{slug}");
         let show: Value = serde_json::from_str(
-            &heddle(&["--json", "thread", "show", &full_name], Some(main.path())).unwrap(),
+            &heddle(
+                &["--output", "json", "thread", "show", &full_name],
+                Some(main.path()),
+            )
+            .unwrap(),
         )
         .unwrap();
-        // `thread show --json` renders actor as { provider, model }.
+        // `thread show --output json` renders actor as { provider, model }.
         let actor = &show["actor"];
         assert_eq!(
             actor["provider"].as_str().unwrap_or(""),
@@ -1014,12 +1269,12 @@ fn delegate_assigns_per_task_agents_when_spec_includes_them() {
         );
     }
 
-    // Also assert siblings see each other (the workspace control tower
-    // shot in the YC demo depends on this).
+    // Also assert siblings see each other in the workspace view.
     let show_first: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "thread",
                 "show",
                 "feature/race/approach-anthropic",
@@ -1047,7 +1302,8 @@ fn delegate_creates_child_threads_with_parent_relationship() {
     let parent_started: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "start",
                 "feature/orchestrator",
                 "--workspace",
@@ -1063,7 +1319,8 @@ fn delegate_creates_child_threads_with_parent_relationship() {
 
     let delegate_json = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "delegate",
             "--parent",
             "feature/orchestrator",
@@ -1089,7 +1346,13 @@ fn delegate_creates_child_threads_with_parent_relationship() {
 
     let parser_thread: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "show", "feature/orchestrator/parser"],
+            &[
+                "--output",
+                "json",
+                "thread",
+                "show",
+                "feature/orchestrator/parser",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -1105,7 +1368,14 @@ fn undo_is_scoped_to_the_current_thread() {
 
     let auth_thread: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/auth", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/auth",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -1113,7 +1383,14 @@ fn undo_is_scoped_to_the_current_thread() {
     .unwrap();
     let search_thread: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/search", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/search",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -1127,11 +1404,19 @@ fn undo_is_scoped_to_the_current_thread() {
     fs::write(search_path.join("search.rs"), "search impl").unwrap();
 
     let auth_snapshot: Value = serde_json::from_str(
-        &heddle(&["--json", "capture", "-m", "auth"], Some(&auth_path)).unwrap(),
+        &heddle(
+            &["--output", "json", "capture", "-m", "auth"],
+            Some(&auth_path),
+        )
+        .unwrap(),
     )
     .unwrap();
     let search_snapshot: Value = serde_json::from_str(
-        &heddle(&["--json", "capture", "-m", "search"], Some(&search_path)).unwrap(),
+        &heddle(
+            &["--output", "json", "capture", "-m", "search"],
+            Some(&search_path),
+        )
+        .unwrap(),
     )
     .unwrap();
 
@@ -1147,11 +1432,19 @@ fn undo_is_scoped_to_the_current_thread() {
     );
 
     let auth_thread: Value = serde_json::from_str(
-        &heddle(&["--json", "inspect", "feature/auth"], Some(main.path())).unwrap(),
+        &heddle(
+            &["--output", "json", "inspect", "feature/auth"],
+            Some(main.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
     let search_thread: Value = serde_json::from_str(
-        &heddle(&["--json", "inspect", "feature/search"], Some(main.path())).unwrap(),
+        &heddle(
+            &["--output", "json", "inspect", "feature/search"],
+            Some(main.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
 
@@ -1177,7 +1470,8 @@ fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() 
 
     let start_json = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "feature/deps",
             "--workspace",
@@ -1197,7 +1491,7 @@ fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() 
     )
     .unwrap();
     let capture_json = heddle(
-        &["--json", "capture", "-m", "dependency update"],
+        &["--output", "json", "capture", "-m", "dependency update"],
         Some(&thread),
     )
     .unwrap();
@@ -1212,7 +1506,7 @@ fn lightweight_thread_capture_marks_heavy_impact_and_merge_preview_reports_it() 
     );
 
     let preview_json = heddle(
-        &["--json", "merge", "feature/deps", "--preview"],
+        &["--output", "json", "merge", "feature/deps", "--preview"],
         Some(main.path()),
     )
     .unwrap();
@@ -1228,7 +1522,8 @@ fn thread_promote_materializes_visible_checkout_without_changing_thread_identity
 
     let start_json = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "feature/promote",
             "--workspace",
@@ -1244,7 +1539,8 @@ fn thread_promote_materializes_visible_checkout_without_changing_thread_identity
 
     let promote_json = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "thread",
             "promote",
             "feature/promote",
@@ -1273,7 +1569,8 @@ fn status_watch_emits_initial_snapshot_for_local_repos() {
 
     let output = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "status",
             "--watch",
             "--watch-iterations",
@@ -1327,7 +1624,8 @@ fn thread_show_watch_emits_initial_snapshot_for_local_repos() {
 
     let output = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "thread",
             "show",
             "feature/watch-thread",
@@ -1350,7 +1648,8 @@ fn workspace_show_groups_current_stacked_and_parallel_threads() {
     let parent_started: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "start",
                 "feature/orchestrator",
                 "--workspace",
@@ -1364,7 +1663,8 @@ fn workspace_show_groups_current_stacked_and_parallel_threads() {
     let parent_path = std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
     heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "delegate",
             "--parent",
             "feature/orchestrator",
@@ -1379,7 +1679,11 @@ fn workspace_show_groups_current_stacked_and_parallel_threads() {
     )
     .unwrap();
 
-    let output = heddle(&["--json", "workspace", "show"], Some(&parent_path)).unwrap();
+    let output = heddle(
+        &["--output", "json", "workspace", "show"],
+        Some(&parent_path),
+    )
+    .unwrap();
     let workspace: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(workspace["current_thread"], "feature/orchestrator");
     let groups = workspace["groups"].as_array().unwrap();
@@ -1406,7 +1710,14 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
     let main = setup_repo("base.txt", "base");
     let source_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/source", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/source",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -1414,7 +1725,14 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
     .unwrap();
     let target_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/target", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/target",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -1429,7 +1747,8 @@ fn capture_split_moves_selected_dirty_paths_into_target_thread() {
     let split: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "capture",
                 "--split",
                 "--into",
@@ -1455,7 +1774,14 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
     let main = setup_repo("base.txt", "base");
     let source_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/source", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/source",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -1463,7 +1789,14 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
     .unwrap();
     let target_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/target", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/target",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -1478,7 +1811,8 @@ fn thread_move_reassigns_selected_captured_paths_between_threads() {
     let moved: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "thread",
                 "move",
                 "feature/source",
@@ -1503,7 +1837,8 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
     let parent_started: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "start",
                 "feature/orchestrator",
                 "--workspace",
@@ -1517,7 +1852,8 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
     let parent_path = std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
     let delegate_json = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "delegate",
             "--parent",
             "feature/orchestrator",
@@ -1533,7 +1869,7 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
         .to_string();
     let child_thread: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "show", &child_name],
+            &["--output", "json", "thread", "show", &child_name],
             Some(main.path()),
         )
         .unwrap(),
@@ -1546,7 +1882,7 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
 
     let absorbed: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "absorb", &child_name],
+            &["--output", "json", "thread", "absorb", &child_name],
             Some(main.path()),
         )
         .unwrap(),
@@ -1561,7 +1897,14 @@ fn thread_resolve_refreshes_clean_stale_threads() {
     let main = setup_repo("base.txt", "base");
     let started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/stale", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/stale",
+                "--workspace",
+                "auto",
+            ],
             Some(main.path()),
         )
         .unwrap(),
@@ -1576,7 +1919,7 @@ fn thread_resolve_refreshes_clean_stale_threads() {
 
     let resolved: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "resolve", "feature/stale"],
+            &["--output", "json", "thread", "resolve", "feature/stale"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1588,7 +1931,7 @@ fn thread_resolve_refreshes_clean_stale_threads() {
 
     let thread_show: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "show", "feature/stale"],
+            &["--output", "json", "thread", "show", "feature/stale"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1650,7 +1993,11 @@ fn log_never_surfaces_unknown_principal_after_init() {
     // system principal leaks into user-facing output either.
     for thread in &["main", "feature/parent"] {
         let log_json: Value = serde_json::from_str(
-            &heddle(&["--json", "log", thread, "-n", "20"], Some(temp.path())).unwrap(),
+            &heddle(
+                &["--output", "json", "log", thread, "-n", "20"],
+                Some(temp.path()),
+            )
+            .unwrap(),
         )
         .unwrap();
         let states = log_json["states"]

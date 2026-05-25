@@ -8,7 +8,7 @@
 //! - `list` enumerates every redaction in the repo.
 //! - `show` dumps a single redaction by its content-addressed id.
 //!
-//! Respects `--json` via `should_output_json`.
+//! Respects `--output json` via `should_output_json`.
 //!
 //! `--all-states` propagates the redaction across every state reachable
 //! from a thread tip or marker. The walk fans out by blob hash (not

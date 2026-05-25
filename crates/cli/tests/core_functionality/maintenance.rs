@@ -11,7 +11,7 @@ const MAINTENANCE_ENVS: [(&str, &str); 1] = [("HEDDLE_FSMONITOR", "native")];
 
 fn maintenance_inspect_json(path: &Path) -> Value {
     let output = heddle_with_env(
-        &["--json", "maintenance", "inspect"],
+        &["--output", "json", "maintenance", "inspect"],
         Some(path),
         &MAINTENANCE_ENVS,
     )
@@ -263,7 +263,7 @@ fn test_store_warm_promotes_packed_repo_and_is_idempotent() {
     heddle_must_succeed(&["gc", "--prune"], temp.path());
 
     // First warm: should report some `promoted` count and 0 errors.
-    let first = heddle_must_succeed(&["--json", "store", "warm"], temp.path());
+    let first = heddle_must_succeed(&["--output", "json", "store", "warm"], temp.path());
     let first_json: Value = serde_json::from_str(&first).expect("warm output should be JSON");
     let first_promoted = first_json
         .get("promoted")
@@ -280,7 +280,7 @@ fn test_store_warm_promotes_packed_repo_and_is_idempotent() {
     );
 
     // Second warm: idempotent — every blob already loose+uncompressed.
-    let second = heddle_must_succeed(&["--json", "store", "warm"], temp.path());
+    let second = heddle_must_succeed(&["--output", "json", "store", "warm"], temp.path());
     let second_json: Value =
         serde_json::from_str(&second).expect("second warm output should be JSON");
     let second_promoted = second_json

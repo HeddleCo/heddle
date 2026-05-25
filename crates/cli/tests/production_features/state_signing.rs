@@ -67,7 +67,7 @@ fn test_snapshot_sign_cli() {
     );
 
     if result.is_ok() {
-        let show_result = heddle(&["show", "HEAD", "--json"], Some(temp.path())).unwrap();
+        let show_result = heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
         let show: serde_json::Value = serde_json::from_str(&show_result).expect("show JSON");
         assert!(
             show.get("signature").is_some() || show.get("signature_status").is_some(),

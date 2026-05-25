@@ -30,8 +30,8 @@ fn test_merge_rename_on_one_side_modify_on_other() {
     .unwrap();
     heddle(&["capture", "-m", "Modify foo.rs"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["merge", "feature-a"], Some(temp.path()));
-    assert!(result.is_ok(), "merge should succeed: {:?}", result.err());
+    assert_stale_merge_refuses(temp.path(), "feature-a");
+    refresh_then_merge_thread(temp.path(), "feature-a");
 
     assert!(
         temp.path().join("bar.rs").exists(),
@@ -66,11 +66,8 @@ fn test_merge_rename_rename_conflict() {
     fs::rename(temp.path().join("shared.rs"), temp.path().join("beta.rs")).unwrap();
     heddle(&["capture", "-m", "Rename to beta"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["merge", "feature-a"], Some(temp.path()));
-    let output = match &result {
-        Ok(s) => s.clone(),
-        Err(s) => s.clone(),
-    };
+    assert_stale_merge_refuses(temp.path(), "feature-a");
+    let output = refresh_thread_expect_conflict(temp.path(), "feature-a");
     assert!(
         output.contains("conflict") || output.contains("Conflict"),
         "rename/rename should produce a conflict, got: {}",
@@ -150,8 +147,8 @@ fn test_merge_cross_directory_rename_with_modify() {
     .unwrap();
     heddle(&["capture", "-m", "Modify utils.rs"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["merge", "feature-a"], Some(temp.path()));
-    assert!(result.is_ok(), "merge should succeed: {:?}", result.err());
+    assert_stale_merge_refuses(temp.path(), "feature-a");
+    refresh_then_merge_thread(temp.path(), "feature-a");
 
     assert!(
         temp.path().join("src/lib/utils.rs").exists(),
@@ -182,8 +179,8 @@ fn test_merge_pure_rename_no_conflict() {
     fs::write(temp.path().join("baz.rs"), "fn new_stuff() {}").unwrap();
     heddle(&["capture", "-m", "Add baz"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["merge", "feature-a"], Some(temp.path()));
-    assert!(result.is_ok(), "merge should succeed: {:?}", result.err());
+    assert_stale_merge_refuses(temp.path(), "feature-a");
+    refresh_then_merge_thread(temp.path(), "feature-a");
 
     assert!(
         temp.path().join("bar.rs").exists(),

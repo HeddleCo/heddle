@@ -48,7 +48,7 @@ fn test_spaces_in_filename() {
     std::fs::write(temp.path().join("file with spaces.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Spaces in name"], temp.path());
     assert!(temp.path().join("file with spaces.txt").exists());
-    let result = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let result = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let status: Value = serde_json::from_str(&result).expect("Status should be valid JSON");
     let changes = status.get("changes").expect("Should have changes field");
     let modified = changes.get("modified").and_then(|m| m.as_array()).unwrap();
@@ -113,7 +113,7 @@ fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
     assert!(temp.path().join("target/foo.bin").exists());
 
     // HEAD advanced and disk matches state — no divergence.
-    let status_json = heddle_must_succeed(&["status", "--json"], temp.path());
+    let status_json = heddle_must_succeed(&["status", "--output", "json"], temp.path());
     let status: Value = serde_json::from_str(&status_json).unwrap();
     let changes = status.get("changes").unwrap();
     assert!(changes["modified"].as_array().unwrap().is_empty());
@@ -835,14 +835,11 @@ fn test_redo_ff_merge_refuses_when_post_target_state_missing() {
     );
 }
 
-/// Non-fast-forward merge undo: both threads have divergent work since the
-/// common ancestor. The merge synthesizes a new merge state with two parents.
-/// Undo must restore main to its pre-merge tip; feature's tip never moved.
-/// Unlike the FF path, this case exercises the `Snapshot` inverse (the merge
-/// records a new state with `thread = Some("main")`), so the thread ref *is*
-/// reset alongside HEAD.
+/// Divergent target/source histories are stale until refreshed. The old
+/// direct non-fast-forward merge path used to synthesize a merge state here;
+/// the stricter verification model refuses before writing an undoable op.
 #[test]
-fn test_undo_non_ff_merge_restores_both_threads() {
+fn test_stale_non_ff_merge_refuses_without_moving_threads() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -862,28 +859,20 @@ fn test_undo_non_ff_merge_restores_both_threads() {
     heddle_must_succeed(&["capture", "-m", "main work"], temp.path());
     let main_tip_before = head_short(temp.path());
 
-    heddle_must_succeed(&["merge", "feature"], temp.path());
-    let merge_state = head_short(temp.path());
-    assert_ne!(
-        merge_state, main_tip_before,
-        "non-FF merge must produce a fresh merge state"
+    let err = heddle(&["merge", "feature"], Some(temp.path()))
+        .expect_err("stale divergent merge must refuse before mutation");
+    assert!(
+        err.contains("Thread 'feature' is stale") && err.contains("heddle thread refresh feature"),
+        "stale merge should explain the refresh path: {err}"
     );
-    assert_ne!(
-        merge_state, feature_tip_before,
-        "non-FF merge must not collapse to feature's tip"
-    );
-
-    heddle_must_succeed(&["undo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         main_tip_before,
-        "undo of non-FF merge must restore HEAD to main's pre-merge tip"
+        "stale merge refusal must leave HEAD at main's pre-merge tip"
     );
 
     let repo = Repository::open(temp.path()).unwrap();
 
-    // The `main` thread ref must be reset too (not just HEAD): the `Snapshot`
-    // inverse for a merge carries the thread name so the ref rewinds with it.
     let main_tip = repo
         .refs()
         .get_thread("main")
@@ -892,17 +881,19 @@ fn test_undo_non_ff_merge_restores_both_threads() {
         .short();
     assert_eq!(
         main_tip, main_tip_before,
-        "non-FF undo must reset the `main` thread ref to its pre-merge tip"
+        "stale merge refusal must leave the `main` thread ref unchanged"
     );
 
-    // Feature is untouched throughout — its tip stays put.
     let feature_tip = repo
         .refs()
         .get_thread("feature")
         .unwrap()
         .expect("feature thread still exists")
         .short();
-    assert_eq!(feature_tip, feature_tip_before);
+    assert_eq!(
+        feature_tip, feature_tip_before,
+        "stale merge refusal must leave the source thread unchanged"
+    );
 }
 
 /// `--dry-run` is the discoverable spelling of `--preview` documented in
@@ -2096,37 +2087,41 @@ fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
     std::fs::write(temp.path().join("conflict.txt"), "main edit\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "main edit"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    // Conflicted 3-way merge — leaves HEAD at `main_tip_before` with
-    // conflict markers on disk and a live merge_state.
-    let _ = heddle(&["merge", "feature"], Some(temp.path()));
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    let feature_tip_before = head_short(temp.path());
+    let refresh = heddle(&["thread", "refresh", "feature"], Some(temp.path()));
+    assert!(
+        refresh
+            .as_ref()
+            .is_err_and(|err| err.contains("thread_refresh_conflicted")),
+        "refresh should create a durable conflict state: {refresh:?}"
+    );
 
     heddle_must_succeed(&["resolve", "--abort"], temp.path());
     assert_eq!(
         head_short(temp.path()),
-        main_tip_before,
-        "abort must leave HEAD at main's pre-merge tip"
+        feature_tip_before,
+        "abort must leave HEAD at feature's pre-refresh tip"
     );
 
-    // Undo the abort — `FastForwardV2 { pre = post = main_tip_before }`
+    // Undo the abort — `FastForwardV2 { pre = post = feature_tip_before }`
     // so the observable state is unchanged.
     heddle_must_succeed(&["undo"], temp.path());
     let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
+    let feature_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread("feature")
         .unwrap()
-        .expect("main thread still exists")
+        .expect("feature thread still exists")
         .short();
     assert_eq!(
-        main_tip, main_tip_before,
-        "undo of merge abort must leave main thread ref at the pre-merge tip"
+        feature_tip, feature_tip_before,
+        "undo of refresh abort must leave feature thread ref at the pre-refresh tip"
     );
     match repo.head_ref().unwrap() {
-        refs::Head::Attached { thread } => assert_eq!(thread, "main"),
+        refs::Head::Attached { thread } => assert_eq!(thread, "feature"),
         refs::Head::Detached { state } => panic!(
-            "HEAD must stay attached to main; got detached at {}",
+            "HEAD must stay attached to feature; got detached at {}",
             state.short()
         ),
     }

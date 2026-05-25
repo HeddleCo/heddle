@@ -332,7 +332,7 @@ fn upgrade_integrations(cli: &Cli, repo: &Repository, args: IntegrationTargetArg
         // Default (Relative). But every pre-PathMode install actually wrote
         // *absolute* paths — that's the codex-flagged regression. So when the
         // serde default fired (i.e. the on-disk manifest had no `path_mode`
-        // field), trust the actual installed config, not the default. We
+        // field), use the actual installed config, not the default. We
         // re-read the harness's installed settings file and probe the first
         // emitted command for a leading `heddle` literal vs an absolute path.
         let path_mode = match existing.as_ref() {
@@ -1174,7 +1174,7 @@ mod tests {
     /// machines where `heddle` isn't on PATH.
     ///
     /// Fix: when probing the existing install, read the actual settings
-    /// file and trust the on-disk command shape over the manifest's
+    /// file and prefer the on-disk command shape over the manifest's
     /// (defaulted) `path_mode`. Setup: install once with absolute mode,
     /// then drop the `path_mode` field from the manifest TOML to
     /// emulate a pre-PathMode install. The upgrade path must detect the

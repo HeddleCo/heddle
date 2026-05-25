@@ -18,6 +18,26 @@ fn write_file(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathB
     path
 }
 
+fn doctor_docs_json_failure(output: &std::process::Output) -> Value {
+    assert!(
+        !output.status.success(),
+        "expected non-zero exit on docs drift"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode docs drift should emit exactly one JSON envelope on stderr, not a stdout report: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: Value = serde_json::from_str(&stderr)
+        .unwrap_or_else(|err| panic!("parse doctor docs JSON failure envelope: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "machine_contract_drift");
+    assert_eq!(envelope["output_kind"], "doctor_docs");
+    assert_eq!(envelope["status"], "drift");
+    assert_eq!(envelope["verified"], false);
+    envelope
+}
+
 #[test]
 fn flags_invalid_workspace_value() {
     let temp = TempDir::new().expect("tempdir");
@@ -28,16 +48,26 @@ fn flags_invalid_workspace_value() {
     );
 
     let output = heddle_output(
-        &["doctor", "docs", "--path", md.to_str().unwrap(), "--json"],
+        &[
+            "doctor",
+            "docs",
+            "--path",
+            md.to_str().unwrap(),
+            "--output",
+            "json",
+        ],
         Some(temp.path()),
     )
     .expect("invoke doctor docs");
 
-    // Doctor exits non-zero when drift is found — that's the CI signal.
-    assert!(!output.status.success(), "expected non-zero exit on drift");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let report: Value = serde_json::from_str(&stdout).expect("parse JSON report");
+    let report = doctor_docs_json_failure(&output);
+    assert_eq!(report["output_kind"], "doctor_docs");
+    assert_eq!(report["status"], "drift");
+    assert_eq!(report["verified"], false);
+    assert_eq!(
+        report["recommended_action_argv"],
+        heddle_argv_json(["doctor", "docs", "--all", "--output", "json"])
+    );
     assert_eq!(report["files_scanned"], 1);
     let issues = report["issues"].as_array().expect("issues array");
     assert!(!issues.is_empty(), "expected at least one issue");
@@ -60,14 +90,18 @@ fn flags_unknown_verb_and_subverb() {
     );
 
     let output = heddle_output(
-        &["doctor", "docs", "--path", md.to_str().unwrap(), "--json"],
+        &[
+            "doctor",
+            "docs",
+            "--path",
+            md.to_str().unwrap(),
+            "--output",
+            "json",
+        ],
         Some(temp.path()),
     )
     .expect("invoke doctor docs");
-    assert!(!output.status.success());
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let report: Value = serde_json::from_str(&stdout).expect("parse JSON report");
+    let report = doctor_docs_json_failure(&output);
     let issues = report["issues"].as_array().expect("issues array");
     let kinds: Vec<&str> = issues.iter().filter_map(|i| i["kind"].as_str()).collect();
     assert!(
@@ -89,12 +123,19 @@ fn clean_markdown_exits_zero() {
         temp.path(),
         "ok.md",
         "Use `heddle start probe --workspace materialized --path ./checkout` for isolation.\n\
-         For status, run `heddle status --json`.\n\
+         For status, run `heddle status --output json`.\n\
          Clean up with `heddle thread drop probe --delete-thread`.\n",
     );
 
     let output = heddle_output(
-        &["doctor", "docs", "--path", md.to_str().unwrap(), "--json"],
+        &[
+            "doctor",
+            "docs",
+            "--path",
+            md.to_str().unwrap(),
+            "--output",
+            "json",
+        ],
         Some(temp.path()),
     )
     .expect("invoke doctor docs");
@@ -106,12 +147,84 @@ fn clean_markdown_exits_zero() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let report: Value = serde_json::from_str(&stdout).expect("parse JSON report");
+    assert_eq!(report["output_kind"], "doctor_docs");
+    assert_eq!(report["status"], "clean");
+    assert_eq!(report["verified"], true);
+    assert_eq!(report["recommended_action"], serde_json::Value::Null);
     assert_eq!(report["files_scanned"], 1);
     assert_eq!(
         report["issues"].as_array().expect("issues").len(),
         0,
         "unexpected issues: {}",
         stdout
+    );
+}
+
+#[test]
+fn accepts_catalog_global_options_and_non_finite_scope_values() {
+    let temp = TempDir::new().expect("tempdir");
+    let md = write_file(
+        temp.path(),
+        "ok.md",
+        "Inspect `heddle status --output json --repo .`.\n\
+         Add context with `heddle context set --path src/lib.rs --scope symbol:foo --kind rationale -m note`.\n\
+         Install with `heddle integration install codex --harness-install-scope repo`.\n",
+    );
+
+    let output = heddle_output(
+        &[
+            "doctor",
+            "docs",
+            "--path",
+            md.to_str().unwrap(),
+            "--output",
+            "json",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke doctor docs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "expected zero exit on catalog-backed globals and non-finite scope; stdout={} stderr={}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_str(&stdout).expect("parse JSON report");
+    assert_eq!(report["issues"].as_array().expect("issues").len(), 0);
+}
+
+#[test]
+fn flags_invalid_catalog_finite_value() {
+    let temp = TempDir::new().expect("tempdir");
+    let md = write_file(
+        temp.path(),
+        "drift.md",
+        "Use `heddle context set --path src/lib.rs --kind warning -m note`.\n",
+    );
+
+    let output = heddle_output(
+        &[
+            "doctor",
+            "docs",
+            "--path",
+            md.to_str().unwrap(),
+            "--output",
+            "json",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke doctor docs");
+    let report = doctor_docs_json_failure(&output);
+    let issues = report["issues"].as_array().expect("issues array");
+    assert!(
+        issues.iter().any(
+            |issue| issue["kind"] == Value::String("invalid_flag_value".to_string())
+                && issue["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("--kind warning"))
+        ),
+        "expected invalid finite --kind value; got: {report}"
     );
 }
 
@@ -192,7 +305,8 @@ fn all_enumerates_markdown_without_git() {
             "doctor",
             "docs",
             "--all",
-            "--json",
+            "--output",
+            "json",
         ],
         Some(root),
     )
@@ -238,7 +352,8 @@ fn flags_unreadable_path_as_hard_failure() {
             "docs",
             "--path",
             missing.to_str().unwrap(),
-            "--json",
+            "--output",
+            "json",
         ],
         Some(temp.path()),
     )
@@ -250,18 +365,17 @@ fn flags_unreadable_path_as_hard_failure() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let report: Value = serde_json::from_str(&stdout).expect("parse JSON report");
+    let report = doctor_docs_json_failure(&output);
     let issues = report["issues"].as_array().expect("issues array");
     assert_eq!(
         issues.len(),
         1,
-        "unreadable path should produce exactly one issue; got: {stdout}"
+        "unreadable path should produce exactly one issue; got: {report}"
     );
     assert_eq!(
         issues[0]["kind"],
         Value::String("unreadable".to_string()),
-        "issue kind should be 'unreadable'; got: {stdout}"
+        "issue kind should be 'unreadable'; got: {report}"
     );
     let detail = issues[0]["detail"].as_str().unwrap_or_default();
     assert!(
@@ -283,7 +397,14 @@ fn skips_feature_gated_presence_verb() {
     );
 
     let output = heddle_output(
-        &["doctor", "docs", "--path", md.to_str().unwrap(), "--json"],
+        &[
+            "doctor",
+            "docs",
+            "--path",
+            md.to_str().unwrap(),
+            "--output",
+            "json",
+        ],
         Some(temp.path()),
     )
     .expect("invoke doctor docs");

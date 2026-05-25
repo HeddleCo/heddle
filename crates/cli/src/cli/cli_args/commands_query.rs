@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle query` — structured query over the operation log (A10).
+//! `heddle query` — structured query over the operation log.
 
 use clap::Args;
 

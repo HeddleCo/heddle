@@ -2,11 +2,9 @@
 //! Runtime git-process dependency lint.
 //!
 //! Heddle's public Git-overlay workflows must not depend on a `git`
-//! executable being present on PATH. A few process calls are still
-//! intentional: explicit Git escape hatches, best-effort diagnostics,
-//! or optional fallback paths that degrade cleanly. This lint makes
-//! that inventory reviewable instead of letting new `git` spawns land
-//! unnoticed.
+//! executable being present on PATH. Git-format work is handled by
+//! native code and gix; tests and fixture builders may shell out to Git,
+//! but runtime CLI crates may not.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,103 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const ALLOWED_GIT_SPAWNS: &[(&str, &str, &str)] = &[
-    (
-        "crates/cli/src/cli/commands/doctor_schemas.rs",
-        "find_repo_root",
-        "best-effort repo-root fallback when no .heddle/.git ancestor is visible; explicit --repo avoids it",
-    ),
-    (
-        "crates/cli/src/bridge/git_core.rs",
-        "resolve_remote_default_branch",
-        "optional remote HEAD hint; missing git returns None and callers fall back",
-    ),
-    (
-        "crates/cli/src/bridge/git_core.rs",
-        "clone_url_to_bare_via_git",
-        "optional partial/filter clone escape hatch where native gix cannot honor the requested capability",
-    ),
-    (
-        "crates/cli/src/cli/commands/clone.rs",
-        "read_blob_bytes",
-        "optional lazy partial-clone promisor hydration after local object lookup misses",
-    ),
-    (
-        "crates/cli/src/cli/commands/clone.rs",
-        "git_available",
-        "best-effort clone verification probe; missing git keeps structural Heddle/Git HEAD checks",
-    ),
-    (
-        "crates/cli/src/cli/commands/clone.rs",
-        "run_git_clone_step",
-        "post-clone Git-clean validation path used only when git is present",
-    ),
-    (
-        "crates/cli/src/cli/commands/clone.rs",
-        "git_output",
-        "post-clone git status validation path used only when git is present",
-    ),
-    (
-        "crates/cli/src/cli/commands/checkpoint.rs",
-        "git_rev_parse_head",
-        "Git-overlay checkpoint audit trail records previous/new Git OIDs after a Heddle state is preserved",
-    ),
-    (
-        "crates/cli/src/cli/commands/git_overlay_health.rs",
-        "build_plain_git_trust_probe",
-        "shared plain-Git first-run trust probe that must not initialize .heddle as a side effect",
-    ),
-    (
-        "crates/cli/src/cli/commands/git_overlay_health.rs",
-        "git_probe_stdout",
-        "shared plain-Git trust probe for branch and dirty-summary hints before Heddle exists",
-    ),
-    (
-        "crates/cli/src/cli/commands/undo_apply.rs",
-        "git_stdout",
-        "Git checkpoint undo/redo safety preflight verifies Git HEAD/worktree before moving refs",
-    ),
-    (
-        "crates/cli/src/cli/commands/oss.rs",
-        "cmd_version",
-        "best-effort bug-context probe; missing git serializes git_version=null",
-    ),
-    (
-        "crates/cli/src/cli/commands/operator_core.rs",
-        "git_unmerged_paths",
-        "raw Git operation recovery helper for externally-started Git control flows",
-    ),
-    (
-        "crates/cli/src/cli/commands/operator_core.rs",
-        "run_git_control_attempt",
-        "raw Git continue/abort helper for externally-started Git control flows",
-    ),
-    (
-        "crates/cli/src/cli/commands/merge/mod.rs",
-        "validate_git_commit_preconditions_extended",
-        "explicit --git-commit preflight; plain Heddle merge does not require this path",
-    ),
-    (
-        "crates/cli/src/cli/commands/merge/git_commit.rs",
-        "validate_git_state",
-        "explicit --git-commit preflight against Git index/branch state",
-    ),
-    (
-        "crates/cli/src/cli/commands/merge/git_commit.rs",
-        "write_git_commit",
-        "explicit --git-commit operation that intentionally creates a Git commit",
-    ),
-    (
-        "crates/repo/src/repository.rs",
-        "git_remote_tracking_status",
-        "supported read path with missing-git fallback to remote_tracking=null",
-    ),
-    (
-        "crates/repo/src/repository.rs",
-        "git_overlay_worktree_status",
-        "supported read path with missing-git fallback to native Heddle tree comparison",
-    ),
-];
+const ALLOWED_GIT_SPAWNS: &[(&str, &str, &str)] = &[];
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 struct SpawnSite {
@@ -124,10 +26,7 @@ struct SpawnSite {
 fn runtime_git_process_spawns_match_reviewed_allowlist() {
     let workspace = workspace_root();
     let mut sites = Vec::new();
-    for dir in [
-        workspace.join("crates/cli/src"),
-        workspace.join("crates/repo/src"),
-    ] {
+    for dir in default_cli_runtime_source_dirs(&workspace) {
         walk_rust_files(&dir, &mut |path| scan_file(&workspace, path, &mut sites));
     }
 
@@ -153,7 +52,7 @@ fn runtime_git_process_spawns_match_reviewed_allowlist() {
 
     assert!(
         unexpected.is_empty(),
-        "unreviewed runtime `git` process spawn(s):\n{}\nAdd only intentional optional escape hatches to ALLOWED_GIT_SPAWNS with a reason, or replace the call with native/gix behavior.",
+        "runtime `git` process spawn(s) are not allowed:\n{}\nReplace the call with native/gix behavior or move fixture setup into tests.",
         unexpected
             .iter()
             .map(|site| format!(
@@ -187,11 +86,15 @@ fn scan_file(workspace: &Path, path: &Path, sites: &mut Vec<SpawnSite>) {
     let source =
         fs::read_to_string(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
     let mut function = String::from("<module>");
+    let mut git_command_aliases = BTreeSet::new();
+    let mut pending_command_new: Option<(usize, String, String, usize)> = None;
     let mut pending_cfg_test = false;
-    let mut in_test_module = false;
+    let mut test_module_depth: Option<usize> = None;
     for (idx, line) in source.lines().enumerate() {
         let trimmed = line.trim_start();
-        if in_test_module {
+        if let Some(depth) = test_module_depth {
+            let depth = brace_depth_after_line(depth, line);
+            test_module_depth = (depth > 0).then_some(depth);
             continue;
         }
         if trimmed == "#[cfg(test)]" {
@@ -200,7 +103,8 @@ fn scan_file(workspace: &Path, path: &Path, sites: &mut Vec<SpawnSite>) {
         }
         if pending_cfg_test {
             if trimmed.starts_with("mod tests") && trimmed.contains('{') {
-                in_test_module = true;
+                let depth = brace_depth_after_line(0, line);
+                test_module_depth = (depth > 0).then_some(depth);
                 continue;
             }
             if !trimmed.starts_with('#') && !trimmed.is_empty() {
@@ -209,22 +113,118 @@ fn scan_file(workspace: &Path, path: &Path, sites: &mut Vec<SpawnSite>) {
         }
         if let Some(name) = parse_function_name(trimmed) {
             function = name.to_string();
+            git_command_aliases.clear();
+            pending_command_new = None;
         }
-        if is_git_spawn(trimmed) {
+        if let Some((line, source, function, remaining)) = pending_command_new.take() {
+            if line_mentions_git_command_arg(trimmed, &git_command_aliases) {
+                sites.push(SpawnSite {
+                    file: rel.to_string(),
+                    function,
+                    line,
+                    source: format!("{source} {}", trimmed.trim()),
+                });
+                continue;
+            }
+            if remaining > 0 && !trimmed.contains(')') {
+                pending_command_new = Some((line, source, function, remaining - 1));
+            }
+        }
+        if let Some(alias) = parse_git_command_alias(trimmed) {
+            git_command_aliases.insert(alias.to_ascii_lowercase());
+        }
+        if is_git_spawn_with_aliases(trimmed, &git_command_aliases) {
             sites.push(SpawnSite {
                 file: rel.to_string(),
                 function: function.clone(),
                 line: idx + 1,
                 source: trimmed.to_string(),
             });
+        } else if starts_multiline_command_new(trimmed) {
+            pending_command_new = Some((idx + 1, trimmed.to_string(), function.clone(), 4));
         }
     }
 }
 
 fn is_git_spawn(line: &str) -> bool {
-    line.contains("Command::new(\"git\")")
-        || line.contains("ProcessCommand::new(\"git\")")
-        || line.contains("std::process::Command::new(\"git\")")
+    let compact = line.split_whitespace().collect::<String>();
+    let lower = compact.to_ascii_lowercase();
+    lower.contains("command::new(\"git\")")
+        || lower.contains("processcommand::new(\"git\")")
+        || lower.contains("command::new(r#\"git\"#)")
+        || lower.contains("command::new(git")
+        || lower.contains("command::new(&git")
+        || shell_wrapper_mentions_git(&lower)
+}
+
+fn is_git_spawn_with_aliases(line: &str, aliases: &BTreeSet<String>) -> bool {
+    if is_git_spawn(line) {
+        return true;
+    }
+    let compact = line
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    aliases.iter().any(|alias| {
+        compact.contains(&format!("command::new({alias})"))
+            || compact.contains(&format!("command::new(&{alias})"))
+            || compact.contains(&format!("processcommand::new({alias})"))
+            || compact.contains(&format!("processcommand::new(&{alias})"))
+    })
+}
+
+fn starts_multiline_command_new(line: &str) -> bool {
+    let compact = line
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    (compact.contains("command::new(") || compact.contains("processcommand::new("))
+        && !compact.contains(')')
+}
+
+fn line_mentions_git_command_arg(line: &str, aliases: &BTreeSet<String>) -> bool {
+    let compact = line
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    compact.contains("\"git\"")
+        || compact.contains("r#\"git\"#")
+        || aliases.iter().any(|alias| {
+            compact == *alias
+                || compact == format!("{alias},")
+                || compact == format!("&{alias}")
+                || compact == format!("&{alias},")
+        })
+}
+
+fn parse_git_command_alias(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    let rest = line.strip_prefix("let ")?;
+    let (name, value) = rest.split_once('=')?;
+    let name = name.trim().trim_start_matches("mut ").trim();
+    if !is_rust_identifier(name) {
+        return None;
+    }
+    let value = value.trim().trim_end_matches(';').trim();
+    matches!(value, "\"git\"" | "r#\"git\"#").then_some(name)
+}
+
+fn is_rust_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn shell_wrapper_mentions_git(line: &str) -> bool {
+    let shell_spawn = line.contains("command::new(\"sh\")")
+        || line.contains("command::new(\"bash\")")
+        || line.contains("command::new(\"cmd\")")
+        || line.contains("command::new(\"powershell\")")
+        || line.contains("command::new(\"pwsh\")");
+    shell_spawn && line.contains("git")
 }
 
 fn parse_function_name(line: &str) -> Option<&str> {
@@ -235,6 +235,17 @@ fn parse_function_name(line: &str) -> Option<&str> {
         .unwrap_or(after.len());
     let name = &after[..name_end];
     (!name.is_empty()).then_some(name)
+}
+
+fn brace_depth_after_line(mut depth: usize, line: &str) -> usize {
+    for ch in line.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
 }
 
 fn walk_rust_files(dir: &Path, visit: &mut impl FnMut(&Path)) {
@@ -258,4 +269,86 @@ fn workspace_root() -> PathBuf {
         .nth(2)
         .expect("workspace root")
         .to_path_buf()
+}
+
+fn default_cli_runtime_source_dirs(workspace: &Path) -> Vec<PathBuf> {
+    [
+        "crates/cli/src",
+        "crates/cli-shared/src",
+        "crates/client/src",
+        "crates/crypto/src",
+        "crates/daemon/src",
+        "crates/grpc/src",
+        "crates/ingest/src",
+        "crates/merge/src",
+        "crates/mount/src",
+        "crates/objects/src",
+        "crates/oplog/src",
+        "crates/proto/src",
+        "crates/refs/src",
+        "crates/repo/src",
+        "crates/review/src",
+        "crates/runtime-bridge/src",
+        "crates/semantic/src",
+        "crates/state_review/src",
+        "crates/weft-client-shim/src",
+    ]
+    .into_iter()
+    .map(|path| workspace.join(path))
+    .filter(|path| path.exists())
+    .collect()
+}
+
+#[test]
+fn git_spawn_detector_catches_aliases_and_shell_wrappers() {
+    for line in [
+        "Command::new(\"git\")",
+        "std::process::Command::new(\"git\")",
+        "tokio::process::Command::new(\"git\")",
+        "ProcessCommand::new(\"git\")",
+        "Command::new(GIT_BINARY)",
+        "Command::new(&git_path)",
+        "Command::new(\"sh\").arg(\"-c\").arg(\"git status\")",
+        "Command::new(\"bash\").args([\"-c\", \"git fetch\"])",
+    ] {
+        assert!(is_git_spawn(line), "should flag {line:?}");
+    }
+
+    for line in [
+        "Command::new(\"heddle\")",
+        "Command::new(\"xdg-open\")",
+        "Command::new(\"cmd\").args([\"/C\", \"start\", url])",
+        "let git = gix::open(path)?;",
+    ] {
+        assert!(!is_git_spawn(line), "should not flag {line:?}");
+    }
+}
+
+#[test]
+fn git_spawn_detector_catches_multiline_and_local_aliases() {
+    let mut aliases = BTreeSet::new();
+    aliases.insert("git_cmd".to_string());
+    assert!(is_git_spawn_with_aliases(
+        "Command::new(git_cmd).arg(\"status\")",
+        &aliases
+    ));
+    assert!(is_git_spawn_with_aliases(
+        "std::process::Command::new(&git_cmd)",
+        &aliases
+    ));
+
+    assert!(starts_multiline_command_new("Command::new("));
+    assert!(line_mentions_git_command_arg(
+        "    \"git\"",
+        &BTreeSet::new()
+    ));
+    assert_eq!(
+        parse_git_command_alias("let git_cmd = \"git\";"),
+        Some("git_cmd")
+    );
+    assert_eq!(
+        parse_git_command_alias("let mut git_cmd = r#\"git\"#;"),
+        Some("git_cmd")
+    );
+    assert_eq!(parse_git_command_alias("let git = gix::open(path)?;"), None);
 }

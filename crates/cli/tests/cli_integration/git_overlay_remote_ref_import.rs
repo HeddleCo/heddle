@@ -78,9 +78,10 @@ fn git_overlay_imports_explicit_remote_tracking_branch_ref() {
         "remote-tracking ref import should sync one branch: {import_output}"
     );
 
-    let threads: Value =
-        serde_json::from_str(&heddle(&["thread", "list", "--json"], Some(clone.path())).unwrap())
-            .unwrap();
+    let threads: Value = serde_json::from_str(
+        &heddle(&["thread", "list", "--output", "json"], Some(clone.path())).unwrap(),
+    )
+    .unwrap();
     assert!(
         threads["threads"].as_array().unwrap().iter().any(|thread| {
             thread["name"] == "origin/feature/parser-fast" && thread["history_imported"] == true

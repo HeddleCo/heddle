@@ -6,7 +6,7 @@
 //! merge, thread create/update, marker, fork, collapse, goto. Default
 //! behavior tails forever and exits on SIGINT (Ctrl-C). `--since 5m`
 //! replays the last N before tailing live; `--filter` restricts to
-//! the named kinds; `--json` emits one JSON object per line for
+//! the named kinds; `--output json` emits one JSON object per line for
 //! piping to `jq` or downstream tooling.
 //!
 //! ## Tailing strategy
@@ -29,7 +29,7 @@
 //! (CLI `--no-color` flag, `NO_COLOR` env, `CLICOLOR_FORCE` env, TTY
 //! detection) is initialized once in `main` and consulted by the
 //! shared helpers. JSON output is uncolored unconditionally because
-//! the print sites short-circuit on `--json` before any styled
+//! the print sites short-circuit on JSON mode before any styled
 //! helper runs.
 
 use std::{
@@ -75,7 +75,7 @@ const MAX_TAIL_WINDOW: usize = 100_000;
 
 /// Entry kinds the user can pass to `--filter`. Names match the
 /// `kind` field emitted in JSON mode so a `--filter snapshot` pipes
-/// cleanly into `--json` for downstream tooling.
+/// cleanly into `--output json` for downstream tooling.
 const FILTER_KINDS: &[&str] = &[
     "snapshot",
     "goto",
@@ -178,17 +178,12 @@ fn oplog_file_path(heddle_dir: &Path) -> PathBuf {
     heddle_dir.join("oplog").join("oplog.bin")
 }
 
-/// Resolve JSON-vs-text mode. Either the global `--json` flag or
-/// the watch-specific `--json` flag turns it on; explicit `--output`
-/// overrides both. We deliberately *don't* call `should_output_json`
+/// Resolve JSON-vs-text mode. Explicit `--output json` opts in. We deliberately *don't* call `should_output_json`
 /// here because that helper auto-flips to JSON on a non-TTY, which
 /// would make `heddle watch | tee log.txt` silently change format.
 /// `watch` is opinionated: human-readable by default, JSON only when
 /// the user asks.
-fn json_mode(cli: &Cli, args: &WatchArgs) -> bool {
-    if args.json || cli.json {
-        return true;
-    }
+fn json_mode(cli: &Cli, _args: &WatchArgs) -> bool {
     matches!(cli.output, Some(OutputMode::Json))
 }
 
@@ -540,7 +535,7 @@ struct EmittedEntry {
 }
 
 /// JSON-mode view of an actor (agent provider/model). Mirrors the
-/// shape rendered by `heddle status --json` so consumers can join
+/// shape rendered by `heddle status --output json` so consumers can join
 /// `watch` events with `status` outputs without renaming fields.
 #[derive(Clone, Debug, Serialize)]
 struct ActorInfo {

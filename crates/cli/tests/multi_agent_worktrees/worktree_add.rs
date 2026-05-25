@@ -31,7 +31,7 @@ fn top_level_start_defaults_to_lightweight_in_auto_mode() {
     let main = setup_repo("hello.txt", "world");
 
     let output = heddle(
-        &["--json", "start", "feature/default-visible"],
+        &["--output", "json", "start", "feature/default-visible"],
         Some(main.path()),
     )
     .unwrap();
@@ -94,7 +94,8 @@ fn thread_promote_preserves_thread_identity() {
     .unwrap();
     let out = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "thread",
             "promote",
             "feature/promote-me",
@@ -136,7 +137,7 @@ fn thread_drop_removes_materialized_checkout_and_optionally_thread_ref() {
     .unwrap();
 
     assert!(!checkout.path().exists(), "checkout should be deleted");
-    let out = heddle(&["--json", "thread", "list"], Some(main.path())).unwrap();
+    let out = heddle(&["--output", "json", "thread", "list"], Some(main.path())).unwrap();
     let v: Value = serde_json::from_str(&out).unwrap();
     let threads = v["threads"].as_array().unwrap();
     assert!(
@@ -202,7 +203,7 @@ fn test_snapshot_excludes_nested_thread_worktrees() {
 
     // Parent's status must be clean: the nested file belongs to the
     // child thread, not to main.
-    let status_json = heddle(&["--json", "status"], Some(main.path())).unwrap();
+    let status_json = heddle(&["--output", "json", "status"], Some(main.path())).unwrap();
     let status: Value = serde_json::from_str(&status_json).unwrap();
     let added = status["changes"]["added"].as_array().unwrap();
     assert!(
@@ -217,7 +218,7 @@ fn test_snapshot_excludes_nested_thread_worktrees() {
     // Snapshot from main: must be a no-op (no new state created on
     // top of init, OR the new state must not pull in the nested file).
     heddle(&["capture", "-m", "post-nested"], Some(main.path())).unwrap();
-    let log = heddle(&["--json", "log"], Some(main.path())).unwrap();
+    let log = heddle(&["--output", "json", "log"], Some(main.path())).unwrap();
     assert!(
         !log.contains("agent-only.txt"),
         "snapshot must not capture the nested child's file"
@@ -248,7 +249,7 @@ fn test_status_distinguishes_own_worktree_from_nested_threads() {
     fs::write(nested.join("agent-only.txt"), "child work").unwrap();
 
     // From inside the child's worktree: own changes ARE visible.
-    let child_status = heddle(&["--json", "status"], Some(&nested)).unwrap();
+    let child_status = heddle(&["--output", "json", "status"], Some(&nested)).unwrap();
     let child: Value = serde_json::from_str(&child_status).unwrap();
     let child_added = child["changes"]["added"].as_array().unwrap();
     assert!(
@@ -261,7 +262,7 @@ fn test_status_distinguishes_own_worktree_from_nested_threads() {
 
     // From the parent (after switching off the child thread): clean.
     heddle(&["thread", "switch", "main"], Some(main.path())).unwrap();
-    let parent_status = heddle(&["--json", "status"], Some(main.path())).unwrap();
+    let parent_status = heddle(&["--output", "json", "status"], Some(main.path())).unwrap();
     let parent: Value = serde_json::from_str(&parent_status).unwrap();
     let parent_added = parent["changes"]["added"].as_array().unwrap();
     assert!(

@@ -34,12 +34,12 @@ extract time.
 |---|---|---|---|
 | `clone` | `cargo test --locked -p heddle-cli --test cli_integration realworld_fixtures_clone_and_import_round_trip -- --ignored --nocapture` | Pass | Real public fixtures clone with `PATH=""`. |
 | `bridge import` | Same real-world fixture test | Pass | Imports all refs with `PATH=""`. |
-| `fsck --bridge --json` | Same real-world fixture test | Pass | JSON parses and `valid=true` with `PATH=""`; no host-`git` carve-out remains in this test. |
-| `thread list --json` | Same real-world fixture test | Pass | JSON parses and exposes imported threads with `PATH=""`. |
-| `status --json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `git-shaped` dirty long-path probe | Pass | Fresh Git worktree without Heddle state reports `git-overlay`, current thread, and dirty path with `PATH=""`; large fixture probe detected `untracked dirty file.txt` under a long path with spaces. |
-| `diagnose --json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit; manual `git-shaped` dirty long-path probe | Pass | No longer fails when upstream drift probing cannot spawn `git`; large dirty-worktree probe parsed cleanly with `PATH=""`. |
-| `workspace show --json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit | Pass | No longer fails when upstream drift probing cannot spawn `git`. |
-| `ready --json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit | Pass | Emits parseable JSON and exits 0 with `PATH=""`. |
+| `fsck --bridge --output json` | Same real-world fixture test | Pass | JSON parses and `valid=true` with `PATH=""`; no host-`git` carve-out remains in this test. |
+| `thread list --output json` | Same real-world fixture test | Pass | JSON parses and exposes imported threads with `PATH=""`. |
+| `status --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `git-shaped` dirty long-path probe | Pass | Fresh Git worktree without Heddle state reports `git-overlay`, current thread, and dirty path with `PATH=""`; large fixture probe detected `untracked dirty file.txt` under a long path with spaces. |
+| `diagnose --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit; manual `git-shaped` dirty long-path probe | Pass | No longer fails when upstream drift probing cannot spawn `git`; large dirty-worktree probe parsed cleanly with `PATH=""`. |
+| `workspace show --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit | Pass | No longer fails when upstream drift probing cannot spawn `git`. |
+| `ready --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit | Pass | Emits parseable JSON and exits 0 with `PATH=""`. |
 | `help status` | Manual `tapestry` audit | Pass | Purpose, usage, flags, examples; stdout only. |
 | everyday help entrypoints | `everyday_commands_have_all_required_help_entrypoints` | Pass | Rubric everyday commands support `heddle help <cmd>`, `<cmd> --help`, and `<cmd> -h`. |
 | public command-path help entrypoints | `public_command_paths_have_all_required_help_entrypoints` | Pass after fix | Enumerates visible clap command paths and verifies `heddle help <path>`, `<path> --help`, and `<path> -h`; nested `heddle help thread list`-style paths now route to clap help. |
@@ -50,7 +50,7 @@ extract time.
 | `init --repo <path>` | `test_cli_init_honors_global_repo_path`; manual probe | Pass after fix | Initializes the requested path, not the process cwd; conflicting `--repo` + positional paths fail before side effects. |
 | everyday save/read machine streams | `git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path` | Pass | In Git-overlay mode with `PATH=""`, `init`, `status`, `capture`, `checkpoint`, `log`, `show`, `diagnose`, and `ready` emit parseable JSON with empty stderr; `diff --output text` respects `NO_COLOR=1`. |
 | `start` / `merge` / `undo` JSON workflow | `start_merge_undo_json_workflow_keeps_machine_streams_clean` | Pass after strengthening | Isolated solid checkout, feature capture, merge preview/apply, undo list/preview all emit parseable JSON with empty stderr; merge and undo preview paths do not mutate current state or worktree content; repeat merge is a successful `Already up to date` text no-op. |
-| `version --repo <path> --verbose --json` | `version_verbose_honors_explicit_repo_path` | Pass after fix | Verbose bug-context JSON reports the explicitly requested repository root, not the process cwd. |
+| `version --repo <path> --verbose --output json` | `version_verbose_honors_explicit_repo_path` | Pass after fix | Verbose bug-context JSON reports the explicitly requested repository root, not the process cwd. |
 | `resolve` outside a merge | `resolve_without_merge_emits_actionable_json_error` | Pass after fix | JSON and text failures use `kind=operation_not_in_progress` / `Error: No merge in progress`, hint at `heddle status`, keep stdout empty, and avoid the old `object not found` wrapper. |
 | corrupt repository ref recovery | `fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json` | Pass after fix | Corrupt thread ref fails non-zero with stdout clean; JSON stderr has `kind=repository_integrity_error`, preserves the invalid-object error, and hints `heddle fsck --full`; text mode mirrors the recovery hint. |
 | global quiet/color/narrow text behavior | `quiet_no_color_and_narrow_text_outputs_preserve_global_contract`; `narrow_no_color_text_outputs_cover_everyday_read_surfaces` | Pass after fix | `--quiet` suppresses capture/log tips; `NO_COLOR=1` wins over forced color; `COLUMNS=28/30` text succeeds across status, diagnose, doctor, diff, log, show, thread list, workspace show, bridge status, fsck, and ready with primary labels intact. |
@@ -74,8 +74,8 @@ extract time.
 - Expanded `git_replacement_matrix` to cover a fresh Git worktree with no
   Heddle state under `PATH=""` for `status`, `diagnose`, `thread list`,
   `workspace show`, and `ready`.
-- Updated real-world fixture tests so `fsck --bridge --json` and
-  `thread list --json` run under `PATH=""` rather than borrowing host Git.
+- Updated real-world fixture tests so `fsck --bridge --output json` and
+  `thread list --output json` run under `PATH=""` rather than borrowing host Git.
 - Classified missing path IO errors as `path_not_found` in JSON-mode error
   envelopes, with an actionable `--repo` / `heddle init` recovery hint.
 - Added parseable JSON samples for every registered schema verb in
@@ -91,7 +91,7 @@ extract time.
 - Added a no-`git` everyday machine-stream regression covering Git-overlay
   `init`, `status`, `capture`, `checkpoint`, `log`, `show`, `diagnose`,
   `ready`, and `diff` with `NO_COLOR=1`.
-- Fixed `heddle version --repo <path> --verbose --json` so bug-context output
+- Fixed `heddle version --repo <path> --verbose --output json` so bug-context output
   reports the explicitly requested repository instead of the process cwd.
 - Classified resolve/continue-style no-operation failures as
   `operation_not_in_progress` with an actionable `heddle status` hint, and
@@ -294,18 +294,18 @@ C-or-lower or hard-gate findings remain open.
 | Everyday command | Current score | Evidence status | Residual risk |
 |---|---:|---|---|
 | `status` | A | JSON/text/no-git/error cases sampled; machine-stream no-git regression pass; large dirty long-path `git-shaped` probe pass; narrow/no-color text pass; TTY auto/text and explicit JSON pass | Low residual risk. |
-| `thread` | A | `thread list --json` no-git real fixtures pass; public help paths pass; cleanup safety suite pass; narrow/no-color text pass; unknown-thread recovery points at `heddle thread list` | Low residual risk on rare subcommands. |
-| `bridge` | A | `bridge import` no-git real fixtures pass; bridge init/export/import/push/pull/sync tests pass; no-op import/sync text+JSON and divergent-recovery copy are pinned | Optional Git escape hatches are documented and linted. |
+| `thread` | A | `thread list --output json` no-git real fixtures pass; public help paths pass; cleanup safety suite pass; narrow/no-color text pass; unknown-thread recovery points at `heddle thread list` | Low residual risk on rare subcommands. |
+| `bridge` | A | `bridge import` no-git real fixtures pass; bridge init/export/import/push/pull/sync tests pass; no-op import/sync text+JSON and divergent-recovery copy are pinned | Runtime `git` subprocesses are forbidden and linted. |
 | `diagnose` | A | JSON no-git pass; narrow/no-color text pass; plain-Git baseline and branch-switch coverage pass; recovery shape sampled | Low residual risk. |
 | `help` | A | All rubric everyday commands and visible public command paths have `help`, `--help`, and `-h` coverage; typo suggestions and unknown-topic recovery sampled | Low residual risk. |
 | `clone` | A | no-git real fixtures pass; local/bare clone path with `PATH=""` pass; unsupported lazy/depth/filter/file-url flags reject cleanly; text completion names next step | Remote-network progress remains an optional long-running polish area. |
-| `fsck` | A | `fsck --bridge --json` no-git real fixtures pass; narrow/no-color text pass; corrupt ref recovery passes in JSON and text | Low residual risk. |
+| `fsck` | A | `fsck --bridge --output json` no-git real fixtures pass; narrow/no-color text pass; corrupt ref recovery passes in JSON and text | Low residual risk. |
 | `ready` | A | no-git JSON pass; clean machine-stream regression pass; text ready/already-ready no-op pass; stale/heavy-impact coverage exists in multi-agent tests | Low residual risk. |
 | `workspace` | A | no-git JSON pass; grouped current/stacked/parallel threads covered; promoted to the curated core-loop surface; bare `heddle workspace` defaults to the control-tower view | Low residual risk on very large thread lists. |
 | `doctor` | A | `doctor docs` and `doctor schemas` gates clean; narrow/no-color text pass; text/json recovery sampled; docs-doctor unknown flags and unreadable paths pass | Low residual risk. |
 | `init` | A | `--repo` path handling fixed and tested; JSON/text init sampled; existing repo/conflicting path failures covered | Low residual risk. |
 | `capture` | A | text and JSON sampled; no-git JSON stream regression pass; `--quiet` tip suppression pass; large-deletion destructive safety pass | Low residual risk on platform-specific filesystem errors. |
-| `checkpoint` | A | Git-overlay no-git JSON stream regression pass; no-git write-through to branch/index pass; locked-index failure names the skip reason; native refusal is controlled JSON | Optional Git escape hatches documented and linted. |
+| `checkpoint` | A | Git-overlay no-git JSON stream regression pass; no-git write-through to branch/index pass; locked-index failure names the skip reason; native refusal is controlled JSON | Runtime `git` subprocesses are forbidden and linted. |
 | `log`, `show`, `diff` | A | no-git machine/text stream regression pass; narrow/no-color text pass; `show`/`diff` missing-ID recovery pass; `log` quiet-tip bug fixed | Low residual risk. |
 | `start` | A | JSON workflow stream pass; text cd hints, spaced path quoting, non-empty path recovery, and TTY start guidance covered | Low residual risk on rare workspace-mode failures. |
 | `merge` | A | JSON preview/apply workflow pass; preview non-mutation pass; conflict/continue/abort coverage exists in overlay matrix; already-applied merge is successful text no-op with clean stderr and unchanged state | Low residual risk. |
@@ -326,30 +326,32 @@ auto-output, TTY output, corrupt-repo recovery, exit-code, destructive-safety,
 and runtime `git` process lint gates are explicit in CI; final release work
 should keep them required on protected branches.
 
-Remaining runtime `git` process calls are classified below and enforced by
+Runtime Git-format paths are classified below. Spawning the `git` executable in
+production CLI runtime code is forbidden and enforced by
 `cargo test -p heddle-cli --test git_process_lint`.
 
 Default `--output auto` is documented by README/CLI help and tested: text on
 TTY, JSON when stdout is piped, with `--output text` and `--output json` as
 explicit overrides.
 
-## Runtime Git Process Call Inventory
+## Runtime Git Dependency Inventory
 
 Enforced by `cargo test -p heddle-cli --test git_process_lint`.
 
 The hard gate is no `git` executable dependency for supported Git-overlay
-workflows. Current remaining process calls are classified as follows:
+workflows. The default CLI runtime has an empty allowlist for `git`
+subprocesses; Git-format operations use native code and `gix`.
 
 | Location | Classification | Rationale |
 |---|---|---|
-| `repo::Repository::git_remote_tracking_status` / `git_overlay_worktree_status` | Supported read path with no-git fallback | Spawn failures with `NotFound` degrade to `remote_tracking=null` or native Heddle worktree comparison; covered by no-git matrix. |
-| `bridge::git_core::resolve_remote_default_branch` | Optional remote default-branch hint | Missing `git` returns `None`; clone/import fall back to explicit refs/native heuristics. |
-| `bridge::git_core::clone_url_to_bare_via_git` | Optional partial/filter clone escape hatch | Used where the native gix path cannot honor the requested filter/depth capability; ordinary local/bare clone no-git workflows are covered by real fixtures. |
-| `clone::GitOverlayBlobHydrator::read_blob_bytes` | Optional lazy partial-clone hydration | Local object lookup is attempted first; promisor refetch for missing blobs requires the Git CLI protocol behavior. Document as a lazy-clone escape hatch. |
-| `merge --git-commit` / `merge::git_commit` | Explicit optional escape hatch | The flag asks Heddle to create a Git commit and intentionally depends on Git configuration/index commands. Plain Heddle merge is covered without this flag. |
-| `operator_core` continue/abort helpers | Optional raw Git control-flow interop | These paths exist to recover externally-started Git operations; Heddle-native continue/abort paths remain separate. |
-| `oss::cmd_version` | Optional environment probe | `git --version` is best-effort bug-context metadata; missing Git serializes `git_version=null`. |
-| `doctor_schemas::find_repo_root` fallback | Optional root-discovery fallback | Only used when neither `.heddle` nor `.git` is found in ancestors; schema checks can run with explicit `--repo`. |
+| `repo::Repository::git_remote_tracking_status` / `git_overlay_worktree_status` | Native/gix read path | Remote tracking, HEAD, and worktree/index checks do not invoke the Git binary. |
+| `bridge::git_core::resolve_remote_default_branch` | Native/gix remote default-branch hint | Clone/import use protocol/ref inspection without invoking the Git binary. |
+| `bridge::git_core::clone_url_to_bare` filtered clone | Unsupported native capability | Filtered/lazy Git-overlay clones now fail closed instead of shelling out to `git clone`; ordinary local/bare clone no-git workflows are covered by real fixtures. |
+| `clone::GitOverlayBlobHydrator::read_blob_bytes` | Local-only native hydration | Local object lookup is attempted first; missing promisor blobs report the native lazy-hydration boundary instead of invoking `git cat-file`. |
+| `merge --git-commit` / `merge::git_commit` | Native Git object/ref write | The flag asks Heddle to create a Git commit, and the implementation writes Git objects, index, and refs through native libraries. |
+| `operator_core` continue/abort helpers | No-git handoff for raw Git sequencer state | Heddle detects externally-started Git operations and reports preservation/handoff guidance instead of invoking `git rebase --continue`, `git merge --abort`, or similar commands. |
+| `oss::cmd_version` | No Git process probe | Verbose version output reports that the Git binary is not required; JSON keeps `git_version=null`. |
+| `doctor_schemas::find_repo_root` fallback | Native filesystem root discovery | Schema checks walk ancestor directories directly; no Git process probe is required. |
 
 
 ## Non-Blocking Risks Observed

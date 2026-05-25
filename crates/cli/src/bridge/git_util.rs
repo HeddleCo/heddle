@@ -50,18 +50,6 @@ impl<'a> GitBridge<'a> {
         None
     }
 
-    /// Convert Heddle state attribution to Git signature.
-    pub(crate) fn state_to_signature(state: &State) -> gix::actor::Signature {
-        gix::actor::Signature {
-            name: state.attribution.principal.name.as_str().into(),
-            email: state.attribution.principal.email.as_str().into(),
-            time: gix::date::Time {
-                seconds: state.created_at.timestamp(),
-                offset: 0,
-            },
-        }
-    }
-
     /// Build a Git commit message from a Heddle state.
     ///
     /// Phase B (post-2026-05) onward: this is just the state's intent text,
@@ -108,7 +96,21 @@ impl<'a> GitBridge<'a> {
         annotations_omitted: u32,
     ) -> String {
         let body = Self::build_commit_message(state);
-        let mut out = body;
+        Self::build_commit_message_with_footer_with_body(
+            state,
+            &body,
+            hosted_url,
+            annotations_omitted,
+        )
+    }
+
+    pub(crate) fn build_commit_message_with_footer_with_body(
+        state: &State,
+        body: &str,
+        hosted_url: Option<&str>,
+        annotations_omitted: u32,
+    ) -> String {
+        let mut out = body.to_string();
         if !out.ends_with('\n') {
             out.push('\n');
         }

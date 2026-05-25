@@ -21,7 +21,7 @@ use std::fs;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{heddle, heddle_output};
+use super::{assert_json_recovery_advice_fields, heddle, heddle_output};
 
 /// Bootstrap a repo containing a fake-secret file in a captured state.
 /// Returns the temp dir and the short change-id of the capture.
@@ -44,7 +44,7 @@ fn setup_repo_with_secret() -> (TempDir, String) {
     let value: Value = serde_json::from_str(&raw).unwrap();
     let state = value["states"][0]["change_id"]
         .as_str()
-        .expect("log --json should expose change_id")
+        .expect("log --output json should expose change_id")
         .to_string();
     (temp, state)
 }
@@ -193,16 +193,19 @@ fn purge_apply_refuses_without_force() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let err: Value =
         serde_json::from_str(&stderr).expect("purge refusal should emit JSON error envelope");
+    assert_json_recovery_advice_fields(&err, &err.to_string());
     assert!(
         err["kind"] == "destructive_requires_force"
             && err["error"]
                 .as_str()
                 .is_some_and(|error| error.contains("Refusing to purge")
-                    && error.contains("destructive action requires --force")
-                    && error.contains("purge is irreversible")
-                    && error.contains("nothing was removed")
-                    && error.contains("heddle redact list")
-                    && error.contains("heddle purge apply"))
+                    && error.contains("destructive action requires --force"))
+            && err["unsafe_condition"]
+                .as_str()
+                .is_some_and(|condition| condition.contains("purge is irreversible"))
+            && err["preserved"]
+                .as_str()
+                .is_some_and(|preserved| preserved.contains("nothing was removed"))
             && err["hint"]
                 .as_str()
                 .is_some_and(|hint| hint.contains("heddle redact list")
@@ -240,14 +243,17 @@ fn undo_redact_refusal_uses_json_error_envelope() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let err: Value =
         serde_json::from_str(&stderr).expect("undo refusal should emit JSON error envelope");
+    assert_json_recovery_advice_fields(&err, &err.to_string());
     assert!(
         err["kind"] == "redaction_undo_requires_confirmation"
             && err["error"]
                 .as_str()
                 .is_some_and(|error| error.contains("Refusing to undo")
                     && error.contains("redact apply")
-                    && error.contains("re-expose previously-hidden content")
-                    && error.contains("no undo mutation was applied"))
+                    && error.contains("re-expose previously-hidden content"))
+            && err["preserved"]
+                .as_str()
+                .is_some_and(|preserved| preserved.contains("no undo mutation was applied"))
             && err["hint"]
                 .as_str()
                 .is_some_and(|hint| hint.contains("--allow-redact-undo")),

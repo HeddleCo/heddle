@@ -13,7 +13,10 @@ use grpc::heddle::v1::{
 use repo::{HistoryQuery, Repository, operation_dedup::OperationDedupStore};
 use serde::Serialize;
 
-use super::history_target::{resolve_state_id, resolve_state_id_bytes};
+use super::{
+    advice::RecoveryAdvice,
+    history_target::{resolve_state_id, resolve_state_id_bytes},
+};
 use crate::cli::{
     cli_args::{
         Cli, ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewShowArgs, ReviewSignArgs,
@@ -79,8 +82,8 @@ struct SignatureView {
 }
 
 async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
-    let svc = open_state_review_service()?;
-    let state_id = resolve_state(args.state.as_deref())?;
+    let svc = open_state_review_service(cli)?;
+    let state_id = resolve_state(cli, args.state.as_deref())?;
     let payload_resp = svc
         .get_review_payload(tonic::Request::new(GetReviewPayloadRequest {
             repo_path: String::new(),
@@ -245,8 +248,8 @@ fn render_text(out: &ReviewShowOutput, all_signals: bool) {
 
 async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
     use grpc::heddle::v1::review_scope::{Scope, SymbolList, WholeChange};
-    let svc = open_state_review_service()?;
-    let state_id_bytes = resolve_state_id_bytes(&open_repo()?, &args.state)?;
+    let svc = open_state_review_service(cli)?;
+    let state_id_bytes = resolve_state_id_bytes(&open_repo(cli)?, &args.state)?;
     let scope_inner = if args.symbols.is_empty() {
         Scope::WholeChange(WholeChange {})
     } else {
@@ -309,8 +312,8 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
 }
 
 async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
-    let svc = open_state_review_service()?;
-    let repo = open_repo()?;
+    let svc = open_state_review_service(cli)?;
+    let repo = open_repo(cli)?;
     let head = repo
         .head()
         .context("read HEAD")?
@@ -323,9 +326,7 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
                 .principal
                 .as_ref()
                 .map(|p| p.email.clone())
-                .ok_or_else(|| {
-                    anyhow!("--mine-only requires a configured principal in repo config")
-                })
+                .ok_or_else(|| anyhow!(review_mine_only_principal_required_advice()))
         })
         .transpose()?;
 
@@ -408,7 +409,7 @@ struct NextStateView {
 }
 
 async fn run_health(cli: &Cli, args: &ReviewHealthArgs) -> Result<()> {
-    let svc = open_signal_service()?;
+    let svc = open_signal_service(cli)?;
     let resp = svc
         .get_repo_signal_health(tonic::Request::new(GetRepoSignalHealthRequest {
             repo_path: String::new(),
@@ -448,23 +449,26 @@ async fn run_health(cli: &Cli, args: &ReviewHealthArgs) -> Result<()> {
     Ok(())
 }
 
-fn open_state_review_service() -> Result<LocalStateReviewService> {
-    let repo = open_repo()?;
+fn open_state_review_service(cli: &Cli) -> Result<LocalStateReviewService> {
+    let repo = open_repo(cli)?;
     let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
     let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
     Ok(LocalStateReviewService::new(inner))
 }
 
-fn open_signal_service() -> Result<LocalSignalService> {
-    let repo = open_repo()?;
+fn open_signal_service(cli: &Cli) -> Result<LocalSignalService> {
+    let repo = open_repo(cli)?;
     let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
     let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
     Ok(LocalSignalService::new(inner))
 }
 
-fn open_repo() -> Result<Repository> {
-    let cwd = std::env::current_dir().context("get current working directory")?;
-    Repository::open(&cwd).context("open Heddle repository")
+fn open_repo(cli: &Cli) -> Result<Repository> {
+    let root = match cli.repo.as_ref() {
+        Some(repo) => repo.clone(),
+        None => std::env::current_dir().context("get current working directory")?,
+    };
+    Repository::open(&root).context("open Heddle repository")
 }
 
 fn signal_view(s: &grpc::heddle::v1::RiskSignal) -> SignalView {
@@ -503,11 +507,11 @@ fn opt_string(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
-fn resolve_state(explicit: Option<&str>) -> Result<Vec<u8>> {
-    let repo = open_repo()?;
+fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
+    let repo = open_repo(cli)?;
     if let Some(s) = explicit {
         // Routes through the canonical resolver so short/full IDs and
-        // marker names all work — matches `heddle log --json` output.
+        // marker names all work — matches `heddle log --output json` output.
         return Ok(resolve_state_id(&repo, s)?.as_bytes().to_vec());
     }
     let head = repo
@@ -519,6 +523,22 @@ fn resolve_state(explicit: Option<&str>) -> Result<Vec<u8>> {
 
 fn status_to_anyhow(status: tonic::Status) -> anyhow::Error {
     anyhow!("{}: {}", status.code(), status.message())
+}
+
+fn review_mine_only_principal_required_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "review_mine_only_principal_required",
+        "--mine-only requires a configured principal in repo config",
+        "Configure a repository principal with `heddle init --principal-name <name> --principal-email <email>`, or rerun `heddle review next` without `--mine-only`.",
+        "`--mine-only` needs the repository principal email, but repo config has no principal",
+        "guessing an actor email could report the wrong pending review state",
+        "review signatures, repository state, refs, metadata, and worktree files were left unchanged",
+        "heddle init --principal-name <name> --principal-email <email>",
+        vec![
+            "heddle init --principal-name <name> --principal-email <email>".to_string(),
+            "heddle review next".to_string(),
+        ],
+    )
 }
 
 /// Render a 16-byte ChangeId from the wire as its display form. Empty input
@@ -546,7 +566,7 @@ fn review_kind_to_str(kind: grpc::heddle::v1::ReviewKind) -> &'static str {
 mod tests {
     use super::*;
 
-    /// Shape contract for `review health --json`. The handler builds the
+    /// Shape contract for `review health --output json`. The handler builds the
     /// JSON object inline with `serde_json::json!`; this test pins the
     /// keys, types, and nested entry shape against a hand-built sample
     /// that mirrors the handler's exact construction. Keeps the JSON
@@ -622,5 +642,20 @@ mod tests {
             "agent_co_review"
         );
         assert_eq!(review_kind_to_str(ReviewKind::Unspecified), "");
+    }
+
+    #[test]
+    fn mine_only_principal_advice_is_typed() {
+        let advice = review_mine_only_principal_required_advice();
+
+        assert_eq!(advice.kind, "review_mine_only_principal_required");
+        assert_eq!(
+            advice.primary_command,
+            "heddle init --principal-name <name> --principal-email <email>"
+        );
+        assert!(advice.primary_hint().contains("heddle review next"));
+        assert!(advice.unsafe_condition.contains("--mine-only"));
+        assert!(advice.would_change.contains("wrong pending review"));
+        assert!(advice.preserved.contains("review signatures"));
     }
 }

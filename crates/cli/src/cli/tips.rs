@@ -6,7 +6,7 @@
 //!
 //! - **stderr only**: piping `heddle <verb>` to other tools never includes
 //!   tips.
-//! - **never in `--json`**: scripted consumers don't get advisory output.
+//! - **never in `--output json`**: scripted consumers don't get advisory output.
 //! - **once per session per repo**: a session marker file at
 //!   `~/.heddle/session/<repo-id>/tips-shown.toml` records which tips
 //!   have been shown so we don't nag.
@@ -18,10 +18,10 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tip {
-    /// "tip: `heddle checkpoint` is cheaper for frequent saves."
+    /// "tip: `heddle checkpoint` writes the current capture to Git."
     /// Emitted after a successful capture.
     CheckpointAfterCapture,
-    /// "tip: `heddle query` filters across the operation log."
+    /// "tip: `heddle query` searches saved change history."
     /// Emitted after the first heavy `heddle log` view.
     QueryFromLog,
     /// "tip: `heddle agent serve` runs a local daemon for tight loops."
@@ -45,11 +45,9 @@ impl Tip {
     pub fn message(&self) -> &'static str {
         match self {
             Self::CheckpointAfterCapture => {
-                "tip: `heddle checkpoint` is cheaper than `capture` for frequent agent-style saves"
+                "tip: `heddle checkpoint` writes the current captured state to a Git-facing checkpoint"
             }
-            Self::QueryFromLog => {
-                "tip: `heddle query` filters across the operation log (see `heddle help operation-ids`)"
-            }
+            Self::QueryFromLog => "tip: `heddle query` searches saved change history",
             Self::AgentServeForLatency => {
                 "tip: `heddle agent serve` runs a local daemon that cuts per-command latency for agent loops"
             }

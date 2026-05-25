@@ -110,7 +110,7 @@ fn test_read_from_packfile() {
         show_result.err()
     );
 
-    let log_json = heddle(&["--json", "log"], Some(temp.path())).unwrap();
+    let log_json = heddle(&["--output", "json", "log"], Some(temp.path())).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&log_json).unwrap();
     let parent = parsed["states"][0]["parents"][0]
         .as_str()

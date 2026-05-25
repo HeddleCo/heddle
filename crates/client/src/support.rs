@@ -2,7 +2,7 @@
 //! for Heddle staff. Talks to `HostedUserService::{Grant,List,Revoke}
 //! SupportAccess` over the configured remote.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use cli_shared::{
     UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
@@ -13,7 +13,7 @@ use grpc::heddle::v1::{
 };
 use repo::Repository;
 use serde::Serialize;
-use weft_client_shim::CliContext;
+use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{
     grpc_hosted::HostedGrpcClient,
@@ -33,6 +33,13 @@ struct SupportAccessOutput {
     revoked_at: u64,
     revoked_by: String,
     reason: String,
+}
+
+#[derive(Serialize)]
+struct SupportRevokeOutput {
+    output_kind: &'static str,
+    id: String,
+    revoked: bool,
 }
 
 impl From<ProtoSupportAccessGrant> for SupportAccessOutput {
@@ -103,9 +110,10 @@ async fn open_client(repo: &Repository, remote: &str) -> Result<HostedGrpcClient
     let addr = match target {
         RemoteTarget::Network { addr, .. } => addr,
         RemoteTarget::Local(_) => {
-            return Err(anyhow!(
-                "support access is a hosted-server feature; remote '{remote}' is local"
-            ));
+            return Err(anyhow!(HostedRecoveryAdvice::hosted_remote_required(
+                remote,
+                "support access",
+            )));
         }
     };
     let user_config = UserConfig::load_default().unwrap_or_default();
@@ -131,27 +139,57 @@ fn parse_ttl(raw: &str) -> Result<u32> {
         Some('h') => (&raw[..raw.len() - 1], 3600u64),
         Some('d') => (&raw[..raw.len() - 1], 86400u64),
         _ => {
-            return Err(anyhow!(
-                "invalid --ttl '{raw}': use 30s/15m/2h/3d or seconds"
-            ));
+            return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
+                "invalid_ttl",
+                format!("invalid --ttl '{raw}': use 30s/15m/2h/3d or seconds"),
+                "Use a TTL like `30s`, `15m`, `2h`, `3d`, or a bare number of seconds.",
+                "heddle support grant --ttl <duration>",
+            )));
         }
     };
-    let n: u64 = num_part
-        .parse()
-        .with_context(|| format!("invalid --ttl '{raw}'"))?;
-    let total = n
-        .checked_mul(multiplier_secs)
-        .ok_or_else(|| anyhow!("--ttl too large"))?;
+    let n: u64 = num_part.parse().map_err(|_| {
+        anyhow!(HostedRecoveryAdvice::invalid_usage(
+            "invalid_ttl",
+            format!("invalid --ttl '{raw}'"),
+            "Use a TTL like `30s`, `15m`, `2h`, `3d`, or a bare number of seconds.",
+            "heddle support grant --ttl <duration>",
+        ))
+    })?;
+    let total = n.checked_mul(multiplier_secs).ok_or_else(|| {
+        anyhow!(HostedRecoveryAdvice::invalid_usage(
+            "invalid_ttl",
+            "--ttl too large",
+            "Use a smaller support-access TTL.",
+            "heddle support grant --ttl <duration>",
+        ))
+    })?;
     if total == 0 {
-        return Err(anyhow!("--ttl must be > 0"));
+        return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
+            "invalid_ttl",
+            "--ttl must be > 0",
+            "Use a positive support-access TTL.",
+            "heddle support grant --ttl <duration>",
+        )));
     }
-    let secs: u32 = total.try_into().map_err(|_| anyhow!("--ttl too large"))?;
+    let secs: u32 = total.try_into().map_err(|_| {
+        anyhow!(HostedRecoveryAdvice::invalid_usage(
+            "invalid_ttl",
+            "--ttl too large",
+            "Use a smaller support-access TTL.",
+            "heddle support grant --ttl <duration>",
+        ))
+    })?;
     Ok(secs)
 }
 
 async fn run_grant(ctx: &dyn CliContext, args: SupportGrantArgs) -> Result<()> {
     if args.namespace.is_none() && args.repo.is_none() {
-        return Err(anyhow!("one of --namespace or --repo is required"));
+        return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
+            "support_target_required",
+            "one of --namespace or --repo is required",
+            "Choose the hosted namespace or repository that should receive support access.",
+            "heddle support grant --namespace <namespace>",
+        )));
     }
     let repo = Repository::open(resolve_repo_path(ctx)?)?;
     let mut client = open_client(&repo, &args.remote).await?;
@@ -191,7 +229,12 @@ async fn run_grant(ctx: &dyn CliContext, args: SupportGrantArgs) -> Result<()> {
 
 async fn run_list(ctx: &dyn CliContext, args: SupportListArgs) -> Result<()> {
     if args.namespace.is_none() && args.repo.is_none() {
-        return Err(anyhow!("one of --namespace or --repo is required"));
+        return Err(anyhow!(HostedRecoveryAdvice::invalid_usage(
+            "support_target_required",
+            "one of --namespace or --repo is required",
+            "Choose the hosted namespace or repository whose support grants should be listed.",
+            "heddle support list --namespace <namespace>",
+        )));
     }
     let repo = Repository::open(resolve_repo_path(ctx)?)?;
     let mut client = open_client(&repo, &args.remote).await?;
@@ -245,7 +288,12 @@ async fn run_revoke(ctx: &dyn CliContext, args: SupportRevokeArgs) -> Result<()>
     let op_id = ctx.operation_id_wire();
     client.revoke_support_access(&args.id, op_id).await?;
     if ctx.should_output_json(Some(repo.config())) {
-        println!("{{\"revoked\":\"{}\"}}", args.id);
+        let output = SupportRevokeOutput {
+            output_kind: "support_revoke",
+            id: args.id,
+            revoked: true,
+        };
+        println!("{}", serde_json::to_string(&output)?);
     } else {
         println!("Revoked support-access grant {}.", args.id);
     }

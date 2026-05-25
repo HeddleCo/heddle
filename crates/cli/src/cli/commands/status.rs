@@ -28,33 +28,46 @@ use tokio_tungstenite::{
 use tracing::debug;
 
 use super::{
+    git_compat::{GitIndexPlan, git_index_plan_for_root},
     git_overlay_health::{
-        GitOverlayHealth, RepositoryTrustState, build_git_overlay_health,
-        build_plain_git_trust_probe,
+        GitOverlayHealth, RepositoryVerificationState, action_argv, action_template,
+        build_git_overlay_health, build_plain_git_verification_probe, command_argvs,
+        override_trust_recommended_action, serialize_empty_action_as_null,
     },
-    operator_loop::primary_next_action,
-    thread::{CoordinationStatus, collect_thread_summaries, find_thread_summary_single},
+    operator_loop::primary_next_action_with_verification,
+    snapshot::resolve_principal,
+    thread::{
+        CoordinationStatus, collect_thread_summaries, contextual_thread_action,
+        current_thread_next_action_with_verification, find_thread_summary_single,
+        thread_recovery_action_is_primary,
+    },
 };
-#[cfg(feature = "client")]
-use crate::config::UserConfig;
 use crate::{
+    bridge::git_core::principal_is_default_unknown,
     cli::{Cli, should_output_json, style, worktree_status_options},
+    config::UserConfig,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
 
 #[derive(Serialize)]
 pub(crate) struct StatusOutput {
+    output_kind: &'static str,
     repository_capability: String,
+    repository_label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
     storage_model: String,
     hosted_enabled: bool,
     #[serde(skip)]
     render_json: bool,
     operation: Option<RepositoryOperationStatus>,
     remote_tracking: Option<GitRemoteTrackingStatus>,
-    trust: RepositoryTrustState,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+    git_index: Option<GitIndexPlan>,
     /// Carried for the human-readable renderer only. Not part of the
     /// JSON contract: import-hint information is exposed via
-    /// `heddle bridge git status --json` instead, which is the
+    /// `heddle bridge git status --output json` instead, which is the
     /// command whose subject is the bridge.
     #[serde(skip)]
     git_overlay_import_hint: Option<GitOverlayImportHintOutput>,
@@ -65,7 +78,9 @@ pub(crate) struct StatusOutput {
     current_state: Option<String>,
     path: Option<String>,
     execution_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     heddle_session_id: Option<String>,
     actor: Option<ActorInfo>,
     harness: Option<String>,
@@ -86,8 +101,15 @@ pub(crate) struct StatusOutput {
     heavy_impact_paths: Vec<String>,
     changed_path_count: usize,
     blockers: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_notice: Option<String>,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
+    recovery_action_templates: Vec<super::command_catalog::ActionTemplate>,
     thread_health: String,
     coordination_status: CoordinationStatus,
     is_isolated: bool,
@@ -125,7 +147,9 @@ struct MaterializedThreadInfo {
 
 #[derive(Serialize)]
 struct ActorInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
 }
 
@@ -149,7 +173,7 @@ struct GitCheckpointInfo {
     committed_at: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 struct ChangesInfo {
     modified: Vec<String>,
     added: Vec<String>,
@@ -167,17 +191,24 @@ struct GitOverlayImportHintOutput {
 #[derive(Serialize)]
 struct PlainGitStatusOutput {
     repository_capability: String,
+    repository_label: String,
     storage_model: String,
     heddle_initialized: bool,
     git_branch: Option<String>,
     path: String,
     git_overlay_health: GitOverlayHealth,
-    trust: RepositoryTrustState,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
     recommended_action: String,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
+    recovery_action_templates: Vec<super::command_catalog::ActionTemplate>,
     thread_health: String,
     changed_path_count: usize,
     changes: ChangesInfo,
+    git_index: Option<GitIndexPlan>,
 }
 
 fn changes_from_status(status: &WorktreeStatus) -> ChangesInfo {
@@ -253,25 +284,25 @@ pub async fn cmd_status(
         return watch_status(cli, short, watch_iterations, watch_interval_ms).await;
     }
     if let Some(output) = build_plain_git_status_probe(cli)? {
-        render_plain_git_status(cli, &output, short);
+        render_plain_git_status(cli, &output, short)?;
         return Ok(());
     }
     let output = build_status_output(cli, short)?;
-    render_status(cli, &output, short);
+    render_status(cli, &output, short)?;
     Ok(())
 }
 
 fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput>> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
-    let Some(probe) = build_plain_git_trust_probe(start)? else {
+    let Some(probe) = build_plain_git_verification_probe(start)? else {
         return Ok(None);
     };
     let changes = changes_from_status(&probe.changes);
     let changed_path_count = probe.changes.change_count();
     let git_overlay_health = GitOverlayHealth {
         status: probe.trust.status.clone(),
-        clean: probe.trust.trusted,
+        clean: probe.trust.verified,
         summary: probe.trust.summary.clone(),
         recovery_commands: probe.trust.recovery_commands.clone(),
         checks: probe
@@ -282,51 +313,66 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
                 name: check.name.clone(),
                 status: check.status.clone(),
                 summary: check.summary.clone(),
+                details: check.details.clone(),
             })
             .collect(),
     };
     let trust = probe.trust;
+    let git_index = git_index_plan_for_root(&probe.root)?;
     Ok(Some(PlainGitStatusOutput {
         repository_capability: "plain-git".to_string(),
+        repository_label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
         storage_model: "git-only".to_string(),
         heddle_initialized: false,
         git_branch: probe.git_branch,
         path: probe.root.display().to_string(),
         recommended_action: trust.recommended_action.clone(),
+        recommended_action_argv: trust.recommended_action_argv.clone(),
+        recommended_action_template: trust.recommended_action_template.clone(),
         recovery_commands: trust.recovery_commands.clone(),
+        recovery_command_argv: trust.recovery_command_argv.clone(),
+        recovery_action_templates: trust.recovery_action_templates.clone(),
         thread_health: trust.status.clone(),
         changed_path_count,
         changes,
+        git_index,
         git_overlay_health,
         trust,
     }))
 }
 
-fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool) {
+fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool) -> Result<()> {
     if should_output_json(cli, None) {
-        println!(
-            "{}",
-            serde_json::to_string(output).expect("plain Git status JSON serializes")
-        );
-        return;
+        crate::cli::render::write_json_stdout(output)?;
+        return Ok(());
     }
     if short {
-        render_short_changes(&output.changes);
-        return;
+        render_short_plain_git_status(output);
+        return Ok(());
     }
     println!("{}", style::bold("Heddle status"));
-    println!(
-        "Repository: {} {}",
-        output.repository_capability,
-        style::dim(&format!("({})", output.storage_model))
-    );
+    println!("Repository: {}", output.repository_label);
     if let Some(branch) = &output.git_branch {
         println!("Git branch: {}", style::bold(branch));
     }
-    println!("Health: {}", style::thread_state(&output.thread_health));
     println!(
-        "Git overlay: {}",
-        style::warn(&output.git_overlay_health.summary)
+        "Health: {}",
+        style::thread_state(&human_thread_health(&output.thread_health))
+    );
+    println!(
+        "Heddle setup: {}",
+        style::warn("not set up for this Git repo yet")
+    );
+    println!(
+        "Setup needed: Git repo detected; connect this branch with {}",
+        style::bold(&output.recommended_action)
+    );
+    println!(
+        "{}",
+        style::dim(&plain_git_setup_effects(
+            output.changes.is_empty(),
+            &output.recommended_action
+        ))
     );
     println!();
     println!(
@@ -341,9 +387,7 @@ fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool
     println!();
     println!("{}", style::bold("Next"));
     println!("  command: {}", style::bold(&output.recommended_action));
-    if let Some(import) = output.git_overlay_health.recovery_commands.get(1) {
-        println!("  then: {}", style::dim(import));
-    }
+    Ok(())
 }
 
 pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput> {
@@ -361,18 +405,13 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let operation_start = Instant::now();
     let operation = repo.operation_status()?;
     let operation_ms = operation_start.elapsed().as_millis();
-    // `git_remote_tracking_status` spawns `git rev-list` and `git
-    // rev-parse` subprocesses (~30ms on macOS, dominated by process
-    // fork). The output is the "Remote drift: …" line which only
-    // renders when ahead/behind != 0 — frequently absent. Skip the
-    // subprocess work in the default text fast path; JSON and -v pay
-    // for the contract.
-    // Single gating predicate for the slow "walk every thread / spawn
-    // git subprocesses / populate cross-thread relations" path. JSON
-    // and `-v` text actually display the data; default text doesn't.
+    // Single gating predicate for the slower "walk every thread /
+    // inspect remote tracking / populate cross-thread relations" path.
+    // JSON and `-v` text actually display the data; default text doesn't.
     let needs_full_walk = cli.verbose > 0 || as_json;
+    let needs_remote_tracking = needs_full_walk || short_text;
     let remote_tracking_start = Instant::now();
-    let remote_tracking = if needs_full_walk {
+    let remote_tracking = if needs_remote_tracking {
         repo.git_remote_tracking_status().unwrap_or(None)
     } else {
         None
@@ -387,17 +426,33 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     };
     let import_hint_ms = import_hint_start.elapsed().as_millis();
     let git_overlay_health = build_git_overlay_health(&repo);
-    let trust = RepositoryTrustState::from_health(&repo, git_overlay_health.clone());
+    let trust = RepositoryVerificationState::from_health(&repo, git_overlay_health.clone());
     let status_options = worktree_status_options(Some(repo.config()));
+    let git_worktree_status = repo.git_overlay_worktree_status().unwrap_or(None);
+    let git_index = git_index_plan_for_root(repo.root())?;
+    let identity_notice = first_capture_identity_notice(&repo, current_state.as_ref())?;
+    let git_clean_mapping_blocker = matches!(
+        trust.status.as_str(),
+        "needs_import" | "needs_reconcile" | "git_branch_advanced"
+    ) && git_worktree_status
+        .as_ref()
+        .is_some_and(WorktreeStatus::is_clean);
 
     // Get worktree status
     let worktree_status_start = Instant::now();
-    let (changes, worktree_profile) = if let Some(ref state) = current_state {
+    let (changes, worktree_profile) = if git_clean_mapping_blocker {
+        (ChangesInfo::default(), None)
+    } else if let Some(status) = git_worktree_status.as_ref()
+        && !status.is_clean()
+        && trust.status != "needs_checkpoint"
+    {
+        (changes_from_status(status), None)
+    } else if let Some(ref state) = current_state {
         let tree = repo.require_tree(&state.tree)?;
         let (status, profile) =
             repo.compare_worktree_cached_profiled_with_options(&tree, &status_options)?;
         (changes_from_status(&status), Some(profile))
-    } else if let Some(status) = repo.git_overlay_worktree_status()? {
+    } else if let Some(status) = git_worktree_status {
         (changes_from_status(&status), None)
     } else {
         let tree = objects::object::Tree::new();
@@ -411,6 +466,17 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let worktree_status_ms = worktree_status_start.elapsed().as_millis();
 
     if short_text {
+        let recommended_action = if trust.verified {
+            primary_next_action_with_verification(
+                operation.as_ref(),
+                remote_tracking.as_ref(),
+                None,
+                None,
+                &trust,
+            )
+        } else {
+            trust.recommended_action.clone()
+        };
         debug!(
             repo_open_ms,
             body_ms = body_start.elapsed().as_millis(),
@@ -432,8 +498,12 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
                 ],
             );
         }
+        let presentation = crate::cli::render::repository_presentation(&repo, None, None);
         return Ok(StatusOutput {
+            output_kind: "status",
             repository_capability: repo.capability_label().to_string(),
+            repository_label: presentation.label,
+            repository_context: presentation.context,
             storage_model: repo.storage_model_label().to_string(),
             hosted_enabled: repo.hosted_enabled(),
             render_json: as_json,
@@ -447,6 +517,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             trust: trust.clone(),
             operation,
             remote_tracking,
+            git_index,
             thread: None,
             base_state: None,
             base_root: None,
@@ -473,11 +544,35 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             impact_categories: Vec::new(),
             heavy_impact_paths: Vec::new(),
             changed_path_count: 0,
-            blockers: Vec::new(),
-            recommended_action: String::new(),
+            blockers: if trust.verified {
+                Vec::new()
+            } else {
+                trust
+                    .checks
+                    .iter()
+                    .filter(|check| {
+                        !check.clean
+                            && check.status != "not_checked"
+                            && !check
+                                .summary
+                                .contains("checked after the primary verification blocker")
+                    })
+                    .map(|check| format!("{}: {}", check.name, check.summary))
+                    .collect()
+            },
+            identity_notice: identity_notice.clone(),
+            recommended_action_argv: action_argv(&recommended_action),
+            recommended_action_template: action_template(&recommended_action),
+            recommended_action,
             recovery_commands: trust.recovery_commands.clone(),
-            thread_health: "clean".to_string(),
-            coordination_status: CoordinationStatus::Clean,
+            recovery_command_argv: command_argvs(&trust.recovery_commands),
+            recovery_action_templates: trust.recovery_action_templates.clone(),
+            thread_health: trust.status.clone(),
+            coordination_status: if trust.verified {
+                CoordinationStatus::Clean
+            } else {
+                CoordinationStatus::Blocked
+            },
             is_isolated: false,
             parallel_threads: Vec::new(),
             state: None,
@@ -538,27 +633,46 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
 
     let state_info = current_state.as_ref().map(|s| StateInfo {
         change_id: s.change_id.short(),
-        content_hash: s.tree.short(),
+        content_hash: s.compute_hash().short(),
         intent: s.intent.clone(),
     });
-    let git_checkpoint = current_state
-        .as_ref()
-        .and_then(|state| {
-            repo.latest_git_checkpoint_for_change(&state.change_id)
-                .ok()
-                .flatten()
-        })
-        .map(|record| GitCheckpointInfo {
-            git_commit: record.git_commit,
-            committed_at: record.committed_at,
-        });
+    let current_state_short = current_state.as_ref().map(|state| state.change_id.short());
+    let git_checkpoint = if trust.status == "needs_checkpoint" {
+        None
+    } else {
+        current_state
+            .as_ref()
+            .and_then(|state| {
+                repo.latest_git_checkpoint_for_change(&state.change_id)
+                    .ok()
+                    .flatten()
+            })
+            .map(|record| GitCheckpointInfo {
+                git_commit: record.git_commit,
+                committed_at: record.committed_at,
+            })
+    };
 
     let materialized_start = Instant::now();
     let materialized_threads = assess_materialized_threads(&repo);
     let materialized_ms = materialized_start.elapsed().as_millis();
+    let target_thread = thread_summary
+        .as_ref()
+        .and_then(|thread| thread.target_thread.clone());
+    let parent_thread = thread_summary
+        .as_ref()
+        .and_then(|thread| thread.parent_thread.clone());
+    let presentation = crate::cli::render::repository_presentation(
+        &repo,
+        target_thread.as_deref(),
+        parent_thread.as_deref(),
+    );
 
     let output = StatusOutput {
+        output_kind: "status",
         repository_capability: repo.capability_label().to_string(),
+        repository_label: presentation.label,
+        repository_context: presentation.context,
         storage_model: repo.storage_model_label().to_string(),
         hosted_enabled: repo.hosted_enabled(),
         render_json: as_json,
@@ -572,16 +686,19 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         trust: trust.clone(),
         operation,
         remote_tracking,
+        git_index,
         thread: track_name.clone(),
         base_state: thread_summary
             .as_ref()
-            .and_then(|thread| thread.base_state.clone()),
+            .and_then(|thread| thread.base_state.clone())
+            .or_else(|| current_state_short.clone()),
         base_root: thread_summary
             .as_ref()
             .and_then(|thread| thread.base_root.clone()),
         current_state: thread_summary
             .as_ref()
-            .and_then(|thread| thread.current_state.clone()),
+            .and_then(|thread| thread.current_state.clone())
+            .or_else(|| current_state_short.clone()),
         path: thread_summary
             .as_ref()
             .and_then(|thread| thread.path.clone()),
@@ -627,12 +744,8 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         freshness: thread_summary
             .as_ref()
             .and_then(|thread| thread.freshness.clone()),
-        target_thread: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.target_thread.clone()),
-        parent_thread: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.parent_thread.clone()),
+        target_thread,
+        parent_thread,
         child_threads: thread_summary
             .as_ref()
             .map(|thread| thread.child_threads.clone())
@@ -657,8 +770,13 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             .map(|thread| thread.changed_paths.len())
             .unwrap_or_default(),
         blockers: Vec::new(),
+        identity_notice,
         recommended_action: String::new(),
+        recommended_action_argv: None,
+        recommended_action_template: None,
         recovery_commands: trust.recovery_commands.clone(),
+        recovery_command_argv: command_argvs(&trust.recovery_commands),
+        recovery_action_templates: trust.recovery_action_templates.clone(),
         thread_health: "clean".to_string(),
         coordination_status: thread_summary
             .as_ref()
@@ -746,35 +864,108 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let advice = thread_stub.as_ref().map(|thread| {
         describe_thread_advice_with_initial(thread, has_changes, 0, false, initial_state)
     });
-    let recommended_action = if output.trust.trusted {
-        primary_next_action(
-            output.operation.as_ref(),
-            output.remote_tracking.as_ref(),
-            import_hint.as_ref(),
-            advice
-                .as_ref()
-                .map(|advice| advice.recommended_action.as_str()),
+    let mut trust = output.trust.clone();
+    if let Some(thread) = output.thread.as_deref()
+        && !trust.recommended_action.is_empty()
+    {
+        let contextual = contextual_thread_action(
+            &repo,
+            thread,
+            output.target_thread.as_deref(),
+            &trust.recommended_action,
+        );
+        if contextual != trust.recommended_action {
+            override_trust_recommended_action(&mut trust, contextual);
+        }
+    }
+    let thread_health = advice.as_ref().map(|advice| advice.thread_health.as_str());
+    let thread_action = advice
+        .as_ref()
+        .map(|advice| advice.recommended_action.as_str());
+    let recommended_action = current_thread_next_action_with_verification(
+        output.operation.as_ref(),
+        output.remote_tracking.as_ref(),
+        import_hint.as_ref(),
+        thread_health,
+        thread_action,
+        &trust,
+    );
+    let recommended_action = if let Some(thread) = output.thread.as_deref() {
+        contextual_thread_action(
+            &repo,
+            thread,
+            output.target_thread.as_deref(),
+            &recommended_action,
         )
     } else {
-        output.trust.recommended_action.clone()
+        recommended_action
     };
-    let thread_health = if output.trust.trusted {
+    if trust.verified
+        && !recommended_action.is_empty()
+        && trust.recommended_action != recommended_action
+        && thread_recovery_action_is_primary(thread_health, &recommended_action)
+    {
+        override_trust_recommended_action(&mut trust, recommended_action.clone());
+    }
+    let thread_health = if trust.verified {
         advice
             .as_ref()
             .map(|advice| advice.thread_health.clone())
             .unwrap_or_else(|| "clean".to_string())
     } else {
-        output.trust.status.clone()
+        trust.status.clone()
     };
+    let needs_checkpoint = trust.status == "needs_checkpoint";
+    let mut trust_blockers = trust
+        .checks
+        .iter()
+        .filter(|check| {
+            !check.clean
+                && check.status != "not_checked"
+                && !(check.name == "Clone" && check.status == "blocked")
+                && !check
+                    .summary
+                    .contains("checked after the primary verification blocker")
+        })
+        .map(|check| format!("{}: {}", check.name, check.summary))
+        .collect::<Vec<_>>();
+    let blocked_by_trust = !trust.verified;
+    if blocked_by_trust && trust_blockers.is_empty() && !trust.summary.trim().is_empty() {
+        trust_blockers.push(format!("Verification: {}", trust.summary));
+    }
     let output = StatusOutput {
-        blockers: advice
-            .as_ref()
-            .map(|advice| advice.blockers.clone())
-            .unwrap_or_default(),
-        recommended_action,
-        recovery_commands: output.trust.recovery_commands.clone(),
+        blockers: if blocked_by_trust {
+            trust_blockers
+        } else {
+            advice
+                .as_ref()
+                .map(|advice| advice.blockers.clone())
+                .unwrap_or_default()
+        },
+        identity_notice: output.identity_notice,
+        recommended_action: recommended_action.clone(),
+        recommended_action_argv: action_argv(&recommended_action),
+        recommended_action_template: action_template(&recommended_action),
+        recovery_commands: trust.recovery_commands.clone(),
+        recovery_command_argv: command_argvs(&trust.recovery_commands),
+        recovery_action_templates: trust.recovery_action_templates.clone(),
         thread_health,
-        changed_path_count: changed_path_count(thread_summary.as_ref(), &output.changes),
+        coordination_status: if blocked_by_trust && !needs_checkpoint {
+            CoordinationStatus::Blocked
+        } else {
+            output.coordination_status
+        },
+        thread_state: if blocked_by_trust && !needs_checkpoint && output.thread_state.is_some() {
+            Some(ThreadState::Blocked)
+        } else {
+            output.thread_state
+        },
+        changed_path_count: if trust.verified {
+            changed_path_count(thread_summary.as_ref(), &output.changes)
+        } else {
+            changes_path_count(&output.changes)
+        },
+        trust,
         ..output
     };
     let advice_ms = advice_start.elapsed().as_millis();
@@ -810,13 +1001,10 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     Ok(output)
 }
 
-pub(crate) fn render_status(cli: &Cli, output: &StatusOutput, short: bool) {
+pub(crate) fn render_status(cli: &Cli, output: &StatusOutput, short: bool) -> Result<()> {
     let render_start = Instant::now();
     if output.render_json {
-        println!(
-            "{}",
-            serde_json::to_string(output).expect("status JSON serializes")
-        );
+        crate::cli::render::write_json_stdout(output)?;
     } else if short {
         render_short_status(output);
     } else {
@@ -828,6 +1016,7 @@ pub(crate) fn render_status(cli: &Cli, output: &StatusOutput, short: bool) {
             &[ProfileField::duration("render_ms", render_start.elapsed())],
         );
     }
+    Ok(())
 }
 
 async fn watch_status(
@@ -866,7 +1055,7 @@ async fn watch_status(
                 ))
             );
         }
-        render_status(cli, &output, short);
+        render_status(cli, &output, short)?;
         iterations += 1;
         if watch_iterations.is_some_and(|limit| iterations >= limit) {
             break;
@@ -902,7 +1091,41 @@ fn render_short_changes(changes: &ChangesInfo) {
 
 fn render_short_status(output: &StatusOutput) {
     render_short_changes(&output.changes);
+    if output.changes.is_empty() {
+        println!(
+            "{} {}",
+            style::bold(short_status_subject(output)),
+            style::thread_state(&short_status_health(output))
+        );
+    }
     render_materialized_advisory(output);
+}
+
+fn short_status_health(output: &StatusOutput) -> String {
+    if output.recommended_action == "heddle push" && output.thread_health == "clean" {
+        "ready to push".to_string()
+    } else {
+        human_thread_health(&output.thread_health)
+    }
+}
+
+fn short_status_subject(output: &StatusOutput) -> &str {
+    output
+        .thread
+        .as_deref()
+        .or_else(|| output.current_state.as_ref().map(|_| "detached"))
+        .unwrap_or("repository")
+}
+
+fn render_short_plain_git_status(output: &PlainGitStatusOutput) {
+    render_short_changes(&output.changes);
+    if output.changes.is_empty() {
+        println!(
+            "{} {}",
+            style::bold(output.git_branch.as_deref().unwrap_or("detached")),
+            style::thread_state(&human_thread_health(&output.thread_health))
+        );
+    }
 }
 
 fn render_status_changes_plain(changes: &ChangesInfo) {
@@ -915,6 +1138,12 @@ fn render_status_changes_plain(changes: &ChangesInfo) {
     }
     for path in &changes.deleted {
         println!("  {}:  {}", style::error("deleted"), path);
+    }
+}
+
+impl ChangesInfo {
+    fn is_empty(&self) -> bool {
+        self.modified.is_empty() && self.added.is_empty() && self.deleted.is_empty()
     }
 }
 
@@ -971,13 +1200,7 @@ fn render_status_materialized(threads: &[MaterializedThreadInfo], verbose: bool)
         println!();
         println!("{}", style::bold("Materialized threads (stale)"));
         for t in stale {
-            println!(
-                "  {} {} {} {}",
-                style::bold(&t.name),
-                style::dim(&t.state_id),
-                style::dim(&t.tree_hash_short),
-                style::warn("stale"),
-            );
+            println!("  {} {}", style::bold(&t.name), style::warn("stale"));
         }
         return;
     }
@@ -1011,11 +1234,7 @@ fn render_status_header(output: &StatusOutput) {
             .map(|thread| style::bold(thread))
             .unwrap_or_else(|| style::warn("detached HEAD"))
     );
-    println!(
-        "Repository: {} {}",
-        output.repository_capability,
-        style::dim(&format!("({})", output.storage_model))
-    );
+    println!("Repository: {}", output.repository_label);
     if output.hosted_enabled {
         println!("Hosted: {}", style::accent("enabled"));
     }
@@ -1031,20 +1250,65 @@ fn render_status_operation(output: &StatusOutput) {
         );
     }
     if let Some(remote_tracking) = &output.remote_tracking {
-        println!("Remote drift: {}", style::warn(&remote_tracking.message));
+        if remote_tracking.behind == 0 && remote_tracking.ahead > 0 {
+            println!("Remote sync: {}", style::accent(&remote_tracking.message));
+        } else {
+            println!("Remote drift: {}", style::warn(&remote_tracking.message));
+        }
     }
     if let Some(hint) = &output.git_overlay_import_hint {
-        println!(
-            "Git import: {} other branch(es) are still Git-only ({})",
-            hint.missing_branch_count,
-            crate::cli::render::preview_list(&hint.missing_branches, hint.missing_branch_count,)
-        );
+        if hint
+            .missing_branches
+            .iter()
+            .any(|branch| branch == &hint.current_branch)
+        {
+            if matches!(
+                output.git_overlay_health.status.as_str(),
+                "needs_init" | "needs_import"
+            ) {
+                println!(
+                    "Setup needed: Git repo detected; connect this branch with {}",
+                    style::bold(&hint.recommended_command)
+                );
+            }
+        } else {
+            println!(
+                "{}",
+                crate::cli::render::git_only_branch_summary(
+                    &hint.missing_branches,
+                    hint.missing_branch_count,
+                )
+            );
+        }
     }
     if !output.git_overlay_health.clean {
-        println!(
-            "Git overlay: {}",
-            style::warn(&output.git_overlay_health.summary)
-        );
+        let label = if matches!(
+            output.git_overlay_health.status.as_str(),
+            "needs_init" | "needs_import"
+        ) {
+            "Setup needed"
+        } else {
+            "Verification"
+        };
+        if let Some(setup) = git_setup_line(output) {
+            println!("{label}: {}", style::warn(&setup));
+        } else {
+            println!(
+                "{label}: {}",
+                style::warn(&output.git_overlay_health.summary)
+            );
+        }
+        if output.git_overlay_health.status == "needs_import"
+            && output.changed_path_count == 0
+            && !has_status_changes(output)
+        {
+            println!(
+                "Git worktree: {}",
+                style::accent(
+                    "clean; .heddle metadata is present, adoption imports Git history, and the Git worktree stays clean"
+                )
+            );
+        }
     }
 }
 
@@ -1059,27 +1323,41 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
     }
     // Health text is short ("clean" / "blocked" / etc.) — colour it
     // so a glance tells you the state without reading the word.
-    println!("Health: {}", style::thread_state(&output.thread_health));
+    println!(
+        "Health: {}",
+        style::thread_state(&human_thread_health(&output.thread_health))
+    );
     println!("Coordination: {}", output.coordination_status);
-    if let Some(base) = &output.base_state {
+    if verbose && let Some(base) = &output.base_state {
         println!("Base: {}", style::dim(base));
     }
-    if let Some(base_root) = &output.base_root {
-        println!("Base root: {}", style::dim(base_root));
+    if verbose
+        && let Some(base_root) = &output.base_root
+        && !base_root.is_empty()
+    {
+        println!("Base tree: {}", style::dim(base_root));
     }
 
     if let Some(state) = &output.state {
-        println!(
-            "State: {} ({})",
-            style::change_id(&state.change_id),
-            style::dim(&state.content_hash)
-        );
+        if verbose {
+            println!(
+                "State: {} ({})",
+                style::change_id(&state.change_id),
+                style::dim(&state.content_hash)
+            );
+        } else {
+            println!("Saved change: {}", style::change_id(&state.change_id));
+        }
         if let Some(intent) = &state.intent {
             // Quote stays plain; the inner intent string is the
             // editorial line, so it's bolded.
-            println!("Intent: \"{}\"", style::bold(intent));
+            if verbose {
+                println!("Intent: \"{}\"", style::bold(intent));
+            } else {
+                println!("Last save: {}", style::bold(intent));
+            }
         }
-        if let Some(checkpoint) = &output.git_checkpoint {
+        if verbose && let Some(checkpoint) = &output.git_checkpoint {
             println!(
                 "Git checkpoint: {} ({})",
                 style::dim(
@@ -1087,6 +1365,8 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
                 ),
                 style::dim(&checkpoint.committed_at)
             );
+        } else if output.git_checkpoint.is_some() {
+            println!("Git: {}", style::accent("saved to commit"));
         } else if verbose {
             // The fallback "Capture durability: local only" repeats on
             // every status the user runs against a non-checkpointed
@@ -1123,7 +1403,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
             println!("{}", style::dim("Worktree"));
             emitted = true;
         }
-        println!("Workspace: {}", mode);
+        println!("Checkout: {}", status_workspace_label(output, mode));
     }
     if let Some(state) = &output.thread_state {
         if !emitted {
@@ -1145,6 +1425,22 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
         // `stale` carry the same semantics as `active` and `blocked`
         // would on the thread itself.
         println!("Sync: {}", style::thread_state(&freshness.to_string()));
+    }
+    if let Some(context) = &output.repository_context
+        && let Some(parent_repository) = &context.parent_repository
+    {
+        if !emitted {
+            println!();
+            println!("{}", style::dim("Worktree"));
+            emitted = true;
+        }
+        println!("Parent repo: {}", parent_repository);
+        if context.kind == "git-overlay-isolated-checkout" {
+            println!(
+                "Git checkout: {}",
+                style::dim("no .git here; raw Git commands belong in the parent repo")
+            );
+        }
     }
     if let Some(target) = &output.target_thread {
         if !emitted {
@@ -1170,7 +1466,8 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
         }
         println!("Child threads: {}", output.child_threads.join(", "));
     }
-    if let Some(actor) = &output.actor
+    if verbose
+        && let Some(actor) = &output.actor
         && let Some(text) =
             crate::cli::render::actor_display(actor.provider.as_deref(), actor.model.as_deref())
     {
@@ -1247,7 +1544,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
             println!("Attach: {}", attach_reason);
         }
     }
-    if let Some(usage_summary) = &output.usage_summary {
+    if verbose && let Some(usage_summary) = &output.usage_summary {
         let mut parts = Vec::new();
         if let Some(input) = usage_summary.input_tokens {
             parts.push(format!("input {}", input));
@@ -1274,8 +1571,29 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
     }
 }
 
+fn status_workspace_label(output: &StatusOutput, mode: &ThreadMode) -> &'static str {
+    if output
+        .repository_context
+        .as_ref()
+        .is_some_and(|context| context.kind == "git-overlay-isolated-checkout")
+    {
+        return "Git-overlay isolated checkout";
+    }
+    match mode {
+        ThreadMode::Materialized if output.repository_capability == "git-overlay" => {
+            "Git branch checkout"
+        }
+        ThreadMode::Materialized => "main checkout",
+        ThreadMode::Solid => "isolated checkout",
+        ThreadMode::Virtualized => "virtual checkout",
+    }
+}
+
 fn render_status_advice(output: &StatusOutput) {
     println!();
+    if let Some(notice) = &output.identity_notice {
+        println!("Identity: {}", style::warn(notice));
+    }
     if !output.parallel_threads.is_empty() {
         println!(
             "Parallel work: {}",
@@ -1285,10 +1603,23 @@ fn render_status_advice(output: &StatusOutput) {
     if let Some(task) = &output.task {
         println!("Task: {}", task);
     }
-    println!(
-        "Changed paths: {}",
-        style::bold(&output.changed_path_count.to_string())
-    );
+    let checkpoint_needed = output.thread_health == "needs_checkpoint";
+    if checkpoint_needed {
+        println!(
+            "Git checkpoint pending: {}",
+            style::bold("saved Heddle state is not yet a Git commit")
+        );
+    } else if matches!(output.thread_state, Some(ThreadState::Ready)) {
+        println!(
+            "Thread changes vs target: {}",
+            style::bold(&output.changed_path_count.to_string())
+        );
+    } else {
+        println!(
+            "Changed paths: {}",
+            style::bold(&output.changed_path_count.to_string())
+        );
+    }
     if output.promotion_suggested && !output.heavy_impact_paths.is_empty() {
         println!(
             "Heavy-impact change: {} — review broader impact before merging",
@@ -1310,9 +1641,22 @@ fn render_status_advice(output: &StatusOutput) {
         );
     }
     if !output.blockers.is_empty() {
-        println!("{}", style::warn("Blocked by"));
+        if checkpoint_needed {
+            println!("{}", style::bold("Saved in Heddle"));
+        } else {
+            println!("{}", style::warn("Blocked by"));
+        }
         for blocker in &output.blockers {
-            println!("  - {}", style::warn(blocker));
+            let blocker = if checkpoint_needed {
+                checkpoint_blocker_text(blocker)
+            } else {
+                human_status_blocker_text(blocker)
+            };
+            if checkpoint_needed {
+                println!("  - {}", style::dim(&blocker));
+            } else {
+                println!("  - {}", style::warn(&blocker));
+            }
         }
     }
     if !output.recommended_action.is_empty() {
@@ -1330,19 +1674,32 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
     if output.operation.is_some() {
         return "an operation is in progress; finish or abort it before starting another workflow";
     }
+    if output.recommended_action.contains("checkpoint") {
+        return "the work is saved in Heddle; checkpoint writes the Git commit for this saved state";
+    }
+    if output.recommended_action.contains("adopt --ref")
+        || output.git_overlay_import_hint.as_ref().is_some_and(|hint| {
+            hint.missing_branches
+                .iter()
+                .any(|branch| branch == &hint.current_branch)
+        })
+    {
+        return "connect this Git branch to Heddle before using history-oriented commands";
+    }
     if !output.blockers.is_empty() {
         return "the current thread has blockers that must be cleared before integration";
+    }
+    if output.changed_path_count > 0 && output.recommended_action.contains("commit") {
+        return "there are uncommitted worktree changes; commit captures them and writes the Git checkpoint";
     }
     if output.changed_path_count > 0 && output.recommended_action.contains("capture") {
         return "there are uncaptured worktree changes; capture records a recoverable state";
     }
-    if output.git_overlay_import_hint.is_some()
-        || output.recommended_action.contains("bridge git import")
-    {
-        return "this Git branch is tip-only in Heddle; import history before using history-oriented commands";
-    }
-    if output.remote_tracking.is_some() {
-        return "remote tracking reports drift; reconcile that before integration";
+    if let Some(remote_tracking) = &output.remote_tracking {
+        if remote_tracking.behind == 0 && remote_tracking.ahead > 0 {
+            return "local commits are safe and waiting to be pushed upstream";
+        }
+        return "remote tracking reports drift; sync that before integration";
     }
     if output.recommended_action.contains("ready") {
         return "the work is captured; readiness checks merge blockers without landing changes";
@@ -1355,15 +1712,92 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
 
 fn status_next_follow_up(output: &StatusOutput) -> Option<&'static str> {
     let action = output.recommended_action.as_str();
-    if action.contains("capture") {
+    if action.contains("commit") && status_has_publish_target(output) {
+        Some("run `heddle push` when the checkpoint is ready to publish")
+    } else if action.contains("checkpoint") && status_has_publish_target(output) {
+        Some("run `heddle push` when the Git checkpoint is ready to publish")
+    } else if action.contains("capture") {
         Some("run `heddle ready` when the captured work should be checked for merge")
     } else if action.contains("ready") {
         Some("preview integration with `heddle merge <thread> --preview` before landing it")
+    } else if action.contains("merge") && action.contains("--preview") {
+        Some(
+            "land the previewed thread with `heddle ship --thread <thread> --no-push`; add `--push` only when a remote is configured",
+        )
     } else if action.contains("resolve") || action.contains("continue") || action.contains("abort")
     {
         Some("check `heddle status` again after the operation state changes")
     } else {
         None
+    }
+}
+
+fn status_has_publish_target(output: &StatusOutput) -> bool {
+    output.remote_tracking.is_some() || output.trust.default_remote.is_some()
+}
+
+fn checkpoint_blocker_text(blocker: &str) -> String {
+    blocker
+        .strip_prefix("Worktree: ")
+        .unwrap_or(blocker)
+        .replace(
+            "captured in Heddle but not checkpointed to Git",
+            "saved in Heddle and ready to checkpoint to Git",
+        )
+}
+
+fn human_status_blocker_text(blocker: &str) -> String {
+    if let Some(summary) = blocker
+        .strip_prefix("Mapping: ")
+        .or_else(|| blocker.strip_prefix("Heddle: "))
+        .or_else(|| blocker.strip_prefix("Verification: "))
+    {
+        if summary.contains("reconcile") || summary.contains("Git branch") {
+            return format!("Git/Heddle mismatch: {summary}");
+        }
+        return format!(
+            "Setup needed: {}",
+            summary
+                .replace("still need Heddle import", "need Heddle setup")
+                .replace(
+                    "import this branch tip before comparing Heddle state",
+                    "connect this branch before using Heddle history"
+                )
+        );
+    }
+    blocker.to_string()
+}
+
+fn git_setup_line(output: &StatusOutput) -> Option<String> {
+    if !matches!(
+        output.git_overlay_health.status.as_str(),
+        "needs_init" | "needs_import"
+    ) || output.recommended_action.is_empty()
+    {
+        return None;
+    }
+    if !output.recommended_action.starts_with("heddle adopt") {
+        return None;
+    }
+    Some(format!(
+        "Git repo detected; connect this branch with {}",
+        output.recommended_action
+    ))
+}
+
+fn plain_git_setup_effects(git_clean: bool, recommended_action: &str) -> String {
+    if recommended_action == "heddle init" {
+        if git_clean {
+            return ".heddle metadata will be created; there are no Git commits to import yet, and the Git worktree stays clean.".to_string();
+        }
+        return ".heddle metadata will be created; there are no Git commits to import yet, and existing Git worktree changes stay untouched.".to_string();
+    }
+    if git_clean {
+        ".heddle metadata will be created, Git history imported, and the Git worktree stays clean."
+            .to_string()
+    } else {
+        ".heddle metadata will be created, Git history imported, and existing Git worktree changes stay untouched."
+            .to_string()
     }
 }
 
@@ -1400,6 +1834,23 @@ fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo>
         .collect()
 }
 
+fn first_capture_identity_notice(
+    repo: &Repository,
+    current_state: Option<&objects::object::State>,
+) -> Result<Option<String>> {
+    if !current_state.map(is_synthetic_root).unwrap_or(true) {
+        return Ok(None);
+    }
+    let user_config = UserConfig::load_default().unwrap_or_default();
+    let principal = resolve_principal(repo, &user_config)?;
+    if principal_is_default_unknown(&principal) {
+        return Ok(Some(
+            "no principal configured; the first capture/checkpoint would use Unknown <unknown@example.com>. Set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`.".to_string(),
+        ));
+    }
+    Ok(None)
+}
+
 fn changed_path_count(
     thread: Option<&super::thread::ThreadSummary>,
     changes: &ChangesInfo,
@@ -1414,15 +1865,27 @@ fn changed_path_count(
     paths.len()
 }
 
+fn changes_path_count(changes: &ChangesInfo) -> usize {
+    let mut paths = BTreeSet::new();
+    paths.extend(changes.modified.iter().cloned());
+    paths.extend(changes.added.iter().cloned());
+    paths.extend(changes.deleted.iter().cloned());
+    paths.len()
+}
+
 fn render_status_changes(output: &StatusOutput) {
     // Changes
-    let has_changes = !output.changes.modified.is_empty()
-        || !output.changes.added.is_empty()
-        || !output.changes.deleted.is_empty();
+    let has_changes = has_status_changes(output);
 
     println!();
+    if let Some(index) = output.git_index.as_ref()
+        && git_index_has_paths(index)
+    {
+        render_git_index_status(index);
+        return;
+    }
     if has_changes {
-        println!("{}", style::bold("Changes not yet captured"));
+        println!("{}", style::bold("Changes not yet saved"));
         for path in &output.changes.modified {
             println!("  {}: {}", style::warn("modified"), path);
         }
@@ -1432,9 +1895,92 @@ fn render_status_changes(output: &StatusOutput) {
         for path in &output.changes.deleted {
             println!("  {}:  {}", style::error("deleted"), path);
         }
+    } else if output.trust.verified {
+        println!("{}", style::dim("No unsaved changes, worktree clean"));
+    } else if output.trust.worktree_state == "not_checked" {
+        let message = if output.trust.status == "git_branch_advanced" {
+            "No unsaved worktree changes detected; import the external Git branch tip before comparing Heddle state"
+        } else {
+            "No unsaved worktree changes detected; finish setup before comparing Heddle state"
+        };
+        println!("{}", style::dim(message));
+    } else if output.trust.worktree_state == "clean" {
+        println!(
+            "{}",
+            style::dim(&format!(
+                "No unsaved worktree changes detected; repository verification is {}",
+                output.trust.status
+            ))
+        );
     } else {
-        println!("{}", style::dim("Nothing to capture, worktree clean"));
+        println!("{}", style::dim("No unsaved worktree changes detected"));
     }
+}
+
+fn git_index_has_paths(index: &GitIndexPlan) -> bool {
+    !index.staged_paths.is_empty()
+        || !index.unstaged_paths.is_empty()
+        || !index.untracked_paths.is_empty()
+}
+
+fn render_git_index_status(index: &GitIndexPlan) {
+    println!("{}", style::bold("Git index and worktree"));
+    if !index.staged_paths.is_empty() {
+        println!("  staged for commit:");
+        for path in &index.staged_paths {
+            println!("    {}", path);
+        }
+    }
+    if !index.unstaged_paths.is_empty() {
+        println!("  unstaged after commit:");
+        for path in &index.unstaged_paths {
+            println!("    {}", path);
+        }
+    }
+    if !index.untracked_paths.is_empty() {
+        println!("  untracked after commit:");
+        for path in &index.untracked_paths {
+            println!("    {}", path);
+        }
+    }
+    println!("  commit scope: {}", git_index_commit_scope_text(index));
+    if index.commit_mode == "staged_index" && !index.preserved_after_commit.is_empty() {
+        println!(
+            "  include the rest with: {}",
+            style::bold("heddle commit --all -m \"...\"")
+        );
+    }
+}
+
+fn git_index_commit_scope_text(index: &GitIndexPlan) -> &'static str {
+    match index.commit_mode {
+        "staged_index" => {
+            "plain `heddle commit` checkpoints staged paths only; unstaged and untracked paths stay put"
+        }
+        "worktree_all" => "plain `heddle commit` checkpoints all unstaged and untracked paths",
+        "worktree_all_explicit" => {
+            "`heddle commit --all` checkpoints staged, unstaged, and untracked paths"
+        }
+        "none" => "no Git paths are ready to commit",
+        _ => "plain `heddle commit` checkpoints the listed paths",
+    }
+}
+
+fn human_thread_health(status: &str) -> String {
+    match status {
+        "needs_init" => "setup needed".to_string(),
+        "needs_import" => "setup needed".to_string(),
+        "git_branch_advanced" => "Git branch advanced outside Heddle".to_string(),
+        "needs_reconcile" => "Git/Heddle mismatch".to_string(),
+        "needs_checkpoint" => "checkpoint needed".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn has_status_changes(output: &StatusOutput) -> bool {
+    !output.changes.modified.is_empty()
+        || !output.changes.added.is_empty()
+        || !output.changes.deleted.is_empty()
 }
 
 fn render_status_parallel(output: &StatusOutput) {

@@ -212,11 +212,11 @@ fn realworld_git_complex_fixture_round_trips_overlay_inventory_without_git_on_pa
     // flag was retired once the default flow was the all-refs path.
     heddle_without_git(&["bridge", "import"], &work).unwrap();
 
-    let fsck = heddle_without_git(&["fsck", "--bridge", "--json"], &work).unwrap();
+    let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
     assert_eq!(parsed["valid"], true, "complex fixture should fsck: {fsck}");
 
-    let threads = heddle_without_git(&["thread", "list", "--json"], &work).unwrap();
+    let threads = heddle_without_git(&["thread", "list", "--output", "json"], &work).unwrap();
     assert!(
         threads.contains("feature/parser") || threads.contains("feature-docs"),
         "import should expose non-main refs as overlay threads: {threads}"
@@ -265,7 +265,7 @@ fn realworld_git_large_binary_blob_stress_without_git_on_path() {
         metadata.len() > 0,
         "large checkout should materialize a blob or a safety pointer"
     );
-    let fsck = heddle_without_git(&["fsck", "--bridge", "--json"], &work).unwrap();
+    let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work).unwrap();
     let parsed: Value = serde_json::from_str(&fsck).expect("fsck output should parse");
     assert_eq!(parsed["valid"], true, "large fixture should fsck: {fsck}");
 }
@@ -359,7 +359,7 @@ fn realworld_git_rebase_chain_round_trips_overlay() {
     heddle_without_git(&["bridge", "import"], &work).unwrap();
 
     let threads = serde_json::from_str::<Value>(
-        &heddle_without_git(&["thread", "list", "--json"], &work).unwrap(),
+        &heddle_without_git(&["thread", "list", "--output", "json"], &work).unwrap(),
     )
     .unwrap();
     let names: Vec<String> = threads["threads"]
@@ -375,7 +375,11 @@ fn realworld_git_rebase_chain_round_trips_overlay() {
     // `feature/chain` should resolve to the post-rebase tip — the
     // pre-rebase commit graph is no longer reachable from any ref, so
     // it shouldn't surface as the thread's current state.
-    let log = heddle_with_host_git(&["--json", "log", "feature/chain", "-n", "10"], &work).unwrap();
+    let log = heddle_with_host_git(
+        &["--output", "json", "log", "feature/chain", "-n", "10"],
+        &work,
+    )
+    .unwrap();
     let log: Value = serde_json::from_str(&log).unwrap();
     let intents: Vec<String> = log["states"]
         .as_array()
@@ -591,11 +595,11 @@ fn realworld_git_cherry_pick_assigns_distinct_change_ids() {
     heddle_without_git(&["bridge", "import"], &work).unwrap();
 
     let log_a: Value = serde_json::from_str(
-        &heddle_with_host_git(&["--json", "log", "feature/a", "-n", "1"], &work).unwrap(),
+        &heddle_with_host_git(&["--output", "json", "log", "feature/a", "-n", "1"], &work).unwrap(),
     )
     .unwrap();
     let log_b: Value = serde_json::from_str(
-        &heddle_with_host_git(&["--json", "log", "feature/b", "-n", "1"], &work).unwrap(),
+        &heddle_with_host_git(&["--output", "json", "log", "feature/b", "-n", "1"], &work).unwrap(),
     )
     .unwrap();
     let id_a = log_a["states"][0]["change_id"]
@@ -721,7 +725,7 @@ fn realworld_fixtures_clone_and_import_round_trip() {
         heddle_without_git(&["bridge", "import"], &work)
             .unwrap_or_else(|err| panic!("bridge import failed for {}: {err}", entry.name));
 
-        let fsck = heddle_without_git(&["fsck", "--bridge", "--json"], &work)
+        let fsck = heddle_without_git(&["fsck", "--bridge", "--output", "json"], &work)
             .unwrap_or_else(|err| panic!("fsck --bridge failed for {}: {err}", entry.name));
         let parsed: Value = serde_json::from_str(&fsck)
             .unwrap_or_else(|_| panic!("fsck output should parse for {}: {fsck}", entry.name));
@@ -731,7 +735,7 @@ fn realworld_fixtures_clone_and_import_round_trip() {
             entry.name
         );
 
-        let threads = heddle_without_git(&["thread", "list", "--json"], &work)
+        let threads = heddle_without_git(&["thread", "list", "--output", "json"], &work)
             .unwrap_or_else(|err| panic!("thread list failed for {}: {err}", entry.name));
         let threads_json: Value = serde_json::from_str(&threads).unwrap();
         let names: Vec<String> = threads_json["threads"]
@@ -756,17 +760,17 @@ fn realworld_fixtures_clone_and_import_round_trip() {
 /// Mapped doc lines (numbered to match the document order):
 ///   1. `heddle status` shows current branch as a Heddle thread
 ///   2. `heddle start agent/...` creates an isolated thread with a path
-///   3. `heddle thread list` is the control tower (current/ahead/state)
+///   3. `heddle thread list` shows coordination state (current/ahead/state)
 ///   4. Overlapping edits in isolated checkouts stay separated
 ///   5. `heddle capture` records intent + confidence on the right thread
 ///   6. Merging a thread leaves the rest stale, not silently overwritten
-///   7. `heddle continue` is the single recovery verb during a merge conflict
+///   7. Heddle-native merge conflicts recover through Heddle verbs
 ///   8. Conflict markers name the lanes (CURRENT (...) / INCOMING (...))
 ///   9. Stale thread with non-overlapping edits rebases automatically
 ///  10. Raw Git branch is discovered as a tip-only mirror with import hint
 ///  11. `heddle checkpoint` produces a Git-facing commit
-///  12. `heddle abort` backs out a raw-Git merge conflict cleanly
-///  13. `heddle continue` names the unresolved file on a rebase conflict
+///  12. Raw-Git sequencer conflicts get a no-git preservation handoff
+///  13. Heddle-native recovery names unresolved files
 ///
 /// Some of these (4, 6, 7, 8, 9, 12, 13) require constructed conflict
 /// scenarios on top of the real fixture; we build them in-test rather
@@ -785,7 +789,7 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         work_root.path(),
     )
     .unwrap();
-    let status_json = heddle_with_host_git(&["--json", "status"], &work).unwrap();
+    let status_json = heddle_with_host_git(&["--output", "json", "status"], &work).unwrap();
     let status: Value = serde_json::from_str(&status_json).unwrap();
     assert_eq!(
         status["thread"].as_str(),
@@ -808,7 +812,7 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         .expect("cloned repo should have a HEAD commit");
     git_set_reference(&cloned, "refs/heads/raw-side-branch", head.id().detach());
     heddle_without_git(&["bridge", "import"], &work).unwrap();
-    let threads_json = heddle_without_git(&["thread", "list", "--json"], &work).unwrap();
+    let threads_json = heddle_without_git(&["thread", "list", "--output", "json"], &work).unwrap();
     let threads: Value = serde_json::from_str(&threads_json).unwrap();
     let names: Vec<String> = threads["threads"]
         .as_array()
@@ -821,7 +825,7 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         "(M10) raw git branch should surface as a heddle thread post-import: {names:?}"
     );
 
-    // ── (3) "thread list as the control tower" ── shape check ──
+    // ── (3) thread coordination state shape check ──
     // Each thread row exposes coordination state (current / ahead /
     // ready / merged) and the marker is JSON-stable for transcript use.
     for thread in threads["threads"].as_array().unwrap() {
@@ -846,7 +850,8 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     ] {
         let started_json = heddle_with_host_git(
             &[
-                "--json",
+                "--output",
+                "json",
                 "start",
                 slug,
                 "--workspace",
@@ -904,7 +909,8 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     for (slug, path) in &agent_paths {
         let cap_json = heddle_with_host_git(
             &[
-                "--json",
+                "--output",
+                "json",
                 "capture",
                 "--intent",
                 &format!("draft work for {slug}"),
@@ -923,9 +929,10 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     }
 
     // ── (3 cont.) Captures should bump each thread's coordination state ──
-    let post_capture_threads: Value =
-        serde_json::from_str(&heddle_with_host_git(&["--json", "thread", "list"], &work).unwrap())
-            .unwrap();
+    let post_capture_threads: Value = serde_json::from_str(
+        &heddle_with_host_git(&["--output", "json", "thread", "list"], &work).unwrap(),
+    )
+    .unwrap();
     let ahead_count = post_capture_threads["threads"]
         .as_array()
         .unwrap()
@@ -955,9 +962,10 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     );
     // After the first merge, the other agent threads are stale and
     // should be reported with a non-`merged` coordination status.
-    let post_merge: Value =
-        serde_json::from_str(&heddle_with_host_git(&["--json", "thread", "list"], &work).unwrap())
-            .unwrap();
+    let post_merge: Value = serde_json::from_str(
+        &heddle_with_host_git(&["--output", "json", "thread", "list"], &work).unwrap(),
+    )
+    .unwrap();
     let stale_remaining: Vec<&str> = post_merge["threads"]
         .as_array()
         .unwrap()
@@ -979,7 +987,13 @@ fn marketing_moments_walkthrough_against_real_fixture() {
 
     // ── (11) `heddle checkpoint` bundles captures into a Git commit ──
     let checkpoint_out = heddle_with_host_git(
-        &["--json", "checkpoint", "-m", "Checkpoint integrated work"],
+        &[
+            "--output",
+            "json",
+            "checkpoint",
+            "-m",
+            "Checkpoint integrated work",
+        ],
         &work,
     )
     .unwrap_or_else(|err| panic!("(M11) checkpoint failed: {err}"));
@@ -992,7 +1006,7 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         "(M11) checkpoint should report the new state/change_id: {checkpoint_out}"
     );
 
-    // ── (7) `heddle continue` as the single recovery verb ──
+    // ── (7) Heddle-native recovery verbs are wired ──
     // With no operation pending, `continue` should exit cleanly and
     // surface a "nothing to continue" message rather than crashing.
     let continue_out = heddle_with_host_git(&["continue"], &work).unwrap_or_else(|err| {
@@ -1007,7 +1021,7 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         "(M7) heddle continue verb must be wired up; got: {continue_out}"
     );
 
-    // ── (12) `heddle abort` as the rescue verb ──
+    // ── (12) `heddle abort` is wired for Heddle-native operations ──
     let abort_out = heddle_with_host_git(&["abort"], &work).unwrap_or_else(|err| err);
     assert!(
         !abort_out.contains("error: unrecognized") && !abort_out.contains("error: no such"),
@@ -1024,7 +1038,7 @@ fn marketing_moments_walkthrough_against_real_fixture() {
         "(M9) thread refresh on stale non-overlapping thread should succeed: {refresh_out:?}"
     );
 
-    // ── (13) `heddle continue` naming the unresolved file is exercised
+    // ── (13) Heddle-native recovery naming the unresolved file is exercised
     // in git_overlay_matrix's conflict tests against synthetic state.
     // Walking it here against a real fixture would require building out
     // a deliberate textual conflict on the real history — the verb

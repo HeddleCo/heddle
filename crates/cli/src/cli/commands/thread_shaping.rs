@@ -5,13 +5,16 @@ use std::{fs, path::Path};
 
 use anyhow::{Result, anyhow};
 use objects::{fs_ops::remove_path_recursively, object::ChangeId};
-use repo::Repository;
+use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
-    git_overlay_health::{RepositoryTrustState, build_repository_trust_state},
-    merge::merge_thread_into_current,
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    merge::{
+        merge_thread_into_current, ship_command_for_thread,
+        ship_command_for_thread_with_push_target,
+    },
     operator_core::OperatorCommandOutput,
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
@@ -58,7 +61,11 @@ pub fn cmd_capture_split(
 ) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     let current = super::thread_cmd::current_thread(&repo)?.ok_or_else(|| {
-        anyhow!("No current thread; `heddle capture --split` requires an active thread checkout")
+        anyhow!(RecoveryAdvice::no_current_thread(
+            "capture --split",
+            None,
+            "heddle thread switch <name>",
+        ))
     })?;
     let target = load_thread(&repo, &into)?;
     let moved_paths = collect_worktree_split_paths(&repo, &prefixes)?;
@@ -255,6 +262,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         thread.execution_path.clone()
     };
     let source_repo = Repository::open(&source_root)?;
+    let rebase_state_path = source_repo.heddle_dir().join("REBASE_STATE");
 
     if thread.freshness == repo::ThreadFreshness::Stale
         && refresh_thread(&repo, &thread_id, cli).is_ok()
@@ -274,11 +282,16 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             .integration_policy_result
             .manual_resolution_state = resolved_state;
         manager.save(&refreshed_thread)?;
-        let trust = build_repository_trust_state(&repo);
+        let operator = if rebase_state_path.exists() {
+            thread_resolve_rebase_followup_operator(&source_repo, &rebase_state_path, &thread.id)?
+        } else {
+            let trust = build_repository_verification_state(&repo);
+            thread_resolve_refresh_operator(&thread.id, &trust)
+        };
         return emit_thread_resolve(
             cli,
             &ThreadResolveOutput {
-                operator: thread_resolve_refresh_operator(&thread.id, &trust),
+                operator,
                 thread: thread_id,
             },
         );
@@ -286,7 +299,6 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
 
     let summary = super::thread::find_thread_summary(&repo, &thread.id)?
         .ok_or_else(|| anyhow!("Thread '{}' not found", thread.id))?;
-    let rebase_state_path = source_repo.heddle_dir().join("REBASE_STATE");
     let mut blockers = if rebase_state_path.exists() {
         Vec::new()
     } else {
@@ -324,7 +336,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 thread.id,
                 preview.conflicts.join(", ")
             ));
-            recommended_action = format!("heddle merge {}", thread.id);
+            recommended_action = format!("heddle merge {} --preview", thread.id);
         }
     }
     if blockers.is_empty() {
@@ -340,7 +352,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         if rebase_state_path.exists() {
             recommended_action
         } else {
-            format!("heddle ship --thread {}", summary.name)
+            ship_command_for_thread(&repo, &summary.name)
         }
     } else {
         recommended_action
@@ -348,11 +360,12 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_overlay_import_hint()?;
-    let recommended_action = primary_next_action(
+    let recommended_action = thread_resolve_next_action(
+        &blockers,
         operation.as_ref(),
         remote_tracking.as_ref(),
         import_hint.as_ref(),
-        Some(&recommended_action),
+        &recommended_action,
     );
     emit_thread_resolve(
         cli,
@@ -367,20 +380,77 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 message: "Thread requires a manual follow-up".to_string(),
                 blockers: blockers.clone(),
                 warnings: Vec::new(),
-                next_action: Some(recommended_action.clone()),
-                recommended_action: Some(recommended_action),
+                next_action: recommended_action.clone(),
+                recommended_action,
             },
             thread: summary.name.clone(),
         },
     )
 }
 
+fn thread_resolve_next_action(
+    blockers: &[String],
+    operation: Option<&RepositoryOperationStatus>,
+    remote_tracking: Option<&GitRemoteTrackingStatus>,
+    import_hint: Option<&GitOverlayImportHint>,
+    local_action: &str,
+) -> Option<String> {
+    let action = if blockers.is_empty() {
+        primary_next_action(operation, remote_tracking, import_hint, Some(local_action))
+    } else if let Some(operation) = operation {
+        operation.next_action.clone()
+    } else {
+        local_action.to_string()
+    };
+    (!action.trim().is_empty()).then_some(action)
+}
+
+fn thread_resolve_rebase_followup_operator(
+    source_repo: &Repository,
+    rebase_state_path: &Path,
+    thread_id: &str,
+) -> Result<OperatorCommandOutput> {
+    let rebase_state = super::rebase::load_persisted_rebase_state(rebase_state_path)?;
+    let current_state = source_repo
+        .current_state()?
+        .ok_or_else(|| anyhow!("Thread '{}' has no current state", thread_id))?;
+    let next_action = "heddle rebase --continue".to_string();
+    let mut blockers = Vec::new();
+    if !rebase_state
+        .pre_conflict_head
+        .is_some_and(|head| head != current_state.change_id)
+    {
+        blockers.push(
+            "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),
+        );
+    }
+
+    Ok(OperatorCommandOutput {
+        status: if blockers.is_empty() {
+            "completed".to_string()
+        } else {
+            "blocked".to_string()
+        },
+        action: "resolve".to_string(),
+        message: if blockers.is_empty() {
+            "Thread requires a manual follow-up".to_string()
+        } else {
+            "Thread still requires a manual rebase resolution".to_string()
+        },
+        blockers,
+        warnings: Vec::new(),
+        next_action: Some(next_action.clone()),
+        recommended_action: Some(next_action),
+    })
+}
+
 fn thread_resolve_refresh_operator(
     thread_id: &str,
-    trust: &RepositoryTrustState,
+    trust: &RepositoryVerificationState,
 ) -> OperatorCommandOutput {
-    let ship_command = format!("heddle ship --thread {thread_id}");
-    if trust.trusted {
+    let ship_command =
+        ship_command_for_thread_with_push_target(thread_id, trust.default_remote.is_some());
+    if trust.verified {
         return OperatorCommandOutput {
             status: "synced".to_string(),
             action: "resolve".to_string(),
@@ -393,7 +463,7 @@ fn thread_resolve_refresh_operator(
     }
 
     let recommended_action = if trust.recommended_action.is_empty() {
-        "heddle trust".to_string()
+        "heddle verify".to_string()
     } else {
         trust.recommended_action.clone()
     };
@@ -407,7 +477,7 @@ fn thread_resolve_refresh_operator(
         status: "blocked".to_string(),
         action: "resolve".to_string(),
         message: format!(
-            "Thread refreshed cleanly, but repository trust is blocked: {}",
+            "Thread refreshed cleanly, but repository verification is blocked: {}",
             trust.summary
         ),
         blockers,
@@ -634,78 +704,155 @@ fn emit_thread_resolve(cli: &Cli, output: &ThreadResolveOutput) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::commands::git_overlay_health::TrustCheck;
+    use crate::cli::commands::git_overlay_health::VerificationCheck;
 
-    fn trust_state(trusted: bool) -> RepositoryTrustState {
-        let check = TrustCheck {
+    fn trust_state(verified: bool) -> RepositoryVerificationState {
+        let check = VerificationCheck {
             name: "Mapping".to_string(),
-            status: if trusted { "clean" } else { "needs_import" }.to_string(),
-            clean: trusted,
-            summary: if trusted {
+            status: if verified { "clean" } else { "needs_import" }.to_string(),
+            clean: verified,
+            summary: if verified {
                 "Git/Heddle mapping is clean"
             } else {
                 "active Git branch has not been imported"
             }
             .to_string(),
-            recommended_action: (!trusted)
-                .then(|| "heddle bridge git import --ref main".to_string()),
-            recovery_commands: if trusted {
+            recommended_action: (!verified).then(|| "heddle adopt --ref main".to_string()),
+            recommended_action_argv: (!verified).then(|| {
+                vec![
+                    "heddle".to_string(),
+                    "adopt".to_string(),
+                    "--ref".to_string(),
+                    "main".to_string(),
+                ]
+            }),
+            recommended_action_template: None,
+            recovery_commands: if verified {
                 Vec::new()
             } else {
-                vec!["heddle bridge git import --ref main".to_string()]
+                vec!["heddle adopt --ref main".to_string()]
             },
+            recovery_command_argv: if verified {
+                Vec::new()
+            } else {
+                vec![vec![
+                    "heddle".to_string(),
+                    "adopt".to_string(),
+                    "--ref".to_string(),
+                    "main".to_string(),
+                ]]
+            },
+            recovery_action_templates: Vec::new(),
             details: std::collections::BTreeMap::new(),
         };
-        RepositoryTrustState {
-            trusted,
-            status: if trusted { "clean" } else { "needs_import" }.to_string(),
+        let machine_contract_coverage =
+            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+        RepositoryVerificationState {
+            verified,
+            status: if verified { "clean" } else { "needs_import" }.to_string(),
             repository_mode: "git-overlay".to_string(),
             heddle_initialized: true,
             git_branch: Some("main".to_string()),
             heddle_thread: Some("main".to_string()),
             worktree_dirty: false,
+            worktree_state: "clean".to_string(),
             import_state: check.status.clone(),
             mapping_state: check.status.clone(),
             remote_drift: "clean".to_string(),
             active_operation: None,
             default_remote: None,
             clone_verification: "not_applicable".to_string(),
-            machine_contract: "available".to_string(),
+            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+                &machine_contract_coverage,
+            )
+            .to_string(),
+            machine_contract_coverage,
             summary: check.summary.clone(),
+            workflow_status: "clean".to_string(),
+            workflow_summary: "no workflow attention needed".to_string(),
             recommended_action: check.recommended_action.clone().unwrap_or_default(),
+            recommended_action_argv: check.recommended_action_argv.clone(),
+            recommended_action_template: check.recommended_action_template.clone(),
             recovery_commands: check.recovery_commands.clone(),
+            recovery_command_argv: check.recovery_command_argv.clone(),
+            recovery_action_templates: check.recovery_action_templates.clone(),
             checks: vec![check],
         }
     }
 
     #[test]
-    fn thread_resolve_reports_synced_only_when_repository_trust_is_clean() {
+    fn thread_resolve_reports_synced_only_when_repository_verification_is_clean() {
         let clean = thread_resolve_refresh_operator("feature/clean", &trust_state(true));
         assert_eq!(clean.status, "synced");
         assert_eq!(
             clean.recommended_action.as_deref(),
-            Some("heddle ship --thread feature/clean")
+            Some("heddle ship --thread feature/clean --no-push")
         );
 
         let blocked = thread_resolve_refresh_operator("feature/blocked", &trust_state(false));
         assert_eq!(blocked.status, "blocked");
         assert!(
-            blocked.message.contains("repository trust is blocked"),
-            "blocked message should name trust, got: {}",
+            blocked
+                .message
+                .contains("repository verification is blocked"),
+            "blocked message should name verification, got: {}",
             blocked.message
         );
         assert_eq!(
             blocked.recommended_action.as_deref(),
-            Some("heddle bridge git import --ref main")
+            Some("heddle adopt --ref main")
         );
         assert!(
             blocked
                 .blockers
                 .iter()
                 .any(|blocker| blocker.contains("active Git branch has not been imported")),
-            "trust blocker should be surfaced: {:?}",
+            "verification blocker should be surfaced: {:?}",
             blocked.blockers
         );
+    }
+
+    #[test]
+    fn thread_resolve_blockers_keep_local_recovery_ahead_of_remote_push() {
+        let blockers = vec!["Thread still has merge conflicts".to_string()];
+        let remote = GitRemoteTrackingStatus {
+            branch: "main".to_string(),
+            upstream: "origin/main".to_string(),
+            ahead: 1,
+            behind: 0,
+            message: "branch is ahead".to_string(),
+            next_action: "heddle push".to_string(),
+        };
+
+        let action = thread_resolve_next_action(
+            &blockers,
+            None,
+            Some(&remote),
+            None,
+            "heddle merge feature/conflict --preview",
+        );
+
+        assert_eq!(
+            action.as_deref(),
+            Some("heddle merge feature/conflict --preview")
+        );
+    }
+
+    #[test]
+    fn thread_resolve_clean_state_can_surface_remote_push() {
+        let remote = GitRemoteTrackingStatus {
+            branch: "main".to_string(),
+            upstream: "origin/main".to_string(),
+            ahead: 1,
+            behind: 0,
+            message: "branch is ahead".to_string(),
+            next_action: "heddle push".to_string(),
+        };
+
+        let action =
+            thread_resolve_next_action(&[], None, Some(&remote), None, "heddle ship --thread x");
+
+        assert_eq!(action.as_deref(), Some("heddle push"));
     }
 
     #[test]

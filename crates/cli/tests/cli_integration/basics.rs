@@ -58,6 +58,20 @@ fn git(args: &[&str], path: &std::path::Path) {
     assert!(status.success(), "git {:?} should succeed", args);
 }
 
+fn heddle_adopt(path: &std::path::Path) {
+    heddle(&["adopt"], Some(path)).unwrap();
+}
+
+fn json_stdout(output: &Output, context: &str) -> Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "{context} should emit JSON on stdout: {err}; stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
 #[test]
 fn test_cli_capture_blocks_large_git_overlay_deletion_without_force() {
     let temp = TempDir::new().unwrap();
@@ -71,7 +85,7 @@ fn test_cli_capture_blocks_large_git_overlay_deletion_without_force() {
         .unwrap();
     }
     git_commit_all(temp.path(), "seed web tree");
-    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle_adopt(temp.path());
 
     std::fs::remove_dir_all(temp.path().join("web")).unwrap();
     let error = heddle(&["capture", "-m", "remove web"], Some(temp.path()))
@@ -80,6 +94,33 @@ fn test_cli_capture_blocks_large_git_overlay_deletion_without_force() {
         error.contains("Large capture safety check") && error.contains("heddle capture --force"),
         "large capture should explain the guardrail and escape hatch: {error}"
     );
+
+    let json_refusal = heddle_output(
+        &["--output", "json", "capture", "-m", "remove web"],
+        Some(temp.path()),
+    )
+    .expect("large deletion capture should run and refuse");
+    assert!(
+        !json_refusal.status.success(),
+        "large deletion capture should require --force"
+    );
+    let stderr = str::from_utf8(&json_refusal.stderr).expect("stderr should be utf8");
+    let envelope: Value = serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
+    assert_eq!(envelope["kind"], "large_capture_requires_force");
+    assert_eq!(envelope["code"], "large_capture_requires_force");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("Large capture safety check")),
+        "JSON error should carry concise refusal text: {envelope}"
+    );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("heddle capture --force")),
+        "JSON hint should name the force retry: {envelope}"
+    );
+    assert_json_recovery_advice_fields(&envelope, stderr);
 
     let forced = heddle(
         &["capture", "--force", "-m", "remove web intentionally"],
@@ -201,11 +242,11 @@ fn test_cli_init_in_git_repo_bootstraps_sidecar() {
 
     let output = heddle(&["init"], Some(temp.path())).unwrap();
     assert!(
-        output.contains("sidecar"),
-        "expected sidecar language: {output}"
+        output.contains("Heddle data"),
+        "expected user-facing Heddle data language: {output}"
     );
 
-    let status = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let status = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&status).unwrap();
     assert_eq!(parsed["repository_capability"], "git-overlay");
     assert_eq!(parsed["storage_model"], "git+heddle-sidecar");
@@ -217,7 +258,7 @@ fn test_cli_status_bootstraps_plain_git_repo_and_adopts_current_branch() {
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("plain.txt"), "drop-in status").unwrap();
 
-    let status = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let status = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&status).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert_eq!(parsed["storage_model"], "git-only");
@@ -267,7 +308,7 @@ fn test_cli_status_surfaces_git_import_hint_for_other_branches() {
         .expect("git branch should run");
     assert!(status.success());
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         parsed["changes"]["added"]
@@ -279,8 +320,12 @@ fn test_cli_status_surfaces_git_import_hint_for_other_branches() {
     );
 
     // Import-hint information has moved to `heddle bridge git status
-    // --json`; per-command outputs no longer carry it.
-    let bridge_output = heddle(&["bridge", "git", "status", "--json"], Some(temp.path())).unwrap();
+    // --output json`; per-command outputs no longer carry it.
+    let bridge_output = heddle(
+        &["bridge", "git", "status", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
     assert_eq!(bridge["git_overlay_import_hint"]["missing_branch_count"], 1);
     assert_eq!(
@@ -289,7 +334,7 @@ fn test_cli_status_surfaces_git_import_hint_for_other_branches() {
     );
     assert_eq!(
         bridge["git_overlay_import_hint"]["recommended_command"],
-        "heddle bridge git import --ref support/import-me"
+        "heddle adopt --ref support/import-me"
     );
 }
 
@@ -303,7 +348,7 @@ fn test_cli_status_in_plain_git_repo_distinguishes_modified_and_untracked() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
     std::fs::write(temp.path().join("plain.txt"), "new file").unwrap();
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
 
     assert!(
@@ -335,7 +380,7 @@ fn test_cli_status_in_plain_git_repo_respects_gitignore() {
     std::fs::write(temp.path().join("ignored.log"), "ignore me").unwrap();
     std::fs::write(temp.path().join("visible.txt"), "show me").unwrap();
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     let added = parsed["changes"]["added"].as_array().unwrap();
 
@@ -359,7 +404,7 @@ fn test_cli_status_in_plain_git_repo_handles_detached_head() {
     git(&["checkout", "--detach", "HEAD"], temp.path());
     std::fs::write(temp.path().join("plain.txt"), "detached work").unwrap();
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
 
     assert!(
@@ -395,8 +440,12 @@ fn test_cli_status_surfaces_git_import_hint_for_many_branches() {
     }
 
     // Import-hint information has moved to `heddle bridge git status
-    // --json`; per-command outputs no longer carry it.
-    let output = heddle(&["bridge", "git", "status", "--json"], Some(temp.path())).unwrap();
+    // --output json`; per-command outputs no longer carry it.
+    let output = heddle(
+        &["bridge", "git", "status", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
 
     assert_eq!(
@@ -422,7 +471,7 @@ fn test_cli_status_in_plain_git_repo_reports_staged_deletions() {
     std::fs::remove_file(temp.path().join("tracked.txt")).unwrap();
     git(&["add", "-A"], temp.path());
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         parsed["changes"]["deleted"]
@@ -445,7 +494,7 @@ fn test_cli_status_in_plain_git_repo_works_from_subdirectory() {
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(temp.path().join("plain.txt"), "new file").unwrap();
 
-    let output = heddle(&["status", "--json"], Some(&nested)).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(&nested)).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["git_branch"], "feature/drop-in");
     assert!(
@@ -468,7 +517,7 @@ fn test_cli_diagnose_in_plain_git_repo_uses_git_baseline() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
     std::fs::write(temp.path().join("plain.txt"), "new file").unwrap();
 
-    let output = heddle(&["diagnose", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["diagnose", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert_eq!(parsed["git_overlay_health"]["status"], "needs_init");
@@ -503,7 +552,7 @@ fn test_cli_thread_list_in_plain_git_repo_respects_detached_head() {
     git_commit_all(temp.path(), "seed branch");
     git(&["checkout", "--detach", "HEAD"], temp.path());
 
-    let output = heddle(&["thread", "list", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         parsed["current"].is_null(),
@@ -519,7 +568,11 @@ fn test_cli_workspace_in_plain_git_repo_respects_detached_head() {
     git_commit_all(temp.path(), "seed branch");
     git(&["checkout", "--detach", "HEAD"], temp.path());
 
-    let output = heddle(&["workspace", "show", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(
+        &["workspace", "show", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         parsed["current_thread"].is_null(),
@@ -535,10 +588,10 @@ fn test_cli_show_head_in_plain_git_repo_surfaces_import_hint() {
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/import-me"], temp.path());
 
-    let output = heddle(&["show", "HEAD", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
-    assert_eq!(parsed["recommended_action"], "heddle init");
+    assert_eq!(parsed["recommended_action"], "heddle adopt");
     assert!(parsed["state"].is_null());
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -554,10 +607,10 @@ fn test_cli_log_in_plain_git_repo_surfaces_import_hint() {
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/import-me"], temp.path());
 
-    let output = heddle(&["log", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["log", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
-    assert_eq!(parsed["recommended_action"], "heddle init");
+    assert_eq!(parsed["recommended_action"], "heddle adopt");
     assert!(parsed["states"].as_array().unwrap().is_empty());
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -578,7 +631,7 @@ fn test_cli_status_in_plain_git_repo_handles_mixed_staged_and_unstaged_changes()
     git(&["add", "delete.txt"], temp.path());
     std::fs::write(temp.path().join("plain.txt"), "new file").unwrap();
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         parsed["changes"]["modified"]
@@ -620,7 +673,7 @@ fn test_cli_status_in_plain_git_repo_handles_git_rename_as_delete_plus_add() {
     .unwrap();
     git(&["add", "-A"], temp.path());
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         parsed["changes"]["deleted"]
@@ -646,19 +699,32 @@ fn test_cli_ready_in_plain_git_repo_captures_mixed_git_state() {
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
     std::fs::write(temp.path().join("plain.txt"), "new file").unwrap();
 
-    let ready: Value =
-        serde_json::from_str(&heddle(&["--json", "ready"], Some(temp.path())).unwrap()).unwrap();
+    let ready_output = heddle_output(
+        &["--output", "json", "ready", "-m", "ready mixed git state"],
+        Some(temp.path()),
+    )
+    .expect("invoke ready");
+    assert!(
+        !ready_output.status.success(),
+        "ready should preserve the capture but require a Git checkpoint before claiming verification"
+    );
+    let ready = json_stdout(&ready_output, "ready blocked after capture");
+    assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
+    assert_eq!(ready["verification"]["status"], "needs_checkpoint");
+    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
 
     let status: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert!(status["state"]["change_id"].as_str().is_some());
-    assert!(status["changes"]["added"].as_array().unwrap().is_empty());
-    assert!(status["changes"]["modified"].as_array().unwrap().is_empty());
+    assert_eq!(status["verification"]["status"], "needs_checkpoint");
+    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
 }
 
 #[test]
@@ -667,6 +733,7 @@ fn test_cli_compare_in_plain_git_repo_bootstraps_from_git_overlay_head() {
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
 
@@ -696,11 +763,13 @@ fn test_cli_merge_preview_rejects_dirty_plain_git_repo_after_bootstrap() {
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
 
     let started: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "start",
                 "feature/preview-thread",
                 "--workspace",
@@ -717,17 +786,32 @@ fn test_cli_merge_preview_rejects_dirty_plain_git_repo_after_bootstrap() {
 
     std::fs::write(temp.path().join("dirty.txt"), "dirty main worktree").unwrap();
 
-    let err = heddle(
+    let err = heddle_output(
         &["merge", "feature/preview-thread", "--preview"],
         Some(temp.path()),
     )
-    .unwrap_err();
+    .expect("invoke merge preview");
     assert!(
-        err.contains("Refusing to merge")
-            && err.contains("dirty.txt")
-            && err.contains("heddle capture -m")
-            && err.contains("heddle stash push -m"),
-        "merge preview should reject dirty current worktree with shared advice: {err}"
+        !err.status.success(),
+        "merge preview should reject dirty current worktree"
+    );
+    let envelope: Value = serde_json::from_slice(&err.stderr)
+        .unwrap_or_else(|json_err| panic!("merge refusal should be JSON: {json_err}; {err:?}"));
+    assert_eq!(envelope["kind"], "dirty_worktree");
+    assert!(
+        envelope["unsafe_condition"]
+            .as_str()
+            .is_some_and(|condition| condition.contains("dirty.txt")),
+        "merge preview should list dirty paths: {envelope}"
+    );
+    assert_eq!(
+        envelope["recovery_commands"],
+        serde_json::json!([
+            "heddle commit -m \"...\"",
+            "heddle capture -m \"...\"",
+            "heddle stash push -m \"...\""
+        ]),
+        "merge preview should keep shared preservation commands: {envelope}"
     );
 }
 
@@ -737,6 +821,7 @@ fn test_cli_compare_head_head_bootstraps_in_plain_git_repo() {
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
 
     let output = heddle(&["compare", "HEAD", "HEAD"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
@@ -787,7 +872,7 @@ fn test_cli_status_in_plain_git_repo_handles_deeper_history_and_many_branches() 
     }
     std::fs::write(temp.path().join("plain.txt"), "new file").unwrap();
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["git_branch"], "feature/drop-in");
     assert!(
@@ -800,8 +885,12 @@ fn test_cli_status_in_plain_git_repo_handles_deeper_history_and_many_branches() 
     );
 
     // Import-hint information has moved to `heddle bridge git status
-    // --json`; per-command outputs no longer carry it.
-    let bridge_output = heddle(&["bridge", "git", "status", "--json"], Some(temp.path())).unwrap();
+    // --output json`; per-command outputs no longer carry it.
+    let bridge_output = heddle(
+        &["bridge", "git", "status", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
     assert_eq!(
         bridge["git_overlay_import_hint"]["missing_branch_count"],
@@ -821,7 +910,7 @@ fn test_cli_log_in_plain_git_repo_handles_deeper_history_and_many_branches() {
         git(&["branch", &format!("support/log-{branch}")], temp.path());
     }
 
-    let output = heddle(&["log", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["log", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert!(parsed["states"].as_array().unwrap().is_empty());
@@ -831,11 +920,15 @@ fn test_cli_log_in_plain_git_repo_handles_deeper_history_and_many_branches() {
     );
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    let bridge_output = heddle(&["bridge", "git", "status", "--json"], Some(temp.path())).unwrap();
+    let bridge_output = heddle(
+        &["bridge", "git", "status", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
     assert_eq!(
         bridge["git_overlay_import_hint"]["missing_branch_count"],
-        10
+        11
     );
 }
 
@@ -848,14 +941,16 @@ fn test_cli_status_tracks_git_branch_switch_after_bootstrap() {
     git(&["branch", "support/switch-me"], temp.path());
 
     let first: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert_eq!(first["git_branch"], "feature/drop-in");
 
     git(&["checkout", "support/switch-me"], temp.path());
     std::fs::write(temp.path().join("switch.txt"), "switched").unwrap();
 
     let second: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert_eq!(second["git_branch"], "support/switch-me");
     assert!(
         second["changes"]["added"]
@@ -867,8 +962,12 @@ fn test_cli_status_tracks_git_branch_switch_after_bootstrap() {
     );
 
     // Import-hint information has moved to `heddle bridge git status
-    // --json`; per-command outputs no longer carry it.
-    let bridge_output = heddle(&["bridge", "git", "status", "--json"], Some(temp.path())).unwrap();
+    // --output json`; per-command outputs no longer carry it.
+    let bridge_output = heddle(
+        &["bridge", "git", "status", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let bridge: Value = serde_json::from_str(&bridge_output).unwrap();
     assert!(
         bridge["git_overlay_import_hint"]["missing_branches"]
@@ -891,7 +990,11 @@ fn test_cli_workspace_tracks_git_branch_switch_after_bootstrap() {
     let _ = heddle(&["init"], Some(temp.path())).unwrap();
     git(&["checkout", "support/workspace-switch"], temp.path());
 
-    let output = heddle(&["workspace", "show", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(
+        &["workspace", "show", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["current_thread"], "support/workspace-switch");
 }
@@ -907,7 +1010,7 @@ fn test_cli_thread_list_tracks_git_branch_switch_after_bootstrap() {
     let _ = heddle(&["init"], Some(temp.path())).unwrap();
     git(&["checkout", "support/thread-switch"], temp.path());
 
-    let output = heddle(&["thread", "list", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["current"], "support/thread-switch");
 }
@@ -919,10 +1022,10 @@ fn test_cli_status_handles_detached_head_after_bootstrap() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
 
-    let _ = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let _ = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     git(&["checkout", "--detach", "HEAD"], temp.path());
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         parsed["thread"].is_null(),
@@ -943,7 +1046,11 @@ fn test_cli_bridge_git_import_clears_import_hint_for_existing_branches() {
     git(&["branch", "support/import-me"], temp.path());
 
     let before: Value = serde_json::from_str(
-        &heddle(&["bridge", "git", "status", "--json"], Some(temp.path())).unwrap(),
+        &heddle(
+            &["bridge", "git", "status", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(before["git_overlay_import_hint"]["missing_branch_count"], 1);
@@ -958,7 +1065,11 @@ fn test_cli_bridge_git_import_clears_import_hint_for_existing_branches() {
     );
 
     let after: Value = serde_json::from_str(
-        &heddle(&["bridge", "git", "status", "--json"], Some(temp.path())).unwrap(),
+        &heddle(
+            &["bridge", "git", "status", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert!(
@@ -966,9 +1077,10 @@ fn test_cli_bridge_git_import_clears_import_hint_for_existing_branches() {
         "importing Git branches should clear the import hint: {after}"
     );
 
-    let threads: Value =
-        serde_json::from_str(&heddle(&["thread", "list", "--json"], Some(temp.path())).unwrap())
-            .unwrap();
+    let threads: Value = serde_json::from_str(
+        &heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
     assert!(
         threads["threads"]
             .as_array()
@@ -1007,9 +1119,10 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_branch() {
         "ref-scoped import should sync only one branch: {import_output}"
     );
 
-    let threads: Value =
-        serde_json::from_str(&heddle(&["thread", "list", "--json"], Some(temp.path())).unwrap())
-            .unwrap();
+    let threads: Value = serde_json::from_str(
+        &heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
     assert!(
         threads["threads"]
             .as_array()
@@ -1020,13 +1133,12 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_branch() {
         "selected branch should be imported: {threads}"
     );
     assert!(
-        threads["threads"]
+        threads["available_git_refs"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|thread| thread["name"] == "support/leave-alone"
-                && thread["history_imported"] == false),
-        "unselected branch should remain tip-only: {threads}"
+            .any(|thread| thread["name"] == "support/leave-alone"),
+        "unselected branch should remain available as a Git-only ref: {threads}"
     );
 }
 
@@ -1039,11 +1151,14 @@ fn test_cli_show_git_only_branch_tip_suggests_ref_scoped_import() {
     git(&["branch", "support/git-only"], temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let output = heddle(&["show", "support/git-only", "--json"], Some(temp.path()))
-        .unwrap_err()
-        .to_string();
+    let output = heddle(
+        &["show", "support/git-only", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap_err()
+    .to_string();
     assert!(
-        output.contains("heddle bridge git import --ref support/git-only"),
+        output.contains("heddle adopt --ref support/git-only"),
         "show should recommend a ref-scoped import for git-only branch tips: {output}"
     );
 }
@@ -1057,49 +1172,64 @@ fn test_cli_show_git_only_tag_suggests_ref_scoped_import() {
     git(&["tag", "v1.0.0"], temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let output = heddle(&["show", "v1.0.0", "--json"], Some(temp.path()))
+    let output = heddle(&["show", "v1.0.0", "--output", "json"], Some(temp.path()))
         .unwrap_err()
         .to_string();
     assert!(
-        output.contains("heddle bridge git import --ref v1.0.0"),
+        output.contains("heddle adopt --ref v1.0.0"),
         "show should recommend a ref-scoped import for git-only tags: {output}"
     );
 }
 
 #[test]
-fn test_cli_diff_git_only_branch_tip_suggests_ref_scoped_import() {
+fn test_cli_diff_mapped_git_branch_alias_resolves_without_import_loop() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
     git(&["branch", "support/git-only"], temp.path());
 
     let output = heddle(
-        &["diff", "HEAD", "support/git-only", "--json"],
+        &["diff", "HEAD", "support/git-only", "--output", "json"],
         Some(temp.path()),
     )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        output.contains("heddle bridge git import --ref support/git-only"),
-        "diff should recommend a ref-scoped import for git-only branch tips: {output}"
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["status"], "completed");
+    assert_eq!(
+        parsed["changes"]
+            .as_array()
+            .expect("changes should be an array")
+            .len(),
+        0,
+        "branch aliases at already-mapped Git commits should resolve without an import loop: {parsed}"
     );
 }
 
 #[test]
-fn test_cli_compare_git_only_tag_suggests_ref_scoped_import() {
+fn test_cli_compare_mapped_git_tag_resolves_without_import_loop() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
     git(&["tag", "v1.0.0"], temp.path());
 
-    let output = heddle(&["compare", "HEAD", "v1.0.0", "--json"], Some(temp.path()))
-        .unwrap_err()
-        .to_string();
-    assert!(
-        output.contains("heddle bridge git import --ref v1.0.0"),
-        "compare should recommend a ref-scoped import for git-only tags: {output}"
+    let output = heddle(
+        &["compare", "HEAD", "v1.0.0", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(parsed["summary"]["total"], 0);
+    assert_eq!(
+        parsed["changes"]
+            .as_array()
+            .expect("changes should be an array")
+            .len(),
+        0,
+        "tags at already-mapped Git commits should resolve without an import loop: {parsed}"
     );
 }
 
@@ -1112,20 +1242,33 @@ fn test_cli_thread_list_marks_tip_only_branch_with_ref_scoped_import_action() {
     git(&["branch", "support/git-only"], temp.path());
     let _ = heddle(&["init"], Some(temp.path())).unwrap();
 
-    let threads: Value =
-        serde_json::from_str(&heddle(&["thread", "list", "--json"], Some(temp.path())).unwrap())
-            .unwrap();
-    let thread = threads["threads"]
+    let threads: Value = serde_json::from_str(
+        &heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        threads["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|thread| thread["name"] != "support/git-only"),
+        "Git-only refs should not be shaped as active threads: {threads}"
+    );
+    let available_ref = threads["available_git_refs"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|thread| thread["name"] == "support/git-only")
-        .expect("support/git-only should be visible as a tip-only mirror");
-    assert_eq!(thread["history_imported"], false);
-    assert_eq!(thread["thread_health"], "tip_only");
+        .find(|git_ref| git_ref["name"] == "support/git-only")
+        .expect("support/git-only should be visible as an available Git ref");
+    assert!(
+        available_ref["git_commit"]
+            .as_str()
+            .is_some_and(|oid| !oid.is_empty()),
+        "available Git refs should expose their Git tip: {threads}"
+    );
     assert_eq!(
-        thread["recommended_action"],
-        "heddle bridge git import --ref support/git-only"
+        available_ref["recommended_action"],
+        "heddle adopt --ref support/git-only"
     );
 }
 
@@ -1152,15 +1295,15 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_tag() {
         "expected selected tag import output: {import_output}"
     );
 
-    let v1 = heddle(&["show", "v1.0.0", "--json"], Some(temp.path())).unwrap();
+    let v1 = heddle(&["show", "v1.0.0", "--output", "json"], Some(temp.path())).unwrap();
     let parsed_v1: Value = serde_json::from_str(&v1).unwrap();
     assert!(parsed_v1["change_id"].as_str().is_some());
 
-    let v2_err = heddle(&["show", "v2.0.0", "--json"], Some(temp.path()))
+    let v2_err = heddle(&["show", "v2.0.0", "--output", "json"], Some(temp.path()))
         .unwrap_err()
         .to_string();
     assert!(
-        v2_err.contains("heddle bridge git import --ref v2.0.0"),
+        v2_err.contains("heddle adopt --ref v2.0.0"),
         "unselected tag should remain import-only: {v2_err}"
     );
 }
@@ -1184,9 +1327,10 @@ fn test_cli_bridge_git_import_defaults_to_current_repo_even_after_mirror_exists(
         "expected live current repo import, not stale mirror import: {import_output}"
     );
 
-    let threads: Value =
-        serde_json::from_str(&heddle(&["thread", "list", "--json"], Some(temp.path())).unwrap())
-            .unwrap();
+    let threads: Value = serde_json::from_str(
+        &heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
     assert!(
         threads["threads"]
             .as_array()
@@ -1206,11 +1350,11 @@ fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/diagnose-switch"], temp.path());
 
-    let _ = heddle(&["diagnose", "--json"], Some(temp.path())).unwrap();
+    let _ = heddle(&["diagnose", "--output", "json"], Some(temp.path())).unwrap();
     git(&["checkout", "support/diagnose-switch"], temp.path());
     std::fs::write(temp.path().join("diag.txt"), "dirty").unwrap();
 
-    let output = heddle(&["diagnose", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["diagnose", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert_eq!(parsed["git_overlay_health"]["status"], "needs_init");
@@ -1239,14 +1383,19 @@ fn test_cli_show_head_tracks_git_branch_switch_after_bootstrap() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked").unwrap();
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/show-switch"], temp.path());
+    git(&["checkout", "support/show-switch"], temp.path());
+    std::fs::write(temp.path().join("tracked.txt"), "support tracked").unwrap();
+    git_commit_all(temp.path(), "support branch");
+    git(&["checkout", "feature/drop-in"], temp.path());
 
-    heddle(&["init"], Some(temp.path())).unwrap();
-    let before: Value =
-        serde_json::from_str(&heddle(&["show", "HEAD", "--json"], Some(temp.path())).unwrap())
-            .unwrap();
+    heddle_adopt(temp.path());
+    let before: Value = serde_json::from_str(
+        &heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap(),
+    )
+    .unwrap();
     git(&["checkout", "support/show-switch"], temp.path());
 
-    let output = heddle(&["show", "HEAD", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["show", "HEAD", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "git-overlay");
     assert!(parsed["change_id"].as_str().is_some());
@@ -1264,19 +1413,32 @@ fn test_cli_ready_captures_current_git_branch_after_switch() {
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/ready-switch"], temp.path());
 
-    let _ = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    heddle_adopt(temp.path());
     git(&["checkout", "support/ready-switch"], temp.path());
     std::fs::write(temp.path().join("ready.txt"), "capture me").unwrap();
 
-    let ready: Value =
-        serde_json::from_str(&heddle(&["--json", "ready"], Some(temp.path())).unwrap()).unwrap();
+    let ready_output = heddle_output(
+        &["--output", "json", "ready", "-m", "ready switched branch"],
+        Some(temp.path()),
+    )
+    .expect("invoke ready");
+    assert!(
+        !ready_output.status.success(),
+        "ready should preserve the capture but require a Git checkpoint before claiming verification"
+    );
+    let ready = json_stdout(&ready_output, "ready blocked after switched branch capture");
+    assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
+    assert_eq!(ready["verification"]["status"], "needs_checkpoint");
+    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
 
     let status: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert_eq!(status["thread"], "support/ready-switch");
     assert!(status["state"]["change_id"].as_str().is_some());
-    assert!(status["changes"]["added"].as_array().unwrap().is_empty());
+    assert_eq!(status["verification"]["status"], "needs_checkpoint");
+    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
 }
 
 #[test]
@@ -1300,7 +1462,7 @@ fn test_cli_workspace_surfaces_git_import_hint_in_text_output() {
         "missing branch hint: {output}"
     );
     assert!(
-        output.contains("heddle bridge git import"),
+        output.contains("heddle adopt"),
         "missing import command: {output}"
     );
 }
@@ -1308,8 +1470,9 @@ fn test_cli_workspace_surfaces_git_import_hint_in_text_output() {
 #[test]
 fn test_cli_init_with_principal() {
     let temp = TempDir::new().unwrap();
+    let config_path = temp.path().join("heddle-user.toml");
 
-    let result = heddle(
+    let result = heddle_output_with_env(
         &[
             "init",
             "--principal-name",
@@ -1318,10 +1481,10 @@ fn test_cli_init_with_principal() {
             "test@example.com",
         ],
         Some(temp.path()),
+        &[("HEDDLE_CONFIG", config_path.to_str().unwrap())],
     );
     assert!(result.is_ok());
 
-    let config_path = temp.path().join(".heddle-user/config.toml");
     let config = UserConfig::load(&config_path).unwrap();
     let principal = config.principal.expect("principal should be set");
     assert_eq!(principal.name, "Test User");
@@ -1409,13 +1572,7 @@ fn test_cli_checkpoint_skips_when_git_index_is_locked() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(
-                |error| (error.contains("locked") || error.contains("index"))
-                    && error.contains("Unsafe:")
-                    && error.contains("Would change:")
-                    && error.contains("Preserved:")
-                    && error.contains("Primary recovery:")
-            ),
+            .is_some_and(|error| error.contains("locked") || error.contains("index")),
         "checkpoint must explain the index-lock conflict with typed advice: {stderr}"
     );
     assert!(
@@ -1474,22 +1631,23 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
     let git_commit = String::from_utf8(head.stdout).unwrap().trim().to_string();
     assert!(!git_commit.is_empty());
 
-    // Heddle now records change_id provenance on `refs/notes/heddle`
+    // Heddle records change_id provenance on `refs/notes/heddle`
     // inside the bridge mirror at `.heddle/git/` rather than rewriting
     // commit messages with a `Heddle-Change:` trailer — that keeps Git
-    // commit SHAs stable across heddle imports/exports. The bridge
-    // also mirrors `refs/notes/heddle` from the bridge mirror back
-    // into the user's own `.git/` on every checkpoint, so plain
-    // `git notes show` from the working directory works without
-    // `--git-dir` poking inside `.heddle/`.
+    // commit SHAs stable across heddle imports/exports and keeps normal
+    // `git log --all` in the user's repo free of Heddle metadata roots.
     let notes = Command::new("git")
+        .arg(format!(
+            "--git-dir={}",
+            temp.path().join(".heddle/git").display()
+        ))
         .args(["notes", "--ref=refs/notes/heddle", "show", &git_commit])
         .current_dir(temp.path())
         .output()
         .expect("git notes show should run");
     assert!(
         notes.status.success(),
-        "expected refs/notes/heddle in the user's .git/ to record the checkpoint commit; stderr: {}",
+        "expected refs/notes/heddle in the bridge mirror to record the checkpoint commit; stderr: {}",
         String::from_utf8_lossy(&notes.stderr)
     );
     let note_body = String::from_utf8(notes.stdout).unwrap();
@@ -1497,28 +1655,58 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
         note_body.contains("hd-"),
         "note body should embed a Heddle change id: {note_body}"
     );
+    let git_log = Command::new("git")
+        .args(["log", "--all", "--format=%s"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git log --all should run");
+    assert!(git_log.status.success());
+    let git_log = String::from_utf8(git_log.stdout).unwrap();
+    assert!(
+        !git_log.contains("heddle: state metadata"),
+        "user Git history should not expose Heddle metadata commits: {git_log}"
+    );
 
-    let status = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let status = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&status).unwrap();
     assert_eq!(parsed["git_checkpoint"]["git_commit"], git_commit);
 }
 
 #[test]
-fn test_cli_checkpoint_bootstraps_current_state_in_plain_git_repo() {
+fn test_cli_checkpoint_refuses_plain_git_repo_before_adoption() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("checkpoint.txt"), "checkpoint me").unwrap();
 
-    let _output = heddle(
-        &["checkpoint", "-m", "Bootstrap Git checkpoint"],
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "checkpoint",
+            "-m",
+            "Bootstrap Git checkpoint",
+        ],
         Some(temp.path()),
     )
-    .unwrap();
+    .expect("invoke checkpoint before adoption");
+    assert!(
+        !output.status.success(),
+        "checkpoint should refuse plain Git instead of implicitly adopting"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let envelope: Value =
+        serde_json::from_slice(&output.stderr).expect("refusal should be JSON advice");
+    assert_eq!(envelope["kind"], "git_repo_needs_adoption");
+    assert_eq!(envelope["primary_command"], "heddle init");
 
-    let status: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
-    assert!(status["state"]["change_id"].as_str().is_some());
-    assert!(status["git_checkpoint"]["git_commit"].as_str().is_some());
+    assert!(
+        !temp.path().join(".heddle").exists(),
+        "refused checkpoint must not create Heddle metadata"
+    );
 }
 
 #[test]
@@ -1528,14 +1716,28 @@ fn test_cli_ready_in_git_overlay_auto_captures_initial_state() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("ready.txt"), "capture me").unwrap();
 
-    let ready: Value =
-        serde_json::from_str(&heddle(&["--json", "ready"], Some(temp.path())).unwrap()).unwrap();
+    let ready_output = heddle_output(
+        &["--output", "json", "ready", "-m", "ready initial state"],
+        Some(temp.path()),
+    )
+    .expect("invoke ready");
+    assert!(
+        !ready_output.status.success(),
+        "ready should preserve the capture but require a Git checkpoint before claiming verification"
+    );
+    let ready = json_stdout(&ready_output, "ready blocked after initial capture");
+    assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
+    assert_eq!(ready["verification"]["status"], "needs_checkpoint");
+    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
 
     let status: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert!(status["state"]["change_id"].as_str().is_some());
     assert!(status["git_checkpoint"].is_null());
+    assert_eq!(status["verification"]["status"], "needs_checkpoint");
+    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
 }
 
 #[test]
@@ -1547,7 +1749,8 @@ fn test_cli_start_bootstraps_current_state_in_plain_git_repo() {
     let started: Value = serde_json::from_str(
         &heddle(
             &[
-                "--json",
+                "--output",
+                "json",
                 "start",
                 "feature/overlay-thread",
                 "--workspace",
@@ -1562,7 +1765,8 @@ fn test_cli_start_bootstraps_current_state_in_plain_git_repo() {
     assert!(started["execution_path"].as_str().is_some());
 
     let status: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert!(status["state"]["change_id"].as_str().is_some());
 }
 
@@ -1576,7 +1780,8 @@ fn test_cli_marker_create_bootstraps_current_state_in_plain_git_repo() {
     assert!(output.contains("bootstrap-marker"));
 
     let status: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert!(status["state"]["change_id"].as_str().is_some());
 }
 
@@ -1594,17 +1799,18 @@ fn test_cli_thread_create_bootstraps_current_state_in_plain_git_repo() {
     assert!(output.contains("feature/create-thread"));
 
     let status: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert!(status["state"]["change_id"].as_str().is_some());
 }
 
 #[test]
-fn test_cli_show_head_bootstraps_current_state_in_plain_git_repo() {
+fn test_cli_show_head_guides_unborn_plain_git_repo_without_bootstrap() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("show.txt"), "show me").unwrap();
 
-    let output = heddle(&["--json", "show", "HEAD"], Some(temp.path())).unwrap();
+    let output = heddle(&["--output", "json", "show", "HEAD"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert_eq!(parsed["recommended_action"], "heddle init");
@@ -1615,7 +1821,7 @@ fn test_cli_show_head_bootstraps_current_state_in_plain_git_repo() {
 }
 
 #[test]
-fn test_cli_log_bootstraps_current_state_in_plain_git_repo() {
+fn test_cli_log_guides_unborn_plain_git_repo_without_bootstrap() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("log.txt"), "log me").unwrap();
@@ -1632,12 +1838,20 @@ fn test_cli_log_bootstraps_current_state_in_plain_git_repo() {
 fn test_cli_ship_in_git_overlay_auto_checkpoints() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
-    heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["capture", "-m", "Bootstrap"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("base.txt"), "base").unwrap();
+    git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
 
     let started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/ship-it", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/ship-it",
+                "--workspace",
+                "auto",
+            ],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1648,7 +1862,7 @@ fn test_cli_ship_in_git_overlay_auto_checkpoints() {
 
     let shipped: Value = serde_json::from_str(
         &heddle(
-            &["--json", "ship", "--thread", "feature/ship-it"],
+            &["--output", "json", "ship", "--thread", "feature/ship-it"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1660,7 +1874,8 @@ fn test_cli_ship_in_git_overlay_auto_checkpoints() {
     assert!(temp.path().join("ship.txt").exists());
 
     let status: Value =
-        serde_json::from_str(&heddle(&["status", "--json"], Some(temp.path())).unwrap()).unwrap();
+        serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
+            .unwrap();
     assert!(status["git_checkpoint"]["git_commit"].as_str().is_some());
 }
 
@@ -1670,12 +1885,18 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("base.txt"), "base").unwrap();
     git_commit_all(temp.path(), "seed branch");
-    heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["capture", "-m", "Bootstrap"], Some(temp.path())).unwrap();
+    heddle_adopt(temp.path());
 
     let auth_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/auth", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/auth",
+                "--workspace",
+                "auto",
+            ],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1683,7 +1904,14 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     .unwrap();
     let search_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/search", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/search",
+                "--workspace",
+                "auto",
+            ],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1697,7 +1925,11 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     heddle(&["capture", "-m", "auth v1"], Some(&auth_path)).unwrap();
     std::fs::write(auth_path.join("auth.rs"), "auth v2").unwrap();
     let auth_capture: Value = serde_json::from_str(
-        &heddle(&["--json", "capture", "-m", "auth v2"], Some(&auth_path)).unwrap(),
+        &heddle(
+            &["--output", "json", "capture", "-m", "auth v2"],
+            Some(&auth_path),
+        )
+        .unwrap(),
     )
     .unwrap();
 
@@ -1706,7 +1938,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     std::fs::write(search_path.join("search.rs"), "search v2").unwrap();
     let search_capture: Value = serde_json::from_str(
         &heddle(
-            &["--json", "capture", "-m", "search v2"],
+            &["--output", "json", "capture", "-m", "search v2"],
             Some(&search_path),
         )
         .unwrap(),
@@ -1714,11 +1946,19 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     .unwrap();
 
     let auth_thread: Value = serde_json::from_str(
-        &heddle(&["--json", "inspect", "feature/auth"], Some(temp.path())).unwrap(),
+        &heddle(
+            &["--output", "json", "inspect", "feature/auth"],
+            Some(temp.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
     let search_thread: Value = serde_json::from_str(
-        &heddle(&["--json", "inspect", "feature/search"], Some(temp.path())).unwrap(),
+        &heddle(
+            &["--output", "json", "inspect", "feature/search"],
+            Some(temp.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(
@@ -1736,8 +1976,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     )
     .unwrap_err();
     assert!(
-        auth_checkpoint_err.contains("Git-backed repositories")
-            || auth_checkpoint_err.contains("git-backed repositories"),
+        auth_checkpoint_err.contains("only for Git-overlay repositories"),
         "isolated auth thread should reject direct checkpoint: {auth_checkpoint_err}"
     );
     let search_checkpoint_err = heddle(
@@ -1746,14 +1985,13 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     )
     .unwrap_err();
     assert!(
-        search_checkpoint_err.contains("Git-backed repositories")
-            || search_checkpoint_err.contains("git-backed repositories"),
+        search_checkpoint_err.contains("only for Git-overlay repositories"),
         "isolated search thread should reject direct checkpoint: {search_checkpoint_err}"
     );
 
     let auth_ship: Value = serde_json::from_str(
         &heddle(
-            &["--json", "ship", "--thread", "feature/auth"],
+            &["--output", "json", "ship", "--thread", "feature/auth"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1763,9 +2001,19 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     assert_eq!(auth_ship["checkpointed"], true);
     assert!(auth_ship["git_commit"].as_str().is_some());
 
+    let search_refresh: Value = serde_json::from_str(
+        &heddle(
+            &["--output", "json", "thread", "refresh", "feature/search"],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(search_refresh["status"], "completed");
+
     let search_ship: Value = serde_json::from_str(
         &heddle(
-            &["--json", "ship", "--thread", "feature/search"],
+            &["--output", "json", "ship", "--thread", "feature/search"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1787,15 +2035,13 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
         "expected at least two git checkpoint records after shipping both threads: {checkpoint_records}"
     );
     assert!(
-        records
-            .iter()
-            .any(|record| record["summary"] == "Ship feature/auth"),
+        records.iter().any(|record| record["summary"] == "auth v2"),
         "shipping auth should create its own git checkpoint record: {checkpoint_records}"
     );
     assert!(
         records
             .iter()
-            .any(|record| record["summary"] == "Ship feature/search"),
+            .any(|record| record["summary"] == "search v2"),
         "shipping search should create its own git checkpoint record: {checkpoint_records}"
     );
     assert_ne!(
@@ -1804,22 +2050,24 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     );
 
     // Each shipped thread should record a Heddle change id on the
-    // `refs/notes/heddle` ref. The bridge write-through mirrors
-    // notes from the bridge mirror at `.heddle/git/` back into the
-    // user's own `.git/refs/notes/heddle`, so plain `git notes show`
-    // from the working dir resolves them.
+    // bridge mirror's `refs/notes/heddle` ref without publishing the
+    // metadata notes ref into the user's ordinary `.git/refs`.
     for git_commit in [
         auth_ship["git_commit"].as_str().unwrap(),
         search_ship["git_commit"].as_str().unwrap(),
     ] {
         let notes = Command::new("git")
+            .arg(format!(
+                "--git-dir={}",
+                temp.path().join(".heddle/git").display()
+            ))
             .args(["notes", "--ref=refs/notes/heddle", "show", git_commit])
             .current_dir(temp.path())
             .output()
             .expect("git notes show should run");
         assert!(
             notes.status.success(),
-            "shipped commit {git_commit} should have a heddle note in user .git/; stderr: {}",
+            "shipped commit {git_commit} should have a heddle note in the bridge mirror; stderr: {}",
             String::from_utf8_lossy(&notes.stderr)
         );
         let note_body = String::from_utf8(notes.stdout).unwrap();
@@ -1836,12 +2084,18 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("base.txt"), "base").unwrap();
     git_commit_all(temp.path(), "seed branch");
-    heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["capture", "-m", "Bootstrap"], Some(temp.path())).unwrap();
+    heddle_adopt(temp.path());
 
     let auth_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/auth", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/auth",
+                "--workspace",
+                "auto",
+            ],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1856,17 +2110,33 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
 
     let auth_before_ship: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "show", "feature/auth"],
+            &["--output", "json", "thread", "show", "feature/auth"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
     assert_eq!(auth_before_ship["freshness"], "stale");
+    let auth_refresh: Value = serde_json::from_str(
+        &heddle(
+            &["--output", "json", "thread", "refresh", "feature/auth"],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(auth_refresh["status"], "completed");
 
     let search_started: Value = serde_json::from_str(
         &heddle(
-            &["--json", "start", "feature/search", "--workspace", "auto"],
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/search",
+                "--workspace",
+                "auto",
+            ],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1878,7 +2148,7 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
 
     let auth_ship: Value = serde_json::from_str(
         &heddle(
-            &["--json", "ship", "--thread", "feature/auth"],
+            &["--output", "json", "ship", "--thread", "feature/auth"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1888,9 +2158,19 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
     assert_eq!(auth_ship["checkpointed"], true);
     assert!(auth_ship["git_commit"].as_str().is_some());
 
+    let search_refresh: Value = serde_json::from_str(
+        &heddle(
+            &["--output", "json", "thread", "refresh", "feature/search"],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(search_refresh["status"], "completed");
+
     let search_ship: Value = serde_json::from_str(
         &heddle(
-            &["--json", "ship", "--thread", "feature/search"],
+            &["--output", "json", "ship", "--thread", "feature/search"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1903,7 +2183,7 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
 
     let auth_thread: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "show", "feature/auth"],
+            &["--output", "json", "thread", "show", "feature/auth"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1917,7 +2197,7 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
 
     let search_thread: Value = serde_json::from_str(
         &heddle(
-            &["--json", "thread", "show", "feature/search"],
+            &["--output", "json", "thread", "show", "feature/search"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -1936,13 +2216,13 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
     assert!(
         records
             .iter()
-            .any(|record| record["summary"] == "Ship feature/auth"),
+            .any(|record| record["summary"] == "auth work"),
         "stale auth ship should record a git checkpoint: {checkpoint_records}"
     );
     assert!(
         records
             .iter()
-            .any(|record| record["summary"] == "Ship feature/search"),
+            .any(|record| record["summary"] == "search work"),
         "clean search ship should record a git checkpoint: {checkpoint_records}"
     );
 }
@@ -1958,7 +2238,9 @@ fn test_cli_push_rejects_local_only_git_overlay_repo() {
     // rather than silently no-op'ing.
     let err = heddle(&["push"], Some(temp.path())).unwrap_err();
     assert!(
-        err.contains("destination") && err.contains("origin"),
+        err.contains("remote_not_configured")
+            && err.contains("heddle remote add <name> <url>")
+            && err.contains("heddle remote list"),
         "expected guidance about the missing remote, got: {err}"
     );
 }
@@ -2037,7 +2319,7 @@ fn test_cli_snapshot_without_confidence_records_none() {
     );
 
     let change_id = snapshot_json["change_id"].as_str().unwrap();
-    let show_json = heddle(&["show", "--json", change_id], Some(temp.path())).unwrap();
+    let show_json = heddle(&["show", "--output", "json", change_id], Some(temp.path())).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&show_json).unwrap();
     assert!(
         parsed["confidence"].is_null(),
@@ -2111,7 +2393,11 @@ fn test_cli_log_limit_caps_json_state_count() {
         .unwrap();
     }
 
-    let json = heddle(&["--json", "log", "--limit", "3"], Some(temp.path())).unwrap();
+    let json = heddle(
+        &["--output", "json", "log", "--limit", "3"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&json).unwrap();
     let states = parsed["states"].as_array().expect("states array");
     assert!(
@@ -2162,7 +2448,7 @@ fn test_cli_log_since_marker_excludes_marker_and_walks_back() {
     }
 
     let json = heddle(
-        &["--json", "log", "--since", "checkpoint"],
+        &["--output", "json", "log", "--since", "checkpoint"],
         Some(temp.path()),
     )
     .unwrap();
@@ -2221,7 +2507,9 @@ fn test_cli_log_since_with_limit_applies_bound_then_trims() {
     }
 
     let json = heddle(
-        &["--json", "log", "--since", "start", "--limit", "2"],
+        &[
+            "--output", "json", "log", "--since", "start", "--limit", "2",
+        ],
         Some(temp.path()),
     )
     .unwrap();

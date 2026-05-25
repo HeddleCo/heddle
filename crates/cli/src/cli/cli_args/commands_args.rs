@@ -38,6 +38,63 @@ pub struct InitArgs {
     pub harness_install_force: bool,
 }
 
+/// Arguments for the `adopt` command.
+#[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Examples:
+  heddle adopt                                # initialize Heddle and import all Git refs
+  heddle adopt --ref main                     # adopt only one branch or tag
+  heddle adopt ../repo --ref main --ref v1.0  # adopt selected refs in another repo
+")]
+pub struct AdoptArgs {
+    /// Git repository to adopt (default: current directory).
+    pub path: Option<std::path::PathBuf>,
+
+    /// Git branch or tag to import. Repeat to import selected refs; omit to import all refs.
+    #[arg(long = "ref", value_name = "REF")]
+    pub refs: Vec<String>,
+}
+
+/// Arguments for the `commands` command.
+#[derive(Clone, Debug, clap::Args)]
+pub struct CommandCatalogArgs {
+    /// Include only command paths matching this display name or subtree prefix.
+    ///
+    /// Examples: `--command commit`, `--command "thread"`, or
+    /// `--command "thread show"`. Repeat to include multiple command families.
+    #[arg(long = "command", value_name = "COMMAND")]
+    pub commands: Vec<String>,
+
+    /// Include only commands in the selected discovery tier. Repeat to include multiple tiers.
+    #[arg(long, value_enum)]
+    pub tier: Vec<CommandCatalogTier>,
+
+    /// Include only commands that can mutate repository, worktree, process, or network state.
+    #[arg(long)]
+    pub mutating: bool,
+
+    /// Include only commands that accept caller-supplied `--op-id` replay ids.
+    #[arg(long)]
+    pub supports_op_id: bool,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum CommandCatalogTier {
+    Everyday,
+    Advanced,
+    Hidden,
+}
+
+impl CommandCatalogTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Everyday => "everyday",
+            Self::Advanced => "advanced",
+            Self::Hidden => "hidden",
+        }
+    }
+}
+
 /// Arguments for the `diagnose` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct DiagnoseArgs {
@@ -77,7 +134,7 @@ pub enum DoctorCommands {
     /// like `--workspace`, `--scope`, and `--kind`.
     ///
     /// Exits non-zero when any drift is found, so it's safe to run in
-    /// CI. Pair with `--json` for structured output. Run on every PR
+    /// CI. Pair with `--output json` for structured output. Run on every PR
     /// to prevent the docs from drifting from the CLI again.
     Docs(DoctorDocsArgs),
 
@@ -85,10 +142,10 @@ pub enum DoctorCommands {
     /// schemas.
     ///
     /// Generates the canonical schema for every verb in the schemas
-    /// registry, parses every `## heddle <verb> --json` sample in
+    /// registry, parses every `## heddle <verb> --output json` sample in
     /// `docs/json-schemas.md`, and verifies that every key in the
     /// sample is declared in the schema. Exits non-zero on drift.
-    /// Pair with `--json` for CI. Run alongside `heddle doctor docs`
+    /// Pair with `--output json` for CI. Run alongside `heddle doctor docs`
     /// on every PR.
     Schemas,
 }
@@ -108,13 +165,24 @@ pub struct DoctorDocsArgs {
     pub all: bool,
 }
 
+fn parse_confidence(s: &str) -> Result<f32, String> {
+    let value = s
+        .parse::<f32>()
+        .map_err(|_| format!("confidence must be a finite number from 0.0 to 1.0, got `{s}`"))?;
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(format!(
+            "confidence must be a finite number from 0.0 to 1.0, got `{s}`"
+        ));
+    }
+    Ok(value)
+}
+
 /// Arguments for the `capture` command.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
   heddle capture -m 'add login route'           # capture the worktree with intent
   heddle capture -m 'wip' --confidence 0.6      # honest confidence on a draft step
-  heddle capture --split --into auth -- src/    # move dirty paths into a sibling thread
 ")]
 pub struct SnapshotArgs {
     /// Natural language intent for this recoverable step.
@@ -122,7 +190,7 @@ pub struct SnapshotArgs {
     pub intent: Option<String>,
 
     /// Confidence level (0.0-1.0).
-    #[arg(long)]
+    #[arg(long, value_parser = parse_confidence)]
     pub confidence: Option<f32>,
 
     /// Allow a large or deletion-heavy capture without the safety preflight.
@@ -130,57 +198,61 @@ pub struct SnapshotArgs {
     pub force: bool,
 
     /// Override HEDDLE_AGENT_PROVIDER.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub agent_provider: Option<String>,
 
     /// Override HEDDLE_AGENT_MODEL.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub agent_model: Option<String>,
 
-    /// Override HEDDLE_SESSION_ID.
-    #[arg(long)]
+    /// Override active agent session id.
+    #[arg(long, hide = true)]
     pub agent_session: Option<String>,
 
-    /// Override HEDDLE_SESSION_SEGMENT.
-    #[arg(long)]
+    /// Override active agent session segment.
+    #[arg(long, hide = true)]
     pub agent_segment: Option<String>,
 
     /// Override HEDDLE_AGENT_POLICY.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub policy: Option<String>,
 
     /// Omit policy attribution.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub no_policy: bool,
 
     /// Omit agent attribution.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub no_agent: bool,
 
     /// Split selected paths into another thread instead of capturing the whole worktree.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub split: bool,
 
     /// Target thread when using `--split`.
-    #[arg(long, requires = "split")]
+    #[arg(long, hide = true, requires = "split")]
     pub into: Option<String>,
 
     /// Repository-relative path prefix to include when using `--split`.
-    #[arg(long = "path", requires = "split", value_name = "PATH")]
+    #[arg(long = "path", hide = true, requires = "split", value_name = "PATH")]
     pub paths: Vec<String>,
 }
 
 /// Arguments for the Git-compatible `commit` shim.
 ///
-/// This is intentionally a thin daily-driver affordance over Heddle's
-/// native `capture` + `checkpoint` loop: it records a recoverable
-/// Heddle state first, then binds that state to the Git-overlay
-/// checkout as a Git commit boundary.
+/// This is the daily-driver save path: it records a recoverable Heddle
+/// state, plus the matching Git checkpoint in Git-overlay repositories.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
+Behavior:
+  With nothing staged in the Git index, `heddle commit -m ...` captures and checkpoints all modified, deleted, and untracked worktree paths.
+  When the Git index has staged paths, plain `heddle commit -m ...` checkpoints exactly the staged index and leaves extra unstaged/untracked paths in the worktree.
+  Add `--all` only when you intentionally want those extra paths included too.
+
 Examples:
-  heddle commit -m 'add login route'       # capture work and write a Git checkpoint
-  heddle commit -m 'wip' --confidence 0.6  # preserve honest capture confidence
+  heddle commit -m 'add login route'       # save work; Git-overlay repos also checkpoint Git
+  heddle commit -m 'wip' --confidence 0.6  # record honest confidence
+  heddle commit --all -m 'save everything' # include unstaged/untracked paths even when the Git index is staged
 ")]
 pub struct CommitArgs {
     /// Commit/capture message.
@@ -188,8 +260,12 @@ pub struct CommitArgs {
     pub message: Option<String>,
 
     /// Confidence level for the captured Heddle state (0.0-1.0).
-    #[arg(long)]
+    #[arg(long, value_parser = parse_confidence)]
     pub confidence: Option<f32>,
+
+    /// Include unstaged and untracked paths when the Git index already has staged changes.
+    #[arg(long)]
+    pub all: bool,
 
     /// Allow a large or deletion-heavy capture without the safety preflight.
     #[arg(short, long)]
@@ -231,8 +307,13 @@ pub struct BranchArgs {
 Examples:
   heddle switch feature/auth       # switch to an existing thread
   heddle checkout hd-abc123        # move the worktree to a state
+  heddle start feature/auth --path ../feature-auth  # create an isolated thread
 ")]
 pub struct SwitchArgs {
+    /// Git-style branch creation is guided to Heddle's isolated thread flow.
+    #[arg(short = 'b', short_alias = 'c')]
+    pub create: bool,
+
     /// Thread name or state id.
     pub target: String,
 
@@ -252,7 +333,7 @@ Examples:
   heddle log                          # walk the current thread
   heddle log --oneline -n 20          # 20 most recent states in compact form
   heddle log --reflog                 # include re-attributed history
-  heddle log --paths src/auth.rs      # restrict to states touching a path
+  heddle log --path src/auth.rs       # restrict to states touching a path
 ")]
 pub struct LogArgs {
     /// Starting state (default: HEAD).
@@ -443,26 +524,13 @@ pub struct UndoArgs {
 /// `docs/design/clonefile-threads.md` for the rationale.
 #[derive(Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
 pub enum WorkspaceModeArg {
-    /// Let Heddle choose the right mode for this thread (the default):
-    /// `materialized` on reflink-capable filesystems, `virtualized`
-    /// elsewhere when the mount feature is available, `solid`
-    /// otherwise.
+    /// Let Heddle choose the right checkout mode.
     Auto,
-    /// Clonefile/reflink the captured tree into a thread directory
-    /// (APFS / btrfs / XFS w/ reflinks / bcachefs / ReFS). Real
-    /// `read(2)`-able bytes; ~zero disk cost until the agent diverges
-    /// blocks. Day-one default on reflink-capable hosts.
+    /// Create a disk checkout with shared extents when the filesystem supports it.
     Materialized,
-    /// Project the captured tree through a content-addressed
-    /// FUSE/FSKit/ProjFS mount. Nothing on disk until the kernel
-    /// asks. Requires `heddle` built with the `mount` feature. By
-    /// default the mount is owned by the long-lived `heddled` daemon
-    /// (survives the CLI exit, shareable across invocations); pass
-    /// `--no-daemon` to keep it in this process.
+    /// Use a virtual filesystem checkout when the mount feature is available.
     Virtualized,
-    /// Full file copies with no shared extents. Strong isolation;
-    /// the right choice on ext4 / NTFS hosts that have neither
-    /// reflinks nor a usable mount API.
+    /// Copy full files into an isolated checkout.
     Solid,
 }
 
@@ -474,6 +542,8 @@ Examples:
   heddle start feature/auth --workspace materialized     # real checkout on disk
   heddle start scratch --path ../scratch          # place the checkout explicitly
   heddle start fix-flake --task 'fix CI flake'    # attach a task description
+
+Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run raw Git commands from the parent Git-overlay repo when needed.
 ")]
 pub struct ThreadStartArgs {
     /// Thread name to create or resume.
@@ -492,11 +562,11 @@ pub struct ThreadStartArgs {
     pub workspace: WorkspaceModeArg,
 
     /// AI provider name for the registered agent thread.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub agent_provider: Option<String>,
 
     /// AI model name for the registered agent thread.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub agent_model: Option<String>,
 
     /// First-class task/goal metadata for the thread.
@@ -517,7 +587,7 @@ pub struct ThreadStartArgs {
     ///   dir=$(heddle start foo --print-cd-path) && cd "$dir"
     /// Skips all other output (no JSON, no styling, no extra lines) so the
     /// stdout is a clean path. Mutually exclusive with `--watch`-style flows.
-    #[arg(long, conflicts_with_all = ["agent_provider", "agent_model"])]
+    #[arg(long, hide = true, conflicts_with_all = ["agent_provider", "agent_model"])]
     pub print_cd_path: bool,
 
     /// For `--workspace virtualized`: hand the filesystem mount off to the
@@ -531,6 +601,7 @@ pub struct ThreadStartArgs {
         overrides_with = "no_daemon",
         action = clap::ArgAction::SetTrue,
         default_value_t = true,
+        hide = true,
     )]
     pub daemon: bool,
 
@@ -543,6 +614,7 @@ pub struct ThreadStartArgs {
         long,
         overrides_with = "daemon",
         action = clap::ArgAction::SetTrue,
+        hide = true,
     )]
     pub no_daemon: bool,
 
@@ -554,7 +626,7 @@ pub struct ThreadStartArgs {
     /// the new thread checkout — transparent to any `cargo` invocation
     /// in that directory. Has no effect on light (FUSE-mounted) threads,
     /// and a no-op for repositories without a top-level `Cargo.toml`.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub shared_target: bool,
 }
 
@@ -619,9 +691,10 @@ pub struct TryArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Workspace mode for the ephemeral thread. Defaults to `heavy`
+    /// Workspace mode for the ephemeral thread. Defaults to `materialized`
     /// (a real isolated checkout) so `<cmd>` runs against a proper
-    /// filesystem.
+    /// filesystem. Pass `auto`, `virtualized`, or `solid` to use a different
+    /// workspace strategy.
     #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Materialized)]
     pub workspace: WorkspaceModeArg,
     /// On zero exit, automatically merge the resulting thread into
@@ -660,9 +733,10 @@ pub struct AttemptArgs {
     /// fork-bombs on shared CI machines.
     pub n: u32,
 
-    /// Workspace mode for each ephemeral thread. Defaults to `heavy`
+    /// Workspace mode for each ephemeral thread. Defaults to `materialized`
     /// (a real isolated checkout) so `<cmd>` runs against a proper
-    /// filesystem.
+    /// filesystem. Pass `auto`, `virtualized`, or `solid` to use a different
+    /// workspace strategy.
     #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Materialized)]
     pub workspace: WorkspaceModeArg,
 
@@ -724,6 +798,10 @@ pub struct ReadyArgs {
     /// Intent/message to use if `ready` needs to capture outstanding work first.
     #[arg(short = 'm', long)]
     pub message: Option<String>,
+
+    /// Honest confidence estimate (0.0-1.0) if `ready` captures outstanding work.
+    #[arg(long, value_parser = parse_confidence)]
+    pub confidence: Option<f32>,
 }
 
 /// Arguments for the `sync` command.
@@ -1068,6 +1146,10 @@ pub struct ResolveArgs {
     #[arg(long, conflicts_with = "ours")]
     pub theirs: bool,
 
+    /// Mark the path resolved even if conflict markers are still present.
+    #[arg(long)]
+    pub force: bool,
+
     /// Abort the merge.
     #[arg(long)]
     pub abort: bool,
@@ -1079,7 +1161,7 @@ pub struct ResolveArgs {
 /// land in a single place.
 #[derive(Clone, Debug, clap::Args)]
 pub struct RemoteOperationArgs {
-    /// Remote address (host:port).
+    /// Remote name, local path, URL, or hosted address.
     pub remote: Option<String>,
 
     /// Thread to act on.
@@ -1100,6 +1182,13 @@ pub struct PushArgs {
     /// Force push.
     #[arg(short, long)]
     pub force: bool,
+
+    /// Push every Heddle thread, Git tag visible to this checkout, and Heddle note ref in Git-overlay mode.
+    ///
+    /// Without this flag, Git-overlay push sends the current branch plus
+    /// refs/notes/heddle and skips Git tags.
+    #[arg(long)]
+    pub all_threads: bool,
 }
 
 /// Arguments for the `pull` command.
@@ -1113,7 +1202,7 @@ pub struct PullArgs {
     pub local_thread: Option<String>,
 
     /// Leave blob content absent by design and hydrate it explicitly later.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub lazy: bool,
 }
 
@@ -1139,7 +1228,7 @@ pub struct CloneArgs {
     /// (plain `https://…/repo.git` URLs and local-path clones) reject
     /// this flag today and report a clear error — lazy hydration over
     /// the Git transport is planned for v0.3.1.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub lazy: bool,
 
     /// Partial-clone filter spec. Only `blob:none` is accepted; other
@@ -1148,7 +1237,7 @@ pub struct CloneArgs {
     /// is a synonym for `--lazy` (skip blob content; hydrate on
     /// demand). Git-overlay clones reject the flag at runtime; this
     /// is planned for v0.3.1.
-    #[arg(long, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
+    #[arg(long, hide = true, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
     pub filter: Option<String>,
 }
 
@@ -1370,7 +1459,7 @@ pub struct AgentCaptureArgs {
     pub message: Option<String>,
 
     /// Honest confidence estimate (0.0–1.0).
-    #[arg(long)]
+    #[arg(long, value_parser = parse_confidence)]
     pub confidence: Option<f32>,
 }
 
@@ -1385,6 +1474,10 @@ pub struct AgentReadyArgs {
     /// Optional summary message.
     #[arg(long, short = 'm')]
     pub message: Option<String>,
+
+    /// Honest confidence estimate (0.0-1.0) if `agent ready` captures outstanding work.
+    #[arg(long, value_parser = parse_confidence)]
+    pub confidence: Option<f32>,
 }
 
 /// Arguments for the `watch` command.
@@ -1392,7 +1485,7 @@ pub struct AgentReadyArgs {
 /// Streams live oplog activity (snapshots, merges, thread create/update,
 /// markers, etc.) as it happens. Default behavior tails forever and exits
 /// on Ctrl-C. `--since 5m` replays the last N before tailing live;
-/// `--filter` restricts output to the named kinds; `--json` emits one
+/// `--filter` restricts output to the named kinds; `--output json` emits one
 /// JSON object per line for piping to `jq`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct WatchArgs {
@@ -1407,12 +1500,6 @@ pub struct WatchArgs {
     /// fork,collapse,goto,marker_create,marker_delete`).
     #[arg(long, value_name = "KINDS")]
     pub filter: Option<String>,
-
-    /// Emit one JSON object per line instead of human-readable text.
-    /// Use this to pipe to `jq` or downstream tooling. Note: the
-    /// global `--json` flag also enables JSON mode.
-    #[arg(long)]
-    pub json: bool,
 
     /// Internal helper for tests: stop after the oplog file produces
     /// this many modify events (still drains pending entries first).
@@ -1462,6 +1549,20 @@ mod capture_message_alias_tests {
     fn capture_accepts_short_m() {
         let args = parse_capture(&["-m", "my change"]).expect("-m should parse");
         assert_eq!(args.intent.as_deref(), Some("my change"));
+    }
+
+    #[test]
+    fn capture_rejects_non_finite_or_out_of_range_confidence() {
+        for value in ["NaN", "inf", "-0.1", "1.7"] {
+            let confidence_arg = format!("--confidence={value}");
+            let err = parse_capture(&["-m", "bad confidence", &confidence_arg])
+                .expect_err("invalid confidence should fail to parse");
+            assert!(
+                err.to_string()
+                    .contains("confidence must be a finite number from 0.0 to 1.0"),
+                "unexpected parse error for {value}: {err}"
+            );
+        }
     }
 }
 

@@ -31,7 +31,12 @@ pub struct IntegrationInstallArgs {
     pub harnesses: Vec<String>,
 
     /// Install scope (`repo` or `user`).
-    #[arg(long, visible_alias = "harness-install-scope", default_value = "repo")]
+    #[arg(
+        long,
+        visible_alias = "harness-install-scope",
+        default_value = "repo",
+        value_parser = ["repo", "user"]
+    )]
     pub scope: String,
 
     /// Overwrite Heddle-managed entries when needed.

@@ -49,7 +49,7 @@ fn materialized_thread_can_read_shared_history() {
     )
     .unwrap();
 
-    let log_out = heddle(&["--json", "log"], Some(thread_dir.path())).unwrap();
+    let log_out = heddle(&["--output", "json", "log"], Some(thread_dir.path())).unwrap();
     let log: Value = serde_json::from_str(&log_out).unwrap();
     assert!(!log["states"].as_array().unwrap().is_empty());
 }

@@ -98,7 +98,7 @@ Keep under 2 sentences. Lead with the key point. Use plain language.
 ### 1. Marketing hero (highest impact)
 - H1: identity-first, 5–10 words, end with a period
 - Lede: 2 sentences max — first makes the reader nod, second earns the CTA
-- Stats: signal a living, trusted system — not small numbers that underwhelm
+- Stats: signal a living, verified system — not small numbers that underwhelm
 - Body copy: one idea per sentence, lead with outcome
 
 ### 2. Feature/scene cards

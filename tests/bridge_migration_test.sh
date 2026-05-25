@@ -51,7 +51,7 @@ verify_repo() {
     git_commits=$(git -C "$git_mirror" rev-list $(git -C "$git_mirror" for-each-ref --format='%(objectname)' refs/heads/ refs/tags/) --count 2>/dev/null || echo 0)
   fi
 
-  # Use heddle import stats from the JSON output we captured, or count via import --json
+  # Use heddle import stats from the JSON output we captured, or count via import --output json
   local heddle_import_json="$WORKDIR/${name}_import.json"
   local heddle_states=0
   if [[ -f "$heddle_import_json" ]]; then
@@ -83,7 +83,7 @@ print(data.get('commits_imported', 0))
     git -C "$git_mirror" for-each-ref --format='%(refname:short)' refs/heads/ | sort > "$git_branches_file"
   fi
 
-  (cd "$heddle_dir" && "$HEDDLE" --json thread list 2>/dev/null | python3 -c "
+  (cd "$heddle_dir" && "$HEDDLE" --output json thread list 2>/dev/null | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 threads = data.get('threads', data) if isinstance(data, dict) else data
@@ -111,7 +111,7 @@ if isinstance(threads, list):
   local heddle_markers_file="$WORKDIR/${name}_heddle_markers.txt"
 
   git -C "$git_mirror" for-each-ref --format='%(refname:short)' refs/tags/ | sort > "$git_tags_file"
-  (cd "$heddle_dir" && "$HEDDLE" --json marker list 2>/dev/null | python3 -c "
+  (cd "$heddle_dir" && "$HEDDLE" --output json marker list 2>/dev/null | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 markers = data.get('markers', data) if isinstance(data, dict) else data
@@ -185,7 +185,7 @@ test_repo() {
   # Use import --path with the mirror (more reliable than pull for verification,
   # and we get the JSON import stats directly)
   local import_output
-  if import_output=$(cd "$heddle_dir" && "$HEDDLE" --json bridge git import --path "$git_mirror" 2>&1); then
+  if import_output=$(cd "$heddle_dir" && "$HEDDLE" --output json bridge git import --path "$git_mirror" 2>&1); then
     echo "$import_output" > "$WORKDIR/${name}_import.json"
     ok "Import succeeded: $import_output"
   else
@@ -209,7 +209,7 @@ GIT_GALEED="$WORKDIR/git-heddle"
 git clone --depth 50 --no-single-branch --quiet "https://github.com/git/git.git" "$GIT_SHALLOW" 2>&1
 mkdir -p "$GIT_GALEED"
 (cd "$GIT_GALEED" && "$HEDDLE" init --quiet 2>/dev/null || "$HEDDLE" init 2>/dev/null)
-import_output=$(cd "$GIT_GALEED" && "$HEDDLE" --json bridge git import --path "$GIT_SHALLOW" 2>&1) && {
+import_output=$(cd "$GIT_GALEED" && "$HEDDLE" --output json bridge git import --path "$GIT_SHALLOW" 2>&1) && {
   echo "$import_output" > "$WORKDIR/git_import.json"
   ok "git/git import succeeded"
 } || {

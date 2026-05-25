@@ -148,7 +148,7 @@ A reviewer can answer "yes" to all of:
 
 1. `heddle redact apply <state> --path <file>` runs, writes a `Redaction` object, the state's `read_file` returns the stub.
 2. `heddle purge apply <state> --path <file>` requires `purge:repo` capability, removes the blob bytes from the local store, writes a `Purge` oplog entry.
-3. Both operations are signed (Ed25519), and `heddle review show <state>` displays the redaction + purge in the trust strip alongside the merge signature.
+3. Both operations are signed (Ed25519), and `heddle review show <state>` displays the redaction + purge in the verification strip alongside the merge signature.
 4. `bridge git export` of a redacted state exports the stub, not the secret.
 5. Property tests + integration tests pass.
 6. `heddle maintenance gc --prune` does not collect `Redaction` or `Purge` objects even when their referenced blobs are gone.

@@ -59,7 +59,7 @@ pub enum GitCommands {
     /// only on the Git side and need a `bridge import` run), the active
     /// branch on the Git side, and any pending bridge operation. This
     /// is the canonical place to consume bridge-status information for
-    /// scripts; other `--json` outputs intentionally omit it.
+    /// scripts; other `--output json` outputs intentionally omit it.
     Status,
     /// Initialize Git mirror.
     Init {
@@ -91,8 +91,8 @@ pub enum GitCommands {
     /// `ssh://...`, `git://...`, `git@host:owner/repo.git`, or
     /// `file://...`. URL imports are cloned into a heddle-managed temp
     /// directory and then imported the same way local imports are.
-    /// Authentication for private URL sources uses the standard git
-    /// credential helpers (~/.git-credentials, ssh-agent, etc.).
+    /// Authentication for private URL sources uses Git-compatible
+    /// credential files/config and the host SSH agent when available.
     Import {
         /// Local path or git URL to import from.
         #[arg(short, long, value_parser = parse_git_source)]
@@ -114,9 +114,12 @@ pub enum GitCommands {
 
     /// Preview a recovery path when a Git branch and Heddle thread diverge.
     Reconcile {
-        /// Which side should be treated as authoritative.
+        /// Which local side should be treated as authoritative when applying.
+        ///
+        /// Omit with `--preview` to inspect both local repair choices without
+        /// changing refs, remotes, index, or worktree files.
         #[arg(long, value_parser = ["git", "heddle"])]
-        prefer: String,
+        prefer: Option<String>,
         /// Branch/ref to reconcile.
         #[arg(long = "ref", value_name = "BRANCH")]
         ref_name: String,

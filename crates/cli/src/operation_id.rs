@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Client-supplied operation-id resolution.
 //!
-//! The CLI accepts `--op-id <UUID>` (or `HEDDLE_OPERATION_ID`) on every
-//! state-changing verb. When set, the verb passes it through to the
-//! gRPC layer; the dedup store returns the original outcome on replay.
-//! When unset, the call executes without dedup.
+//! Commands that advertise `supports_op_id: true` in the command
+//! catalog accept `--op-id <UUID>` or `HEDDLE_OPERATION_ID`. The local
+//! CLI reserves the id before dispatch, records stdout/stderr/exit
+//! status, and replays that recorded result for the same command body.
+//! Reusing the id with different arguments fails with a typed conflict.
 //!
-//! Verbs that have been routed through `with_idempotency` in the
-//! `grpc_local_impl` services already honour the field. Verbs that
-//! still bypass the gRPC layer (most existing core verbs) ignore it
-//! today; wiring lands incrementally as those verbs migrate.
+//! Commands that advertise `persists_op_id: true` may additionally
+//! generate and save an op-id for interrupted retry loops. Current
+//! explicit replay support does not imply generated persistence.
 
 use std::{io::Write, path::PathBuf, process::Command, str::FromStr};
 
@@ -21,7 +21,10 @@ use repo::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{cli_args::Cli, commands::RecoveryAdvice};
+use crate::cli::{
+    cli_args::{Cli, OutputMode},
+    commands::RecoveryAdvice,
+};
 
 const LOCAL_OP_ID_CHILD_ENV: &str = "HEDDLE_LOCAL_OP_ID_CHILD";
 
@@ -38,13 +41,15 @@ pub fn resolve_operation_id(cli: &Cli) -> Result<Option<OperationId>> {
     if raw.trim().is_empty() {
         return Ok(None);
     }
-    Ok(Some(
-        OperationId::from_str(raw).context("parse --op-id as UUID v4")?,
-    ))
+    OperationId::from_str(raw)
+        .map(Some)
+        .map_err(|err| anyhow!(RecoveryAdvice::op_id_invalid(raw, err)))
 }
 
 pub fn supports_local_op_id(command_name: &str) -> bool {
-    crate::cli::commands::command_supports_op_id(command_name)
+    crate::cli::commands::command_runtime_contract(command_name)
+        .map(|contract| contract.supports_op_id)
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,22 +74,72 @@ pub fn run_local_idempotency_if_requested(
         return Err(anyhow!(RecoveryAdvice::op_id_unsupported(command_name)));
     }
 
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let bootstrap_store = uses_bootstrap_op_id_store(command_name);
     let normalized_args = normalized_argv_for_op_id();
-    let request_hash = hash_request_body(normalized_args.join("\0").as_bytes());
-    let store = OperationDedupStore::open(repo.heddle_dir()).context("open op-id dedup store")?;
+    let bootstrap_scope = if bootstrap_store {
+        Some(bootstrap_op_id_scope(cli)?)
+    } else {
+        None
+    };
+    let request_hash = request_hash_for_op_id(
+        &normalized_args,
+        bootstrap_scope
+            .as_ref()
+            .map(|scope| scope.hash_material.as_str()),
+    )?;
+    let store = if bootstrap_store {
+        let scope = bootstrap_scope
+            .as_ref()
+            .expect("bootstrap scope should be present for bootstrap store");
+        OperationDedupStore::open(bootstrap_op_id_store_dir(scope))
+            .context("open bootstrap op-id dedup store")?
+    } else {
+        let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+        let bootstrap_scope = bootstrap_op_id_scope_for_root(repo.root().to_path_buf())?;
+        let bootstrap_store =
+            OperationDedupStore::open(bootstrap_op_id_store_dir(&bootstrap_scope))
+                .context("open bootstrap op-id dedup store")?;
+        if let Some(existing) = bootstrap_store.metadata_for(op_id, command_name) {
+            return Err(anyhow!(RecoveryAdvice::op_id_conflict(
+                command_name,
+                &bootstrap_scope.label,
+                &normalized_args,
+                request_hash,
+                Some(existing),
+            )));
+        }
+        OperationDedupStore::open(repo.heddle_dir()).context("open op-id dedup store")?
+    };
+    let json_mode = explicit_json_requested(cli);
 
     match store.reserve(op_id, command_name, request_hash)? {
         DedupOutcome::Replay { response } => {
             let replay: LocalOpIdResponse =
                 serde_json::from_slice(&response).context("decode cached op-id response")?;
-            replay_response(&replay)?;
+            replay_response(
+                &replay,
+                json_mode.then_some(OpIdDisplayContext {
+                    op_id: &op_id,
+                    command_name,
+                    status: "replayed",
+                    replayed: true,
+                }),
+            )?;
             if replay.status_code != 0 {
                 std::process::exit(replay.status_code);
             }
             Ok(true)
         }
-        DedupOutcome::Conflict => Err(anyhow!(RecoveryAdvice::op_id_conflict())),
+        DedupOutcome::Conflict => Err(anyhow!(RecoveryAdvice::op_id_conflict(
+            command_name,
+            bootstrap_scope
+                .as_ref()
+                .map(|scope| scope.label.as_str())
+                .unwrap_or("repository-local .heddle"),
+            &normalized_args,
+            request_hash,
+            store.metadata_for(op_id, command_name),
+        ))),
         DedupOutcome::InFlight => Err(anyhow!(RecoveryAdvice::op_id_in_flight())),
         DedupOutcome::Reserved => {
             let output = Command::new(std::env::current_exe()?)
@@ -105,7 +160,15 @@ pub fn run_local_idempotency_if_requested(
             };
             let encoded = serde_json::to_vec(&response).context("encode cached op-id response")?;
             store.record(op_id, command_name, request_hash, encoded)?;
-            replay_response(&response)?;
+            replay_response(
+                &response,
+                json_mode.then_some(OpIdDisplayContext {
+                    op_id: &op_id,
+                    command_name,
+                    status: "executed",
+                    replayed: false,
+                }),
+            )?;
             if response.status_code != 0 {
                 std::process::exit(response.status_code);
             }
@@ -114,10 +177,70 @@ pub fn run_local_idempotency_if_requested(
     }
 }
 
-fn replay_response(response: &LocalOpIdResponse) -> Result<()> {
-    std::io::stdout().write_all(&response.stdout)?;
-    std::io::stderr().write_all(&response.stderr)?;
+#[derive(Clone, Copy)]
+struct OpIdDisplayContext<'a> {
+    op_id: &'a OperationId,
+    command_name: &'a str,
+    status: &'a str,
+    replayed: bool,
+}
+
+fn replay_response(
+    response: &LocalOpIdResponse,
+    context: Option<OpIdDisplayContext>,
+) -> Result<()> {
+    let stdout = context
+        .map(|context| decorate_json_stream(&response.stdout, context))
+        .transpose()?
+        .unwrap_or_else(|| response.stdout.clone());
+    let stderr = context
+        .map(|context| decorate_json_stream(&response.stderr, context))
+        .transpose()?
+        .unwrap_or_else(|| response.stderr.clone());
+    std::io::stdout().write_all(&stdout)?;
+    std::io::stderr().write_all(&stderr)?;
     Ok(())
+}
+
+fn explicit_json_requested(cli: &Cli) -> bool {
+    matches!(cli.output, Some(OutputMode::Json))
+}
+
+fn decorate_json_stream(bytes: &[u8], context: OpIdDisplayContext) -> Result<Vec<u8>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return Ok(bytes.to_vec());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(bytes.to_vec());
+    };
+    let op_id = context.op_id.to_string();
+    object.insert(
+        "op_id".to_string(),
+        serde_json::Value::String(op_id.clone()),
+    );
+    object.insert(
+        "idempotency_status".to_string(),
+        serde_json::Value::String(context.status.to_string()),
+    );
+    object.insert(
+        "replayed".to_string(),
+        serde_json::Value::Bool(context.replayed),
+    );
+    object.insert(
+        "operation_record".to_string(),
+        serde_json::json!({
+            "op_id": op_id,
+            "command": context.command_name,
+            "idempotency_status": context.status,
+            "replayed": context.replayed,
+        }),
+    );
+    let mut decorated = serde_json::to_vec(&value)?;
+    decorated.push(b'\n');
+    Ok(decorated)
 }
 
 fn normalized_argv_for_op_id() -> Vec<String> {
@@ -134,6 +257,62 @@ fn normalized_argv_for_op_id() -> Vec<String> {
         normalized.push(arg);
     }
     normalized
+}
+
+fn request_hash_for_op_id(
+    normalized_args: &[String],
+    invocation_context: Option<&str>,
+) -> Result<[u8; 32]> {
+    let mut body = normalized_args.join("\0").into_bytes();
+    if let Some(context) = invocation_context {
+        body.extend_from_slice(b"\0context\0");
+        body.extend_from_slice(context.as_bytes());
+    }
+    Ok(hash_request_body(&body))
+}
+
+fn uses_bootstrap_op_id_store(command_name: &str) -> bool {
+    matches!(command_name, "init" | "adopt" | "clone")
+}
+
+struct BootstrapOpIdScope {
+    id: String,
+    label: String,
+    hash_material: String,
+}
+
+fn bootstrap_op_id_scope(cli: &Cli) -> Result<BootstrapOpIdScope> {
+    let root = match &cli.command {
+        crate::cli::Commands::Init(args) => args.path.clone().or_else(|| cli.repo.clone()),
+        crate::cli::Commands::Adopt(args) => args.path.clone().or_else(|| cli.repo.clone()),
+        crate::cli::Commands::Clone(args) => Some(PathBuf::from(&args.local)),
+        _ => cli.repo.clone(),
+    }
+    .unwrap_or(std::env::current_dir().context("resolve current directory for op-id scope")?);
+    bootstrap_op_id_scope_for_root(root)
+}
+
+fn bootstrap_op_id_scope_for_root(root: PathBuf) -> Result<BootstrapOpIdScope> {
+    use sha2::{Digest, Sha256};
+
+    let canonical = std::fs::canonicalize(&root).unwrap_or(root);
+    let label = canonical.display().to_string();
+    let hash_material = format!("bootstrap-repo-root\0{label}");
+    let mut hasher = Sha256::new();
+    hasher.update(hash_material.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    Ok(BootstrapOpIdScope {
+        id: digest[..16.min(digest.len())].to_string(),
+        label,
+        hash_material,
+    })
+}
+
+fn bootstrap_op_id_store_dir(scope: &BootstrapOpIdScope) -> PathBuf {
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join(".heddle").join("bootstrap-op-id").join(&scope.id)
 }
 
 /// Same as [`resolve_operation_id`] but returns the wire-string form
@@ -166,7 +345,8 @@ fn last_op_id_path(repo: &Repository) -> PathBuf {
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct LastOpIdFile {
     /// Per-verb most-recent op-id. Verbs whose command contract does
-    /// not opt into op-id persistence are never read or written here.
+    /// not opt into generated op-id persistence are never read or
+    /// written here.
     #[serde(default)]
     by_verb: std::collections::BTreeMap<String, String>,
 }
@@ -189,7 +369,10 @@ pub fn resolve_or_persist_for_verb(
     if let Some(explicit) = resolve_operation_id(cli)? {
         return Ok(explicit);
     }
-    if !crate::cli::commands::command_persists_op_id(verb) {
+    if !crate::cli::commands::command_runtime_contract(verb)
+        .map(|contract| contract.persists_op_id)
+        .unwrap_or(false)
+    {
         return Ok(OperationId::new());
     }
     let path = last_op_id_path(repo);

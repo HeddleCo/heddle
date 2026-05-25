@@ -113,7 +113,7 @@ fn test_nested_tracked_heddle_paths_are_not_ignored_by_status_or_snapshot() {
         &["capture", "-m", "Thread nested heddle files"],
         temp.path(),
     );
-    let status = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let status = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let status_json: Value = serde_json::from_str(&status).unwrap();
     assert!(
         status_json["changes"]["deleted"]
@@ -126,7 +126,7 @@ fn test_nested_tracked_heddle_paths_are_not_ignored_by_status_or_snapshot() {
         "hd-examplehead-v2\n",
     )
     .unwrap();
-    let status = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let status = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let status_json: Value = serde_json::from_str(&status).unwrap();
     let modified = status_json["changes"]["modified"].as_array().unwrap();
     assert!(
@@ -199,7 +199,7 @@ fn default_heddleignore_suppresses_common_macos_noise() {
     std::fs::create_dir_all(&xcuserdata).unwrap();
     std::fs::write(xcuserdata.join("UserInterfaceState.xcuserstate"), b"x").unwrap();
 
-    let status = heddle_must_succeed(&["--json", "status"], temp.path());
+    let status = heddle_must_succeed(&["--output", "json", "status"], temp.path());
     let status_json: Value = serde_json::from_str(&status).unwrap();
     let untracked = status_json["changes"]["added"]
         .as_array()

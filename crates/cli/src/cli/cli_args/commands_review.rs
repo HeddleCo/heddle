@@ -9,8 +9,7 @@ pub enum ReviewCommands {
     Show(ReviewShowArgs),
     /// Submit a review signature on a state.
     Sign(ReviewSignArgs),
-    /// Walk to the next pending review (placeholder — A10's query layer
-    /// wires real selection).
+    /// Walk to the next pending review when review selection is configured.
     Next(ReviewNextArgs),
     /// Per-module signal health over a rolling window.
     Health(ReviewHealthArgs),

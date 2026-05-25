@@ -118,11 +118,11 @@ pub async fn cmd_context_edit(
     let context_root = head_state
         .context
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No context annotations in this repository"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (target, mut blob, index) = repo
         .find_annotation(context_root, &annotation_id)?
-        .ok_or_else(|| anyhow::anyhow!("Annotation not found: {annotation_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
 
     let annotation = blob
         .annotations
@@ -199,11 +199,11 @@ pub async fn cmd_context_supersede(
     let context_root = head_state
         .context
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No context annotations in this repository"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (original_target, mut original_blob, index) = repo
         .find_annotation(context_root, &annotation_id)?
-        .ok_or_else(|| anyhow::anyhow!("Annotation not found: {annotation_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
     let original_annotation = original_blob.annotations[index].clone();
     let original_revision = original_annotation.current_revision().cloned().unwrap();
 

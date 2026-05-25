@@ -6,6 +6,10 @@ use objects::object::{Session, SessionSegment};
 use repo::{Repository, SessionManager};
 use serde::Serialize;
 
+use super::{
+    advice::RecoveryAdvice,
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+};
 use crate::cli::{Cli, should_output_json};
 
 #[derive(Serialize)]
@@ -13,6 +17,7 @@ struct SessionOutput {
     id: String,
     principal: String,
     created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ended_at: Option<String>,
     active: bool,
     segments: Vec<SegmentOutput>,
@@ -24,7 +29,30 @@ struct SegmentOutput {
     provider: String,
     model: String,
     started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     policy_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SessionEnvelope {
+    session: SessionOutput,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize)]
+struct SegmentEnvelope {
+    segment: SegmentOutput,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize)]
+struct SessionListOutput {
+    sessions: Vec<SessionOutput>,
+    active_only: bool,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
 }
 
 impl From<&Session> for SessionOutput {
@@ -65,7 +93,10 @@ pub async fn cmd_session_start(
     let session = manager.start_session(principal, provider, model, policy)?;
 
     if should_output_json(cli, None) {
-        let output = SessionOutput::from(&session);
+        let output = SessionEnvelope {
+            session: SessionOutput::from(&session),
+            trust: build_repository_verification_state(&repo),
+        };
         println!("{}", serde_json::to_string(&output)?);
     } else {
         println!("Session: {}", session.id);
@@ -86,13 +117,20 @@ pub async fn cmd_session_segment(
     let mut manager = SessionManager::new(repo.root());
 
     let current_id = manager.get_current_session_id()?.ok_or_else(|| {
-        anyhow::anyhow!("No active session. Start one with `heddle session start`")
+        anyhow::anyhow!(RecoveryAdvice::no_current_session(
+            "session segment",
+            None,
+            "heddle session start",
+        ))
     })?;
 
     let segment = manager.add_segment(&current_id, provider, model, policy)?;
 
     if should_output_json(cli, None) {
-        let output = SegmentOutput::from(&segment);
+        let output = SegmentEnvelope {
+            segment: SegmentOutput::from(&segment),
+            trust: build_repository_verification_state(&repo),
+        };
         println!("{}", serde_json::to_string(&output)?);
     } else {
         println!("Segment: {}", segment.id);
@@ -108,7 +146,10 @@ pub async fn cmd_session_end(cli: &Cli, session_id: Option<String>) -> Result<()
     let session = manager.end_session(session_id.as_deref())?;
 
     if should_output_json(cli, None) {
-        let output = SessionOutput::from(&session);
+        let output = SessionEnvelope {
+            session: SessionOutput::from(&session),
+            trust: build_repository_verification_state(&repo),
+        };
         println!("{}", serde_json::to_string(&output)?);
     } else {
         println!("Session ended: {}", session.id);
@@ -123,9 +164,13 @@ pub async fn cmd_session_show(cli: &Cli, session_id: Option<String>) -> Result<(
 
     let id = match session_id {
         Some(id) => id,
-        None => manager
-            .get_current_session_id()?
-            .ok_or_else(|| anyhow::anyhow!("No active session"))?,
+        None => manager.get_current_session_id()?.ok_or_else(|| {
+            anyhow::anyhow!(RecoveryAdvice::no_current_session(
+                "session show",
+                Some("<SESSION_ID>"),
+                "heddle session start",
+            ))
+        })?,
     };
 
     let session = manager
@@ -133,7 +178,10 @@ pub async fn cmd_session_show(cli: &Cli, session_id: Option<String>) -> Result<(
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", id))?;
 
     if should_output_json(cli, None) {
-        let output = SessionOutput::from(&session);
+        let output = SessionEnvelope {
+            session: SessionOutput::from(&session),
+            trust: build_repository_verification_state(&repo),
+        };
         println!("{}", serde_json::to_string(&output)?);
     } else {
         println!("Session: {}", session.id);
@@ -173,7 +221,11 @@ pub async fn cmd_session_list(cli: &Cli, active_only: bool) -> Result<()> {
     let sessions = manager.list_sessions(active_only)?;
 
     if should_output_json(cli, None) {
-        let output: Vec<SessionOutput> = sessions.iter().map(SessionOutput::from).collect();
+        let output = SessionListOutput {
+            sessions: sessions.iter().map(SessionOutput::from).collect(),
+            active_only,
+            trust: build_repository_verification_state(&repo),
+        };
         println!("{}", serde_json::to_string(&output)?);
     } else {
         if sessions.is_empty() {

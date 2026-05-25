@@ -128,7 +128,7 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
 
 fn cmd_purge_list(cli: &Cli, repo: &Repository, _args: PurgeListArgs) -> Result<()> {
     // List every redaction in the repo that's been purged. The
-    // companion view in the oplog (`heddle log --json` filtered to
+    // companion view in the oplog (`heddle log --output json` filtered to
     // `OpRecord::Purge`) covers the audit trail; this surface is the
     // "which blobs are purged right now" view.
     let listing = repo.list_all_redactions()?;

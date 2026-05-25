@@ -7,7 +7,7 @@
 //!
 //! * a full change ID (`hd-sqr398dvx9ayt9bf8bf5gz0jg8`)
 //! * a short change ID prefix (`hd-sqr398dvx9ay`, as printed by
-//!   `heddle log --json`)
+//!   `heddle log --output json`)
 //! * a marker name (`failed-build-2026-05-09`)
 //! * `HEAD`, `@`, `HEAD~N`, `@~N`
 //! * a thread name
@@ -70,13 +70,13 @@ fn state_not_found_advice(spec: &str) -> RecoveryAdvice {
 }
 
 fn tip_only_branch_history_advice(branch: &str) -> RecoveryAdvice {
-    let import_command = format!("heddle bridge git import --ref {branch}");
+    let import_command = super::git_overlay_health::canonical_adopt_ref_command(branch);
     RecoveryAdvice::safety_refusal(
         "git_branch_history_not_imported",
-        format!("Git branch '{branch}' is visible as a tip-only mirror"),
+        format!("Heddle has not imported Git branch '{branch}' history yet"),
         format!("Import its history first with `{import_command}`."),
         format!("branch '{branch}' has a Git tip but no imported Heddle history"),
-        "history-sensitive commands cannot safely resolve this branch to a Heddle state yet",
+        "history-sensitive commands cannot safely resolve this branch until Heddle imports its Git history",
         "repository state and worktree files were left unchanged",
         import_command.clone(),
         vec![import_command],
@@ -84,7 +84,7 @@ fn tip_only_branch_history_advice(branch: &str) -> RecoveryAdvice {
 }
 
 fn tip_only_tag_history_advice(tag: &str) -> RecoveryAdvice {
-    let import_command = format!("heddle bridge git import --ref {tag}");
+    let import_command = super::git_overlay_health::canonical_adopt_ref_command(tag);
     RecoveryAdvice::safety_refusal(
         "git_tag_history_not_imported",
         format!("Git tag '{tag}' is visible but its history is not imported yet"),

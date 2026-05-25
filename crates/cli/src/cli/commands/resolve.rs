@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use repo::{MergeState, Repository};
 use serde::Serialize;
 
@@ -29,6 +29,7 @@ pub fn cmd_resolve(
     list: bool,
     ours: bool,
     theirs: bool,
+    force: bool,
     abort: bool,
 ) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
@@ -43,7 +44,7 @@ pub fn cmd_resolve(
     }
 
     if all {
-        return cmd_resolve_all(&repo, &merge_manager, cli, ours, theirs);
+        return cmd_resolve_all(&repo, &merge_manager, cli, ours, theirs, force);
     }
 
     let Some(path) = path else {
@@ -52,7 +53,7 @@ pub fn cmd_resolve(
         ));
     };
 
-    cmd_resolve_file(&repo, &merge_manager, cli, &path, ours, theirs)
+    cmd_resolve_file(&repo, &merge_manager, cli, &path, ours, theirs, force)
 }
 
 fn cmd_resolve_abort(
@@ -131,6 +132,7 @@ fn cmd_resolve_all(
     cli: &Cli,
     ours: bool,
     theirs: bool,
+    force: bool,
 ) -> Result<()> {
     let merge_state = load_merge_state_or_advice(merge_manager, "resolve merge conflicts")?;
     let unresolved = unresolved_paths(&merge_state);
@@ -141,6 +143,7 @@ fn cmd_resolve_all(
 
     for path in &unresolved {
         resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
+        ensure_resolved_file_has_no_conflict_markers(repo, path, ours || theirs, force)?;
         merge_manager.resolve(path)?;
     }
 
@@ -175,9 +178,18 @@ fn cmd_resolve_file(
     path: &str,
     ours: bool,
     theirs: bool,
+    force: bool,
 ) -> Result<()> {
     let merge_state = load_merge_state_or_advice(merge_manager, "resolve merge conflict")?;
+    if !merge_state
+        .conflicts
+        .iter()
+        .any(|conflict| conflict == path)
+    {
+        return Err(anyhow!(path_not_in_active_merge_advice(path)));
+    }
     resolve_file_with_version(repo, &merge_state, path, ours, theirs)?;
+    ensure_resolved_file_has_no_conflict_markers(repo, path, ours || theirs, force)?;
     merge_manager.resolve(path)?;
 
     let remaining = merge_manager.unresolved()?;
@@ -199,6 +211,30 @@ fn cmd_resolve_file(
     }
 
     Ok(())
+}
+
+fn ensure_resolved_file_has_no_conflict_markers(
+    repo: &Repository,
+    path: &str,
+    selected_side: bool,
+    force: bool,
+) -> Result<()> {
+    if selected_side || force {
+        return Ok(());
+    }
+    let full_path = repo.root().join(path);
+    let content = fs::read(&full_path)
+        .with_context(|| format!("read resolved conflict candidate {}", full_path.display()))?;
+    if contains_conflict_markers(&content) {
+        return Err(anyhow!(conflict_markers_still_present_advice(path)));
+    }
+    Ok(())
+}
+
+fn contains_conflict_markers(content: &[u8]) -> bool {
+    content.split(|byte| *byte == b'\n').any(|line| {
+        line.starts_with(b"<<<<<<<") || line.starts_with(b"=======") || line.starts_with(b">>>>>>>")
+    })
 }
 
 fn resolve_file_with_version(
@@ -282,5 +318,37 @@ fn no_conflicts_to_resolve_advice() -> RecoveryAdvice {
         "repository state was left unchanged",
         "heddle resolve --list",
         vec!["heddle resolve --list".to_string()],
+    )
+}
+
+fn path_not_in_active_merge_advice(path: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "conflict_path_not_found",
+        format!("No active merge conflict is registered for {path}"),
+        "Inspect unresolved conflicts with `heddle resolve --list`.",
+        format!("{path} is not in the active merge conflict set"),
+        "marking an unregistered path resolved would make the merge state disagree with the worktree",
+        "repository state was left unchanged",
+        "heddle resolve --list",
+        vec!["heddle resolve --list".to_string()],
+    )
+}
+
+fn conflict_markers_still_present_advice(path: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "conflict_markers_still_present",
+        format!("Refusing to mark {path} resolved while conflict markers remain"),
+        format!(
+            "Edit {path} to remove `<<<<<<<`, `=======`, and `>>>>>>>`, then rerun `heddle resolve {path}`. Use `--ours`, `--theirs`, or `--force` only when intentional."
+        ),
+        format!("{path} still contains conflict marker lines"),
+        "continuing the merge would capture unresolved marker text as the resolved file content",
+        "the merge state, refs, objects, and worktree files were left unchanged",
+        format!("heddle conflict show {path}"),
+        vec![
+            format!("heddle conflict show {path}"),
+            format!("heddle resolve {path}"),
+            format!("heddle resolve {path} --force"),
+        ],
     )
 }

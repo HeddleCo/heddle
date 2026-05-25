@@ -41,7 +41,7 @@ fn git_overlay_interop_bridge_shorthand_imports_current_branch() {
     init_git(temp.path());
     commit_file(temp.path(), "story.txt", "one\n", "seed");
 
-    let status = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let status = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&status).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert!(parsed["current_state"].is_null());
@@ -66,7 +66,7 @@ fn git_overlay_interop_native_git_commit_then_heddle_import_adopts_tip() {
     let temp = TempDir::new().unwrap();
     init_git(temp.path());
     let first_tip = commit_file(temp.path(), "story.txt", "one\n", "seed");
-    heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     heddle(&["bridge", "import", "--ref", "main"], Some(temp.path())).unwrap();
     let first_state = status_json(temp.path())["current_state"]
         .as_str()
@@ -77,8 +77,8 @@ fn git_overlay_interop_native_git_commit_then_heddle_import_adopts_tip() {
     assert_ne!(first_tip, second_tip);
     let before_import = status_json(temp.path());
     assert_eq!(
-        before_import["recommended_action"], "heddle capture",
-        "native git commit should look dirty until Heddle adopts/imports it: {before_import}"
+        before_import["recommended_action"], "heddle adopt --ref main",
+        "native git commit should require importing the active Git tip before more Heddle work: {before_import}"
     );
 
     heddle(&["bridge", "import", "--ref", "main"], Some(temp.path())).unwrap();
@@ -118,7 +118,7 @@ fn git_overlay_interop_fetch_sync_then_heddle_status_stays_clean() {
     );
     configure_git(&work);
     git(&work, &["switch", "main"]);
-    heddle(&["status", "--json"], Some(&work)).unwrap();
+    heddle(&["status", "--output", "json"], Some(&work)).unwrap();
     heddle(&["bridge", "import", "--ref", "main"], Some(&work)).unwrap();
 
     git(
@@ -142,7 +142,7 @@ fn git_overlay_interop_fetch_sync_then_heddle_status_stays_clean() {
     git(&upstream, &["push", "origin", "main"]);
     git(&work, &["fetch", "origin"]);
 
-    let sync = heddle(&["sync", "--json"], Some(&work)).unwrap();
+    let sync = heddle(&["sync", "--output", "json"], Some(&work)).unwrap();
     let sync: Value = serde_json::from_str(&sync).unwrap();
     assert_eq!(sync["status"], "synced");
 
@@ -153,11 +153,11 @@ fn git_overlay_interop_fetch_sync_then_heddle_status_stays_clean() {
 }
 
 #[test]
-fn git_overlay_interop_git_conflict_routes_through_heddle_continue() {
+fn git_overlay_interop_git_conflict_routes_to_no_git_handoff() {
     let temp = TempDir::new().unwrap();
     init_git(temp.path());
     commit_file(temp.path(), "clash.txt", "base\n", "seed");
-    heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     heddle(&["bridge", "import", "--ref", "main"], Some(temp.path())).unwrap();
 
     git(temp.path(), &["switch", "-c", "side"]);
@@ -179,11 +179,11 @@ fn git_overlay_interop_git_conflict_routes_through_heddle_continue() {
 
     let status = status_json(temp.path());
     assert_eq!(status["operation"]["scope"], "git");
-    assert_eq!(status["recommended_action"], "heddle continue");
+    assert_eq!(status["recommended_action"], "heddle bridge git status");
 
-    let cont = heddle(&["--output", "text", "continue"], Some(temp.path())).unwrap();
+    let cont = heddle(&["--output", "text", "continue"], Some(temp.path())).unwrap_err();
     assert!(
-        cont.contains("Git merge still has unresolved conflicts"),
+        cont.contains("no-git runtime") && cont.contains("clash.txt"),
         "{cont}"
     );
     assert!(cont.contains("Next step:"));

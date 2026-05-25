@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle agent` — agent-loop affordances.
 //!
-//! Currently only `agent serve` is wired (W2): a local-only gRPC daemon
+//! `agent serve` runs a local-only gRPC daemon
 //! over a Unix-domain socket inside the repo's `.heddle/sockets/`. The
-//! daemon hosts the W2 services (state-review, discussion, signal,
+//! daemon hosts agent services (state-review, discussion, signal,
 //! operation-log query, transaction, hook) so a tight agent loop avoids
 //! per-command process startup latency.
 //!
 //! `heddle agent serve` is intentionally distinct from `heddle daemon`,
 //! which controls the FUSE mount daemon — different subsystem, different
-//! UX. `heddle help daemon` (A17) contrasts the two.
+//! UX. `heddle help daemon` contrasts the two.
 
 use std::path::PathBuf;
 
@@ -25,8 +25,7 @@ pub enum AgentCommands {
     /// Run the local agent gRPC daemon.
     ///
     /// The daemon binds a Unix socket inside the repo's `.heddle/sockets/`
-    /// directory and serves the W2 contract to the same-user CLI. Out of
-    /// scope for first ship: multi-user, remote daemon-as-service, TLS.
+    /// directory and serves local same-user CLI calls.
     Serve(AgentServeArgs),
 
     /// Report whether the local agent daemon is running for this repo.

@@ -21,10 +21,10 @@ pub struct WorkspaceShowArgs {
 
 #[derive(Subcommand, Clone)]
 pub enum WorkspaceCommands {
-    /// Show the workspace control tower for the current repository.
+    /// Show thread and checkout state for the current repository.
     #[command(after_help = "\
 Examples:
-  heddle workspace                         # repo-wide control tower
+  heddle workspace                         # repo-wide thread state
   heddle workspace show --watch            # continuously refresh thread state
   heddle workspace show --output json      # stable groups for scripts and agents
 ")]

@@ -7,38 +7,35 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::diff_types::{DiffOutput, LineDiff, SemanticChangeEntry};
+use super::diff_types::{DiffOutput, LineDiff, SemanticChangeEntry, should_render_modified_pair};
 use crate::cli::style;
 
 const PAGER_LINE_THRESHOLD: usize = 200;
 const SIGNATURE_CHANGE_SEPARATOR: &str = "\u{1f}";
 
 pub(crate) fn print_stat(output: &DiffOutput) {
-    let mut added = 0;
-    let mut modified = 0;
-    let mut deleted = 0;
-    let mut renamed = 0;
-
     for change in &output.changes {
         match change.kind.as_str() {
             "added" => {
-                added += 1;
                 // Status glyph is the carrier; colour only the +/M/-
                 // prefix and let path text stay neutral so long path
                 // lists scan as a column rather than a lightshow.
                 println!(" {} {} | added", style::accent("+"), change.path);
             }
             "modified" => {
-                modified += 1;
                 println!(" {} {} | modified", style::warn("M"), change.path);
             }
             "deleted" => {
-                deleted += 1;
                 println!(" {} {} | deleted", style::error("-"), change.path);
             }
             "renamed" => {
-                renamed += 1;
-                println!(" {} {} | renamed", style::accent("R"), change.path);
+                let old_path = change.old_path.as_deref().unwrap_or("?");
+                println!(
+                    " {} {} -> {} | renamed",
+                    style::accent("R"),
+                    old_path,
+                    change.path
+                );
             }
             _ => {}
         }
@@ -52,7 +49,6 @@ pub(crate) fn print_stat(output: &DiffOutput) {
                     change.from_path.as_deref().unwrap_or("?"),
                     change.to_path.as_deref().unwrap_or("?")
                 );
-                renamed += 1;
             }
         }
     }
@@ -60,11 +56,11 @@ pub(crate) fn print_stat(output: &DiffOutput) {
     println!();
     println!(
         " {} files changed, {} additions, {} modifications, {} deletions, {} renames",
-        output.changes.len() + renamed,
-        added,
-        modified,
-        deleted,
-        renamed
+        output.stats.files_changed,
+        output.stats.additions,
+        output.stats.modifications,
+        output.stats.deletions,
+        output.stats.renames
     );
 }
 
@@ -73,10 +69,17 @@ pub(crate) fn print_diff(output: &DiffOutput) {
     for change in &output.changes {
         // File-header rows: `--- a/...` / `+++ b/...` are dim;
         // they're navigation, not data.
-        rendered.push_str(&style::dim(&format!("--- a/{}", change.path)));
+        let old_path = change.old_path.as_deref().unwrap_or(&change.path);
+        rendered.push_str(&style::dim(&format!("--- a/{old_path}")));
         rendered.push('\n');
         rendered.push_str(&style::dim(&format!("+++ b/{}", change.path)));
         rendered.push('\n');
+        if change.kind == "renamed" {
+            rendered.push_str(&style::dim(&format!("rename from {old_path}")));
+            rendered.push('\n');
+            rendered.push_str(&style::dim(&format!("rename to {}", change.path)));
+            rendered.push('\n');
+        }
 
         if let Some(lines) = &change.lines {
             let mut index = 0;
@@ -106,7 +109,12 @@ pub(crate) fn print_diff(output: &DiffOutput) {
                 index += 1;
             }
         } else {
-            rendered.push_str(&style::dim("Binary file or unable to diff"));
+            let summary = if change.binary {
+                format!("Binary file changed: {}", change.path)
+            } else {
+                format!("File changed; line diff unavailable: {}", change.path)
+            };
+            rendered.push_str(&style::dim(&summary));
             rendered.push('\n');
         }
 
@@ -202,31 +210,6 @@ fn paint_modified_body(removed: &str, added: &str) -> String {
         }
     }
     rendered
-}
-
-fn should_render_modified_pair(removed: &str, added: &str) -> bool {
-    let prefix_len = common_prefix_boundary(removed, added);
-    let suffix_len = common_suffix_boundary(&removed[prefix_len..], &added[prefix_len..]);
-    let shared_len = prefix_len + suffix_len;
-    let max_len = removed.len().max(added.len());
-
-    // The `~` row is a review affordance for one logical line edit.
-    // If two adjacent delete/add lines barely overlap, keeping the
-    // normal two-line patch shape is clearer and avoids visually
-    // gluing unrelated code together.
-    shared_len >= 4 && shared_len * 3 >= max_len
-}
-
-fn common_prefix_boundary(left: &str, right: &str) -> usize {
-    let mut boundary = 0;
-    for ((left_index, left_char), (_, right_char)) in left.char_indices().zip(right.char_indices())
-    {
-        if left_char != right_char {
-            break;
-        }
-        boundary = left_index + left_char.len_utf8();
-    }
-    boundary
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -352,17 +335,6 @@ impl TokenKind {
             Self::Punctuation
         }
     }
-}
-
-fn common_suffix_boundary(left: &str, right: &str) -> usize {
-    let mut boundary = 0;
-    for (left_char, right_char) in left.chars().rev().zip(right.chars().rev()) {
-        if left_char != right_char {
-            break;
-        }
-        boundary += left_char.len_utf8();
-    }
-    boundary
 }
 
 pub(crate) fn print_context(output: &DiffOutput) {
@@ -786,10 +758,11 @@ fn semantic_path(change: &SemanticChangeEntry) -> String {
 mod tests {
     use super::{
         SIGNATURE_CHANGE_SEPARATOR, aligned_added_tokens, group_semantic_changes, paint_line,
-        paint_signature_change_item_lines, should_render_modified_pair,
-        signature_change_display_segments,
+        paint_signature_change_item_lines, signature_change_display_segments,
     };
-    use crate::cli::commands::diff::diff_types::{LineDiff, SemanticChangeEntry};
+    use crate::cli::commands::diff::diff_types::{
+        LineDiff, SemanticChangeEntry, change_line_counts, should_render_modified_pair,
+    };
 
     #[test]
     fn modified_pair_compacts_only_when_lines_share_context() {
@@ -844,6 +817,20 @@ mod tests {
         let rendered = paint_line(&line);
         assert!(rendered.contains("   7    8 | "));
         assert!(rendered.ends_with(" let value = 42;"));
+    }
+
+    #[test]
+    fn stat_counts_pure_insertions_as_additions() {
+        let lines = vec![
+            LineDiff::with_lines("@", "@ -1,1 +1,2 @@", None, None),
+            LineDiff::with_lines(" ", "base", Some(1), Some(1)),
+            LineDiff::with_lines("+", "added", None, Some(2)),
+        ];
+
+        let counts = change_line_counts(Some(&lines));
+        assert_eq!(counts.added, 1);
+        assert_eq!(counts.modified, 0);
+        assert_eq!(counts.deleted, 0);
     }
 
     #[test]

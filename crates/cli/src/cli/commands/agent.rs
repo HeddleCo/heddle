@@ -10,20 +10,48 @@ use daemon::local_daemon::{
     serve,
 };
 use repo::Repository;
+use schemars::JsonSchema;
 use serde::Serialize;
 
-use super::advice::RecoveryAdvice;
+use super::{
+    advice::RecoveryAdvice,
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+};
 use crate::cli::{
     cli_args::{AgentCommands, AgentServeArgs, Cli},
     should_output_json,
 };
 
-#[derive(Serialize)]
-struct AgentStatusOutput {
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentServeOutput {
+    pub output_kind: &'static str,
+    pub status: String,
+    pub socket_path: String,
+    pub pid_path: String,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentStatusOutput {
+    output_kind: &'static str,
     running: bool,
     pid: Option<u32>,
     socket_path: String,
     pid_path: String,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentStopOutput {
+    output_kind: &'static str,
+    stopped: bool,
+    swept_stale: bool,
+    pid: Option<i32>,
+    reason: Option<String>,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
 }
 
 pub async fn run(cli: &Cli, command: &AgentCommands) -> Result<()> {
@@ -62,7 +90,7 @@ async fn run_serve(cli: &Cli, args: &AgentServeArgs) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        let repo = open_repo()?;
+        let repo = open_repo(cli)?;
         let mut config = LocalDaemonConfig::from_repo(&repo);
         if let Some(socket) = args.socket.clone() {
             config = config.with_socket(socket);
@@ -92,24 +120,40 @@ async fn run_serve(cli: &Cli, args: &AgentServeArgs) -> Result<()> {
         let shutdown = async {
             let _ = tokio::signal::ctrl_c().await;
         };
+        let socket_path = config.socket_path.display().to_string();
+        let pid_path = config.pid_path.display().to_string();
+        let repo_root = repo.root().to_path_buf();
         serve(repo, config, shutdown)
             .await
             .map_err(|e| anyhow!("local daemon failed: {e}"))?;
+        let repo = Repository::open(&repo_root)?;
+        if should_output_json(cli, Some(repo.config())) {
+            let output = AgentServeOutput {
+                output_kind: "agent_serve",
+                status: "stopped".to_string(),
+                socket_path,
+                pid_path,
+                trust: build_repository_verification_state(&repo),
+            };
+            println!("{}", serde_json::to_string(&output)?);
+        }
         Ok(())
     }
 }
 
 async fn run_status(cli: &Cli) -> Result<()> {
-    let repo = open_repo()?;
+    let repo = open_repo(cli)?;
     let pid_path = pid_path(&repo);
     let socket_path = socket_path(&repo);
     let pid = read_pid(&pid_path);
     let running = pid.map(pid_alive).unwrap_or(false);
     let output = AgentStatusOutput {
+        output_kind: "agent_status",
         running,
         pid,
         socket_path: socket_path.display().to_string(),
         pid_path: pid_path.display().to_string(),
+        trust: build_repository_verification_state(&repo),
     };
     if should_output_json(cli, Some(repo.config())) {
         println!(
@@ -132,7 +176,7 @@ async fn run_status(cli: &Cli) -> Result<()> {
 }
 
 async fn run_stop(cli: &Cli) -> Result<()> {
-    let repo = open_repo()?;
+    let repo = open_repo(cli)?;
     let pid_path = pid_path(&repo);
 
     // Read the pidfile and require the heddle marker. A pidfile lacking
@@ -144,7 +188,17 @@ async fn run_stop(cli: &Cli) -> Result<()> {
             if !should_output_json(cli, Some(repo.config())) {
                 println!("heddle agent: not running (no pidfile)");
             } else {
-                println!("{{\"stopped\":false,\"reason\":\"no pidfile\"}}");
+                print_stop_output(
+                    &repo,
+                    AgentStopOutput {
+                        output_kind: "agent_stop",
+                        stopped: false,
+                        swept_stale: false,
+                        pid: None,
+                        reason: Some("no pidfile".to_string()),
+                        trust: build_repository_verification_state(&repo),
+                    },
+                )?;
             }
             return Ok(());
         }
@@ -178,7 +232,17 @@ async fn run_stop(cli: &Cli) -> Result<()> {
             if !should_output_json(cli, Some(repo.config())) {
                 println!("heddle agent: pidfile pointed at dead pid {pid}; cleaned up");
             } else {
-                println!("{{\"stopped\":true,\"swept_stale\":true,\"pid\":{pid}}}");
+                print_stop_output(
+                    &repo,
+                    AgentStopOutput {
+                        output_kind: "agent_stop",
+                        stopped: true,
+                        swept_stale: true,
+                        pid: Some(pid),
+                        reason: None,
+                        trust: build_repository_verification_state(&repo),
+                    },
+                )?;
             }
             return Ok(());
         }
@@ -219,7 +283,17 @@ async fn run_stop(cli: &Cli) -> Result<()> {
         if !should_output_json(cli, Some(repo.config())) {
             println!("heddle agent: SIGTERM sent to pid {pid}");
         } else {
-            println!("{{\"stopped\":true,\"swept_stale\":false,\"pid\":{pid}}}");
+            print_stop_output(
+                &repo,
+                AgentStopOutput {
+                    output_kind: "agent_stop",
+                    stopped: true,
+                    swept_stale: false,
+                    pid: Some(pid),
+                    reason: None,
+                    trust: build_repository_verification_state(&repo),
+                },
+            )?;
         }
     }
     #[cfg(not(unix))]
@@ -239,9 +313,14 @@ async fn run_stop(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn open_repo() -> Result<Repository> {
+fn print_stop_output(_repo: &Repository, output: AgentStopOutput) -> Result<()> {
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+fn open_repo(cli: &Cli) -> Result<Repository> {
     let cwd = std::env::current_dir().context("get current working directory")?;
-    Repository::open(&cwd).context("open Heddle repository")
+    Repository::open(cli.repo.as_ref().unwrap_or(&cwd)).context("open Heddle repository")
 }
 
 #[cfg(unix)]

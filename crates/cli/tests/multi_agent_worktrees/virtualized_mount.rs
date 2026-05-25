@@ -39,11 +39,11 @@ fn virtualized_thread_round_trip() {
 
     // Start a virtualized thread. The mount point lives outside
     // the repo (sibling `.{name}-heddle-mounts/...` directory),
-    // and `heddle --json` prints the resolved path under
+    // and `heddle --output json` prints the resolved path under
     // `thread.path`.
     let raw = heddle(
         &[
-            "--json",
+            "--output", "json",
             "start",
             "feature/mount-demo",
             "--workspace",
@@ -116,17 +116,18 @@ fn virtualized_thread_round_trip() {
 
 /// Helper: capture a snapshot in `cwd` and return the short change_id.
 fn capture_short(cwd: &std::path::Path, msg: &str) -> String {
-    let out = heddle(&["--json", "capture", "-m", msg], Some(cwd)).expect("snapshot succeeded");
-    let v: Value = serde_json::from_str(&out).expect("snapshot --json is valid JSON");
+    let out =
+        heddle(&["--output", "json", "capture", "-m", msg], Some(cwd)).expect("snapshot succeeded");
+    let v: Value = serde_json::from_str(&out).expect("snapshot --output json is valid JSON");
     v.get("change_id")
         .and_then(Value::as_str)
         .expect("snapshot output exposes change_id")
         .to_string()
 }
 
-/// Helper: pull `thread.path` (the mount point) out of `start --json` output.
+/// Helper: pull `thread.path` (the mount point) out of `start --output json` output.
 fn mount_path_from_start(raw: &str) -> String {
-    let out: Value = serde_json::from_str(raw).expect("start --json output");
+    let out: Value = serde_json::from_str(raw).expect("start --output json output");
     out.get("thread")
         .and_then(|t| t.get("path"))
         .and_then(Value::as_str)
@@ -178,7 +179,8 @@ fn virtualized_from_other_thread_head_serves_that_threads_tip() {
     // mount is alpha's tip, i.e. S3.
     let raw = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "beta",
             "--workspace",
@@ -212,7 +214,11 @@ fn virtualized_from_short_change_id_serves_that_state() {
     let main = setup_repo("greet.txt", "S1");
     // The short ID for S1 is on disk after init — pull it from the log.
     let log: Value = serde_json::from_str(
-        &heddle(&["--json", "log", "main", "-n", "1"], Some(main.path())).expect("log main"),
+        &heddle(
+            &["--output", "json", "log", "main", "-n", "1"],
+            Some(main.path()),
+        )
+        .expect("log main"),
     )
     .unwrap();
     let s1_short = log["states"][0]["change_id"]
@@ -227,7 +233,8 @@ fn virtualized_from_short_change_id_serves_that_state() {
 
     let raw = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "gamma",
             "--workspace",
@@ -265,7 +272,8 @@ fn virtualized_from_head_tilde_serves_parent_state() {
 
     let raw = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "delta",
             "--workspace",
@@ -332,7 +340,8 @@ fn default_uses_daemon_when_no_flag() {
 
     heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "feature/default-daemon",
             "--workspace",
@@ -373,7 +382,8 @@ fn no_daemon_flag_uses_in_process() {
 
     heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "feature/no-daemon",
             "--workspace",

@@ -32,17 +32,18 @@ pub use commands_advanced::{
 };
 pub use commands_agent::{AgentCommands, AgentServeArgs};
 pub use commands_args::{
-    ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs,
+    ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
     AgentApiListArgs, AgentCaptureArgs, AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs,
     AgentReleaseStatusArg, AgentReserveArgs, AttemptArgs, BranchArgs, CloneArgs, CollapseArgs,
-    CommitArgs, DelegateArgs, DelegatedTaskSpec, DiagnoseArgs, DiffArgs, DoctorArgs,
-    DoctorCommands, DoctorDocsArgs, InitArgs, LogArgs, MergeArgs, PullArgs, PushArgs, ReadyArgs,
-    ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs, SessionListArgs,
-    SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShipArgs, SnapshotArgs, SwitchArgs,
-    SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs,
-    ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs,
-    TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
+    CommandCatalogArgs, CommandCatalogTier, CommitArgs, DelegateArgs, DelegatedTaskSpec,
+    DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, InitArgs, LogArgs,
+    MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
+    SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs,
+    ShipArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs,
+    ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs,
+    ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs,
+    ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
+    WorkspaceModeArg,
 };
 pub use commands_bisect::BisectCommands;
 #[cfg(feature = "git-overlay")]

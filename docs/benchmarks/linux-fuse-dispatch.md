@@ -57,7 +57,7 @@ The harness:
    tempdir).
 2. For each requested mode: creates N parallel workdirs via
    `git worktree add` / `heddle start --workspace solid` /
-   `heddle start --workspace virtualized --daemon`. For virtualized
+   `heddle start --workspace virtualized`. For virtualized
    the `--path` argument is ignored by the CLI; the actual mount path
    is read from the JSON output (`thread.path` /
    `<parent>/.<repo-name>-heddle-mounts/<thread>`).

@@ -4,10 +4,10 @@
 //! Every state-changing CLI verb and gRPC method accepts an optional
 //! `client_operation_id` (UUID v4). The first time the server sees an id it
 //! processes the request and persists `(operation_id, request_hash, response)`.
-//! If the same id arrives again with the same body hash, the server returns
-//! the cached response bit-identical without re-executing. If the body
-//! differs, the server returns `FailedPrecondition` so the caller can detect
-//! the bug.
+//! If the same id arrives again for the same verb with the same body hash, the
+//! server returns the cached response bit-identical without re-executing. If the
+//! body or verb differs, the server returns `FailedPrecondition` so the caller
+//! can detect the bug.
 //!
 //! This module owns the local file-backed store. Persisted layout:
 //! `<heddle_dir>/state/operation_dedup.bin` — rmp-serde encoded
@@ -74,9 +74,9 @@ pub struct DedupEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct DedupFile {
     format_version: u8,
-    /// Keyed by `format!("{verb}/{operation_id}")` so verb collisions are
-    /// resolved at the key level. `BTreeMap` gives deterministic on-disk
-    /// ordering for stable round-trip.
+    /// Keyed by `format!("{verb}/{operation_id}")` for compatibility with
+    /// existing on-disk stores. New reservations still enforce operation-id
+    /// uniqueness across verbs by scanning values before claiming a new key.
     entries: BTreeMap<String, DedupEntry>,
 }
 
@@ -104,6 +104,18 @@ pub enum DedupOutcome {
     Replay { response: Vec<u8> },
     InFlight,
     Conflict,
+}
+
+/// Safe-to-report metadata for an existing op-id slot. This deliberately
+/// omits cached response bytes; callers use it to explain conflicts without
+/// leaking command output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DedupConflictMetadata {
+    pub operation_id: OperationId,
+    pub verb: String,
+    pub request_hash: [u8; 32],
+    pub created_at_secs: i64,
+    pub pending: bool,
 }
 
 /// File-backed dedup store. Cheap to clone — the heavy lifting is behind a
@@ -155,6 +167,9 @@ impl OperationDedupStore {
     /// [`DedupOutcome::InFlight`] (matching body) or
     /// [`DedupOutcome::Conflict`] (mismatched body).
     ///
+    /// An operation id is unique within the store. Reusing it for a different
+    /// verb is a conflict even if the request body hash happens to match.
+    ///
     /// Caller contract: when [`DedupOutcome::Reserved`] is returned, the
     /// caller MUST follow up with either [`Self::record`] (on success) or
     /// [`Self::cancel`] (on failure) — otherwise the slot remains held
@@ -176,6 +191,13 @@ impl OperationDedupStore {
             }),
             Some(_) => Ok(DedupOutcome::Conflict),
             None => {
+                if inner
+                    .entries
+                    .values()
+                    .any(|entry| entry.operation_id == operation_id)
+                {
+                    return Ok(DedupOutcome::Conflict);
+                }
                 let entry = DedupEntry {
                     operation_id,
                     verb: verb.to_string(),
@@ -257,6 +279,32 @@ impl OperationDedupStore {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Return safe metadata for a previously reserved or completed slot.
+    pub fn metadata_for(
+        &self,
+        operation_id: OperationId,
+        verb: &str,
+    ) -> Option<DedupConflictMetadata> {
+        let key = key_for(verb, operation_id);
+        let inner = self.inner.lock().expect("dedup mutex poisoned");
+        inner
+            .entries
+            .get(&key)
+            .or_else(|| {
+                inner
+                    .entries
+                    .values()
+                    .find(|entry| entry.operation_id == operation_id)
+            })
+            .map(|entry| DedupConflictMetadata {
+                operation_id: entry.operation_id,
+                verb: entry.verb.clone(),
+                request_hash: entry.request_hash,
+                created_at_secs: entry.created_at_secs,
+                pending: entry.pending,
+            })
     }
 
     fn persist(&self, inner: &DedupFile) -> Result<()> {
@@ -391,15 +439,19 @@ mod tests {
     }
 
     #[test]
-    fn different_verbs_do_not_collide() {
+    fn same_op_id_with_different_verb_conflicts() {
         let (_t, store) = make_store();
         let op = OperationId::new();
         let hash = hash_request_body(b"x");
         store.record(op, "capture", hash, b"r1".to_vec()).unwrap();
         assert_eq!(
             store.reserve(op, "merge", hash).unwrap(),
-            DedupOutcome::Reserved
+            DedupOutcome::Conflict
         );
+        let metadata = store
+            .metadata_for(op, "merge")
+            .expect("cross-verb conflict should expose recorded metadata");
+        assert_eq!(metadata.verb, "capture");
     }
 
     #[test]

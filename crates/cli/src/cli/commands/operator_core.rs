@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::{path::Path, process::Command};
+use std::{collections::BTreeSet, path::Path};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+use gix::bstr::ByteSlice;
 use repo::{
     GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
     RepositoryOperationStatus,
 };
-use serde::Serialize;
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use super::{
     bisect::reset_bisect_state,
+    git_overlay_health::{action_argv, action_template, import_hint_includes_active_branch},
     rebase::{
         OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
         has_persisted_rebase_state,
@@ -19,7 +21,7 @@ use super::{
 };
 use crate::config::UserConfig;
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct OperatorCommandOutput {
     pub status: String,
     pub action: String,
@@ -27,18 +29,69 @@ pub(crate) struct OperatorCommandOutput {
     /// Reasons the operation could not advance state. Only populated
     /// when `status == "blocked"` or `status == "failed"`. When the
     /// operation succeeded with caveats, use `warnings` instead.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<String>,
     /// Non-blocking nudges surfaced when the operation actually
     /// advanced state but the caller may still want a follow-up
     /// (e.g. a heavy-impact change worth reviewing for broader impact).
     /// Always omitted when empty.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub recommended_action: Option<String>,
+}
+
+pub(crate) fn blocked_operator_exit_code(status: &str) -> Option<i32> {
+    matches!(status, "blocked" | "failed").then_some(1)
+}
+
+pub(crate) fn exit_if_blocked_operator_status(status: &str) {
+    if let Some(code) = blocked_operator_exit_code(status) {
+        std::process::exit(code);
+    }
+}
+
+impl Serialize for OperatorCommandOutput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let next_action = normalized_action(self.next_action.as_deref());
+        let recommended_action = normalized_action(self.recommended_action.as_deref());
+        let next_action_argv = next_action.and_then(action_argv);
+        let next_action_template = next_action.and_then(action_template);
+        let recommended_action_argv = recommended_action.and_then(action_argv);
+        let recommended_action_template = recommended_action.and_then(action_template);
+
+        let mut len = 10;
+        if !self.blockers.is_empty() {
+            len += 1;
+        }
+        if !self.warnings.is_empty() {
+            len += 1;
+        }
+
+        let mut state = serializer.serialize_struct("OperatorCommandOutput", len)?;
+        state.serialize_field("output_kind", &self.action)?;
+        state.serialize_field("status", &self.status)?;
+        state.serialize_field("action", &self.action)?;
+        state.serialize_field("message", &self.message)?;
+        if !self.blockers.is_empty() {
+            state.serialize_field("blockers", &self.blockers)?;
+        }
+        if !self.warnings.is_empty() {
+            state.serialize_field("warnings", &self.warnings)?;
+        }
+        state.serialize_field("next_action", &next_action)?;
+        state.serialize_field("next_action_argv", &next_action_argv)?;
+        state.serialize_field("next_action_template", &next_action_template)?;
+        state.serialize_field("recommended_action", &recommended_action)?;
+        state.serialize_field("recommended_action_argv", &recommended_action_argv)?;
+        state.serialize_field("recommended_action_template", &recommended_action_template)?;
+        state.end()
+    }
+}
+
+fn normalized_action(action: Option<&str>) -> Option<&str> {
+    action.filter(|action| !action.trim().is_empty())
 }
 
 pub(crate) fn open_operator_repo_from_path(path: &Path) -> Result<Repository> {
@@ -206,61 +259,23 @@ fn continue_from_operation(
         }),
         (OperationScope::Git, OperationKind::Rebase) => {
             let unresolved = git_unmerged_paths(repo)?;
-            if !unresolved.is_empty() {
-                return Ok(git_conflict_blocked_action(
-                    "rebase",
-                    "Git rebase still has unresolved conflicts",
-                    unresolved,
-                ));
-            }
-            run_git_control(repo, &["rebase", "--continue"])?;
-            Ok(simple_action(
-                "continued",
-                "rebase",
-                "Continued the in-progress Git rebase",
-            ))
+            Ok(raw_git_operation_handoff("continue", operation, unresolved))
         }
         (OperationScope::Git, OperationKind::Merge) => {
             let unresolved = git_unmerged_paths(repo)?;
-            if !unresolved.is_empty() {
-                return Ok(git_conflict_blocked_action(
-                    "merge",
-                    "Git merge still has unresolved conflicts",
-                    unresolved,
-                ));
-            }
-            run_git_control(repo, &["merge", "--continue"])?;
-            Ok(simple_action(
-                "continued",
-                "merge",
-                "Continued the in-progress Git merge",
-            ))
+            Ok(raw_git_operation_handoff("continue", operation, unresolved))
         }
         (OperationScope::Git, OperationKind::CherryPick) => {
-            continue_git_cherry_pick(repo)?;
-            Ok(simple_action(
-                "continued",
-                "cherry-pick",
-                "Continued the in-progress Git cherry-pick",
-            ))
+            let unresolved = git_unmerged_paths(repo)?;
+            Ok(raw_git_operation_handoff("continue", operation, unresolved))
         }
         (OperationScope::Git, OperationKind::Revert) => {
-            continue_git_revert(repo)?;
-            Ok(simple_action(
-                "continued",
-                "revert",
-                "Continued the in-progress Git revert",
-            ))
+            let unresolved = git_unmerged_paths(repo)?;
+            Ok(raw_git_operation_handoff("continue", operation, unresolved))
         }
-        (OperationScope::Git, OperationKind::Bisect) => Ok(OperatorCommandOutput {
-            status: "blocked".to_string(),
-            action: "bisect".to_string(),
-            message: "Git bisect needs a good/bad decision before it can continue".to_string(),
-            blockers: Vec::new(),
-            warnings: Vec::new(),
-            next_action: Some("git bisect good or git bisect bad".to_string()),
-            recommended_action: Some("git bisect good or git bisect bad".to_string()),
-        }),
+        (OperationScope::Git, OperationKind::Bisect) => {
+            Ok(raw_git_operation_handoff("continue", operation, Vec::new()))
+        }
         (OperationScope::Heddle, OperationKind::Merge) => unreachable!(),
         _ => Ok(OperatorCommandOutput {
             status: "noop".to_string(),
@@ -285,20 +300,9 @@ fn abort_from_operation(
         (OperationScope::Heddle, OperationKind::Bisect) => {
             reset_bisect_state(repo)?;
         }
-        (OperationScope::Git, OperationKind::Rebase) => {
-            run_git_control(repo, &["rebase", "--abort"])?
-        }
-        (OperationScope::Git, OperationKind::Merge) => {
-            run_git_control(repo, &["merge", "--abort"])?
-        }
-        (OperationScope::Git, OperationKind::CherryPick) => {
-            run_git_control(repo, &["cherry-pick", "--abort"])?
-        }
-        (OperationScope::Git, OperationKind::Revert) => {
-            run_git_control(repo, &["revert", "--abort"])?
-        }
-        (OperationScope::Git, OperationKind::Bisect) => {
-            run_git_control(repo, &["bisect", "reset"])?
+        (OperationScope::Git, _) => {
+            let unresolved = git_unmerged_paths(repo).unwrap_or_default();
+            return Ok(raw_git_operation_handoff("abort", operation, unresolved));
         }
         _ => {}
     }
@@ -317,35 +321,45 @@ fn abort_from_operation(
     })
 }
 
-fn simple_action(status: &str, action: &str, message: &str) -> OperatorCommandOutput {
+fn raw_git_operation_handoff(
+    attempted_action: &str,
+    operation: &RepositoryOperationStatus,
+    unresolved: Vec<String>,
+) -> OperatorCommandOutput {
+    let primary = raw_git_preservation_command();
+    let mut blockers = vec![format!(
+        "externally-started Git {} is {}",
+        operation.kind, operation.state
+    )];
+    blockers.extend(unresolved.iter().map(|path| format!("unresolved: {path}")));
+    let unresolved_summary = if unresolved.is_empty() {
+        String::new()
+    } else {
+        format!(" Unresolved paths: {}.", unresolved.join(", "))
+    };
+    let recovery_text = raw_git_operation_recovery_text(&operation.kind, &primary);
     OperatorCommandOutput {
-        status: status.to_string(),
-        action: action.to_string(),
-        message: message.to_string(),
-        blockers: Vec::new(),
+        status: "blocked".to_string(),
+        action: operation.kind.to_string(),
+        message: format!(
+            "Cannot {attempted_action} the active raw Git {} inside Heddle's no-git runtime. Heddle did not start this Git sequencer operation, so it left Git metadata, refs, index, and worktree files unchanged.{unresolved_summary} {recovery_text}",
+            operation.kind
+        ),
+        blockers,
         warnings: Vec::new(),
-        next_action: None,
-        recommended_action: None,
+        next_action: Some(primary.clone()),
+        recommended_action: Some(primary),
     }
 }
 
-fn git_conflict_blocked_action(
-    action: &str,
-    message: &str,
-    unresolved: Vec<String>,
-) -> OperatorCommandOutput {
-    OperatorCommandOutput {
-        status: "blocked".to_string(),
-        action: action.to_string(),
-        message: format!("{message}: {}", unresolved.join(", ")),
-        blockers: unresolved,
-        warnings: Vec::new(),
-        next_action: Some(
-            "Resolve the files, stage them with `git add <files>`, then run `heddle continue`"
-                .to_string(),
-        ),
-        recommended_action: Some("git add <files> && heddle continue".to_string()),
-    }
+fn raw_git_preservation_command() -> String {
+    "heddle bridge git status".to_string()
+}
+
+fn raw_git_operation_recovery_text(kind: &OperationKind, primary_command: &str) -> String {
+    format!(
+        "Inspect it with `{primary_command}`. Heddle did not start this raw Git {kind}, so finish or abort it with the Git-compatible tool that started it, then run `heddle verify` for the exact adoption command."
+    )
 }
 
 pub(crate) fn recommend_next_action(
@@ -360,7 +374,14 @@ pub(crate) fn recommend_next_action(
     if let Some(remote_tracking) = remote_tracking {
         if remote_tracking.behind > 0 {
             return if remote_tracking.ahead > 0 {
-                "heddle sync".to_string()
+                if remote_tracking.upstream.is_empty() {
+                    "heddle fetch".to_string()
+                } else {
+                    format!(
+                        "heddle bridge git import --ref {}",
+                        remote_tracking.upstream
+                    )
+                }
             } else {
                 "heddle pull".to_string()
             };
@@ -372,85 +393,65 @@ pub(crate) fn recommend_next_action(
         return fallback.to_string();
     }
     if let Some(hint) = import_hint {
-        return hint.recommended_command.clone();
+        if import_hint_includes_active_branch(hint) {
+            return hint.recommended_command.clone();
+        }
     }
     String::new()
 }
 
-pub(crate) fn run_git_control(repo: &Repository, args: &[&str]) -> Result<()> {
-    let (success, stderr) = run_git_control_attempt(repo, args)?;
-    if success {
-        return Ok(());
-    }
-
-    Err(anyhow!(
-        "git {} failed at '{}': {}",
-        args.join(" "),
-        repo.root().display(),
-        stderr
-    ))
-}
-
 fn git_unmerged_paths(repo: &Repository) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo.root())
-        .args(["diff", "--name-only", "--diff-filter=U"])
-        .output()
-        .map_err(|error| anyhow!("failed to inspect Git conflicts: {error}"))?;
-    if !output.status.success() {
-        return Ok(Vec::new());
+    let git = match gix::discover(repo.root()) {
+        Ok(git) => git,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let index = match git.index_or_empty() {
+        Ok(index) => index,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut paths = BTreeSet::new();
+    for (_, path) in index.entries_with_paths_by_filter_map(|path, entry| {
+        (entry.stage_raw() != 0).then(|| path.to_str_lossy().into_owned())
+    }) {
+        paths.insert(path);
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToString::to_string)
-        .collect())
+    Ok(paths.into_iter().collect())
 }
 
-fn run_git_control_attempt(repo: &Repository, args: &[&str]) -> Result<(bool, String)> {
-    let output = Command::new("git")
-        .env("GIT_EDITOR", "true")
-        .env("GIT_MERGE_AUTOEDIT", "no")
-        .arg("-C")
-        .arg(repo.root())
-        .args(args)
-        .output()
-        .map_err(|error| anyhow!("failed to run git {}: {}", args.join(" "), error))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Ok((output.status.success(), stderr))
-}
-
-fn continue_git_cherry_pick(repo: &Repository) -> Result<()> {
-    let (success, stderr) = run_git_control_attempt(repo, &["cherry-pick", "--continue"])?;
-    if success {
-        return Ok(());
+    #[test]
+    fn raw_git_operation_handoff_recommends_heddle_preservation_not_git_cli() {
+        let operation = RepositoryOperationStatus {
+            scope: OperationScope::Git,
+            kind: OperationKind::Merge,
+            in_progress: true,
+            state: "in-progress".to_string(),
+            message: "Git merge is in progress".to_string(),
+            next_action: raw_git_preservation_command(),
+        };
+        let output =
+            raw_git_operation_handoff("continue", &operation, vec!["conflict.txt".to_string()]);
+        assert_eq!(output.status, "blocked");
+        assert_eq!(
+            output.recommended_action.as_deref(),
+            Some("heddle bridge git status")
+        );
+        assert!(output.message.contains("no-git runtime"));
+        assert!(output.message.contains("conflict.txt"));
+        assert!(
+            output
+                .blockers
+                .iter()
+                .any(|path| path == "unresolved: conflict.txt")
+        );
+        assert!(
+            !output
+                .recommended_action
+                .as_deref()
+                .is_some_and(|action| action.starts_with("git "))
+        );
     }
-    if stderr.contains("previous cherry-pick is now empty") {
-        return run_git_control(repo, &["cherry-pick", "--skip"]);
-    }
-    Err(anyhow!(
-        "git cherry-pick --continue failed at '{}': {}",
-        repo.root().display(),
-        stderr
-    ))
-}
-
-fn continue_git_revert(repo: &Repository) -> Result<()> {
-    let (success, stderr) = run_git_control_attempt(repo, &["revert", "--continue"])?;
-    if success {
-        return Ok(());
-    }
-    if stderr.contains("previous cherry-pick is now empty")
-        || stderr.contains("previous revert is now empty")
-    {
-        return run_git_control(repo, &["revert", "--skip"]);
-    }
-    Err(anyhow!(
-        "git revert --continue failed at '{}': {}",
-        repo.root().display(),
-        stderr
-    ))
 }

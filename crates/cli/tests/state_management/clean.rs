@@ -122,7 +122,7 @@ fn test_clean_json_output() {
     setup_repo_with_file(&temp, "tracked.txt", "content");
     fs::write(temp.path().join("untracked.txt"), "untracked").unwrap();
     fs::write(temp.path().join("another.txt"), "another").unwrap();
-    let result = heddle(&["clean", "--force", "--json"], Some(temp.path()));
+    let result = heddle(&["clean", "--force", "--output", "json"], Some(temp.path()));
     assert!(result.is_ok());
     let output: Value = serde_json::from_str(&result.unwrap()).expect("output should be JSON");
     assert!(output.get("removed").is_some());

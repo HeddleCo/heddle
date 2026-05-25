@@ -12,7 +12,7 @@ public surface:
 1. **[AGENTS.md](AGENTS.md)** — contributor rules, scope boundaries, what
    docs are authoritative for which behavior.
 2. **[docs/PRINCIPLES.md](docs/PRINCIPLES.md)** — the five operating
-   principles (trust, disposability, composability, restraint, honesty).
+   principles (verification, disposability, composability, restraint, honesty).
    Every CLI change is graded against these. "If a change makes one of
    them weaker, the change is wrong."
 3. **[CLAUDE.md](CLAUDE.md)** — repo-level Claude Code hooks and the
@@ -144,7 +144,7 @@ From [docs/PRINCIPLES.md](docs/PRINCIPLES.md):
 
 > The surface is small on purpose, the outputs are honest on purpose,
 > and the verbs compose because the primitives beneath them are the
-> right shape. Five principles run through every command: trust,
+> right shape. Five principles run through every command: verification,
 > disposability, composability, restraint, honesty. Read this before
 > you add a verb, change a flag, or argue for a new output field.
 
