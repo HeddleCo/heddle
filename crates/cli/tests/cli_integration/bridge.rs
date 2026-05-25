@@ -192,3 +192,51 @@ fn test_cli_push_mirror_failure_does_not_abort_primary_push() {
         threads
     );
 }
+
+/// `--mirror` MUST require `=` to take an explicit value. Without
+/// `require_equals = true`, clap would consume the next token (the
+/// positional primary remote) as the mirror value, silently pushing
+/// the primary to the configured default and the mirror to the
+/// intended primary target.
+///
+/// Pins the behavior: `heddle push --mirror <PRIMARY>` parses
+/// `<PRIMARY>` as the positional remote, and `--mirror` takes its
+/// `default_missing_value` ("origin"). Since no `origin` git remote
+/// is configured here, the mirror push warns but does not abort.
+#[test]
+fn test_cli_push_mirror_requires_equals_does_not_swallow_positional() {
+    let source = TempDir::new().unwrap();
+    let weft_target = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    heddle(&["init"], Some(weft_target.path())).unwrap();
+    std::fs::write(source.path().join("file.txt"), "require equals").unwrap();
+    heddle(&["capture", "-m", "Initial"], Some(source.path())).unwrap();
+
+    let weft_path = weft_target.path().to_string_lossy().to_string();
+    // Space form with the positional remote immediately after
+    // `--mirror`. Without `require_equals=true`, clap consumes
+    // `weft_path` as the mirror's value, leaving the primary remote
+    // unspecified — silently inverting the user's intent. With
+    // `require_equals=true`, `--mirror` takes its
+    // `default_missing_value` and `weft_path` parses as the
+    // positional primary remote.
+    let result = heddle(
+        &["push", "--mirror", &weft_path, "--thread", "main"],
+        Some(source.path()),
+    );
+    assert!(
+        result.is_ok(),
+        "push must succeed; primary should land at <PRIMARY> and mirror default (origin) is best-effort: {:?}",
+        result.err()
+    );
+
+    // Primary push landed at the heddle target — proving the
+    // positional was NOT swallowed by --mirror.
+    let threads = heddle(&["thread", "list"], Some(weft_target.path())).unwrap();
+    assert!(
+        threads.contains("main"),
+        "primary push should land at the positional remote, not be swallowed by --mirror: {}",
+        threads
+    );
+}
