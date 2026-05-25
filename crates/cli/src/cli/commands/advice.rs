@@ -849,9 +849,154 @@ impl RecoveryAdvice {
         )
     }
 
+    pub(crate) fn from_git_bridge_error(
+        error: &crate::bridge::git_core::GitBridgeError,
+    ) -> Option<Self> {
+        use crate::bridge::git_core::GitBridgeError;
+        match error {
+            GitBridgeError::NonFastForwardRef { name, .. }
+                if name == crate::bridge::git_notes::NOTES_REF =>
+            {
+                Some(Self::git_overlay_note_ref_conflict())
+            }
+            GitBridgeError::NonFastForwardRef { name, .. } => name
+                .strip_prefix("refs/heads/")
+                .map(Self::git_overlay_remote_push_rejected),
+            GitBridgeError::Conflict(message) if is_git_overlay_mapping_conflict(message) => {
+                Some(Self::git_overlay_mapping_conflict())
+            }
+            GitBridgeError::GitHeddleThreadDiverged { thread, branch, .. } => {
+                Some(Self::git_heddle_thread_diverged(thread, branch))
+            }
+            GitBridgeError::RemoteDiverged {
+                branch, upstream, ..
+            } => Some(Self::git_overlay_remote_diverged(branch, upstream)),
+            GitBridgeError::ShallowClone {
+                repository,
+                retry_command,
+            } => Some(Self::git_overlay_shallow_clone(repository, retry_command)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn git_overlay_note_ref_conflict() -> Self {
+        Self::safety_refusal(
+            "git_overlay_note_ref_conflict",
+            "Remote Heddle notes do not fast-forward",
+            "Fetch the remote Heddle notes, then retry the push. If the conflict remains, create a fresh Heddle clone from the remote so Git-to-Heddle identity metadata stays authoritative.",
+            "updating refs/notes/heddle would replace remote Git-to-Heddle identity metadata instead of fast-forwarding it",
+            "pushing would remap commits that another Heddle checkout already identified",
+            "remote refs/notes/heddle was left unchanged",
+            "heddle fetch",
+            vec![
+                "heddle fetch".to_string(),
+                "heddle push".to_string(),
+                "heddle clone <remote> <fresh-path>".to_string(),
+            ],
+        )
+    }
+
+    pub(crate) fn git_overlay_mapping_conflict() -> Self {
+        Self::safety_refusal(
+            "git_overlay_mapping_conflict",
+            "Git-overlay mapping metadata disagrees with refs/notes/heddle",
+            "The local sidecar and refs/notes/heddle disagree about Git-to-Heddle identity. Use a fresh Heddle clone from the remote, or restore the notes ref from the checkout whose mapping is authoritative before retrying.",
+            "one Git commit maps to different Heddle change ids across the sidecar and refs/notes/heddle",
+            "continuing would corrupt or hide the Git/Heddle identity mapping",
+            "the command stopped before applying the requested ref or worktree update",
+            "heddle clone <remote> <fresh-path>",
+            vec!["heddle clone <remote> <fresh-path>".to_string()],
+        )
+    }
+
+    pub(crate) fn git_overlay_shallow_clone(
+        repository: &std::path::Path,
+        retry_command: &str,
+    ) -> Self {
+        let primary_command = "heddle clone <remote> <fresh-path>".to_string();
+        Self::safety_refusal(
+            "git_overlay_shallow_clone",
+            "Shallow Git repository cannot be imported",
+            format!(
+                "Import needs complete ancestry. Create or choose a complete checkout with `{primary_command}`, then retry with `{retry_command}`."
+            ),
+            format!(
+                "Git repository '{}' is shallow and does not contain the full commit ancestry Heddle needs to preserve stable change identity",
+                repository.display()
+            ),
+            "importing from this checkout would create an incomplete Git-to-Heddle history map",
+            "Heddle refs, Git refs, index, and worktree files were left unchanged",
+            primary_command.clone(),
+            vec![primary_command, retry_command.to_string()],
+        )
+    }
+
+    pub(crate) fn git_heddle_thread_diverged(thread: &str, branch: &str) -> Self {
+        let primary_command = format!("heddle bridge git reconcile --ref {branch} --preview");
+        let heddle_preview =
+            format!("heddle bridge git reconcile --prefer heddle --ref {branch} --preview");
+        let git_preview =
+            format!("heddle bridge git reconcile --prefer git --ref {branch} --preview");
+        Self::safety_refusal(
+            "git_heddle_thread_diverged",
+            "Git branch and Heddle thread have diverged",
+            format!(
+                "Inspect both local repair choices with `{primary_command}`. Preview mode does not move refs, update the index, change worktree files, push, or pull."
+            ),
+            format!(
+                "Heddle thread '{thread}' and Git branch '{branch}' both contain history the other side lacks"
+            ),
+            "importing or syncing now would need to choose whether the local Git branch or Heddle thread is authoritative",
+            "Heddle refs, Git refs, and worktree files were left unchanged",
+            primary_command.clone(),
+            vec![primary_command, heddle_preview, git_preview],
+        )
+    }
+
+    pub(crate) fn git_overlay_remote_push_rejected(branch: &str) -> Self {
+        let primary_command = "heddle fetch".to_string();
+        Self::safety_refusal(
+            "git_overlay_remote_diverged",
+            "Remote branch does not fast-forward the local Git checkpoint",
+            "Fetch first so Heddle can inspect the remote tip locally, then run `heddle verify` for the exact integration command.",
+            format!(
+                "pushing branch '{branch}' would rewrite the remote branch instead of fast-forwarding it"
+            ),
+            "pushing now would replace work that exists on the remote",
+            "the remote branch, local Git branch, Heddle refs, index, and worktree files were left unchanged",
+            primary_command.clone(),
+            vec![primary_command, "heddle verify".to_string()],
+        )
+    }
+
+    pub(crate) fn git_overlay_remote_diverged(branch: &str, upstream: &str) -> Self {
+        let import_command = format!("heddle bridge git import --ref {upstream}");
+        let merge_preview = format!("heddle merge {upstream} --preview");
+        Self::safety_refusal(
+            "git_overlay_remote_diverged",
+            "Remote branch does not fast-forward the local Git checkpoint",
+            format!(
+                "Import the fetched upstream tip with `{import_command}`, then preview integration with `{merge_preview}`."
+            ),
+            format!(
+                "local branch '{branch}' and upstream '{upstream}' both contain commits the other side lacks"
+            ),
+            "pulling now would need to integrate upstream work with local Heddle work before moving the branch",
+            "Heddle refs, the visible Git branch, and worktree files were left unchanged",
+            import_command.clone(),
+            vec![import_command, merge_preview],
+        )
+    }
+
     pub fn primary_hint(&self) -> &str {
         &self.hint
     }
+}
+
+fn is_git_overlay_mapping_conflict(message: &str) -> bool {
+    (message.starts_with("git oid ") || message.starts_with("change id "))
+        && message.contains(" mapped to ")
+        && message.contains(" (new ")
 }
 
 pub(crate) fn dirty_worktree_recovery_commands() -> Vec<String> {
@@ -892,3 +1037,53 @@ impl fmt::Display for RecoveryAdvice {
 }
 
 impl Error for RecoveryAdvice {}
+
+#[cfg(test)]
+mod tests {
+    use super::RecoveryAdvice;
+    use crate::bridge::git_core::GitBridgeError;
+
+    #[test]
+    fn git_bridge_mapping_conflict_returns_typed_advice() {
+        let error = GitBridgeError::Conflict(
+            "git oid abc mapped to old-change (new new-change)".to_string(),
+        );
+
+        let advice = RecoveryAdvice::from_git_bridge_error(&error)
+            .expect("mapping conflict should be classified");
+
+        assert_eq!(advice.kind, "git_overlay_mapping_conflict");
+        assert_eq!(advice.primary_command, "heddle clone <remote> <fresh-path>");
+        assert!(
+            advice
+                .unsafe_condition
+                .contains("one Git commit maps to different Heddle change ids")
+        );
+    }
+
+    #[test]
+    fn git_bridge_shallow_clone_returns_typed_advice() {
+        let retry_command = "heddle bridge git import --ref main";
+        let error = GitBridgeError::ShallowClone {
+            repository: std::path::PathBuf::from("/tmp/shallow"),
+            retry_command: retry_command.to_string(),
+        };
+
+        let advice = RecoveryAdvice::from_git_bridge_error(&error)
+            .expect("shallow clone should be classified");
+
+        assert_eq!(advice.kind, "git_overlay_shallow_clone");
+        assert_eq!(
+            advice.recovery_commands,
+            vec![
+                "heddle clone <remote> <fresh-path>".to_string(),
+                retry_command.to_string()
+            ]
+        );
+        assert!(
+            !advice.hint.contains("git fetch"),
+            "shallow recovery should stay no-git friendly: {}",
+            advice.hint
+        );
+    }
+}
