@@ -1423,7 +1423,10 @@ pub struct ThreadSummarySchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CloneSchema {
     pub output_kind: Option<String>,
+    pub action: Option<String>,
     pub status: Option<String>,
+    pub success: Option<bool>,
+    pub cloned: Option<bool>,
     pub transport: Option<String>,
     pub remote: Option<String>,
     pub local: Option<String>,
@@ -1431,6 +1434,8 @@ pub struct CloneSchema {
     pub repository_capability: Option<String>,
     pub commits_imported: Option<u64>,
     pub states_created: Option<u64>,
+    pub objects: Option<usize>,
+    pub state: Option<String>,
     #[serde(rename = "verification")]
     pub trust: Option<RepositoryVerificationStateSchema>,
 }

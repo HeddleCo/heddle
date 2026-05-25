@@ -18,8 +18,12 @@ use objects::{
 };
 use refs::Head;
 use repo::{BlobHydrator, Repository};
+use serde::Serialize;
 
-use super::{advice::RecoveryAdvice, git_overlay_health::build_repository_verification_state};
+use super::{
+    advice::RecoveryAdvice,
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+};
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
@@ -39,6 +43,89 @@ struct CloneOptions {
     depth: Option<u32>,
     lazy: bool,
     filter: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CloneOutput {
+    output_kind: &'static str,
+    action: &'static str,
+    status: &'static str,
+    success: bool,
+    cloned: bool,
+    transport: &'static str,
+    remote: String,
+    local: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository_capability: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commits_imported: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    states_created: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objects: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(rename = "verification")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trust: Option<RepositoryVerificationState>,
+}
+
+struct GitOverlayCloneOutputInput {
+    remote: String,
+    local: String,
+    branch: String,
+    commits_imported: usize,
+    states_created: usize,
+    trust: RepositoryVerificationState,
+}
+
+fn git_overlay_clone_output(input: GitOverlayCloneOutputInput) -> CloneOutput {
+    CloneOutput {
+        output_kind: "clone",
+        action: "clone",
+        status: "cloned",
+        success: true,
+        cloned: true,
+        transport: "git",
+        remote: input.remote,
+        local: input.local,
+        branch: Some(input.branch),
+        repository_capability: Some("git-overlay"),
+        commits_imported: Some(input.commits_imported),
+        states_created: Some(input.states_created),
+        objects: None,
+        state: None,
+        trust: Some(input.trust),
+    }
+}
+
+fn heddle_clone_output(
+    remote: String,
+    local: String,
+    branch: String,
+    objects: Option<usize>,
+    state: Option<String>,
+    trust: Option<RepositoryVerificationState>,
+) -> CloneOutput {
+    CloneOutput {
+        output_kind: "clone",
+        action: "clone",
+        status: "cloned",
+        success: true,
+        cloned: true,
+        transport: "heddle",
+        remote,
+        local,
+        branch: Some(branch),
+        repository_capability: Some("native"),
+        commits_imported: None,
+        states_created: None,
+        objects,
+        state,
+        trust,
+    }
 }
 
 pub async fn cmd_clone(
@@ -296,20 +383,15 @@ fn finish_git_overlay_clone(
 
     if should_output_json(cli, Some(repo.config())) {
         let trust = build_repository_verification_state(&repo);
-        println!(
-            "{}",
-            serde_json::json!({
-                "output_kind": "clone",
-                "status": "cloned",
-                "transport": "git",
-                "remote": remote_label,
-                "local": local_path.display().to_string(),
-                "branch": track_name,
-                "commits_imported": stats.commits_imported,
-                "states_created": stats.states_created,
-                "verification": trust,
-            })
-        );
+        let output = git_overlay_clone_output(GitOverlayCloneOutputInput {
+            remote: remote_label,
+            local: local_path.display().to_string(),
+            branch: track_name,
+            commits_imported: stats.commits_imported,
+            states_created: stats.states_created,
+            trust,
+        });
+        crate::cli::render::write_json_stdout(&output)?;
     } else {
         let repo_name = clone_repo_name_from_label(&remote_label);
         for line in format_clone_completion_lines(repo_name, stats.commits_imported, &track_name) {
@@ -978,16 +1060,15 @@ async fn clone_local(
     let origin_url = configure_local_clone_origin(&local_repo, remote_path)?;
 
     if should_output_json(cli, Some(local_repo.config())) {
-        println!(
-            "{}",
-            serde_json::json!({
-                "output_kind": "clone",
-                "status": "cloned",
-                "remote": origin_url,
-                "local": local_path.display().to_string(),
-                "objects": objects_copied,
-            })
+        let output = heddle_clone_output(
+            origin_url,
+            local_path.display().to_string(),
+            track_name.to_string(),
+            Some(objects_copied),
+            Some(state_id.to_string()),
+            Some(build_repository_verification_state(&local_repo)),
         );
+        crate::cli::render::write_json_stdout(&output)?;
     } else {
         let depth_info = depth.map(|d| format!(" (depth {})", d)).unwrap_or_default();
         println!(
@@ -1205,19 +1286,15 @@ async fn clone_network(
                 .context("failed to persist lazy-hydrator.toml")?;
         }
         if should_output_json(cli, Some(local_repo.config())) {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "output_kind": "clone",
-                    "status": "cloned",
-                    "remote": addr.to_string(),
-                    "local": local_path.display().to_string(),
-                    "state": result
-                        .final_state
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
-                })
+            let output = heddle_clone_output(
+                addr.to_string(),
+                local_path.display().to_string(),
+                track_name.to_string(),
+                None,
+                result.final_state.map(|state| state.to_string()),
+                Some(build_repository_verification_state(&local_repo)),
             );
+            crate::cli::render::write_json_stdout(&output)?;
         } else {
             let depth_info = depth.map(|d| format!(" (depth {})", d)).unwrap_or_default();
             println!(

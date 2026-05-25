@@ -10670,9 +10670,13 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
     .expect("heddle clone");
     let clone_output: Value = serde_json::from_str(&clone_json).expect("clone JSON parses");
     assert_eq!(clone_output["output_kind"], "clone");
+    assert_eq!(clone_output["action"], "clone");
     assert_eq!(clone_output["status"], "cloned");
+    assert_eq!(clone_output["success"], true);
+    assert_eq!(clone_output["cloned"], true);
     assert_eq!(clone_output["transport"], "git");
     assert_eq!(clone_output["branch"], "master");
+    assert_eq!(clone_output["repository_capability"], "git-overlay");
     assert_eq!(clone_output["commits_imported"], 2);
     assert_eq!(clone_output["states_created"], 2);
     assert_eq!(
