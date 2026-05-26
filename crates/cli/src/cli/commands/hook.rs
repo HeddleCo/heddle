@@ -3,9 +3,10 @@
 
 use std::io::{self, IsTerminal, Read};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow};
 use repo::{Hook, HookManager, Repository};
 
+use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, HookCommands, HookInstallSource, should_output_json};
 
 pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
@@ -28,8 +29,7 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
         }
 
         HookCommands::Install { name, source } => {
-            let hook =
-                Hook::from_name(&name).ok_or_else(|| anyhow::anyhow!("Unknown hook: {}", name))?;
+            let hook = Hook::from_name(&name).ok_or_else(|| hook_unknown_advice(&name))?;
             let content = load_hook_script(source)?;
 
             manager.install(hook, &content)?;
@@ -42,8 +42,7 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
         }
 
         HookCommands::Uninstall { name } => {
-            let hook =
-                Hook::from_name(&name).ok_or_else(|| anyhow::anyhow!("Unknown hook: {}", name))?;
+            let hook = Hook::from_name(&name).ok_or_else(|| hook_unknown_advice(&name))?;
 
             let removed = manager.uninstall(hook)?;
 
@@ -113,16 +112,55 @@ fn load_hook_script(source: HookInstallSource) -> Result<String> {
         return read_hook_stdin().context("failed to read hook script from stdin");
     }
 
-    bail!("hook install requires --from-file <path> or stdin input")
+    Err(anyhow!(hook_install_source_required_advice()))
 }
 
 fn read_hook_stdin() -> Result<String> {
     let mut content = String::new();
     io::stdin().read_to_string(&mut content)?;
     if content.is_empty() {
-        bail!("hook install received empty stdin; pass --from-file <path> or pipe script content");
+        return Err(anyhow!(hook_install_empty_stdin_advice()));
     }
     Ok(content)
+}
+
+fn hook_unknown_advice(name: &str) -> anyhow::Error {
+    anyhow!(RecoveryAdvice::safety_refusal(
+        "hook_unknown",
+        format!("Unknown hook: {name}"),
+        "Inspect supported hooks with `heddle hook events`, then retry with one of those names.",
+        format!("hook '{name}' is not registered in the hook event catalog"),
+        "installing or uninstalling an unknown hook would create policy state the runtime never executes",
+        "no hook files or hook metadata were changed",
+        "heddle hook events",
+        vec!["heddle hook events".to_string()],
+    ))
+}
+
+fn hook_install_source_required_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "hook_install_source_required",
+        "hook install requires --from-file <path> or stdin input",
+        "Pass `--from-file <path>` or pipe hook content with `--from-stdin`.",
+        "hook install was invoked without a script source",
+        "installing an empty or implicit hook would create policy behavior the user did not provide",
+        "no hook file was written",
+        "heddle hook install <name> --from-file <path>",
+        vec!["heddle hook install <name> --from-file <path>".to_string()],
+    )
+}
+
+fn hook_install_empty_stdin_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "hook_install_empty_stdin",
+        "hook install received empty stdin; pass --from-file <path> or pipe script content",
+        "Pass `--from-file <path>` or pipe non-empty hook content with `--from-stdin`.",
+        "hook install read an empty stdin stream",
+        "installing an empty hook could silently replace expected repository policy",
+        "no hook file was written",
+        "heddle hook install <name> --from-file <path>",
+        vec!["heddle hook install <name> --from-file <path>".to_string()],
+    )
 }
 
 #[cfg(test)]

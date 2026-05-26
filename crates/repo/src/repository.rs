@@ -50,11 +50,9 @@ mod status_tracked_refresh;
 mod status_untracked_scan;
 
 use std::{
-    collections::HashMap,
-    fs,
-    io::Write,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs, io,
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, RwLock},
 };
 
@@ -65,6 +63,10 @@ pub use context_suggestions::{
     MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW,
     compute_rewrite_pct, is_major_rewrite,
 };
+use gix::{
+    bstr::{BStr, ByteSlice},
+    prelude::ObjectIdExt,
+};
 pub use objects::object::DiffKind;
 use objects::{
     error::{HeddleError, Result},
@@ -72,9 +74,9 @@ use objects::{
     lock::{RepoLock, RepositoryLockExt},
     object::{Attribution, ChangeId, ContentHash, Principal, State, Tree},
     store::{FsStore, ObjectStore, ShallowInfo},
-    worktree::WorktreeStatus,
+    worktree::{WorktreeStatus, should_ignore as should_ignore_path},
 };
-use oplog::{OpLog, OpLogBackend};
+use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefManager};
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
@@ -93,19 +95,26 @@ pub use repository_maintenance::{
     RepositoryPerformanceInspectionReport, WorktreeIndexInspection,
 };
 pub use repository_materialization::WarmCanonicalStoreStats;
-pub use repository_thread_materialize::ThreadCaptureOutcome;
 pub use repository_partial_fetch::MissingBlob;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
+pub use repository_thread_materialize::ThreadCaptureOutcome;
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
 use serde::{Deserialize, Serialize};
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
+const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryCapability {
     GitOverlay,
     NativeHeddle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GitHeadState {
+    Attached(String),
+    Detached(gix::hash::ObjectId),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +138,8 @@ pub struct GitOverlayBranchTip {
     pub branch: String,
     pub git_commit: String,
     pub history_imported: bool,
+    #[serde(skip)]
+    pub mapped_change: Option<ChangeId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +147,8 @@ pub struct GitOverlayTagTip {
     pub tag: String,
     pub git_commit: String,
     pub history_imported: bool,
+    #[serde(skip)]
+    pub mapped_change: Option<ChangeId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,8 +205,18 @@ pub struct GitRemoteTrackingStatus {
     pub upstream: String,
     pub ahead: usize,
     pub behind: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub upstream_is_undone_checkpoint: bool,
     pub message: String,
     pub next_action: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,6 +258,7 @@ pub trait BlobHydrator: Send + Sync {
 pub struct Repository {
     root: PathBuf,
     heddle_dir: PathBuf,
+    capability: RepositoryCapability,
     store: Box<dyn ObjectStore>,
     refs: Box<dyn RefBackend>,
     oplog: Box<dyn OpLogBackend>,
@@ -270,9 +294,11 @@ impl Repository {
         config: RepoConfig,
         shallow: ShallowInfo,
     ) -> Self {
+        let capability = repository_capability_for_root(&root);
         Self {
             root,
             heddle_dir,
+            capability,
             store,
             refs,
             oplog,
@@ -307,10 +333,8 @@ impl Repository {
         );
         // Run any pending declarative migrations. Idempotent:
         // re-opening a repo a second time is a no-op for the migration pass.
-        // Failures here are logged but non-fatal — the inline
-        // `migrate_legacy_tracks` calls before this point already handle the
-        // load-bearing work, and surfacing migration errors through `open` is
-        // worse than letting the repo open and warning later.
+        // Failures here are logged but non-fatal; surfacing migration errors
+        // through `open` is worse than letting the repo open and warning later.
         if let Err(err) = crate::migration::apply_pending(&repo) {
             tracing::warn!("declarative migrations failed during repo open: {err}");
         }
@@ -433,9 +457,11 @@ impl Repository {
             thread: "main".to_string(),
         })?;
 
+        let capability = repository_capability_for_root(&root);
         Ok(Self {
             root,
             heddle_dir: heddle_dir.clone(),
+            capability,
             store: Box::new(store),
             refs: Box::new(refs),
             oplog: Box::new(oplog),
@@ -477,6 +503,13 @@ impl Repository {
         Ok(repo)
     }
 
+    /// Install local, untracked Git exclude rules Heddle needs for Git-overlay
+    /// repos. Only Heddle's sidecar is excluded automatically; project
+    /// artifacts must be covered by `.gitignore` or `.heddleignore`.
+    pub fn ensure_git_overlay_local_excludes(path: impl AsRef<Path>) -> Result<()> {
+        ensure_git_overlay_exclude(path.as_ref())
+    }
+
     /// Open an existing Heddle repository using a custom object store backend.
     pub fn open_with_store(
         heddle_dir: impl AsRef<Path>,
@@ -494,8 +527,6 @@ impl Repository {
             .to_path_buf();
         let config = RepoConfig::load(&heddle_dir.join("config.toml"))?;
         let refs = RefManager::new(&heddle_dir);
-        refs.migrate_legacy_tracks()?;
-        refs.cleanup_stale_temps();
         Self::open_raw(root, heddle_dir, store, config, refs)
     }
 
@@ -512,10 +543,13 @@ impl Repository {
     ///   (per-checkout cached state).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let start_path = path.as_ref().canonicalize()?;
-        let discovered_git_root = discover_git_root(&start_path);
+        let mut discovered_git_root = None;
 
         let mut current = Some(start_path.as_path());
         while let Some(dir) = current {
+            if discovered_git_root.is_none() && has_git_metadata(dir) {
+                discovered_git_root = Some(dir.to_path_buf());
+            }
             let heddle_path = dir.join(".heddle");
 
             if heddle_path.is_dir() {
@@ -574,8 +608,6 @@ impl Repository {
                         Self::build_store(&config, &shared_galeed_dir)?;
                     let local_head_path = heddle_path.join("HEAD");
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
-                    refs.migrate_legacy_tracks()?;
-                    refs.cleanup_stale_temps();
                     return Self::open_raw(
                         dir.to_path_buf(),
                         shared_galeed_dir,
@@ -590,41 +622,57 @@ impl Repository {
                     let config = RepoConfig::load(&heddle_path.join("config.toml"))?;
                     let store: Box<dyn ObjectStore> = Self::build_store(&config, &heddle_path)?;
                     let refs = RefManager::new(&heddle_path);
-                    refs.migrate_legacy_tracks()?;
-                    refs.cleanup_stale_temps();
                     let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
-                    if repo.capability() == RepositoryCapability::GitOverlay
-                        && let Ok(Some(git_head)) = detect_git_head(dir)
-                    {
-                        // Avoid the disk write when our HEAD already matches
-                        // git's. Reading the existing head is a small file
-                        // read; the write that follows hits atomic-rename
-                        // machinery (sync + rename) which dominates here.
-                        //
-                        // Detached HEAD only counts as an explicit user
-                        // override (e.g. `heddle goto`) when the detached
-                        // state diverges from git's current branch tip.
-                        // `cmd_clone` writes Head::Attached then calls
-                        // repo.goto() — which unconditionally detaches —
-                        // and relies on this reopen path to re-attach;
-                        // when the detached state still matches the branch
-                        // tip we treat that as a bootstrap leftover and
-                        // sync. A user `heddle goto <other>` lands on a
-                        // state that does *not* match the branch tip, so
-                        // it survives (heddle#146).
-                        let stale = match (repo.refs.read_head(), &git_head) {
-                            (Ok(Head::Detached { state }), Head::Attached { thread }) => {
-                                match repo.refs.get_thread(thread) {
-                                    Ok(Some(tip)) => tip == state,
-                                    _ => false,
+                    if repo.capability() == RepositoryCapability::GitOverlay {
+                        match detect_git_head_state(dir) {
+                            Ok(Some(GitHeadState::Attached(thread))) => {
+                                let git_head = Head::Attached { thread };
+                                // Avoid the disk write when our HEAD already matches
+                                // git's. Reading the existing head is a small file
+                                // read; the write that follows hits atomic-rename
+                                // machinery (sync + rename) which dominates here.
+                                //
+                                // Detached Heddle HEAD only counts as an explicit user
+                                // override (e.g. `heddle goto`) when the detached
+                                // state diverges from git's current branch tip.
+                                // `cmd_clone` writes Head::Attached then calls
+                                // repo.goto() — which unconditionally detaches —
+                                // and relies on this reopen path to re-attach;
+                                // when the detached state still matches the branch
+                                // tip we treat that as a bootstrap leftover and
+                                // sync. A user `heddle goto <other>` lands on a
+                                // state that does *not* match the branch tip, so
+                                // it survives (heddle#146).
+                                let stale = match (repo.refs.read_head(), &git_head) {
+                                    (Ok(Head::Detached { state }), Head::Attached { thread }) => {
+                                        match repo.refs.get_thread(thread) {
+                                            Ok(Some(tip)) => tip == state,
+                                            _ => false,
+                                        }
+                                    }
+                                    (Ok(Head::Detached { .. }), _) => false,
+                                    (Ok(current), _) => current != git_head,
+                                    (Err(_), _) => true,
+                                };
+                                if stale {
+                                    repo.refs.write_head(&git_head)?;
                                 }
                             }
-                            (Ok(Head::Detached { .. }), _) => false,
-                            (Ok(current), _) => current != git_head,
-                            (Err(_), _) => true,
-                        };
-                        if stale {
-                            repo.refs.write_head(&git_head)?;
+                            Ok(Some(GitHeadState::Detached(git_oid))) => {
+                                if let Ok(Some(state)) =
+                                    repo.git_overlay_mapped_change_for_git_oid(git_oid)
+                                {
+                                    let git_head = Head::Detached { state };
+                                    let stale = match repo.refs.read_head() {
+                                        Ok(current) => current != git_head,
+                                        Err(_) => true,
+                                    };
+                                    if stale {
+                                        repo.refs.write_head(&git_head)?;
+                                    }
+                                }
+                            }
+                            Ok(None) | Err(_) => {}
                         }
                     }
                     return Ok(repo);
@@ -655,11 +703,7 @@ impl Repository {
     }
 
     pub fn capability(&self) -> RepositoryCapability {
-        if has_git_metadata(&self.root) {
-            RepositoryCapability::GitOverlay
-        } else {
-            RepositoryCapability::NativeHeddle
-        }
+        self.capability
     }
 
     pub fn capability_label(&self) -> &'static str {
@@ -691,6 +735,13 @@ impl Repository {
     }
 
     pub fn current_lane(&self) -> Result<Option<String>> {
+        if self.capability() == RepositoryCapability::GitOverlay
+            && self.git_overlay_head_is_detached()?
+            && detect_git_in_progress_branch(&self.root)?.is_none()
+        {
+            return Ok(None);
+        }
+
         if self.current_state()?.is_none() && self.capability() == RepositoryCapability::GitOverlay
         {
             return self.git_overlay_current_branch();
@@ -719,93 +770,148 @@ impl Repository {
             None => return Ok(None),
         };
 
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])
-            .output()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect upstream drift at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?;
-
-        if !output.status.success() {
-            return Ok(None);
-        }
-
-        let counts = String::from_utf8_lossy(&output.stdout);
-        let mut parts = counts.split_whitespace();
-        let behind = parts
-            .next()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0);
-        let ahead = parts
-            .next()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0);
-        if ahead == 0 && behind == 0 {
-            return Ok(None);
-        }
-
-        let upstream_output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args([
-                "rev-parse",
-                "--abbrev-ref",
-                "--symbolic-full-name",
-                "@{upstream}",
-            ])
-            .output()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect upstream branch at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?;
-
-        if !upstream_output.status.success() {
-            return Ok(None);
-        }
-
-        let upstream = String::from_utf8_lossy(&upstream_output.stdout)
-            .trim()
-            .to_string();
-        if upstream.is_empty() {
-            return Ok(None);
-        }
-
-        let message = match (ahead, behind) {
-            (0, behind) => format!(
-                "Git branch '{}' is behind upstream '{}' by {} commit(s)",
-                branch, upstream, behind
-            ),
-            (ahead, 0) => format!(
-                "Git branch '{}' is ahead of upstream '{}' by {} commit(s)",
-                branch, upstream, ahead
-            ),
-            (ahead, behind) => format!(
-                "Git branch '{}' has diverged from upstream '{}' (ahead {}, behind {})",
-                branch, upstream, ahead, behind
-            ),
+        let git = match gix::discover(&self.root) {
+            Ok(git) => git,
+            Err(_) => return Ok(None),
         };
-        let next_action = match (ahead, behind) {
-            (0, _) => "git pull --rebase".to_string(),
-            (_, 0) => "git push".to_string(),
-            _ => "git fetch && git rebase @{upstream}".to_string(),
+        let Some(head) = git_resolve_oid(&git, "HEAD")? else {
+            return Ok(None);
         };
+
+        let local_ref_name = format!("refs/heads/{branch}");
+        if let Some(local_ref) = git_find_reference(&git, &local_ref_name)? {
+            if let Some(tracking_ref_name) =
+                local_ref.remote_tracking_ref_name(gix::remote::Direction::Fetch)
+            {
+                let tracking_ref_name = tracking_ref_name.map_err(|error| {
+                    HeddleError::Config(format!(
+                        "failed to inspect upstream branch at '{}': {error}",
+                        self.root.display()
+                    ))
+                })?;
+                let tracking_ref = tracking_ref_name.as_ref();
+                let tracking_name = tracking_ref.as_bstr().to_str_lossy().into_owned();
+                if let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)? {
+                    let (ahead, behind) = git_ahead_behind(&self.root, &git, upstream_head, head)?;
+                    if ahead == 0 && behind == 0 {
+                        return Ok(None);
+                    }
+                    let upstream = git_remote_tracking_display_name(&tracking_name);
+                    let local_oid = head.to_string();
+                    let upstream_oid = upstream_head.to_string();
+                    let upstream_is_undone_checkpoint = self.remote_tracks_undone_git_checkpoint(
+                        &branch,
+                        &local_oid,
+                        &upstream_oid,
+                    )?;
+                    return Ok(Some(GitRemoteTrackingStatus {
+                        branch: branch.clone(),
+                        upstream: upstream.clone(),
+                        ahead,
+                        behind,
+                        local_oid: Some(local_oid),
+                        upstream_oid: Some(upstream_oid),
+                        upstream_is_undone_checkpoint,
+                        message: git_remote_tracking_message(
+                            &branch,
+                            &upstream,
+                            ahead,
+                            behind,
+                            upstream_is_undone_checkpoint,
+                        ),
+                        next_action: git_remote_tracking_next_action(
+                            ahead,
+                            behind,
+                            upstream_is_undone_checkpoint,
+                        ),
+                    }));
+                }
+            }
+        }
+
+        let remotes = git_remote_names(&self.root)?;
+        if remotes.is_empty() {
+            return Ok(None);
+        }
+        for remote in &remotes {
+            let remote_ref = format!("refs/remotes/{remote}/{branch}");
+            if let Some(remote_head) = git_resolve_oid(&git, &remote_ref)? {
+                if remote_head == head {
+                    return Ok(None);
+                }
+                let (ahead, behind) = git_ahead_behind(&self.root, &git, remote_head, head)?;
+                if behind > 0 {
+                    let upstream = format!("{remote}/{branch}");
+                    let local_oid = head.to_string();
+                    let upstream_oid = remote_head.to_string();
+                    let upstream_is_undone_checkpoint = self.remote_tracks_undone_git_checkpoint(
+                        &branch,
+                        &local_oid,
+                        &upstream_oid,
+                    )?;
+                    return Ok(Some(GitRemoteTrackingStatus {
+                        branch: branch.clone(),
+                        upstream: upstream.clone(),
+                        ahead,
+                        behind,
+                        local_oid: Some(local_oid),
+                        upstream_oid: Some(upstream_oid),
+                        upstream_is_undone_checkpoint,
+                        message: git_remote_tracking_message(
+                            &branch,
+                            &upstream,
+                            ahead,
+                            behind,
+                            upstream_is_undone_checkpoint,
+                        ),
+                        next_action: git_remote_tracking_next_action(
+                            ahead,
+                            behind,
+                            upstream_is_undone_checkpoint,
+                        ),
+                    }));
+                }
+            }
+        }
 
         Ok(Some(GitRemoteTrackingStatus {
-            branch,
-            upstream,
-            ahead,
-            behind,
-            message,
-            next_action,
+            branch: branch.clone(),
+            upstream: String::new(),
+            ahead: 0,
+            behind: 0,
+            local_oid: Some(head.to_string()),
+            upstream_oid: None,
+            upstream_is_undone_checkpoint: false,
+            message: format!("Git branch '{branch}' has no upstream tracking branch"),
+            next_action: "heddle push".to_string(),
+        }))
+    }
+
+    fn remote_tracks_undone_git_checkpoint(
+        &self,
+        branch: &str,
+        local_oid: &str,
+        upstream_oid: &str,
+    ) -> Result<bool> {
+        let scope = self.op_scope();
+        let batches = self.oplog().redo_batches_scoped(64, Some(&scope))?;
+        Ok(batches.iter().any(|batch| {
+            batch.entries.iter().any(|entry| {
+                if !entry.undone {
+                    return false;
+                }
+                matches!(
+                    &entry.operation,
+                    OpRecord::GitCheckpoint {
+                        branch: checkpoint_branch,
+                        previous_git_oid: Some(previous_git_oid),
+                        new_git_oid,
+                        ..
+                    } if checkpoint_branch == branch
+                        && previous_git_oid == local_oid
+                        && new_git_oid == upstream_oid
+                )
+            })
         }))
     }
 
@@ -819,22 +925,58 @@ impl Repository {
             None => return Ok(None),
         };
         let branch_tips = self.git_overlay_branch_tips()?;
+        let imported_threads: std::collections::HashSet<String> =
+            self.refs().list_threads()?.into_iter().collect();
+        let threads_with_real_history: std::collections::HashSet<String> = imported_threads
+            .iter()
+            .filter_map(|thread| {
+                self.refs()
+                    .get_thread(thread)
+                    .ok()
+                    .flatten()
+                    .and_then(|change| self.store.get_state(&change).ok())
+                    .flatten()
+                    .filter(|state| !is_synthetic_root(state))
+                    .map(|_| thread.clone())
+            })
+            .collect();
         let mut missing_branches = branch_tips
             .into_iter()
-            .filter(|tip| tip.branch != current_branch && !tip.history_imported)
+            .filter(|tip| {
+                !tip.history_imported
+                    && !(threads_with_real_history.contains(&tip.branch)
+                        && tip.mapped_change.is_some())
+            })
             .map(|tip| tip.branch)
             .collect::<Vec<_>>();
-        missing_branches.sort();
+        missing_branches.sort_by(|left, right| {
+            match (left == &current_branch, right == &current_branch) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => left.cmp(right),
+            }
+        });
         missing_branches.dedup();
 
         if missing_branches.is_empty() {
             return Ok(None);
         }
 
-        let recommended_command = if missing_branches.len() == 1 {
-            format!("heddle bridge git import --ref {}", missing_branches[0])
+        let missing_tags = self
+            .git_overlay_tag_tips()?
+            .into_iter()
+            .any(|tip| !tip.history_imported);
+        let recommended_command = if missing_branches.len() > 1 || missing_tags {
+            "heddle adopt".to_string()
+        } else if missing_branches
+            .iter()
+            .any(|branch| branch == &current_branch)
+        {
+            format!("heddle adopt --ref {current_branch}")
+        } else if missing_branches.len() == 1 {
+            format!("heddle adopt --ref {}", missing_branches[0])
         } else {
-            "heddle bridge git import".to_string()
+            "heddle adopt".to_string()
         };
 
         Ok(Some(GitOverlayImportHint {
@@ -861,6 +1003,7 @@ impl Repository {
         let imported_threads: std::collections::HashSet<String> =
             self.refs().list_threads()?.into_iter().collect();
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut branch_tips = Vec::new();
 
         for branch in git_repo
@@ -894,32 +1037,42 @@ impl Repository {
             else {
                 continue;
             };
+            let git_commit = target.to_string();
+            let mapped_change = self.git_overlay_mapped_change_for_commit(
+                &git_commit,
+                &bridge_mapping,
+                &checkpoint_mapping,
+            )?;
             let history_imported = if imported_threads.contains(&name) {
                 // Read the thread ref once; the mapped + checkpointed
                 // checks each used to re-read it, which doubled the
                 // ref-store hits per branch on a 60+ branch repo.
                 let existing_thread = self.refs().get_thread(&name)?;
                 let mapped = matches!(
-                    (existing_thread.as_ref(), bridge_mapping.get(&target.to_string())),
+                    (existing_thread.as_ref(), mapped_change.as_ref()),
                     (Some(existing), Some(mapped_change))
-                        if existing.to_string_full() == *mapped_change
+                        if existing == mapped_change
                 );
                 let checkpointed = if mapped {
                     false
                 } else if let Some(existing) = existing_thread {
                     self.latest_git_checkpoint_for_change(&existing)?
-                        .is_some_and(|record| record.git_commit == target.to_string())
+                        .is_some_and(|record| record.git_commit == git_commit)
+                        || mapped_change.as_ref().is_some_and(|mapped_change| {
+                            self.change_is_ancestor(mapped_change, &existing)
+                        })
                 } else {
                     false
                 };
                 mapped || checkpointed
             } else {
-                false
+                mapped_change.is_some()
             };
             branch_tips.push(GitOverlayBranchTip {
                 branch: name,
-                git_commit: target.to_string(),
+                git_commit,
                 history_imported,
+                mapped_change,
             });
         }
 
@@ -943,6 +1096,7 @@ impl Repository {
         let imported_markers: std::collections::HashSet<String> =
             self.refs().list_markers()?.into_iter().collect();
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut tag_tips = Vec::new();
 
         for tag in git_repo
@@ -976,19 +1130,25 @@ impl Repository {
             else {
                 continue;
             };
+            let git_commit = target.to_string();
+            let mapped_change = self.git_overlay_mapped_change_for_commit(
+                &git_commit,
+                &bridge_mapping,
+                &checkpoint_mapping,
+            )?;
             let history_imported = if imported_markers.contains(&name) {
                 matches!(
-                    (self.refs().get_marker(&name)?, bridge_mapping.get(&target.to_string())),
-                    (Some(existing), Some(mapped_change))
-                        if existing.to_string_full() == *mapped_change
+                    (self.refs().get_marker(&name)?, mapped_change.as_ref()),
+                    (Some(existing), Some(mapped_change)) if existing == *mapped_change
                 )
             } else {
                 false
             };
             tag_tips.push(GitOverlayTagTip {
                 tag: name,
-                git_commit: target.to_string(),
+                git_commit,
                 history_imported,
+                mapped_change,
             });
         }
 
@@ -1010,93 +1170,122 @@ impl Repository {
             .find(|tip| tip.tag == name))
     }
 
+    pub fn git_overlay_mapped_change_for_branch(&self, name: &str) -> Result<Option<ChangeId>> {
+        Ok(self
+            .git_overlay_branch_tip(name)?
+            .and_then(|tip| tip.mapped_change))
+    }
+
+    pub fn git_overlay_mapped_change_for_tag(&self, name: &str) -> Result<Option<ChangeId>> {
+        Ok(self
+            .git_overlay_tag_tip(name)?
+            .and_then(|tip| tip.mapped_change))
+    }
+
+    fn change_is_ancestor(&self, ancestor: &ChangeId, descendant: &ChangeId) -> bool {
+        let mut graph = CommitGraphIndex::new(self);
+        graph.is_ancestor(ancestor, descendant).unwrap_or(false)
+    }
+
     pub fn git_overlay_worktree_status(&self) -> Result<Option<WorktreeStatus>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
-        // heddle#152: `heddle clone <url>` writes `.git/` as a bare
-        // mirror (`gix::init_bare`), so the embedded git has no
-        // working tree. Shelling out to `git -C <root> status
-        // --porcelain` then fails with "fatal: this operation must be
-        // run in a work tree" and surfaces as
-        // `Error: configuration error: git status failed at '...'`.
-        // When the embedded git is bare, report "no overlay status
-        // available" so callers fall back to heddle's own
-        // tree-compare path.
-        if let Ok(git_repo) = gix::open(&self.root)
-            && git_repo.workdir().is_none()
-        {
+        let git_repo = match gix::discover(&self.root) {
+            Ok(repo) => repo,
+            Err(_) => return Ok(None),
+        };
+        if git_repo.workdir().is_none() {
             return Ok(None);
         }
 
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(["status", "--porcelain", "--untracked-files=all"])
-            .output()
+        let index = git_repo.index_or_empty().map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to inspect Git index at '{}': {}",
+                self.root.display(),
+                error
+            ))
+        })?;
+        let head_tree = git_repo.head_tree_id_or_empty().map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to inspect Git HEAD tree at '{}': {}",
+                self.root.display(),
+                error
+            ))
+        })?;
+        let head_index = git_repo
+            .index_from_tree(head_tree.as_ref())
             .map_err(|error| {
                 HeddleError::Config(format!(
-                    "failed to inspect git worktree at '{}': {}",
+                    "failed to inspect Git HEAD tree at '{}': {}",
                     self.root.display(),
                     error
                 ))
             })?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(HeddleError::Config(format!(
-                "git status failed at '{}': {}",
-                self.root.display(),
-                stderr
-            )));
+        let mut head_entries = BTreeMap::new();
+        for (_, (path, entry)) in head_index.entries_with_paths_by_filter_map(|path, entry| {
+            Some((git_path(path), (entry.id, entry.mode.bits())))
+        }) {
+            head_entries.insert(path, entry);
+        }
+        let mut index_entries = BTreeMap::new();
+        for (_, (path, entry)) in index.entries_with_paths_by_filter_map(|path, entry| {
+            Some((git_path(path), (entry.id, entry.mode.bits())))
+        }) {
+            index_entries.insert(path, entry);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut status = WorktreeStatus::default();
-        for line in stdout.lines() {
-            if line.len() < 3 {
-                continue;
-            }
-            let code = &line[..2];
-            let raw_path = &line[3..];
-            if (code.starts_with('R') || code.ends_with('R'))
-                && let Some((old_path, new_path)) = raw_path.split_once(" -> ")
-            {
-                let old_path = PathBuf::from(old_path);
-                let new_path = PathBuf::from(new_path);
-                if !(old_path == Path::new(".heddle") || old_path.starts_with(".heddle")) {
-                    status.deleted.push(old_path);
-                }
-                if !(new_path == Path::new(".heddle") || new_path.starts_with(".heddle")) {
-                    status.added.push(new_path);
-                }
-                continue;
-            }
-            let path = raw_path
-                .rsplit_once(" -> ")
-                .map(|(_, new_path)| new_path)
-                .unwrap_or(raw_path);
-            let path = PathBuf::from(path);
-            if path == Path::new(".heddle") || path.starts_with(".heddle") {
-                continue;
-            }
+        let mut added = BTreeSet::new();
+        let mut modified = BTreeSet::new();
+        let mut deleted = BTreeSet::new();
 
-            if code == "??" {
-                status.added.push(path);
+        for (path, entry) in &index_entries {
+            if ignored_git_overlay_status_path(path) {
                 continue;
             }
-
-            let chars: Vec<char> = code.chars().collect();
-            if chars.contains(&'D') {
-                status.deleted.push(path);
-            } else if chars.contains(&'A') {
-                status.added.push(path);
-            } else {
-                status.modified.push(path);
+            match head_entries.get(path) {
+                None => {
+                    added.insert(PathBuf::from(path));
+                }
+                Some(head_entry) if head_entry != entry => {
+                    modified.insert(PathBuf::from(path));
+                }
+                Some(_) => {}
+            }
+        }
+        for path in head_entries.keys() {
+            if !ignored_git_overlay_status_path(path) && !index_entries.contains_key(path) {
+                deleted.insert(PathBuf::from(path));
             }
         }
 
-        Ok(Some(status))
+        for (path, (oid, mode)) in &index_entries {
+            if ignored_git_overlay_status_path(path) {
+                continue;
+            }
+            match git_overlay_worktree_entry_state(&self.root, path, *oid, *mode)? {
+                GitOverlayWorktreeEntryState::Clean => {}
+                GitOverlayWorktreeEntryState::Deleted => {
+                    deleted.insert(PathBuf::from(path));
+                }
+                GitOverlayWorktreeEntryState::Modified => {
+                    modified.insert(PathBuf::from(path));
+                }
+            }
+        }
+
+        let ignore_patterns = self.ignore_patterns()?;
+        let tracked_paths: BTreeSet<&str> = index_entries.keys().map(String::as_str).collect();
+        for path in git_overlay_untracked_paths(&self.root, &tracked_paths, &ignore_patterns)? {
+            added.insert(PathBuf::from(path));
+        }
+
+        Ok(Some(WorktreeStatus {
+            modified: modified.into_iter().collect(),
+            added: added.into_iter().collect(),
+            deleted: deleted.into_iter().collect(),
+        }))
     }
 
     fn git_overlay_bridge_mapping(&self) -> Result<HashMap<String, String>> {
@@ -1121,37 +1310,81 @@ impl Repository {
             .collect())
     }
 
+    fn git_overlay_checkpoint_mapping(&self) -> Result<HashMap<String, String>> {
+        Ok(self
+            .list_git_checkpoints()?
+            .into_iter()
+            .map(|record| (record.git_commit, record.change_id))
+            .collect())
+    }
+
+    fn git_overlay_mapped_change_for_commit(
+        &self,
+        git_commit: &str,
+        bridge_mapping: &HashMap<String, String>,
+        checkpoint_mapping: &HashMap<String, String>,
+    ) -> Result<Option<ChangeId>> {
+        let Some(change) = bridge_mapping
+            .get(git_commit)
+            .or_else(|| checkpoint_mapping.get(git_commit))
+        else {
+            return Ok(None);
+        };
+        let change_id = ChangeId::parse(change).map_err(|error| {
+            HeddleError::Config(format!(
+                "git commit {git_commit} maps to invalid Heddle change id '{change}': {error}"
+            ))
+        })?;
+        if self.store.get_state(&change_id)?.is_some() {
+            Ok(Some(change_id))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn git_overlay_mapped_change_for_git_oid(
+        &self,
+        git_oid: gix::hash::ObjectId,
+    ) -> Result<Option<ChangeId>> {
+        let git_commit = git_oid.to_string();
+        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
+        self.git_overlay_mapped_change_for_commit(&git_commit, &bridge_mapping, &checkpoint_mapping)
+    }
+
     pub fn git_overlay_current_branch(&self) -> Result<Option<String>> {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
 
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-            .output()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect git HEAD at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?;
-
-        if output.status.success() {
-            let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if branch.is_empty() {
-                return Ok(None);
-            }
-            return Ok(Some(branch));
+        match detect_git_head_state(&self.root)? {
+            Some(GitHeadState::Attached(branch)) => return Ok(Some(branch)),
+            Some(GitHeadState::Detached(_)) | None => {}
         }
 
-        if let Some(branch) = detect_git_in_progress_branch(&self.root)? {
-            return Ok(Some(branch));
+        detect_git_in_progress_branch(&self.root)
+    }
+
+    pub fn git_overlay_head_is_detached(&self) -> Result<bool> {
+        if self.capability() != RepositoryCapability::GitOverlay {
+            return Ok(false);
         }
 
-        Ok(None)
+        Ok(matches!(
+            detect_git_head_state(&self.root)?,
+            Some(GitHeadState::Detached(_))
+        ))
+    }
+
+    pub fn git_overlay_detached_head_commit(&self) -> Result<Option<String>> {
+        if self.capability() != RepositoryCapability::GitOverlay {
+            return Ok(None);
+        }
+
+        Ok(match detect_git_head_state(&self.root)? {
+            Some(GitHeadState::Detached(git_oid)) => Some(git_oid.to_string()),
+            Some(GitHeadState::Attached(_)) | None => None,
+        })
     }
 
     fn git_overlay_commit_tip_oid(
@@ -1226,42 +1459,43 @@ impl Repository {
         }
 
         let git_dir = resolve_git_dir(&self.root)?;
+        let raw_git_next_action = "heddle bridge git status";
         let candidates = [
             (
                 git_dir.join("rebase-merge"),
                 OperationKind::Rebase,
                 "Git rebase is in progress",
-                "heddle continue",
+                raw_git_next_action,
             ),
             (
                 git_dir.join("rebase-apply"),
                 OperationKind::Rebase,
                 "Git rebase is in progress",
-                "heddle continue",
+                raw_git_next_action,
             ),
             (
                 git_dir.join("MERGE_HEAD"),
                 OperationKind::Merge,
                 "Git merge is in progress",
-                "heddle continue",
+                raw_git_next_action,
             ),
             (
                 git_dir.join("CHERRY_PICK_HEAD"),
                 OperationKind::CherryPick,
                 "Git cherry-pick is in progress",
-                "heddle continue",
+                raw_git_next_action,
             ),
             (
                 git_dir.join("REVERT_HEAD"),
                 OperationKind::Revert,
                 "Git revert is in progress",
-                "heddle continue",
+                raw_git_next_action,
             ),
             (
                 git_dir.join("BISECT_LOG"),
                 OperationKind::Bisect,
                 "Git bisect is in progress",
-                "git bisect good or git bisect bad",
+                raw_git_next_action,
             ),
         ];
 
@@ -1397,19 +1631,14 @@ impl Repository {
 
     pub fn ignore_patterns(&self) -> Result<Vec<String>> {
         let mut patterns = self.config.worktree.ignore.clone();
+        if self.capability() == RepositoryCapability::GitOverlay {
+            patterns.push(".git".to_string());
+            append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;
+        }
         let path = self.root.join(".heddleignore");
 
         if path.exists() {
-            let contents = std::fs::read_to_string(path)?;
-            for line in contents.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    continue;
-                }
-                if !patterns.iter().any(|pattern| pattern == trimmed) {
-                    patterns.push(trimmed.to_string());
-                }
-            }
+            append_ignore_file_patterns(&mut patterns, &path)?;
         }
 
         Ok(patterns)
@@ -1466,14 +1695,45 @@ impl Repository {
     }
 
     pub fn head(&self) -> Result<Option<ChangeId>> {
-        Ok(match self.refs.read_head()? {
-            Head::Attached { thread } => self.refs.get_thread(&thread)?,
+        Ok(match self.head_ref()? {
+            Head::Attached { thread } => match self.refs.get_thread(&thread)? {
+                Some(change_id) => Some(change_id),
+                None if self.capability() == RepositoryCapability::GitOverlay => {
+                    self.git_overlay_mapped_change_for_branch(&thread)?
+                }
+                None => None,
+            },
             Head::Detached { state } => Some(state),
         })
     }
 
     pub fn head_ref(&self) -> Result<Head> {
-        self.refs.read_head()
+        let raw = self.refs.read_head()?;
+        if self.capability() != RepositoryCapability::GitOverlay {
+            return Ok(raw);
+        }
+        if matches!(raw, Head::Detached { .. }) {
+            return Ok(raw);
+        }
+        if let Some(GitHeadState::Detached(git_oid)) = detect_git_head_state(&self.root)?
+            && let Some(state) = self.git_overlay_mapped_change_for_git_oid(git_oid)?
+        {
+            return Ok(Head::Detached { state });
+        }
+        let Some(branch) = self.git_overlay_current_branch()? else {
+            return Ok(raw);
+        };
+        if matches!(&raw, Head::Attached { thread } if thread == &branch) {
+            return Ok(raw);
+        }
+        if self.refs.get_thread(&branch)?.is_some()
+            || self
+                .git_overlay_mapped_change_for_branch(&branch)?
+                .is_some()
+        {
+            return Ok(Head::Attached { thread: branch });
+        }
+        Ok(raw)
     }
 
     /// Resolve the on-disk worktree path for the *active thread*.
@@ -1526,7 +1786,29 @@ impl Repository {
             return Ok(Principal::new(&config.name, &config.email));
         }
 
+        if self.capability() == RepositoryCapability::GitOverlay
+            && let Some(principal) = git_config_principal(&self.root)
+        {
+            return Ok(principal);
+        }
+
+        if let Some(principal) = self.shared_checkout_parent_git_principal() {
+            return Ok(principal);
+        }
+
         Ok(Principal::new("Unknown", "unknown@example.com"))
+    }
+
+    fn shared_checkout_parent_git_principal(&self) -> Option<Principal> {
+        let local_heddle_dir = self.root.join(".heddle");
+        if local_heddle_dir == self.heddle_dir || !local_heddle_dir.join("objectstore").is_file() {
+            return None;
+        }
+        let parent_root = self.heddle_dir.parent()?;
+        if parent_root == self.root {
+            return None;
+        }
+        git_config_principal(parent_root)
     }
 
     pub fn get_attribution(&self) -> Result<Attribution> {
@@ -1695,7 +1977,10 @@ impl Repository {
 }
 
 fn ensure_git_overlay_exclude(root: &Path) -> Result<()> {
-    let git_dir = root.join(".git");
+    let git_dir = match gix::discover(root) {
+        Ok(repo) if repo.workdir().is_some() => repo.git_dir().to_path_buf(),
+        _ => root.join(".git"),
+    };
     if !git_dir.is_dir() {
         return Ok(());
     }
@@ -1703,24 +1988,38 @@ fn ensure_git_overlay_exclude(root: &Path) -> Result<()> {
     let info_dir = git_dir.join("info");
     fs::create_dir_all(&info_dir)?;
     let exclude_path = info_dir.join("exclude");
-    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
-    let already_has_rule = existing
-        .lines()
-        .map(str::trim)
-        .any(|line| line == ".heddle/" || line == "/.heddle/" || line == ".heddle");
-    if already_has_rule {
+    let mut contents = fs::read_to_string(&exclude_path).unwrap_or_default();
+    let existing_lines = contents.lines().map(str::trim).collect::<BTreeSet<_>>();
+    let mut missing = Vec::new();
+    for pattern in GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS {
+        if !existing_lines
+            .iter()
+            .any(|line| git_overlay_exclude_line_matches(line, pattern))
+        {
+            missing.push(*pattern);
+        }
+    }
+    if missing.is_empty() {
         return Ok(());
     }
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&exclude_path)?;
-    if !existing.is_empty() && !existing.ends_with('\n') {
-        writeln!(file)?;
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
     }
-    writeln!(file, ".heddle/")?;
+    contents.push_str("# Heddle local metadata\n");
+    for pattern in missing {
+        contents.push_str(pattern);
+        contents.push('\n');
+    }
+    fs::write(exclude_path, contents)?;
     Ok(())
+}
+
+fn git_overlay_exclude_line_matches(line: &str, pattern: &str) -> bool {
+    line == pattern
+        || matches!(
+            (line, pattern),
+            (".heddle", ".heddle/") | ("/.heddle/", ".heddle/") | ("/.heddle", ".heddle/")
+        )
 }
 
 /// Stable system principal stamped into the synthetic seed state created
@@ -1759,13 +2058,322 @@ fn parse_objectstore_pointer(content: &str) -> Option<PathBuf> {
 
 fn has_git_metadata(path: &Path) -> bool {
     let dot_git = path.join(".git");
-    dot_git.is_dir() || dot_git.is_file()
+    if !(dot_git.is_dir() || dot_git.is_file()) {
+        return false;
+    }
+
+    gix::discover(path).is_ok()
+}
+
+fn git_config_principal(root: &Path) -> Option<Principal> {
+    let git_repo = gix::discover(root).ok()?;
+    let config = git_repo.config_snapshot();
+    let name = config
+        .string("user.name")
+        .map(|value| value.to_str_lossy().into_owned())?;
+    let email = config
+        .string("user.email")
+        .map(|value| value.to_str_lossy().into_owned())?;
+    if name.trim().is_empty() || email.trim().is_empty() {
+        return None;
+    }
+    Some(Principal::new(&name, &email))
+}
+
+enum GitOverlayWorktreeEntryState {
+    Clean,
+    Modified,
+    Deleted,
+}
+
+fn git_overlay_worktree_entry_state(
+    root: &Path,
+    path: &str,
+    expected_oid: gix::ObjectId,
+    mode: u32,
+) -> Result<GitOverlayWorktreeEntryState> {
+    const GIT_MODE_SYMLINK: u32 = 0o120000;
+    const GIT_MODE_COMMIT: u32 = 0o160000;
+
+    let absolute = root.join(path);
+    let metadata = match fs::symlink_metadata(&absolute) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(GitOverlayWorktreeEntryState::Deleted);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if mode == GIT_MODE_COMMIT {
+        return Ok(if metadata.file_type().is_dir() {
+            GitOverlayWorktreeEntryState::Clean
+        } else {
+            GitOverlayWorktreeEntryState::Modified
+        });
+    }
+    if metadata.file_type().is_dir() {
+        return Ok(GitOverlayWorktreeEntryState::Modified);
+    }
+
+    let bytes = if mode == GIT_MODE_SYMLINK {
+        match fs::read_link(&absolute) {
+            Ok(target) => target.to_string_lossy().into_owned().into_bytes(),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => fs::read(&absolute)?,
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        fs::read(&absolute)?
+    };
+    let actual_oid = gix::objs::compute_hash(expected_oid.kind(), gix::objs::Kind::Blob, &bytes)
+        .map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to hash Git worktree path '{path}': {error}"
+            ))
+        })?;
+    Ok(if actual_oid == expected_oid {
+        GitOverlayWorktreeEntryState::Clean
+    } else {
+        GitOverlayWorktreeEntryState::Modified
+    })
+}
+
+fn git_overlay_untracked_paths(
+    root: &Path,
+    tracked_paths: &BTreeSet<&str>,
+    ignore_patterns: &[String],
+) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    let filter_root = root.to_path_buf();
+    let filter_ignore_patterns = ignore_patterns.to_vec();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .filter_entry(move |entry| {
+            should_descend_for_git_overlay_status(
+                &filter_root,
+                entry.path(),
+                &filter_ignore_patterns,
+            )
+        })
+        .build();
+    for entry in walker {
+        let entry = entry.map_err(|error| HeddleError::Config(error.to_string()))?;
+        let file_type = entry.file_type();
+        if !file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink()) {
+            continue;
+        }
+        let path = repo_relative_git_path(root, entry.path())?;
+        if !tracked_paths.contains(path.as_str())
+            && !ignored_git_overlay_status_path(&path)
+            && !should_ignore_path(Path::new(&path), ignore_patterns)
+        {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+fn should_descend_for_git_overlay_status(
+    root: &Path,
+    path: &Path,
+    ignore_patterns: &[String],
+) -> bool {
+    if is_git_or_heddle_dir(path) {
+        return false;
+    }
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+    if relative.as_os_str().is_empty() {
+        return true;
+    }
+    !should_ignore_path(relative, ignore_patterns)
+}
+
+fn is_git_or_heddle_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == ".git" || name == ".heddle")
+}
+
+fn repo_relative_git_path(root: &Path, path: &Path) -> Result<String> {
+    let relative = path.strip_prefix(root).map_err(|error| {
+        HeddleError::Config(format!(
+            "failed to relativize Git worktree path '{}': {}",
+            path.display(),
+            error
+        ))
+    })?;
+    Ok(path_to_git_path(relative))
+}
+
+fn path_to_git_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn git_path(path: &BStr) -> String {
+    path.to_str_lossy().into_owned()
+}
+
+fn ignored_git_overlay_status_path(path: &str) -> bool {
+    path == ".heddle" || path.starts_with(".heddle/")
+}
+
+fn git_remote_names(root: &Path) -> Result<Vec<String>> {
+    let repo = match gix::discover(root) {
+        Ok(repo) => repo,
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(repo
+        .remote_names()
+        .into_iter()
+        .map(|name| name.to_str_lossy().into_owned())
+        .filter(|name| !name.trim().is_empty())
+        .collect())
+}
+
+fn git_find_reference<'repo>(
+    repo: &'repo gix::Repository,
+    name: &str,
+) -> Result<Option<gix::Reference<'repo>>> {
+    repo.try_find_reference(name).map_err(|error| {
+        HeddleError::Config(format!("failed to inspect Git reference '{name}': {error}"))
+    })
+}
+
+fn git_resolve_oid(repo: &gix::Repository, rev: &str) -> Result<Option<gix::ObjectId>> {
+    match repo.rev_parse_single(rev.as_bytes().as_bstr()) {
+        Ok(id) => Ok(Some(id.detach())),
+        Err(_) => Ok(None),
+    }
+}
+
+fn git_ahead_behind(
+    root: &Path,
+    repo: &gix::Repository,
+    upstream: gix::ObjectId,
+    head: gix::ObjectId,
+) -> Result<(usize, usize)> {
+    if upstream == head {
+        return Ok((0, 0));
+    }
+    let ahead = git_reachable_count(root, repo, head, upstream)?;
+    let behind = git_reachable_count(root, repo, upstream, head)?;
+    Ok((ahead, behind))
+}
+
+fn git_reachable_count(
+    root: &Path,
+    repo: &gix::Repository,
+    tip: gix::ObjectId,
+    hidden: gix::ObjectId,
+) -> Result<usize> {
+    let walk = tip
+        .attach(repo)
+        .ancestors()
+        .with_hidden([hidden])
+        .all()
+        .map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to inspect Git upstream drift at '{}': {error}",
+                root.display()
+            ))
+        })?;
+    let mut count = 0;
+    for entry in walk {
+        entry.map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to inspect Git upstream drift at '{}': {error}",
+                root.display()
+            ))
+        })?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn git_remote_tracking_display_name(name: &str) -> String {
+    name.strip_prefix("refs/remotes/")
+        .unwrap_or(name)
+        .to_string()
+}
+
+fn git_remote_tracking_message(
+    branch: &str,
+    upstream: &str,
+    ahead: usize,
+    behind: usize,
+    upstream_is_undone_checkpoint: bool,
+) -> String {
+    if upstream_is_undone_checkpoint && ahead == 0 && behind > 0 {
+        return format!(
+            "Upstream '{upstream}' still points at a Git commit that was undone locally on branch '{branch}'"
+        );
+    }
+    match (ahead, behind) {
+        (0, behind) => format!(
+            "Git branch '{}' is behind upstream '{}' by {} commit(s)",
+            branch, upstream, behind
+        ),
+        (ahead, 0) => format!(
+            "Git branch '{}' is ahead of upstream '{}' by {} commit(s)",
+            branch, upstream, ahead
+        ),
+        (ahead, behind) => format!(
+            "Git branch '{}' has diverged from upstream '{}' (ahead {}, behind {})",
+            branch, upstream, ahead, behind
+        ),
+    }
+}
+
+fn git_remote_tracking_next_action(
+    ahead: usize,
+    behind: usize,
+    upstream_is_undone_checkpoint: bool,
+) -> String {
+    if upstream_is_undone_checkpoint && ahead == 0 && behind > 0 {
+        return "heddle push --force".to_string();
+    }
+    match (ahead, behind) {
+        (0, _) => "heddle pull".to_string(),
+        (_, 0) => "heddle push".to_string(),
+        _ => "heddle pull".to_string(),
+    }
+}
+
+fn repository_capability_for_root(root: &Path) -> RepositoryCapability {
+    if has_git_metadata(root) {
+        RepositoryCapability::GitOverlay
+    } else {
+        RepositoryCapability::NativeHeddle
+    }
+}
+
+fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let contents = std::fs::read_to_string(path)?;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if !patterns.iter().any(|pattern| pattern == trimmed) {
+            patterns.push(trimmed.to_string());
+        }
+    }
+    Ok(())
 }
 
 /// Read git's HEAD ref via `gix::discover` (~25ms — full repository
 /// inspection). Used as a fallback when the fast path can't parse the
 /// raw `.git/HEAD` file (e.g. detached HEAD, multi-worktree layouts).
-fn detect_git_head_via_gix(path: &Path) -> Result<Option<Head>> {
+fn detect_git_head_state_via_gix(path: &Path) -> Result<Option<GitHeadState>> {
     let repo = gix::discover(path).map_err(|error| {
         HeddleError::Config(format!(
             "failed to inspect git repository at '{}': {}",
@@ -1778,9 +2386,22 @@ fn detect_git_head_via_gix(path: &Path) -> Result<Option<Head>> {
         Err(_) => return Ok(None),
     };
 
-    Ok(head.referent_name().map(|name| Head::Attached {
-        thread: name.shorten().to_string(),
-    }))
+    if let Some(name) = head.referent_name() {
+        return Ok(Some(GitHeadState::Attached(name.shorten().to_string())));
+    }
+    if head.is_detached()
+        && let Some(id) = head.id()
+    {
+        return Ok(Some(GitHeadState::Detached(id.detach())));
+    }
+    Ok(None)
+}
+
+fn detect_git_head_state(path: &Path) -> Result<Option<GitHeadState>> {
+    if let Some(head) = detect_git_head_fast(path) {
+        return Ok(Some(head));
+    }
+    detect_git_head_state_via_gix(path)
 }
 
 /// Detect git's current HEAD branch.
@@ -1793,18 +2414,18 @@ fn detect_git_head_via_gix(path: &Path) -> Result<Option<Head>> {
 /// and any malformed file (where we'd rather surface the right error
 /// than guess).
 fn detect_git_head(path: &Path) -> Result<Option<Head>> {
-    if let Some(head) = detect_git_head_fast(path) {
-        return Ok(Some(head));
+    if let Some(GitHeadState::Attached(thread)) = detect_git_head_state(path)? {
+        return Ok(Some(Head::Attached { thread }));
     }
-    detect_git_head_via_gix(path)
+    Ok(None)
 }
 
-/// Fast path for `.git/HEAD` parsing. Returns `Some(Head::Attached)`
+/// Fast path for `.git/HEAD` parsing. Returns `Some(GitHeadState::Attached)`
 /// when `.git/HEAD` is the simple `ref: refs/heads/<name>` form;
 /// returns `None` for any case we don't trust ourselves to parse
 /// correctly (detached HEAD raw OIDs, `gitdir:` worktree pointers,
 /// missing files), letting the gix fallback handle it.
-fn detect_git_head_fast(path: &Path) -> Option<Head> {
+fn detect_git_head_fast(path: &Path) -> Option<GitHeadState> {
     let head_path = path.join(".git").join("HEAD");
     // `.git` may also be a *file* (the gitdir: pointer used by
     // worktrees and submodules) — don't try to read it as a directory.
@@ -1818,7 +2439,7 @@ fn detect_git_head_fast(path: &Path) -> Option<Head> {
     if name.is_empty() {
         return None;
     }
-    Some(Head::Attached { thread: name })
+    Some(GitHeadState::Attached(name))
 }
 
 fn resolve_git_dir(path: &Path) -> Result<PathBuf> {
@@ -1849,16 +2470,4 @@ fn detect_git_in_progress_branch(path: &Path) -> Result<Option<String>> {
         }
     }
     Ok(None)
-}
-
-fn discover_git_root(path: &Path) -> Option<PathBuf> {
-    let start = path.canonicalize().ok()?;
-    let mut current = Some(start.as_path());
-    while let Some(dir) = current {
-        if has_git_metadata(dir) {
-            return Some(dir.to_path_buf());
-        }
-        current = dir.parent();
-    }
-    None
 }

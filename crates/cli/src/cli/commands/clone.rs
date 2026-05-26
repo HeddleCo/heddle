@@ -10,27 +10,35 @@ use std::{
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
+#[cfg(feature = "client")]
+use heddle_client::grpc_hosted::PullMaterialization;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     object::{Blob, ContentHash},
 };
 use refs::Head;
 use repo::{BlobHydrator, Repository};
+use serde::Serialize;
 
+use super::{
+    advice::RecoveryAdvice,
+    git_overlay_health::{
+        RepositoryVerificationState, build_repository_verification_state,
+        canonical_bridge_import_ref_command,
+    },
+};
 #[cfg(feature = "client")]
 use crate::remote::credential_key_from_remote_url;
 use crate::{
     bridge::{
         GitBridge,
-        git_core::{clone_url_to_bare, copy_local_repo_to_bare, open_repo},
+        git_core::{clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference},
         git_import::{import_all, import_selected_refs},
     },
     cli::{Cli, should_output_json, style},
     client::LocalSync,
-    remote::RemoteTarget,
+    remote::{Remote, RemoteConfig, RemoteTarget},
 };
-#[cfg(feature = "client")]
-use heddle_client::grpc_hosted::PullMaterialization;
 
 /// Pull/materialization options shared by local and network clone paths.
 struct CloneOptions {
@@ -38,6 +46,89 @@ struct CloneOptions {
     depth: Option<u32>,
     lazy: bool,
     filter: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CloneOutput {
+    output_kind: &'static str,
+    action: &'static str,
+    status: &'static str,
+    success: bool,
+    cloned: bool,
+    transport: &'static str,
+    remote: String,
+    local: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository_capability: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commits_imported: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    states_created: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objects: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+    #[serde(rename = "verification")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trust: Option<RepositoryVerificationState>,
+}
+
+struct GitOverlayCloneOutputInput {
+    remote: String,
+    local: String,
+    branch: String,
+    commits_imported: usize,
+    states_created: usize,
+    trust: RepositoryVerificationState,
+}
+
+fn git_overlay_clone_output(input: GitOverlayCloneOutputInput) -> CloneOutput {
+    CloneOutput {
+        output_kind: "clone",
+        action: "clone",
+        status: "cloned",
+        success: true,
+        cloned: true,
+        transport: "git",
+        remote: input.remote,
+        local: input.local,
+        branch: Some(input.branch),
+        repository_capability: Some("git-overlay"),
+        commits_imported: Some(input.commits_imported),
+        states_created: Some(input.states_created),
+        objects: None,
+        state: None,
+        trust: Some(input.trust),
+    }
+}
+
+fn heddle_clone_output(
+    remote: String,
+    local: String,
+    branch: String,
+    objects: Option<usize>,
+    state: Option<String>,
+    trust: Option<RepositoryVerificationState>,
+) -> CloneOutput {
+    CloneOutput {
+        output_kind: "clone",
+        action: "clone",
+        status: "cloned",
+        success: true,
+        cloned: true,
+        transport: "heddle",
+        remote,
+        local,
+        branch: Some(branch),
+        repository_capability: Some("native"),
+        commits_imported: None,
+        states_created: None,
+        objects,
+        state,
+        trust,
+    }
 }
 
 pub async fn cmd_clone(
@@ -58,7 +149,7 @@ pub async fn cmd_clone(
     };
 
     if local_path.exists() {
-        return Err(anyhow!("Local path '{}' already exists", local));
+        return Err(anyhow!(clone_destination_exists_advice(&local)));
     }
 
     // Parse the remote URL
@@ -67,10 +158,13 @@ pub async fn cmd_clone(
     let target = match RemoteTarget::parse(&remote) {
         Ok(target) => target,
         Err(_) => {
+            if looks_like_local_path(&remote) {
+                return Err(anyhow!(clone_remote_not_found_advice(Path::new(&remote))));
+            }
             if let Ok(url) = gix::url::parse(remote.as_bytes().into()) {
                 return clone_git_overlay_url(cli, &url, local_path, &options);
             }
-            return Err(anyhow!("invalid remote url: {}", remote));
+            return Err(anyhow!(clone_invalid_remote_url_advice(&remote)));
         }
     };
 
@@ -96,13 +190,47 @@ pub async fn cmd_clone(
             #[cfg(not(feature = "client"))]
             let _ = (addr, repo_path);
             #[cfg(not(feature = "client"))]
-            anyhow::bail!(
-                "network clone support is not available in this build; enable the `client` feature"
-            );
+            return Err(anyhow!(network_clone_unavailable_advice()));
         }
     }
 
     Ok(())
+}
+
+fn clone_invalid_remote_url_advice(remote: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_invalid_remote_url",
+        format!("Invalid remote URL: {remote}"),
+        "Use `file:///path/to/repo`, an existing local path, a hosted/network remote, or a Git clone URL.",
+        format!("remote '{remote}' could not be parsed as a supported Heddle or Git remote"),
+        "clone cannot determine which transport or repository to read from",
+        "no destination directory, repository metadata, refs, or worktree files were written",
+        "heddle clone <remote> <path>",
+        vec!["heddle clone <remote> <path>".to_string()],
+    )
+}
+
+fn clone_destination_exists_advice(local: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_destination_exists",
+        format!("Local path '{local}' already exists"),
+        "Choose an empty destination path, or move the existing path aside before retrying `heddle clone`.",
+        format!("destination path '{local}' already exists"),
+        "clone would need to write repository metadata and worktree files into that destination",
+        "existing destination path and current repository state were left unchanged",
+        "heddle clone <remote> <new-path>",
+        vec!["heddle clone <remote> <new-path>".to_string()],
+    )
+}
+
+fn looks_like_local_path(remote: &str) -> bool {
+    let path = Path::new(remote);
+    path.is_absolute()
+        || remote == "."
+        || remote == ".."
+        || remote.starts_with("./")
+        || remote.starts_with("../")
+        || remote.starts_with("~/")
 }
 
 fn clone_git_overlay_url(
@@ -127,7 +255,11 @@ fn clone_git_overlay_path(
     fs::create_dir_all(local_path)?;
     gix::init(local_path).map_err(anyhow::Error::msg)?;
     copy_local_repo_to_bare(remote_path, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
-    finish_git_overlay_clone(cli, local_path, options, remote_path.display().to_string())
+    let remote_label = fs::canonicalize(remote_path)
+        .unwrap_or_else(|_| remote_path.to_path_buf())
+        .display()
+        .to_string();
+    finish_git_overlay_clone(cli, local_path, options, remote_label)
 }
 
 /// Reject `--depth` / `--lazy` / `--filter` for Git-overlay clones before
@@ -142,30 +274,47 @@ fn clone_git_overlay_path(
 /// scannable.
 fn reject_unsupported_for_git_overlay(options: &CloneOptions) -> Result<()> {
     if let Some(filter) = options.filter.as_deref() {
-        return Err(anyhow!(
-            "--filter {} is not yet supported for Git-overlay clones; \
-             the import step requires all blobs locally. Run a full clone \
-             for now — lazy hydration over the Git transport is planned \
-             for v0.3.1 (see heddle#143).",
-            filter
-        ));
+        return Err(anyhow!(unsupported_git_overlay_clone_option_advice(
+            "--filter",
+            Some(filter)
+        )));
     }
     if options.lazy {
-        return Err(anyhow!(
-            "--lazy is not yet supported for Git-overlay clones; \
-             the import step requires all blobs locally. Run a full clone \
-             for now — lazy hydration over the Git transport is planned \
-             for v0.3.1 (see heddle#143)."
-        ));
+        return Err(anyhow!(unsupported_git_overlay_clone_option_advice(
+            "--lazy", None
+        )));
     }
     if options.depth.is_some() {
-        return Err(anyhow!(
-            "--depth is not yet supported for Git-overlay clones; \
-             the import step walks ancestry past the shallow boundary. \
-             Run a full clone for now."
-        ));
+        return Err(anyhow!(unsupported_git_overlay_clone_option_advice(
+            "--depth", None
+        )));
     }
     Ok(())
+}
+
+fn unsupported_git_overlay_clone_option_advice(
+    flag: &'static str,
+    value: Option<&str>,
+) -> RecoveryAdvice {
+    let flag_with_value = value
+        .map(|value| format!("{flag} {value}"))
+        .unwrap_or_else(|| flag.to_string());
+    let detail = match flag {
+        "--depth" => "the import step walks ancestry past the shallow boundary",
+        _ => "the import step requires all blobs locally",
+    };
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_clone_option_unsupported",
+        format!("{flag_with_value} is not yet supported for Git-overlay clones; {detail}"),
+        format!("Run a full Git-overlay clone without `{flag}` for now."),
+        "Git-overlay import requires a complete local Git object graph",
+        format!(
+            "accepting `{flag}` now could leave a partially imported clone that Heddle cannot verify"
+        ),
+        "no clone directory, Git refs, or Heddle state were written",
+        "heddle clone <remote> <path>",
+        vec!["heddle clone <remote> <path>".to_string()],
+    )
 }
 
 fn finish_git_overlay_clone(
@@ -183,20 +332,35 @@ fn finish_git_overlay_clone(
             Some(&local_path.join(".git")),
             std::slice::from_ref(thread),
         )
-        .map_err(anyhow::Error::msg)?
+        .map_err(|err| {
+            anyhow!(clone_git_overlay_import_failed_advice(
+                Some(thread),
+                &remote_label,
+                err.to_string()
+            ))
+        })?
     } else {
-        import_all(&mut bridge, Some(&local_path.join(".git"))).map_err(anyhow::Error::msg)?
+        import_all(&mut bridge, Some(&local_path.join(".git"))).map_err(|err| {
+            anyhow!(clone_git_overlay_import_failed_advice(
+                None,
+                &remote_label,
+                err.to_string()
+            ))
+        })?
     };
 
     let track_name = select_clone_thread(
         &repo,
         options.thread.as_deref(),
         read_git_head_branch(&local_path.join(".git")).as_deref(),
+        &remote_label,
     )?;
-    let state_id = repo
-        .refs()
-        .get_thread(&track_name)?
-        .ok_or_else(|| anyhow!("Git clone did not import branch '{}'", track_name))?;
+    let state_id = repo.refs().get_thread(&track_name)?.ok_or_else(|| {
+        anyhow!(clone_git_overlay_branch_not_imported_advice(
+            &track_name,
+            &remote_label
+        ))
+    })?;
     // Materialize the imported tip *while HEAD is still on the
     // init-time default* — `goto` writes `Head::Detached`, which is
     // fine here because we re-attach immediately below. Switching to
@@ -217,20 +381,23 @@ fn finish_git_overlay_clone(
         thread: track_name.clone(),
     })?;
     write_git_head_branch(&local_path.join(".git"), &track_name)?;
+    configure_git_overlay_origin_tracking(local_path, &track_name)?;
+    verify_git_overlay_clone(&repo, local_path, &track_name, &state_id)?;
 
     if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{{\"status\":\"cloned\",\"transport\":\"git\",\"remote\":{:?},\"local\":{:?},\"branch\":{:?},\"commits_imported\":{}}}",
-            remote_label,
-            local_path.display().to_string(),
-            track_name,
-            stats.commits_imported
-        );
+        let trust = build_repository_verification_state(&repo);
+        let output = git_overlay_clone_output(GitOverlayCloneOutputInput {
+            remote: remote_label,
+            local: local_path.display().to_string(),
+            branch: track_name,
+            commits_imported: stats.commits_imported,
+            states_created: stats.states_created,
+            trust,
+        });
+        crate::cli::render::write_json_stdout(&output)?;
     } else {
         let repo_name = clone_repo_name_from_label(&remote_label);
-        for line in
-            format_clone_completion_lines(repo_name, stats.commits_imported, &track_name)
-        {
+        for line in format_clone_completion_lines(repo_name, stats.commits_imported, &track_name) {
             println!("{line}");
         }
     }
@@ -239,10 +406,9 @@ fn finish_git_overlay_clone(
 
 fn write_git_overlay_origin(local_path: &Path, remote_label: &str) -> Result<()> {
     let config_path = local_path.join(".git").join("config");
-    let mut contents = fs::read_to_string(&config_path).unwrap_or_default();
-    if contents.contains("[remote \"origin\"]") {
-        return Ok(());
-    }
+    let contents = fs::read_to_string(&config_path).unwrap_or_default();
+    let mut contents = ensure_git_config_core_bare_false(&contents);
+    contents = remove_git_config_remote_section(&contents, "origin");
     if !contents.ends_with('\n') && !contents.is_empty() {
         contents.push('\n');
     }
@@ -251,6 +417,404 @@ fn write_git_overlay_origin(local_path: &Path, remote_label: &str) -> Result<()>
     ));
     fs::write(config_path, contents)?;
     Ok(())
+}
+
+fn ensure_git_config_core_bare_false(contents: &str) -> String {
+    let mut rewritten = String::new();
+    let mut in_core = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_core = trimmed == "[core]";
+            rewritten.push_str(line);
+            rewritten.push('\n');
+            continue;
+        }
+        if in_core
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("bare"))
+        {
+            continue;
+        }
+        rewritten.push_str(line);
+        rewritten.push('\n');
+    }
+    if !rewritten.is_empty() && !rewritten.ends_with("\n\n") {
+        rewritten.push('\n');
+    }
+    rewritten.push_str("[core]\n");
+    rewritten.push_str("\tbare = false\n");
+    rewritten
+}
+
+fn remove_git_config_remote_section(contents: &str, remote_name: &str) -> String {
+    remove_git_config_named_section(contents, "remote", remote_name)
+}
+
+fn remove_git_config_branch_section(contents: &str, branch_name: &str) -> String {
+    remove_git_config_named_section(contents, "branch", branch_name)
+}
+
+fn remove_git_config_named_section(contents: &str, section: &str, subsection_name: &str) -> String {
+    let mut rewritten = String::new();
+    let mut skipping_section = false;
+    for line in contents.lines() {
+        if let Some(section_name) = parse_git_config_subsection_name(line, section) {
+            skipping_section = section_name == subsection_name;
+            if skipping_section {
+                continue;
+            }
+        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
+            skipping_section = false;
+        }
+        if !skipping_section {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+    }
+    if !rewritten.is_empty() && !rewritten.ends_with("\n\n") {
+        rewritten.push('\n');
+    }
+    rewritten
+}
+
+fn parse_git_config_subsection_name(line: &str, section: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let prefix = format!("[{section} \"");
+    let inner = trimmed.strip_prefix(&prefix)?.strip_suffix("\"]")?;
+    unescape_git_config_string(inner)
+}
+
+fn escape_git_config_string(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\u{0008}' => out.push_str("\\b"),
+            ch => out.push(ch),
+        }
+    }
+    out
+}
+
+fn unescape_git_config_string(value: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next()? {
+            '\\' => out.push('\\'),
+            '"' => out.push('"'),
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'b' => out.push('\u{0008}'),
+            escaped => out.push(escaped),
+        }
+    }
+    Some(out)
+}
+
+fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Result<()> {
+    let git_dir = local_path.join(".git");
+    let git_repo = open_repo(&git_dir).map_err(|err| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: cannot reopen Git checkout: {err}"),
+            format!(
+                "Git repository at '{}' could not be opened",
+                git_dir.display()
+            ),
+            "clone cannot seed origin tracking until the selected Git branch is readable",
+            "heddle status",
+        ))
+    })?;
+    let branch_ref = format!("refs/heads/{branch}");
+    let mut reference = git_repo.find_reference(&branch_ref).map_err(|err| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: selected Git branch '{branch}' is missing: {err}"),
+            format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
+            "Git status would report upstream tracking for a branch whose local ref is absent",
+            canonical_bridge_import_ref_command(branch),
+        ))
+    })?;
+    let target = reference.peel_to_id().map_err(|err| {
+        anyhow!(clone_verification_failed_advice(
+            format!(
+                "clone verification failed: selected Git branch '{branch}' is not readable: {err}"
+            ),
+            format!("Git ref '{branch_ref}' could not be peeled to a commit"),
+            "Git status would report upstream tracking for an unreadable branch",
+            canonical_bridge_import_ref_command(branch),
+        ))
+    })?;
+    set_reference(
+        &git_repo,
+        &format!("refs/remotes/origin/{branch}"),
+        target.detach(),
+        gix::refs::transaction::PreviousValue::Any,
+        "heddle: seed origin remote-tracking branch after clone",
+    )
+    .map_err(|err| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: cannot seed origin/{branch}: {err}"),
+            format!("Git remote-tracking ref 'refs/remotes/origin/{branch}' could not be written"),
+            "Git status would not show the cloned branch tracking origin",
+            "heddle status",
+        ))
+    })?;
+    write_git_overlay_branch_upstream(local_path, branch)?;
+    Ok(())
+}
+
+fn write_git_overlay_branch_upstream(local_path: &Path, branch: &str) -> Result<()> {
+    let config_path = local_path.join(".git").join("config");
+    let contents = fs::read_to_string(&config_path).unwrap_or_default();
+    let mut contents = remove_git_config_branch_section(&contents, branch);
+    if !contents.ends_with('\n') && !contents.is_empty() {
+        contents.push('\n');
+    }
+    let branch_section = escape_git_config_string(branch);
+    contents.push_str(&format!(
+        "[branch \"{branch_section}\"]\n\tremote = origin\n\tmerge = refs/heads/{branch}\n"
+    ));
+    fs::write(config_path, contents)?;
+    Ok(())
+}
+
+fn verify_git_overlay_clone(
+    repo: &Repository,
+    local_path: &Path,
+    track_name: &str,
+    state_id: &objects::object::ChangeId,
+) -> Result<()> {
+    ensure_git_excludes_heddle(local_path)?;
+    refresh_git_index_to_head(local_path)?;
+    if let Some(status) = repo.git_overlay_worktree_status()?
+        && !status.is_clean()
+    {
+        let dirty = clone_dirty_paths(&status).join(", ");
+        return Err(anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: Git worktree is not clean after checkout: {dirty}"),
+            format!(
+                "Git-overlay status reports dirty path(s) after clone checkout at {}: {dirty}",
+                local_path.display(),
+            ),
+            "treating this clone as verified could hide checkout files that were not imported into Heddle",
+            "heddle status",
+        )));
+    }
+
+    let git_head = read_git_head_branch(&local_path.join(".git")).ok_or_else(|| {
+        anyhow!(clone_verification_failed_advice(
+            "clone verification failed: .git/HEAD is not attached to a branch",
+            "Git HEAD is detached after clone verification",
+            "Heddle cannot prove which Git branch should map to the imported thread",
+            canonical_bridge_import_ref_command(track_name),
+        ))
+    })?;
+    if git_head != track_name {
+        return Err(anyhow!(clone_verification_failed_advice(
+            format!(
+                "clone verification failed: .git/HEAD points at '{git_head}', but Heddle attached '{track_name}'"
+            ),
+            format!("Git HEAD branch '{git_head}' does not match Heddle thread '{track_name}'"),
+            "continuing would leave Git and Heddle attached to different active names",
+            canonical_bridge_import_ref_command(&git_head),
+        )));
+    }
+
+    match repo.current_lane()? {
+        Some(current) if current == track_name => {}
+        Some(current) => {
+            return Err(anyhow!(clone_verification_failed_advice(
+                format!(
+                    "clone verification failed: Heddle active thread is '{current}', expected '{track_name}'"
+                ),
+                format!(
+                    "Heddle active thread '{current}' does not match imported Git branch '{track_name}'"
+                ),
+                "continuing would report the clone as verified while Heddle is attached to the wrong thread",
+                format!("heddle thread switch {track_name} --force"),
+            )));
+        }
+        None => {
+            return Err(anyhow!(clone_verification_failed_advice(
+                "clone verification failed: Heddle HEAD is detached after clone",
+                "Heddle HEAD is detached after clone verification",
+                "continuing would report the clone as verified without an attached Heddle thread",
+                format!("heddle thread switch {track_name} --force"),
+            )));
+        }
+    }
+
+    let imported = repo.refs().get_thread(track_name)?;
+    if imported.as_ref() != Some(state_id) {
+        return Err(anyhow!(clone_verification_failed_advice(
+            format!(
+                "clone verification failed: Git branch '{track_name}' did not map to the imported Heddle state"
+            ),
+            format!("Git branch '{track_name}' does not map to imported Heddle state {state_id}"),
+            "continuing would leave the Git/Heddle mapping unproven for this clone",
+            canonical_bridge_import_ref_command(track_name),
+        )));
+    }
+
+    Ok(())
+}
+
+fn refresh_git_index_to_head(local_path: &Path) -> Result<()> {
+    let git = gix::discover(local_path).map_err(|err| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: cannot reopen Git checkout: {err}"),
+            format!(
+                "Git repository at '{}' could not be opened",
+                local_path.display()
+            ),
+            "clone cannot refresh the Git index to match the selected branch",
+            "heddle status",
+        ))
+    })?;
+    let head_tree = git.head_tree_id_or_empty().map_err(|err| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: cannot read Git HEAD tree: {err}"),
+            "Git HEAD tree could not be read during clone verification",
+            "clone cannot refresh the Git index to match the selected branch",
+            "heddle status",
+        ))
+    })?;
+    let mut index = git.index_from_tree(head_tree.as_ref()).map_err(|err| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: cannot build Git index from HEAD tree: {err}"),
+            "Git index could not be rebuilt from HEAD during clone verification",
+            "clone cannot prove the Git index and selected branch agree",
+            "heddle status",
+        ))
+    })?;
+    index.write(Default::default()).map_err(|err| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: cannot write Git index: {err}"),
+            "Git index could not be written during clone verification",
+            "clone cannot prove the Git index and selected branch agree",
+            "heddle status",
+        ))
+    })?;
+    Ok(())
+}
+
+fn clone_dirty_paths(status: &objects::worktree::WorktreeStatus) -> Vec<String> {
+    let mut paths = Vec::new();
+    paths.extend(status.added.iter().map(|path| path.display().to_string()));
+    paths.extend(
+        status
+            .modified
+            .iter()
+            .map(|path| path.display().to_string()),
+    );
+    paths.extend(status.deleted.iter().map(|path| path.display().to_string()));
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn clone_verification_failed_advice(
+    error: impl Into<String>,
+    unsafe_condition: impl Into<String>,
+    would_change: impl Into<String>,
+    primary_command: impl Into<String>,
+) -> RecoveryAdvice {
+    let primary_command = primary_command.into();
+    RecoveryAdvice::safety_refusal(
+        "clone_verification_failed",
+        error,
+        format!("Repair the clone mapping, then rerun `{primary_command}`."),
+        unsafe_condition,
+        would_change,
+        "the cloned files, Git refs, and Heddle metadata were left for inspection",
+        primary_command.clone(),
+        vec![primary_command],
+    )
+}
+
+fn clone_git_overlay_import_failed_advice(
+    requested_ref: Option<&str>,
+    remote_label: &str,
+    cause: String,
+) -> RecoveryAdvice {
+    let requested = requested_ref
+        .map(|name| format!(" for requested ref '{name}'"))
+        .unwrap_or_default();
+    let primary_command = requested_ref
+        .map(|name| format!("heddle clone {remote_label} <path> --thread {name}"))
+        .unwrap_or_else(|| format!("heddle clone {remote_label} <path>"));
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_clone_import_failed",
+        format!("Git-overlay clone import failed{requested}: {cause}"),
+        "Retry with an existing commit-pointing branch or repair the source repository, then clone again.",
+        format!("Git-overlay import failed{requested}: {cause}"),
+        "clone cannot create a verified Git/Heddle mapping until the requested refs import cleanly",
+        "the clone directory, copied Git objects, and Heddle metadata were left for inspection",
+        primary_command.clone(),
+        vec![primary_command],
+    )
+}
+
+fn clone_git_overlay_branch_not_imported_advice(
+    track_name: &str,
+    remote_label: &str,
+) -> RecoveryAdvice {
+    let primary_command = format!("heddle clone {remote_label} <path> --thread {track_name}");
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_clone_branch_not_imported",
+        format!("Git clone did not import branch '{track_name}'"),
+        "Retry with an existing commit-pointing branch or repair the source repository, then clone again.",
+        format!(
+            "Git-overlay clone selected branch '{track_name}', but no Heddle thread was imported for it"
+        ),
+        "materializing this clone would attach Git and Heddle to an unverified or missing branch mapping",
+        "the clone directory, copied Git objects, and Heddle metadata were left for inspection",
+        primary_command.clone(),
+        vec![primary_command],
+    )
+}
+
+fn clone_git_overlay_no_branch_refs_advice(remote_label: &str) -> RecoveryAdvice {
+    let primary_command = format!("heddle clone {remote_label} <path>");
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_clone_no_branch_refs",
+        "Git clone did not import any branch refs",
+        "Clone from a repository with at least one commit-pointing branch, or pass `--thread <branch>` after creating one.",
+        format!("Git-overlay import from '{remote_label}' produced no branch refs"),
+        "clone cannot choose a verified active branch without an imported Git/Heddle mapping",
+        "the clone directory, copied Git objects, and Heddle metadata were left for inspection",
+        primary_command.clone(),
+        vec![primary_command],
+    )
+}
+
+#[cfg(not(feature = "client"))]
+fn network_clone_unavailable_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "network_clone_unavailable",
+        "Network clone support is not available in this build",
+        "Use a build with the `client` feature enabled, or clone from a local path.",
+        "this heddle binary was built without hosted/network clone support",
+        "clone cannot contact hosted/network remotes without the client transport",
+        "no destination directory, repository metadata, refs, or worktree files were written",
+        "heddle clone <local-path> <path>",
+        vec!["heddle clone <local-path> <path>".to_string()],
+    )
+}
+
+fn ensure_git_excludes_heddle(local_path: &Path) -> Result<()> {
+    Ok(Repository::ensure_git_overlay_local_excludes(local_path)?)
 }
 
 /// Best-effort repo-name extraction for the text-mode clone summary.
@@ -320,7 +884,8 @@ fn format_clone_completion_lines(
             "  {}",
             style::field("current thread", &style::bold(thread_name))
         ),
-        format!("  Next: {}", style::bold("heddle log")),
+        super::action_line::format_next("heddle status", 2)
+            .expect("static clone next action is non-empty"),
     ]
 }
 
@@ -329,13 +894,11 @@ fn format_clone_completion_lines(
 /// Priority order:
 ///
 /// 1. `--thread <name>` if the user asked for one explicitly. We
-///    trust the user even if the name doesn't match a thread yet —
+///    accept the user-provided name even if it doesn't match a thread yet —
 ///    the subsequent `get_thread` lookup will surface a clear error.
 /// 2. The branch the remote advertises as `HEAD` (passed in via
 ///    `git_head_branch_hint`, read from `.git/HEAD` after the bare
-///    clone — `git clone --bare` and our `clone_url_to_bare` +
-///    `git ls-remote --symref` path both mirror the remote's
-///    symref). This is what fixes heddle#141: cloning ripgrep should
+///    clone. This is what fixes heddle#141: cloning ripgrep should
 ///    land on `master`, not the alphabetically-first imported branch
 ///    `ag/bstr-migration`.
 /// 3. `"main"` if present — preserves the long-standing UX for
@@ -348,6 +911,7 @@ fn select_clone_thread(
     repo: &Repository,
     requested: Option<&str>,
     git_head_branch_hint: Option<&str>,
+    remote_label: &str,
 ) -> Result<String> {
     if let Some(requested) = requested {
         return Ok(requested.to_string());
@@ -364,7 +928,7 @@ fn select_clone_thread(
     threads
         .into_iter()
         .next()
-        .ok_or_else(|| anyhow!("Git clone did not import any branch refs"))
+        .ok_or_else(|| anyhow!(clone_git_overlay_no_branch_refs_advice(remote_label)))
 }
 
 /// Read `.git/HEAD` as a symbolic ref into `refs/heads/`, returning
@@ -405,40 +969,35 @@ async fn clone_local(
     } = options;
     let depth = *depth;
     if let Some(filter) = filter.as_deref() {
-        return Err(anyhow!(
-            "--filter {} is only supported for hosted/network remotes",
-            filter
-        ));
+        return Err(anyhow!(local_clone_option_unsupported_advice(
+            "--filter", filter
+        )));
     }
     if *lazy {
-        return Err(anyhow!(
-            "lazy clone is only supported for hosted/network remotes"
-        ));
+        return Err(anyhow!(local_clone_option_unsupported_advice(
+            "--lazy", "true"
+        )));
     }
 
     if !remote_path.exists() {
-        return Err(anyhow!(
-            "Remote repository '{}' does not exist",
-            remote_path.display()
-        ));
+        return Err(anyhow!(clone_remote_not_found_advice(remote_path)));
     }
 
-    // Create the local directory
-    fs::create_dir_all(local_path)?;
-
-    // Initialize the local repository
-    let local_repo = Repository::init(local_path)?;
-
-    // Open the remote and sync
+    // Resolve the requested remote thread before creating the
+    // destination. Missing-thread refusals should not leave behind a
+    // half-initialized clone directory.
     let sync = LocalSync::open(remote_path)?;
     let remote_repo = sync.source();
-
-    // Get the thread to clone
     let track_name = thread.as_deref().unwrap_or("main");
     let state_id = remote_repo
         .refs()
         .get_thread(track_name)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found in remote", track_name))?;
+        .ok_or_else(|| clone_remote_thread_not_found_advice(track_name, remote_path))?;
+
+    // Create and initialize the local repository only after all
+    // preflight target selection has succeeded.
+    fs::create_dir_all(local_path)?;
+    let local_repo = Repository::init(local_path)?;
 
     // Fetch the state and dependencies
     let objects_copied = if let Some(d) = depth {
@@ -456,23 +1015,38 @@ async fn clone_local(
     // mis-advance the "main" thread ref instead of the cloned one. Clone
     // post-HEAD-attach is tracked separately.
     local_repo.goto(&state_id)?;
+    local_repo.refs().write_head(&Head::Attached {
+        thread: track_name.to_string(),
+    })?;
 
-    // Copy worktree files from remote (for file:// protocol, we can do a direct copy)
-    copy_worktree(remote_repo.root(), local_repo.root())?;
+    // Copy worktree files from ordinary local remotes. A Heddle repo may
+    // also live inside a bare Git directory used as a local remote; that
+    // directory has no project worktree, only Git administrative files
+    // such as HEAD/config/hooks/objects/refs. The fetched Heddle state
+    // above has already materialized the real project files, so copying
+    // the bare Git root would pollute the clone.
+    if !looks_like_bare_git_admin_root(remote_repo.root()) {
+        copy_worktree(remote_repo.root(), local_repo.root())?;
+    }
+
+    let origin_url = configure_local_clone_origin(&local_repo, remote_path)?;
 
     if should_output_json(cli, Some(local_repo.config())) {
-        println!(
-            "{{\"status\": \"cloned\", \"remote\": \"file://{}\", \"local\": \"{}\", \"objects\": {}}}",
-            remote_path.display(),
-            local_path.display(),
-            objects_copied
+        let output = heddle_clone_output(
+            origin_url,
+            local_path.display().to_string(),
+            track_name.to_string(),
+            Some(objects_copied),
+            Some(state_id.to_string()),
+            Some(build_repository_verification_state(&local_repo)),
         );
+        crate::cli::render::write_json_stdout(&output)?;
     } else {
         let depth_info = depth.map(|d| format!(" (depth {})", d)).unwrap_or_default();
         println!(
             "{} cloned {} into {}{}",
             style::ok_marker(),
-            style::dim(&format!("file://{}", remote_path.display())),
+            style::dim(&origin_url),
             style::bold(&local_path.display().to_string()),
             style::dim(&depth_info)
         );
@@ -483,6 +1057,103 @@ async fn clone_local(
     }
 
     Ok(())
+}
+
+fn configure_local_clone_origin(repo: &Repository, remote_path: &Path) -> Result<String> {
+    let remote_path = fs::canonicalize(remote_path).unwrap_or_else(|_| remote_path.to_path_buf());
+    let origin_url = format!("file://{}", remote_path.display());
+    let mut cfg = RemoteConfig::open(repo).map_err(|err| {
+        anyhow!(clone_default_remote_failed_advice(
+            &origin_url,
+            err.to_string()
+        ))
+    })?;
+    cfg.add(
+        "origin",
+        Remote {
+            url: origin_url.clone(),
+        },
+    )
+    .map_err(|err| {
+        anyhow!(clone_default_remote_failed_advice(
+            &origin_url,
+            err.to_string()
+        ))
+    })?;
+    Ok(origin_url)
+}
+
+fn looks_like_bare_git_admin_root(path: &Path) -> bool {
+    !path.join(".git").exists()
+        && path.join("HEAD").is_file()
+        && path.join("objects").is_dir()
+        && path.join("refs").is_dir()
+}
+
+fn local_clone_option_unsupported_advice(option: &'static str, value: &str) -> RecoveryAdvice {
+    let detail = if option == "--filter" {
+        format!("{option} {value}")
+    } else {
+        option.to_string()
+    };
+    RecoveryAdvice::safety_refusal(
+        "local_clone_option_unsupported",
+        format!("{detail} is only supported for hosted/network remotes"),
+        "Retry without lazy/filter options for local remotes, or use a hosted/network remote that supports lazy materialization.",
+        format!("selected clone transport is local but {detail} requires hosted/network hydration"),
+        "clone cannot create a lazy local checkout because the local transport does not provide on-demand object hydration",
+        "destination path was left unchanged; no local clone repository was initialized",
+        "heddle clone <remote> <path>",
+        vec!["heddle clone <remote> <path>".to_string()],
+    )
+}
+
+fn clone_default_remote_failed_advice(origin_url: &str, cause: String) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_default_remote_failed",
+        format!("Cloned state, but could not configure default remote 'origin': {cause}"),
+        "Inspect the clone, then configure the remote with `heddle remote add origin <url>` if you want push/pull defaults.",
+        format!("local clone could not write default remote 'origin' for {origin_url}: {cause}"),
+        "future push or pull commands would not know which remote to use by default",
+        "objects, refs, and worktree files were already copied into the clone",
+        "heddle remote add origin <url>",
+        vec!["heddle remote add origin <url>".to_string()],
+    )
+}
+
+fn clone_remote_not_found_advice(remote_path: &Path) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_remote_not_found",
+        format!(
+            "Remote repository '{}' does not exist",
+            remote_path.display()
+        ),
+        "Check the remote path or URL, then retry `heddle clone` with an existing repository.",
+        format!(
+            "remote repository '{}' does not exist or is not reachable as a local path",
+            remote_path.display()
+        ),
+        "clone cannot read refs, objects, or worktree data from the requested source",
+        "destination path was left unchanged; no local clone repository was initialized",
+        "heddle clone <remote> <path>",
+        vec!["heddle clone <remote> <path>".to_string()],
+    )
+}
+
+fn clone_remote_thread_not_found_advice(track_name: &str, remote_path: &Path) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_remote_thread_not_found",
+        format!("Thread '{track_name}' not found in remote"),
+        "Inspect the remote with `heddle thread list`, then retry `heddle clone --thread <thread>` with an existing thread.",
+        format!(
+            "remote '{}' has no Heddle thread named '{track_name}'",
+            remote_path.display()
+        ),
+        "clone cannot choose a state to fetch or materialize until the remote thread resolves",
+        "destination path was left unchanged; no local clone repository was initialized",
+        "heddle thread list",
+        vec!["heddle thread list".to_string()],
+    )
 }
 
 /// Extract the `host:port` substring from a raw remote URL so the lazy
@@ -541,7 +1212,14 @@ async fn clone_network(
     client.auto_rotate_if_needed().await;
 
     if should_output_json(cli, Some(local_repo.config())) {
-        println!("{{\"status\":\"connected\",\"address\":\"{}\"}}", addr);
+        println!(
+            "{}",
+            serde_json::json!({
+                "output_kind": "clone_connection",
+                "status": "connected",
+                "address": addr.to_string(),
+            })
+        );
     } else {
         println!("Connected to {}", addr);
     }
@@ -580,15 +1258,15 @@ async fn clone_network(
                 .context("failed to persist lazy-hydrator.toml")?;
         }
         if should_output_json(cli, Some(local_repo.config())) {
-            println!(
-                "{{\"status\": \"cloned\", \"remote\": \"{}\", \"local\": \"{}\", \"state\": \"{}\"}}",
-                addr,
-                local_path.display(),
-                result
-                    .final_state
-                    .map(|s| s.to_string())
-                    .unwrap_or_default()
+            let output = heddle_clone_output(
+                addr.to_string(),
+                local_path.display().to_string(),
+                track_name.to_string(),
+                None,
+                result.final_state.map(|state| state.to_string()),
+                Some(build_repository_verification_state(&local_repo)),
             );
+            crate::cli::render::write_json_stdout(&output)?;
         } else {
             let depth_info = depth.map(|d| format!(" (depth {})", d)).unwrap_or_default();
             println!(
@@ -607,7 +1285,9 @@ async fn clone_network(
         }
     } else {
         let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
-        return Err(anyhow!("Clone failed: {}", err));
+        return Err(anyhow!(RecoveryAdvice::network_clone_failed(
+            &err, local_path
+        )));
     }
 
     Ok(())
@@ -649,13 +1329,33 @@ fn copy_entry(path: &Path, dest_path: &Path) -> Result<()> {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&target, dest_path)?;
         #[cfg(not(unix))]
-        return Err(anyhow!("Symlinks are not supported on this platform"));
+        return Err(anyhow!(clone_symlink_unsupported_advice(path, dest_path)));
     } else if path.is_dir() {
         copy_dir_recursive(path, dest_path)?;
     } else {
         fs::copy(path, dest_path)?;
     }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn clone_symlink_unsupported_advice(path: &Path, dest_path: &Path) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_symlink_unsupported",
+        "Symlinks are not supported on this platform",
+        "Retry on a platform with symlink support, or remove the symlink from the source before cloning.",
+        format!(
+            "source path '{}' is a symlink but this platform cannot create symlinks",
+            path.display()
+        ),
+        format!(
+            "clone would need to create symlink '{}' to preserve the worktree exactly",
+            dest_path.display()
+        ),
+        "the clone operation stopped before replacing the unsupported symlink with different file contents",
+        "heddle clone <remote> <path>",
+        vec!["heddle clone <remote> <path>".to_string()],
+    )
 }
 
 /// Read-time blob hydrator for **Git-overlay** lazy clones (issue #50).
@@ -665,10 +1365,11 @@ fn copy_entry(path: &Path, dest_path: &Path) -> Result<()> {
 /// blake3-hashed blob is recorded in `.heddle/partial-fetch` but is
 /// absent from the local object store — the read path delegates here.
 /// This hydrator looks up the corresponding Git object id, fetches the
-/// blob from the underlying gix repo (which triggers the gix promisor
-/// fetch against the original remote when `extensions.partialClone =
-/// origin` is set in `.git/config`), and writes the bytes into the
-/// heddle store. The retry-read then surfaces the blob normally.
+/// blob from the underlying gix repo when it is already present locally
+/// and writes the bytes into the heddle store. Native promisor fetching
+/// for absent Git blobs is not implemented yet; Heddle rejects public
+/// Git-overlay lazy/filtered clones until that path can run without a
+/// `git` executable.
 ///
 /// ## Why a side-table?
 ///
@@ -723,14 +1424,6 @@ impl BlobHydrator for GitOverlayBlobHydrator {
                 ))
             })?;
 
-        // Try the local ODB first; if absent, shell out to git which
-        // honours `extensions.partialClone = <remote>` and triggers
-        // the promisor fetch on miss. gix 0.80 cannot do the
-        // promisor fetch itself (the v2 `filter` capability isn't
-        // surfaced through its fetch builder), but it CAN read the
-        // bytes after `git` has populated them — so a follow-up
-        // local lookup is enough to keep the loose-blob bookkeeping
-        // in one place.
         let bytes = self.read_blob_bytes(oid)?;
         let heddle_blob = Blob::new(bytes);
         // Sanity-check the upstream gave us bytes that match the
@@ -759,26 +1452,10 @@ impl GitOverlayBlobHydrator {
             return Ok(bytes);
         }
 
-        // Promisor refetch via the git CLI. The git binary speaks the
-        // full v2 wire protocol and honours `extensions.partialClone`,
-        // so a `cat-file -p` against a missing blob transparently
-        // fetches it from the recorded remote. `--batch-command` or
-        // `-p` both work; `-p` is the simpler one-shot.
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&self.git_repo_path)
-            .args(["cat-file", "-p"])
-            .arg(oid.to_string())
-            .output()
-            .map_err(HeddleError::Io)?;
-        if !output.status.success() {
-            return Err(HeddleError::Io(std::io::Error::other(format!(
-                "git cat-file -p {oid} in {} failed: {}",
-                self.git_repo_path.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))));
-        }
-        Ok(output.stdout)
+        Err(HeddleError::Config(format!(
+            "Git blob {oid} is missing from {}; native Git-overlay lazy hydration is not implemented yet. Re-run a full clone/import without --lazy or --filter so Heddle has a complete local object graph.",
+            self.git_repo_path.display()
+        )))
     }
 }
 
@@ -797,8 +1474,7 @@ impl GitOverlayBlobHydrator {
 /// hydrator returns the descriptive `"no Git OID mapping"` error if a
 /// missing blob is requested.
 pub fn register_git_overlay_factory() {
-    use std::path::Path as StdPath;
-    use std::sync::Arc as StdArc;
+    use std::{path::Path as StdPath, sync::Arc as StdArc};
 
     use repo::lazy_hydrator::{
         BlobHydratorFactory, HydratorSection, KIND_GIT_OVERLAY, register_factory,
@@ -856,7 +1532,10 @@ mod tests {
     #[test]
     fn clone_repo_name_extracts_last_filesystem_segment() {
         assert_eq!(clone_repo_name_from_label("/home/user/foo"), "foo");
-        assert_eq!(clone_repo_name_from_label("file:///tmp/projects/bar/"), "bar");
+        assert_eq!(
+            clone_repo_name_from_label("file:///tmp/projects/bar/"),
+            "bar"
+        );
     }
 
     #[test]
@@ -873,10 +1552,7 @@ mod tests {
         // shorthand — earlier versions unconditionally split on `:` and
         // dropped the drive letter, producing `\src\ripgrep` instead of
         // `ripgrep`.
-        assert_eq!(
-            clone_repo_name_from_label("C:\\src\\ripgrep"),
-            "ripgrep"
-        );
+        assert_eq!(clone_repo_name_from_label("C:\\src\\ripgrep"), "ripgrep");
         assert_eq!(clone_repo_name_from_label("C:/src/ripgrep"), "ripgrep");
         assert_eq!(
             clone_repo_name_from_label("D:\\workspaces\\heddle.git"),
@@ -890,14 +1566,8 @@ mod tests {
         // contains no path separator. `/tmp/foo:bar/repo` and
         // `./foo:bar/repo.git` are valid local paths whose basename
         // must not be shadowed by the colon.
-        assert_eq!(
-            clone_repo_name_from_label("/tmp/foo:bar/repo.git"),
-            "repo"
-        );
-        assert_eq!(
-            clone_repo_name_from_label("./foo:bar/repo.git"),
-            "repo"
-        );
+        assert_eq!(clone_repo_name_from_label("/tmp/foo:bar/repo.git"), "repo");
+        assert_eq!(clone_repo_name_from_label("./foo:bar/repo.git"), "repo");
     }
 
     #[test]
@@ -924,8 +1594,8 @@ mod tests {
             "summary must name the current thread: {joined}"
         );
         assert!(
-            joined.to_lowercase().contains("heddle log"),
-            "summary must suggest `heddle log` as the next step: {joined}"
+            joined.to_lowercase().contains("heddle status"),
+            "summary must suggest `heddle status` as the next step: {joined}"
         );
     }
 
@@ -936,7 +1606,9 @@ mod tests {
         let lines = format_clone_completion_lines("tiny", 1, "main");
         let joined = lines.join("\n");
         assert!(
-            joined.contains("1 commit ") || joined.contains("1 commit\n") || joined.ends_with("1 commit"),
+            joined.contains("1 commit ")
+                || joined.contains("1 commit\n")
+                || joined.ends_with("1 commit"),
             "one commit must not pluralize: {joined}"
         );
     }
@@ -980,6 +1652,13 @@ mod tests {
     fn reject_unsupported_rejects_filter() {
         let err = reject_unsupported_for_git_overlay(&opts(None, false, Some("blob:none")))
             .expect_err("filter must be rejected");
+        let advice = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
+            .expect("filter refusal should use typed recovery advice");
+        assert_eq!(advice.kind, "git_overlay_clone_option_unsupported");
+        assert_eq!(advice.primary_command, "heddle clone <remote> <path>");
+        assert!(advice.preserved.contains("no clone directory"));
         let msg = err.to_string();
         assert!(
             msg.contains("--filter"),
@@ -995,6 +1674,12 @@ mod tests {
     fn reject_unsupported_rejects_lazy() {
         let err = reject_unsupported_for_git_overlay(&opts(None, true, None))
             .expect_err("lazy must be rejected");
+        let advice = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
+            .expect("lazy refusal should use typed recovery advice");
+        assert_eq!(advice.kind, "git_overlay_clone_option_unsupported");
+        assert!(advice.primary_hint().contains("full Git-overlay clone"));
         let msg = err.to_string();
         assert!(msg.contains("--lazy"), "message must name --lazy: {msg}");
         assert!(
@@ -1007,12 +1692,42 @@ mod tests {
     fn reject_unsupported_rejects_depth() {
         let err = reject_unsupported_for_git_overlay(&opts(Some(1), false, None))
             .expect_err("depth must be rejected");
+        let advice = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
+            .expect("depth refusal should use typed recovery advice");
+        assert_eq!(advice.kind, "git_overlay_clone_option_unsupported");
+        assert!(advice.error.contains("shallow boundary"));
         let msg = err.to_string();
         assert!(msg.contains("--depth"), "message must name --depth: {msg}");
         assert!(
             msg.contains("not yet supported"),
             "message must say not yet supported: {msg}"
         );
+    }
+
+    #[test]
+    fn clone_verification_failures_use_typed_recovery_advice() {
+        let advice = clone_verification_failed_advice(
+            "clone verification failed: Heddle active thread is 'dev', expected 'main'",
+            "Heddle active thread 'dev' does not match imported Git branch 'main'",
+            "continuing would report the clone as verified while Heddle is attached to the wrong thread",
+            "heddle thread switch main --force",
+        );
+
+        assert_eq!(advice.kind, "clone_verification_failed");
+        assert!(
+            advice
+                .error
+                .contains("clone verification failed: Heddle active thread")
+        );
+        assert_eq!(advice.primary_command, "heddle thread switch main --force");
+        assert_eq!(
+            advice.recovery_commands,
+            vec!["heddle thread switch main --force"]
+        );
+        assert!(advice.preserved.contains("left for inspection"));
+        assert!(advice.primary_hint().contains("Repair the clone mapping"));
     }
 
     /// Standalone helpers to exercise [`GitOverlayBlobHydrator`]'s
@@ -1107,11 +1822,10 @@ mod tests {
         }
 
         #[test]
-        fn read_blob_bytes_falls_back_to_git_cli_and_surfaces_its_error() {
-            // No blob in the bare repo for this OID and no remote to
-            // refetch from → git cat-file -p exits non-zero and the
-            // error must surface with the OID + bare-repo path
-            // mentioned so an operator can debug it.
+        fn read_blob_bytes_missing_blob_reports_native_lazy_boundary() {
+            // No blob in the bare repo for this OID. Heddle must not
+            // shell out to `git cat-file`; the error should name the
+            // missing OID and the native lazy-hydration boundary.
             let (_temp, bare, _repo) = fixtures();
             let absent_oid = gix::ObjectId::null(gix::hash::Kind::Sha1);
             let hydrator = GitOverlayBlobHydrator::new(bare.clone());
@@ -1121,8 +1835,8 @@ mod tests {
                 .expect_err("missing blob + no promisor must fail");
             let msg = err.to_string();
             assert!(
-                msg.contains("git cat-file"),
-                "error must name the fallback command: {msg}"
+                msg.contains("native Git-overlay lazy hydration is not implemented yet"),
+                "error must name the native unsupported boundary: {msg}"
             );
             assert!(
                 msg.contains(&absent_oid.to_string()),

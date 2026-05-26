@@ -47,7 +47,7 @@
 //!   * Programmatic `FSResource.mount(...)` invocation.
 
 use std::{
-    ffi::{c_char, c_int, c_void, CStr, CString, OsStr},
+    ffi::{CStr, CString, OsStr, c_char, c_int, c_void},
     os::unix::ffi::OsStrExt,
     path::Path,
     sync::Arc,
@@ -70,9 +70,9 @@ pub mod readiness;
 // throughout this file so any signature change in `c_abi` propagates
 // here at the type-checker, not at runtime.
 use c_abi::{
-    heddle_fskit_is_available, heddle_fskit_session_free, heddle_fskit_session_mount,
-    heddle_fskit_session_new, heddle_fskit_session_unmount, HeddleEnumerateEmit,
-    HeddleFSKitSessionHandle,
+    HeddleEnumerateEmit, HeddleFSKitSessionHandle, heddle_fskit_is_available,
+    heddle_fskit_session_free, heddle_fskit_session_mount, heddle_fskit_session_new,
+    heddle_fskit_session_unmount,
 };
 
 // ----------------------------------------------------------------

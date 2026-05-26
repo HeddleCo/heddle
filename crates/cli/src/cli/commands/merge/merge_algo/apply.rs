@@ -6,6 +6,7 @@ use objects::object::{Tree, TreeEntry};
 use repo::Repository;
 
 use super::super::prepare_dir_for_file_replacement;
+use crate::cli::commands::RecoveryAdvice;
 
 pub(crate) fn apply_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
     // Two distinct "no tree" cases collapse here. Keep them apart:
@@ -22,13 +23,22 @@ pub(crate) fn apply_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
     //   `heddle fsck --full`.
     let current_tree = match repo.current_state()? {
         Some(state) => repo.store().get_tree(&state.tree)?.ok_or_else(|| {
-            anyhow!(
-                "current state {} references tree {} but the object store has no such tree; \
-                 aborting merge application to avoid silently replacing tracked content with \
-                 an empty baseline. Run `heddle fsck --full` to inspect store integrity.",
-                state.change_id.short(),
-                state.tree,
-            )
+            anyhow!(RecoveryAdvice::merge_integrity_refusal(
+                format!(
+                    "current state {} references tree {} but the object store has no such tree; \
+                     aborting merge application to avoid silently replacing tracked content with \
+                     an empty baseline",
+                    state.change_id.short(),
+                    state.tree,
+                ),
+                format!(
+                    "current state {} references missing tree {} in the object store",
+                    state.change_id.short(),
+                    state.tree,
+                ),
+                "merge application would compare against an empty baseline and could silently replace tracked content with the merged tree, losing tracked paths outside it",
+                "merge application stopped before materializing the merged tree; current HEAD, refs, object store, and worktree were left unchanged",
+            ))
         })?,
         None => Tree::default(),
     };
@@ -171,12 +181,21 @@ fn source_subtree_for(
     }
     repo.resolve_subtree(current_tree, Path::new(name))?
         .ok_or_else(|| {
-            anyhow!(
-                "current tree records subtree {:?} (hash {}) but the object store cannot \
-                 resolve it; aborting merge application to avoid leaving the subtree's tracked \
-                 descendants orphaned on disk. Run `heddle fsck --full` to inspect store integrity.",
-                name,
-                entry.hash,
-            )
+            anyhow!(RecoveryAdvice::merge_integrity_refusal(
+                format!(
+                    "current tree records subtree {:?} (hash {}) but the object store cannot \
+                     resolve it; aborting merge application to avoid leaving the subtree's tracked \
+                     descendants orphaned on disk",
+                    name,
+                    entry.hash,
+                ),
+                format!(
+                    "current tree records subtree {:?} with missing hash {} in the object store",
+                    name,
+                    entry.hash,
+                ),
+                "merge application would drop the directory entry without a source subtree and could leave its tracked descendants orphaned on disk as untracked additions",
+                "repository HEAD, refs, and object store were left unchanged; merge application stopped before removing this subtree's tracked descendants or writing the final merged tree",
+            ))
         })
 }

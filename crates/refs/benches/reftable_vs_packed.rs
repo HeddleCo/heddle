@@ -36,8 +36,7 @@ use std::{
 };
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use objects::fs_atomic::write_file_atomic;
-use objects::object::ChangeId;
+use objects::{fs_atomic::write_file_atomic, object::ChangeId};
 use refs::{PackedRefsModel, ReftableModel};
 use tempfile::TempDir;
 

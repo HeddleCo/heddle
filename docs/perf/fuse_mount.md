@@ -186,7 +186,7 @@ runs.
   `mount_read_paths::bench_chunked_read_cold`; cold-cache behavior
   of the host page cache is a follow-up for when we run benches on
   a dedicated bare-metal runner.
-- **No `heddle mount` / `heddle unmount` CLI in `lifecycle`.** The
+- **No `mount` / `unmount` CLI in `lifecycle`.** The
   CLI is a thin wrapper around `FuseShell::mount_background` (see
   `crates/cli/src/cli/commands/mount_lifecycle.rs`); process-launch
   overhead would dominate and obscure the kernel-side cost we care

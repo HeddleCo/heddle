@@ -3,15 +3,15 @@ use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
 
 use super::{
-    fs_paths::{blobs_dir, hash_path},
     FsStore, LooseObjectWriteMode,
+    fs_paths::{blobs_dir, hash_path},
 };
 use crate::{
     object::{
         Action, Attribution, Blob, ChangeId, ContentHash, Operation, Principal, State, Tree,
         TreeEntry,
     },
-    store::{atomic::temp_path, HeddleError, ObjectStore},
+    store::{HeddleError, ObjectStore, atomic::temp_path},
 };
 
 fn create_test_store() -> (TempDir, FsStore) {

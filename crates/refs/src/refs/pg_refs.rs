@@ -355,8 +355,9 @@ impl RefBackend for PgRefBackend {
 // ── Issue #62 regression: current-thread runtime panic ──────────────────────
 #[cfg(test)]
 mod current_thread_runtime_tests {
-    use super::*;
     use sqlx::postgres::PgPoolOptions;
+
+    use super::*;
 
     /// Issue #62: `PgRefBackend`'s sync methods must not panic when the
     /// caller is on a `current_thread` Tokio runtime. The pre-fix

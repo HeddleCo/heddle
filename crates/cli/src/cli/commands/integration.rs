@@ -14,6 +14,7 @@ use repo::Repository;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::advice::RecoveryAdvice;
 use crate::{
     cli::{
         Cli, IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs,
@@ -37,7 +38,12 @@ impl IntegrationScope {
         match value {
             "repo" => Ok(Self::Repo),
             "user" => Ok(Self::User),
-            other => Err(anyhow!("invalid integration scope: {other}")),
+            other => Err(anyhow!(RecoveryAdvice::invalid_usage(
+                "integration_scope_invalid",
+                format!("invalid integration scope: {other}"),
+                "Use `--scope repo` or `--scope user`.",
+                "heddle integration install --scope repo",
+            ))),
         }
     }
 }
@@ -246,7 +252,7 @@ fn install_selected(
             "codex" => install_codex(repo, &mut manifest, &scope, force, path_mode)?,
             "claude-code" => install_claude(repo, &mut manifest, &scope, force, path_mode)?,
             "opencode" => install_opencode(repo, &mut manifest, &scope, force, path_mode)?,
-            other => return Err(anyhow!("unsupported harness: {other}")),
+            other => return Err(anyhow!(unsupported_harness_advice(other))),
         }
     }
     save_manifest(repo, &manifest)?;
@@ -326,7 +332,7 @@ fn upgrade_integrations(cli: &Cli, repo: &Repository, args: IntegrationTargetArg
         // Default (Relative). But every pre-PathMode install actually wrote
         // *absolute* paths — that's the codex-flagged regression. So when the
         // serde default fired (i.e. the on-disk manifest had no `path_mode`
-        // field), trust the actual installed config, not the default. We
+        // field), use the actual installed config, not the default. We
         // re-read the harness's installed settings file and probe the first
         // emitted command for a leading `heddle` literal vs an absolute path.
         let path_mode = match existing.as_ref() {
@@ -337,7 +343,7 @@ fn upgrade_integrations(cli: &Cli, repo: &Repository, args: IntegrationTargetArg
             "codex" => install_codex(repo, &mut manifest, &scope, true, path_mode)?,
             "claude-code" => install_claude(repo, &mut manifest, &scope, true, path_mode)?,
             "opencode" => install_opencode(repo, &mut manifest, &scope, true, path_mode)?,
-            other => return Err(anyhow!("unsupported harness: {other}")),
+            other => return Err(anyhow!(unsupported_harness_advice(other))),
         }
     }
     save_manifest(repo, &manifest)?;
@@ -555,11 +561,20 @@ fn normalize_harnesses(harnesses: Vec<String>) -> Result<Vec<String>> {
             "codex" => "codex",
             "claude-code" => "claude-code",
             "opencode" => "opencode",
-            other => return Err(anyhow!("unsupported harness: {other}")),
+            other => return Err(anyhow!(unsupported_harness_advice(other))),
         };
         seen.insert(normalized.to_string());
     }
     Ok(seen.into_iter().collect())
+}
+
+fn unsupported_harness_advice(harness: &str) -> RecoveryAdvice {
+    RecoveryAdvice::invalid_usage(
+        "integration_harness_unsupported",
+        format!("unsupported harness: {harness}"),
+        "Use one of: codex, claude-code, opencode.",
+        "heddle integration install codex",
+    )
 }
 
 fn target_harnesses(manifest: &IntegrationManifest, requested: Vec<String>) -> Result<Vec<String>> {
@@ -581,7 +596,12 @@ fn install_codex(
     path_mode: PathMode,
 ) -> Result<()> {
     if *scope != IntegrationScope::User {
-        return Err(anyhow!("codex integration currently requires --scope user"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "integration_codex_scope_invalid",
+            "codex integration currently requires --scope user",
+            "Rerun the install with `--scope user`.",
+            "heddle integration install codex --scope user",
+        )));
     }
     let home = env::var("HOME").context("HOME is required for codex integration install")?;
     let config_path = PathBuf::from(home).join(".codex").join("config.toml");
@@ -1154,7 +1174,7 @@ mod tests {
     /// machines where `heddle` isn't on PATH.
     ///
     /// Fix: when probing the existing install, read the actual settings
-    /// file and trust the on-disk command shape over the manifest's
+    /// file and prefer the on-disk command shape over the manifest's
     /// (defaulted) `path_mode`. Setup: install once with absolute mode,
     /// then drop the `path_mode` field from the manifest TOML to
     /// emulate a pre-PathMode install. The upgrade path must detect the

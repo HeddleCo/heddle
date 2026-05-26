@@ -6,6 +6,7 @@ mod hydration;
 mod sync;
 mod user;
 
+use cli_shared::ClientConfig;
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::v1::{
     KeypairProof, MintBiscuitRequest, auth_service_client::AuthServiceClient,
@@ -22,7 +23,6 @@ use tonic::{
 };
 
 use crate::credentials;
-use cli_shared::ClientConfig;
 
 pub struct HostedGrpcClient {
     pub(super) inner: RepoSyncServiceClient<Channel>,

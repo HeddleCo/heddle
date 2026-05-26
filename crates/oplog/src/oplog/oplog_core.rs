@@ -154,6 +154,71 @@ impl OpLog {
         self.update_batch_undone_state(batch, false)
     }
 
+    /// Coalesce two existing batches into one logical undo/redo unit.
+    ///
+    /// This is intentionally narrow: it rewrites only batch metadata for
+    /// already-recorded entries. Forward side effects must already be durable
+    /// before callers use this to present them as one operation.
+    pub fn coalesce_batches(
+        &self,
+        primary_batch_id: u64,
+        secondary_batch_id: u64,
+    ) -> Result<OpBatch> {
+        if primary_batch_id == secondary_batch_id {
+            let mut batches =
+                self.collect_batches_scoped(1, |batch| batch.id == primary_batch_id, None)?;
+            return batches.pop().ok_or_else(|| {
+                HeddleError::Config(format!("oplog batch {primary_batch_id} not found"))
+            });
+        }
+
+        let _lock = self.write_lock()?;
+        let mut packed = self.load_fresh()?;
+        let mut matching_indices = Vec::new();
+        let mut saw_primary = false;
+        let mut saw_secondary = false;
+
+        for (idx, entry) in packed.entries.iter().enumerate() {
+            let batch_id = if entry.batch_id == 0 {
+                entry.id
+            } else {
+                entry.batch_id
+            };
+            if batch_id == primary_batch_id {
+                saw_primary = true;
+                matching_indices.push(idx);
+            } else if batch_id == secondary_batch_id {
+                saw_secondary = true;
+                matching_indices.push(idx);
+            }
+        }
+
+        if !saw_primary || !saw_secondary {
+            return Err(HeddleError::Config(format!(
+                "cannot coalesce missing oplog batch(es): primary={primary_batch_id}, secondary={secondary_batch_id}"
+            )));
+        }
+
+        matching_indices.sort_by_key(|idx| packed.entries[*idx].id);
+        for (batch_index, entry_idx) in matching_indices.iter().copied().enumerate() {
+            let entry = &mut packed.entries[entry_idx];
+            entry.batch_id = primary_batch_id;
+            entry.batch_index = batch_index as u32;
+        }
+
+        packed.save()?;
+        let entries = matching_indices
+            .into_iter()
+            .map(|idx| packed.entries[idx].clone())
+            .collect::<Vec<_>>();
+        *self.cached.lock().unwrap() = Some(packed);
+
+        Ok(OpBatch {
+            id: primary_batch_id,
+            entries,
+        })
+    }
+
     /// Record a batch of operations.
     pub fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
         self.record_batch_scoped(operations, None)
@@ -422,5 +487,9 @@ impl OpLogBackend for OpLog {
 
     fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch> {
         OpLog::mark_batch_redone(self, batch)
+    }
+
+    fn coalesce_batches(&self, primary_batch_id: u64, secondary_batch_id: u64) -> Result<OpBatch> {
+        OpLog::coalesce_batches(self, primary_batch_id, secondary_batch_id)
     }
 }

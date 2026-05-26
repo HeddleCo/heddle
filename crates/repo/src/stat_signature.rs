@@ -132,13 +132,14 @@ fn file_index(path: &Path, metadata: &std::fs::Metadata) -> u64 {
 #[cfg(windows)]
 fn file_index_via_handle(path: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
+
     use windows_sys::Win32::{
         Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
         Storage::FileSystem::{
-            CreateFileW, GetFileInformationByHandle, GetFileInformationByHandleEx,
-            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, FileIdInfo, OPEN_EXISTING,
+            BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandle,
+            GetFileInformationByHandleEx, OPEN_EXISTING,
         },
     };
 
@@ -199,8 +200,7 @@ fn file_index_via_handle(path: &Path) -> Option<u64> {
     if legacy_ok == 0 {
         return None;
     }
-    let file_index =
-        ((legacy.nFileIndexHigh as u64) << 32) | (legacy.nFileIndexLow as u64);
+    let file_index = ((legacy.nFileIndexHigh as u64) << 32) | (legacy.nFileIndexLow as u64);
     // XOR the volume serial in so two distinct volumes that happen
     // to assign the same file index don't collide.
     Some(file_index ^ (legacy.dwVolumeSerialNumber as u64))
@@ -233,8 +233,10 @@ fn fold_file_id_info(info: &windows_sys::Win32::Storage::FileSystem::FILE_ID_INF
 /// instead of pretending every file has the same identity.
 #[cfg(windows)]
 fn file_index_fallback_hash(path: &Path, metadata: &std::fs::Metadata) -> u64 {
-    use std::hash::{Hash, Hasher};
-    use std::os::windows::fs::MetadataExt;
+    use std::{
+        hash::{Hash, Hasher},
+        os::windows::fs::MetadataExt,
+    };
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     metadata.file_size().hash(&mut hasher);
@@ -293,7 +295,10 @@ mod tests {
         // legitimately be zero on some filesystems (e.g. FAT32 has
         // no inode), so we don't probe them individually.
         assert_eq!(sig1.0, 5);
-        assert_eq!(sig1, sig2, "back-to-back stat must produce identical signatures");
+        assert_eq!(
+            sig1, sig2,
+            "back-to-back stat must produce identical signatures"
+        );
     }
 
     /// Modifying the file's contents must change the signature.

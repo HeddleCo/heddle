@@ -204,11 +204,7 @@ enum LineAction<'a> {
 /// check: any base line modified by both sides — or any same-anchor
 /// insertion with different content — bails out so the conflict marker
 /// path remains correct.
-fn compose_disjoint(
-    base: &[&[u8]],
-    ours: &[&[u8]],
-    theirs: &[&[u8]],
-) -> Option<Vec<u8>> {
+fn compose_disjoint(base: &[&[u8]], ours: &[&[u8]], theirs: &[&[u8]]) -> Option<Vec<u8>> {
     let (our_actions, our_inserts) = classify_against_base(base, ours);
     let (their_actions, their_inserts) = classify_against_base(base, theirs);
 
@@ -234,7 +230,11 @@ fn compose_disjoint(
         }
     }
     // Trailing-gap insertions (past end of base).
-    compose_gap(&mut out, &our_inserts[base.len()], &their_inserts[base.len()])?;
+    compose_gap(
+        &mut out,
+        &our_inserts[base.len()],
+        &their_inserts[base.len()],
+    )?;
     Some(out)
 }
 

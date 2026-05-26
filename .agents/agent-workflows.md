@@ -2,7 +2,7 @@
 
 ## CLI Output
 
-- Prefer `--json` or `--output json` for automation.
+- Prefer `--output json` for automation.
 - Treat text output as human-facing and unstable.
 - `auto` switches to JSON when stdout is not a TTY.
 
@@ -24,18 +24,18 @@ Do not rely on `HEDDLE_SESSION_ID` or `HEDDLE_SESSION_SEGMENT`; they are not imp
 Use Heddle as a JSON-speaking CLI:
 
 ```bash
-heddle status --json
-heddle log --json
-heddle diff --json
-heddle show HEAD --json
+heddle status --output json
+heddle log --output json
+heddle diff --output json
+heddle show HEAD --output json
 ```
 
 Common write flow:
 
 ```bash
 heddle capture -m "Implement feature X"
-heddle diff --semantic --json
-heddle blame src/file.rs --json
+heddle diff --semantic --output json
+heddle blame src/file.rs --output json
 ```
 
 ## Harness And Actor Model
@@ -78,7 +78,7 @@ Important current behavior:
 
 - `heddle start` defaults to a private lightweight thread with a Heddle-managed execution root.
 - `heddle thread show/list/refresh/promote/drop` manage thread lifecycle and maintenance.
-- `heddle start --workspace heavy` creates a user-visible isolated checkout when the thread needs a heavier environment.
+- `heddle start --workspace materialized` creates a user-visible isolated checkout when the thread needs a heavier environment.
 - `capture` records changed paths, impact categories, freshness, and promotion warnings for the active thread.
 - `merge --preview` shows the semantic integration summary before apply.
 - `start <thread> --path <dir>` creates an isolated checkout with its own working directory.

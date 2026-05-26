@@ -34,8 +34,8 @@ use std::{
 use cli::client::local_daemon::{
     LocalDaemonStatus, connect_local_daemon_channel, detect_local_daemon, probe,
 };
-use repo::Repository;
 use daemon::local_daemon::{LocalDaemonConfig, serve};
+use repo::Repository;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 

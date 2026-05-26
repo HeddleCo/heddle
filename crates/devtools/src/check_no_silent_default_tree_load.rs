@@ -25,14 +25,15 @@
 //! The built-in default is empty: the legacy doc-comment pins are no longer
 //! needed because the AST walker doesn't visit doc-comments.
 
-use std::env;
-use std::ffi::OsStr;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
-use syn::visit::Visit;
-use syn::{Expr, ExprMethodCall, Stmt};
+use syn::{Expr, ExprMethodCall, Stmt, visit::Visit};
 use walkdir::WalkDir;
 
 const DEFAULT_SEARCH_DIRS: &[&str] = &["crates"];
@@ -270,8 +271,9 @@ fn chain_originates_from_get_tree(expr: &Expr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     fn scan_source(src: &str) -> Vec<Hit> {
         let file = syn::parse_file(src).expect("parse");

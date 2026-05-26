@@ -182,12 +182,15 @@ impl RuntimeBridge {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::{
-        Arc, Barrier,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
     };
-    use std::time::{Duration, Instant};
+
+    use super::*;
 
     #[test]
     fn block_on_from_non_tokio_thread() {

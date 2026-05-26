@@ -14,6 +14,42 @@ fn create_divergent_branches(temp: &TempDir) {
     heddle(&["capture", "-m", "Main change"], Some(temp.path())).unwrap();
 }
 
+fn refresh_then_merge(temp: &TempDir, thread: &str, extra_args: &[&str]) -> Result<String, String> {
+    let current = status_json(temp.path())["thread"]
+        .as_str()
+        .unwrap_or("main")
+        .to_string();
+    heddle(&["thread", "switch", thread], Some(temp.path())).unwrap();
+    heddle(&["thread", "refresh", thread], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", &current], Some(temp.path())).unwrap();
+    let mut args = vec!["merge", thread];
+    args.extend_from_slice(extra_args);
+    heddle(&args, Some(temp.path()))
+}
+
+fn refresh_thread_expect_conflict(temp: &TempDir, thread: &str) -> String {
+    heddle(&["thread", "switch", thread], Some(temp.path())).unwrap();
+    let result = heddle(&["thread", "refresh", thread], Some(temp.path()));
+    let err = result.expect_err("stale conflicting thread refresh should block");
+    assert!(
+        err.contains("thread_refresh_conflicted"),
+        "refresh conflict should use typed advice: {err}"
+    );
+    assert!(
+        temp.path().join(".heddle/MERGE_STATE").exists(),
+        "refresh conflict should leave durable merge state"
+    );
+    err
+}
+
+fn sibling_checkout_path(repo: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let repo_name = repo
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repo");
+    repo.with_file_name(format!("{repo_name}-{suffix}"))
+}
+
 #[test]
 fn test_merge_fast_forward() {
     let temp = TempDir::new().unwrap();
@@ -30,11 +66,134 @@ fn test_merge_fast_forward() {
     let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
     assert_eq!(content, "v2");
 }
+
+#[test]
+fn test_merge_preview_counts_match_isolated_added_file_materialization() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+
+    let checkout = sibling_checkout_path(temp.path(), "preview-counts");
+    let checkout_arg = checkout.to_str().expect("checkout path utf8");
+    heddle(
+        &["start", "feature/preview-counts", "--path", checkout_arg],
+        Some(temp.path()),
+    )
+    .unwrap();
+    fs::write(
+        checkout.join("preview-added.txt"),
+        "added from isolated thread\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "add isolated file"], Some(&checkout)).unwrap();
+    heddle(&["ready"], Some(&checkout)).unwrap();
+
+    let before_preview_status = status_json(temp.path());
+    assert_eq!(
+        before_preview_status["worktree_changed_path_count"], 0,
+        "parent worktree should be clean before preview: {before_preview_status}"
+    );
+    assert!(
+        !temp.path().join("preview-added.txt").exists(),
+        "source file should not exist in the parent before preview"
+    );
+
+    let preview_out = heddle(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature/preview-counts",
+            "--preview",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let preview: Value = serde_json::from_str(&preview_out).expect("preview JSON");
+    assert_eq!(preview["status"], "preview", "{preview}");
+    assert_eq!(preview["preview_only"], true, "{preview}");
+    assert_eq!(preview["would_merge"], true, "{preview}");
+    assert_eq!(
+        preview["changed_path_count"], 1,
+        "preview must count the file a real materialization will add: {preview}"
+    );
+    assert_eq!(
+        preview["changed_paths"],
+        serde_json::json!(["preview-added.txt"]),
+        "preview must list the file a real materialization will add: {preview}"
+    );
+
+    let text_preview = heddle(
+        &[
+            "merge",
+            "feature/preview-counts",
+            "--preview",
+            "--output",
+            "text",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(
+        text_preview.contains("changed paths: preview-added.txt")
+            && !text_preview.contains("Already up to date")
+            && !text_preview.contains("0 changed path"),
+        "human preview must not imply there is nothing to materialize: {text_preview}"
+    );
+
+    let after_preview_status = status_json(temp.path());
+    assert_eq!(
+        after_preview_status["current_state"], before_preview_status["current_state"],
+        "preview must not advance the parent state: before={before_preview_status} after={after_preview_status}"
+    );
+    assert_eq!(
+        after_preview_status["worktree_changed_path_count"], 0,
+        "preview must not dirty the parent worktree: {after_preview_status}"
+    );
+    assert_eq!(
+        after_preview_status["thread_changed_path_count"],
+        before_preview_status["thread_changed_path_count"],
+        "preview should not change the captured source-thread path count: before={before_preview_status} after={after_preview_status}"
+    );
+    assert!(
+        !temp.path().join("preview-added.txt").exists(),
+        "preview must not materialize the source file in the parent"
+    );
+    let verify_after_preview: Value =
+        serde_json::from_str(&heddle(&["--output", "json", "verify"], Some(temp.path())).unwrap())
+            .expect("verify JSON");
+    assert_eq!(
+        verify_after_preview["clean"], true,
+        "verify should remain clean after preview: {verify_after_preview}"
+    );
+
+    let merged_out = heddle(
+        &["--output", "json", "merge", "feature/preview-counts"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let merged: Value = serde_json::from_str(&merged_out).expect("merge JSON");
+    assert_eq!(merged["status"], "completed", "{merged}");
+    assert_eq!(merged["preview_only"], false, "{merged}");
+    assert_eq!(
+        merged["changed_path_count"], preview["changed_path_count"],
+        "materialized merge count must match preview: preview={preview} merged={merged}"
+    );
+    assert_eq!(
+        merged["changed_paths"], preview["changed_paths"],
+        "materialized merge paths must match preview: preview={preview} merged={merged}"
+    );
+    assert_eq!(
+        fs::read_to_string(temp.path().join("preview-added.txt")).unwrap(),
+        "added from isolated thread\n"
+    );
+}
 #[test]
 fn test_merge_creates_merge_state() {
     let temp = TempDir::new().unwrap();
     create_divergent_branches(&temp);
-    let result = heddle(&["merge", "feature"], Some(temp.path()));
+    let result = refresh_then_merge(&temp, "feature", &[]);
     assert!(result.is_ok());
     assert_file_exists(temp.path().join("base.txt"), "base file should exist");
     assert_file_exists(temp.path().join("feature.txt"), "feature file should exist");
@@ -57,8 +216,7 @@ fn test_merge_with_conflict_reports_conflict() {
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
     fs::write(temp.path().join("file.txt"), "main version").unwrap();
     heddle(&["capture", "-m", "Main modifies file"], Some(temp.path())).unwrap();
-    let result = heddle(&["merge", "feature"], Some(temp.path()));
-    assert!(result.is_ok());
+    refresh_thread_expect_conflict(&temp, "feature");
     let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
     assert!(
         content.contains("<<<<<<<")
@@ -67,12 +225,12 @@ fn test_merge_with_conflict_reports_conflict() {
             || content.contains("feature version")
     );
     assert!(
-        content.contains("<<<<<<< CURRENT (main)"),
-        "conflict markers should name the current thread: {content}"
+        content.contains("<<<<<<< CURRENT"),
+        "conflict markers should name the current side: {content}"
     );
     assert!(
-        content.contains(">>>>>>> INCOMING (feature)"),
-        "conflict markers should name the incoming thread: {content}"
+        content.contains(">>>>>>> INCOMING (main)"),
+        "conflict markers should name the incoming target side: {content}"
     );
 }
 
@@ -111,8 +269,8 @@ fn test_merge_auto_merges_non_overlapping_same_file_appends_from_threads() {
     .unwrap();
     heddle(&["capture", "-m", "Main append"], Some(temp.path())).unwrap();
 
-    heddle(&["merge", "worker_a"], Some(temp.path())).unwrap();
-    heddle(&["merge", "worker_b"], Some(temp.path())).unwrap();
+    refresh_then_merge(&temp, "worker_a", &[]).unwrap();
+    refresh_then_merge(&temp, "worker_b", &[]).unwrap();
 
     let content = fs::read_to_string(&source).unwrap();
     assert!(
@@ -141,15 +299,26 @@ fn test_continue_after_manual_marker_removal_says_mark_file_resolved() {
     fs::write(&file, "main\n").unwrap();
     heddle(&["capture", "-m", "Main edit"], Some(temp.path())).unwrap();
 
-    heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+    refresh_thread_expect_conflict(&temp, "feature");
     let conflicted = fs::read_to_string(&file).unwrap();
     assert!(
-        conflicted.contains("<<<<<<< CURRENT (main)"),
+        conflicted.contains("<<<<<<< CURRENT"),
         "same-line conflict should leave markers: {conflicted}"
     );
 
     fs::write(&file, "manually resolved\n").unwrap();
-    let blocked_continue = heddle(&["--json", "continue"], Some(temp.path())).unwrap();
+    let blocked_continue =
+        heddle_output(&["--output", "json", "continue"], Some(temp.path())).unwrap();
+    assert!(
+        !blocked_continue.status.success(),
+        "blocked continue should exit nonzero while preserving machine-readable stdout"
+    );
+    let stderr = str::from_utf8(&blocked_continue.stderr).unwrap_or("");
+    assert!(
+        stderr.trim().is_empty(),
+        "blocked continue JSON response should not be rendered as an error envelope: {stderr}"
+    );
+    let blocked_continue = str::from_utf8(&blocked_continue.stdout).unwrap();
     let blocked_continue: serde_json::Value =
         serde_json::from_str(&blocked_continue).expect("continue output should be JSON");
     assert_eq!(blocked_continue["status"], "blocked");
@@ -166,7 +335,7 @@ fn test_continue_after_manual_marker_removal_says_mark_file_resolved() {
     );
 
     heddle(&["resolve", "file.txt"], Some(temp.path())).unwrap();
-    let continued = heddle(&["--json", "continue"], Some(temp.path())).unwrap();
+    let continued = heddle(&["--output", "json", "continue"], Some(temp.path())).unwrap();
     let continued: serde_json::Value =
         serde_json::from_str(&continued).expect("continue output should be JSON");
     assert_eq!(continued["status"], "continued");
@@ -176,18 +345,20 @@ fn test_continue_after_manual_marker_removal_says_mark_file_resolved() {
 fn test_merge_no_commit() {
     let temp = TempDir::new().unwrap();
     create_divergent_branches(&temp);
-    let result = heddle(&["merge", "feature", "--no-commit"], Some(temp.path()));
-    assert!(result.is_ok());
-    let status_after = status_json(temp.path());
+    let output = heddle_output(
+        &["--output", "json", "merge", "feature", "--no-commit"],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
-        !status_after["changes"]["added"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-            || !status_after["changes"]["modified"]
-                .as_array()
-                .unwrap()
-                .is_empty()
+        !output.status.success(),
+        "stale --no-commit merge should block"
+    );
+    let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(parsed["status"], "blocked");
+    assert_eq!(
+        parsed["recommended_action"],
+        "heddle thread refresh feature"
     );
 }
 #[test]
@@ -198,6 +369,8 @@ fn test_merge_message() {
         &["merge", "feature", "-m", "Merge feature into main"],
         Some(temp.path()),
     );
+    assert!(result.is_err(), "stale merge should refuse before mutation");
+    let result = refresh_then_merge(&temp, "feature", &["-m", "Merge feature into main"]);
     assert!(result.is_ok());
 }
 #[test]
@@ -206,7 +379,7 @@ fn test_merge_into_current_track() {
     create_divergent_branches(&temp);
     let status_before = status_json(temp.path());
     assert_eq!(status_before["thread"].as_str().unwrap(), "main");
-    heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+    refresh_then_merge(&temp, "feature", &[]).unwrap();
     let status_after = status_json(temp.path());
     assert_eq!(status_after["thread"].as_str().unwrap(), "main");
 }
@@ -222,14 +395,29 @@ fn test_merge_with_uncommitted_changes_fails() {
     let temp = TempDir::new().unwrap();
     create_divergent_branches(&temp);
     fs::write(temp.path().join("uncommitted.txt"), "uncommitted").unwrap();
-    let result = heddle(&["merge", "feature"], Some(temp.path()));
-    let error = result.expect_err("merge with uncaptured changes should fail");
+    let output = heddle_output(&["--output", "json", "merge", "feature"], Some(temp.path()))
+        .expect("dirty merge should run");
+    assert!(!output.status.success(), "dirty merge should fail");
+    let error = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(error).expect("dirty merge should emit JSON recovery advice");
+    assert_eq!(envelope["kind"], "dirty_worktree");
+    assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
     assert!(
-        error.contains("uncaptured changes"),
-        "dirty-worktree blocker should use Heddle-native language: {error}"
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("Save or stash worktree changes before merge")),
+        "dirty-worktree blocker should use typed recovery advice: {error}"
     );
     assert!(
-        error.contains("heddle capture") && error.contains("heddle continue"),
+        envelope["recovery_commands"]
+            .as_array()
+            .is_some_and(|commands| commands
+                .iter()
+                .any(|command| command == "heddle capture -m \"...\"")
+                && commands
+                    .iter()
+                    .any(|command| command == "heddle stash push -m \"...\"")),
         "dirty-worktree blocker should suggest Heddle-native actions: {error}"
     );
 }
@@ -268,7 +456,11 @@ fn test_merge_fast_forward_advances_current_thread() {
     heddle(&["capture", "-m", "Feature work"], Some(temp.path())).unwrap();
 
     // Capture the change_id at the tip of `feature`.
-    let feature_show = heddle(&["thread", "show", "feature", "--json"], Some(temp.path())).unwrap();
+    let feature_show = heddle(
+        &["thread", "show", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let feature: Value = serde_json::from_str(&feature_show).unwrap();
     let merged_target = feature["current_state"]
         .as_str()
@@ -283,7 +475,11 @@ fn test_merge_fast_forward_advances_current_thread() {
     );
 
     // After fast-forward, `main` must point at the integrated state.
-    let main_show = heddle(&["thread", "show", "main", "--json"], Some(temp.path())).unwrap();
+    let main_show = heddle(
+        &["thread", "show", "main", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let main: Value = serde_json::from_str(&main_show).unwrap();
     assert_eq!(
         main["current_state"].as_str().unwrap(),
@@ -319,7 +515,11 @@ fn test_merge_from_main_worktree_targets_active_thread_lightweight_worktree() {
     // Build the merge source on `main`.
     fs::write(temp.path().join("source.txt"), "ff target").unwrap();
     heddle(&["capture", "-m", "FF source"], Some(temp.path())).unwrap();
-    let main_show = heddle(&["thread", "show", "main", "--json"], Some(temp.path())).unwrap();
+    let main_show = heddle(
+        &["thread", "show", "main", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let main_json: Value = serde_json::from_str(&main_show).unwrap();
     let merge_target = main_json["current_state"].as_str().unwrap().to_string();
 
@@ -340,7 +540,11 @@ fn test_merge_from_main_worktree_targets_active_thread_lightweight_worktree() {
     // on, all operations should follow metadata, not CWD.
     heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
 
-    let feature_show = heddle(&["thread", "show", "feature", "--json"], Some(temp.path())).unwrap();
+    let feature_show = heddle(
+        &["thread", "show", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let feature: Value = serde_json::from_str(&feature_show).unwrap();
     let feature_path = feature["execution_path"]
         .as_str()
@@ -376,8 +580,11 @@ fn test_merge_from_main_worktree_targets_active_thread_lightweight_worktree() {
     );
 
     // And feature.current_state must point at the merged tip.
-    let feature_after =
-        heddle(&["thread", "show", "feature", "--json"], Some(temp.path())).unwrap();
+    let feature_after = heddle(
+        &["thread", "show", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let feature_after: Value = serde_json::from_str(&feature_after).unwrap();
     assert_eq!(
         feature_after["current_state"].as_str().unwrap(),
@@ -399,7 +606,11 @@ fn test_goto_from_main_worktree_targets_active_thread_lightweight_worktree() {
 
     fs::write(temp.path().join("ahead.txt"), "ahead").unwrap();
     heddle(&["capture", "-m", "Ahead"], Some(temp.path())).unwrap();
-    let ahead_show = heddle(&["thread", "show", "main", "--json"], Some(temp.path())).unwrap();
+    let ahead_show = heddle(
+        &["thread", "show", "main", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let ahead_json: Value = serde_json::from_str(&ahead_show).unwrap();
     let ahead_state = ahead_json["current_state"].as_str().unwrap().to_string();
 
@@ -411,7 +622,11 @@ fn test_goto_from_main_worktree_targets_active_thread_lightweight_worktree() {
     .unwrap();
     heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
 
-    let feature_show = heddle(&["thread", "show", "feature", "--json"], Some(temp.path())).unwrap();
+    let feature_show = heddle(
+        &["thread", "show", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let feature: Value = serde_json::from_str(&feature_show).unwrap();
     let feature_path = feature["execution_path"].as_str().unwrap().to_string();
 
@@ -456,7 +671,11 @@ fn test_rebase_from_main_worktree_targets_active_thread_lightweight_worktree() {
     .unwrap();
     heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
 
-    let feature_show = heddle(&["thread", "show", "feature", "--json"], Some(temp.path())).unwrap();
+    let feature_show = heddle(
+        &["thread", "show", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let feature: Value = serde_json::from_str(&feature_show).unwrap();
     let feature_path = feature["execution_path"].as_str().unwrap().to_string();
 
@@ -474,7 +693,7 @@ fn test_rebase_from_main_worktree_targets_active_thread_lightweight_worktree() {
 }
 
 #[test]
-fn test_rebase_continue_accepts_manual_resolution_snapshot() {
+fn test_thread_resolve_accepts_manual_rebase_resolution_snapshot() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     fs::write(temp.path().join("base.txt"), "base").unwrap();
@@ -513,25 +732,26 @@ fn test_rebase_continue_accepts_manual_resolution_snapshot() {
     .unwrap();
 
     let resolve_output = heddle(
-        &["thread", "resolve", "feature", "--json"],
+        &["thread", "resolve", "feature", "--output", "json"],
         Some(temp.path()),
     )
     .unwrap();
     let resolve_json: Value = serde_json::from_str(&resolve_output).unwrap();
     assert_eq!(resolve_json["status"], "completed");
     assert_eq!(resolve_json["recommended_action"], "heddle continue");
-
-    let continue_output = heddle(&["rebase", "--continue"], Some(temp.path())).unwrap();
     assert!(
-        continue_output.contains("Accepted manual resolution")
-            || continue_output.contains("Rebase completed")
-            || continue_output.contains("\"status\": \"manual-resolution-accepted\""),
-        "manual resolution should be accepted during rebase continue: {continue_output}"
+        temp.path().join(".heddle/REBASE_STATE").exists(),
+        "thread resolve should accept the manual rebase resolution and leave continue as the explicit operation boundary"
     );
-    assert!(
-        !temp.path().join(".heddle/REBASE_STATE").exists(),
-        "rebase state should clear after the manual resolution is accepted"
-    );
+    fs::write(
+        temp.path().join("conflict.txt"),
+        "main version\nfeature version\n",
+    )
+    .unwrap();
+    heddle(&["resolve", "conflict.txt"], Some(temp.path())).unwrap();
+    let continued = heddle(&["--output", "json", "continue"], Some(temp.path())).unwrap();
+    let continued_json: Value = serde_json::from_str(&continued).unwrap();
+    assert_eq!(continued_json["status"], "continued");
 
     let content = fs::read_to_string(temp.path().join("conflict.txt")).unwrap();
     assert_eq!(content, "main version\nfeature version\n");
@@ -611,7 +831,11 @@ fn test_thread_switch_does_not_modify_cwd_worktree() {
         Some(temp.path()),
     )
     .unwrap();
-    let feature_show = heddle(&["thread", "show", "feature", "--json"], Some(temp.path())).unwrap();
+    let feature_show = heddle(
+        &["thread", "show", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let feature_json: Value = serde_json::from_str(&feature_show).unwrap();
     let feature_path = feature_json["execution_path"].as_str().unwrap().to_string();
     fs::write(
@@ -766,7 +990,11 @@ fn test_thread_switch_works_from_inside_thread_worktree() {
         Some(temp.path()),
     )
     .unwrap();
-    let alpha_show = heddle(&["thread", "show", "alpha", "--json"], Some(temp.path())).unwrap();
+    let alpha_show = heddle(
+        &["thread", "show", "alpha", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let alpha_path = serde_json::from_str::<Value>(&alpha_show).unwrap()["execution_path"]
         .as_str()
         .unwrap()
@@ -783,7 +1011,11 @@ fn test_thread_switch_works_from_inside_thread_worktree() {
     .unwrap();
 
     heddle(&["start", "beta", "--workspace", "auto"], Some(temp.path())).unwrap();
-    let beta_show = heddle(&["thread", "show", "beta", "--json"], Some(temp.path())).unwrap();
+    let beta_show = heddle(
+        &["thread", "show", "beta", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let beta_path = serde_json::from_str::<Value>(&beta_show).unwrap()["execution_path"]
         .as_str()
         .unwrap()
@@ -880,7 +1112,11 @@ fn test_thread_switch_to_thread_with_missing_worktree_handles_gracefully() {
         Some(temp.path()),
     )
     .unwrap();
-    let ghost_show = heddle(&["thread", "show", "ghost", "--json"], Some(temp.path())).unwrap();
+    let ghost_show = heddle(
+        &["thread", "show", "ghost", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let ghost_path = serde_json::from_str::<Value>(&ghost_show).unwrap()["execution_path"]
         .as_str()
         .unwrap()
@@ -936,7 +1172,7 @@ fn test_thread_switch_to_thread_with_missing_worktree_handles_gracefully() {
     );
 }
 
-/// Regression: `heddle merge` must not silently destroy heddle-ignored
+/// Regression: `heddle merge` must not silently destroy explicitly ignored
 /// content under a tracked top-level directory it drops. Pre-fix,
 /// `apply_merged_tree` called `remove_path_recursively` on entries the
 /// merged tree no longer contained, recursively nuking `web/node_modules/`
@@ -946,6 +1182,7 @@ fn test_thread_switch_to_thread_with_missing_worktree_handles_gracefully() {
 fn test_merge_preserves_ignored_siblings_in_dropped_tracked_dir() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join(".heddleignore"), "node_modules/\n").unwrap();
 
     // Base state on `main`: tracked `web/index.html` exists.
     fs::create_dir_all(temp.path().join("web")).unwrap();
@@ -958,9 +1195,9 @@ fn test_merge_preserves_ignored_siblings_in_dropped_tracked_dir() {
     fs::remove_dir_all(temp.path().join("web")).unwrap();
     heddle(&["capture", "-m", "drop web"], Some(temp.path())).unwrap();
 
-    // Back on `main`, drop the heddle-ignored sibling. The default ignore
-    // list (`target`, `node_modules`, `.git`) skips this — invisible to
-    // status, present on disk.
+    // Back on `main`, drop the explicitly heddle-ignored sibling.
+    // `.heddleignore` names `node_modules/`, so status ignores it while the
+    // filesystem still holds it.
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
     fs::create_dir_all(temp.path().join("web/node_modules/lodash")).unwrap();
     fs::write(
@@ -980,7 +1217,7 @@ fn test_merge_preserves_ignored_siblings_in_dropped_tracked_dir() {
     // Ignored sibling preserved.
     assert_file_exists(
         temp.path().join("web/node_modules/lodash/index.js"),
-        "heddle-ignored content must survive merge that drops the tracked dir",
+        "ignored content must survive merge that drops the tracked dir",
     );
 }
 
@@ -1029,8 +1266,8 @@ fn test_merge_with_promotion_warning_completes_with_warning_not_blocker() {
 
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
 
-    let out = heddle(&["--json", "merge", "feature"], Some(temp.path())).unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+    let out = heddle(&["--output", "json", "merge", "feature"], Some(temp.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&out).expect("merge --output json should be JSON");
 
     // The merge actually advanced state.
     assert!(
@@ -1044,6 +1281,10 @@ fn test_merge_with_promotion_warning_completes_with_warning_not_blocker() {
     assert_eq!(
         parsed["thread_state"], "merged",
         "thread should be marked merged on a successful merge: {parsed}"
+    );
+    assert_eq!(
+        parsed["thread_health"], "clean",
+        "merged threads must not keep the pre-merge ready health label: {parsed}"
     );
     // No real blockers — the operation didn't fail to advance state.
     let blockers = parsed["blockers"].as_array();
@@ -1096,16 +1337,22 @@ fn test_merge_with_real_conflict_reports_blocked_with_null_merge_state() {
     fs::write(&file, "main line\n").unwrap();
     heddle(&["capture", "-m", "Main edit"], Some(temp.path())).unwrap();
 
-    let out = heddle(&["--json", "merge", "feature"], Some(temp.path())).unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+    let output = heddle_output(&["--output", "json", "merge", "feature"], Some(temp.path()))
+        .expect("blocked merge should still produce a process output");
+    assert!(
+        !output.status.success(),
+        "stale conflict merge should refuse before mutation"
+    );
+    let stdout = str::from_utf8(&output.stdout).unwrap_or("");
+    let parsed: Value = serde_json::from_str(stdout).expect("merge --output json should be JSON");
 
     assert_eq!(
         parsed["status"], "blocked",
-        "real conflict must report status: blocked: {parsed}"
+        "stale conflict must report status: blocked: {parsed}"
     );
     assert!(
         parsed["merge_state"].is_null(),
-        "merge_state must be null when conflict prevented advance: {parsed}"
+        "merge_state must be null when stale preflight prevented merge: {parsed}"
     );
     let blockers = parsed["blockers"]
         .as_array()
@@ -1114,20 +1361,18 @@ fn test_merge_with_real_conflict_reports_blocked_with_null_merge_state() {
         !blockers.is_empty(),
         "blockers must be non-empty on a real conflict: {parsed}"
     );
-    // next_action should point at the resolution flow.
-    if let Some(next) = parsed["next_action"].as_str() {
-        assert!(
-            next.contains("continue") || next.contains("resolve"),
-            "next_action on conflict should point at the resolution flow: {next}"
-        );
-    }
+    assert_eq!(
+        parsed["recommended_action"],
+        "heddle thread refresh feature"
+    );
+    refresh_thread_expect_conflict(&temp, "feature");
 }
 
 /// Helper: read a thread's `target_thread` from the JSON view of
 /// `heddle thread show`. Used by refresh tests that need to
 /// configure a target before invoking refresh.
 fn thread_target(temp: &std::path::Path, thread: &str) -> Option<String> {
-    let out = heddle(&["--json", "thread", "show", thread], Some(temp)).ok()?;
+    let out = heddle(&["--output", "json", "thread", "show", thread], Some(temp)).ok()?;
     let parsed: Value = serde_json::from_str(&out).ok()?;
     parsed["target_thread"].as_str().map(|s| s.to_string())
 }
@@ -1154,7 +1399,8 @@ fn test_thread_refresh_with_disjoint_sibling_changes_succeeds() {
 
     let alpha_started = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "alpha",
             "--workspace",
@@ -1169,7 +1415,8 @@ fn test_thread_refresh_with_disjoint_sibling_changes_succeeds() {
 
     let beta_started = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "beta",
             "--workspace",
@@ -1232,7 +1479,8 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
 
     heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "alpha",
             "--workspace",
@@ -1245,7 +1493,8 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
     .expect("start alpha");
     heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "beta",
             "--workspace",
@@ -1275,26 +1524,211 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
     // fail — but with a precise message naming the conflicting path,
     // not the historical "resolve rebase conflicts and retry" when
     // there is no actual conflict marker on disk.
-    let refresh_result = heddle(&["thread", "refresh", "beta"], Some(temp.path()));
-    let Err(refresh_err) = refresh_result else {
+    let refresh_output = heddle_output(
+        &["--output", "json", "thread", "refresh", "beta"],
+        Some(temp.path()),
+    )
+    .expect("invoke thread refresh");
+    if refresh_output.status.success() {
         // The 3-way merge could legitimately resolve this if the
         // merge engine collapses the two single-line edits.
         // Acceptable; just exit.
         return;
-    };
+    }
+    let refresh_err = std::str::from_utf8(&refresh_output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(refresh_err).expect("refresh conflict should emit JSON envelope");
+    assert_eq!(envelope["kind"], "thread_refresh_conflicted");
+    assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
     assert!(
-        !refresh_err.contains("resolve rebase conflicts and retry"),
+        !envelope["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("resolve rebase conflicts and retry"),
         "refresh error must not be the historical misleading 'rebase conflicts' string: {refresh_err}"
     );
     assert!(
-        refresh_err.contains("conflicting path") || refresh_err.contains("contested.txt"),
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("could not be refreshed cleanly")
+                && error.contains("contested.txt")),
         "refresh error on real conflict must name the conflicting path: {refresh_err}"
+    );
+    assert!(
+        envelope["unsafe_condition"]
+            .as_str()
+            .is_some_and(|condition| condition.contains("conflicting path")
+                || condition.contains("contested.txt")),
+        "refresh unsafe_condition must name the conflicting path: {refresh_err}"
+    );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("heddle --repo")
+                && hint.contains("conflict list")
+                && hint.contains("continue")),
+        "refresh conflict hint should name the shared recovery loop: {refresh_err}"
+    );
+    assert!(
+        envelope["primary_command"]
+            .as_str()
+            .is_some_and(|command| command.starts_with("heddle --repo ")
+                && command.ends_with(" conflict list")),
+        "refresh conflict must recommend the persisted conflict list as primary: {refresh_err}"
+    );
+
+    let beta_repo = beta_path.to_str().unwrap();
+    let conflict_list = heddle(
+        &["--output", "json", "--repo", beta_repo, "conflict", "list"],
+        Some(temp.path()),
+    )
+    .expect("refresh conflict should persist conflict state in beta checkout");
+    let conflict_list_json: Value = serde_json::from_str(&conflict_list).unwrap();
+    assert!(
+        conflict_list_json["conflicts"]
+            .as_array()
+            .is_some_and(|conflicts| conflicts
+                .iter()
+                .any(|conflict| conflict["file"] == "contested.txt")),
+        "thread refresh conflict should be inspectable with conflict list: {conflict_list_json}"
+    );
+    let conflict_show = heddle(
+        &[
+            "--output",
+            "json",
+            "--repo",
+            beta_repo,
+            "conflict",
+            "show",
+            "contested.txt",
+        ],
+        Some(temp.path()),
+    )
+    .expect("refresh conflict should be inspectable with conflict show");
+    let conflict_show_json: Value = serde_json::from_str(&conflict_show).unwrap();
+    assert!(
+        conflict_show_json["worktree_content"]
+            .as_str()
+            .is_some_and(|content| content.contains("<<<<<<<")
+                && content.contains("=======")
+                && content.contains(">>>>>>>")),
+        "thread refresh conflict should leave durable conflict markers: {conflict_show_json}"
+    );
+}
+
+#[test]
+fn test_thread_refresh_conflict_then_abort_keeps_main_clean() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    fs::write(temp.path().join("contested.bin"), b"base\0").unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    let alpha_path = temp.path().join("threads/alpha");
+    let beta_path = temp.path().join("threads/beta");
+
+    heddle(
+        &[
+            "--output",
+            "json",
+            "start",
+            "alpha",
+            "--workspace",
+            "materialized",
+            "--path",
+            alpha_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("start alpha");
+    heddle(
+        &[
+            "--output",
+            "json",
+            "start",
+            "beta",
+            "--workspace",
+            "materialized",
+            "--path",
+            beta_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("start beta");
+
+    let Some(beta_target) = thread_target(temp.path(), "beta") else {
+        eprintln!("beta has no target_thread; skipping refresh-abort test");
+        return;
+    };
+
+    fs::write(alpha_path.join("contested.bin"), b"alpha\0").unwrap();
+    heddle(&["capture", "-m", "Alpha binary edit"], Some(&alpha_path)).unwrap();
+    fs::write(beta_path.join("contested.bin"), b"beta\0").unwrap();
+    heddle(&["capture", "-m", "Beta binary edit"], Some(&beta_path)).unwrap();
+
+    heddle(&["thread", "switch", &beta_target], Some(temp.path())).unwrap();
+    heddle(&["merge", "alpha"], Some(temp.path())).expect("merge alpha must succeed");
+
+    assert_eq!(
+        fs::read(temp.path().join("contested.bin")).unwrap(),
+        b"alpha\0"
+    );
+    let before_refresh = status_json(temp.path());
+    assert_eq!(before_refresh["thread"].as_str(), Some("main"));
+    assert!(before_refresh["operation"].is_null());
+
+    let refresh_output = heddle_output(
+        &["--output", "json", "thread", "refresh", "beta"],
+        Some(temp.path()),
+    )
+    .expect("invoke thread refresh");
+    assert!(
+        !refresh_output.status.success(),
+        "binary conflict should block refresh"
+    );
+
+    let abort_output = heddle(&["--output", "json", "abort"], Some(temp.path()))
+        .expect("abort after failed refresh should be safe");
+    let abort_json: Value = serde_json::from_str(&abort_output).unwrap();
+    assert!(
+        abort_json["status"] == "noop" || abort_json["status"] == "aborted",
+        "abort should either find no operation or abort safely: {abort_json}"
+    );
+
+    let after_abort = status_json(temp.path());
+    assert_eq!(
+        after_abort["thread"].as_str(),
+        Some("main"),
+        "abort after a failed thread refresh must leave main attached"
+    );
+    assert!(
+        after_abort["operation"].is_null(),
+        "abort after failed refresh must leave no active operation: {after_abort}"
+    );
+    assert!(
+        after_abort["changes"]["modified"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+            && after_abort["changes"]["added"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+            && after_abort["changes"]["deleted"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+        "main worktree should be clean after abort: {after_abort}"
+    );
+    assert_eq!(
+        fs::read(temp.path().join("contested.bin")).unwrap(),
+        b"alpha\0",
+        "main worktree must keep target content, not beta topic content"
     );
 }
 
 // ----- --with-diff tests (item 3.3) ---------------------------------
 //
-// `heddle merge <thread> --preview --with-diff --json` must surface the
+// `heddle merge <thread> --preview --with-diff --output json` must surface the
 // parent ↔ thread-tip diff alongside the existing preview metadata so an
 // agent doesn't have to make a separate `heddle diff` call to see what
 // would land. Without `--with-diff`, the `diff` field must be omitted.
@@ -1319,12 +1753,20 @@ fn test_merge_preview_with_diff_returns_populated_diff_changes() {
     let temp = TempDir::new().unwrap();
     create_simple_feature_thread(&temp);
 
-    let out = heddle(
-        &["--json", "merge", "feature", "--preview", "--with-diff"],
+    let preview_output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature",
+            "--preview",
+            "--with-diff",
+        ],
         Some(temp.path()),
     )
     .unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+    let parsed: Value =
+        serde_json::from_slice(&preview_output.stdout).expect("merge --output json should be JSON");
 
     let diff = &parsed["diff"];
     assert!(
@@ -1381,11 +1823,11 @@ fn test_merge_preview_without_with_diff_omits_diff_field() {
     create_simple_feature_thread(&temp);
 
     let out = heddle(
-        &["--json", "merge", "feature", "--preview"],
+        &["--output", "json", "merge", "feature", "--preview"],
         Some(temp.path()),
     )
     .unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+    let parsed: Value = serde_json::from_str(&out).expect("merge --output json should be JSON");
 
     // Convention: when `--with-diff` is not set, the `diff` field is
     // omitted entirely (not null) so consumers can detect intent
@@ -1405,11 +1847,11 @@ fn test_merge_apply_with_diff_echoes_landed_changes() {
     // Apply the merge (not preview). The diff should describe what
     // just landed: parent tip ↔ thread tip.
     let out = heddle(
-        &["--json", "merge", "feature", "--with-diff"],
+        &["--output", "json", "merge", "feature", "--with-diff"],
         Some(temp.path()),
     )
     .unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+    let parsed: Value = serde_json::from_str(&out).expect("merge --output json should be JSON");
 
     assert_eq!(
         parsed["status"], "completed",
@@ -1460,18 +1902,26 @@ fn git_output(args: &[&str], cwd: &std::path::Path) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
-/// Set up a heddle-native repo with a `feature` thread that diverges
-/// from `main`, plus a real `.git` directory with a single base
-/// commit. Heddle ignores `.git/` (built-in) and the test's auxiliary
-/// noise files via `.heddleignore`. `--git-commit` requires a `.git`
-/// to write into; the test repo provides exactly that.
+/// Set up a Git-backed Heddle repo with a `feature` thread that diverges
+/// from `main`. Heddle ignores `.git/` (built-in) and the test's auxiliary
+/// noise files via `.heddleignore`. `--git-commit` requires a verified Git
+/// mapping, so the fixture adopts the base branch before creating Heddle-only
+/// feature work.
 fn create_git_overlay_feature_thread(temp: &TempDir) {
     let path = temp.path();
 
-    // Heddle first so we land on heddle-native (not git-overlay) — in
-    // git-overlay, `main` and `feature` would share the same heddle
-    // state and `merge feature` would resolve to "already up to date",
-    // which is not what we're trying to exercise here.
+    git(&["init", "--initial-branch", "main"], path);
+    git(&["config", "user.name", "Heddle Test"], path);
+    git(&["config", "user.email", "heddle@example.com"], path);
+
+    // Ignore everything the test doesn't want Git to capture
+    // (Heddle metadata and scratch directories).
+    fs::write(
+        path.join(".gitignore"),
+        ".heddle/\n.heddleignore\n.gitignore\n",
+    )
+    .unwrap();
+
     fs::write(
         path.join(".heddleignore"),
         // The .git tree, the .gitignore we'll write later, plus the
@@ -1483,30 +1933,16 @@ fn create_git_overlay_feature_thread(temp: &TempDir) {
     )
     .unwrap();
 
-    heddle(&["init"], Some(path)).unwrap();
     fs::write(path.join("base.txt"), "base content\n").unwrap();
-    heddle(&["capture", "-m", "Base"], Some(path)).unwrap();
+    git(&["add", "base.txt"], path);
+    git(&["commit", "-m", "git base"], path);
+    heddle(&["adopt", "--ref", "main"], Some(path)).unwrap();
+
     heddle(&["thread", "create", "feature"], Some(path)).unwrap();
     heddle(&["thread", "switch", "feature"], Some(path)).unwrap();
     fs::write(path.join("feature.txt"), "feature content\n").unwrap();
     heddle(&["capture", "-m", "Feature work"], Some(path)).unwrap();
     heddle(&["thread", "switch", "main"], Some(path)).unwrap();
-
-    // Now bootstrap git on top, so .git exists for --git-commit. We
-    // commit the current main-tip state (base.txt only) so subsequent
-    // git status only flags new files the merge will introduce.
-    git(&["init", "--initial-branch", "main"], path);
-    git(&["config", "user.name", "Heddle Test"], path);
-    git(&["config", "user.email", "heddle@example.com"], path);
-    // Ignore everything the test doesn't want the merge commit to
-    // capture (heddle metadata, scratch directories).
-    fs::write(
-        path.join(".gitignore"),
-        ".heddle/\n.heddleignore\n.gitignore\n",
-    )
-    .unwrap();
-    git(&["add", "base.txt"], path);
-    git(&["commit", "-m", "git base"], path);
 }
 
 #[test]
@@ -1536,11 +1972,11 @@ fn test_merge_git_commit_writes_commit_with_merge_state_trailer() {
     let before_count = before.lines().count();
 
     let out = heddle(
-        &["--json", "merge", "feature", "--git-commit"],
+        &["--output", "json", "merge", "feature", "--git-commit"],
         Some(temp.path()),
     )
     .unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+    let parsed: Value = serde_json::from_str(&out).expect("merge --output json should be JSON");
 
     assert_eq!(
         parsed["status"], "completed",
@@ -1580,8 +2016,8 @@ fn test_merge_git_commit_writes_commit_with_merge_state_trailer() {
         "git HEAD commit message must contain Merge-State trailer: {head_msg}"
     );
     assert!(
-        head_msg.contains("Co-Authored-By:"),
-        "git HEAD commit message must contain Co-Authored-By trailer: {head_msg}"
+        !head_msg.contains("Co-Authored-By: Unknown <unknown@example.com>"),
+        "git HEAD commit message must not contain placeholder attribution: {head_msg}"
     );
 }
 
@@ -1593,12 +2029,20 @@ fn test_merge_git_commit_preview_emits_payload_without_writing() {
     let before = git_output(&["log", "--oneline"], temp.path());
     let before_count = before.lines().count();
 
-    let out = heddle(
-        &["--json", "merge", "feature", "--git-commit", "--preview"],
+    let preview_output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature",
+            "--git-commit",
+            "--preview",
+        ],
         Some(temp.path()),
     )
     .unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+    let parsed: Value =
+        serde_json::from_slice(&preview_output.stdout).expect("merge --output json should be JSON");
 
     assert_eq!(
         parsed["status"], "preview",
@@ -1636,6 +2080,100 @@ fn test_merge_git_commit_preview_emits_payload_without_writing() {
 }
 
 #[test]
+fn test_merge_stale_thread_preview_and_git_commit_apply_refuse_consistently() {
+    let temp = TempDir::new().unwrap();
+    create_git_overlay_feature_thread(&temp);
+
+    fs::write(
+        temp.path().join("base.txt"),
+        "base content\nadvanced on main\n",
+    )
+    .unwrap();
+    git(&["add", "base.txt"], temp.path());
+    git(
+        &["commit", "-m", "advance main outside heddle"],
+        temp.path(),
+    );
+    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+    let git_head_before = git_output(&["log", "-1", "--format=%H"], temp.path());
+
+    let thread_show = heddle(
+        &["thread", "show", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let thread_show: Value = serde_json::from_str(&thread_show).unwrap();
+    assert_eq!(
+        thread_show["freshness"], "stale",
+        "fixture must reproduce the stale-thread state: {thread_show}"
+    );
+
+    let preview = heddle_output(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature",
+            "--preview",
+            "--with-diff",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke stale merge preview");
+    assert!(
+        !preview.status.success(),
+        "stale preview must refuse before producing a merge plan"
+    );
+    assert!(
+        preview.stdout.is_empty(),
+        "strict preview refusal should render recovery advice on stderr only"
+    );
+    let preview_stderr = str::from_utf8(&preview.stderr).unwrap();
+    let preview_json: Value = serde_json::from_str(preview_stderr)
+        .unwrap_or_else(|err| panic!("expected JSON preview refusal: {err}: {preview_stderr}"));
+    assert_eq!(preview_json["kind"], "merge_preview_blocked");
+    assert_eq!(
+        preview_json["primary_command"],
+        "heddle thread refresh feature"
+    );
+
+    let apply = heddle_output(
+        &["--output", "json", "merge", "feature", "--git-commit"],
+        Some(temp.path()),
+    )
+    .expect("invoke stale merge apply");
+    assert!(
+        !apply.status.success(),
+        "stale apply must exit nonzero when the shared preflight refuses"
+    );
+    let apply_stdout = str::from_utf8(&apply.stdout).unwrap();
+    let apply_json: Value = serde_json::from_str(apply_stdout)
+        .unwrap_or_else(|err| panic!("expected JSON apply refusal: {err}: {apply_stdout}"));
+    assert_eq!(
+        apply_json["status"], "blocked",
+        "stale apply must refuse just like preview: {apply_json}"
+    );
+    assert_eq!(
+        apply_json["recommended_action"], "heddle thread refresh feature",
+        "apply must use the same freshness recovery path as preview: {apply_json}"
+    );
+    assert_eq!(apply_json["merge_state"], Value::Null);
+    assert!(
+        apply_json.get("git_commit").is_none() || apply_json["git_commit"].is_null(),
+        "blocked stale apply must not write a git checkpoint: {apply_json}"
+    );
+    assert!(
+        !temp.path().join("feature.txt").exists(),
+        "stale apply must leave the target worktree unchanged"
+    );
+    assert_eq!(
+        git_output(&["log", "-1", "--format=%H"], temp.path()),
+        git_head_before,
+        "stale apply must not advance Git history"
+    );
+}
+
+#[test]
 fn test_merge_git_commit_blocks_on_unrelated_uncommitted_git_changes() {
     let temp = TempDir::new().unwrap();
     create_git_overlay_feature_thread(&temp);
@@ -1651,12 +2189,17 @@ fn test_merge_git_commit_blocks_on_unrelated_uncommitted_git_changes() {
     )
     .unwrap();
 
-    let out = heddle(
-        &["--json", "merge", "feature", "--git-commit"],
+    let output = heddle_output(
+        &["--output", "json", "merge", "feature", "--git-commit"],
         Some(temp.path()),
     )
-    .unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+    .expect("invoke merge --git-commit");
+    assert!(
+        !output.status.success(),
+        "blocked merge --git-commit should exit nonzero"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout).expect("merge --output json should be JSON");
 
     assert_eq!(
         parsed["status"], "blocked",
@@ -1681,6 +2224,26 @@ fn test_merge_git_commit_blocks_on_unrelated_uncommitted_git_changes() {
         parsed.get("git_commit").is_none() || parsed["git_commit"].is_null(),
         "git_commit must be absent when blocked: {parsed}"
     );
+    assert_eq!(
+        parsed["recommended_action"], "heddle merge feature --git-commit",
+        "blocked pre-snapshot git coordination should recommend a concrete Heddle retry, not prose: {parsed}"
+    );
+    let action_tail = parsed["recommended_action_argv"]
+        .as_array()
+        .expect("concrete recommended action should expose argv")
+        .iter()
+        .skip(1)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        action_tail,
+        vec![
+            Value::String("merge".to_string()),
+            Value::String("feature".to_string()),
+            Value::String("--git-commit".to_string()),
+        ]
+    );
+    assert_eq!(parsed["recommended_action_template"], Value::Null);
 }
 
 #[test]
@@ -1689,12 +2252,17 @@ fn test_merge_git_commit_without_git_overlay_blocks_with_clear_error() {
     let temp = TempDir::new().unwrap();
     create_simple_feature_thread(&temp);
 
-    let out = heddle(
-        &["--json", "merge", "feature", "--git-commit"],
+    let output = heddle_output(
+        &["--output", "json", "merge", "feature", "--git-commit"],
         Some(temp.path()),
     )
-    .unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
+    .expect("invoke merge --git-commit");
+    assert!(
+        !output.status.success(),
+        "blocked merge --git-commit should exit nonzero"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout).expect("merge --output json should be JSON");
 
     assert_eq!(
         parsed["status"], "blocked",
@@ -1774,7 +2342,7 @@ fn test_merge_conflict_markers_anchored_at_column_zero_no_trailing_newline() {
     fs::write(&file, "pub type Config = MainConfig;").unwrap();
     heddle(&["capture", "-m", "Main edit"], Some(temp.path())).unwrap();
 
-    heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+    refresh_thread_expect_conflict(&temp, "feature");
     let content = fs::read_to_string(&file).unwrap();
     assert_markers_at_column_zero(&content, "no-trailing-newline both sides");
 
@@ -1815,7 +2383,7 @@ fn test_merge_conflict_markers_well_formed_across_newline_shapes() {
         fs::write(&file, ours).unwrap();
         heddle(&["capture", "-m", "main edit"], Some(temp.path())).unwrap();
 
-        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+        refresh_thread_expect_conflict(&temp, "feature");
         let content = fs::read_to_string(&file).unwrap();
         assert_markers_at_column_zero(&content, label);
     }
@@ -1856,6 +2424,9 @@ fn test_merge_semantic_resolves_disjoint_function_edits_clean() {
     .unwrap();
     heddle(&["capture", "-m", "gamma edit"], Some(temp.path())).unwrap();
 
+    heddle(&["thread", "switch", "edit_alpha"], Some(temp.path())).unwrap();
+    heddle(&["thread", "refresh", "edit_alpha"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
     let result = heddle(&["merge", "edit_alpha", "--semantic"], Some(temp.path()));
     assert!(result.is_ok(), "semantic merge should succeed");
 
@@ -1894,10 +2465,10 @@ fn test_merge_semantic_falls_through_on_text_file() {
     fs::write(&f, "main line\n").unwrap();
     heddle(&["capture", "-m", "m"], Some(temp.path())).unwrap();
 
-    heddle(&["merge", "feature", "--semantic"], Some(temp.path())).unwrap();
+    refresh_thread_expect_conflict(&temp, "feature");
     let merged = fs::read_to_string(&f).unwrap();
     assert!(
-        merged.contains("<<<<<<< CURRENT (main)"),
+        merged.contains("<<<<<<< CURRENT"),
         "same-line conflict on a non-language file must still produce markers under --semantic: {merged}"
     );
 }
@@ -1952,49 +2523,33 @@ fn test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_resha
     .unwrap();
     heddle(&["capture", "-m", "main: edit d"], Some(temp.path())).unwrap();
 
-    let out = heddle(
-        &["--json", "merge", "feature", "--semantic", "--preview"],
+    let preview_output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature",
+            "--semantic",
+            "--preview",
+        ],
         Some(temp.path()),
     )
-    .unwrap();
-    let parsed: Value = serde_json::from_str(&out).expect("merge --json should be JSON");
-
-    // Real merge plan (`--semantic`): clean. These come from
-    // `merge_plan.relation()` / `merge_result.conflicts`, both built
-    // with the operator-selected strategy.
-    let conflicts = parsed["conflicts"]
-        .as_array()
-        .expect("conflicts must be an array on a preview");
+    .expect("preview should emit a process output");
     assert!(
-        conflicts.is_empty(),
-        "with --semantic, structural reshape must produce zero conflict paths: {parsed}"
+        !preview_output.status.success(),
+        "stale semantic preview should refuse before planning"
+    );
+    let stderr = str::from_utf8(&preview_output.stderr).unwrap_or("");
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("blocked preview should emit a JSON envelope");
+
+    assert_eq!(
+        envelope["kind"], "merge_preview_blocked",
+        "stale semantic preview must refuse before claiming merge semantics: {envelope}"
     );
     assert_eq!(
-        parsed["conflict_count"], 0,
-        "with --semantic, conflict_count must be 0 on a clean structural-reshape merge: {parsed}"
-    );
-
-    // The bug: `preview_summary` is sourced from a preview report built
-    // with a hardcoded `MergeStrategy::HunkOnly`. On this fixture
-    // `text_hunk_merge` surfaces ≥1 conflict, so the preview report
-    // emits a misleading `conflicts: 1 path conflict(s)` line and
-    // potentially a `blocked: ...` line, contradicting `conflicts: []`
-    // and `conflict_count: 0` above.
-    let preview_summary = parsed["preview_summary"]
-        .as_array()
-        .expect("preview_summary must be an array");
-    let summary_strings: Vec<&str> = preview_summary.iter().filter_map(|v| v.as_str()).collect();
-    assert!(
-        !summary_strings
-            .iter()
-            .any(|line| line.starts_with("conflicts:")),
-        "preview_summary must not report conflicts when --semantic plan is clean: {summary_strings:?}"
-    );
-    assert!(
-        !summary_strings
-            .iter()
-            .any(|line| line.starts_with("blocked:")),
-        "preview_summary must not report blocked when --semantic plan is clean: {summary_strings:?}"
+        envelope["primary_command"], "heddle thread refresh feature",
+        "stale semantic preview should route through refresh: {envelope}"
     );
 }
 
@@ -2026,7 +2581,8 @@ fn test_thread_refresh_routes_through_semantic_driver_on_structural_reshape() {
     let beta_path = temp.path().join("threads/beta");
     heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "start",
             "beta",
             "--workspace",
@@ -2089,7 +2645,7 @@ fn test_thread_refresh_routes_through_semantic_driver_on_structural_reshape() {
 /// `main` — the inner preview computed `A → main` (often a clean
 /// fast-forward) while the actual merge_plan and apply path computed
 /// `A → B`. The two halves of the preview output disagreed:
-/// `preview_summary` line `semantic preview: <inner-result>` said one
+/// `preview_summary` line `merge type: <inner-result>` said one
 /// thing while the top-level `semantic_result` / `conflicts` said
 /// another. Worst case the inner-side claim of "clean / fast_forward"
 /// led an operator to expect a successful merge that then surfaced
@@ -2158,26 +2714,27 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    let semantic_preview_line = preview_summary
+    let merge_type_line = preview_summary
         .iter()
-        .find_map(|line| line.strip_prefix("semantic preview: "))
+        .find_map(|line| line.strip_prefix("merge type: "))
         .unwrap_or("");
+    let normalized_merge_type = merge_type_line.replace('-', "_");
 
-    // Invariant #1 (internal consistency): the `semantic preview: X` line
+    // Invariant #1 (internal consistency): the `merge type: X` line
     // emitted by the preview MUST match the top-level `semantic_result`
     // on the same preview. Pre-fix this fails: the inner report keys off
     // `thread.target_thread` (main) so it says `fast_forward` while the
     // outer plan correctly says `path_conflicts` (or vice versa).
     assert_eq!(
-        semantic_preview_line, preview_semantic,
-        "preview_summary's semantic-preview line must agree with top-level semantic_result; \
-         got summary line {semantic_preview_line:?} but top-level {preview_semantic:?}. \
+        normalized_merge_type, preview_semantic,
+        "preview_summary's merge-type line must agree with top-level semantic_result; \
+         got summary line {merge_type_line:?} but top-level {preview_semantic:?}. \
          Full preview: {preview}"
     );
 
     // Invariant #2 (preview vs reality): the real merge run on the same
     // inputs must produce the same `semantic_result` the preview reported.
-    let real_out = heddle(
+    let real_output = heddle_output(
         &[
             "--output",
             "json",
@@ -2189,8 +2746,9 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
         ],
         Some(temp.path()),
     )
-    .unwrap();
-    let real: Value = serde_json::from_str(&real_out).expect("real merge must emit JSON");
+    .expect("real merge should emit a process output");
+    let real_stdout = str::from_utf8(&real_output.stdout).unwrap_or("");
+    let real: Value = serde_json::from_str(real_stdout).expect("real merge must emit JSON");
     assert_eq!(
         preview["semantic_result"], real["semantic_result"],
         "preview's semantic_result must equal the real merge's semantic_result on identical inputs. \

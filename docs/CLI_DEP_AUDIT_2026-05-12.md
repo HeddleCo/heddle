@@ -117,13 +117,25 @@ The CLI's `hosted-client` feature is the only thing that should still touch the 
 
 ## Other tiers (lower-leverage, can land independently)
 
-### Tier 2 — Drop `gix-protocol` + `gix-transport`, shell out to `git` for net I/O
+### Tier 2 — Do not shell out to `git` for product Git-overlay net I/O
 
-The big weight in the gix family (`gix-protocol`: 252 deps, `gix-transport`: 203) is HTTPS fetch/push. `heddle bridge git push/pull` already shells out to the `git` binary for some operations ([crates/cli/src/cli/commands/integration.rs](crates/cli/src/cli/commands/integration.rs)). Every dev has `git` installed.
+Historical note: this audit once proposed dropping `gix-protocol` +
+`gix-transport` and delegating Git network work to the user's `git`
+binary. That direction is no longer compatible with the product contract.
+Heddle is Git-compatible, not Git-binary-dependent: supported Git-overlay
+workflows must run in clean agent/CI/container environments with no `git`
+executable on `PATH`.
 
-If we commit to shelling out fully, we keep only `gix-object` + `gix-hash` (for parsing the commit graph during import and reading packed-refs) and drop the network stack entirely.
+Keep the native Git transport stack for public fetch/push/clone/import
+paths. Production CLI runtime paths must not spawn the Git executable; the
+empty allowlist is enforced by `crates/cli/tests/git_process_lint.rs`. Raw-Git
+recovery interop is a handoff: Heddle preserves work and reports Heddle recovery
+commands, then asks the user to finish or abort with the Git-compatible tool
+that started the external operation.
 
-**Drop**: ~80–100 deps. **Effort**: 1 day plus dogfooding the `bridge git import` path against URL sources.
+**Drop**: none from this route. **Effort**: replace dependency-reduction
+ideas with native transport simplification, feature-gating, or smaller
+library choices that preserve the no-Git runtime contract.
 
 ### Tier 3 — Hand-write the 22 JSON schemas, drop `schemars`
 

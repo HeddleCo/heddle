@@ -6,7 +6,10 @@ use objects::object::ContentHash;
 use repo::{DiffKind, Repository};
 use serde::Serialize;
 
-use super::stash_ops::{apply_stash, build_worktree_tree, restore_worktree};
+use super::{
+    advice::RecoveryAdvice,
+    stash_ops::{apply_stash, build_worktree_tree, restore_worktree},
+};
 use crate::cli::{Cli, StashCommands, should_output_json, worktree_status_options};
 
 #[derive(Serialize)]
@@ -61,7 +64,7 @@ fn cmd_stash_push(cli: &Cli, repo: &Repository, message: Option<String>) -> Resu
     )?;
 
     if status.is_clean() {
-        return Err(anyhow!("No changes to stash"));
+        return Err(anyhow!(no_changes_to_stash_advice()));
     }
 
     let stash_manager = repo.stash_manager();
@@ -127,7 +130,7 @@ fn cmd_stash_pop(cli: &Cli, repo: &Repository) -> Result<()> {
         .pop_with(|stash| {
             apply_stash(repo, stash).map_err(|err| std::io::Error::other(err.to_string()).into())
         })?
-        .ok_or_else(|| anyhow!("No stash found"))?;
+        .ok_or_else(|| anyhow!(no_stash_available_advice("pop stash", "No stash found")))?;
 
     if should_output_json(cli, Some(repo.config())) {
         println!(
@@ -148,7 +151,7 @@ fn cmd_stash_apply(cli: &Cli, repo: &Repository) -> Result<()> {
     let stash_manager = repo.stash_manager();
     let stash = stash_manager
         .top()?
-        .ok_or_else(|| anyhow!("No stash found"))?;
+        .ok_or_else(|| anyhow!(no_stash_available_advice("apply stash", "No stash found")))?;
 
     apply_stash(repo, &stash)?;
 
@@ -186,7 +189,10 @@ fn cmd_stash_drop(cli: &Cli, repo: &Repository) -> Result<()> {
             }
         }
         None => {
-            return Err(anyhow!("No stash to drop"));
+            return Err(anyhow!(no_stash_available_advice(
+                "drop stash",
+                "No stash to drop"
+            )));
         }
     }
 
@@ -218,7 +224,7 @@ fn cmd_stash_show(cli: &Cli, repo: &Repository) -> Result<()> {
     let stash_manager = repo.stash_manager();
     let stash = stash_manager
         .top()?
-        .ok_or_else(|| anyhow!("No stash found"))?;
+        .ok_or_else(|| anyhow!(no_stash_available_advice("show stash", "No stash found")))?;
 
     let parent_tree_hash = ContentHash::from_hex(&stash.parent_tree_hash)
         .map_err(|e| anyhow!("Invalid parent tree hash: {}", e))?;
@@ -267,4 +273,36 @@ fn cmd_stash_show(cli: &Cli, repo: &Repository) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn no_changes_to_stash_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "no_changes_to_stash",
+        "No changes to stash",
+        "Inspect the worktree with `heddle status`; make changes before running `heddle stash push -m \"...\"`.",
+        "the worktree has no modified, deleted, or untracked paths",
+        "stash push would create an empty stash entry with no recoverable work",
+        "repository state was left unchanged",
+        "heddle status",
+        vec![
+            "heddle status".to_string(),
+            "heddle stash push -m \"...\"".to_string(),
+        ],
+    )
+}
+
+fn no_stash_available_advice(action: &'static str, error: &'static str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "no_stash_available",
+        error,
+        "Inspect the stash stack with `heddle stash list`; create one with `heddle stash push -m \"...\"` before retrying.",
+        "the stash stack is empty",
+        format!("{action} would need an existing stash entry"),
+        "repository state was left unchanged",
+        "heddle stash list",
+        vec![
+            "heddle stash list".to_string(),
+            "heddle stash push -m \"...\"".to_string(),
+        ],
+    )
 }

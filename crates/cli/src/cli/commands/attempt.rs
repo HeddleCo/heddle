@@ -29,8 +29,9 @@
 //! resolve. Each attempt runs inside its own ephemeral checkout via
 //! `Command::current_dir(&thread_path)`; the parent is never touched.
 //! `heddle attempt` does not auto-merge — the user picks the winner
-//! by inspecting the table and running `heddle merge <thread>` (the
-//! recommended verb is included in the output for direct copy-paste).
+//! by inspecting the table and previewing `heddle merge <thread>
+//! --preview --with-diff` (the recommended verb is included in the
+//! output for direct copy-paste and machine replay).
 
 use std::{
     path::{Path, PathBuf},
@@ -44,6 +45,9 @@ use repo::Repository;
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
+    advice::RecoveryAdvice,
+    command_catalog::{ActionFields, ActionTemplate},
     diff::compute_state_diff,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread::start_thread,
@@ -147,25 +151,46 @@ struct AttemptOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     recommended: Option<String>,
 
-    /// `heddle merge <recommended> --with-diff` hint, when applicable.
+    /// `heddle merge <recommended> --preview --with-diff` hint, when applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
     next_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_action_argv: Option<Vec<String>>,
+    next_action_template: Option<ActionTemplate>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recommended_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<ActionTemplate>,
 }
 
 pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
     if args.command.is_empty() {
-        return Err(anyhow!("Usage: heddle attempt <N> -- <cmd...>"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "attempt_command_required",
+            "Usage: heddle attempt <N> -- <cmd...>",
+            "Pass a command after `--` so Heddle can run each candidate attempt.",
+            "heddle attempt <N> -- <cmd...>",
+        )));
     }
     if args.n == 0 {
-        return Err(anyhow!("N must be at least 1 (was 0)"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "attempt_count_invalid",
+            "N must be at least 1 (was 0)",
+            "Use `heddle attempt 1 -- <cmd...>` or a larger attempt count.",
+            "heddle attempt 1 -- <cmd...>",
+        )));
     }
     if args.n > MAX_ATTEMPTS {
-        return Err(anyhow!(
-            "heddle attempt is capped at {} parallel attempts (you asked for {}). \
-            For higher fan-out, run multiple `heddle attempt` invocations.",
-            MAX_ATTEMPTS,
-            args.n
-        ));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "attempt_count_too_large",
+            format!(
+                "heddle attempt is capped at {} parallel attempts (you asked for {}). For higher fan-out, run multiple `heddle attempt` invocations.",
+                MAX_ATTEMPTS, args.n
+            ),
+            format!("Use at most {MAX_ATTEMPTS} attempts in one invocation."),
+            format!("heddle attempt {MAX_ATTEMPTS} -- <cmd...>"),
+        )));
     }
 
     let repo_root_arg = cli
@@ -219,9 +244,9 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
     for i in 1..=args.n {
         let name = format!("{prefix}-{i}");
         if thread_name_in_use(&repo, &name)? {
-            return Err(anyhow!(
-                "thread '{name}' already exists; pick a different --name-prefix or omit it for an auto-generated prefix"
-            ));
+            return Err(anyhow!(attempt_thread_name_collision_advice(
+                &name, &prefix, args.n
+            )));
         }
     }
 
@@ -413,7 +438,7 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
                 attempt.thread_dropped = false;
                 continue;
             }
-            match drop_thread_silent(&repo, &attempt.thread, true) {
+            match drop_thread_silent(&repo, &attempt.thread, true, true) {
                 Ok(_) => {
                     attempt.thread_dropped = true;
                     dropped += 1;
@@ -475,7 +500,9 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
 
     let next_action = recommended
         .as_deref()
-        .map(|name| format!("heddle merge {name} --with-diff"));
+        .map(|name| format!("heddle merge {name} --preview --with-diff"));
+    let next_action = ActionFields::from_optional_action(next_action);
+    let recommended_action = next_action.clone();
 
     let message = match &recommended {
         Some(thread) if attempts_succeeded > 0 => format!(
@@ -504,7 +531,12 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
         attempts_dropped: dropped,
         attempts: all_results,
         recommended,
-        next_action,
+        next_action: next_action.action,
+        next_action_argv: next_action.argv,
+        next_action_template: next_action.template,
+        recommended_action: recommended_action.action,
+        recommended_action_argv: recommended_action.argv,
+        recommended_action_template: recommended_action.template,
     };
 
     emit(cli, &repo, &output)
@@ -689,6 +721,22 @@ fn display_cmd(cmd: &[String]) -> String {
     cmd.join(" ")
 }
 
+fn attempt_thread_name_collision_advice(name: &str, prefix: &str, n: u32) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "attempt_thread_name_collision",
+        format!("thread '{name}' already exists"),
+        "Pick a different `--name-prefix`, or omit it so Heddle can generate a collision-resistant prefix.",
+        format!("`heddle attempt` would synthesize `{name}` from --name-prefix `{prefix}`"),
+        "reusing that thread name could attach to and later clean up an existing user thread",
+        "no attempt threads were spawned and existing threads were left unchanged",
+        format!("heddle attempt {n} --name-prefix <different-prefix> -- <cmd...>"),
+        vec![
+            format!("heddle attempt {n} --name-prefix <different-prefix> -- <cmd...>"),
+            format!("heddle attempt {n} -- <cmd...>"),
+        ],
+    )
+}
+
 fn emit(cli: &Cli, repo: &Repository, output: &AttemptOutput) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(output)?);
@@ -777,7 +825,7 @@ fn emit(cli: &Cli, repo: &Repository, output: &AttemptOutput) -> Result<()> {
     };
     println!("{}", painted);
     if let Some(next) = &output.next_action {
-        println!("Next: {}", style::bold(next));
+        print_next(next);
     }
     Ok(())
 }
@@ -818,7 +866,6 @@ mod tests {
         };
         let cli = Cli {
             command: crate::cli::Commands::Attempt(make_args()),
-            json: false,
             output: None,
             no_color: true,
             repo: Some(repo.root().to_path_buf()),
@@ -828,6 +875,11 @@ mod tests {
         };
 
         let err = cmd_attempt(&cli, make_args()).expect_err("must refuse on name collision");
+        let advice = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
+            .expect("collision refusal should carry typed recovery advice");
+        assert_eq!(advice.kind, "attempt_thread_name_collision");
         let msg = err.to_string();
         assert!(
             msg.contains("attempt-fixed-1") && msg.contains("already exists"),
@@ -875,7 +927,6 @@ mod tests {
         };
         let cli = Cli {
             command: crate::cli::Commands::Attempt(make_args()),
-            json: false,
             output: None,
             no_color: true,
             repo: Some(repo.root().to_path_buf()),
@@ -885,6 +936,11 @@ mod tests {
         };
 
         let err = cmd_attempt(&cli, make_args()).expect_err("must refuse on mid-collision");
+        let advice = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
+            .expect("collision refusal should carry typed recovery advice");
+        assert_eq!(advice.kind, "attempt_thread_name_collision");
         assert!(
             err.to_string().contains("attempt-mid-2"),
             "must name the colliding thread, not just the first; got: {err}"

@@ -17,13 +17,13 @@ app from Finder.
 
 ```
 $ brew install heddleco/heddle/heddle
-$ heddle thread start --workspace light mybranch
+$ heddle start mybranch --workspace virtualized
    ⚠  Heddle FSKit extension not enabled.
       Opening System Settings — toggle "Heddle" on under
       File System Extensions, then re-run.
    ℹ  Using NFS fallback for this run.
 [user toggles, comes back]
-$ heddle thread start --workspace light mybranch
+$ heddle start mybranch --workspace virtualized
    ✓ mounted at .repo-heddle-mounts/mybranch (via FSKit)
 ```
 
@@ -117,7 +117,7 @@ lsregister -f /Applications/HeddleHost.app
 `System Settings → General → Login Items & Extensions → File
 System Extensions → Heddle [toggle on]`.
 
-After this, every `heddle thread start --workspace light` will
+After this, every `heddle start <name> --workspace virtualized` will
 use FSKit transparently.
 
 ## Implementation gotchas (macOS 26.4)
@@ -251,7 +251,7 @@ The eventual `brew install heddleco/heddle/heddle` should:
 2. Install `HeddleHost.app` to `/Applications/HeddleHost.app`.
 3. Run `lsregister -f /Applications/HeddleHost.app` in
    `post_install` so the extension is discoverable on the first
-   `heddle thread start`.
+   `heddle start`.
 
 A Homebrew **cask** is the right shape because it ships a `.app`:
 

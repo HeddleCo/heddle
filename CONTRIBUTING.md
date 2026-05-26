@@ -94,7 +94,7 @@ public surface:
 1. **[AGENTS.md](AGENTS.md)** — contributor rules, scope boundaries, what
    docs are authoritative for which behavior.
 2. **[docs/PRINCIPLES.md](docs/PRINCIPLES.md)** — the five operating
-   principles (trust, disposability, composability, restraint, honesty).
+   principles (verification, disposability, composability, restraint, honesty).
    Every CLI change is graded against these. "If a change makes one of
    them weaker, the change is wrong."
 3. **[CLAUDE.md](CLAUDE.md)** — repo-level Claude Code hooks and the
@@ -185,6 +185,24 @@ takes that struct. The same struct serializes to JSON via
 `serde_json::to_string`; selection is decided by
 `cli::cli::should_output_json(cli, Some(repo.config()))`.
 
+**Exit codes.** Use `crate::exit::HeddleExitCode` rather than `1`. The
+shell sink in `main.rs` already routes through `from_error` /
+`from_clap`; per-command contracts declare the codes they may emit
+via `CommandContract.exit_codes`, and the table in
+[`docs/exit-codes.md`](docs/exit-codes.md) is the agent-facing
+reference. New codes need both a contract entry and a table row — the
+`exit_codes_declared_have_doc_entry` lint catches the missing-row
+case.
+
+**Stdout/stderr split under `--output json`.** Machine output goes to
+stdout (either one well-formed JSON document terminated by a newline,
+or NDJSON for streaming commands). Diagnostics, progress, and the
+JSON error envelope go to stderr. Mixing the two breaks scripted
+callers — a stray `println!` on the JSON happy path leaks a
+diagnostic into the parsed stream. The contract is enforced by
+[`crates/cli/tests/cli_integration/stdout_stderr_split.rs`](crates/cli/tests/cli_integration/stdout_stderr_split.rs),
+which sweeps every catalog entry with `supports_json: true`.
+
 ## Short-flag conventions
 
 Documented in
@@ -226,7 +244,7 @@ From [docs/PRINCIPLES.md](docs/PRINCIPLES.md):
 
 > The surface is small on purpose, the outputs are honest on purpose,
 > and the verbs compose because the primitives beneath them are the
-> right shape. Five principles run through every command: trust,
+> right shape. Five principles run through every command: verification,
 > disposability, composability, restraint, honesty. Read this before
 > you add a verb, change a flag, or argue for a new output field.
 

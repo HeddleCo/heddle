@@ -34,7 +34,8 @@ fn test_thread_create_then_delegate() {
     // it.)
     let delegate_out = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "delegate",
             "--parent",
             "modulo-race",
@@ -86,7 +87,11 @@ fn test_thread_create_writes_record() {
     );
 
     // And the loader must surface the thread.
-    let show_out = heddle(&["--json", "thread", "show", name], Some(main.path())).expect(
+    let show_out = heddle(
+        &["--output", "json", "thread", "show", name],
+        Some(main.path()),
+    )
+    .expect(
         "thread show should succeed after thread create — it routes \
              through find_thread_summary which reads the record store",
     );
@@ -107,7 +112,11 @@ fn test_thread_create_then_show_via_record() {
 
     heddle(&["thread", "create", name], Some(main.path())).unwrap();
 
-    let show_out = heddle(&["--json", "thread", "show", name], Some(main.path())).unwrap();
+    let show_out = heddle(
+        &["--output", "json", "thread", "show", name],
+        Some(main.path()),
+    )
+    .unwrap();
     let summary: Value = serde_json::from_str(&show_out).unwrap();
 
     assert_eq!(summary["name"], name);
@@ -122,15 +131,10 @@ fn test_thread_create_then_show_via_record() {
         "create does not materialize a worktree, so path must be null; \
          got: {summary}"
     );
-    // The summary maps `Thread::execution_path: PathBuf` to
-    // `Option<String>` via `Some(path.display().to_string())`, so an
-    // empty `PathBuf::new()` serializes as `""` rather than null. We
-    // only require that no real path leaked in (no worktree was
-    // materialized).
-    assert_eq!(
-        summary["execution_path"], "",
+    assert!(
+        summary["execution_path"].is_null(),
         "create does not materialize a worktree, so execution_path must \
-         be empty; got: {summary}"
+         be null; got: {summary}"
     );
     assert!(
         summary["base_state"].is_string(),
@@ -161,7 +165,8 @@ fn test_thread_create_then_switch_then_capture_then_delegate() {
     // ref existed, because the record was missing.
     let delegate_out = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "delegate",
             "--parent",
             parent,

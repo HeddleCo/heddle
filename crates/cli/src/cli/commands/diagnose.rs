@@ -14,18 +14,32 @@ use repo::{
 use serde::Serialize;
 
 use super::{
+    action_line::print_next_step,
+    git_overlay_health::{
+        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_argv,
+        action_template, build_git_overlay_health, build_plain_git_verification_probe,
+        build_repository_verification_state, remote_tracking_with_verification_action,
+        serialize_empty_action_as_null, trust_visible_worktree_status,
+    },
     operator_loop::primary_next_action,
-    thread::{CoordinationStatus, ThreadActorInfo, ThreadSummary, collect_thread_summaries},
+    thread::{
+        CoordinationStatus, ThreadActorInfo, ThreadSummary, collect_thread_summaries,
+        thread_workspace_label,
+    },
 };
 use crate::cli::{Cli, DiagnoseArgs, should_output_json, style, worktree_status_options};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct DiagnoseOutput {
+    output_kind: &'static str,
     repository: String,
     repository_capability: String,
     storage_model: String,
     hosted_enabled: bool,
     git_overlay_import_hint: Option<DiagnoseGitOverlayImportHintOutput>,
+    git_overlay_health: GitOverlayHealth,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
     operation: Option<RepositoryOperationStatus>,
     remote_tracking: Option<GitRemoteTrackingStatus>,
     thread: Option<DiagnoseThreadOutput>,
@@ -33,6 +47,12 @@ pub(crate) struct DiagnoseOutput {
     changes: DiagnoseChangesOutput,
     workspace: DiagnoseWorkspaceOutput,
     health: DiagnoseHealthOutput,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
+    recommended_action: String,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
+    recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
     profile: Option<DiagnoseProfileOutput>,
 }
 
@@ -52,7 +72,9 @@ struct DiagnoseThreadOutput {
     child_threads: Vec<String>,
     task: Option<String>,
     actor: Option<ThreadActorInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     heddle_session_id: Option<String>,
     harness: Option<String>,
     changed_path_count: usize,
@@ -93,9 +115,13 @@ struct DiagnoseWorkspaceOutput {
 
 #[derive(Debug, Clone, Serialize)]
 struct DiagnoseHealthOutput {
+    output_kind: &'static str,
     status: String,
     blockers: Vec<String>,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -121,7 +147,101 @@ pub fn cmd_diagnose(cli: &Cli, args: DiagnoseArgs) -> Result<()> {
     Ok(())
 }
 
+fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> {
+    let cwd = std::env::current_dir()?;
+    let start = cli.repo.as_ref().unwrap_or(&cwd);
+    let Some(probe) = build_plain_git_verification_probe(start)? else {
+        return Ok(None);
+    };
+    let changes = DiagnoseChangesOutput {
+        modified: probe
+            .changes
+            .modified
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        added: probe
+            .changes
+            .added
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        deleted: probe
+            .changes
+            .deleted
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        total: probe.changes.change_count(),
+    };
+    let import_hint = probe
+        .import_hint
+        .clone()
+        .map(|hint| DiagnoseGitOverlayImportHintOutput {
+            current_branch: hint.current_branch,
+            missing_branch_count: hint.missing_branch_count,
+            missing_branches: hint.missing_branches,
+            recommended_command: hint.recommended_command,
+        });
+    let trust = probe.trust.clone();
+    let git_overlay_health = GitOverlayHealth {
+        status: trust.status.clone(),
+        clean: trust.verified,
+        summary: trust.summary.clone(),
+        recovery_commands: trust.recovery_commands.clone(),
+        checks: trust
+            .checks
+            .iter()
+            .map(|check| GitOverlayHealthCheck {
+                name: check.name.clone(),
+                status: check.status.clone(),
+                summary: check.summary.clone(),
+                details: check.details.clone(),
+            })
+            .collect(),
+    };
+    Ok(Some(DiagnoseOutput {
+        output_kind: "diagnose",
+        repository: probe.root.display().to_string(),
+        repository_capability: "plain-git".to_string(),
+        storage_model: "git-only".to_string(),
+        hosted_enabled: false,
+        git_overlay_import_hint: import_hint,
+        git_overlay_health,
+        trust: trust.clone(),
+        operation: None,
+        remote_tracking: None,
+        thread: None,
+        state: None,
+        changes,
+        workspace: DiagnoseWorkspaceOutput {
+            thread_count: 0,
+            parallel_count: 0,
+            ready_count: 0,
+            blocked_count: 0,
+            active_actor_count: 0,
+        },
+        health: DiagnoseHealthOutput {
+            output_kind: "diagnose_health",
+            status: trust.status.clone(),
+            blockers: vec![trust.summary.clone()],
+            recommended_action: trust.recommended_action.clone(),
+            recommended_action_argv: trust.recommended_action_argv.clone(),
+            recommended_action_template: trust.recommended_action_template.clone(),
+        },
+        recommended_action: trust.recommended_action.clone(),
+        recommended_action_argv: trust.recommended_action_argv.clone(),
+        recommended_action_template: trust.recommended_action_template.clone(),
+        recovery_commands: trust.recovery_commands.clone(),
+        recovery_command_argv: trust.recovery_command_argv.clone(),
+        profile: None,
+    }))
+}
+
 pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<DiagnoseOutput> {
+    if let Some(output) = build_plain_git_diagnose_output(cli)? {
+        return Ok(output);
+    }
     let total_start = Instant::now();
 
     let repo_open_start = Instant::now();
@@ -133,11 +253,17 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_overlay_import_hint()?;
+    let git_overlay_health = build_git_overlay_health(&repo);
+    let trust = build_repository_verification_state(&repo);
+    let remote_tracking =
+        remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
     let current_state_ms = current_state_start.elapsed().as_millis();
 
     let status_start = Instant::now();
     let status_options = worktree_status_options(Some(repo.config()));
-    let status = if let Some(state) = current_state.as_ref() {
+    let status = if let Some(status) = trust_visible_worktree_status(&repo, &trust)? {
+        status
+    } else if let Some(state) = current_state.as_ref() {
         let tree = repo.require_tree(&state.tree)?;
         repo.compare_worktree_cached_with_options(&tree, &status_options)?
     } else if let Some(status) = repo.git_overlay_worktree_status()? {
@@ -183,7 +309,17 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         .as_ref()
         .map(is_synthetic_root)
         .unwrap_or(true);
-    let health = diagnose_health(&repo, current_summary, changes.total > 0, initial_state);
+    let mut health = diagnose_health(&repo, current_summary, changes.total > 0, initial_state);
+    if !git_overlay_health.clean && operation.is_none() {
+        health.status = git_overlay_health.status.clone();
+        health.recommended_action = git_overlay_health
+            .primary_recovery_command()
+            .unwrap_or("heddle doctor")
+            .to_string();
+        if health.blockers.is_empty() {
+            health.blockers.push(git_overlay_health.summary.clone());
+        }
+    }
     let workspace = diagnose_workspace(&summaries);
     let thread = current_summary.map(diagnose_thread);
     let state = current_state.as_ref().map(|state| DiagnoseStateOutput {
@@ -208,7 +344,43 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         total_ms: total_start.elapsed().as_millis(),
     });
 
+    let health = {
+        let recommended_action = if health.status == "clean" || operation.is_some() {
+            primary_next_action(
+                operation.as_ref(),
+                remote_tracking.as_ref(),
+                import_hint.as_ref(),
+                Some(&health.recommended_action),
+            )
+        } else {
+            health.recommended_action.clone()
+        };
+        DiagnoseHealthOutput {
+            output_kind: "diagnose_health",
+            recommended_action: recommended_action.clone(),
+            recommended_action_argv: action_argv(&recommended_action),
+            recommended_action_template: action_template(&recommended_action),
+            ..health
+        }
+    };
+    let recommended_action = if trust.verified {
+        health.recommended_action.clone()
+    } else {
+        trust.recommended_action.clone()
+    };
+    let recommended_action_argv = if trust.verified {
+        health.recommended_action_argv.clone()
+    } else {
+        trust.recommended_action_argv.clone()
+    };
+    let recommended_action_template = if trust.verified {
+        health.recommended_action_template.clone()
+    } else {
+        trust.recommended_action_template.clone()
+    };
+
     Ok(DiagnoseOutput {
+        output_kind: "diagnose",
         repository: repo.root().display().to_string(),
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
@@ -221,21 +393,20 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
                 recommended_command: hint.recommended_command,
             }
         }),
+        git_overlay_health,
+        trust: trust.clone(),
         operation: operation.clone(),
         remote_tracking: remote_tracking.clone(),
         thread,
         state,
         changes,
         workspace,
-        health: DiagnoseHealthOutput {
-            recommended_action: primary_next_action(
-                operation.as_ref(),
-                remote_tracking.as_ref(),
-                import_hint.as_ref(),
-                Some(&health.recommended_action),
-            ),
-            ..health
-        },
+        health,
+        recommended_action,
+        recommended_action_argv,
+        recommended_action_template,
+        recovery_commands: trust.recovery_commands.clone(),
+        recovery_command_argv: trust.recovery_command_argv.clone(),
         profile,
     })
 }
@@ -304,7 +475,17 @@ fn diagnose_health(
     initial_state: bool,
 ) -> DiagnoseHealthOutput {
     let Some(summary) = current_summary else {
+        let recommended_action = if worktree_dirty {
+            if repo.capability() == repo::RepositoryCapability::GitOverlay {
+                "heddle commit -m \"...\""
+            } else {
+                "heddle capture"
+            }
+        } else {
+            ""
+        };
         return DiagnoseHealthOutput {
+            output_kind: "diagnose_health",
             status: if worktree_dirty && initial_state {
                 "uncaptured"
             } else if worktree_dirty {
@@ -314,11 +495,9 @@ fn diagnose_health(
             }
             .to_string(),
             blockers: Vec::new(),
-            recommended_action: if worktree_dirty {
-                "heddle capture".to_string()
-            } else {
-                String::new()
-            },
+            recommended_action: recommended_action.to_string(),
+            recommended_action_argv: action_argv(recommended_action),
+            recommended_action_template: action_template(recommended_action),
         };
     };
 
@@ -362,10 +541,14 @@ fn diagnose_health(
     };
     let advice =
         describe_thread_advice_with_initial(&thread, worktree_dirty, 0, false, initial_state);
+    let recommended_action = advice.recommended_action;
     DiagnoseHealthOutput {
+        output_kind: "diagnose_health",
         status: advice.thread_health,
         blockers: advice.blockers,
-        recommended_action: advice.recommended_action,
+        recommended_action: recommended_action.clone(),
+        recommended_action_argv: action_argv(&recommended_action),
+        recommended_action_template: action_template(&recommended_action),
     }
 }
 
@@ -384,8 +567,11 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
         style::dim(&output.repository)
     );
     println!(
-        "Repository mode: {} ({})",
-        output.repository_capability, output.storage_model
+        "Repository: {}",
+        crate::cli::render::repository_mode_label(
+            &output.repository_capability,
+            &output.storage_model
+        )
     );
     if output.hosted_enabled {
         println!("Hosted: enabled");
@@ -401,15 +587,27 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
     }
     if let Some(hint) = &output.git_overlay_import_hint {
         println!(
-            "Git overlay: {} branch tip(s) available for import ({})",
-            hint.missing_branch_count,
-            crate::cli::render::preview_list(&hint.missing_branches, hint.missing_branch_count,)
+            "{}",
+            crate::cli::render::git_only_branch_summary(
+                &hint.missing_branches,
+                hint.missing_branch_count,
+            )
         );
+    }
+    if !output.git_overlay_health.clean {
+        let label = if output.repository_capability == "git-overlay" {
+            "Git overlay health"
+        } else {
+            "Verification"
+        };
+        println!("{label}: {}", output.git_overlay_health.summary);
     }
     if let Some(thread) = &output.thread {
         println!(
             "Thread: {} [{} · {}]",
-            thread.name, thread.visibility, thread.coordination_status
+            thread.name,
+            diagnose_thread_visibility(thread),
+            thread.coordination_status
         );
         if let Some(path) = thread.path.as_ref().or(thread.execution_path.as_ref()) {
             println!("Execution root: {path}");
@@ -439,11 +637,21 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
     }
 
     if let Some(state) = &output.state {
-        println!("State: {} ({})", state.change_id, state.tree);
-        if let Some(intent) = &state.intent {
-            println!("Intent: \"{intent}\"");
+        if cli.verbose > 0 {
+            println!("State: {} ({})", state.change_id, state.tree);
+        } else {
+            println!("Saved change: {}", state.change_id);
         }
-        if let Some(checkpoint) = &state.git_checkpoint {
+        if let Some(intent) = &state.intent {
+            if cli.verbose > 0 {
+                println!("Intent: \"{intent}\"");
+            } else {
+                println!("Last save: {intent}");
+            }
+        }
+        if cli.verbose > 0
+            && let Some(checkpoint) = &state.git_checkpoint
+        {
             println!(
                 "Git checkpoint: {} ({})",
                 &checkpoint.git_commit[..std::cmp::min(12, checkpoint.git_commit.len())],
@@ -482,10 +690,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
         println!("Blocked by: {}", output.health.blockers.join(" | "));
     }
     if !output.health.recommended_action.is_empty() {
-        println!(
-            "Next step: {}",
-            style::bold(&output.health.recommended_action)
-        );
+        print_next_step(&output.health.recommended_action);
     }
     if let Some(profile) = &output.profile {
         println!(
@@ -497,6 +702,14 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
             profile.total_ms
         );
     }
+}
+
+fn diagnose_thread_visibility(thread: &DiagnoseThreadOutput) -> &str {
+    thread
+        .mode
+        .as_ref()
+        .map(thread_workspace_label)
+        .unwrap_or(&thread.visibility)
 }
 
 fn changed_path_preview(changes: &DiagnoseChangesOutput) -> String {

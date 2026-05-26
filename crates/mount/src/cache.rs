@@ -26,8 +26,8 @@
 //! evict the rest of the working set.
 
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
     Mutex,
+    atomic::{AtomicU64, Ordering},
 };
 
 use bytes::Bytes;

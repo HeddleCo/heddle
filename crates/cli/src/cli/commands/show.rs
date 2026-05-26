@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Show command.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use repo::{Repository, format_confidence};
 use serde::Serialize;
 
-use super::{history_target::resolve_state_id, snapshot::ensure_current_state};
+use super::{
+    action_line::{print_next_step, print_next_step_dim},
+    git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
+    history_target::{require_resolved_state, resolve_state_id},
+    snapshot::ensure_current_state,
+};
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
@@ -44,7 +49,9 @@ struct PrincipalInfo {
 struct AgentInfo {
     provider: String,
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     policy_id: Option<String>,
 }
 
@@ -66,7 +73,13 @@ struct ShowGitOverlayImportHintOutput {
 }
 
 pub fn cmd_show(cli: &Cli, state_spec: String) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let cwd = std::env::current_dir()?;
+    let start = cli.repo.as_ref().unwrap_or(&cwd);
+    if let Some(probe) = build_plain_git_verification_probe(start)? {
+        return render_plain_git_show(cli, &probe, &state_spec);
+    }
+
+    let repo = Repository::open(start)?;
     if matches!(state_spec.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
         ensure_current_state(
             &repo,
@@ -74,13 +87,9 @@ pub fn cmd_show(cli: &Cli, state_spec: String) -> Result<()> {
             Some("Bootstrap git-overlay before showing HEAD".to_string()),
         )?;
     }
-
     let id = resolve_state_id(&repo, &state_spec)?;
 
-    let state = repo
-        .store()
-        .get_state(&id)?
-        .ok_or_else(|| anyhow!("State not found: {}", state_spec))?;
+    let state = require_resolved_state(&repo, &id)?;
 
     let output = ShowOutput {
         repository_capability: repo.capability_label().to_string(),
@@ -129,24 +138,73 @@ pub fn cmd_show(cli: &Cli, state_spec: String) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print_state(&output, cli.verbose > 0);
+        render_state(&output, cli.verbose > 0);
     }
 
     Ok(())
 }
 
-fn print_state(output: &ShowOutput, verbose: bool) {
+fn render_plain_git_show(
+    cli: &Cli,
+    probe: &PlainGitVerificationProbe,
+    state_spec: &str,
+) -> Result<()> {
+    if should_output_json(cli, None) {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "repository_capability": "plain-git",
+                "storage_model": "git",
+                "requested": state_spec,
+                "state": null,
+                "verification": &probe.trust,
+                "recommended_action": &probe.trust.recommended_action,
+                "recovery_commands": &probe.trust.recovery_commands,
+            }))?
+        );
+    } else {
+        println!("Git repo, Heddle not initialized");
+        if let Some(branch) = &probe.git_branch {
+            println!("Git branch: {}", style::bold(branch));
+        }
+        println!("State: unavailable until this Git repo is initialized and imported");
+        if probe.trust.recommended_action.is_empty() {
+            print_next_step("heddle init");
+        } else {
+            print_next_step(&probe.trust.recommended_action);
+        }
+        if let Some(branch) = &probe.git_branch
+            && probe.trust.recommended_action
+                != super::git_overlay_health::canonical_adopt_ref_command(branch)
+        {
+            println!(
+                "Then: {}",
+                style::bold(&super::git_overlay_health::canonical_adopt_ref_command(
+                    branch
+                ))
+            );
+        }
+    }
+    Ok(())
+}
+
+fn render_state(output: &ShowOutput, verbose: bool) {
     println!(
-        "Repository mode: {} ({})",
-        output.repository_capability, output.storage_model
+        "Repository: {}",
+        crate::cli::render::repository_mode_label(
+            &output.repository_capability,
+            &output.storage_model
+        )
     );
     if let Some(hint) = &output.git_overlay_import_hint {
         println!(
-            "Git import: {} other branch(es) still live only in Git ({})",
-            hint.missing_branch_count,
-            crate::cli::render::preview_list(&hint.missing_branches, hint.missing_branch_count,)
+            "{}",
+            crate::cli::render::git_only_branch_summary(
+                &hint.missing_branches,
+                hint.missing_branch_count,
+            )
         );
-        println!("Next step: {}", style::dim(&hint.recommended_command));
+        print_next_step_dim(&hint.recommended_command);
     }
     println!();
     // Identifiers are dimmed: structurally important but not the

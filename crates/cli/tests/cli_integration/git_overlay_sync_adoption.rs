@@ -56,7 +56,7 @@ fn git_overlay_sync_adopts_fast_forward_upstream_tip() {
     );
     configure_git_identity(&work);
 
-    heddle(&["status", "--json"], Some(&work)).unwrap();
+    heddle(&["status", "--output", "json"], Some(&work)).unwrap();
     heddle(&["bridge", "import", "--ref", "main"], Some(&work)).unwrap();
     let before = status_json(&work);
     let before_state = before["current_state"]
@@ -77,7 +77,7 @@ fn git_overlay_sync_adopts_fast_forward_upstream_tip() {
     git(&upstream, &["push", "origin", "main"]);
     git(&work, &["fetch", "origin"]);
 
-    let sync = heddle(&["sync", "--json"], Some(&work)).unwrap();
+    let sync = heddle(&["sync", "--output", "json"], Some(&work)).unwrap();
     let sync_json: Value = serde_json::from_str(&sync).expect("sync output should be JSON");
     assert_eq!(
         sync_json["status"], "synced",

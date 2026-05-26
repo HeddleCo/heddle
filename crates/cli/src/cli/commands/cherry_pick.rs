@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Cherry-pick command - apply specific commits.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use objects::object::Attribution;
 use repo::Repository;
 
-use super::worktree_safety::ensure_worktree_clean;
+use super::{advice::RecoveryAdvice, worktree_safety::ensure_worktree_clean};
 use crate::cli::{Cli, should_output_json};
 
 pub fn cmd_cherry_pick(
@@ -27,12 +27,12 @@ pub fn cmd_cherry_pick(
 
     let change_id = repo
         .resolve_state(&commit)?
-        .ok_or_else(|| anyhow!("Commit {} not found", commit))?;
+        .ok_or_else(|| cherry_pick_commit_not_found_advice(&commit))?;
 
     let state = repo
         .store()
         .get_state(&change_id)?
-        .ok_or_else(|| anyhow!("Commit {} not found", commit))?;
+        .ok_or_else(|| cherry_pick_commit_not_found_advice(&commit))?;
 
     // Apply the tree from the cherry-picked commit
     let tree = repo.require_tree(&state.tree)?;
@@ -71,6 +71,19 @@ pub fn cmd_cherry_pick(
     }
 
     Ok(())
+}
+
+fn cherry_pick_commit_not_found_advice(commit: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "cherry_pick_commit_not_found",
+        format!("Refusing to cherry-pick: commit '{commit}' not found"),
+        "Inspect available history with `heddle log`, then rerun cherry-pick with an existing state.",
+        format!("no Heddle state matching '{commit}' was found"),
+        "cherry-pick would need to write that commit tree into the worktree",
+        "repository state and worktree files were left unchanged",
+        "heddle log",
+        vec!["heddle log".to_string()],
+    )
 }
 
 fn apply_tree_to_worktree(repo: &Repository, tree: &objects::object::Tree) -> Result<()> {

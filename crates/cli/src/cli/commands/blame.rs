@@ -10,7 +10,11 @@ use objects::object::{
 use repo::Repository;
 use serde::Serialize;
 
-use super::snapshot::ensure_current_state;
+use super::{
+    advice::RecoveryAdvice,
+    history_target::{require_resolved_state, resolve_state_id},
+    snapshot::ensure_current_state,
+};
 use crate::{
     cli::{Cli, should_output_json},
     config::UserConfig,
@@ -29,6 +33,8 @@ struct BlameLine {
 
 #[derive(Serialize)]
 struct BlameOutput {
+    output_kind: &'static str,
+    status: &'static str,
     file: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     context: Vec<ContextSnippet>,
@@ -69,8 +75,7 @@ pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: b
                 Some(format!("Bootstrap git-overlay before blaming {}", file)),
             )?;
         }
-        repo.resolve_state(&state_id)?
-            .ok_or_else(|| anyhow!("State not found: {}", state_id))?
+        resolve_state_id(&repo, &state_id)?
     } else {
         ensure_current_state(
             &repo,
@@ -79,10 +84,7 @@ pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: b
         )?
     };
 
-    let state_obj = repo
-        .store()
-        .get_state(&target_state_id)?
-        .ok_or_else(|| anyhow!("State not found"))?;
+    let state_obj = require_resolved_state(&repo, &target_state_id)?;
 
     let tree = repo
         .store()
@@ -151,6 +153,8 @@ pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: b
             .collect();
 
         let output = BlameOutput {
+            output_kind: "blame",
+            status: "completed",
             file: file.clone(),
             context,
             lines: output_lines,
@@ -242,11 +246,11 @@ fn summarize_context(content: &str) -> String {
 
 fn find_file_in_tree(repo: &Repository, tree: &Tree, file: &Path) -> Result<ContentHash> {
     let Some(name) = file.iter().next().and_then(|part| part.to_str()) else {
-        return Err(anyhow!("File '{}' not found in state", file.display()));
+        return Err(anyhow!(blame_file_not_found_advice(file)));
     };
     let entry = tree
         .get(name)
-        .ok_or_else(|| anyhow!("File '{}' not found in state", file.display()))?;
+        .ok_or_else(|| anyhow!(blame_file_not_found_advice(file)))?;
     let mut components = file.iter();
     components.next();
     let rest = components.as_path();
@@ -254,13 +258,29 @@ fn find_file_in_tree(repo: &Repository, tree: &Tree, file: &Path) -> Result<Cont
         return Ok(entry.hash);
     }
     if !entry.is_tree() {
-        return Err(anyhow!("File '{}' not found in state", file.display()));
+        return Err(anyhow!(blame_file_not_found_advice(file)));
     }
     let subtree = repo
         .store()
         .get_tree(&entry.hash)?
-        .ok_or_else(|| anyhow!("File '{}' not found in state", file.display()))?;
+        .ok_or_else(|| anyhow!(blame_file_not_found_advice(file)))?;
     find_file_in_tree(repo, &subtree, rest)
+}
+
+fn blame_file_not_found_advice(file: &Path) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "blame_file_not_found",
+        format!("File '{}' not found in state", file.display()),
+        "Inspect the state with `heddle show`, then retry `heddle blame <path>` with a tracked file.",
+        format!(
+            "requested blame path '{}' does not exist in the selected Heddle state",
+            file.display()
+        ),
+        "blame cannot attribute lines for a path that is absent from the selected state",
+        "repository state, refs, and worktree files were left unchanged",
+        "heddle show",
+        vec!["heddle show".to_string()],
+    )
 }
 
 fn compute_blame_from_provenance(provenance: &FileProvenance) -> Result<HashMap<usize, LineInfo>> {

@@ -289,7 +289,10 @@ impl Repository {
             // already the "no redactions for this blob" signal.
             if sidecar_path.exists() {
                 fs::remove_file(&sidecar_path).with_context(|| {
-                    format!("remove empty redactions sidecar '{}'", sidecar_path.display())
+                    format!(
+                        "remove empty redactions sidecar '{}'",
+                        sidecar_path.display()
+                    )
                 })?;
             }
             return Ok(RemoveRedactionOutcome {
@@ -886,9 +889,7 @@ mod tests {
         );
 
         // Materialize gate now restores original bytes (no active stub).
-        let stub = repo
-            .redaction_stub_for_blob(&blob)
-            .expect("stub lookup");
+        let stub = repo.redaction_stub_for_blob(&blob).expect("stub lookup");
         assert!(
             stub.is_none(),
             "with no active redaction, materialize must not substitute the stub"
@@ -973,7 +974,12 @@ mod tests {
         let unknown_state = ChangeId::from_bytes([0u8; 16]);
         let unknown_id = ContentHash::from_bytes([0u8; 32]);
         let err = repo
-            .remove_redaction(&unknown_blob, &unknown_state, "config/nope.toml", &unknown_id)
+            .remove_redaction(
+                &unknown_blob,
+                &unknown_state,
+                "config/nope.toml",
+                &unknown_id,
+            )
             .expect_err("unknown record must error");
         let msg = err.to_string();
         assert!(
@@ -1037,8 +1043,7 @@ mod tests {
                 .expect("pre-purge lookup"),
             "fresh redaction must not report purged"
         );
-        repo.purge_blob(&blob, &sample_principal())
-            .expect("purge");
+        repo.purge_blob(&blob, &sample_principal()).expect("purge");
         assert!(
             repo.redaction_is_purged(&blob, &state, &path)
                 .expect("post-purge lookup"),

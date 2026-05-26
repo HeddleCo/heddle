@@ -3,15 +3,15 @@
 //!
 //! Walks every `heddle <verb> [<subverb>] [flags]` invocation embedded in a
 //! markdown file and reports any drift: verbs that no longer exist, long
-//! flags that aren't on that verb, or literal values for `--workspace`,
-//! `--scope`, and `--kind` that aren't in the valid set.
+//! flags that aren't on that verb, or literal values for finite-valued
+//! flags that aren't in the valid set.
 //!
 //! The check is built on top of clap's own `Cli::command()`, so it's
 //! always in sync with the binary you're running. Wire `heddle doctor
-//! docs --all --json` into CI on every PR to catch doc drift.
+//! docs --all --output json` into CI on every PR to catch doc drift.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -19,7 +19,15 @@ use anyhow::{Result, anyhow};
 use clap::{Command as ClapCommand, CommandFactory};
 use objects::worktree::should_ignore;
 use serde::Serialize;
+use serde_json::{Map, Value};
 
+use super::{
+    RecoveryAdvice,
+    command_catalog::{
+        CommandCatalogOption, CommandCatalogOutput, build_command_catalog,
+        feature_gated_command_roots, normalize_heddle_argv,
+    },
+};
 use crate::cli::{Cli, DoctorDocsArgs, should_output_json};
 
 /// One drift finding.
@@ -57,6 +65,12 @@ pub enum IssueKind {
 /// Aggregate output for the verb (human and JSON share this shape).
 #[derive(Debug, Clone, Serialize)]
 pub struct DocsReport {
+    pub output_kind: &'static str,
+    pub status: &'static str,
+    #[serde(rename = "verified")]
+    pub verified: bool,
+    pub recommended_action: Option<String>,
+    pub recommended_action_argv: Option<Vec<String>>,
     pub files_scanned: usize,
     pub issues: Vec<DocsIssue>,
 }
@@ -95,10 +109,39 @@ pub fn cmd_doctor_docs(cli: &Cli, args: DoctorDocsArgs) -> Result<()> {
         scan_markdown(&display, &bytes, &cli_command, &mut issues);
     }
 
+    let clean = issues.is_empty();
+    let recommended_action = (!clean).then(|| "heddle doctor docs --all --output json".to_string());
+    let recommended_action_argv = recommended_action.as_ref().map(|_| {
+        normalize_heddle_argv(vec![
+            "heddle".to_string(),
+            "doctor".to_string(),
+            "docs".to_string(),
+            "--all".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ])
+    });
     let report = DocsReport {
+        output_kind: "doctor_docs",
+        status: if clean { "clean" } else { "drift" },
+        verified: clean,
+        recommended_action,
+        recommended_action_argv,
         files_scanned: files.len(),
         issues,
     };
+
+    if !report.issues.is_empty() {
+        if json {
+            return Err(anyhow!(doctor_docs_drift_advice(&report)?));
+        }
+        render_human(&report);
+        return Err(anyhow!(
+            "{} drift issue(s) found across {} file(s)",
+            report.issues.len(),
+            report.files_scanned
+        ));
+    }
 
     if json {
         let s = serde_json::to_string_pretty(&report)?;
@@ -106,15 +149,58 @@ pub fn cmd_doctor_docs(cli: &Cli, args: DoctorDocsArgs) -> Result<()> {
     } else {
         render_human(&report);
     }
+    Ok(())
+}
 
-    if !report.issues.is_empty() {
-        return Err(anyhow!(
-            "{} drift issue(s) found across {} file(s)",
+fn doctor_docs_drift_advice(report: &DocsReport) -> Result<RecoveryAdvice> {
+    let primary = report
+        .recommended_action
+        .clone()
+        .unwrap_or_else(|| "heddle doctor docs --all --output json".to_string());
+    let mut advice = RecoveryAdvice::safety_refusal(
+        "machine_contract_drift",
+        format!(
+            "{} docs drift issue(s) found across {} file(s)",
             report.issues.len(),
             report.files_scanned
-        ));
-    }
-    Ok(())
+        ),
+        format!(
+            "Inspect the issue list in this envelope, then run `{primary}` after updating docs or command metadata."
+        ),
+        format!(
+            "documented Heddle invocations no longer match the registered CLI surface: {} issue(s)",
+            report.issues.len()
+        ),
+        "agents could follow stale commands, flags, or values from the public documentation",
+        "repository state, refs, metadata, and worktree files were left unchanged",
+        primary.clone(),
+        vec![primary],
+    );
+    let mut extra = Map::new();
+    extra.insert(
+        "output_kind".to_string(),
+        Value::String(report.output_kind.to_string()),
+    );
+    extra.insert(
+        "status".to_string(),
+        Value::String(report.status.to_string()),
+    );
+    extra.insert("verified".to_string(), Value::Bool(report.verified));
+    extra.insert(
+        "recommended_action".to_string(),
+        serde_json::to_value(&report.recommended_action)?,
+    );
+    extra.insert(
+        "recommended_action_argv".to_string(),
+        serde_json::to_value(&report.recommended_action_argv)?,
+    );
+    extra.insert(
+        "files_scanned".to_string(),
+        serde_json::json!(report.files_scanned),
+    );
+    extra.insert("issues".to_string(), serde_json::to_value(&report.issues)?);
+    advice.extra_json_fields = extra;
+    Ok(advice)
 }
 
 fn render_human(report: &DocsReport) {
@@ -176,6 +262,7 @@ fn resolve_files(repo_root: &Path, args: &DoctorDocsArgs) -> Result<Vec<PathBuf>
 /// (build outputs, deps).
 const IGNORE_PATTERNS: &[&str] = &[
     ".git",
+    ".codex/",
     ".heddle",
     ".heddleignore",
     "target/",
@@ -277,9 +364,10 @@ pub fn scan_markdown(
     cli_command: &ClapCommand,
     out: &mut Vec<DocsIssue>,
 ) {
+    let catalog = build_command_catalog();
     let invocations = extract_invocations(text);
     for inv in invocations {
-        check_invocation(display_path, &inv, cli_command, out);
+        check_invocation(display_path, &inv, cli_command, &catalog, out);
     }
 }
 
@@ -407,6 +495,7 @@ fn check_invocation(
     file: &str,
     inv: &Invocation,
     cli_command: &ClapCommand,
+    catalog: &CommandCatalogOutput,
     out: &mut Vec<DocsIssue>,
 ) {
     if inv.tokens.is_empty() {
@@ -431,7 +520,7 @@ fn check_invocation(
     // Cargo feature aren't visible on `Cli::command()` here. Don't
     // false-positive on docs that describe them — agents and humans
     // both reach for these surfaces in real builds.
-    if FEATURE_GATED_VERBS.contains(&verb) {
+    if feature_gated_command_roots().contains(&verb) {
         return;
     }
 
@@ -456,7 +545,7 @@ fn check_invocation(
     // top-level verb.
     let mut resolved_cmd = verb_cmd;
     let mut tokens_used = 1;
-    let mut path_segments = vec![verb.to_string()];
+    let mut path_segments = vec![verb_cmd.get_name().to_string()];
     while tokens_used < inv.tokens.len() {
         let next = &inv.tokens[tokens_used];
         if next.starts_with('-')
@@ -469,7 +558,7 @@ fn check_invocation(
         }
         if let Some(sub) = find_subcommand(resolved_cmd, next) {
             resolved_cmd = sub;
-            path_segments.push(next.clone());
+            path_segments.push(sub.get_name().to_string());
             tokens_used += 1;
             continue;
         }
@@ -498,7 +587,7 @@ fn check_invocation(
 
     // Now walk remaining tokens for `--flag` / `--flag=value` shapes.
     let mut i = tokens_used;
-    let valid_flags = collect_long_flags(resolved_cmd);
+    let catalog_options = collect_catalog_options(catalog, &path_segments);
     while i < inv.tokens.len() {
         let tok = &inv.tokens[i];
         if let Some(flag_body) = tok.strip_prefix("--") {
@@ -513,7 +602,7 @@ fn check_invocation(
             };
             // Many docs use `--flag-name>` accidentally; guard.
             let flag_name = flag_name.trim_end_matches('>').to_string();
-            if !valid_flags.contains(&flag_name) {
+            if !catalog_options.contains_key(&flag_name) {
                 out.push(DocsIssue {
                     file: file.to_string(),
                     line: inv.line,
@@ -540,7 +629,8 @@ fn check_invocation(
                     }),
                 };
                 if let Some(value) = value
-                    && let Some((valid, sug)) = validate_flag_value(&flag_name, &value)
+                    && let Some((valid, sug)) =
+                        validate_flag_value(catalog_options[&flag_name], &value)
                     && !valid
                 {
                     out.push(DocsIssue {
@@ -572,47 +662,24 @@ fn find_subcommand<'a>(cmd: &'a ClapCommand, name: &str) -> Option<&'a ClapComma
     })
 }
 
-fn collect_long_flags(cmd: &ClapCommand) -> BTreeSet<String> {
-    let mut flags = BTreeSet::new();
-    for arg in cmd.get_arguments() {
-        if let Some(long) = arg.get_long() {
-            flags.insert(long.to_string());
-        }
-        for alias in arg.get_all_aliases().unwrap_or_default() {
-            flags.insert(alias.to_string());
-        }
-        for alias in arg.get_visible_aliases().unwrap_or_default() {
-            flags.insert(alias.to_string());
-        }
-    }
-    // Globals declared on the root `Cli` aren't visible on derived
-    // subcommand `Command` instances until clap calls `build()` (which
-    // happens during parse, not from `Cli::command()`). Inject them
-    // explicitly so we don't false-positive on every doc that uses
-    // `--json` or `--repo`.
-    for global in GLOBAL_LONG_FLAGS {
-        flags.insert((*global).to_string());
-    }
-    flags
+fn collect_catalog_options<'a>(
+    catalog: &'a CommandCatalogOutput,
+    path_segments: &[String],
+) -> BTreeMap<String, &'a CommandCatalogOption> {
+    let Some(options) = catalog.options_for_path(path_segments) else {
+        return BTreeMap::new();
+    };
+    options
+        .into_iter()
+        .flat_map(|option| {
+            option
+                .long
+                .iter()
+                .chain(option.aliases.iter())
+                .map(move |name| (name.clone(), option))
+        })
+        .collect()
 }
-
-/// Global long flags declared on the root `Cli` (`#[arg(global =
-/// true)]`). Mirrored from [`crate::cli::cli_args::cli_base::Cli`].
-const GLOBAL_LONG_FLAGS: &[&str] = &[
-    "json", "output", "no-color", "repo", "verbose", "quiet", "op-id", "help", "version",
-];
-
-/// Verbs that exist in the source tree but only when an opt-in Cargo
-/// feature is enabled. The default `cargo install --path crates/cli`
-/// build doesn't include them, so `Cli::command()` here can't see
-/// them — but they're still real surfaces docs talk about.
-///
-/// Keep this list short and grounded in the cli crate's feature
-/// table.
-const FEATURE_GATED_VERBS: &[&str] = &[
-    // `presence publish` — gated behind `client`.
-    "presence",
-];
 
 fn suggest_known_alt(parent: &ClapCommand, _wrong: &str) -> Option<String> {
     // Cheap "did you mean" surface: just list a couple of close hits.
@@ -631,50 +698,35 @@ fn suggest_known_alt(parent: &ClapCommand, _wrong: &str) -> Option<String> {
     ))
 }
 
-/// Returns Some((is_valid, suggestion_string)) if `flag` is one of the
-/// known-enum flags this checker validates, else None to mean
-/// "unchecked".
-fn validate_flag_value(flag: &str, value: &str) -> Option<(bool, Option<String>)> {
-    let table = enum_flag_table();
-    if let Some(values) = table.get(flag) {
-        // Strip placeholder shapes (`<name>`, `"…"`, etc.) — we only
-        // validate literal values.
-        if value.starts_with('<')
-            || value.starts_with('"')
-            || value.starts_with('\'')
-            || value.contains(':')
-        {
-            return None;
-        }
-        let valid = values.contains(&value);
-        let suggestion = if valid {
-            None
-        } else {
-            Some(format!("use --{flag} {{{}}}", values.to_vec().join("|")))
-        };
-        Some((valid, suggestion))
-    } else {
-        None
+/// Returns Some((is_valid, suggestion_string)) if `option` advertises finite
+/// values in the command catalog, else None to mean "unchecked".
+fn validate_flag_value(
+    option: &CommandCatalogOption,
+    value: &str,
+) -> Option<(bool, Option<String>)> {
+    if option.possible_values.is_empty()
+        || matches!(option.value_kind.as_str(), "boolean" | "count")
+    {
+        return None;
     }
-}
-
-/// Hard-coded valid sets for the small set of `--flag value` enums we
-/// know about. Kept narrow on purpose — false positives are worse than
-/// false negatives here.
-fn enum_flag_table() -> BTreeMap<&'static str, Vec<&'static str>> {
-    let mut t = BTreeMap::new();
-    t.insert(
-        "workspace",
-        vec!["auto", "materialized", "virtualized", "solid"],
-    );
-    t.insert("kind", vec!["constraint", "invariant", "rationale"]);
-    // `--scope` is overloaded across verbs (`integration install
-    // --scope repo|user`, `context set --scope file|symbol:…|lines:…`).
-    // We only validate the integration-install shape here; the context
-    // shape is a value with a colon and we already skip those.
-    t.insert("scope", vec!["repo", "user", "file"]);
-    t.insert("output", vec!["auto", "json", "text"]);
-    t
+    // Strip placeholder shapes (`<name>`, `"…"`, etc.) — we only validate
+    // literal values.
+    if value.starts_with('<') || value.starts_with('"') || value.starts_with('\'') {
+        return None;
+    }
+    let valid = option
+        .possible_values
+        .iter()
+        .any(|candidate| candidate == value);
+    let suggestion = if valid {
+        None
+    } else {
+        option
+            .long
+            .as_ref()
+            .map(|flag| format!("use --{flag} {{{}}}", option.possible_values.join("|")))
+    };
+    Some((valid, suggestion))
 }
 
 #[cfg(test)]
@@ -702,6 +754,85 @@ mod tests {
                 .any(|i| matches!(i.kind, IssueKind::InvalidFlagValue)
                     && i.invocation.contains("--workspace ephemeral"))
         );
+    }
+
+    #[test]
+    fn detects_invalid_finite_value_from_catalog_metadata() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Use `heddle context set --path src/lib.rs --kind warning -m note`.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i.kind, IssueKind::InvalidFlagValue)
+                    && i.detail.contains("--kind warning")),
+            "expected catalog-derived invalid --kind value, got: {:?}",
+            issues
+        );
+    }
+
+    #[test]
+    fn accepts_global_flags_from_catalog_metadata() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Inspect `heddle status --output json --repo .`.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(issues.is_empty(), "expected no drift, got: {:?}", issues);
+    }
+
+    #[test]
+    fn accepts_long_aliases_for_catalog_options() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Install `heddle integration install --harness-install-scope user`.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(issues.is_empty(), "expected no drift, got: {:?}", issues);
+    }
+
+    #[test]
+    fn accepts_catalog_option_aliases() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Install `heddle integration install codex --harness-install-scope repo`.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(issues.is_empty(), "expected no drift, got: {:?}", issues);
+    }
+
+    #[test]
+    fn does_not_validate_boolean_flags_as_finite_value_options() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Preview `heddle merge feature --preview main`.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(issues.is_empty(), "expected no drift, got: {:?}", issues);
+    }
+
+    #[test]
+    fn does_not_reject_non_finite_context_scope_values() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Use `heddle context set --path src/lib.rs --scope symbol:foo --kind rationale -m note`.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(issues.is_empty(), "expected no drift, got: {:?}", issues);
     }
 
     #[test]
@@ -816,6 +947,18 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i.kind, IssueKind::InvalidFlagValue))
         );
+    }
+
+    #[test]
+    fn skips_client_feature_gated_support_verb() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Hosted builds expose `heddle support grant --help` for operators.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(issues.is_empty(), "got: {:?}", issues);
     }
 
     #[test]

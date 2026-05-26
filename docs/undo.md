@@ -21,7 +21,7 @@ follow-ups.
 | `heddle thread drop`     | Recreates the thread at its pre-drop tip.                       |
 | `heddle thread rename`   | Renames back.                                                   |
 | `heddle marker create`   | Deletes the marker.                                             |
-| `heddle marker drop`     | Recreates the marker at its prior state.                        |
+| `heddle marker delete`     | Recreates the marker at its prior state.                        |
 | `heddle redact apply`    | Removes the redaction record so the next materialize restores the original bytes. Requires `--allow-redact-undo` (see "Safety contracts"). Refused when the blob has since been purged. |
 | `heddle rebase`          | Restores HEAD **and** the rebased thread ref to the pre-rebase tip in a single undo step. The whole rebase (every per-commit FF the replay emitted) is grouped into one oplog batch via the `OpRecord::TransactionCommit` envelope marker, so undo never lands the tip on an intermediate replay state. Refused when a blob reachable from the pre-rebase tree has since been purged (see "Safety contracts"). Local-only — see "Not undoable" for the remote-aware variant. |
 
@@ -77,7 +77,7 @@ contracts below are enforced by integration tests in
   dirty paths. Capture the changes with `heddle capture -m "..."` (or remove
   them) and retry. The check is shared with `cherry-pick` and `rebase`.
 - **Destructive-boundary refusal.** If the state the inverse would restore
-  has been removed from the object store — typically by `heddle gc --prune`
+  has been removed from the object store — typically by `heddle maintenance gc --prune`
   reaching past the live oplog window — `heddle undo` refuses with a single
   clear message naming the missing op id. Restore from a backup or list past
   the boundary with `heddle undo --list`.

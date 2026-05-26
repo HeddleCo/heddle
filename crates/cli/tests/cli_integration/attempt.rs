@@ -23,7 +23,7 @@ use std::fs;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{heddle, heddle_output};
+use super::{heddle, heddle_argv_json, heddle_output};
 
 /// Bootstrap a minimal repo with a single capture so the parent has a
 /// HEAD. Same shape as the `try_cmd.rs` setup so the two suites stay
@@ -36,7 +36,7 @@ fn setup_repo() -> TempDir {
     temp
 }
 
-/// Resolve the parent thread's HEAD via `heddle log --json` so we
+/// Resolve the parent thread's HEAD via `heddle log --output json` so we
 /// observe through the same path an agent would.
 fn parent_head(repo: &std::path::Path) -> String {
     let raw = heddle(&["--output", "json", "log", "--limit", "1"], Some(repo)).unwrap();
@@ -84,12 +84,36 @@ fn attempt_n_one_is_degenerate_try() {
     assert_eq!(value["attempts_total"], 1);
     assert_eq!(value["attempts_succeeded"], 1);
     assert!(value["recommended"].is_string(), "raw: {raw}");
-    assert!(
-        value["next_action"]
-            .as_str()
-            .unwrap()
-            .contains("heddle merge"),
-        "next_action should suggest a merge verb: {raw}"
+    let recommended = value["recommended"]
+        .as_str()
+        .expect("attempt should recommend a winning thread");
+    assert_eq!(
+        value["next_action"],
+        format!("heddle merge {recommended} --preview --with-diff"),
+        "attempt should preview the winning thread before landing it: {raw}"
+    );
+    assert_eq!(
+        value["recommended_action"], value["next_action"],
+        "attempt should expose the shared action field for agents: {raw}"
+    );
+    assert_eq!(
+        value["next_action_argv"],
+        heddle_argv_json(["merge", recommended, "--preview", "--with-diff"]),
+        "attempt should expose replayable argv for the preview action: {raw}"
+    );
+    assert_eq!(
+        value["next_action_template"],
+        Value::Null,
+        "attempt should expose nullable template metadata for concrete actions: {raw}"
+    );
+    assert_eq!(
+        value["recommended_action_argv"], value["next_action_argv"],
+        "recommended action argv should mirror next_action argv: {raw}"
+    );
+    assert_eq!(
+        value["recommended_action_template"],
+        Value::Null,
+        "attempt should expose nullable template metadata beside recommended_action: {raw}"
     );
 
     // Parent invariants.
@@ -385,7 +409,7 @@ fn attempt_shared_target_default_on_for_rust_workspace() {
 
     // The thread checkouts should each contain a `.cargo/config.toml`
     // that redirects to the shared target dir. The thread path layout
-    // for `--workspace heavy` is
+    // for `--workspace materialized` is
     // `<repo_parent>/.<repo_name>-heddle-threads/<thread>/root/`; we
     // assert the cargo config exists there.
     let attempts = value["attempts"].as_array().unwrap();

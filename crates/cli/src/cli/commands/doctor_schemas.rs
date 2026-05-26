@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle doctor schemas` — drift-check `docs/json-schemas.md`
-//! against the schemas registry in [`super::schemas`].
+//! against schema verbs registered by the command contract table.
 //!
 //! Strategy
 //! --------
-//! 1. For every verb in [`super::schemas::REGISTERED_VERBS`], generate
-//!    the canonical schema.
+//! 1. For every schema verb documented by the command contract table,
+//!    generate the canonical schema.
 //! 2. Parse `docs/json-schemas.md` and extract the literal JSON
-//!    sample(s) under each `## heddle <verb> --json` section.
+//!    sample(s) under each `## heddle <verb> --output json` section.
 //! 3. For each extracted sample, compare its top-level keys against
 //!    the schema's `properties` keys. Report any sample key that
 //!    isn't a property in the schema (the most common drift —
@@ -18,16 +18,18 @@
 //! the doc has historically suffered (renames, deletions, leaks of
 //! fields like `git_overlay_import_hint` into per-command outputs).
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command as ProcessCommand,
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::schemas::{REGISTERED_VERBS, schema_for_verb};
+use super::{
+    advice::RecoveryAdvice,
+    command_catalog::normalize_heddle_argv,
+    git_overlay_health::{MachineContractCoverage, machine_contract_coverage},
+    schemas::{documented_schema_verbs, schema_for_verb, schema_verbs},
+};
 use crate::cli::{Cli, should_output_json};
 
 /// One drift finding.
@@ -45,19 +47,159 @@ pub struct SchemaIssue {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SchemaReport {
-    /// All verbs the registry exposes.
+    /// Stable output discriminator for JSON callers.
+    pub output_kind: &'static str,
+    /// One-glance machine status for this doctor surface.
+    pub status: String,
+    /// True only when docs, generated schemas, and catalog coverage agree.
+    #[serde(rename = "verified")]
+    pub verified: bool,
+    /// Human-readable summary of the schema/doc contract.
+    pub summary: String,
+    /// Primary command to rerun or inspect when the report is not verified.
+    pub recommended_action: Option<String>,
+    /// Executable argv for `recommended_action`; empty recommendations use null.
+    pub recommended_action_argv: Option<Vec<String>>,
+    /// Recovery/inspection commands in priority order.
+    pub recovery_commands: Vec<String>,
+    /// Executable argv forms for recovery commands.
+    pub recovery_command_argv: Vec<Vec<String>>,
+    /// All verbs the runtime schema registry exposes.
     pub registered_verbs: Vec<String>,
-    /// Verbs the doc doesn't have a `## heddle <verb> --json`
-    /// section for. (Some of these are deliberately uncovered —
-    /// e.g. `marker show` shares `MarkerOpSchema` with `marker
-    /// create`. The renderer just lists them.)
+    /// Runtime schema verbs selected by the command contract table
+    /// for sample validation in `docs/json-schemas.md`.
+    pub documented_verbs: Vec<String>,
+    /// Runtime schema verbs that have generated schemas but are not
+    /// yet selected for docs sample validation. These are coverage
+    /// gaps, not drift failures.
+    pub undocumented_verbs: Vec<String>,
+    /// Documented verbs the doc doesn't have a `## heddle <verb>
+    /// --output json` section for. (Some sections intentionally bind several
+    /// verbs to one sample via inline hints; those are still matched.)
     pub unmatched_verbs: Vec<String>,
     /// Verbs the doc has a sample for, with all keys validating.
     pub passing_verbs: Vec<String>,
     /// Drift findings.
     pub issues: Vec<SchemaIssue>,
+    /// Catalog-wide schema coverage for every JSON-capable command.
+    /// This is broader than `registered_verbs`: registered/documented
+    /// verbs prove schema drift, while this field shows the remaining
+    /// command catalog gap without making drift checks ambiguous.
+    pub command_contract_schema_coverage: CommandContractSchemaCoverage,
     /// Path to the doc that was checked.
     pub doc_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandContractSchemaCoverage {
+    pub status: String,
+    #[serde(rename = "verified_scope")]
+    pub verified_scope: String,
+    pub advanced_scope: String,
+    pub summary: String,
+    pub catalog_commands_total: usize,
+    pub catalog_mutating_commands_total: usize,
+    pub json_commands_total: usize,
+    pub json_mutating_commands_total: usize,
+    pub json_commands_with_schema: usize,
+    pub json_commands_with_accepted_opaque_schema: usize,
+    pub json_commands_without_schema: usize,
+    #[serde(rename = "verified_scope_json_commands_total")]
+    pub verified_scope_json_commands_total: usize,
+    #[serde(rename = "verified_scope_json_commands_with_schema")]
+    pub verified_scope_json_commands_with_schema: usize,
+    #[serde(rename = "verified_scope_json_commands_with_accepted_opaque_schema")]
+    pub verified_scope_json_commands_with_accepted_opaque_schema: usize,
+    #[serde(rename = "verified_scope_json_commands_without_schema")]
+    pub verified_scope_json_commands_without_schema: usize,
+    pub advanced_scope_json_commands_total: usize,
+    pub advanced_scope_json_commands_with_accepted_opaque_schema: usize,
+    pub mutating_commands_total: usize,
+    pub mutating_commands_with_schema: usize,
+    pub mutating_commands_with_accepted_opaque_schema: usize,
+    pub mutating_commands_without_schema: usize,
+    #[serde(rename = "verified_scope_mutating_commands_total")]
+    pub verified_scope_mutating_commands_total: usize,
+    #[serde(rename = "verified_scope_mutating_commands_with_schema")]
+    pub verified_scope_mutating_commands_with_schema: usize,
+    #[serde(rename = "verified_scope_mutating_commands_with_accepted_opaque_schema")]
+    pub verified_scope_mutating_commands_with_accepted_opaque_schema: usize,
+    #[serde(rename = "verified_scope_mutating_commands_without_schema")]
+    pub verified_scope_mutating_commands_without_schema: usize,
+    pub advanced_scope_mutating_commands_total: usize,
+    pub advanced_scope_mutating_commands_with_accepted_opaque_schema: usize,
+    pub undocumented_schema_verbs_total: usize,
+    pub opaque_schema_verbs_total: usize,
+    pub accepted_opaque_schema_verbs_total: usize,
+    pub unaccepted_opaque_schema_verbs_total: usize,
+    pub missing_schema_examples: Vec<String>,
+    pub missing_mutating_schema_examples: Vec<String>,
+    #[serde(rename = "verified_scope_missing_schema_examples")]
+    pub verified_scope_missing_schema_examples: Vec<String>,
+    #[serde(rename = "verified_scope_accepted_opaque_schema_examples")]
+    pub verified_scope_accepted_opaque_schema_examples: Vec<String>,
+    pub advanced_scope_accepted_opaque_schema_examples: Vec<String>,
+    pub accepted_opaque_schema_examples: Vec<String>,
+    pub unaccepted_opaque_schema_examples: Vec<String>,
+    pub undocumented_schema_examples: Vec<String>,
+}
+
+impl From<MachineContractCoverage> for CommandContractSchemaCoverage {
+    fn from(coverage: MachineContractCoverage) -> Self {
+        Self {
+            status: coverage.status,
+            verified_scope: coverage.verified_scope,
+            advanced_scope: coverage.advanced_scope,
+            summary: coverage.summary,
+            catalog_commands_total: coverage.catalog_commands_total,
+            catalog_mutating_commands_total: coverage.catalog_mutating_commands_total,
+            json_commands_total: coverage.json_commands_total,
+            json_mutating_commands_total: coverage.json_mutating_commands_total,
+            json_commands_with_schema: coverage.json_commands_with_schema,
+            json_commands_with_accepted_opaque_schema: coverage
+                .json_commands_with_accepted_opaque_schema,
+            json_commands_without_schema: coverage.json_commands_without_schema,
+            verified_scope_json_commands_total: coverage.verified_scope_json_commands_total,
+            verified_scope_json_commands_with_schema: coverage
+                .verified_scope_json_commands_with_schema,
+            verified_scope_json_commands_with_accepted_opaque_schema: coverage
+                .verified_scope_json_commands_with_accepted_opaque_schema,
+            verified_scope_json_commands_without_schema: coverage
+                .verified_scope_json_commands_without_schema,
+            advanced_scope_json_commands_total: coverage.advanced_scope_json_commands_total,
+            advanced_scope_json_commands_with_accepted_opaque_schema: coverage
+                .advanced_scope_json_commands_with_accepted_opaque_schema,
+            mutating_commands_total: coverage.mutating_commands_total,
+            mutating_commands_with_schema: coverage.mutating_commands_with_schema,
+            mutating_commands_with_accepted_opaque_schema: coverage
+                .mutating_commands_with_accepted_opaque_schema,
+            mutating_commands_without_schema: coverage.mutating_commands_without_schema,
+            verified_scope_mutating_commands_total: coverage.verified_scope_mutating_commands_total,
+            verified_scope_mutating_commands_with_schema: coverage
+                .verified_scope_mutating_commands_with_schema,
+            verified_scope_mutating_commands_with_accepted_opaque_schema: coverage
+                .verified_scope_mutating_commands_with_accepted_opaque_schema,
+            verified_scope_mutating_commands_without_schema: coverage
+                .verified_scope_mutating_commands_without_schema,
+            advanced_scope_mutating_commands_total: coverage.advanced_scope_mutating_commands_total,
+            advanced_scope_mutating_commands_with_accepted_opaque_schema: coverage
+                .advanced_scope_mutating_commands_with_accepted_opaque_schema,
+            undocumented_schema_verbs_total: coverage.undocumented_schema_verbs_total,
+            opaque_schema_verbs_total: coverage.opaque_schema_verbs_total,
+            accepted_opaque_schema_verbs_total: coverage.accepted_opaque_schema_verbs_total,
+            unaccepted_opaque_schema_verbs_total: coverage.unaccepted_opaque_schema_verbs_total,
+            missing_schema_examples: coverage.missing_schema_examples,
+            missing_mutating_schema_examples: coverage.missing_mutating_schema_examples,
+            verified_scope_missing_schema_examples: coverage.verified_scope_missing_schema_examples,
+            verified_scope_accepted_opaque_schema_examples: coverage
+                .verified_scope_accepted_opaque_schema_examples,
+            advanced_scope_accepted_opaque_schema_examples: coverage
+                .advanced_scope_accepted_opaque_schema_examples,
+            accepted_opaque_schema_examples: coverage.accepted_opaque_schema_examples,
+            unaccepted_opaque_schema_examples: coverage.unaccepted_opaque_schema_examples,
+            undocumented_schema_examples: coverage.undocumented_schema_examples,
+        }
+    }
 }
 
 /// Public entrypoint for `heddle doctor schemas`.
@@ -68,6 +210,9 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
     })?;
 
     let doc_path = repo_root.join("docs").join("json-schemas.md");
+    if !doc_path.exists() {
+        return Err(anyhow!(doctor_schemas_doc_missing_advice(&repo_root)));
+    }
     let doc = std::fs::read_to_string(&doc_path)
         .with_context(|| format!("read {}", doc_path.display()))?;
 
@@ -77,7 +222,25 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
     let mut passing_verbs = Vec::new();
     let mut unmatched_verbs = Vec::new();
 
-    for verb in REGISTERED_VERBS {
+    let registered_verbs: Vec<String> = schema_verbs().iter().map(|s| s.to_string()).collect();
+    let documented_verbs: Vec<String> = documented_schema_verbs()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let undocumented_verbs: Vec<String> = schema_verbs()
+        .iter()
+        .filter(|verb| !documented_schema_verbs().contains(verb))
+        .map(|s| s.to_string())
+        .collect();
+
+    let machine_coverage = machine_contract_coverage();
+    let machine_coverage_value = serde_json::to_value(&machine_coverage)
+        .unwrap_or_else(|_| Value::Object(Default::default()));
+    let coverage: CommandContractSchemaCoverage = machine_coverage.into();
+    let command_coverage_value =
+        serde_json::to_value(&coverage).unwrap_or_else(|_| Value::Object(Default::default()));
+
+    for verb in documented_schema_verbs() {
         let schema = match schema_for_verb(verb) {
             Some(s) => s,
             None => {
@@ -87,6 +250,7 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
             }
         };
         let property_keys = schema_property_keys(&schema);
+        let allows_additional_properties = schema_allows_additional_properties(&schema);
 
         // Look up the sample(s) for this verb. Missing samples are
         // reported as "unmatched" rather than as drift, so dropping
@@ -110,6 +274,17 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
 
         let mut verb_clean = true;
         for sample in verb_samples {
+            let coverage_issue_count = issues.len();
+            collect_coverage_drift_issues(
+                sample,
+                verb,
+                &machine_coverage_value,
+                &command_coverage_value,
+                &mut issues,
+            );
+            if issues.len() != coverage_issue_count {
+                verb_clean = false;
+            }
             let sample_keys = match top_level_keys(&sample.json) {
                 Some(keys) => keys,
                 None => {
@@ -119,6 +294,9 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
                     continue;
                 }
             };
+            if allows_additional_properties {
+                continue;
+            }
             for key in sample_keys {
                 if !property_keys.contains(&key) {
                     verb_clean = false;
@@ -136,13 +314,73 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
         }
     }
 
+    let verified = coverage_has_no_blocking_schema_gaps(&coverage)
+        && unmatched_verbs.is_empty()
+        && issues.is_empty();
+    let status = if verified {
+        coverage.status.clone()
+    } else if !issues.is_empty() {
+        "drift".to_string()
+    } else if !unmatched_verbs.is_empty() {
+        "missing_samples".to_string()
+    } else {
+        coverage.status.clone()
+    };
+    let summary = if verified {
+        coverage.summary.clone()
+    } else if !issues.is_empty() {
+        format!("{} schema drift issue(s) found", issues.len())
+    } else if !unmatched_verbs.is_empty() {
+        format!(
+            "{} documented schema verb(s) lack parseable samples",
+            unmatched_verbs.len()
+        )
+    } else {
+        coverage.summary.clone()
+    };
+    let recommended_action = (!verified).then(|| "heddle doctor schemas --output json".to_string());
+    let recommended_action_argv = if verified {
+        None
+    } else {
+        Some(normalize_heddle_argv(vec![
+            "heddle".to_string(),
+            "doctor".to_string(),
+            "schemas".to_string(),
+            "--output".to_string(),
+            "json".to_string(),
+        ]))
+    };
+    let recovery_commands = if verified {
+        Vec::new()
+    } else {
+        vec!["heddle doctor schemas --output json".to_string()]
+    };
+    let recovery_command_argv = if verified {
+        Vec::new()
+    } else {
+        vec![recommended_action_argv.clone().unwrap_or_default()]
+    };
+
     let report = SchemaReport {
-        registered_verbs: REGISTERED_VERBS.iter().map(|s| s.to_string()).collect(),
+        output_kind: "doctor_schemas",
+        status,
+        verified,
+        summary,
+        recommended_action,
+        recommended_action_argv,
+        recovery_commands,
+        recovery_command_argv,
+        registered_verbs,
+        documented_verbs,
+        undocumented_verbs,
         unmatched_verbs,
         passing_verbs,
         issues,
+        command_contract_schema_coverage: coverage,
         doc_path: doc_path.display().to_string(),
     };
+
+    validate_report(&report)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -150,32 +388,236 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
         render_human(&report);
     }
 
+    Ok(())
+}
+
+fn validate_report(report: &SchemaReport) -> Result<()> {
+    if !coverage_has_no_blocking_schema_gaps(&report.command_contract_schema_coverage) {
+        return Err(anyhow!(schema_contract_advice(report)));
+    }
+    if !report.unmatched_verbs.is_empty() {
+        return Err(anyhow!(schema_contract_advice(report)));
+    }
     if !report.issues.is_empty() {
-        return Err(anyhow!(
-            "{} schema drift issue(s) found",
-            report.issues.len()
-        ));
+        return Err(anyhow!(schema_contract_advice(report)));
     }
     Ok(())
 }
 
+fn coverage_has_no_blocking_schema_gaps(coverage: &CommandContractSchemaCoverage) -> bool {
+    coverage.verified_scope_json_commands_without_schema == 0
+        && coverage.verified_scope_mutating_commands_without_schema == 0
+        && coverage.verified_scope_json_commands_with_accepted_opaque_schema == 0
+        && coverage.verified_scope_mutating_commands_with_accepted_opaque_schema == 0
+        && coverage.unaccepted_opaque_schema_verbs_total == 0
+        && coverage.undocumented_schema_verbs_total == 0
+}
+
+fn collect_coverage_drift_issues(
+    sample: &DocSample,
+    verb: &str,
+    machine_coverage: &Value,
+    command_coverage: &Value,
+    issues: &mut Vec<SchemaIssue>,
+) {
+    collect_coverage_drift_issues_at_path(
+        &sample.json,
+        "",
+        sample.start_line,
+        verb,
+        machine_coverage,
+        command_coverage,
+        issues,
+    );
+}
+
+fn collect_coverage_drift_issues_at_path(
+    value: &Value,
+    path: &str,
+    line: usize,
+    verb: &str,
+    machine_coverage: &Value,
+    command_coverage: &Value,
+    issues: &mut Vec<SchemaIssue>,
+) {
+    let Value::Object(map) = value else {
+        return;
+    };
+    for (key, child) in map {
+        let child_path = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
+        match key.as_str() {
+            "machine_contract_coverage" => {
+                compare_documented_coverage(
+                    &child_path,
+                    child,
+                    machine_coverage,
+                    line,
+                    verb,
+                    issues,
+                );
+            }
+            "command_contract_schema_coverage" => {
+                compare_documented_coverage(
+                    &child_path,
+                    child,
+                    command_coverage,
+                    line,
+                    verb,
+                    issues,
+                );
+            }
+            _ => {}
+        }
+        collect_coverage_drift_issues_at_path(
+            child,
+            &child_path,
+            line,
+            verb,
+            machine_coverage,
+            command_coverage,
+            issues,
+        );
+    }
+}
+
+fn compare_documented_coverage(
+    path: &str,
+    documented: &Value,
+    runtime: &Value,
+    line: usize,
+    verb: &str,
+    issues: &mut Vec<SchemaIssue>,
+) {
+    let (Value::Object(documented), Value::Object(runtime)) = (documented, runtime) else {
+        return;
+    };
+    for (field, documented_value) in documented {
+        let Some(runtime_value) = runtime.get(field) else {
+            continue;
+        };
+        if documented_value != runtime_value {
+            let field_path = format!("{path}.{field}");
+            issues.push(SchemaIssue {
+                verb: verb.to_string(),
+                line,
+                unknown_key: field_path.clone(),
+                detail: format!(
+                    "sample field '{field_path}' is {}, but runtime reports {}",
+                    documented_value, runtime_value
+                ),
+            });
+        }
+    }
+}
+
+fn doctor_schemas_doc_missing_advice(repo_root: &Path) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "doctor_schemas_source_docs_missing",
+        "Cannot run schema docs drift check outside a Heddle source checkout",
+        "Run this from the Heddle source checkout, pass `--repo <source-root>`, or use `heddle commands --output json` and `heddle schemas status` for installed CLI introspection.",
+        format!(
+            "docs/json-schemas.md was not found under {}",
+            repo_root.display()
+        ),
+        "`doctor schemas` compares runtime schemas to source documentation and cannot prove docs drift without that markdown file",
+        "no repository objects, refs, metadata, or worktree files were changed",
+        "heddle commands --output json",
+        vec![
+            "heddle commands --output json".to_string(),
+            "heddle schemas status".to_string(),
+            "heddle doctor schemas --output json".to_string(),
+        ],
+    )
+}
+
+fn schema_contract_advice(report: &SchemaReport) -> RecoveryAdvice {
+    let coverage = &report.command_contract_schema_coverage;
+    let error = if !coverage_has_no_blocking_schema_gaps(coverage) {
+        format!(
+            "Machine contract coverage is incomplete: {}",
+            coverage.summary
+        )
+    } else if !report.unmatched_verbs.is_empty() {
+        format!(
+            "{} documented schema verb(s) lack parseable samples",
+            report.unmatched_verbs.len()
+        )
+    } else if !report.issues.is_empty() {
+        format!("{} schema drift issue(s) found", report.issues.len())
+    } else {
+        "Machine contract check failed".to_string()
+    };
+    let unsafe_condition = if !coverage_has_no_blocking_schema_gaps(coverage) {
+        format!(
+            "command catalog status `{}`; verified scope `{}` has {} JSON-capable command(s), {} mutating command(s), {} opaque schema-backed JSON command(s), {} unaccepted opaque schema verb(s), and {} runtime schema verb(s) outside the documented schema contract",
+            coverage.status,
+            coverage.verified_scope,
+            coverage.verified_scope_json_commands_without_schema,
+            coverage.verified_scope_mutating_commands_without_schema,
+            coverage.verified_scope_json_commands_with_accepted_opaque_schema,
+            coverage.unaccepted_opaque_schema_verbs_total,
+            coverage.undocumented_schema_verbs_total
+        )
+    } else if !report.unmatched_verbs.is_empty() {
+        format!(
+            "documented schema verbs without parseable samples: {}",
+            report.unmatched_verbs.join(", ")
+        )
+    } else {
+        let examples = report
+            .issues
+            .iter()
+            .take(3)
+            .map(|issue| {
+                format!(
+                    "{} line {} unknown `{}`",
+                    issue.verb, issue.line, issue.unknown_key
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("documented JSON samples drifted from generated schemas: {examples}")
+    };
+    RecoveryAdvice::machine_contract_drift(error, unsafe_condition)
+}
+
 fn render_human(report: &SchemaReport) {
     println!(
-        "heddle doctor schemas — {} verb(s) registered, doc: {}",
+        "heddle doctor schemas — {} runtime schema verb(s), {} documented, doc: {}",
         report.registered_verbs.len(),
+        report.documented_verbs.len(),
         report.doc_path
     );
     println!();
+    println!(
+        "  catalog_schema_coverage  {}: {}",
+        report.command_contract_schema_coverage.status,
+        report.command_contract_schema_coverage.summary
+    );
     for verb in &report.passing_verbs {
         println!("  ok   {verb}: sample matches generated schema");
     }
     if !report.unmatched_verbs.is_empty() {
         println!();
         println!(
-            "  -- {} verb(s) without a documented sample (allowed):",
+            "  -- {} documented verb(s) without a parseable sample:",
             report.unmatched_verbs.len()
         );
         for verb in &report.unmatched_verbs {
+            println!("       {verb}");
+        }
+    }
+    if !report.undocumented_verbs.is_empty() {
+        println!();
+        println!(
+            "  coverage_gap  {} runtime schema verb(s) not yet sample-checked by docs:",
+            report.undocumented_verbs.len()
+        );
+        for verb in &report.undocumented_verbs {
             println!("       {verb}");
         }
     }
@@ -191,7 +633,31 @@ fn render_human(report: &SchemaReport) {
         println!("Found {} drift issue(s).", report.issues.len());
     } else {
         println!();
-        println!("No drift detected.");
+        println!("No registered-schema/documented-sample drift detected.");
+        if report
+            .command_contract_schema_coverage
+            .json_commands_without_schema
+            > 0
+        {
+            println!(
+                "Catalog schema coverage is partial; {} JSON-capable command(s) still need registered schemas.",
+                report
+                    .command_contract_schema_coverage
+                    .json_commands_without_schema
+            );
+        }
+        if report
+            .command_contract_schema_coverage
+            .accepted_opaque_schema_verbs_total
+            > 0
+        {
+            println!(
+                "Verified everyday/agent scope is fully concrete; advanced/internal/admin scope carries {} intentionally object-shaped opaque schema verb(s).",
+                report
+                    .command_contract_schema_coverage
+                    .accepted_opaque_schema_verbs_total
+            );
+        }
     }
 }
 
@@ -200,11 +666,48 @@ fn render_human(report: &SchemaReport) {
 /// or a primitive — never the case for the registry today, but handle
 /// it).
 fn schema_property_keys(schema: &Value) -> std::collections::BTreeSet<String> {
-    schema
+    schema_property_keys_from(schema, schema)
+}
+
+fn schema_property_keys_from(root: &Value, schema: &Value) -> std::collections::BTreeSet<String> {
+    let mut keys: std::collections::BTreeSet<String> = schema
         .get("properties")
         .and_then(|p| p.as_object())
         .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    for combinator in ["anyOf", "oneOf", "allOf"] {
+        if let Some(variants) = schema.get(combinator).and_then(|value| value.as_array()) {
+            for variant in variants {
+                keys.extend(schema_property_keys_from(root, variant));
+            }
+        }
+    }
+
+    if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str())
+        && let Some(target) = schema_ref_target(root, reference)
+    {
+        keys.extend(schema_property_keys_from(root, target));
+    }
+
+    keys
+}
+
+fn schema_ref_target<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let path = reference.strip_prefix("#/")?;
+    let mut current = root;
+    for part in path.split('/') {
+        let decoded = part.replace("~1", "/").replace("~0", "~");
+        current = current.get(&decoded)?;
+    }
+    Some(current)
+}
+
+fn schema_allows_additional_properties(schema: &Value) -> bool {
+    schema
+        .get("additionalProperties")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 /// A literal JSON sample lifted out of `docs/json-schemas.md`.
@@ -355,14 +858,14 @@ fn parse_inline_verb(line: &str) -> Option<String> {
     // Accept either — when the prefix is absent, the inner string
     // itself is treated as the verb candidate.
     let inner_verb = inner.strip_prefix("heddle ").unwrap_or(inner).trim();
-    // Strip a trailing `--json` so the registry-verb comparison
-    // doesn't have to know about it.
-    let inner_verb = inner_verb.trim_end_matches("--json").trim();
+    // Strip output-mode selectors so the registry-verb comparison
+    // doesn't have to know about the transport flag.
+    let inner_verb = strip_json_mode_tokens(inner_verb);
     // Reject obviously-non-verb backtick contents (e.g. type names,
     // path fragments). Verbs in this doc are always lowercase
     // alphanumeric tokens, optionally with `--flag` and `|`-separated
     // sub-variants.
-    if !is_plausible_verb_phrase(inner_verb) {
+    if !is_plausible_verb_phrase(&inner_verb) {
         return None;
     }
     // Confirm "emits" / "emit" appears later in the line.
@@ -393,17 +896,18 @@ fn is_plausible_verb_phrase(s: &str) -> bool {
     })
 }
 
-/// `## heddle status --json` matches the verb `"status"`. Strips
-/// the `heddle ` prefix, the `--json` suffix, and any `<state>`-style
+/// `## heddle status --output json` matches the verb `"status"`. Strips
+/// the `heddle ` prefix, output-mode selectors, and any `<state>`-style
 /// placeholders. Pipe-separated headings (e.g. `heddle bridge git
-/// init|export|import|sync|push|pull --json`) match every variant.
+/// init|export|import|sync|push|pull --output json`) match every variant.
 fn sample_matches_verb(heading: &str, verb: &str) -> bool {
     let stripped = heading.trim_start_matches('`').trim_end_matches('`').trim();
     let stripped = stripped.trim_start_matches("heddle ").trim();
-    let mut tokens: Vec<&str> = stripped
+    let mut tokens = strip_json_mode_tokens(stripped)
         .split_whitespace()
-        .filter(|tok| !tok.starts_with('<') && *tok != "--json")
-        .collect();
+        .filter(|tok| !tok.starts_with('<'))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     if tokens.is_empty() {
         return false;
     }
@@ -431,6 +935,22 @@ fn sample_matches_verb(heading: &str, verb: &str) -> bool {
     }
 }
 
+fn strip_json_mode_tokens(input: &str) -> String {
+    let mut out = Vec::new();
+    let mut tokens = input.split_whitespace().peekable();
+    while let Some(token) = tokens.next() {
+        if token == "--output=json" {
+            continue;
+        }
+        if token == "--output" && tokens.peek().is_some_and(|next| *next == "json") {
+            tokens.next();
+            continue;
+        }
+        out.push(token);
+    }
+    out.join(" ")
+}
+
 /// Returns top-level keys when `value` is an object. None for
 /// primitives, arrays, and `null` — those are valid sample shapes
 /// (e.g. `review next` returning literal null) but contribute no
@@ -450,18 +970,10 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
             return Some(ancestor.to_path_buf());
         }
     }
-    // Fallback: ask `git rev-parse --show-toplevel` so this works
-    // inside Heddle worktrees that don't co-locate `.git/`.
-    let output = ProcessCommand::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(start)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8(output.stdout).ok()?;
-    Some(PathBuf::from(path.trim()))
+    let repo = gix::discover(start).ok()?;
+    repo.workdir()
+        .map(Path::to_path_buf)
+        .or_else(|| repo.git_dir().parent().map(Path::to_path_buf))
 }
 
 #[cfg(test)]
@@ -471,7 +983,7 @@ mod tests {
     #[test]
     fn extracts_samples_from_simple_doc() {
         let doc = "\
-## `heddle foo --json`
+## `heddle foo --output json`
 
 Some prose.
 
@@ -479,7 +991,7 @@ Some prose.
 {\"a\": 1, \"b\": 2}
 ```
 
-## `heddle bar --json`
+## `heddle bar --output json`
 
 ```json
 {\"x\": true}
@@ -487,15 +999,15 @@ Some prose.
 ";
         let samples = extract_samples(doc);
         assert_eq!(samples.len(), 2);
-        assert_eq!(samples[0].heading, "`heddle foo --json`");
+        assert_eq!(samples[0].heading, "`heddle foo --output json`");
         assert_eq!(samples[0].json.get("a").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(samples[1].heading, "`heddle bar --json`");
+        assert_eq!(samples[1].heading, "`heddle bar --output json`");
     }
 
     #[test]
     fn skips_fences_with_nonparseable_placeholder_samples() {
         let doc = "\
-## `heddle baz --json`
+## `heddle baz --output json`
 
 ```json
 {\"placeholder\": ...}
@@ -507,13 +1019,19 @@ Some prose.
 
     #[test]
     fn sample_matches_verb_strips_heddle_prefix_and_args() {
-        assert!(sample_matches_verb("`heddle status --json`", "status"));
         assert!(sample_matches_verb(
-            "`heddle bridge git status --json`",
+            "`heddle status --output json`",
+            "status"
+        ));
+        assert!(sample_matches_verb(
+            "`heddle bridge git status --output json`",
             "bridge git status"
         ));
-        assert!(sample_matches_verb("`heddle show <state> --json`", "show"));
-        assert!(!sample_matches_verb("`heddle status --json`", "log"));
+        assert!(sample_matches_verb(
+            "`heddle show <state> --output json`",
+            "show"
+        ));
+        assert!(!sample_matches_verb("`heddle status --output json`", "log"));
     }
 
     #[test]
@@ -528,5 +1046,155 @@ Some prose.
         let mut keys = top_level_keys(&v).unwrap();
         keys.sort();
         assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn generic_object_schema_allows_sample_keys() {
+        let schema: Value =
+            serde_json::from_str(r#"{"type": "object", "additionalProperties": true}"#).unwrap();
+        assert!(schema_allows_additional_properties(&schema));
+        assert!(schema_property_keys(&schema).is_empty());
+    }
+
+    #[test]
+    fn coverage_samples_must_match_runtime_coverage_values() {
+        let sample = DocSample {
+            heading: "`heddle status --output json`".to_string(),
+            inline_verb: None,
+            start_line: 42,
+            json: serde_json::json!({
+                "verification": {
+                    "machine_contract_coverage": {
+                        "summary": "old",
+                        "json_commands_total": 1,
+                        "accepted_opaque_schema_examples": ["transaction begin"]
+                    }
+                },
+                "command_contract_schema_coverage": {
+                    "summary": "old doctor",
+                    "json_commands_with_schema": 10
+                }
+            }),
+        };
+        let machine = serde_json::json!({
+            "summary": "new",
+            "json_commands_total": 2,
+            "accepted_opaque_schema_examples": ["transaction begin", "transaction abort"]
+        });
+        let command = serde_json::json!({
+            "summary": "new doctor",
+            "json_commands_with_schema": 11
+        });
+        let mut issues = Vec::new();
+
+        collect_coverage_drift_issues(&sample, "status", &machine, &command, &mut issues);
+
+        let fields = issues
+            .iter()
+            .map(|issue| issue.unknown_key.as_str())
+            .collect::<Vec<_>>();
+        assert!(fields.contains(&"verification.machine_contract_coverage.summary"));
+        assert!(fields.contains(&"verification.machine_contract_coverage.json_commands_total"));
+        assert!(
+            fields.contains(
+                &"verification.machine_contract_coverage.accepted_opaque_schema_examples"
+            )
+        );
+        assert!(fields.contains(&"command_contract_schema_coverage.summary"));
+        assert!(fields.contains(&"command_contract_schema_coverage.json_commands_with_schema"));
+        assert!(issues.iter().all(|issue| issue.line == 42));
+    }
+
+    #[test]
+    fn validate_report_returns_typed_recovery_advice_for_schema_failure() {
+        let report = SchemaReport {
+            output_kind: "doctor_schemas",
+            status: "missing_samples".to_string(),
+            verified: false,
+            summary: "1 documented schema verb lacks parseable samples".to_string(),
+            recommended_action: Some("heddle doctor schemas --output json".to_string()),
+            recommended_action_argv: Some(vec![
+                "heddle".to_string(),
+                "doctor".to_string(),
+                "schemas".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]),
+            recovery_commands: vec!["heddle doctor schemas --output json".to_string()],
+            recovery_command_argv: vec![vec![
+                "heddle".to_string(),
+                "doctor".to_string(),
+                "schemas".to_string(),
+                "--output".to_string(),
+                "json".to_string(),
+            ]],
+            registered_verbs: vec!["status".to_string()],
+            documented_verbs: vec!["status".to_string()],
+            undocumented_verbs: Vec::new(),
+            unmatched_verbs: vec!["status".to_string()],
+            passing_verbs: Vec::new(),
+            issues: Vec::new(),
+            command_contract_schema_coverage: CommandContractSchemaCoverage {
+                status: "available".to_string(),
+                verified_scope: "everyday_and_agent".to_string(),
+                advanced_scope: "advanced_internal_admin".to_string(),
+                summary: "all JSON-capable commands have schemas".to_string(),
+                catalog_commands_total: 1,
+                catalog_mutating_commands_total: 0,
+                json_commands_total: 1,
+                json_mutating_commands_total: 0,
+                json_commands_with_schema: 1,
+                json_commands_with_accepted_opaque_schema: 0,
+                json_commands_without_schema: 0,
+                verified_scope_json_commands_total: 1,
+                verified_scope_json_commands_with_schema: 1,
+                verified_scope_json_commands_with_accepted_opaque_schema: 0,
+                verified_scope_json_commands_without_schema: 0,
+                advanced_scope_json_commands_total: 0,
+                advanced_scope_json_commands_with_accepted_opaque_schema: 0,
+                mutating_commands_total: 0,
+                mutating_commands_with_schema: 0,
+                mutating_commands_with_accepted_opaque_schema: 0,
+                mutating_commands_without_schema: 0,
+                verified_scope_mutating_commands_total: 0,
+                verified_scope_mutating_commands_with_schema: 0,
+                verified_scope_mutating_commands_with_accepted_opaque_schema: 0,
+                verified_scope_mutating_commands_without_schema: 0,
+                advanced_scope_mutating_commands_total: 0,
+                advanced_scope_mutating_commands_with_accepted_opaque_schema: 0,
+                undocumented_schema_verbs_total: 0,
+                opaque_schema_verbs_total: 0,
+                accepted_opaque_schema_verbs_total: 0,
+                unaccepted_opaque_schema_verbs_total: 0,
+                missing_schema_examples: Vec::new(),
+                missing_mutating_schema_examples: Vec::new(),
+                verified_scope_missing_schema_examples: Vec::new(),
+                verified_scope_accepted_opaque_schema_examples: Vec::new(),
+                advanced_scope_accepted_opaque_schema_examples: Vec::new(),
+                accepted_opaque_schema_examples: Vec::new(),
+                unaccepted_opaque_schema_examples: Vec::new(),
+                undocumented_schema_examples: Vec::new(),
+            },
+            doc_path: "docs/json-schemas.md".to_string(),
+        };
+
+        let err = validate_report(&report).expect_err("schema failure should be rejected");
+        let advice = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
+            .expect("schema failure should use typed recovery advice");
+        assert_eq!(advice.kind, "machine_contract_drift");
+        assert_eq!(
+            advice.primary_command,
+            "heddle doctor schemas --output json"
+        );
+        assert_eq!(
+            advice.recovery_commands,
+            vec!["heddle doctor schemas --output json".to_string()]
+        );
+        assert!(!advice.hint.trim().is_empty());
+        assert!(!advice.unsafe_condition.trim().is_empty());
+        assert!(!advice.would_change.trim().is_empty());
+        assert!(!advice.preserved.trim().is_empty());
     }
 }

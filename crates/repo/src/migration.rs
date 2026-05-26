@@ -162,7 +162,7 @@ fn ledger_path(repo: &Repository) -> PathBuf {
 /// land without tangling `Repository::open_raw`.
 pub static MIGRATIONS: &[Migration] = &[Migration {
     id: "0001_legacy_tracks",
-    description: "Rewrite legacy thread/track refs into the post-2024 layout (also runs inline at open)",
+    description: "Rewrite legacy thread/track refs into the post-2024 layout",
     applies_to: SchemaTarget::RefSummary,
     run: run_legacy_tracks,
 }];

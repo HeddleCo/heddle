@@ -93,9 +93,7 @@ fn bench_materialize_cold(c: &mut Criterion) {
                 || TempDir::new().unwrap(),
                 |dest| {
                     let path = dest.path().join("out");
-                    let manifest = repo
-                        .materialize_thread("main", &path)
-                        .expect("materialize");
+                    let manifest = repo.materialize_thread("main", &path).expect("materialize");
                     black_box(manifest);
                 },
                 BatchSize::PerIteration,

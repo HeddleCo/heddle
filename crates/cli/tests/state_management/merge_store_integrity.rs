@@ -201,6 +201,13 @@ fn test_merge_with_directory_rename_succeeds_no_false_positive() {
     fs::write(temp.path().join("keep.txt"), "keep edited\n").unwrap();
     heddle(&["capture", "-m", "main edits keep"], Some(temp.path())).unwrap();
 
+    // Direct merge now refuses stale threads before doing semantic
+    // planning. Refresh first so this test keeps exercising the store
+    // integrity path, not the freshness gate.
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "refresh", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+
     // The merge MUST succeed; the directory rename is a legitimate
     // "this subtree path doesn't exist on the other side" scenario,
     // and the require_subtree fix must not over-trigger here.

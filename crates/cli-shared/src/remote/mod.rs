@@ -119,6 +119,21 @@ impl RemoteConfig {
         Ok(())
     }
 
+    pub fn clear_default(&mut self) -> Result<()> {
+        self.file.default = None;
+        self.file.save(&self.path)?;
+        Ok(())
+    }
+
+    pub fn set_default(&mut self, name: &str) -> Result<()> {
+        if !self.file.remotes.contains_key(name) {
+            return Err(RemoteError::NotFound(name.to_string()));
+        }
+        self.file.default = Some(name.to_string());
+        self.file.save(&self.path)?;
+        Ok(())
+    }
+
     pub fn default_name(&self) -> Option<&str> {
         self.file.default.as_deref()
     }

@@ -107,12 +107,7 @@ pub(crate) fn reconstruct_merged_file(
         resolved.insert((*key).clone(), resolution);
     }
 
-    let item_emit_order = compute_item_emit_order(
-        &base_mks,
-        &ours_mks,
-        &theirs_mks,
-        &all_keys,
-    );
+    let item_emit_order = compute_item_emit_order(&base_mks, &ours_mks, &theirs_mks, &all_keys);
 
     // For each side, record each item's index so we can look up the
     // inter-item segment that preceded it in source.
@@ -155,18 +150,12 @@ pub(crate) fn reconstruct_merged_file(
     for (emit_idx, key) in item_emit_order.iter().enumerate() {
         let mut segs: [Option<&str>; N_SIDES] = [None, None, None];
         for s in 0..N_SIDES {
-            let r = side_range_for_emit(
-                &side_idx_maps[s],
-                key,
-                &item_emit_order,
-                emit_idx,
-            );
+            let r = side_range_for_emit(&side_idx_maps[s], key, &item_emit_order, emit_idx);
             if emitted[s].insert(r) {
                 segs[s] = Some(inter_slice(side_sources[s], &side_ranges[s], r));
             }
         }
-        let (seg_bytes, seg_conflicts) =
-            merge_segment(segs[0], segs[1], segs[2], markers);
+        let (seg_bytes, seg_conflicts) = merge_segment(segs[0], segs[1], segs[2], markers);
         output.extend_from_slice(&seg_bytes);
         total_conflicts += seg_conflicts;
 
@@ -185,8 +174,7 @@ pub(crate) fn reconstruct_merged_file(
             post[s] = Some(inter_slice(side_sources[s], &side_ranges[s], last));
         }
     }
-    let (post_bytes, post_conflicts) =
-        merge_segment(post[0], post[1], post[2], markers);
+    let (post_bytes, post_conflicts) = merge_segment(post[0], post[1], post[2], markers);
     // Only emit the postamble if it adds bytes — otherwise we risk
     // duplicating the trailing newline already in the last item's bytes.
     if !post_bytes.is_empty() {
@@ -309,9 +297,7 @@ fn materialize_segment(outcome: MergeOutcome, fallback: &str) -> (Vec<u8>, usize
         } => (merged_bytes_with_markers, conflict_count),
         // Binary / DeleteVsModify shouldn't fire on a text subset, but
         // carry through with base bytes rather than nothing.
-        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => {
-            (fallback.as_bytes().to_vec(), 0)
-        }
+        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => (fallback.as_bytes().to_vec(), 0),
     }
 }
 
@@ -520,10 +506,7 @@ fn compute_item_emit_order(
 
     // Filter to keys that appear in the resolved set (some may have been
     // removed from all sides — those are absent from `all_keys`).
-    order
-        .into_iter()
-        .filter(|k| all_keys.contains(k))
-        .collect()
+    order.into_iter().filter(|k| all_keys.contains(k)).collect()
 }
 
 /// Append `eol` to `out` unless `out` already ends with a `\n` (which

@@ -17,11 +17,11 @@ use objects::{
 };
 use tracing::{debug, instrument};
 
-use super::{HeddleError, Repository, Result};
 // Only consumed by the `#[cfg(unix)]` `remove_materialized_leaf`
 // helper; gate the import so Windows builds don't warn it unused.
 #[cfg(unix)]
 use super::repository_worktree_apply::is_directory_not_empty;
+use super::{HeddleError, Repository, Result};
 use crate::{
     worktree_index::IndexEntry,
     worktree_walk::{build_cached_entry, cache_key},
@@ -726,9 +726,9 @@ fn prepare_parent_directories(writes: &[WorktreeWriteOp]) -> Result<()> {
 /// become a symlink in the new tree).
 ///
 /// Tolerates `ENOTEMPTY` from `remove_dir` for the same reason the
-/// incremental apply path does: heddle-ignored siblings (`.git/`,
-/// `target/`, `node_modules/`) may still occupy the directory after
-/// the planner has cleaned out the tracked children. Without this
+/// incremental apply path does: untracked or explicitly ignored siblings
+/// may still occupy the directory after the planner has cleaned out the
+/// tracked children. Without this
 /// tolerance, a `goto` over a real-world worktree that mutates a
 /// tracked directory into a symlink aborts mid-apply with `os error
 /// 66`, leaving HEAD stuck and disk diverged from state.
@@ -766,17 +766,13 @@ fn set_file_mode(path: &Path, executable: bool) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
 
-        // Non-executable files inherit 0o644 from the loose-blob
-        // source — the object store opens loose blobs with explicit
-        // `OpenOptions::mode(0o644)` (see `fs_io::write_atomic`), and
-        // `clonefile`/`fs::copy` both preserve source mode on Unix.
-        // So `set_permissions` would be a no-op `chmod(2)` on every
-        // non-executable file: ~20–30 µs per call × N files, all of
-        // it pure waste. Skip the syscall outright; correctness is
-        // guaranteed by the producer-side mode contract.
-        if executable {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
-        }
+        // `OpenOptions::mode(0o644)` is still filtered by the
+        // process umask, and reflink/copy paths preserve the source
+        // mode. Normalize the worktree-visible file mode here so
+        // materialized checkouts do not inherit a restrictive object
+        // store mode such as `0o600`.
+        let mode = if executable { 0o755 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
     }
     #[cfg(not(unix))]
     {
@@ -820,10 +816,9 @@ mod tests {
     /// Regression: `remove_materialized_leaf` must tolerate `ENOTEMPTY` on
     /// the directory branch, mirroring `remove_existing_path` in the
     /// incremental apply path. Both tolerances are needed because the
-    /// apply planner intentionally skips heddle-ignored entries — when
-    /// the planner asks the materializer to clear a directory whose
-    /// tracked children are gone but whose ignored children
-    /// (`.git/`, `target/`, `node_modules/`) remain, `remove_dir` errors
+    /// apply planner only removes tracked descendants — when the planner asks
+    /// the materializer to clear a directory whose tracked children are gone
+    /// but whose untracked or explicitly ignored children remain, `remove_dir` errors
     /// with `os error 66` (macOS/BSD) / `39` (Linux). Pre-fix the
     /// materialization branch propagated that error and aborted apply
     /// mid-walk, leaving HEAD stuck and disk diverged from state.

@@ -4,8 +4,13 @@
 use anyhow::Result;
 use repo::{DiffKind, Repository};
 
+#[cfg(not(feature = "semantic"))]
+use super::super::advice::RecoveryAdvice;
 use super::{
-    super::{history_target::resolve_state_id, snapshot::ensure_current_state},
+    super::{
+        history_target::{require_resolved_state, resolve_state_id},
+        snapshot::ensure_current_state,
+    },
     compare_output::write_output,
     compare_types::{CompareOutput, CompareSummary, FileChange, SemanticChangeEntry},
 };
@@ -38,19 +43,16 @@ pub fn cmd_compare(cli: &Cli, state_a: String, state_b: String, semantic: bool) 
     let id_a = resolve_state_id(&repo, &state_a)?;
     let id_b = resolve_state_id(&repo, &state_b)?;
 
-    let state_a_obj = repo
-        .store()
-        .get_state(&id_a)?
-        .ok_or_else(|| anyhow::anyhow!("State not found: {}", state_a))?;
-    let state_b_obj = repo
-        .store()
-        .get_state(&id_b)?
-        .ok_or_else(|| anyhow::anyhow!("State not found: {}", state_b))?;
+    let state_a_obj = require_resolved_state(&repo, &id_a)?;
+    let state_b_obj = require_resolved_state(&repo, &id_b)?;
 
     let semantic_result: Option<SemanticDiffResult> = if semantic {
         #[cfg(not(feature = "semantic"))]
         {
-            anyhow::bail!("semantic compare requires building heddle with --features semantic");
+            return Err(anyhow::anyhow!(RecoveryAdvice::feature_unavailable(
+                "semantic compare",
+                "semantic"
+            )));
         }
         #[cfg(feature = "semantic")]
         {

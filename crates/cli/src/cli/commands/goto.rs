@@ -3,14 +3,18 @@
 
 use std::time::Instant;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use repo::Repository;
 use serde::Serialize;
 use tracing::debug;
 
-use super::{history_target::resolve_state_id, snapshot::ensure_current_state};
+use super::{
+    history_target::{require_resolved_state, resolve_state_id},
+    snapshot::ensure_current_state,
+    worktree_safety::ensure_worktree_clean,
+};
 use crate::{
-    cli::{Cli, should_output_json, worktree_status_options},
+    cli::{Cli, should_output_json},
     config::UserConfig,
 };
 
@@ -46,30 +50,19 @@ pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
     }
     let target_id = resolve_state_id(&repo, &target)?;
 
-    let mut current_worktree_verified_clean = false;
-
-    // Check for uncommitted changes
-    if !force && let Some(current) = repo.current_state()? {
-        let tree = repo.require_tree(&current.tree)?;
-        let status = repo.compare_worktree_cached_with_options(
-            &tree,
-            &worktree_status_options(Some(repo.config())),
-        )?;
-
-        if !status.is_clean() {
-            return Err(anyhow!(
-                "Cannot goto: you have uncommitted changes.\n\
-                     Use --force to discard them, or snapshot first."
-            ));
+    let current_worktree_verified_clean = if !force {
+        ensure_worktree_clean(&repo, "goto")?;
+        if let Some(current) = repo.current_state()? {
+            let _ = repo.require_tree(&current.tree)?;
+            true
+        } else {
+            false
         }
+    } else {
+        false
+    };
 
-        current_worktree_verified_clean = true;
-    }
-
-    let target_state = repo
-        .store()
-        .get_state(&target_id)?
-        .ok_or_else(|| anyhow!("State not found: {}", target))?;
+    let target_state = require_resolved_state(&repo, &target_id)?;
 
     if current_worktree_verified_clean {
         repo.goto_verified_clean(&target_id)?;

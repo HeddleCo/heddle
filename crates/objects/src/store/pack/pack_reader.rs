@@ -6,8 +6,8 @@ use std::path::Path;
 use bytes::Bytes;
 
 use super::{
-    decompress_pack_payload, has_zstd_magic, pack_container_spec, pack_index::PackIndex, varint,
-    verify_container, ObjectType, PackObjectId, PackObjectRecord,
+    ObjectType, PackObjectId, PackObjectRecord, decompress_pack_payload, has_zstd_magic,
+    pack_container_spec, pack_index::PackIndex, varint, verify_container,
 };
 use crate::{
     object::ContentHash,
@@ -358,7 +358,7 @@ fn verify_record_id_matches(requested: &PackObjectId, found: &PackObjectId) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{verify_record_id_matches, PackObjectId, PackReader};
+    use super::{PackObjectId, PackReader, verify_record_id_matches};
     use crate::{object::ContentHash, store::StoreError};
 
     #[test]

@@ -6,7 +6,7 @@ fn test_cli_json_output() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).expect("status output should be JSON");
     assert!(
         parsed.get("changes").is_some(),
@@ -34,8 +34,8 @@ fn test_cli_diagnose_reports_current_context() {
         "diagnose should summarize dirty worktree: {output}"
     );
     assert!(
-        output.contains("Next step: heddle capture"),
-        "diagnose should recommend capture for dirty worktree: {output}"
+        output.contains("Next step: heddle commit -m \"...\""),
+        "diagnose should recommend commit for dirty worktree: {output}"
     );
 }
 
@@ -45,13 +45,20 @@ fn test_cli_diagnose_json_profile() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("diagnose.json"), "pending json work").unwrap();
 
-    let output = heddle(&["diagnose", "--profile", "--json"], Some(temp.path())).unwrap();
+    let output = heddle(
+        &["diagnose", "--profile", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&output).expect("diagnose output should be JSON");
     assert_eq!(parsed["thread"]["name"], "main");
     assert_eq!(parsed["changes"]["added"].as_array().unwrap().len(), 1);
     assert_eq!(parsed["changes"]["total"], 1);
     assert_eq!(parsed["health"]["status"], "uncaptured");
-    assert_eq!(parsed["health"]["recommended_action"], "heddle capture");
+    assert_eq!(
+        parsed["health"]["recommended_action"],
+        "heddle commit -m \"...\""
+    );
     assert!(
         parsed["profile"]["total_ms"].is_number(),
         "profile should include total_ms: {parsed}"
@@ -73,8 +80,10 @@ fn status_reports_uncaptured_for_freshly_initialized_repo() {
         .status()
         .expect("git init should run");
     assert!(status.success());
-    for (key, value) in [("user.name", "Heddle Test"), ("user.email", "h@example.com")]
-    {
+    for (key, value) in [
+        ("user.name", "Heddle Test"),
+        ("user.email", "h@example.com"),
+    ] {
         let status = Command::new("git")
             .args(["config", key, value])
             .current_dir(temp.path())
@@ -98,15 +107,19 @@ fn status_reports_uncaptured_for_freshly_initialized_repo() {
 
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let json = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let json = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&json).expect("status JSON parses");
     assert_eq!(
-        parsed["thread_health"], "uncaptured",
-        "freshly-initialized worktree should read as uncaptured, not dirty_worktree: {parsed}"
+        parsed["thread_health"], "needs_import",
+        "freshly-initialized Git-overlay worktree should fail closed when Git and Heddle are not reconciled: {parsed}"
     );
     assert_eq!(
-        parsed["recommended_action"], "heddle capture",
-        "uncaptured state should still recommend `heddle capture`: {parsed}"
+        parsed["git_overlay_health"]["status"], "needs_import",
+        "thread health and Git-overlay health should agree: {parsed}"
+    );
+    assert_eq!(
+        parsed["recommended_action"], "heddle adopt --ref main",
+        "unimported initial state should recommend the exact import command: {parsed}"
     );
 }
 
@@ -137,14 +150,15 @@ fn test_cli_no_color_flag() {
 #[test]
 fn test_cli_fails_closed_on_invalid_user_config() {
     let temp = TempDir::new().unwrap();
-    std::fs::create_dir_all(temp.path().join(".heddle-user")).unwrap();
-    std::fs::write(
-        temp.path().join(".heddle-user/config.toml"),
-        "output = [not valid toml",
+    let config_path = temp.path().join("invalid-heddle-config.toml");
+    std::fs::write(&config_path, "output = [not valid toml").unwrap();
+
+    let output = heddle_output_with_env(
+        &["status"],
+        Some(temp.path()),
+        &[("HEDDLE_CONFIG", config_path.to_str().unwrap())],
     )
     .unwrap();
-
-    let output = heddle_output(&["status"], Some(temp.path())).unwrap();
     assert!(!output.status.success(), "command unexpectedly succeeded");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("TOML parse error"), "stderr was {stderr}");

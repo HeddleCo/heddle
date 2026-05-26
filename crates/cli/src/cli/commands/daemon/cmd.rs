@@ -16,13 +16,42 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use repo::daemon::{
-    load_endpoint, mount_daemon_endpoint_path, pid_alive, MountDaemonRequest, MountDaemonResponse,
+    MountDaemonRequest, MountDaemonResponse, load_endpoint, mount_daemon_endpoint_path, pid_alive,
 };
+use serde::Serialize;
 
 use super::client::{rpc, sweep_stale_mounts};
-use crate::cli::Cli;
+use crate::cli::{Cli, commands::advice::RecoveryAdvice, render::write_json_stdout, should_output_json};
+
+#[derive(Debug, Serialize)]
+struct DaemonStopOutput {
+    output_kind: &'static str,
+    action: &'static str,
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct DaemonStatusOutput {
+    status: &'static str,
+    running: bool,
+    endpoint_path: String,
+    ok: bool,
+    version: Option<u32>,
+    uptime_s: Option<u64>,
+    mount_count: usize,
+    materialized_count: usize,
+    materialized_threads: Vec<MaterializedThreadStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct MaterializedThreadStatus {
+    thread: String,
+    state: String,
+    files: usize,
+    tree: String,
+}
 
 #[cfg(all(target_os = "linux", feature = "mount"))]
 pub fn cmd_daemon_serve(cli: &Cli) -> Result<()> {
@@ -58,6 +87,17 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
     let heddle_dir = resolve_heddle_dir(cli).unwrap_or_else(|_| repo_root.join(".heddle"));
     let materialized =
         repo::thread_manifest::list_thread_manifests(&heddle_dir).unwrap_or_default();
+    let materialized_threads = materialized
+        .iter()
+        .map(|manifest| MaterializedThreadStatus {
+            thread: manifest.thread.clone(),
+            state: manifest.state_id.to_string(),
+            files: manifest.file_count,
+            tree: manifest.tree_hash.to_string()[..12].to_string(),
+        })
+        .collect::<Vec<_>>();
+    let endpoint_path = mount_daemon_endpoint_path(&repo_root).display().to_string();
+    let json = should_output_json(cli, None);
     match response {
         Some(MountDaemonResponse::Health {
             version,
@@ -65,21 +105,67 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
             uptime_s,
             mount_count,
         }) => {
-            println!(
-                "daemon: ok={ok} version={version} uptime_s={uptime_s} mount_count={mount_count} materialized_count={}",
-                materialized.len()
-            );
+            if json {
+                let output = DaemonStatusOutput {
+                    status: "running",
+                    running: true,
+                    endpoint_path,
+                    ok,
+                    version: Some(version),
+                    uptime_s: Some(uptime_s),
+                    mount_count,
+                    materialized_count: materialized_threads.len(),
+                    materialized_threads,
+                };
+                crate::cli::render::write_json_stdout(&output)?;
+                return Ok(());
+            } else {
+                println!(
+                    "daemon: ok={ok} version={version} uptime_s={uptime_s} mount_count={mount_count} materialized_count={}",
+                    materialized.len()
+                );
+            }
         }
         Some(MountDaemonResponse::Error { code, message, .. }) => {
-            return Err(anyhow!("daemon health failed: [{code}] {message}"));
+            return Err(anyhow!(daemon_response_refusal(
+                "daemon_health_failed",
+                format!("daemon health failed: [{code}] {message}"),
+                format!("daemon returned error code {code}: {message}"),
+                "heddle daemon status",
+            )));
         }
-        Some(other) => return Err(anyhow!("unexpected daemon response: {other:?}")),
+        Some(other) => {
+            return Err(anyhow!(daemon_response_refusal(
+                "daemon_unexpected_response",
+                format!("unexpected daemon response: {other:?}"),
+                format!(
+                    "daemon returned a response variant that `status` cannot interpret: {other:?}"
+                ),
+                "heddle daemon status",
+            )));
+        }
         None => {
-            println!(
-                "daemon: not running (no live endpoint at {}) materialized_count={}",
-                mount_daemon_endpoint_path(&repo_root).display(),
-                materialized.len()
-            );
+            if json {
+                let output = DaemonStatusOutput {
+                    status: "not_running",
+                    running: false,
+                    endpoint_path,
+                    ok: false,
+                    version: None,
+                    uptime_s: None,
+                    mount_count: 0,
+                    materialized_count: materialized_threads.len(),
+                    materialized_threads,
+                };
+                crate::cli::render::write_json_stdout(&output)?;
+                return Ok(());
+            } else {
+                println!(
+                    "daemon: not running (no live endpoint at {}) materialized_count={}",
+                    mount_daemon_endpoint_path(&repo_root).display(),
+                    materialized.len()
+                );
+            }
         }
     }
     if !materialized.is_empty() {
@@ -121,6 +207,7 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
 /// they make the integration-test assertions deterministic.
 pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
     let repo_root = resolve_repo_root(cli)?;
+    let json = should_output_json(cli, None);
     let endpoint_path = mount_daemon_endpoint_path(&repo_root);
     // Capture the daemon PID *before* sending shutdown so we can
     // probe it via `kill -0` after the endpoint file is gone. If the
@@ -131,11 +218,33 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
     match rpc(&repo_root, &MountDaemonRequest::Shutdown {}, false)? {
         Some(MountDaemonResponse::Shutdown { ok: true, .. }) => {}
         Some(MountDaemonResponse::Error { code, message, .. }) => {
-            return Err(anyhow!("daemon refused shutdown: [{code}] {message}"));
+            return Err(anyhow!(daemon_response_refusal(
+                "daemon_shutdown_refused",
+                format!("daemon refused shutdown: [{code}] {message}"),
+                format!("daemon returned error code {code}: {message}"),
+                "heddle daemon status",
+            )));
         }
-        Some(other) => return Err(anyhow!("unexpected daemon response: {other:?}")),
+        Some(other) => {
+            return Err(anyhow!(daemon_response_refusal(
+                "daemon_unexpected_response",
+                format!("unexpected daemon response: {other:?}"),
+                format!(
+                    "daemon returned a response variant that `stop` cannot interpret: {other:?}"
+                ),
+                "heddle daemon status",
+            )));
+        }
         None => {
-            println!("daemon: not running");
+            if json {
+                write_json_stdout(&DaemonStopOutput {
+                    output_kind: "daemon_stop",
+                    action: "daemon stop",
+                    status: "not_running",
+                })?;
+            } else {
+                println!("daemon: not running");
+            }
             return Ok(());
         }
     }
@@ -169,8 +278,35 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
     // happy path the daemon has already removed `mounts.json`, so
     // this is a no-op.
     sweep_stale_mounts(&repo_root);
-    println!("daemon: stopped");
+    if json {
+        write_json_stdout(&DaemonStopOutput {
+            output_kind: "daemon_stop",
+            action: "daemon stop",
+            status: "stopped",
+        })?;
+    } else {
+        println!("daemon: stopped");
+    }
     Ok(())
+}
+
+fn daemon_response_refusal(
+    kind: &'static str,
+    error: impl Into<String>,
+    unsafe_condition: impl Into<String>,
+    primary_command: impl Into<String>,
+) -> RecoveryAdvice {
+    let primary_command = primary_command.into();
+    RecoveryAdvice::safety_refusal(
+        kind,
+        error,
+        format!("Inspect the daemon with `{primary_command}` before retrying."),
+        unsafe_condition,
+        "continuing could accept stale mount-daemon state or act on the wrong daemon response",
+        "repository objects, refs, worktree files, and mount registry files were left unchanged",
+        primary_command.clone(),
+        vec![primary_command],
+    )
 }
 
 fn resolve_repo_root(cli: &Cli) -> Result<std::path::PathBuf> {
@@ -193,4 +329,23 @@ fn resolve_heddle_dir(cli: &Cli) -> Result<std::path::PathBuf> {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
     let repo = repo::Repository::open(&start)?;
     Ok(repo.heddle_dir().to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::daemon_response_refusal;
+
+    #[test]
+    fn daemon_response_refusal_carries_typed_recovery_fields() {
+        let advice = daemon_response_refusal(
+            "daemon_health_failed",
+            "daemon health failed: [boom] nope",
+            "daemon returned error code boom: nope",
+            "heddle daemon status",
+        );
+        assert_eq!(advice.kind, "daemon_health_failed");
+        assert_eq!(advice.primary_command, "heddle daemon status");
+        assert!(advice.hint.contains("heddle daemon status"));
+        assert!(advice.would_change.contains("stale mount-daemon state"));
+    }
 }

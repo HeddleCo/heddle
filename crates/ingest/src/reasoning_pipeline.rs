@@ -1269,10 +1269,8 @@ mod tests {
         // helper for absolute paths because that would leave a stray
         // `heddle/` prefix on the output.
         let root = Path::new("/Users/foo/dev/heddle");
-        let got = normalize_target_path(
-            "/Users/foo/.codex/worktrees/89d4/heddle/src/auth.rs",
-            root,
-        );
+        let got =
+            normalize_target_path("/Users/foo/.codex/worktrees/89d4/heddle/src/auth.rs", root);
         assert_eq!(got, "src/auth.rs");
     }
 

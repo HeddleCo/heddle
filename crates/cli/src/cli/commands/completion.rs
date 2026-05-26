@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 use clap::CommandFactory;
 use clap_complete::{Shell, generate};
 
+use super::advice::RecoveryAdvice;
 use crate::cli::Cli;
 
 pub fn cmd_completion(_cli: &Cli, shell: String) -> Result<()> {
@@ -21,10 +22,12 @@ pub fn cmd_completion(_cli: &Cli, shell: String) -> Result<()> {
             generate(Shell::Fish, &mut cmd, "heddle", &mut std::io::stdout());
         }
         _ => {
-            return Err(anyhow!(
-                "Unsupported shell: {}. Supported shells: bash, zsh, fish",
-                shell
-            ));
+            return Err(anyhow!(RecoveryAdvice::invalid_usage(
+                "completion_shell_unsupported",
+                format!("Unsupported shell: {shell}. Supported shells: bash, zsh, fish"),
+                "Use one of: bash, zsh, fish.",
+                "heddle completion bash",
+            )));
         }
     }
 

@@ -3,6 +3,7 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use objects::object::{EntryType, Tree};
@@ -71,7 +72,24 @@ fn scan_directory(
     let entries = list_directory(dir, false)?;
     ctx.stats.directories_scanned += 1;
 
-    let tree_entries = tree.map(Tree::entries).unwrap_or(&[]);
+    let tree = tree.expect("tracked-tree scan requires a tree");
+    let cache_compare_start = Instant::now();
+    if let Some(cached) = ctx.index.get_directory(dir_key)
+        && !ctx.tracked_dirty_directories.contains(dir_key)
+        && cached.clean_tree_hash.as_ref() == Some(&tree.hash())
+        && cached.child_names_match(
+            entries.iter().map(|entry| entry.name.as_str()),
+            entries.len(),
+        )
+    {
+        ctx.stats.directory_cache_compare_ms += cache_compare_start.elapsed().as_millis();
+        ctx.stats.directories_skipped += 1;
+        ctx.stats.cache_hits += 1;
+        return Ok(false);
+    }
+    ctx.stats.directory_cache_compare_ms += cache_compare_start.elapsed().as_millis();
+
+    let tree_entries = tree.entries();
     let mut next_tree_entry = 0usize;
     let mut subtree_has_untracked = false;
 
@@ -146,14 +164,12 @@ fn scan_directory(
         }
     }
 
-    let clean_tree_hash = match tree {
-        Some(tree)
-            if !subtree_has_untracked && !ctx.tracked_dirty_directories.contains(dir_key) =>
-        {
+    let clean_tree_hash =
+        if !subtree_has_untracked && !ctx.tracked_dirty_directories.contains(dir_key) {
             Some(tree.hash())
-        }
-        _ => None,
-    };
+        } else {
+            None
+        };
 
     if let Some(directory_entry) = crate::DirectoryCacheEntry::from_child_names(
         &metadata,

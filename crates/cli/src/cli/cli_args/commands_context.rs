@@ -57,7 +57,11 @@ pub struct ContextSetArgs {
     pub scope: Option<String>,
 
     /// Primary annotation kind: constraint, invariant, or rationale.
-    #[arg(long, default_value = "rationale")]
+    #[arg(
+        long,
+        default_value = "rationale",
+        value_parser = ["constraint", "invariant", "rationale"]
+    )]
     pub kind: String,
 
     /// Explicit tags for categorization (can be repeated).
@@ -128,7 +132,7 @@ pub struct ContextEditArgs {
     pub annotation_id: String,
 
     /// Override the annotation kind for the new revision.
-    #[arg(long)]
+    #[arg(long, value_parser = ["constraint", "invariant", "rationale"])]
     pub kind: Option<String>,
 
     /// Explicit tags for the new revision (can be repeated).
@@ -157,7 +161,11 @@ pub struct ContextSupersedeArgs {
     pub scope: Option<String>,
 
     /// Replacement annotation kind: constraint, invariant, or rationale.
-    #[arg(long, default_value = "rationale")]
+    #[arg(
+        long,
+        default_value = "rationale",
+        value_parser = ["constraint", "invariant", "rationale"]
+    )]
     pub kind: String,
 
     /// Explicit tags for the replacement annotation.

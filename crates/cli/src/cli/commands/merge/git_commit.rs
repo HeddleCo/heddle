@@ -7,11 +7,22 @@
 //! merge introduced. The default (`--git-commit` not set) is preserved
 //! — heddle state advances and git is unaware.
 
-use std::{path::Path, process::Command};
+use std::time::SystemTime;
 
-use anyhow::{Result, anyhow};
-use objects::object::Attribution;
+use anyhow::{Context, Result, anyhow};
+use gix::{
+    bstr::ByteSlice,
+    refs::{
+        Target,
+        transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
+    },
+};
+use objects::object::{Attribution, ChangeId};
+use repo::Repository;
 use serde::Serialize;
+
+use super::super::advice::RecoveryAdvice;
+use crate::bridge::{git_core::LocalGitIdentity, git_export};
 
 /// Outcome of `--git-commit --preview` — what *would* be committed if
 /// the merge ran for real.
@@ -54,10 +65,11 @@ impl std::error::Error for GitCommitBlocked {}
 /// other uncommitted git change is "unrelated" and blocks the
 /// `--git-commit` flow rather than getting silently swept up.
 pub(super) fn validate_git_state(
-    repo_root: &Path,
+    repo: &Repository,
     expected_paths: &[String],
 ) -> std::result::Result<(), GitCommitBlocked> {
     let mut blockers = Vec::new();
+    let repo_root = repo.root();
 
     if !repo_root.join(".git").exists() {
         blockers.push(format!(
@@ -69,52 +81,38 @@ pub(super) fn validate_git_state(
 
     // Detached HEAD blocks the commit — a merge commit on a detached
     // HEAD would be unreachable once HEAD moves.
-    let head_check = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["symbolic-ref", "--quiet", "HEAD"])
-        .output();
-    match head_check {
-        Ok(out) if !out.status.success() => {
-            blockers.push("git HEAD is detached (--git-commit requires an attached branch)".into());
-        }
+    let git = match gix::discover(repo_root) {
+        Ok(git) => git,
         Err(err) => {
-            blockers.push(format!("failed to inspect git HEAD: {err}"));
-            return Err(GitCommitBlocked { blockers });
-        }
-        _ => {}
-    }
-
-    // `git status --porcelain -z` for the unrelated-changes check.
-    // Plain `--porcelain` quotes/escapes pathnames with spaces or
-    // non-ASCII bytes (`"a b.txt"`, `"a\tb.txt"`); the `-z` form
-    // emits NUL-separated raw bytes with no quoting, which is the
-    // only safe way to compare against `expected_paths`. We tolerate
-    // dirt on the expected paths (the merge writes there) and reject
-    // everything else.
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["status", "--porcelain", "-z", "--untracked-files=normal"])
-        .output();
-    let status = match status {
-        Ok(out) if out.status.success() => out,
-        Ok(out) => {
-            blockers.push(format!(
-                "git status failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-            return Err(GitCommitBlocked { blockers });
-        }
-        Err(err) => {
-            blockers.push(format!("failed to run git status: {err}"));
+            blockers.push(format!("failed to inspect git repository: {err}"));
             return Err(GitCommitBlocked { blockers });
         }
     };
+    let attached_branch = git
+        .head_name()
+        .ok()
+        .flatten()
+        .and_then(|name| {
+            name.as_bstr()
+                .to_str()
+                .ok()
+                .and_then(|name| name.strip_prefix("refs/heads/").map(str::to_string))
+        })
+        .filter(|branch| !branch.is_empty());
+    if attached_branch.is_none() {
+        blockers.push("git HEAD is detached (--git-commit requires an attached branch)".into());
+    }
 
     let expected: std::collections::HashSet<&str> =
         expected_paths.iter().map(|p| p.as_str()).collect();
-    let unrelated = parse_porcelain_z_unrelated(&status.stdout, &expected);
+    let git_intent = match super::super::git_compat::git_index_intent_for_root(repo_root) {
+        Ok(intent) => intent,
+        Err(err) => {
+            blockers.push(format!("failed to inspect git worktree status: {err}"));
+            return Err(GitCommitBlocked { blockers });
+        }
+    };
+    let unrelated = unrelated_git_index_intent_paths(&git_intent, &expected);
 
     if !unrelated.is_empty() {
         // Cap the rendered list — the user gets the count and a few
@@ -155,57 +153,18 @@ pub(super) fn validate_git_state(
     }
 }
 
-/// Parse `git status --porcelain -z` output and return the set of paths
-/// that aren't in `expected`. The `-z` format is the only one that's
-/// safe for paths with spaces, tabs, or non-ASCII bytes — plain
-/// `--porcelain` C-quotes them, which would never compare equal to the
-/// raw `expected_paths` strings the merge tracks.
-///
-/// Format reference (`git status --porcelain --help`):
-/// - Each record starts with two status chars + space (`XY `).
-/// - For non-rename/copy records: `XY <PATH>\0`.
-/// - For renames/copies (status starts with `R` or `C`):
-///   `XY <PATH>\0<ORIG_PATH>\0` — the new path is in the main record,
-///   then the original path is a separate NUL-terminated trailer. We
-///   only care about the new path for the unrelated check (the merge
-///   would have produced a write at the new path).
-fn parse_porcelain_z_unrelated(
-    raw: &[u8],
+fn unrelated_git_index_intent_paths(
+    intent: &super::super::git_compat::GitIndexIntent,
     expected: &std::collections::HashSet<&str>,
 ) -> Vec<String> {
-    let mut unrelated: Vec<String> = Vec::new();
-    // Split on NUL into records, then walk pair-wise where the status
-    // code dictates whether the next record is the rename/copy origin.
-    let records: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|r| !r.is_empty()).collect();
-    let mut i = 0;
-    while i < records.len() {
-        let rec = records[i];
-        if rec.len() < 4 {
-            i += 1;
-            continue;
-        }
-        // First two bytes are the index/worktree status flags. `R` or
-        // `C` in either column means a rename/copy record, which is
-        // followed by a separate origin-path record.
-        let xy = &rec[..2];
-        let is_rename_or_copy = xy.iter().any(|c| matches!(*c, b'R' | b'C'));
-        let path_bytes = &rec[3..];
-        // Lossy decode is fine: if the path isn't valid UTF-8 we can't
-        // match it against `expected_paths` (which are Rust strings)
-        // anyway, and reporting the lossy form in the blocker message
-        // is still useful diagnostic output.
-        let path = String::from_utf8_lossy(path_bytes).into_owned();
-        if !expected.contains(path.as_str()) {
-            unrelated.push(path);
-        }
-        if is_rename_or_copy {
-            // Skip the origin-path trailer — we already captured the
-            // new path, and the rename's origin is implied dirt that
-            // the merge didn't claim either; but reporting both would
-            // double-count, so we drop it.
-            i += 2;
-        } else {
-            i += 1;
+    let mut unrelated = Vec::new();
+    for path in intent.staged_paths.iter().chain(intent.extra_paths.iter()) {
+        let comparison_path = path
+            .strip_prefix("unstaged: ")
+            .or_else(|| path.strip_prefix("untracked: "))
+            .unwrap_or(path);
+        if !expected.contains(comparison_path) {
+            unrelated.push(path.clone());
         }
     }
     unrelated
@@ -227,78 +186,181 @@ pub(super) fn build_commit_message(
     out.push_str(&format!("Heddle merge state: {merge_state_id}\n"));
     out.push('\n');
     out.push_str(&format!("Merge-State: {merge_state_id}\n"));
-    out.push_str(&format!(
-        "Co-Authored-By: {} <{}>\n",
-        attribution.principal.name, attribution.principal.email
-    ));
+    if attribution.principal.name.trim() != "Unknown"
+        && attribution.principal.email.trim() != "unknown@example.com"
+        && !attribution.principal.name.trim().is_empty()
+        && !attribution.principal.email.trim().is_empty()
+    {
+        out.push_str(&format!(
+            "Co-Authored-By: {} <{}>\n",
+            attribution.principal.name, attribution.principal.email
+        ));
+    }
     out
 }
 
-/// Stage the changed paths and write a single commit. Returns the
-/// short SHA. We `git add` exact paths (not `-A`) so unrelated files
-/// the user happened to leave on disk are never swept into the merge
-/// commit. `validate_git_state` already guaranteed no unrelated dirt
-/// exists at validation time, but staging precisely is still the
-/// principled boundary.
+/// Write a Git checkpoint commit for the landed Heddle merge state.
 pub(super) fn write_git_commit(
-    repo_root: &Path,
+    repo: &Repository,
+    state_id: &ChangeId,
     paths: &[String],
     message: &str,
+    extra_parents: &[String],
 ) -> Result<GitCommitInfo> {
     if paths.is_empty() {
-        return Err(anyhow!(
-            "merge produced no changed paths — refusing to write an empty git commit"
-        ));
+        return Err(anyhow!(merge_git_commit_empty_advice()));
+    }
+    let repo_root = repo.root();
+    let git = gix::discover(repo_root)
+        .with_context(|| format!("failed to open Git checkout at {}", repo_root.display()))?;
+    let old_head = git
+        .head_id()
+        .context("failed to resolve Git HEAD before merge --git-commit")?
+        .detach();
+    let state = repo
+        .store()
+        .get_state(state_id)?
+        .ok_or_else(|| anyhow!("merge state {} was not found", state_id.short()))?;
+    let identity = crate::bridge::git_core::resolve_git_commit_identity(
+        repo_root,
+        &state.attribution.principal,
+    )?;
+    let tree_id = git_export::export_tree(repo, &git, &state.tree).map_err(|err| {
+        anyhow!(merge_git_commit_failed_advice(
+            "writing Git tree",
+            err.to_string()
+        ))
+    })?;
+
+    let mut parents = vec![old_head];
+    for parent in extra_parents {
+        let oid = parent
+            .parse::<gix::hash::ObjectId>()
+            .with_context(|| format!("invalid extra Git parent '{parent}'"))?;
+        git.find_commit(oid)
+            .with_context(|| format!("extra Git parent '{parent}' is not a commit"))?;
+        if !parents.contains(&oid) {
+            parents.push(oid);
+        }
     }
 
-    // `git add -- <path...>` for each batch. `--` keeps paths that
-    // start with `-` from being parsed as flags.
-    let mut add_cmd = Command::new("git");
-    add_cmd.arg("-C").arg(repo_root).args(["add", "--"]);
-    for path in paths {
-        add_cmd.arg(path);
-    }
-    let add = add_cmd
-        .output()
-        .map_err(|err| anyhow!("git add failed: {err}"))?;
-    if !add.status.success() {
-        return Err(anyhow!(
-            "git add failed: {}",
-            String::from_utf8_lossy(&add.stderr).trim()
-        ));
-    }
+    let seconds = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let signature = identity.to_signature(seconds);
+    let mut committer_buf = gix::date::parse::TimeBuf::default();
+    let mut author_buf = gix::date::parse::TimeBuf::default();
+    let commit = git
+        .new_commit_as(
+            signature.to_ref(&mut committer_buf),
+            signature.to_ref(&mut author_buf),
+            message,
+            tree_id,
+            parents,
+        )
+        .map_err(|err| {
+            anyhow!(merge_git_commit_failed_advice(
+                "writing Git commit object",
+                err.to_string()
+            ))
+        })?;
 
-    let commit = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["commit", "-m", message, "--allow-empty-message"])
-        .output()
-        .map_err(|err| anyhow!("git commit failed: {err}"))?;
-    if !commit.status.success() {
-        return Err(anyhow!(
-            "git commit failed: {}",
-            String::from_utf8_lossy(&commit.stderr).trim()
-        ));
-    }
+    // Keep the checkout index aligned with the committed tree. This is
+    // the native equivalent of `git add <merge paths>` followed by
+    // `git commit`: after HEAD moves, `git status` should be clean.
+    let mut index = git.index_from_tree(&tree_id).map_err(|err| {
+        anyhow!(merge_git_commit_failed_advice(
+            "writing Git index",
+            err.to_string()
+        ))
+    })?;
+    index
+        .write(gix_index::write::Options::default())
+        .map_err(|err| {
+            anyhow!(merge_git_commit_failed_advice(
+                "writing Git index",
+                err.to_string()
+            ))
+        })?;
 
-    let rev = Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .map_err(|err| anyhow!("git rev-parse failed: {err}"))?;
-    if !rev.status.success() {
-        return Err(anyhow!(
-            "git rev-parse HEAD failed: {}",
-            String::from_utf8_lossy(&rev.stderr).trim()
-        ));
-    }
-    let sha = String::from_utf8_lossy(&rev.stdout).trim().to_string();
+    update_head_ref(&git, commit.id, old_head, &identity).map_err(|err| {
+        anyhow!(merge_git_commit_failed_advice(
+            "updating Git HEAD",
+            err.to_string()
+        ))
+    })?;
 
     Ok(GitCommitInfo {
-        sha,
+        sha: commit.id.to_string(),
         message: message.to_string(),
     })
+}
+
+fn update_head_ref(
+    git: &gix::Repository,
+    new_head: gix::hash::ObjectId,
+    old_head: gix::hash::ObjectId,
+    identity: &LocalGitIdentity,
+) -> Result<()> {
+    let seconds = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let signature = identity.to_signature(seconds);
+    let mut time_buf = gix::date::parse::TimeBuf::default();
+    let edit = RefEdit {
+        change: Change::Update {
+            log: LogChange {
+                mode: RefLog::AndReference,
+                force_create_reflog: false,
+                message: "heddle: merge --git-commit".into(),
+            },
+            expected: PreviousValue::MustExistAndMatch(Target::Object(old_head)),
+            new: Target::Object(new_head),
+        },
+        name: "HEAD"
+            .try_into()
+            .map_err(|err| anyhow!("invalid Git HEAD ref: {err}"))?,
+        deref: true,
+    };
+    git.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
+        .context("failed to update Git HEAD")?;
+    Ok(())
+}
+
+fn merge_git_commit_empty_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "merge_git_commit_empty",
+        "Merge produced no changed paths; refusing to write an empty Git commit",
+        "Inspect the merge with `heddle merge --preview`; rerun without `--git-commit` if no Git commit is needed.",
+        "the merge result has no paths to stage for Git",
+        "--git-commit would create an empty Git commit that does not correspond to landed Heddle paths",
+        "Heddle and Git state were left unchanged by the Git commit writer",
+        "heddle merge --preview",
+        vec!["heddle merge --preview".to_string()],
+    )
+}
+
+fn merge_git_commit_failed_advice(stage: &'static str, detail: String) -> RecoveryAdvice {
+    let detail = if detail.trim().is_empty() {
+        "Git did not report a detailed error".to_string()
+    } else {
+        detail
+    };
+    RecoveryAdvice::safety_refusal(
+        "merge_git_commit_failed",
+        format!("{stage} failed while finalizing merge --git-commit: {detail}"),
+        "Resolve the Git checkout issue, then run `heddle checkpoint -m \"...\"`; do not rerun `heddle merge`.",
+        format!("{stage} failed after Heddle merge commit coordination started"),
+        "retrying the Heddle merge could duplicate or obscure the already-landed Heddle merge state",
+        "the Heddle merge state is preserved; the Git commit writer did not report a completed commit",
+        "heddle checkpoint -m \"...\"",
+        vec![
+            "heddle checkpoint -m \"...\"".to_string(),
+            "heddle verify".to_string(),
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -317,134 +379,6 @@ mod tests {
         assert!(msg.contains("Co-Authored-By: Ada Lovelace <ada@example.com>\n"));
     }
 
-    /// Regression for codex feedback on PR #62: plain `git status
-    /// --porcelain` quotes paths with spaces/tabs/non-ASCII bytes —
-    /// e.g. `"path with spaces.txt"` rather than the raw
-    /// `path with spaces.txt`. The old parser compared the raw payload
-    /// (with quotes) to the unquoted `expected_paths`, so a merge that
-    /// touched such a path got rejected as having unrelated dirt.
-    /// The fix uses `--porcelain -z` (NUL-separated, no quoting).
-    /// This test feeds the parser a synthesized -z payload that
-    /// includes a path with spaces, asserts it matches against the
-    /// expected set without quoting issues, and verifies an unrelated
-    /// path still surfaces as dirt.
-    #[test]
-    fn parse_porcelain_z_handles_paths_with_spaces() {
-        // Record 1: ` M path with spaces.txt` (modified) — expected.
-        // Record 2: ` M unrelated.txt` (modified) — NOT expected, must surface.
-        let mut raw: Vec<u8> = Vec::new();
-        raw.extend_from_slice(b" M path with spaces.txt");
-        raw.push(0);
-        raw.extend_from_slice(b" M unrelated.txt");
-        raw.push(0);
-
-        let expected: std::collections::HashSet<&str> =
-            ["path with spaces.txt"].into_iter().collect();
-        let unrelated = parse_porcelain_z_unrelated(&raw, &expected);
-        assert_eq!(
-            unrelated,
-            vec!["unrelated.txt".to_string()],
-            "the path with spaces must match against `expected` cleanly; only `unrelated.txt` should surface"
-        );
-    }
-
-    /// Renames/copies have a follow-up origin path in the -z stream
-    /// (`XY <new>\0<orig>\0`). The parser must only consider the new
-    /// path for the expected-set check, and must skip the origin
-    /// trailer rather than double-reporting it.
-    #[test]
-    fn parse_porcelain_z_skips_rename_origin_trailer() {
-        let mut raw: Vec<u8> = Vec::new();
-        // R rename: new path is `dst path.txt`, origin is `src.txt`.
-        raw.extend_from_slice(b"R  dst path.txt");
-        raw.push(0);
-        raw.extend_from_slice(b"src.txt");
-        raw.push(0);
-        // Followed by a normal modified file that's expected.
-        raw.extend_from_slice(b" M expected.txt");
-        raw.push(0);
-
-        let expected: std::collections::HashSet<&str> =
-            ["dst path.txt", "expected.txt"].into_iter().collect();
-        let unrelated = parse_porcelain_z_unrelated(&raw, &expected);
-        assert!(
-            unrelated.is_empty(),
-            "rename's new-path side is expected and origin is the trailer — nothing should surface. got: {unrelated:?}"
-        );
-    }
-
-    /// Counter-test: paths NOT in `expected` must surface as unrelated,
-    /// including paths with spaces. Confirms the parser doesn't silently
-    /// drop dirt because the path happens to be quoted under the old
-    /// porcelain v1 format.
-    #[test]
-    fn parse_porcelain_z_reports_unrelated_paths_with_spaces() {
-        let mut raw: Vec<u8> = Vec::new();
-        raw.extend_from_slice(b" M weird path.txt");
-        raw.push(0);
-
-        let expected: std::collections::HashSet<&str> = ["other.txt"].into_iter().collect();
-        let unrelated = parse_porcelain_z_unrelated(&raw, &expected);
-        assert_eq!(unrelated, vec!["weird path.txt".to_string()]);
-    }
-
-    /// End-to-end check: spin up a real git repo, create a tracked file
-    /// whose path contains a space, and confirm `validate_git_state`
-    /// accepts it as expected-dirt. Pre-fix, the C-quoted form
-    /// (`"path with spaces.txt"`) wouldn't match the raw expected
-    /// string and the merge would be rejected as having unrelated
-    /// changes.
-    #[test]
-    fn validate_git_state_accepts_path_with_spaces_as_expected() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let root = temp.path();
-
-        // Initialise a git repo with an attached HEAD on a branch.
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["init", "--initial-branch=main"])
-            .output()
-            .expect("git init");
-        // Configure identity so commit works (some CIs require it).
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["config", "user.email", "test@example.com"])
-            .output();
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["config", "user.name", "Test"])
-            .output();
-        // Seed an initial commit so HEAD is symbolic on `main`.
-        std::fs::write(root.join("seed.txt"), b"seed").unwrap();
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["add", "seed.txt"])
-            .output();
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["commit", "-m", "seed"])
-            .output();
-
-        // Now create the path-with-spaces file as the only working-tree
-        // change. validate_git_state must accept it since it's listed
-        // in expected_paths.
-        let weird = "path with spaces.txt";
-        std::fs::write(root.join(weird), b"hello").unwrap();
-
-        let expected_paths = vec![weird.to_string()];
-        let result = validate_git_state(root, &expected_paths);
-        assert!(
-            result.is_ok(),
-            "validate_git_state must accept a path with spaces when it's in expected_paths, got: {:?}",
-            result.err()
-        );
-    }
-
     #[test]
     fn build_commit_message_uses_only_first_subject_line() {
         let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
@@ -456,5 +390,27 @@ mod tests {
         // Subject line should be just the first line.
         assert!(msg.starts_with("Merge thread 'x'\n\n"));
         assert!(!msg.contains("longer body"));
+    }
+
+    #[test]
+    fn merge_git_commit_empty_uses_typed_advice() {
+        let advice = merge_git_commit_empty_advice();
+
+        assert_eq!(advice.kind, "merge_git_commit_empty");
+        assert_eq!(advice.primary_command, "heddle merge --preview");
+        assert!(advice.error.contains("no changed paths"));
+        assert!(advice.would_change.contains("empty Git commit"));
+    }
+
+    #[test]
+    fn merge_git_commit_failure_uses_typed_advice() {
+        let advice =
+            merge_git_commit_failed_advice("writing Git index", "index locked".to_string());
+
+        assert_eq!(advice.kind, "merge_git_commit_failed");
+        assert!(advice.error.contains("writing Git index failed"));
+        assert!(advice.error.contains("index locked"));
+        assert!(advice.primary_command.contains("heddle checkpoint"));
+        assert!(advice.preserved.contains("Heddle merge state is preserved"));
     }
 }

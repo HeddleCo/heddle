@@ -22,6 +22,7 @@
 //! |       |                                   | cherry-pick, rebase           |
 //! | `-s`  | `--short`                         | status                        |
 //! | `-U`  | `--unified`                       | diff                          |
+//! | `-C`  | `--repo`                          | global                        |
 //! | `-v`  | `--verbose` (repeatable)          | global                        |
 //! | `-q`  | `--quiet`                         | global                        |
 //!
@@ -46,14 +47,6 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output JSON (deprecated; use `--output json`).
-    ///
-    /// Still functional — both forms route to JSON. Kept for compatibility
-    /// with scripts and agent harnesses written against the old surface.
-    /// Emits a one-shot stderr warning on first use within a process.
-    #[arg(long, global = true, hide = true)]
-    pub json: bool,
-
     /// Output format. `auto` (default) renders text on a TTY and JSON when piped;
     /// `json` and `text` override regardless of stream.
     #[arg(long, global = true, value_enum)]
@@ -64,7 +57,7 @@ pub struct Cli {
     pub no_color: bool,
 
     /// Repository path (default: find .heddle in ancestors).
-    #[arg(long, global = true)]
+    #[arg(short = 'C', long, global = true, value_name = "PATH")]
     pub repo: Option<std::path::PathBuf>,
 
     /// Increase verbosity.
@@ -77,11 +70,10 @@ pub struct Cli {
 
     /// Client-supplied operation id (UUID v4) for idempotent retries.
     ///
-    /// State-changing verbs that pass this id to the dedup store
-    /// return the original outcome on replay. Unset by default; agents
-    /// supply one explicitly. Honoured for any state-changing verb that
-    /// has been wired through the dedup store. Also reads
-    /// `HEDDLE_OPERATION_ID` from the environment.
+    /// Commands that advertise `supports_op_id: true` in
+    /// `heddle commands --output json` return the original outcome on
+    /// replay. Unset by default; agents supply one explicitly. Also
+    /// reads `HEDDLE_OPERATION_ID` from the environment.
     ///
     /// Hidden from default `--help` to keep the human surface uncluttered;
     /// see `heddle help operation-ids` for the full agent-facing contract.

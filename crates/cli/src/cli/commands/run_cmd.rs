@@ -6,20 +6,32 @@ use std::process::{Command, Stdio};
 use anyhow::{Result, anyhow};
 use repo::{Repository, SessionManager};
 
-use super::thread_cmd::{current_thread, load_thread};
+use super::{
+    advice::RecoveryAdvice,
+    thread_cmd::{current_thread, load_thread},
+};
 use crate::{cli::Cli, config::UserConfig};
 
 pub fn cmd_run(cli: &Cli, thread: Option<String>, command: Vec<String>) -> Result<()> {
     if command.is_empty() {
-        return Err(anyhow!("Usage: heddle run --thread <name> -- <cmd...>"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "run_command_required",
+            "Usage: heddle run --thread <name> -- <cmd...>",
+            "Pass a command after `--` so Heddle knows what to execute in the thread checkout.",
+            "heddle run --thread <name> -- <cmd...>",
+        )));
     }
 
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     let thread = match thread {
         Some(thread_id) => load_thread(&repo, &thread_id)?,
-        None => {
-            current_thread(&repo)?.ok_or_else(|| anyhow!("No current thread; pass --thread"))?
-        }
+        None => current_thread(&repo)?.ok_or_else(|| {
+            anyhow!(RecoveryAdvice::no_current_thread(
+                "run",
+                Some("--thread"),
+                "heddle run --thread <name> -- <cmd...>",
+            ))
+        })?,
     };
 
     let program = &command[0];

@@ -69,6 +69,18 @@ pub trait OpLogBackend: Send + Sync {
     fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch>;
     fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch>;
 
+    /// Coalesce two existing batches into one logical undo/redo unit.
+    ///
+    /// Implementations should preserve entry IDs and chronological entry
+    /// order, rewriting only batch metadata. Backends that cannot rewrite
+    /// local batch metadata may keep the default fail-closed behavior.
+    fn coalesce_batches(&self, primary_batch_id: u64, secondary_batch_id: u64) -> Result<OpBatch> {
+        let _ = (primary_batch_id, secondary_batch_id);
+        Err(objects::error::HeddleError::Config(
+            "oplog backend does not support batch coalescing".to_string(),
+        ))
+    }
+
     fn record_snapshot(
         &self,
         new_state: &ChangeId,

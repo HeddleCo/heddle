@@ -68,9 +68,9 @@ pub use repository::{
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,
     RepositoryPerformanceInspectionReport, SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile,
     ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree,
-    WarmCanonicalStoreStats,
-    WorktreeCompareProfile, WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct,
-    find_merge_base, is_major_rewrite, is_synthetic_root,
+    WarmCanonicalStoreStats, WorktreeCompareProfile, WorktreeIndexInspection,
+    WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base, is_major_rewrite,
+    is_synthetic_root,
 };
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
 pub use session_storage::SessionManager;

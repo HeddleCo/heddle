@@ -227,7 +227,10 @@ fn hydration_survives_repository_reopen() {
     // confirm the registry isn't a one-shot install.
     let bare_open = gix::open(&bare).expect("open bare for second blob");
     let payload2 = b"second-blob-after-reopen\n".to_vec();
-    let oid2 = bare_open.write_blob(payload2.as_slice()).expect("write blob 2").detach();
+    let oid2 = bare_open
+        .write_blob(payload2.as_slice())
+        .expect("write blob 2")
+        .detach();
     let blake3_2 = Blob::new(payload2.clone()).hash();
     // Re-register the factory under the same kind to seed the new
     // OID — last-write-wins, mirroring how the production path could
@@ -243,7 +246,9 @@ fn hydration_survives_repository_reopen() {
     register_factory(KIND_GIT_OVERLAY, factory_2);
 
     let reopened2 = Repository::open(&heddle_root).expect("reopen 2");
-    reopened2.record_missing_blob(blake3_2).expect("mark blob 2 missing");
+    reopened2
+        .record_missing_blob(blake3_2)
+        .expect("mark blob 2 missing");
     let blob2 = reopened2
         .require_blob(&blake3_2)
         .expect("second reopen: hydrator must be re-installed");

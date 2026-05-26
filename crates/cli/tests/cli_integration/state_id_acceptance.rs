@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Coverage for item 1.2 of the heddle 6→8 plan: every state-taking
-//! verb must accept the short ID form printed by `heddle log --json`.
+//! verb must accept the short ID form printed by `heddle log --output json`.
 //!
-//! Before this fix, `heddle log --json` returned `change_id` in the
+//! Before this fix, `heddle log --output json` returned `change_id` in the
 //! short form (`hd-…12 chars`), but `heddle review show`, `heddle
 //! discuss list`, and a couple of others rejected anything that wasn't
 //! a 16-byte full ID. The CLI's own JSON shape was unparseable by its
@@ -25,7 +25,7 @@ fn setup_repo() -> TempDir {
     temp
 }
 
-/// Pull the short ID `heddle log --json` advertises. This is the
+/// Pull the short ID `heddle log --output json` advertises. This is the
 /// observation path an agent or wrapper script would take, so the
 /// downstream commands have to understand exactly this string.
 fn first_short_id(repo: &std::path::Path) -> String {
@@ -33,7 +33,7 @@ fn first_short_id(repo: &std::path::Path) -> String {
     let value: Value = serde_json::from_str(&raw).unwrap();
     value["states"][0]["change_id"]
         .as_str()
-        .expect("log --json should expose change_id")
+        .expect("log --output json should expose change_id")
         .to_string()
 }
 
@@ -43,8 +43,11 @@ fn first_short_id(repo: &std::path::Path) -> String {
 fn review_show_accepts_short_id() {
     let temp = setup_repo();
     let short = first_short_id(temp.path());
-    let raw = heddle(&["review", "show", &short, "--json"], Some(temp.path()))
-        .expect("review show should accept short IDs");
+    let raw = heddle(
+        &["review", "show", &short, "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect("review show should accept short IDs");
     let value: Value = serde_json::from_str(&raw).expect("review show output should be JSON");
     // Server normalizes back to the full form on the way out, but it
     // must round-trip to a state with a matching prefix.
@@ -52,6 +55,23 @@ fn review_show_accepts_short_id() {
     assert!(
         returned.starts_with(&short),
         "round-trip should resolve to the same state: short={short}, returned={returned}"
+    );
+}
+
+#[test]
+fn review_show_respects_global_repo_argument() {
+    let temp = setup_repo();
+    let repo_arg = format!("--repo={}", temp.path().display());
+    let raw = heddle(
+        &[repo_arg.as_str(), "--output=json", "review", "show", "HEAD"],
+        None,
+    )
+    .expect("review show --repo should inspect the selected repository");
+    let value: Value = serde_json::from_str(&raw).expect("review show output should be JSON");
+    assert_eq!(value["headline"], "init");
+    assert_eq!(
+        value["files_changed"], 1,
+        "review show --repo HEAD should summarize the selected repo's captured change: {value}"
     );
 }
 

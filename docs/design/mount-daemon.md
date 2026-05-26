@@ -200,7 +200,7 @@ default-flip date.
 When the original spike was estimated, the breakdown was:
 
 1. Day 1 — extract `LocalMonitorServer` into `crates/repo/src/daemon/` and
-   land a no-op refactor (`heddle monitor --serve` keeps working).
+   land a no-op refactor that keeps the internal monitor serve helper working.
 2. Day 2 — bump protocol to v2; add `mount`/`unmount`/`list_mounts`/`health`
    verbs; daemon-side `MountRegistry` reuses the existing
    `ContentAddressedMount::new` + `FuseShell` pair.

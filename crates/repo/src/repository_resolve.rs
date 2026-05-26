@@ -16,6 +16,15 @@ impl Repository {
             return Ok(Some(id));
         }
 
+        if self.capability() == super::RepositoryCapability::GitOverlay {
+            if let Some(id) = self.git_overlay_mapped_change_for_branch(spec)? {
+                return Ok(Some(id));
+            }
+            if let Some(id) = self.git_overlay_mapped_change_for_tag(spec)? {
+                return Ok(Some(id));
+            }
+        }
+
         resolve_short_change_id(self, spec)
     }
 

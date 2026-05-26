@@ -4,9 +4,11 @@ use repo::{Repository, Thread, ThreadIntegrationPolicy};
 use serde::Serialize;
 
 use super::{
+    advice::RecoveryAdvice,
     checkpoint::create_git_checkpoint,
+    git_overlay_health::build_repository_verification_state,
     merge::{build_thread_preview_report, merge_thread_into_current},
-    operator_core::OperatorCommandOutput,
+    operator_core::{OperatorCommandOutput, VerificationClaimPolicy},
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
@@ -70,7 +72,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_overlay_import_hint()?;
-    let output = if thread.freshness == repo::ThreadFreshness::Current {
+    let mut output = if thread.freshness == repo::ThreadFreshness::Current {
         let recommended_action = primary_next_action(
             operation.as_ref(),
             remote_tracking.as_ref(),
@@ -146,6 +148,15 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
         }
     };
 
+    // Reapplied centralization: defensively gate sync's success claim
+    // on repository verification. Strict policy — sync doesn't have a
+    // ship-publish followup to forgive.
+    let trust = build_repository_verification_state(&repo);
+    output.operator.block_success_claim_if_verification_blocked(
+        &trust,
+        "sync",
+        VerificationClaimPolicy::strict(),
+    );
     emit(cli, &output)
 }
 
@@ -372,6 +383,7 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             None,
             merge_output.merge_state.clone(),
             false,
+            false,
             None,
         )
         .await?;
@@ -382,30 +394,43 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
     }
 
+    let mut operator = OperatorCommandOutput {
+        status: if integrated { "shipped" } else { "blocked" }.to_string(),
+        action: "ship".to_string(),
+        message: if integrated {
+            format!("Shipped thread '{}'", merge_thread.id)
+        } else {
+            format!("Thread '{}' could not be shipped cleanly", merge_thread.id)
+        },
+        blockers: merge_output.operator.blockers.clone(),
+        warnings: Vec::new(),
+        next_action: if integrated {
+            None
+        } else {
+            merge_output.operator.recommended_action.clone()
+        },
+        recommended_action: if integrated {
+            None
+        } else {
+            merge_output.operator.recommended_action.clone()
+        },
+    };
+    // Reapplied centralization (PR 1-3 substrate): even when local
+    // checks succeed, refuse to claim "shipped" if repository
+    // verification is blocked. `allow_ship_publish_followup` matches
+    // the orphan's policy choice — ship is allowed to follow up with
+    // a `heddle push --force` for the publish step, so the gate is
+    // tolerant of that specific verification gap.
+    let trust = build_repository_verification_state(&repo);
+    operator.block_success_claim_if_verification_blocked(
+        &trust,
+        "ship",
+        VerificationClaimPolicy::strict().allow_ship_publish_followup(),
+    );
     emit(
         cli,
         &ShipOutput {
-            operator: OperatorCommandOutput {
-                status: if integrated { "shipped" } else { "blocked" }.to_string(),
-                action: "ship".to_string(),
-                message: if integrated {
-                    format!("Shipped thread '{}'", merge_thread.id)
-                } else {
-                    format!("Thread '{}' could not be shipped cleanly", merge_thread.id)
-                },
-                blockers: merge_output.operator.blockers.clone(),
-                warnings: Vec::new(),
-                next_action: if integrated {
-                    None
-                } else {
-                    merge_output.operator.recommended_action.clone()
-                },
-                recommended_action: if integrated {
-                    None
-                } else {
-                    merge_output.operator.recommended_action.clone()
-                },
-            },
+            operator,
             thread: merge_thread.id.clone(),
             captured,
             checkpointed,
@@ -627,7 +652,7 @@ fn resolve_parent_thread(repo: &Repository, thread: Option<&str>) -> Result<Thre
         let head = repo.head_ref()?;
         match head {
             refs::Head::Attached { thread } => load_thread(repo, &thread),
-            refs::Head::Detached { .. } => Err(anyhow!("No attached parent thread; pass --parent")),
+            refs::Head::Detached { .. } => Err(anyhow!(RecoveryAdvice::no_attached_parent_thread())),
         }
     })
 }

@@ -10,18 +10,18 @@ use objects::{
 use tracing::{debug, instrument, trace, warn};
 
 use super::{
-    repository_worktree_status::{compare_worktree_with_index_detailed, WorktreeStatusDetailed},
     HeddleError, Repository, Result,
+    repository_worktree_status::{WorktreeStatusDetailed, compare_worktree_with_index_detailed},
 };
 use crate::{
+    FsMonitorSettings, WorktreeIndex, WorktreeStatusOptions,
     fsmonitor::ChangeMonitorSession,
     worktree_ignore::WorktreeIgnoreMatcher,
     worktree_index::{WorktreeIndexLoadStats, WorktreeIndexSaveStats},
     worktree_walk::{
-        read_blob_with_hash, validate_symlink_target, walk_worktree, WalkDirectory, WalkEntry,
-        WorktreeWalkPolicy,
+        WalkDirectory, WalkEntry, WorktreeWalkPolicy, read_blob_with_hash, validate_symlink_target,
+        walk_worktree,
     },
-    FsMonitorSettings, WorktreeIndex, WorktreeStatusOptions,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -44,6 +44,16 @@ pub struct WorktreeCompareProfile {
     pub monitor_persist_ms: u128,
     pub untracked_flatten_ms: u128,
     pub untracked_flattened_paths: usize,
+    pub tracked_refresh_ms: u128,
+    pub untracked_scan_ms: u128,
+    pub hashing_ms: u128,
+    pub directory_cache_compare_ms: u128,
+    pub directories_scanned: u64,
+    pub directories_skipped: u64,
+    pub files_hashed: u64,
+    pub cache_hits: u64,
+    pub monitor_changed_paths: u64,
+    pub monitor_skipped_directories: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -322,6 +332,16 @@ impl Repository {
                 monitor_persist_ms,
                 untracked_flatten_ms: 0,
                 untracked_flattened_paths: 0,
+                tracked_refresh_ms: stats.tracked_refresh_ms,
+                untracked_scan_ms: stats.untracked_scan_ms,
+                hashing_ms: stats.hashing_ms,
+                directory_cache_compare_ms: stats.directory_cache_compare_ms,
+                directories_scanned: stats.directories_scanned,
+                directories_skipped: stats.directories_skipped,
+                files_hashed: stats.files_hashed,
+                cache_hits: stats.cache_hits,
+                monitor_changed_paths: stats.monitor_changed_paths,
+                monitor_skipped_directories: stats.monitor_skipped_directories,
             },
         ))
     }

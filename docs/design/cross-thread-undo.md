@@ -240,7 +240,7 @@ The change is concentrated in `crates/cli/src/cli/commands/undo_apply.rs` and
   non-determinism); same fix shape (record what redo needs).
 - `apply_redo_entry`'s legacy V1 `ThreadCreate` arm restores the ref
   only and prints a stderr warning pointing the operator at
-  `heddle thread start <name>` to re-establish the record. V1 records
+  `heddle start <name>` to re-establish the record. V1 records
   age out as the live oplog window slides forward.
 
 **New `OpRecord` variant**: `ThreadCreateV2 { name, state,

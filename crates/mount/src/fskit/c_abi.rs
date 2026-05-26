@@ -23,7 +23,7 @@
 //!     emits prototypes for these in declaration order.
 
 use std::{
-    ffi::{c_char, c_void, CStr},
+    ffi::{CStr, c_char, c_void},
     ptr,
 };
 

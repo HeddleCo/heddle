@@ -217,6 +217,13 @@ pub enum OpRecord {
         /// record was written by the forward path.
         manager_snapshot: Option<Vec<u8>>,
     },
+    /// Git-overlay checkpoint written to the real Git checkout.
+    GitCheckpoint {
+        branch: String,
+        state: ChangeId,
+        previous_git_oid: Option<String>,
+        new_git_oid: String,
+    },
 }
 
 impl OpRecord {
@@ -323,6 +330,19 @@ impl OpRecord {
             }
             OpRecord::ThreadCreateV2 { name, .. } => {
                 format!("create thread {}", name)
+            }
+            OpRecord::GitCheckpoint {
+                branch,
+                previous_git_oid,
+                new_git_oid,
+                ..
+            } => {
+                format!(
+                    "git checkpoint {} ({} -> {})",
+                    branch,
+                    previous_git_oid.as_deref().unwrap_or("(none)"),
+                    new_git_oid
+                )
             }
         }
     }

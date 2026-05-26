@@ -52,23 +52,22 @@ use std::{
 
 use tracing::warn;
 use windows::{
-    core::{GUID, HRESULT, PCWSTR},
     Win32::{
-        Foundation::{FreeLibrary, ERROR_INSUFFICIENT_BUFFER, S_OK},
+        Foundation::{ERROR_INSUFFICIENT_BUFFER, FreeLibrary, S_OK},
         Storage::ProjectedFileSystem::{
-            PrjAllocateAlignedBuffer, PrjFillDirEntryBuffer, PrjFreeAlignedBuffer,
-            PrjMarkDirectoryAsPlaceholder, PrjStartVirtualizing, PrjStopVirtualizing,
-            PrjWriteFileData, PrjWritePlaceholderInfo, PRJ_CALLBACKS, PRJ_CALLBACK_DATA,
-            PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN, PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO,
-            PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_NOTIFICATION,
-            PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_DELETED,
+            PRJ_CALLBACK_DATA, PRJ_CALLBACKS, PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN,
+            PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO, PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT,
+            PRJ_NOTIFICATION, PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_DELETED,
             PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_FILE_MODIFIED,
             PRJ_NOTIFICATION_FILE_HANDLE_CLOSED_NO_MODIFICATION, PRJ_NOTIFICATION_FILE_RENAMED,
             PRJ_NOTIFICATION_MAPPING, PRJ_NOTIFY_TYPES, PRJ_PLACEHOLDER_INFO,
-            PRJ_STARTVIRTUALIZING_OPTIONS,
+            PRJ_STARTVIRTUALIZING_OPTIONS, PrjAllocateAlignedBuffer, PrjFillDirEntryBuffer,
+            PrjFreeAlignedBuffer, PrjMarkDirectoryAsPlaceholder, PrjStartVirtualizing,
+            PrjStopVirtualizing, PrjWriteFileData, PrjWritePlaceholderInfo,
         },
         System::LibraryLoader::LoadLibraryW,
     },
+    core::{GUID, HRESULT, PCWSTR},
 };
 
 use crate::{
@@ -1040,9 +1039,8 @@ fn emit_entry_slice(
         // produces a `&PRJ_FILE_BASIC_INFO` we coerce to a const
         // pointer for the kernel — the struct is read, not modified.
         let basic_ptr: *const PRJ_FILE_BASIC_INFO = &basic;
-        let rc = unsafe {
-            PrjFillDirEntryBuffer(PCWSTR(name_wide.as_ptr()), Some(basic_ptr), buffer)
-        };
+        let rc =
+            unsafe { PrjFillDirEntryBuffer(PCWSTR(name_wide.as_ptr()), Some(basic_ptr), buffer) };
         if let Err(e) = rc {
             if e.code() == HRESULT::from(ERROR_INSUFFICIENT_BUFFER) {
                 if i == 0 {
@@ -1290,7 +1288,11 @@ mod tests {
         // Sanity: the file name encodes the basename so multiple
         // sibling mounts get distinct sidecars.
         assert!(
-            sidecar.file_name().unwrap().to_string_lossy().contains("thread-x"),
+            sidecar
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("thread-x"),
             "sidecar name must include the mount basename, got {}",
             sidecar.display(),
         );

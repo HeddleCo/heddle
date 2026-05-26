@@ -66,8 +66,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::cache::BlobCachePool;
-
 use objects::{
     object::{
         Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
@@ -79,6 +77,7 @@ use repo::Repository;
 use tracing::{debug, instrument, warn};
 
 use crate::{
+    cache::BlobCachePool,
     error::{MountError, Result},
     shell::{
         AttrUpdate, Attrs, DIR_UNIX_MODE, Entry, NodeId, NodeKind, PlatformShell, RenameOptions,

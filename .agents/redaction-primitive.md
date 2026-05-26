@@ -22,7 +22,7 @@
 > `commands_redact.rs` module doc, and `Repository::accept_wire_redactions`
 > in `crates/repo/src/repository_redaction.rs`.
 
-> Self-contained brief for the agent implementing `heddle redact` + `heddle purge`. Don't dispatch sub-agents for the implementation itself — touch the crates directly. Dispatch reviewers only at the end if you want a second opinion before commit.
+> Self-contained brief for the agent implementing `heddle redact apply` + `heddle purge apply`. Don't dispatch sub-agents for the implementation itself — touch the crates directly. Dispatch reviewers only at the end if you want a second opinion before commit.
 
 ## Goal
 
@@ -30,8 +30,8 @@ Add a first-class redaction primitive to Heddle so operators can scrub a sensiti
 
 Two operations:
 
-1. **`heddle redact <state-id> --path <file> --reason "..."`** — declares a blob redacted. Writes a `Redaction` record (a new object type) referencing the original blob's BLAKE3 hash. The state stays addressable; readers see the redaction notice in place of the original content. The blob bytes are still on disk at this stage — redaction is a *declaration*.
-2. **`heddle purge <state-id> --path <file>`** — physically removes the underlying blob bytes from local store + the canonical remote store if configured. Workspace-owner capability only. The `Redaction` tombstone stays. A `Purge` oplog entry records who removed bytes, when, and the redaction it acted on.
+1. **`heddle redact apply <state-id> --path <file> --reason "..."`** — declares a blob redacted. Writes a `Redaction` record (a new object type) referencing the original blob's BLAKE3 hash. The state stays addressable; readers see the redaction notice in place of the original content. The blob bytes are still on disk at this stage — redaction is a *declaration*.
+2. **`heddle purge apply <state-id> --path <file>`** — physically removes the underlying blob bytes from local store + the canonical remote store if configured. Workspace-owner capability only. The `Redaction` tombstone stays. A `Purge` oplog entry records who removed bytes, when, and the redaction it acted on.
 
 Both operations are themselves Heddle actions: attributed (`Principal`), timestamped, signed (Ed25519, same as merges).
 
@@ -82,14 +82,14 @@ The stub is text-only; it's safe to include in materialized worktrees, semantic 
 Add to `crates/cli/src/cli/cli_args/`:
 
 ```
-heddle redact <state-id> --path <file> --reason "..." [--all-states]
+heddle redact apply <state-id> --path <file> --reason "..." [--all-states]
   # --all-states: walk every reachable state and redact every
   # occurrence of the same blob hash. Default: just the named state.
 
 heddle redact list                     # show all Redactions in repo
 heddle redact show <redaction-id>      # show a specific redaction
 
-heddle purge <state-id> --path <file> [--force]
+heddle purge apply <state-id> --path <file> [--force]
   # Requires workspace-owner capability (Biscuit). Refuses unless
   # a Redaction already exists on the blob. --force confirms the
   # bytes-loss step.
@@ -132,8 +132,8 @@ Property tests in `tests/property/redact_purge.rs`:
 6. Capability rejection: a maintainer-token attempting `purge` is denied at the verifier; the attempt is logged in the oplog as a refused operation.
 
 Integration tests in `crates/cli/tests/`:
-- `heddle redact` on a synthetic state with a faux-secret blob, verify the stub appears on `heddle show`.
-- `heddle purge --force` after redact, verify bytes gone from the local store and an oplog entry is present.
+- `heddle redact apply` on a synthetic state with a faux-secret blob, verify the stub appears on `heddle show`.
+- `heddle purge apply <state> --path <file> --force` after redact, verify bytes gone from the local store and an oplog entry is present.
 - Replication: redact on node A, fetch on node B, verify B sees the stub without ever pulling the original bytes.
 
 ## Out of scope for this build
@@ -146,9 +146,9 @@ Integration tests in `crates/cli/tests/`:
 
 A reviewer can answer "yes" to all of:
 
-1. `heddle redact <state> --path <file>` runs, writes a `Redaction` object, the state's `read_file` returns the stub.
-2. `heddle purge <state> --path <file>` requires `purge:repo` capability, removes the blob bytes from the local store, writes a `Purge` oplog entry.
-3. Both operations are signed (Ed25519), and `heddle review show <state>` displays the redaction + purge in the trust strip alongside the merge signature.
+1. `heddle redact apply <state> --path <file>` runs, writes a `Redaction` object, the state's `read_file` returns the stub.
+2. `heddle purge apply <state> --path <file>` requires `purge:repo` capability, removes the blob bytes from the local store, writes a `Purge` oplog entry.
+3. Both operations are signed (Ed25519), and `heddle review show <state>` displays the redaction + purge in the verification strip alongside the merge signature.
 4. `bridge git export` of a redacted state exports the stub, not the secret.
 5. Property tests + integration tests pass.
 6. `heddle maintenance gc --prune` does not collect `Redaction` or `Purge` objects even when their referenced blobs are gone.
@@ -167,6 +167,6 @@ A reviewer can answer "yes" to all of:
 | Property tests | `tests/property/redact_purge.rs` |
 | CLI integration tests | `crates/cli/tests/redact_purge.rs` |
 | Capability rules | `crates/server/src/biscuit/rules.biscuit` |
-| `web/CLAIMS.md` | Add `heddle redact` + `heddle purge` as shipped after this lands |
+| `web/CLAIMS.md` | Add `heddle redact apply` + `heddle purge apply` as shipped after this lands |
 
 Once shipped, update [/security Scene 05](web/src/routes/security/+page.svelte) to drop its PLANNED label and reference the real CLI.

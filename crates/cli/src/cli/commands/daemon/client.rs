@@ -28,6 +28,8 @@ use repo::daemon::{
 };
 use tracing::{debug, warn};
 
+use crate::cli::commands::RecoveryAdvice;
+
 /// Outcome of a daemon mount attempt that distinguishes between
 /// "the daemon couldn't service this request and we can fall back
 /// to the in-process mount path" and "something went wrong that
@@ -108,7 +110,7 @@ pub fn ensure_daemon_endpoint(
     ))
 }
 
-/// Read the endpoint file and decide whether to trust it. Returns
+/// Read the endpoint file and decide whether to accept it. Returns
 /// `Ok(None)` if the file is missing, the version doesn't match
 /// what this CLI speaks, or the recorded PID is dead. Errors only
 /// propagate when the file is unreadable for a reason other than
@@ -276,11 +278,9 @@ fn refine_rpc_error(
     if let Ok(recorded) = load_endpoint(&endpoint_path)
         && recorded.version < MOUNT_PROTOCOL_VERSION
     {
-        return anyhow!(error).context(format!(
-            "heddled daemon is older (v{their_version}) than this CLI (v{our_version}); \
-             run `heddle daemon stop` to force a respawn at the current version, then retry.",
-            their_version = recorded.version,
-            our_version = MOUNT_PROTOCOL_VERSION,
+        return anyhow!(error).context(RecoveryAdvice::stale_daemon_protocol(
+            recorded.version,
+            MOUNT_PROTOCOL_VERSION,
         ));
     }
     anyhow!(error).context(format!(

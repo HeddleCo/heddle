@@ -8,18 +8,18 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    commands_args::{
-        ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AttemptArgs,
-        CloneArgs, CollapseArgs, DelegateArgs, DiagnoseArgs, DiffArgs, DoctorArgs, InitArgs,
-        LogArgs, MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs,
-        RunArgs, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
-        SessionStartArgs, ShipArgs, SnapshotArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs,
-        WatchArgs,
-    },
     AgentCommands, BisectCommands, CheckpointArgs, ConflictCommands, ContextCommands,
     DiscussCommands, HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs,
     RedactCommands, RemoteCommands, ReviewCommands, ShellCommands, StackArgs, StashCommands,
     ThreadCommands, TransactionCommands, WorkspaceCommands,
+    commands_args::{
+        ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
+        AttemptArgs, BranchArgs, CloneArgs, CollapseArgs, CommandCatalogArgs, CommitArgs,
+        DelegateArgs, DiagnoseArgs, DiffArgs, DoctorArgs, InitArgs, LogArgs, MergeArgs, PullArgs,
+        PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
+        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShipArgs,
+        SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
+    },
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, SupportCommands};
@@ -29,21 +29,30 @@ pub enum Commands {
     /// Initialize a new Heddle repository.
     Init(InitArgs),
 
+    /// Adopt the current Git repository into Heddle.
+    ///
+    /// Initializes Heddle sidecar data if needed and imports Git history
+    /// without modifying existing Git worktree changes. Use `--ref` to
+    /// adopt selected branches or tags; omit it to import all local refs.
+    #[command(visible_alias = "import")]
+    Adopt(AdoptArgs),
+
     /// Curated, progressive-disclosure help.
     ///
-    /// `heddle help` prints the twelve everyday verbs and points at
+    /// `heddle help` prints the curated everyday verbs and points at
     /// `heddle help advanced` for everything else. `heddle help
     /// <topic>` prints the topic page (e.g. `daemon`, `signals`,
-    /// `bridge`). `heddle help <verb>` falls through to that verb's
-    /// `--help` so the printer never duplicates clap's per-verb
-    /// derivation.
+    /// `bridge`). `heddle help <command path>` falls through to that
+    /// command's `--help` so the printer never duplicates clap's
+    /// per-verb derivation.
     Help {
-        /// Topic name (`advanced`, `daemon`, `signals`, …) or verb
-        /// name. When omitted, prints the curated default.
-        topic: Option<String>,
+        /// Topic name (`advanced`, `daemon`, `signals`, …) or command
+        /// path. When omitted, prints the curated default.
+        #[arg(value_name = "TOPIC_OR_COMMAND")]
+        topics: Vec<String>,
     },
 
-    /// Show repository status.
+    /// Show what needs attention and the next safe Heddle action.
     #[command(after_help = "\
 Examples:
   heddle status               # current thread, dirty paths, recommended next step
@@ -78,6 +87,17 @@ Examples:
     /// Diagnose repository, thread, actor, and worktree context.
     Diagnose(DiagnoseArgs),
 
+    /// Verify this workspace; exits nonzero until every check is clean.
+    #[command(after_help = "\
+Checks: Git mapping, worktree, remote, operation, clone verification, machine contract.
+
+Examples:
+  heddle verify                # strict verification gate and next recovery step
+  heddle verify --verbose      # full proof rows and machine-contract details
+  heddle verify --output json  # proof JSON when clean; error envelope when blocked
+")]
+    Verify,
+
     /// Explain repository health, or run targeted doctor checks.
     ///
     /// `heddle doctor` (no subcommand) reports repository health and
@@ -91,17 +111,20 @@ Examples:
     #[cfg(feature = "git-overlay")]
     GitOverlay,
 
-    /// Print the JSON Schema for a `--json`-emitting verb.
+    /// Print the JSON Schema for a `--output json`-emitting verb.
     ///
-    /// Single-registry introspection over CLI output shapes —
+    /// Contract-table introspection over CLI output shapes —
     /// useful when wiring tools that consume `heddle <verb>
-    /// --json` and want to validate or generate types. The schemas
-    /// live in `crates/cli/src/cli/commands/schemas.rs`; the same
-    /// registry powers `heddle doctor schemas` for drift detection
+    /// --output json` and want to validate or generate types. The schemas
+    /// live in `crates/cli/src/cli/commands/schemas.rs`; the
+    /// command contract table registers available and documented
+    /// schema verbs for `heddle doctor schemas` drift detection
     /// against `docs/json-schemas.md`.
     ///
-    /// `<verb>` is the joined subcommand path — e.g. `status`, `log`,
-    /// `bridge git status`, `marker list`.
+    /// With no `<verb>`, prints the registered schema verbs. `<verb>`
+    /// is the joined subcommand path — e.g. `status`, `log`, `bridge
+    /// git status`, `marker list`.
+    #[command(visible_alias = "schema")]
     Schemas {
         /// The verb whose schema to emit. Run `heddle schemas --help`
         /// or look at `docs/json-schemas.md` for the registered list.
@@ -117,7 +140,11 @@ Examples:
     /// Show Heddle version. Pass global `--verbose` for bug-report context.
     Version,
 
-    /// Start a thread for work in Heddle's primary thread-first workflow.
+    /// Print the public command and flag catalog.
+    #[command(visible_aliases = ["command-catalog", "catalog"])]
+    Commands(CommandCatalogArgs),
+
+    /// Create or resume an isolated thread for focused work.
     Start(ThreadStartArgs),
 
     /// Run a command in a sandboxed ephemeral thread.
@@ -167,15 +194,13 @@ Examples:
     /// Abort the active operation without remembering the specific subcommand.
     Abort,
 
-    /// Automation/workflow command: capture, integrate, and optionally
-    /// push the current thread.
+    /// Land a ready thread and optionally publish it.
     ///
-    /// `ship` is the **do-it** verb: capture outstanding work, refresh
-    /// against the target if stale, merge into the parent (or
-    /// `--remote` push target), checkpoint, and optionally push. It
-    /// fails closed when conflicts or other blockers exist. Pair with
-    /// `ready` (the **check-only** counterpart) when you want to know
-    /// whether a ship would succeed without performing the integration.
+    /// `ship` is the do-it verb: capture outstanding work if needed,
+    /// refresh against the target when safe, land the thread, write the
+    /// Git checkpoint, and optionally push. It fails closed when
+    /// conflicts or other blockers exist. Pair it with `ready` when you
+    /// want the verdict and next action before landing anything.
     Ship(ShipArgs),
 
     /// Automation/workflow command: fan a parent thread into one or
@@ -191,19 +216,20 @@ Examples:
     /// <name>` is the lower-level path.
     Delegate(DelegateArgs),
 
-    /// Automation/workflow command: capture work, evaluate merge
-    /// readiness, and update thread state.
+    /// Prepare this thread for review or merge.
     ///
-    /// `ready` is the **check-only** counterpart to `ship`. It captures
-    /// any outstanding work, runs the same readiness preflight `ship`
-    /// uses (conflicts, blockers, freshness, semantic risk), and writes
-    /// `Ready` or `Blocked` onto the thread's state — but it never
-    /// merges, never checkpoints, and never pushes. Reach for it when
-    /// you want a verdict without committing to the integration.
+    /// `ready` captures outstanding work if needed, checks conflicts,
+    /// blockers, freshness, and semantic risk, then marks the thread
+    /// ready or blocked and prints the next action. It never lands,
+    /// checkpoints, or pushes; use it when you want Heddle's verdict
+    /// before integrating the work.
     Ready(ReadyArgs),
 
     /// Capture a recoverable Heddle step for undo, provenance, and review.
     Capture(SnapshotArgs),
+
+    /// Save current work as one Heddle change, plus a Git checkpoint in Git-overlay repos.
+    Commit(CommitArgs),
 
     /// Commit the current captured work to the Git-overlay branch/index.
     Checkpoint(CheckpointArgs),
@@ -259,8 +285,17 @@ Examples:
         dry_run: bool,
     },
 
-    /// Show differences between states.
+    /// Show what changed in the worktree, a thread, or two states.
     Diff(DiffArgs),
+
+    /// Git-compatible alias for the Heddle thread command family.
+    Branch(BranchArgs),
+
+    /// Git-compatible alias for `heddle thread switch`.
+    Switch(SwitchArgs),
+
+    /// Git-compatible alias for `heddle thread switch`.
+    Checkout(SwitchArgs),
 
     /// Open or resolve discussions anchored to symbols.
     ///
@@ -270,9 +305,9 @@ Examples:
     /// state mutations.
     #[command(after_help = "\
 Examples:
-  heddle discuss open --path src/auth.rs --symbol verify   # anchor a discussion to a symbol
+  heddle discuss open src/auth.rs verify 'Should this reject expired tokens?'  # anchor a discussion
   heddle discuss append <id> 'switched to argon2'          # add a turn
-  heddle discuss resolve <id> --as annotation              # close into a context annotation
+  heddle discuss resolve <id> --mode into-annotation --annotation-kind rationale --annotation-content 'Kept for compatibility'
 ")]
     Discuss {
         #[command(subcommand)]
@@ -313,9 +348,9 @@ Examples:
     /// window.
     #[command(after_help = "\
 Examples:
-  heddle review show HEAD                  # render the review payload for HEAD
-  heddle review sign HEAD --as read        # acknowledge a review
-  heddle review health --window 7d         # signal fire-rates over the last week
+  heddle review show HEAD                                # render the review payload for HEAD
+  heddle review sign HEAD --kind read --public-key <hex> --signature <hex> --signed-at-unix <ts>
+  heddle review health --window 7                       # signal fire-rates over recent states
 ")]
     Review {
         #[command(subcommand)]
@@ -345,7 +380,7 @@ Examples:
     /// Revert changes from a state.
     Revert(RevertArgs),
 
-    /// Undo last operation.
+    /// Undo the last Heddle operation.
     Undo(UndoArgs),
 
     /// Redo undone operation.
@@ -404,10 +439,16 @@ Examples:
         command: ShellCommands,
     },
 
-    /// Show the repo-wide workspace control tower.
+    /// Show repo-wide thread and checkout state.
+    #[command(after_help = "\
+Examples:
+  heddle workspace                         # repo-wide thread state
+  heddle workspace show --watch            # continuously refresh thread state
+  heddle workspace show --output json      # stable groups for scripts and agents
+")]
     Workspace {
         #[command(subcommand)]
-        command: WorkspaceCommands,
+        command: Option<WorkspaceCommands>,
     },
 
     /// Describe, ready-check, or snapshot the stack of related threads
@@ -427,7 +468,7 @@ Examples:
 ")]
     Stack(StackArgs),
 
-    /// Merge a thread into current thread.
+    /// Preview or land a thread into the current thread.
     Merge(MergeArgs),
 
     /// Resolve merge conflicts.
@@ -453,6 +494,8 @@ Examples:
     },
 
     /// Download objects and refs from remote.
+    ///
+    /// In Git-overlay mode this fetches branches and refs/notes/heddle, not Git tags.
     Fetch {
         /// Remote name or URL.
         remote: Option<String>,

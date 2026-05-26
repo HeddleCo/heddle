@@ -8,9 +8,9 @@ use grpc::heddle::v1::{
 };
 use objects::object::{ChangeId, ContentHash};
 use proto::{
-    Capabilities, CapabilitySet, ObjectId, ObjectInfo, ObjectType, ProtocolError,
     CAPABILITY_CHUNKED_TRANSFER, CAPABILITY_PACK_TRANSFER, CAPABILITY_PARTIAL_FETCH,
-    CAPABILITY_RESUMABLE_TRANSFER,
+    CAPABILITY_RESUMABLE_TRANSFER, Capabilities, CapabilitySet, ObjectId, ObjectInfo, ObjectType,
+    ProtocolError,
 };
 use tonic::Status;
 

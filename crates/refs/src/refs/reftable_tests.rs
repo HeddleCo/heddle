@@ -147,8 +147,7 @@ fn cold_lookup_thread_in_bytes_matches_get() {
 
     for i in 0..32u8 {
         let name = format!("branch-{i:02}");
-        let cold =
-            ReftableModel::lookup_thread_in_bytes(&bytes, &name).expect("cold lookup ok");
+        let cold = ReftableModel::lookup_thread_in_bytes(&bytes, &name).expect("cold lookup ok");
         assert_eq!(cold, Some(cid(i)), "cold lookup matches set for {name}");
     }
 

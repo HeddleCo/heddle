@@ -85,7 +85,7 @@ fn heddle(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
 }
 
 fn status_json(path: &Path) -> Value {
-    let output = heddle(&["status", "--json"], Some(path)).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(path)).unwrap();
     serde_json::from_str(&output).expect("status should return JSON")
 }
 
@@ -109,7 +109,14 @@ fn create_merge_conflict(temp: &TempDir) {
     fs::write(temp.path().join("file.txt"), "main content").unwrap();
     heddle(&["capture", "-m", "Main commit"], Some(temp.path())).unwrap();
 
-    heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    let refresh = heddle(&["thread", "refresh", "feature"], Some(temp.path()));
+    assert!(
+        refresh
+            .as_ref()
+            .is_err_and(|err| err.contains("thread_refresh_conflicted")),
+        "refresh should create a durable conflict state: {refresh:?}"
+    );
 }
 
 fn assert_exists(path: impl AsRef<Path>, msg: &str) {

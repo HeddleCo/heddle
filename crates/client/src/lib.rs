@@ -15,12 +15,13 @@ pub mod support_args;
 
 pub use auth_args::AuthCommands;
 pub use auth_cmd::cmd_auth;
-pub use grpc_hosted::HostedGrpcClient;
-pub use presence::{PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher};
-pub use support::run as cmd_support;
-pub use support_args::{SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs};
-
 // Re-export `device_flow` under the historical `auth` module name so
 // callers using `weft_client::auth::{...}` resolve symbols at the
 // same path the cli used internally pre-move.
 pub use device_flow as auth;
+pub use grpc_hosted::HostedGrpcClient;
+pub use presence::{
+    PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher,
+};
+pub use support::run as cmd_support;
+pub use support_args::{SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs};

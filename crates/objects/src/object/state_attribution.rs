@@ -25,6 +25,9 @@ impl Principal {
     pub fn from_env() -> Option<Self> {
         let name = std::env::var("HEDDLE_PRINCIPAL_NAME").ok()?;
         let email = std::env::var("HEDDLE_PRINCIPAL_EMAIL").ok()?;
+        if name.trim().is_empty() || email.trim().is_empty() {
+            return None;
+        }
         Some(Self { name, email })
     }
 }

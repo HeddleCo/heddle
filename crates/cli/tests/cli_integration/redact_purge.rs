@@ -16,12 +16,12 @@
 //! the full args → handler → repo → materialize stack rather than
 //! poking at internals.
 
-use std::fs;
+use std::{fs, process::Command};
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::heddle;
+use super::{assert_json_recovery_advice_fields, heddle, heddle_output};
 
 /// Bootstrap a repo containing a fake-secret file in a captured state.
 /// Returns the temp dir and the short change-id of the capture.
@@ -44,9 +44,58 @@ fn setup_repo_with_secret() -> (TempDir, String) {
     let value: Value = serde_json::from_str(&raw).unwrap();
     let state = value["states"][0]["change_id"]
         .as_str()
-        .expect("log --json should expose change_id")
+        .expect("log --output json should expose change_id")
         .to_string();
     (temp, state)
+}
+
+fn setup_git_overlay_repo_with_secret() -> (TempDir, String) {
+    let temp = TempDir::new().unwrap();
+    git_overlay_fixture_cmd(temp.path(), &["init", "-b", "main"]);
+    git_overlay_fixture_cmd(temp.path(), &["config", "user.name", "Heddle Test"]);
+    git_overlay_fixture_cmd(temp.path(), &["config", "user.email", "heddle@example.com"]);
+    fs::write(temp.path().join("README.md"), "seed\n").unwrap();
+    git_overlay_fixture_cmd(temp.path(), &["add", "."]);
+    git_overlay_fixture_cmd(temp.path(), &["commit", "-m", "seed"]);
+    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+
+    fs::create_dir_all(temp.path().join("config")).unwrap();
+    fs::write(
+        temp.path().join("config/secrets.toml"),
+        b"api_token = \"super-secret-leaked-value\"\n",
+    )
+    .unwrap();
+    heddle(
+        &["--output", "json", "commit", "-m", "leak the secret"],
+        Some(temp.path()),
+    )
+    .expect("heddle commit");
+
+    let raw = heddle(
+        &["--output", "json", "log", "--limit", "1"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    let state = value["states"][0]["change_id"]
+        .as_str()
+        .expect("log --output json should expose change_id")
+        .to_string();
+    (temp, state)
+}
+
+fn git_overlay_fixture_cmd(path: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .unwrap_or_else(|err| panic!("git {args:?} should run: {err}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -168,14 +217,96 @@ fn purge_apply_refuses_without_force() {
         Some(temp.path()),
     )
     .unwrap();
-    let err = heddle(
-        &["purge", "apply", &state, "--path", "config/secrets.toml"],
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "purge",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+        ],
         Some(temp.path()),
     )
-    .expect_err("purge without --force must refuse");
+    .expect("invoke purge apply");
     assert!(
-        err.contains("irreversible") || err.contains("--force"),
-        "refusal must name the irreversibility constraint: {err}"
+        !output.status.success(),
+        "purge without --force must refuse"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode purge refusal must not write stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let err: Value =
+        serde_json::from_str(&stderr).expect("purge refusal should emit JSON error envelope");
+    assert_json_recovery_advice_fields(&err, &err.to_string());
+    assert!(
+        err["kind"] == "destructive_requires_force"
+            && err["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("Refusing to purge")
+                    && error.contains("destructive action requires --force"))
+            && err["unsafe_condition"]
+                .as_str()
+                .is_some_and(|condition| condition.contains("purge is irreversible"))
+            && err["preserved"]
+                .as_str()
+                .is_some_and(|preserved| preserved.contains("nothing was removed"))
+            && err["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("heddle redact list")
+                    && hint.contains("heddle purge apply")
+                    && hint.contains("--force")),
+        "refusal must use the shared destructive-force advice: {stderr}"
+    );
+}
+
+#[test]
+fn undo_redact_refusal_uses_json_error_envelope() {
+    let (temp, state) = setup_repo_with_secret();
+    heddle(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    let output = heddle_output(&["--output", "json", "undo"], Some(temp.path()))
+        .expect("invoke undo redaction");
+    assert!(!output.status.success(), "undo redaction should refuse");
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode undo refusal must not write stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let err: Value =
+        serde_json::from_str(&stderr).expect("undo refusal should emit JSON error envelope");
+    assert_json_recovery_advice_fields(&err, &err.to_string());
+    assert!(
+        err["kind"] == "redaction_undo_requires_confirmation"
+            && err["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("Refusing to undo")
+                    && error.contains("redact apply")
+                    && error.contains("re-expose previously-hidden content"))
+            && err["preserved"]
+                .as_str()
+                .is_some_and(|preserved| preserved.contains("no undo mutation was applied"))
+            && err["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("--allow-redact-undo")),
+        "undo redaction refusal should expose typed JSON advice: {stderr}"
     );
 }
 
@@ -700,10 +831,8 @@ fn tampered_redaction_is_refused_at_fetch_boundary() {
 //
 // After a redact/purge, the working tree file is unchanged — the next
 // `heddle capture` would re-snapshot the leaked bytes. The CLI emits a
-// hint pointing at the right ignore file to append the path to. The
-// hint is suppressed when the path is already covered by a gitignore-
-// style glob in either `.heddleignore` or `.gitignore`, so the four
-// cases below pin the matcher's behavior end-to-end.
+// hint pointing at the right ignore file to append the path to. Native
+// Heddle prefers `.heddleignore`; Git-overlay prefers `.gitignore`.
 // ---------------------------------------------------------------------
 
 fn redact_apply_json(temp: &TempDir, state: &str) -> Value {
@@ -727,12 +856,8 @@ fn redact_apply_json(temp: &TempDir, state: &str) -> Value {
 
 #[test]
 fn redact_apply_emits_ignore_hint_when_neither_file_covers_path() {
-    // Fresh repo: `heddle init` ships a default `.heddleignore` now
-    // (heddle#80), but the default template doesn't cover the leaked
-    // `config/secrets.toml` path. The hint must still surface,
-    // pointing at `.heddleignore` with `already_exists: true` (so
-    // the message renders as "add ... to .heddleignore", not
-    // "create ...").
+    // Fresh native repos do not auto-create `.heddleignore`. The hint must
+    // surface, pointing at `.heddleignore` with `already_exists: false`.
     let (temp, state) = setup_repo_with_secret();
     let apply = redact_apply_json(&temp, &state);
     let hint = apply
@@ -740,8 +865,8 @@ fn redact_apply_emits_ignore_hint_when_neither_file_covers_path() {
         .expect("ignore_hint should be present when path is uncovered");
     assert_eq!(hint["ignore_file"].as_str().unwrap(), ".heddleignore");
     assert!(
-        hint["already_exists"].as_bool().unwrap(),
-        "init now installs a default .heddleignore"
+        !hint["already_exists"].as_bool().unwrap(),
+        "init should not install a default .heddleignore"
     );
     assert_eq!(
         hint["suggested_pattern"].as_str().unwrap(),
@@ -751,7 +876,7 @@ fn redact_apply_emits_ignore_hint_when_neither_file_covers_path() {
         hint["message"]
             .as_str()
             .unwrap()
-            .contains("config/secrets.toml")
+            .contains("create .heddleignore")
     );
 }
 
@@ -783,11 +908,8 @@ fn redact_apply_emits_no_hint_when_heddleignore_glob_matches() {
 
 #[test]
 fn redact_apply_emits_hint_when_only_gitignore_covers_the_path() {
-    // `.gitignore` covers `config/*.toml` but `.heddleignore` doesn't.
-    // `heddle capture` reads `.heddleignore` + repo config, NOT
-    // `.gitignore`, so the next snapshot would still re-import the
-    // leaked bytes. The hint must surface, pointing at `.heddleignore`
-    // (the file heddle actually consults).
+    // In a native Heddle repo, `.gitignore` is not the capture policy.
+    // The hint must surface, pointing at `.heddleignore`.
     let (temp, state) = setup_repo_with_secret();
     fs::write(temp.path().join(".gitignore"), "config/*.toml\n").unwrap();
     let apply = redact_apply_json(&temp, &state);
@@ -797,11 +919,32 @@ fn redact_apply_emits_hint_when_only_gitignore_covers_the_path() {
     assert_eq!(
         hint["ignore_file"].as_str().unwrap(),
         ".heddleignore",
-        ".gitignore is not consulted by heddle capture; hint must target .heddleignore"
+        ".gitignore is not consulted by native Heddle capture; hint must target .heddleignore"
     );
     assert!(
-        hint["already_exists"].as_bool().unwrap(),
-        "init installs a default .heddleignore (heddle#80)"
+        !hint["already_exists"].as_bool().unwrap(),
+        "init should not install a default .heddleignore"
+    );
+}
+
+#[test]
+fn redact_apply_git_overlay_prefers_gitignore_hint() {
+    let (temp, state) = setup_git_overlay_repo_with_secret();
+    let apply = redact_apply_json(&temp, &state);
+    let hint = apply
+        .get("ignore_hint")
+        .expect("ignore_hint should be present when path is uncovered");
+    assert_eq!(hint["ignore_file"].as_str().unwrap(), ".gitignore");
+    assert!(
+        !hint["already_exists"].as_bool().unwrap(),
+        "fixture does not create a .gitignore"
+    );
+    assert!(
+        hint["message"]
+            .as_str()
+            .unwrap()
+            .contains("create .gitignore"),
+        "Git-overlay redaction should point at Git's shared ignore file: {hint}"
     );
 }
 
@@ -870,8 +1013,8 @@ fn purge_apply_also_emits_ignore_hint() {
         .expect("purge output must include ignore_hint");
     assert_eq!(hint["ignore_file"].as_str().unwrap(), ".heddleignore");
     assert!(
-        hint["already_exists"].as_bool().unwrap(),
-        "init installs a default .heddleignore (heddle#80)"
+        !hint["already_exists"].as_bool().unwrap(),
+        "init should not install a default .heddleignore"
     );
 }
 
@@ -1047,8 +1190,10 @@ fn redact_trust_add_and_list_round_trip() {
 
     // Re-adding the same key fails — operators get a clear signal
     // rather than silent duplicate entries.
-    let err = heddle(
+    let output = heddle_output(
         &[
+            "--output",
+            "json",
             "redact",
             "trust",
             "add",
@@ -1057,9 +1202,114 @@ fn redact_trust_add_and_list_round_trip() {
         ],
         Some(temp.path()),
     )
-    .expect_err("re-add must refuse duplicates");
+    .expect("invoke duplicate trust add");
     assert!(
-        err.contains("already in the trust list"),
-        "duplicate-trust rejection must be clear: {err}"
+        !output.status.success(),
+        "re-add must refuse duplicate trust keys"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode refusal must not write stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: Value =
+        serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
+    assert_eq!(envelope["kind"], "redact_trust_key_duplicate");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("already in the trust list")),
+        "duplicate-trust rejection must be clear: {stderr}"
+    );
+}
+
+#[test]
+fn redact_empty_path_uses_typed_advice_json() {
+    let (temp, state) = setup_repo_with_secret();
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "",
+            "--reason",
+            "empty path smoke",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke redact apply");
+    assert!(!output.status.success(), "empty path must refuse");
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode refusal must not write stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: Value =
+        serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
+    assert_eq!(envelope["kind"], "redact_path_empty");
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("--path <path>")),
+        "typed advice should name the recovery path: {stderr}"
+    );
+}
+
+#[test]
+fn redact_trust_remove_missing_key_uses_typed_advice_json() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    let output = heddle_output(
+        &["--output", "json", "redact", "trust", "remove", "deadbeef"],
+        Some(temp.path()),
+    )
+    .expect("invoke redact trust remove");
+    assert!(!output.status.success(), "missing trust key must refuse");
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode refusal must not write stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: Value =
+        serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
+    assert_eq!(envelope["kind"], "redact_trust_key_not_found");
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("heddle redact trust list")),
+        "typed advice should name the inspection command: {stderr}"
+    );
+}
+
+#[test]
+fn redact_trust_add_missing_key_source_uses_typed_advice_json() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    let output = heddle_output(
+        &["--output", "json", "redact", "trust", "add"],
+        Some(temp.path()),
+    )
+    .expect("invoke redact trust add");
+    assert!(!output.status.success(), "missing key source must refuse");
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode refusal must not write stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: Value =
+        serde_json::from_str(&stderr).expect("stderr should be JSON error envelope");
+    assert_eq!(envelope["kind"], "redact_trust_key_source_required");
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("--from-pem <PATH>")),
+        "typed advice should name key-source recovery: {stderr}"
     );
 }

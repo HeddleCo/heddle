@@ -425,7 +425,7 @@ pub(crate) fn merge_thread_into_current(
         let mut git_commit_blockers: Vec<String> = Vec::new();
         if git_commit
             && !preview
-            && let Err(blocked) = git_commit::validate_git_state(repo.root(), &ff_paths)
+            && let Err(blocked) = git_commit::validate_git_state(&repo, &ff_paths)
         {
             git_commit_blockers = blocked.blockers;
         }
@@ -520,9 +520,11 @@ pub(crate) fn merge_thread_into_current(
                     &attribution,
                 );
                 git_commit_info = Some(git_commit::write_git_commit(
-                    repo.root(),
+                    &repo,
+                    &merge_target_id,
                     &ff_paths,
                     &commit_message,
+                    &[],
                 )?);
             }
         } else if git_commit {
@@ -784,7 +786,7 @@ pub(crate) fn merge_thread_into_current(
     };
     let mut git_commit_blockers: Vec<String> = Vec::new();
     if git_commit {
-        if let Err(blocked) = git_commit::validate_git_state(repo.root(), &merge_paths) {
+        if let Err(blocked) = git_commit::validate_git_state(&repo, &merge_paths) {
             git_commit_blockers = blocked.blockers;
         }
         // Extended pre-flight: check anything else we can dry-run before
@@ -864,7 +866,13 @@ pub(crate) fn merge_thread_into_current(
             &new_state.change_id.short(),
             &attribution,
         );
-        match git_commit::write_git_commit(repo.root(), &merge_paths, &commit_message) {
+        match git_commit::write_git_commit(
+            &repo,
+            &new_state.change_id,
+            &merge_paths,
+            &commit_message,
+            &[],
+        ) {
             Ok(info) => git_commit_info = Some(info),
             Err(err) => {
                 tracing::warn!(
@@ -1047,14 +1055,14 @@ fn validate_git_commit_preconditions_extended(
 /// pre-snapshot blocked) so the JSON honestly reports "no change set
 /// landed" instead of pointing at an arbitrary parent..target diff.
 fn empty_diff_output(state_id: &ChangeId) -> DiffOutput {
-    DiffOutput {
-        from_state: Some(state_id.short()),
-        to_state: Some(state_id.short()),
-        changes: Vec::new(),
-        semantic_changes: None,
-        context: None,
-        broader_guidance: None,
-    }
+    DiffOutput::new(
+        Some(state_id.short()),
+        Some(state_id.short()),
+        Vec::new(),
+        None,
+        None,
+        None,
+    )
 }
 
 /// Shared dir → file type-change handler for merge and cherry-pick.
@@ -1129,8 +1137,13 @@ pub(crate) enum ThreeWayMergeOutcome {
         tree: Tree,
     },
     /// Conflicts exist. `paths` lists the conflicting path strings.
+    /// `tree` is the partially-merged tree (with conflict markers in
+    /// conflicting blobs) so callers can materialize a worktree to
+    /// resolve in. `base` is the merge base used in the 3-way merge.
     Conflicted {
+        tree: Tree,
         paths: Vec<String>,
+        base: ChangeId,
     },
     /// Already-integrated or fast-forward — caller can take a
     /// simpler advance path. The contained `target` is the tip the
@@ -1179,8 +1192,14 @@ pub(crate) fn try_three_way_merge_between_tips(
             let merge_result = plan
                 .merge_result()
                 .ok_or_else(|| anyhow!("Merge plan missing merge_result for Conflicted"))?;
+            let base = plan
+                .relation()
+                .merge_base_id()
+                .ok_or_else(|| anyhow!("Merge base missing from conflicted merge plan"))?;
             Ok(ThreeWayMergeOutcome::Conflicted {
+                tree: merge_result.tree.clone(),
                 paths: merge_result.conflicts.clone(),
+                base,
             })
         }
     }

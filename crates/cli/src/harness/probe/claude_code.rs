@@ -48,15 +48,26 @@ impl HarnessActorProbe for ClaudeCodeProbe {
         };
         Ok(HarnessProbeResult {
             harness: Some("claude-code".to_string()),
-            provider: Some("anthropic".to_string()),
+            provider: input
+                .explicit_provider
+                .clone()
+                .or_else(|| input.env_hints.get("HEDDLE_AGENT_PROVIDER").cloned())
+                .or_else(|| input.current_provider.clone())
+                .or(Some("anthropic".to_string())),
             model: metadata
                 .get("model")
                 .cloned()
-                .or_else(|| argv_value(argv, "--model")),
+                .or_else(|| argv_value(argv, "--model"))
+                .or_else(|| input.env_hints.get("HEDDLE_AGENT_MODEL").cloned())
+                .or_else(|| input.env_hints.get("CLAUDE_MODEL").cloned())
+                .or_else(|| input.env_hints.get("ANTHROPIC_MODEL").cloned())
+                .or_else(|| input.env_hints.get("MODEL").cloned())
+                .or_else(|| input.current_model.clone()),
             thinking_level: metadata
                 .get("effort")
                 .cloned()
-                .or_else(|| argv_value(argv, "--effort")),
+                .or_else(|| argv_value(argv, "--effort"))
+                .or_else(|| input.env_hints.get("THINKING_LEVEL").cloned()),
             native_actor_key: agent_id
                 .clone()
                 .map(|id| format!("claude-code:agent:{id}"))

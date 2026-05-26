@@ -88,7 +88,7 @@ fn heddle_with_env(
 }
 
 fn status_json(path: &std::path::Path) -> Value {
-    let output = heddle(&["status", "--json"], Some(path)).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(path)).unwrap();
     serde_json::from_str(&output).expect("status output should be JSON")
 }
 
@@ -109,6 +109,43 @@ fn assert_file_not_exists(path: impl AsRef<std::path::Path>, msg: &str) {
     assert!(!path.exists(), "{}: {:?}", msg, path);
 }
 
+fn assert_stale_merge_refuses(path: &std::path::Path, thread: &str) {
+    let result = heddle(&["merge", thread], Some(path));
+    let err = result.expect_err("stale direct merge should refuse before mutation");
+    assert!(
+        err.contains(&format!("Thread '{thread}' is stale"))
+            && err.contains(&format!("heddle thread refresh {thread}")),
+        "stale merge should explain the refresh path: {err}"
+    );
+    assert!(
+        !path.join(".heddle/MERGE_STATE").exists(),
+        "stale merge refusal must not create MERGE_STATE"
+    );
+}
+
+fn refresh_thread_expect_conflict(path: &std::path::Path, thread: &str) -> String {
+    heddle(&["thread", "switch", thread], Some(path)).unwrap();
+    let refresh = heddle(&["thread", "refresh", thread], Some(path));
+    assert!(
+        refresh
+            .as_ref()
+            .is_err_and(|err| err.contains("thread_refresh_conflicted")),
+        "thread refresh should create durable conflict state: {refresh:?}"
+    );
+    assert!(
+        path.join(".heddle/MERGE_STATE").exists(),
+        "thread refresh conflict should leave MERGE_STATE in the thread checkout"
+    );
+    refresh.unwrap_err()
+}
+
+fn refresh_then_merge_thread(path: &std::path::Path, thread: &str) -> String {
+    heddle(&["thread", "switch", thread], Some(path)).unwrap();
+    heddle(&["thread", "refresh", thread], Some(path)).unwrap();
+    heddle(&["thread", "switch", "main"], Some(path)).unwrap();
+    heddle(&["merge", thread], Some(path)).unwrap()
+}
+
 mod resolve {
     use super::*;
 
@@ -126,7 +163,8 @@ mod resolve {
         fs::write(temp.path().join("file.txt"), "main version").unwrap();
         heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
 
-        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+        assert_stale_merge_refuses(temp.path(), "feature");
+        refresh_thread_expect_conflict(temp.path(), "feature");
     }
 
     #[test]
@@ -180,7 +218,7 @@ mod resolve {
         assert!(result.is_ok(), "resolve --ours failed: {:?}", result.err());
 
         let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
-        assert_eq!(content, "main version", "should use our version");
+        assert_eq!(content, "feature version", "should use our version");
     }
 
     #[test]
@@ -198,7 +236,7 @@ mod resolve {
         );
 
         let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
-        assert_eq!(content, "feature version", "should use their version");
+        assert_eq!(content, "main version", "should use their version");
     }
 
     #[test]
@@ -279,8 +317,9 @@ mod resolve {
         )
         .unwrap();
 
-        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
-        heddle(&["resolve", "file.txt", "--theirs"], Some(temp.path())).unwrap();
+        assert_stale_merge_refuses(temp.path(), "feature");
+        refresh_thread_expect_conflict(temp.path(), "feature");
+        heddle(&["resolve", "file.txt", "--ours"], Some(temp.path())).unwrap();
         heddle_with_env(
             &[
                 "capture",
@@ -298,8 +337,16 @@ mod resolve {
             ],
         )
         .unwrap();
+        heddle(&["thread", "refresh", "feature"], Some(temp.path())).unwrap();
 
-        let blame = heddle(&["blame", "file.txt", "--json"], Some(temp.path())).unwrap();
+        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+
+        let blame = heddle(
+            &["blame", "file.txt", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&blame).unwrap();
         assert!(
             parsed["lines"][0]["author"]
@@ -335,8 +382,16 @@ mod resolve {
             ],
         )
         .unwrap();
+        heddle(&["thread", "refresh", "feature"], Some(temp.path())).unwrap();
 
-        let blame = heddle(&["blame", "file.txt", "--json"], Some(temp.path())).unwrap();
+        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+
+        let blame = heddle(
+            &["blame", "file.txt", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&blame).unwrap();
         assert!(
             parsed["lines"][0]["author"]
@@ -416,8 +471,12 @@ mod fsck {
         let temp = TempDir::new().unwrap();
         setup_repo_with_file(&temp, "file.txt", "content");
 
-        let result = heddle(&["fsck", "--json"], Some(temp.path()));
-        assert!(result.is_ok(), "fsck --json failed: {:?}", result.err());
+        let result = heddle(&["fsck", "--output", "json"], Some(temp.path()));
+        assert!(
+            result.is_ok(),
+            "fsck --output json failed: {:?}",
+            result.err()
+        );
 
         let output: Value = serde_json::from_str(&result.unwrap()).expect("should be JSON");
         assert!(output.get("valid").is_some(), "should have 'valid' field");
@@ -458,7 +517,8 @@ mod fsck {
         fs::write(temp.path().join("main.txt"), "main").unwrap();
         heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
 
-        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+        assert_stale_merge_refuses(temp.path(), "feature");
+        refresh_then_merge_thread(temp.path(), "feature");
 
         let result = heddle(&["fsck", "--full", "--thorough"], Some(temp.path()));
         assert!(
@@ -622,9 +682,9 @@ mod cherry_pick {
         assert!(!status["changes"]["added"].as_array().unwrap().is_empty());
     }
 
-    /// Regression: `heddle cherry-pick` must not silently destroy
-    /// heddle-ignored content under a tracked top-level directory it
-    /// drops. Pre-fix, `apply_tree_to_worktree` called
+    /// Regression: `heddle cherry-pick` must not silently destroy explicitly
+    /// ignored content under a tracked top-level directory it drops. Pre-fix,
+    /// `apply_tree_to_worktree` called
     /// `remove_path_recursively` on entries the cherry-picked tree no
     /// longer contained, recursively nuking `web/node_modules/` alongside
     /// the tracked `web/index.html`. Post-fix, only tracked descendants
@@ -633,6 +693,7 @@ mod cherry_pick {
     fn test_cherry_pick_preserves_ignored_siblings_in_dropped_tracked_dir() {
         let temp = TempDir::new().unwrap();
         heddle(&["init"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join(".heddleignore"), "node_modules/\n").unwrap();
 
         // Snapshot 1 (BASE): empty.
         heddle(&["capture", "-m", "empty"], Some(temp.path())).unwrap();
@@ -662,9 +723,9 @@ mod cherry_pick {
         // Move back to WITH_WEB so cherry-pick has work to do.
         heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
 
-        // User drops heddle-ignored content alongside the tracked dir.
-        // Default ignore list (`node_modules`) covers this; status hides
-        // it but the filesystem still holds it.
+        // User drops explicitly heddle-ignored content alongside the tracked
+        // dir. `.heddleignore` names `node_modules/`, so status hides it while
+        // the filesystem still holds it.
         fs::create_dir_all(temp.path().join("web/node_modules/lodash")).unwrap();
         fs::write(
             temp.path().join("web/node_modules/lodash/index.js"),
@@ -684,7 +745,7 @@ mod cherry_pick {
         );
         assert_file_exists(
             temp.path().join("web/node_modules/lodash/index.js"),
-            "heddle-ignored content must survive cherry-pick that drops the tracked dir",
+            "ignored content must survive cherry-pick that drops the tracked dir",
         );
     }
 }
@@ -804,8 +865,15 @@ mod blame {
         fs::write(temp.path().join("file.txt"), "content\n").unwrap();
         heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
 
-        let result = heddle(&["blame", "file.txt", "--json"], Some(temp.path()));
-        assert!(result.is_ok(), "blame --json failed: {:?}", result.err());
+        let result = heddle(
+            &["blame", "file.txt", "--output", "json"],
+            Some(temp.path()),
+        );
+        assert!(
+            result.is_ok(),
+            "blame --output json failed: {:?}",
+            result.err()
+        );
 
         let output: Value = serde_json::from_str(&result.unwrap()).expect("should be JSON");
         assert!(output.get("lines").is_some(), "should have 'lines' field");
@@ -855,7 +923,11 @@ mod blame {
         )
         .unwrap();
 
-        let output = heddle(&["blame", "file.txt", "--json"], Some(temp.path())).unwrap();
+        let output = heddle(
+            &["blame", "file.txt", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         let lines = parsed["lines"].as_array().unwrap();
         assert!(
@@ -891,9 +963,14 @@ mod blame {
         fs::write(temp.path().join("other.txt"), "main side\n").unwrap();
         snapshot_with_agent(&temp, "main", "anthropic", "claude-opus-main");
 
-        heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+        assert_stale_merge_refuses(temp.path(), "feature");
+        refresh_then_merge_thread(temp.path(), "feature");
 
-        let output = heddle(&["blame", "file.txt", "--json"], Some(temp.path())).unwrap();
+        let output = heddle(
+            &["blame", "file.txt", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         let lines = parsed["lines"].as_array().unwrap();
         assert!(
@@ -1216,6 +1293,33 @@ mod local_sync {
     }
 
     #[test]
+    fn test_push_local_accepts_git_shaped_remote_thread_alias() {
+        let repo_a = TempDir::new().unwrap();
+        let repo_b = TempDir::new().unwrap();
+
+        heddle(&["init"], Some(repo_a.path())).unwrap();
+        fs::write(repo_a.path().join("file.txt"), "content").unwrap();
+        heddle(&["capture", "-m", "Initial"], Some(repo_a.path())).unwrap();
+
+        heddle(&["init"], Some(repo_b.path())).unwrap();
+
+        let b_path = repo_b.path().to_string_lossy().to_string();
+        let result = heddle(&["push", &b_path, "feature"], Some(repo_a.path()));
+        assert!(
+            result.is_ok(),
+            "Git-shaped push local alias should succeed: {:?}",
+            result.err()
+        );
+
+        let threads = heddle(&["thread", "list"], Some(repo_b.path())).unwrap();
+        assert!(
+            threads.contains("feature"),
+            "pushed thread should be visible in target repo: {}",
+            threads
+        );
+    }
+
+    #[test]
     fn test_fetch_then_merge_remote_content() {
         let source = TempDir::new().unwrap();
         let dest = TempDir::new().unwrap();
@@ -1266,14 +1370,10 @@ mod local_sync {
         )
         .unwrap();
 
-        // Switch back to main (which has dest.txt) and merge
+        // Switch back to main (which has dest.txt), refresh the imported
+        // thread if needed, and merge.
         heddle(&["thread", "switch", "main"], Some(dest.path())).unwrap();
-        let result = heddle(&["merge", "from-source"], Some(dest.path()));
-        assert!(
-            result.is_ok(),
-            "merge remote content should succeed: {:?}",
-            result.err()
-        );
+        heddle(&["merge", "from-source"], Some(dest.path())).unwrap();
 
         // Both unique files should exist after merge
         assert!(
@@ -1328,8 +1428,11 @@ mod local_sync {
         // Source advances `main` with a new state.
         fs::write(source.path().join("forward.txt"), "forward").unwrap();
         heddle(&["capture", "-m", "Forward"], Some(source.path())).unwrap();
-        let source_main =
-            heddle(&["thread", "show", "main", "--json"], Some(source.path())).unwrap();
+        let source_main = heddle(
+            &["thread", "show", "main", "--output", "json"],
+            Some(source.path()),
+        )
+        .unwrap();
         let source_main_v: Value = serde_json::from_str(&source_main).unwrap();
         let target = source_main_v["current_state"]
             .as_str()
@@ -1352,7 +1455,11 @@ mod local_sync {
 
         // After fast-forward pull, dest's `main` thread metadata must
         // advance to the integrated state.
-        let main_show = heddle(&["thread", "show", "main", "--json"], Some(dest.path())).unwrap();
+        let main_show = heddle(
+            &["thread", "show", "main", "--output", "json"],
+            Some(dest.path()),
+        )
+        .unwrap();
         let main: Value = serde_json::from_str(&main_show).unwrap();
         assert_eq!(
             main["current_state"].as_str().unwrap(),
@@ -1361,7 +1468,7 @@ mod local_sync {
         );
 
         // HEAD must remain attached to the previously-attached thread.
-        let status_output = heddle(&["status", "--json"], Some(dest.path())).unwrap();
+        let status_output = heddle(&["status", "--output", "json"], Some(dest.path())).unwrap();
         let status: Value = serde_json::from_str(&status_output).unwrap();
         assert_eq!(
             status["thread"].as_str().unwrap(),
@@ -1644,8 +1751,11 @@ mod rebase {
 
         // Capture the change_id at the tip of `feature` — this is the
         // fast-forward target for rebasing `main` onto `feature`.
-        let feature_show =
-            heddle(&["thread", "show", "feature", "--json"], Some(temp.path())).unwrap();
+        let feature_show = heddle(
+            &["thread", "show", "feature", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap();
         let feature: Value = serde_json::from_str(&feature_show).unwrap();
         let target = feature["current_state"]
             .as_str()
@@ -1666,7 +1776,11 @@ mod rebase {
         );
 
         // After fast-forward, `main` must point at the integrated state.
-        let main_show = heddle(&["thread", "show", "main", "--json"], Some(temp.path())).unwrap();
+        let main_show = heddle(
+            &["thread", "show", "main", "--output", "json"],
+            Some(temp.path()),
+        )
+        .unwrap();
         let main: Value = serde_json::from_str(&main_show).unwrap();
         assert_eq!(
             main["current_state"].as_str().unwrap(),
@@ -1675,7 +1789,7 @@ mod rebase {
         );
 
         // HEAD must remain attached to the parent thread.
-        let status_output = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+        let status_output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
         let status: Value = serde_json::from_str(&status_output).unwrap();
         assert_eq!(
             status["thread"].as_str().unwrap(),

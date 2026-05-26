@@ -4,7 +4,7 @@ Project context, doc map, and operational guidance for agents working in this re
 
 ## Behavioral contract
 
-The twelve behavioral rules live in [CLAUDE.md](CLAUDE.md). That file is the authoritative behavioral spec — read it first, every session. The rules below in this file are project-specific addenda (confidence, compatibility, doc truth-labeling, environment, status, doc map) that wrap around the behavioral contract; they don't replace it.
+The twelve behavioral rules below are the authoritative behavioral spec for this worktree. If a future checkout includes a root `CLAUDE.md`, read it as additional guidance, but do not block on it when it is absent.
 
 If something goes wrong, the first triage step is which rule was violated:
 
@@ -39,11 +39,11 @@ Heddle is still moving quickly. Prefer the current model over preserving legacy 
 Heddle is an AI-native version control system written in Rust. It combines content-addressed storage, immutable history with stable change identifiers, explicit human and agent attribution, hosted namespace/repository control-plane primitives, and an emerging web product for repository intelligence and operations.
 
 **Key files:**
-- `SPEC.md` - Formal specification (source of truth for behavior)
 - `README.md` - Top-level product and capability overview
 - `Cargo.toml` - Workspace configuration
 - `crates/` - Primary Rust implementation
 - `docs/` - Architecture, hosted model, roadmap, and future-state plans
+- `specs/quint/` - Formal specifications and model-checking assets
 - `web/` - Hosted web product
 
 **Current Status:**
@@ -118,8 +118,8 @@ Note: `HEDDLE_SESSION_ID` and `HEDDLE_SESSION_SEGMENT` are **not implemented**. 
 
 ## Quick Reference
 
-- **Spec**: `SPEC.md` - Specification details
 - **Architecture**: `docs/ARCHITECTURE.md` - System design
+- **Formal Specs**: `specs/quint/` - Quint models and spec notes
 - **Hosted Model**: `docs/HOSTED_NAMESPACES.md` and `docs/HOSTED_ADMIN.md`
 - **Roadmap**: `docs/ENTERPRISE_BACKEND_ROADMAP.md`, `docs/RUNNERS_AND_BUILDS.md`, `docs/LINE_PROVENANCE_PLAN.md`
 - **Web Product**: `web/PRODUCT_SPEC.md`

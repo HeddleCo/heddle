@@ -25,7 +25,7 @@ use objects::{
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
-use crate::thread_manifest::{read_manifest, write_manifest, ManifestFile, ThreadManifest};
+use crate::thread_manifest::{ManifestFile, ThreadManifest, read_manifest, write_manifest};
 
 /// Outcome of [`Repository::capture_thread_from_disk`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,7 +188,8 @@ impl Repository {
             .write()
             .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
 
-        let existing_manifest = read_manifest(self.heddle_dir(), thread).map_err(HeddleError::Io)?;
+        let existing_manifest =
+            read_manifest(self.heddle_dir(), thread).map_err(HeddleError::Io)?;
 
         // 0. Fast no-op via the stat-cache. If every file in the
         //    manifest still exists with the same `(inode, mtime,
@@ -251,8 +252,11 @@ impl Repository {
         //    the worktree being captured from — record its canonical
         //    path so the next snapshot can tell whether it's running
         //    inside this same worktree.
-        let mut manifest =
-            ThreadManifest::new(state.change_id, new_tree_hash, canonical_worktree_path(root));
+        let mut manifest = ThreadManifest::new(
+            state.change_id,
+            new_tree_hash,
+            canonical_worktree_path(root),
+        );
         populate_manifest_from_tree(self, &new_tree, root, "", &mut manifest.files)?;
         write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
 
@@ -570,11 +574,7 @@ fn walk_for_no_op(
     Ok(true)
 }
 
-fn stat_cache_no_op(
-    repo: &Repository,
-    manifest: &ThreadManifest,
-    root: &Path,
-) -> Result<bool> {
+fn stat_cache_no_op(repo: &Repository, manifest: &ThreadManifest, root: &Path) -> Result<bool> {
     use std::collections::HashSet;
 
     let ignore_patterns = repo.ignore_patterns()?;
@@ -663,9 +663,10 @@ fn stat_cache_no_op(
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
     use crate::thread_manifest::read_manifest;
-    use tempfile::TempDir;
 
     #[test]
     fn materialize_thread_writes_manifest_with_files() {

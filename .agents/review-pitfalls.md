@@ -133,7 +133,9 @@ In a developer environment that includes `ANTHROPIC_API_KEY`, `AWS_SECRET_ACCESS
 `GITHUB_TOKEN`, etc. This is HIGH severity when the child is user-supplied code (hooks).
 
 Search for every `Command::new` in the codebase. Each one needs `env_clear()` unless the
-subprocess is fully trusted infrastructure (e.g., `git` called internally).
+subprocess is fully trusted infrastructure. Production CLI paths must not spawn `git`; Git
+fixture helpers in tests are not an exception to environment hygiene when they execute
+outside tightly controlled setup.
 
 ---
 

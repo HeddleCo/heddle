@@ -3,15 +3,15 @@
 This is how Heddle thinks about its CLI. The surface is small on purpose, the
 outputs are honest on purpose, and the verbs compose because the primitives
 beneath them are the right shape. Five principles run through every command:
-trust, disposability, composability, restraint, honesty. Read this before you
+verification, disposability, composability, restraint, honesty. Read this before you
 add a verb, change a flag, or argue for a new output field.
 
-## 1. Trust
+## 1. Verification
 
 Outputs say what they mean. Field names are stable across verbs, optional
 fields serialize as explicit `null` rather than disappearing, and empty
 collections come back as `[]` — never omitted. An agent that reads
-`heddle merge --json` and then `heddle status --json` finds `change_id`,
+`heddle merge --output json` and then `heddle status --output json` finds `change_id`,
 `current_state`, and `confidence` carrying the same meaning in both places.
 
 The full contract lives in [docs/json-schemas.md](json-schemas.md): stable
@@ -19,7 +19,7 @@ field names, explicit `null`, no leakage of unrelated context, empty
 collections serialize, pretty-printing only on `heddle show`. A tooling
 author can write a parser against the doc and expect the binary to match.
 
-Trust extends down into errors. The filesystem layer in
+Verification extends down into errors. The filesystem layer in
 [`crates/objects/src/fs_atomic.rs`](../crates/objects/src/fs_atomic.rs)
 ships named predicates — `is_out_of_space`, `is_directory_not_empty`,
 `is_permission_denied`, `is_read_only_filesystem`, `is_cross_device` — so
@@ -61,12 +61,15 @@ enough to deserve a name.
 
 ## 4. Restraint
 
-Less to remember. The everyday `heddle help` curates eleven verbs — `init`,
-`start`, `capture`, `merge`, `log`, `status`, `review`, `discuss`,
-`context`, `undo`, `bridge` — and everything else lives behind
-`heddle help advanced` for the moments you need it. First-time users see
-the smallest surface that does real work. Power users and agents reach
-through to the full set when their task earns it.
+Less to remember. The everyday `heddle help` follows the core loop:
+inspect, adopt or clone, save work, isolate a thread, prove readiness,
+preview integration, ship or push, undo, inspect history, and recover.
+The exact verb list comes from the command contract table so human help
+and `heddle commands --output json` do not drift. Collaboration and
+annotation surfaces such as `review`, `discuss`, and `context` stay
+behind `heddle help advanced` and their topic pages for the moments you
+need them. First-time users see the smallest surface that explains where
+they are, what is in flight, what to do next, and how to recover.
 
 State IDs follow the same logic. Every state-taking verb accepts the same
 specifiers — full change ID, 4-character-or-longer prefix, marker name,
@@ -112,7 +115,7 @@ line-oriented streaming.
 
 ## How this is enforced
 
-`heddle doctor docs --all --json` walks every `heddle <verb>` invocation
+`heddle doctor docs --all --output json` walks every `heddle <verb>` invocation
 embedded in a tracked markdown file and reports drift: verbs that no
 longer exist, flags that aren't on a verb, literal values for
 `--workspace`, `--scope`, and `--kind` that aren't in the valid set

@@ -4,7 +4,7 @@
 mod context_mutate;
 mod context_query;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 pub use context_mutate::*;
 pub use context_query::*;
 use objects::object::{
@@ -16,7 +16,8 @@ use repo::Repository;
 use serde::Serialize;
 
 use super::{
-    history_target::resolve_state_id as resolve_state_id_impl, snapshot::ensure_current_state,
+    advice::RecoveryAdvice, history_target::resolve_state_id as resolve_state_id_impl,
+    snapshot::ensure_current_state,
 };
 use crate::{
     cli::{Cli, should_output_json},
@@ -96,7 +97,12 @@ pub(crate) fn read_annotation_content(
     match (message, file) {
         (Some(msg), _) => Ok(msg),
         (None, Some(path)) => Ok(std::fs::read_to_string(&path)?),
-        (None, None) => anyhow::bail!("Provide annotation content with -m or --file"),
+        (None, None) => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "context_content_required",
+            "Provide annotation content with -m or --file",
+            "Pass `-m <text>` or `--file <path>` with annotation content.",
+            "heddle context set --path <path> -m \"...\"",
+        ))),
     }
 }
 
@@ -172,7 +178,12 @@ pub(crate) fn parse_scope(input: Option<&str>) -> Result<AnnotationScope> {
         Some(s) if s.starts_with("symbol:") => {
             let name = s.strip_prefix("symbol:").unwrap();
             if name.is_empty() {
-                anyhow::bail!("Symbol name must not be empty");
+                return Err(anyhow!(RecoveryAdvice::invalid_usage(
+                    "context_symbol_name_required",
+                    "Symbol name must not be empty",
+                    "Use `--scope symbol:<name>` with a non-empty symbol name.",
+                    "heddle context set --path <path> --scope symbol:<name> -m \"...\"",
+                )));
             }
             Ok(AnnotationScope::Symbol {
                 name: name.to_string(),
@@ -187,13 +198,23 @@ pub(crate) fn parse_scope(input: Option<&str>) -> Result<AnnotationScope> {
             let start: u32 = start.parse()?;
             let end: u32 = end.parse()?;
             if start > end {
-                anyhow::bail!("Line range start ({start}) must not exceed end ({end})");
+                return Err(anyhow!(RecoveryAdvice::invalid_usage(
+                    "context_line_range_invalid",
+                    format!("Line range start ({start}) must not exceed end ({end})"),
+                    "Use `--scope lines:<start>-<end>` with start less than or equal to end.",
+                    "heddle context set --path <path> --scope lines:1-10 -m \"...\"",
+                )));
             }
             Ok(AnnotationScope::Lines(start, end))
         }
-        Some(other) => anyhow::bail!(
-            "Invalid scope '{other}'. Use 'file', 'symbol:<name>', or 'lines:<start>-<end>'"
-        ),
+        Some(other) => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "context_scope_invalid",
+            format!(
+                "Invalid scope '{other}'. Use 'file', 'symbol:<name>', or 'lines:<start>-<end>'"
+            ),
+            "Use `--scope file`, `--scope symbol:<name>`, or `--scope lines:<start>-<end>`.",
+            "heddle context set --path <path> --scope file -m \"...\"",
+        ))),
     }
 }
 
@@ -205,8 +226,18 @@ pub(crate) fn resolve_target(
     match (path, state) {
         (Some(path), None) => Ok(ContextTarget::file(path)?),
         (None, Some(state)) => Ok(ContextTarget::state(resolve_state_id(repo, &state)?)),
-        (None, None) => anyhow::bail!("Specify either --path or --state"),
-        (Some(_), Some(_)) => anyhow::bail!("--path and --state are mutually exclusive"),
+        (None, None) => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "context_target_required",
+            "Specify either --path or --state",
+            "Pass exactly one target: `--path <path>` for file context or `--state <state>` for state context.",
+            "heddle context get --path <path>",
+        ))),
+        (Some(_), Some(_)) => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "context_target_conflict",
+            "--path and --state are mutually exclusive",
+            "Pass exactly one target: either `--path <path>` or `--state <state>`.",
+            "heddle context get --path <path>",
+        ))),
     }
 }
 

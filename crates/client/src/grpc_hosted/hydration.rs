@@ -379,8 +379,7 @@ impl HydrationBridge {
 /// [`LazyHostedHydrator`] adapter that defers the actual gRPC connect (and
 /// worker-thread spawn) until the first `require_blob` call needs it.
 pub fn register_hosted_factory() {
-    use std::path::Path as StdPath;
-    use std::sync::Arc as StdArc;
+    use std::{path::Path as StdPath, sync::Arc as StdArc};
 
     use repo::lazy_hydrator::{
         BlobHydratorFactory, HydratorSection, KIND_HOSTED, register_factory,
@@ -428,16 +427,15 @@ mod tests {
     };
 
     use cli_shared::ClientConfig;
-    use objects::object::{Blob, ChangeId};
-    use repo::Repository;
-    use tempfile::TempDir;
-    use tonic::transport::Endpoint;
-
     use grpc::heddle::v1::{
         auth_service_client::AuthServiceClient, content_service_client::ContentServiceClient,
         hosted_user_service_client::HostedUserServiceClient,
         repo_sync_service_client::RepoSyncServiceClient,
     };
+    use objects::object::{Blob, ChangeId};
+    use repo::Repository;
+    use tempfile::TempDir;
+    use tonic::transport::Endpoint;
 
     use super::{
         super::{HostedGrpcClient, helpers::HostedTransportPolicy},
