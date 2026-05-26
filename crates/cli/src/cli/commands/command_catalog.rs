@@ -83,6 +83,16 @@ pub struct CommandCatalogEntry {
     pub documented_schema_verbs: Vec<String>,
     pub options: Vec<CommandCatalogOption>,
     pub arguments: Vec<CommandCatalogArgument>,
+    /// Sysexits-style codes this command may legitimately return, with a
+    /// one-line agent-facing reason. Empty for commands not yet swept. See
+    /// `docs/exit-codes.md` for the full taxonomy.
+    pub exit_codes: Vec<CommandCatalogExitCode>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CommandCatalogExitCode {
+    pub code: u8,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -274,6 +284,12 @@ struct CommandContract {
     canonical_note: Option<&'static str>,
     advertised_action: Option<AdvertisedAction>,
     feature_gate: Option<&'static str>,
+    /// Sysexits-style codes this command may legitimately return, paired
+    /// with a one-line agent-facing reason. Empty slice means "0 on
+    /// success, generic IoErr (74) on failure" — the implicit default for
+    /// commands not yet swept. See `docs/exit-codes.md` and
+    /// `crates/cli/src/exit.rs::HeddleExitCode`.
+    exit_codes: &'static [(u8, &'static str)],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,6 +327,7 @@ pub struct CommandRuntimeContract {
     pub canonical_note: Option<&'static str>,
     pub advertised_action: Option<AdvertisedAction>,
     pub feature_gate: Option<&'static str>,
+    pub exit_codes: &'static [(u8, &'static str)],
     pub side_effects: Vec<&'static str>,
     pub side_effect_class: &'static str,
     pub first_run_behavior: &'static str,
@@ -677,6 +694,7 @@ const READ_JSON: CommandContract = CommandContract {
     canonical_note: None,
     advertised_action: None,
     feature_gate: None,
+    exit_codes: &[],
 };
 
 const READ_TEXT: CommandContract = CommandContract {
@@ -736,6 +754,7 @@ const MUTATING: CommandContract = CommandContract {
     canonical_note: None,
     advertised_action: None,
     feature_gate: None,
+    exit_codes: &[],
 };
 
 const MUTATING_NO_OP_ID: CommandContract = CommandContract {
@@ -923,6 +942,16 @@ const fn surface(contract: CommandContract, surface: &'static str) -> CommandCon
 const fn feature_gated(contract: CommandContract, feature_gate: &'static str) -> CommandContract {
     CommandContract {
         feature_gate: Some(feature_gate),
+        ..contract
+    }
+}
+
+const fn exits(
+    contract: CommandContract,
+    exit_codes: &'static [(u8, &'static str)],
+) -> CommandContract {
+    CommandContract {
+        exit_codes,
         ..contract
     }
 }
@@ -1149,50 +1178,70 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["bridge", "git", "import"],
-        git_adapter_action(
-            json_discriminators(
-                documented_schemas(IMPORTING_MUTATION, &["bridge git import"]),
-                &[json_discriminator(
-                    Some("bridge git import"),
-                    "output_kind",
-                    "bridge_git_import",
-                )],
+        exits(
+            git_adapter_action(
+                json_discriminators(
+                    documented_schemas(IMPORTING_MUTATION, &["bridge git import"]),
+                    &[json_discriminator(
+                        Some("bridge git import"),
+                        "output_kind",
+                        "bridge_git_import",
+                    )],
+                ),
+                "adopt",
+                "workflow",
+                "Use adopt for the guided Git-to-Heddle conversion workflow.",
             ),
-            "adopt",
-            "workflow",
-            "Use adopt for the guided Git-to-Heddle conversion workflow.",
+            &[
+                (0, "ok"),
+                (65, "malformed git repo or unimportable refs"),
+                (74, "io reading git refs"),
+            ],
         ),
     ),
     entry(
         &["bridge", "git", "sync"],
-        git_adapter_action(
-            json_discriminators(
-                documented_schemas(IMPORTING_MUTATION, &["bridge git sync"]),
-                &[json_discriminator(
-                    Some("bridge git sync"),
-                    "output_kind",
-                    "bridge_git_sync",
-                )],
+        exits(
+            git_adapter_action(
+                json_discriminators(
+                    documented_schemas(IMPORTING_MUTATION, &["bridge git sync"]),
+                    &[json_discriminator(
+                        Some("bridge git sync"),
+                        "output_kind",
+                        "bridge_git_sync",
+                    )],
+                ),
+                "adopt",
+                "workflow",
+                "Use adopt for the guided Git-to-Heddle conversion workflow.",
             ),
-            "adopt",
-            "workflow",
-            "Use adopt for the guided Git-to-Heddle conversion workflow.",
+            &[
+                (0, "ok"),
+                (75, "remote unreachable; safe to retry"),
+                (76, "remote rejected payload"),
+            ],
         ),
     ),
     entry(
         &["bridge", "git", "reconcile"],
-        git_adapter_action(
-            json_discriminators(
-                documented_schemas(IMPORTING_MUTATION, &["bridge git reconcile"]),
-                &[json_discriminator(
-                    Some("bridge git reconcile"),
-                    "output_kind",
-                    "bridge_git_reconcile",
-                )],
+        exits(
+            git_adapter_action(
+                json_discriminators(
+                    documented_schemas(IMPORTING_MUTATION, &["bridge git reconcile"]),
+                    &[json_discriminator(
+                        Some("bridge git reconcile"),
+                        "output_kind",
+                        "bridge_git_reconcile",
+                    )],
+                ),
+                "adopt",
+                "workflow",
+                "Use adopt for the guided Git-to-Heddle conversion workflow.",
             ),
-            "adopt",
-            "workflow",
-            "Use adopt for the guided Git-to-Heddle conversion workflow.",
+            &[
+                (0, "ok"),
+                (65, "unmergeable divergence; manual resolution required"),
+            ],
         ),
     ),
     entry(
@@ -1301,25 +1350,32 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["collapse"], opaque_schemas(MUTATING, &["collapse"])),
     entry(
         &["commit"],
-        front_door(
-            advertised_action(
-                json_discriminators(
-                    documented_schemas(
-                        CommandContract {
-                            writes_git_refs: true,
-                            ..CAPTURE
-                        },
-                        &["commit"],
+        exits(
+            front_door(
+                advertised_action(
+                    json_discriminators(
+                        documented_schemas(
+                            CommandContract {
+                                writes_git_refs: true,
+                                ..CAPTURE
+                            },
+                            &["commit"],
+                        ),
+                        &[json_discriminator(Some("commit"), "output_kind", "commit")],
                     ),
-                    &[json_discriminator(Some("commit"), "output_kind", "commit")],
+                    "heddle commit -m <message>",
+                    &["heddle", "commit", "-m", "<message>"],
+                    &["message"],
+                    true,
+                    false,
                 ),
-                "heddle commit -m <message>",
-                &["heddle", "commit", "-m", "<message>"],
-                &["message"],
-                true,
-                false,
+                30,
             ),
-            30,
+            &[
+                (0, "ok"),
+                (65, "dirty worktree refused or unmergeable input"),
+                (74, "io while writing state"),
+            ],
         ),
     ),
     entry(
@@ -1522,7 +1578,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["init"],
-        front_door(documented_schemas(INIT, &["init"]), 200),
+        exits(
+            front_door(documented_schemas(INIT, &["init"]), 200),
+            &[
+                (0, "ok"),
+                (73, "cannot create state directory"),
+                (78, "workspace config invalid"),
+            ],
+        ),
     ),
     entry(&["inspect"], documented_schemas(READ_JSON, &["inspect"])),
     entry(&["integration"], surface(GROUP, "admin")),
@@ -1603,16 +1666,23 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["merge"],
-        front_door(
-            advertised_action(
-                documented_schemas(WORKTREE_MUTATION, &["merge --preview"]),
-                "heddle merge <thread> --preview",
-                &["heddle", "merge", "<thread>", "--preview"],
-                &["thread"],
-                true,
-                false,
+        exits(
+            front_door(
+                advertised_action(
+                    documented_schemas(WORKTREE_MUTATION, &["merge --preview"]),
+                    "heddle merge <thread> --preview",
+                    &["heddle", "merge", "<thread>", "--preview"],
+                    &["thread"],
+                    true,
+                    false,
+                ),
+                60,
             ),
-            60,
+            &[
+                (0, "ok"),
+                (65, "conflict requires manual resolution"),
+                (74, "io while writing state"),
+            ],
         ),
     ),
     entry(
@@ -1623,16 +1693,24 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["presence", "publish"], feature_gated(READ_JSON, "client")),
     entry(
         &["pull"],
-        front_door(
-            documented_schemas(
-                CommandContract {
-                    writes_git_refs: true,
-                    network_io: true,
-                    ..WORKTREE_MUTATION
-                },
-                &["pull"],
+        exits(
+            front_door(
+                documented_schemas(
+                    CommandContract {
+                        writes_git_refs: true,
+                        network_io: true,
+                        ..WORKTREE_MUTATION
+                    },
+                    &["pull"],
+                ),
+                90,
             ),
-            90,
+            &[
+                (0, "ok"),
+                (75, "remote unreachable; safe to retry"),
+                (76, "upstream protocol error"),
+                (78, "no upstream configured"),
+            ],
         ),
     ),
     entry(&["purge"], GROUP),
@@ -1652,23 +1730,31 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["push"],
-        front_door(
-            advertised_action(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        network_io: true,
-                        ..MUTATING
-                    },
-                    &["push"],
+        exits(
+            front_door(
+                advertised_action(
+                    documented_schemas(
+                        CommandContract {
+                            writes_git_refs: true,
+                            network_io: true,
+                            ..MUTATING
+                        },
+                        &["push"],
+                    ),
+                    "heddle push",
+                    &["heddle", "push"],
+                    &[],
+                    true,
+                    true,
                 ),
-                "heddle push",
-                &["heddle", "push"],
-                &[],
-                true,
-                true,
+                80,
             ),
-            80,
+            &[
+                (0, "ok"),
+                (75, "remote unreachable; safe to retry"),
+                (76, "remote rejected payload; do not retry without changing inputs"),
+                (78, "no upstream configured"),
+            ],
         ),
     ),
     entry(&["query"], documented_schemas(READ_JSON, &["query"])),
@@ -1909,12 +1995,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["status"],
-        front_door(
-            json_discriminators(
-                documented_schemas(READ_JSON_OR_JSONL, &["status"]),
-                &[json_discriminator(Some("status"), "output_kind", "status")],
+        exits(
+            front_door(
+                json_discriminators(
+                    documented_schemas(READ_JSON_OR_JSONL, &["status"]),
+                    &[json_discriminator(Some("status"), "output_kind", "status")],
+                ),
+                10,
             ),
-            10,
+            &[(0, "ok"), (74, "io reading workspace state")],
         ),
     ),
     entry(&["store"], surface(GROUP, "admin")),
@@ -2047,7 +2136,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["verify"],
-        front_door(documented_schemas(READ_JSON, &["verify"]), 110),
+        exits(
+            front_door(documented_schemas(READ_JSON, &["verify"]), 110),
+            &[
+                (0, "verified clean"),
+                (65, "verification reports blocked state"),
+                (74, "io reading state"),
+            ],
+        ),
     ),
     entry(
         &["try"],
@@ -2355,6 +2451,14 @@ fn catalog_entry(
             .collect(),
         options,
         arguments,
+        exit_codes: contract
+            .exit_codes
+            .iter()
+            .map(|(code, reason)| CommandCatalogExitCode {
+                code: *code,
+                reason: (*reason).to_string(),
+            })
+            .collect(),
     }
 }
 
@@ -2927,6 +3031,7 @@ fn runtime_contract(
         canonical_note: contract.canonical_note,
         advertised_action: contract.advertised_action,
         feature_gate: contract.feature_gate,
+        exit_codes: contract.exit_codes,
         side_effects: side_effects(contract),
         side_effect_class: side_effect_class(contract),
         first_run_behavior: first_run_behavior(contract),

@@ -9,6 +9,7 @@ use super::{
     recommended_action_argv,
 };
 use crate::cli::{Cli, render::shell_quote, should_output_json};
+use crate::exit::HeddleExitCode;
 
 /// Print an error to stderr with a one-line next-step hint when the error
 /// chain matches a known recoverable condition. Stays out of the way
@@ -36,7 +37,7 @@ pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
         let mut body = serde_json::json!({
             "code": kind,
             "error": envelope_error,
-            "exit_code": 1,
+            "exit_code": HeddleExitCode::from_error(err).as_u8(),
             "hint": hint,
             "kind": kind,
             "unsafe_condition": classification.unsafe_condition,
@@ -135,7 +136,7 @@ pub fn print_parse_error_json_envelope(err: &ClapError) {
     let body = serde_json::json!({
         "code": "parse_error",
         "error": err.to_string(),
-        "exit_code": err.exit_code(),
+        "exit_code": HeddleExitCode::from_clap(err).as_u8(),
         "hint": "Run `heddle commands --output json` to inspect the command surface.",
         "kind": "parse_error",
         "unsafe_condition": "the requested arguments do not match the registered command surface",

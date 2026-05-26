@@ -9857,7 +9857,12 @@ fn global_exit_codes_and_failure_streams_are_predictable() {
     assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: heddle status"));
 
     let typo = heddle_output(&["statuz"], None).expect("invoke typo");
-    assert_eq!(typo.status.code(), Some(2));
+    assert_eq!(
+        typo.status.code(),
+        Some(64),
+        "unknown subcommand is a Usage error (sysexits EX_USAGE = 64); \
+         see docs/exit-codes.md"
+    );
     assert!(
         typo.stdout.is_empty(),
         "parse errors should not write primary output: {}",
@@ -9872,7 +9877,12 @@ fn global_exit_codes_and_failure_streams_are_predictable() {
     let temp = TempDir::new().unwrap();
     let missing_repo = heddle_output(&["--output", "json", "status"], Some(temp.path()))
         .expect("invoke missing-repo status");
-    assert_eq!(missing_repo.status.code(), Some(1));
+    assert_eq!(
+        missing_repo.status.code(),
+        Some(78),
+        "missing repository is a Config error (sysexits EX_CONFIG = 78) — \
+         the precondition for any repo command is not met; see docs/exit-codes.md"
+    );
     assert!(
         missing_repo.stdout.is_empty(),
         "JSON-mode failures must keep stdout clean: {}",
@@ -11252,5 +11262,70 @@ fn bridge_git_sync_after_clone_reports_zero_imported() {
     assert!(
         text.contains("imported: 0 commits") || text.contains("imported: 0"),
         "text output should also report zero imported on a no-op sync: {text}"
+    );
+}
+
+/// Every non-`Ok` (0) exit code declared on any `CommandContract.exit_codes`
+/// entry must be documented in `docs/exit-codes.md`. Catches the
+/// "added a new code, forgot to update the table" regression.
+#[test]
+fn exit_codes_declared_have_doc_entry() {
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/exit-codes.md"
+    ))
+    .expect("docs/exit-codes.md should exist");
+
+    let catalog = cli::cli::commands::build_command_catalog();
+    let mut declared = std::collections::BTreeSet::new();
+    for entry in &catalog.commands {
+        for code in &entry.exit_codes {
+            if code.code != 0 {
+                declared.insert(code.code);
+            }
+        }
+    }
+
+    assert!(
+        !declared.is_empty(),
+        "no command declares non-zero exit codes; the representative sweep is missing"
+    );
+
+    for code in declared {
+        let needle = format!("|  {code}  |");
+        let alt_needle = format!("| {code} |");
+        assert!(
+            doc.contains(&needle) || doc.contains(&alt_needle),
+            "docs/exit-codes.md is missing a table row for code {code}; \
+             add it or remove the declaration from CommandContract.exit_codes"
+        );
+    }
+}
+
+/// Schema-stability contract: `exit_codes` must surface in the JSON catalog
+/// (`heddle commands --output json`). Agents discover the contract via that
+/// JSON; if a future refactor drops the field, every agent retry policy
+/// degrades silently.
+#[test]
+fn exit_codes_surface_in_json_catalog() {
+    let catalog = cli::cli::commands::build_command_catalog();
+    let push = catalog
+        .commands
+        .iter()
+        .find(|c| c.display == "push")
+        .expect("push command in catalog");
+    assert!(
+        push.exit_codes.iter().any(|c| c.code == 75),
+        "push must surface TempFail (75) in its catalogued exit_codes; \
+         agents key retry behavior off this code"
+    );
+    let bridge_import = catalog
+        .commands
+        .iter()
+        .find(|c| c.display == "bridge git import")
+        .expect("bridge git import command in catalog");
+    assert!(
+        bridge_import.exit_codes.iter().any(|c| c.code == 65),
+        "bridge git import must surface DataErr (65) for malformed repos"
     );
 }
