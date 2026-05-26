@@ -855,6 +855,10 @@ fn git_upstream_remote_name(repo: &Repository) -> Option<String> {
         .filter(|remote| !remote.is_empty())
 }
 
+pub(crate) fn is_known_remote_name(repo: &Repository, name: &str) -> Result<bool> {
+    Ok(merged_remote_items(repo)?.contains_key(name))
+}
+
 fn merged_remote_items(repo: &Repository) -> Result<BTreeMap<String, (String, String)>> {
     let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
     let git_overlay_remotes = if repo.capability() == RepositoryCapability::GitOverlay {

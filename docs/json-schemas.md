@@ -204,18 +204,20 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "208 command(s), 178 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 56 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 208,
-      "json_commands_total": 178,
+      "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 211,
+      "catalog_mutating_commands_total": 108,
+      "json_commands_total": 181,
+      "json_mutating_commands_total": 107,
       "json_commands_with_schema": 122,
-      "json_commands_with_accepted_opaque_schema": 56,
+      "json_commands_with_accepted_opaque_schema": 59,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 39,
       "verified_scope_json_commands_with_schema": 39,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 139,
-      "advanced_scope_json_commands_with_accepted_opaque_schema": 56,
+      "advanced_scope_json_commands_total": 142,
+      "advanced_scope_json_commands_with_accepted_opaque_schema": 59,
       "mutating_commands_total": 107,
       "mutating_commands_with_schema": 75,
       "mutating_commands_with_accepted_opaque_schema": 32,
@@ -226,11 +228,11 @@ in-progress operation.
       "verified_scope_mutating_commands_without_schema": 0,
       "advanced_scope_mutating_commands_total": 83,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 32,
-      "schema_verbs_total": 180,
-      "documented_schema_verbs_total": 180,
+      "schema_verbs_total": 183,
+      "documented_schema_verbs_total": 183,
       "undocumented_schema_verbs_total": 0,
-      "opaque_schema_verbs_total": 56,
-      "accepted_opaque_schema_verbs_total": 56,
+      "opaque_schema_verbs_total": 59,
+      "accepted_opaque_schema_verbs_total": 59,
       "unaccepted_opaque_schema_verbs_total": 0,
       "supports_op_id_total": 103,
       "jsonl_commands_total": 5,
@@ -2989,7 +2991,7 @@ catalog-wide schema coverage.
   "output_kind": "doctor_schemas",
   "status": "available",
   "verified": true,
-  "summary": "208 command(s), 178 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 56 accepted opaque schema(s) outside clean verification",
+  "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
   "recommended_action": null,
   "recommended_action_argv": null,
   "recovery_commands": [],
@@ -3004,18 +3006,20 @@ catalog-wide schema coverage.
     "status": "available",
     "verified_scope": "everyday_and_agent",
     "advanced_scope": "advanced_internal_admin",
-    "summary": "208 command(s), 178 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 56 accepted opaque schema(s) outside clean verification",
-    "catalog_commands_total": 208,
-    "json_commands_total": 178,
+    "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
+    "catalog_commands_total": 211,
+    "catalog_mutating_commands_total": 108,
+    "json_commands_total": 181,
+    "json_mutating_commands_total": 107,
     "json_commands_with_schema": 122,
-    "json_commands_with_accepted_opaque_schema": 56,
+    "json_commands_with_accepted_opaque_schema": 59,
     "json_commands_without_schema": 0,
     "verified_scope_json_commands_total": 39,
     "verified_scope_json_commands_with_schema": 39,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
     "verified_scope_json_commands_without_schema": 0,
-    "advanced_scope_json_commands_total": 139,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 56,
+    "advanced_scope_json_commands_total": 142,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 59,
     "mutating_commands_total": 107,
     "mutating_commands_with_schema": 75,
     "mutating_commands_with_accepted_opaque_schema": 32,
@@ -3027,8 +3031,8 @@ catalog-wide schema coverage.
     "advanced_scope_mutating_commands_total": 83,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 32,
     "undocumented_schema_verbs_total": 0,
-    "opaque_schema_verbs_total": 56,
-    "accepted_opaque_schema_verbs_total": 56,
+    "opaque_schema_verbs_total": 59,
+    "accepted_opaque_schema_verbs_total": 59,
     "unaccepted_opaque_schema_verbs_total": 0,
     "missing_schema_examples": [],
     "missing_mutating_schema_examples": [],
@@ -3400,6 +3404,28 @@ Preview or apply a ref reconciliation between Git and Heddle.
     "heddle bridge git reconcile --prefer git --ref main --preview"
   ]
 }
+```
+
+---
+
+## `heddle stack --output json`
+
+`heddle stack` emits:
+
+```json
+{"thread": "main", "stack": null, "stacks": []}
+```
+
+`heddle stack ready` emits:
+
+```json
+{"thread": "main", "next_action": {"kind": "unknown"}}
+```
+
+`heddle stack snapshot` emits:
+
+```json
+{"thread": "main", "snapshot": null}
 ```
 
 ---

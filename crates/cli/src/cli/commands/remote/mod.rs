@@ -39,7 +39,9 @@ use crate::{
 mod remote_ops;
 
 pub use remote_ops::{cmd_pull, cmd_remote};
-pub(crate) use remote_ops::{resolve_default_remote_name, resolved_default_remote_name};
+pub(crate) use remote_ops::{
+    is_known_remote_name, resolve_default_remote_name, resolved_default_remote_name,
+};
 
 pub(crate) fn push_git_overlay_refs(
     repo: &Repository,

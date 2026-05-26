@@ -6,9 +6,17 @@ use std::fs;
 use anyhow::{Result, anyhow};
 use refs::Head;
 use repo::Repository;
+use serde_json::json;
 
 use super::{
-    ff_record::ff_advance_deferred, snapshot::ensure_current_state,
+    action_line::print_next_step,
+    advice::RecoveryAdvice,
+    ff_record::record_ff_advance,
+    git_overlay_health::{
+        RepositoryVerificationState, action_argv, build_repository_verification_state,
+        repository_verification_primary_command,
+    },
+    snapshot::ensure_current_state,
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
@@ -19,13 +27,10 @@ use crate::{
 mod rebase_ops;
 mod rebase_state;
 
-use rebase_ops::{
-    flush_rebase_batch, mint_rebase_transaction_id, replay_commits, replay_commits_silent,
-};
+use rebase_ops::{mint_rebase_transaction_id, replay_commits, replay_commits_silent};
 pub(crate) use rebase_state::load_rebase_state as load_persisted_rebase_state;
 use rebase_state::{
-    RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state,
-    load_rebase_state_for_abort, save_rebase_state,
+    RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state, save_rebase_state,
 };
 
 const REBASE_STATE_FILE: &str = "REBASE_STATE";
@@ -81,7 +86,7 @@ pub(crate) fn cmd_rebase_silent(
 pub(crate) fn continue_rebase_for_operator(repo: &Repository) -> Result<OperatorContinueStatus> {
     let rebase_state_path = repo.heddle_dir().join(REBASE_STATE_FILE);
     if !rebase_state_path.exists() {
-        return Err(anyhow!("No rebase in progress"));
+        return Err(anyhow!(no_rebase_in_progress_advice("continue rebase")));
     }
 
     let before = load_rebase_state(&rebase_state_path)?;
@@ -146,7 +151,7 @@ fn run_rebase(
         return handle_continue(repo, &rebase_state_path, cli);
     }
 
-    let target_thread = thread.ok_or_else(|| anyhow!("Usage: heddle rebase <thread>"))?;
+    let target_thread = thread.ok_or_else(rebase_target_required_advice)?;
 
     let current_change = ensure_current_state(
         repo,
@@ -164,30 +169,17 @@ fn run_rebase(
     let target_change_id = repo
         .refs()
         .get_thread(target_thread)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", target_thread))?;
+        .ok_or_else(|| rebase_target_not_found_advice(target_thread))?;
 
     if current_state.change_id == target_change_id {
-        if let Some(cli) = cli
-            && should_output_json(cli, Some(repo.config()))
-        {
-            println!("{{\"status\": \"up_to_date\"}}");
-        } else if cli.is_some() {
-            println!("Already up to date");
-        }
+        emit_up_to_date_if_trusted(repo, cli)?;
         return Ok(());
     }
 
     let is_ancestor = is_ancestor_of(repo, &current_state.change_id, &target_change_id)?;
 
     if is_ancestor {
-        // heddle#198: even the single-FF rebase paths surface as a
-        // rebase batch ([FF, TransactionCommit]) so `undo --list`,
-        // `heddle log`, and downstream tooling can identify a rebase
-        // by its envelope shape uniformly across the replay and FF
-        // arms. The undo behavior is unchanged — single-entry vs
-        // multi-entry batches both rewind in one step.
-        let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
-        flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
+        record_ff_advance(repo, target_thread, &target_change_id)?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -216,18 +208,8 @@ fn run_rebase(
         collect_commits_to_rebase(repo, &current_state.change_id, &target_change_id)?;
 
     if commits_to_replay.is_empty() {
-        // Same single-FF-as-rebase-batch wrap as the is_ancestor arm
-        // above (heddle#198).
-        let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
-        flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
-
-        if let Some(cli) = cli
-            && should_output_json(cli, Some(repo.config()))
-        {
-            println!("{{\"status\": \"up_to_date\"}}");
-        } else if cli.is_some() {
-            println!("Already up to date");
-        }
+        record_ff_advance(repo, target_thread, &target_change_id)?;
+        emit_up_to_date_if_trusted(repo, cli)?;
         return Ok(());
     }
 
@@ -239,10 +221,6 @@ fn run_rebase(
         pending_manual_resolution: None,
         pre_conflict_head: None,
         pending_advances: Vec::new(),
-        // Mint once and persist so a crash between `flush_rebase_batch`
-        // and `fs::remove_file(REBASE_STATE)` can re-flush with the
-        // same id; the helper's dedup check then recognises the prior
-        // commit (heddle#198 r2 / Codex PR #218 P2).
         transaction_id: mint_rebase_transaction_id(),
     };
 
@@ -270,21 +248,104 @@ fn run_rebase(
     }
 }
 
+fn emit_up_to_date_if_trusted(repo: &Repository, cli: Option<&Cli>) -> Result<()> {
+    let Some(cli) = cli else {
+        return Ok(());
+    };
+    let trust = build_repository_verification_state(repo);
+    if trust.verified {
+        if should_output_json(cli, Some(repo.config())) {
+            println!("{{\"status\": \"up_to_date\"}}");
+        } else {
+            println!("Already up to date");
+        }
+        return Ok(());
+    }
+
+    emit_up_to_date_blocked_by_trust(repo, cli, trust)
+}
+
+fn emit_up_to_date_blocked_by_trust(
+    repo: &Repository,
+    cli: &Cli,
+    trust: RepositoryVerificationState,
+) -> Result<()> {
+    let recommended_action = repository_verification_primary_command(&trust);
+    if should_output_json(cli, Some(repo.config())) {
+        println!(
+            "{}",
+            serde_json::to_string(&json!({
+                "status": "blocked",
+                "reason": "repository_verification",
+                "summary": trust.summary,
+                "recommended_action": recommended_action.clone(),
+                "recommended_action_argv": action_argv(&recommended_action),
+                "recovery_commands": trust.recovery_commands,
+                "verification": trust,
+            }))?
+        );
+    } else {
+        println!(
+            "Rebase is up to date, but repository verification is blocked: {}",
+            trust.summary
+        );
+        print_next_step(&recommended_action);
+    }
+    Ok(())
+}
+
+fn no_rebase_in_progress_advice(action: &'static str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "no_rebase_in_progress",
+        "No rebase in progress",
+        "Inspect the current operation state with `heddle status`.",
+        "the repository has no persisted Heddle rebase state",
+        format!("{action} would need to move worktree and thread state for an active rebase"),
+        "repository state was left unchanged",
+        "heddle status",
+        vec!["heddle status".to_string()],
+    )
+}
+
+fn rebase_target_required_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "rebase_target_required",
+        "Refusing to rebase: target thread required",
+        "Inspect available threads with `heddle thread list`, then run `heddle rebase <thread>`.",
+        "rebase was requested without a target thread",
+        "rebase would need to move the current thread and worktree onto a specific target",
+        "repository state was left unchanged",
+        "heddle thread list",
+        vec![
+            "heddle thread list".to_string(),
+            "heddle rebase <thread>".to_string(),
+        ],
+    )
+}
+
+fn rebase_target_not_found_advice(target_thread: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "rebase_target_not_found",
+        format!("Refusing to rebase: thread '{target_thread}' not found"),
+        "Inspect available threads with `heddle thread list`, then rerun rebase with an existing thread.",
+        format!("no Heddle thread named '{target_thread}' was found"),
+        "rebase would need to move the current thread and worktree onto that target thread",
+        "repository state was left unchanged",
+        "heddle thread list",
+        vec!["heddle thread list".to_string()],
+    )
+}
+
 fn handle_abort(
     repo: &Repository,
     rebase_state_path: &std::path::Path,
     cli: Option<&Cli>,
 ) -> Result<()> {
     if !rebase_state_path.exists() {
-        return Err(anyhow!("No rebase in progress"));
+        return Err(anyhow!(no_rebase_in_progress_advice("abort rebase")));
     }
 
-    // heddle#198 r2 (Codex PR #218 P2): abort uses the lenient loader
-    // so a single corrupted `pending_advance=` line — crash mid-write
-    // or a hand-edit — doesn't strand the operator with neither abort
-    // nor continue available. Abort only needs `original_head` to
-    // rewind; the buffered FF history is discarded.
-    let state = load_rebase_state_for_abort(rebase_state_path)?;
+    let state = load_rebase_state(rebase_state_path)?;
     repo.goto_without_record(&state.original_head)?;
 
     fs::remove_file(rebase_state_path)?;
@@ -306,7 +367,7 @@ fn handle_continue(
     cli: Option<&Cli>,
 ) -> Result<()> {
     if !rebase_state_path.exists() {
-        return Err(anyhow!("No rebase in progress"));
+        return Err(anyhow!(no_rebase_in_progress_advice("continue rebase")));
     }
 
     if let Some(cli) = cli {
