@@ -75,6 +75,44 @@ impl FsStore {
         Ok(())
     }
 
+    /// Trees analogue of [`put_blobs_packed_impl`]. Each tree is
+    /// supplied as its pre-serialized rmp bytes (the caller is
+    /// expected to have built it via `rmp_serde::to_vec(&tree)` and
+    /// computed its hash via `Tree::hash()`). Used by the git-import
+    /// hot path to coalesce N tree writes into one pack install.
+    pub(super) fn put_trees_packed_impl(
+        &self,
+        trees: Vec<(ContentHash, Vec<u8>)>,
+    ) -> Result<()> {
+        if trees.is_empty() {
+            return Ok(());
+        }
+        let mut compression = self.compression;
+        compression.max_delta_size = 0;
+        let mut builder = PackBuilder::new(compression);
+        let mut staged: Vec<(ContentHash, Vec<u8>)> = Vec::with_capacity(trees.len());
+        for (hash, data) in trees {
+            if ObjectStore::has_tree(self, &hash)? {
+                continue;
+            }
+            staged.push((hash, data.clone()));
+            builder.add(hash, PackObjectType::Tree, data);
+        }
+        if staged.is_empty() {
+            return Ok(());
+        }
+        let (pack_data, index_data, _stats) = builder.build()?;
+        self.install_pack_files(&pack_data, &index_data)?;
+        if let Ok(mut cache) = self.recent_trees.write() {
+            for (hash, data) in staged {
+                let tree: crate::object::Tree = rmp_serde::from_slice(&data)
+                    .map_err(|e| HeddleError::Config(format!("rmp decode tree: {e}")))?;
+                cache.insert(hash, tree);
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn pack_objects_impl(&self, _aggressive: bool) -> Result<(u64, u64)> {
         let blobs = list_hashes_from_dir(&blobs_dir(&self.root))?;
         let trees = list_hashes_from_dir(&trees_dir(&self.root))?;

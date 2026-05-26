@@ -565,6 +565,10 @@ fn import_with_ref_filter(
                 &mut stats,
             )?;
         }
+        // Flush the importer's pending blob writes as a single
+        // packfile. Buffering them turns N per-blob fsyncs into
+        // one — measured ~900ms saved on a 76-commit import (bine).
+        tree_importer.flush_pending_writes()?;
         Ok(())
     })();
     drop(_ancestry_span);

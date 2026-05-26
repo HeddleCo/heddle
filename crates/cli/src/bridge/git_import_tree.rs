@@ -15,6 +15,12 @@ pub struct GitTreeImporter<'a> {
     repo: &'a gix::Repository,
     tree_cache: HashMap<gix::hash::ObjectId, ContentHash>,
     blob_cache: HashMap<gix::hash::ObjectId, ContentHash>,
+    /// Blobs and trees to write at flush time. Buffering them turns
+    /// N `put_blob` / `put_tree` syscalls (one fsync each, ~3.6ms on
+    /// Linux ext4) into one `put_*_packed` pack file each (one fsync
+    /// per pack). Empty unless `flush_pending_writes` has yet to run.
+    pending_blobs: Vec<(ContentHash, Vec<u8>)>,
+    pending_trees: Vec<(ContentHash, Vec<u8>)>,
 }
 
 impl<'a> GitTreeImporter<'a> {
@@ -24,7 +30,30 @@ impl<'a> GitTreeImporter<'a> {
             repo,
             tree_cache: HashMap::new(),
             blob_cache: HashMap::new(),
+            pending_blobs: Vec::new(),
+            pending_trees: Vec::new(),
         }
+    }
+
+    /// Persist any buffered blob/tree writes as packs. MUST be called
+    /// before the importer is dropped, otherwise objects referenced
+    /// by imported states won't actually exist in the store.
+    pub fn flush_pending_writes(&mut self) -> GitResult<()> {
+        if !self.pending_blobs.is_empty() {
+            let batch = std::mem::take(&mut self.pending_blobs);
+            self.heddle_repo
+                .store()
+                .put_blobs_packed(batch)
+                .map_err(|e| GitBridgeError::Git(format!("flush packed blobs: {e}")))?;
+        }
+        if !self.pending_trees.is_empty() {
+            let batch = std::mem::take(&mut self.pending_trees);
+            self.heddle_repo
+                .store()
+                .put_trees_packed(batch)
+                .map_err(|e| GitBridgeError::Git(format!("flush packed trees: {e}")))?;
+        }
+        Ok(())
     }
 
     pub fn import_tree(&mut self, tree_oid: gix::hash::ObjectId) -> GitResult<ContentHash> {
@@ -101,7 +130,14 @@ impl<'a> GitTreeImporter<'a> {
         }
 
         let tree = Tree::from_entries(entries);
-        let hash = self.heddle_repo.store().put_tree(&tree)?;
+        let hash = tree.hash();
+        // Defer the disk write. `Tree::hash` is a pure function of
+        // entries, so the hash is stable now; callers needing the
+        // tree to actually be on disk must invoke
+        // `flush_pending_writes`.
+        let serialized = rmp_serde::to_vec(&tree)
+            .map_err(|e| GitBridgeError::Git(format!("rmp encode tree: {e}")))?;
+        self.pending_trees.push((hash, serialized));
         self.tree_cache.insert(tree_oid, hash);
         Ok(hash)
     }
@@ -116,8 +152,14 @@ impl<'a> GitTreeImporter<'a> {
             .find_blob(blob_oid)
             .map_err(|err| GitBridgeError::Git(err.to_string()))?;
 
-        let heddle_blob = Blob::new(blob.take_data());
-        let hash = self.heddle_repo.store().put_blob(&heddle_blob)?;
+        let data = blob.take_data();
+        let heddle_blob = Blob::from_slice(&data);
+        let hash = heddle_blob.hash();
+        // Defer the actual disk write — caller MUST call
+        // `flush_pending_writes` before relying on the blob being
+        // present. The hash is stable now because Blob's hash is a
+        // pure function of bytes.
+        self.pending_blobs.push((hash, data));
         self.blob_cache.insert(blob_oid, hash);
         Ok(hash)
     }
@@ -127,18 +169,27 @@ impl<'a> GitTreeImporter<'a> {
             return Ok(*hash);
         }
 
-        let blob = Blob::new(format!("{} {}", SUBMODULE_PREFIX, oid).into_bytes());
-        let hash = self.heddle_repo.store().put_blob(&blob)?;
+        let data = format!("{} {}", SUBMODULE_PREFIX, oid).into_bytes();
+        let blob = Blob::from_slice(&data);
+        let hash = blob.hash();
+        self.pending_blobs.push((hash, data));
         self.blob_cache.insert(oid, hash);
         Ok(hash)
     }
 }
 
-/// Import a Git tree as a Heddle tree.
+/// Import a Git tree as a Heddle tree. Convenience wrapper: persists
+/// blobs and trees before returning. Long-running callers should
+/// instead instantiate [`GitTreeImporter`] directly and call
+/// [`GitTreeImporter::flush_pending_writes`] once at the end of the
+/// import to batch the writes into a single packfile.
 pub fn import_git_tree(
     heddle_repo: &HeddleRepository,
     repo: &gix::Repository,
     tree_oid: gix::hash::ObjectId,
 ) -> GitResult<ContentHash> {
-    GitTreeImporter::new(heddle_repo, repo).import_tree(tree_oid)
+    let mut importer = GitTreeImporter::new(heddle_repo, repo);
+    let hash = importer.import_tree(tree_oid)?;
+    importer.flush_pending_writes()?;
+    Ok(hash)
 }

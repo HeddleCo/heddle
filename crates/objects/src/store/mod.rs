@@ -127,6 +127,9 @@ impl ObjectStore for SharedStore {
     fn put_blobs_packed(&self, blobs: Vec<(ContentHash, Vec<u8>)>) -> Result<()> {
         self.0.put_blobs_packed(blobs)
     }
+    fn put_trees_packed(&self, trees: Vec<(ContentHash, Vec<u8>)>) -> Result<()> {
+        self.0.put_trees_packed(trees)
+    }
     fn begin_snapshot_write_batch(&self) -> Result<()> {
         self.0.begin_snapshot_write_batch()
     }
@@ -370,6 +373,25 @@ pub trait ObjectStore: Send + Sync {
         for (hash, data) in blobs {
             if !self.has_blob(&hash)? {
                 self.put_blob_bytes_with_hash(&data, hash)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Trees analogue of [`put_blobs_packed`]. Backends with native
+    /// pack support coalesce N tree writes into one fsync-pair (one
+    /// for `.pack`, one for `.idx`). Default impl falls through to
+    /// per-tree writes via `put_tree_serialized` so backends without
+    /// pack support still satisfy the contract.
+    ///
+    /// Trees are supplied as pre-serialized rmp bytes plus the
+    /// pre-computed `Tree::hash()`. The caller is responsible for the
+    /// (hash, bytes) round-trip — backends will validate corruption
+    /// the same way `put_tree_serialized` does.
+    fn put_trees_packed(&self, trees: Vec<(ContentHash, Vec<u8>)>) -> Result<()> {
+        for (hash, data) in trees {
+            if !self.has_tree(&hash)? {
+                self.put_tree_serialized(&data, hash)?;
             }
         }
         Ok(())

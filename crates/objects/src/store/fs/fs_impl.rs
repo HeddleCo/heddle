@@ -880,6 +880,11 @@ impl ObjectStore for FsStore {
         self.put_blobs_packed_impl(blobs)
     }
 
+    #[instrument(skip(self, trees), fields(count = trees.len()))]
+    fn put_trees_packed(&self, trees: Vec<(crate::object::ContentHash, Vec<u8>)>) -> Result<()> {
+        self.put_trees_packed_impl(trees)
+    }
+
     #[instrument(skip(self))]
     fn install_pack_streaming(
         &self,
