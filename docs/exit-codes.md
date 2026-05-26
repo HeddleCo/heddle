@@ -46,10 +46,10 @@ intentionally — let it surface naturally.
 
 ## Schema/contract stability
 
-The CLI's `cargo` version IS the JSON contract version. Pin
-`heddle >= 0.X.Y` in your agent's dependencies and the catalogued output
-shapes (`output_kind`, declared discriminators, `exit_codes`) are stable for
-that minor.
+The CLI's `cargo` version IS the JSON contract version. Pin a
+`heddle-cli` version constraint (e.g. `>= 0.X.Y`) in your agent's
+dependencies and the catalogued output shapes (`output_kind`,
+declared discriminators, `exit_codes`) are stable for that minor.
 
 - Breaking changes to any catalogued output bump the **minor** pre-1.0 and
   the **major** post-1.0.
