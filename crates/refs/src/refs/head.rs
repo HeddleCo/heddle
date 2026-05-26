@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! HEAD reference definition.
 
-use objects::object::ChangeId;
+use objects::object::{ChangeId, ThreadName};
 
 /// Parse error for HEAD text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -11,7 +11,7 @@ pub struct HeadParseError(pub String);
 /// HEAD reference - points to current state.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Head {
-    Attached { thread: String },
+    Attached { thread: ThreadName },
     Detached { state: ChangeId },
 }
 
@@ -20,7 +20,7 @@ impl Head {
         let contents = contents.trim();
         if let Some(thread) = contents.strip_prefix("ref: ") {
             Ok(Head::Attached {
-                thread: thread.to_string(),
+                thread: ThreadName::new(thread),
             })
         } else if let Ok(id) = ChangeId::parse(contents) {
             Ok(Head::Detached { state: id })

@@ -8,6 +8,7 @@ mod blob;
 mod diff;
 mod discussion;
 mod hash;
+mod identifiers;
 mod operation_id;
 mod redaction;
 mod risk_signal;
@@ -32,6 +33,7 @@ pub use discussion::{
     DiscussionsBlob,
 };
 pub use hash::{ChangeId, ChangeIdParseError, ContentHash};
+pub use identifiers::{MarkerName, Scope, ThreadName};
 pub use operation_id::{OperationId, OperationIdParseError};
 pub use redaction::{
     REDACTION_SIGNING_PAYLOAD_VERSION_TAG, Redaction, RedactionError, RedactionsBlob,
