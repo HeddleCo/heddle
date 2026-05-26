@@ -183,10 +183,13 @@ fn actor_show_defaults_to_current_thread_actor() {
     )
     .unwrap();
 
-    let actor: Value = serde_json::from_str(
-        &heddle(&["--output", "json", "actor", "show"], Some(main.path())).unwrap(),
-    )
-    .unwrap();
+    let actor: Value = inject_post_verification_at(
+        main.path(),
+        serde_json::from_str(
+            &heddle(&["--output", "json", "actor", "show"], Some(main.path())).unwrap(),
+        )
+        .unwrap(),
+    );
 
     let actor_entry = &actor["actor"];
     assert_eq!(

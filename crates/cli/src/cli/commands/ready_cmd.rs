@@ -40,6 +40,7 @@ struct ReadyOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     captured_state: Option<String>,
     thread_state: String,
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     report: ThreadPreviewReport,

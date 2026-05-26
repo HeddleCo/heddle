@@ -123,27 +123,7 @@ metadata only; it does not import Git history or write Git-tracked files.
   ],
   "message": "Initialized Heddle data in /repo/.heddle for Git-overlay workflows",
   "next_action": "heddle adopt --ref main",
-  "recommended_action": "heddle adopt --ref main",
-  "verification": {
-    "verified": false,
-    "status": "needs_import",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "needs_import",
-    "mapping_state": "needs_import",
-    "remote_drift": "not_checked",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "blocked",
-    "machine_contract": "available",
-    "summary": "Git branch 'main' has not been imported into Heddle",
-    "recommended_action": "heddle adopt --ref main",
-    "recovery_commands": ["heddle adopt --ref main"],
-    "checks": []
-  }
+  "recommended_action": "heddle adopt --ref main"
 }
 ```
 
@@ -159,7 +139,10 @@ metadata only; it does not import Git history or write Git-tracked files.
 | `side_effects` | array<string> | required | Human-readable, machine-preserved list of what init changed or intentionally left untouched. |
 | `message` | string | required | Human summary. |
 | `next_action`, `recommended_action` | string \| null | required | Primary verification-guided next command. In a Git repo this is the explicit `heddle adopt --ref <branch>` command. |
-| `verification` | object | required | Post-init `RepositoryVerificationState`; Git repos report `needs_import` until import completes. |
+
+Note: the `verification` block is intentionally omitted from mutation
+replies. Run `heddle verify --output json` (or `heddle status --output
+json`) for the canonical verification surface.
 
 ---
 
@@ -477,27 +460,7 @@ surface; the native first-run loop should prefer `commit`.
   },
   "promotion_suggested": false,
   "heavy_impact_paths": [],
-  "message": "captured state hd-capture123",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "message": "captured state hd-capture123"
 }
 ```
 
@@ -512,27 +475,7 @@ surface; the native first-run loop should prefer `commit`.
   "summary": "wrote Git checkpoint abc123 for hd-capture123",
   "capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
-  "committed_at": "2026-05-23T00:00:00Z",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "committed_at": "2026-05-23T00:00:00Z"
 }
 ```
 
@@ -556,27 +499,7 @@ surface; the native first-run loop should prefer `commit`.
   "next_action_template": null,
   "recommended_action": null,
   "recommended_action_argv": null,
-  "recommended_action_template": null,
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "recommended_action_template": null
 }
 ```
 
@@ -594,27 +517,7 @@ surface; the native first-run loop should prefer `commit`.
   "next_action_template": null,
   "recommended_action": null,
   "recommended_action_argv": null,
-  "recommended_action_template": null,
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "recommended_action_template": null
 }
 ```
 
@@ -637,26 +540,6 @@ saves a Heddle state without recommending a Git checkpoint.
   "captured": true,
   "captured_state": "hd-sqr398dvx9ay",
   "thread_state": "ready",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  },
   "report": {}
 }
 ```
@@ -679,26 +562,6 @@ saves a Heddle state without recommending a Git checkpoint.
   "performed_steps": ["merge", "checkpoint"],
   "skipped_steps": ["capture(no changes)", "sync(current)", "push(not requested)"],
   "merge_state": "hd-ship123",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  },
   "chosen_path": "capture_sync_merge_checkpoint"
 }
 ```
@@ -788,27 +651,7 @@ Preview a merge without changing the worktree.
   "next_action_argv": ["heddle", "ship", "--thread", "feature/parser", "--push"],
   "recommended_action": "heddle ship --thread feature/parser --push",
   "recommended_action_argv": ["heddle", "ship", "--thread", "feature/parser", "--push"],
-  "diff": {},
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": "origin",
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "diff": {}
 }
 ```
 
@@ -839,27 +682,7 @@ continue.
   "message": "started thread parser-fast",
   "thread": null,
   "path": "../parser-fast",
-  "execution_path": "../parser-fast",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "parser-fast",
-    "heddle_thread": "parser-fast",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "execution_path": "../parser-fast"
 }
 ```
 
@@ -889,27 +712,7 @@ available, checkout paths, and post-command verification.
   "message": "Created thread 'feature/parser' at hd-sqr398dvx9ay",
   "thread": null,
   "path": null,
-  "execution_path": null,
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": "origin",
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "execution_path": null
 }
 ```
 
@@ -971,8 +774,7 @@ List recent saved states on a thread.
   "recommended_action_template": null,
   "thread": null,
   "path": null,
-  "execution_path": null,
-  "verification": null
+  "execution_path": null
 }
 ```
 
@@ -1260,29 +1062,7 @@ verification.
   "branch": "main",
   "repository_capability": "git-overlay",
   "commits_imported": 3,
-  "states_created": 3,
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": "origin",
-    "clone_verification": "verified",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recommended_action_argv": null,
-    "recovery_commands": [],
-    "recovery_command_argv": [],
-    "checks": []
-  }
+  "states_created": 3
 }
 ```
 
@@ -1324,29 +1104,7 @@ verification.
   "name": "origin",
   "url": "file:///tmp/source.git",
   "default": null,
-  "message": "Added remote",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "not_applicable",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": "origin",
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Heddle repository is initialized",
-    "recommended_action": "",
-    "recommended_action_argv": null,
-    "recovery_commands": [],
-    "recovery_command_argv": [],
-    "checks": []
-  }
+  "message": "Added remote"
 }
 ```
 
@@ -1373,26 +1131,6 @@ array.
     "status": "active",
     "started_at": "2026-05-24T00:00:00Z",
     "actor_chain": []
-  },
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
   }
 }
 ```
@@ -1437,27 +1175,7 @@ array.
   "session_id": "agent-4dvta2dd6as3uzjrszmq",
   "status": "complete",
   "thread": "actor/agent-4dvta2dd6as3uzjrszmq",
-  "coordination_status": "active",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "coordination_status": "active"
 }
 ```
 
@@ -1520,27 +1238,7 @@ Background startup refusals use the shared error envelope.
 {
   "status": "stopped",
   "socket_path": "/work/project/.heddle/sockets/grpc.sock",
-  "pid_path": "/work/project/.heddle/sockets/grpc.pid",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "pid_path": "/work/project/.heddle/sockets/grpc.pid"
 }
 ```
 
@@ -1586,27 +1284,7 @@ Background startup refusals use the shared error envelope.
   "stopped": false,
   "swept_stale": false,
   "pid": null,
-  "reason": "no pidfile",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "reason": "no pidfile"
 }
 ```
 
@@ -1633,26 +1311,6 @@ Background startup refusals use the shared error envelope.
     "thinking_level": "high",
     "probe_source": "app_protocol",
     "probe_confidence": 0.98
-  },
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
   }
 }
 ```
@@ -1674,27 +1332,7 @@ shape is the same capture envelope.
   "confidence": 0.8,
   "promotion_suggested": false,
   "heavy_impact_paths": [],
-  "message": "Captured hd-sqr398dvx9ay",
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "message": "Captured hd-sqr398dvx9ay"
 }
 ```
 
@@ -1719,27 +1357,7 @@ the same ready envelope.
   "captured": false,
   "captured_state": null,
   "thread_state": "ready",
-  "report": {},
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "report": {}
 }
 ```
 
@@ -1796,26 +1414,6 @@ the same ready envelope.
         "started_at": "2026-05-24T00:00:00Z"
       }
     ]
-  },
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
   }
 }
 ```
@@ -1831,26 +1429,6 @@ the same ready envelope.
     "provider": "openai",
     "model": "gpt-5.1",
     "started_at": "2026-05-24T00:05:00Z"
-  },
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "heddle-native",
-    "heddle_initialized": true,
-    "git_branch": null,
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Repository is not using the Git overlay",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
   }
 }
 ```
@@ -1894,27 +1472,7 @@ the same ready envelope.
 {
   "remote": "origin",
   "refs_fetched": 1,
-  "objects_fetched": 2,
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": "origin",
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "objects_fetched": 2
 }
 ```
 
@@ -1940,27 +1498,7 @@ the same ready envelope.
   "commits_seen_scope": "branches_and_heddle_notes",
   "materialized_checkout": true,
   "changed_path_count": 1,
-  "changed_paths": ["src/app.rs"],
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": "origin",
-    "clone_verification": "verified",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "changed_paths": ["src/app.rs"]
 }
 ```
 
@@ -2000,27 +1538,7 @@ the same ready envelope.
   "next_action_template": null,
   "recommended_action": null,
   "recommended_action_argv": null,
-  "recommended_action_template": null,
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": "origin",
-    "clone_verification": "verified",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  }
+  "recommended_action_template": null
 }
 ```
 
@@ -2067,29 +1585,7 @@ imports the requested Git refs, and returns the post-adoption verification proof
   "tags_synced": 1,
   "skipped_non_commit_refs": 0,
   "partial_mirror_refs": 0,
-  "already_in_sync": false,
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": "origin",
-    "clone_verification": "verified",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recommended_action_argv": null,
-    "recovery_commands": [],
-    "recovery_command_argv": [],
-    "checks": []
-  }
+  "already_in_sync": false
 }
 ```
 
@@ -2145,37 +1641,7 @@ carries `git_overlay_import_hint`.
   "recommended_action": "heddle bridge git import --ref support/import-me",
   "recommended_action_argv": ["heddle", "bridge", "git", "import", "--ref", "support/import-me"],
   "recovery_commands": ["heddle bridge git import --ref support/import-me"],
-  "recovery_command_argv": [["heddle", "bridge", "git", "import", "--ref", "support/import-me"]],
-  "verification": {
-    "verified": false,
-    "status": "needs_import",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "import_state": "needs_import",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "1 Git branch tip(s) still need Heddle import",
-    "recommended_action": "heddle bridge git import --ref support/import-me",
-    "recovery_commands": ["heddle bridge git import --ref support/import-me"],
-    "checks": [
-      {
-        "name": "Mapping",
-        "status": "needs_import",
-        "clean": false,
-        "summary": "1 Git branch tip(s) still need Heddle import",
-        "recommended_action": "heddle bridge git import --ref support/import-me",
-        "recovery_commands": ["heddle bridge git import --ref support/import-me"],
-        "details": {}
-      }
-    ]
-  }
+  "recovery_command_argv": [["heddle", "bridge", "git", "import", "--ref", "support/import-me"]]
 }
 ```
 
@@ -2858,8 +2324,8 @@ key naming:
 | `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
 | `import` | `{"commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N}` |
 | `sync` | `{"states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
-| `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin", "verification": {...}}` |
-| `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin", "verification": {...}}` |
+| `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
+| `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
 
 `heddle bridge git init --output json` emits:
 
@@ -2888,13 +2354,13 @@ key naming:
 `heddle bridge git push --output json` emits:
 
 ```json
-{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin", "verification": {}}
+{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}
 ```
 
 `heddle bridge git pull --output json` emits:
 
 ```json
-{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin", "verification": {}}
+{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}
 ```
 
 ---
@@ -3207,7 +2673,6 @@ Refresh the active or named thread, or report the verification/action blocker.
   "warnings": [],
   "next_action": "heddle ship",
   "recommended_action": "heddle ship",
-  "verification": {"verified": true, "status": "clean", "checks": []},
   "thread": "feature/parser",
   "current_state": "hd-sqr398dvx9ay",
   "chosen_path": "refresh"
@@ -3322,34 +2787,7 @@ name, delete, or rename it emits a thread operation result.
     "shared_target_dir": null
   },
   "path": null,
-  "execution_path": null,
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "main",
-    "worktree_dirty": false,
-    "worktree_state": "clean",
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "workflow_status": "clean",
-    "workflow_summary": "no ready threads are waiting to land",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recommended_action_argv": null,
-    "recommended_action_template": null,
-    "recovery_commands": [],
-    "recovery_command_argv": [],
-    "recovery_action_templates": [],
-    "checks": []
-  }
+  "execution_path": null
 }
 ```
 
@@ -3366,8 +2804,7 @@ shape when the target resolves as a state rather than a thread.
   "message": "Switched to thread 'feature/parser'",
   "thread": null,
   "path": null,
-  "execution_path": null,
-  "verification": null
+  "execution_path": null
 }
 ```
 

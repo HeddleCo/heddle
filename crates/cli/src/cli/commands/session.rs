@@ -36,6 +36,8 @@ struct SegmentOutput {
 #[derive(Serialize)]
 struct SessionEnvelope {
     session: SessionOutput,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -43,6 +45,8 @@ struct SessionEnvelope {
 #[derive(Serialize)]
 struct SegmentEnvelope {
     segment: SegmentOutput,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }

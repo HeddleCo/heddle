@@ -62,6 +62,8 @@ struct RemoteMutationOutput {
     url: Option<String>,
     default: Option<String>,
     message: String,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -104,6 +106,8 @@ struct PullOutput {
     state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     objects: Option<usize>,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }

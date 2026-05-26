@@ -615,7 +615,12 @@
         "$ref": "#/definitions/AgentReservationOutput"
       },
       "verification": {
-        "$ref": "#/definitions/RepositoryVerificationState"
+        "allOf": [
+          {
+            "$ref": "#/definitions/RepositoryVerificationState"
+          }
+        ],
+        "writeOnly": true
       }
     },
     "required": [

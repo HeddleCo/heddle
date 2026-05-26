@@ -27,6 +27,50 @@ fn verify_json(cwd: &std::path::Path) -> Value {
     envelope["verification"].clone()
 }
 
+/// Mutation `--output json` replies no longer embed `verification`
+/// (the verification-claim gate still consults it in-memory, but it
+/// is omitted from the wire to keep mutation replies focused).
+/// Some integration tests pattern-match on the field; this helper
+/// invokes `heddle verify --output json` after the fact and grafts
+/// the proof back onto the test fixture so the existing assertions
+/// keep working without per-call rewrites. Real consumers see the
+/// field omitted.
+fn inject_post_verification_at(cwd: &std::path::Path, mut value: Value) -> Value {
+    let obj = match value.as_object_mut() {
+        Some(obj) => obj,
+        None => return value,
+    };
+    if obj.contains_key("verification") {
+        return value;
+    }
+    let verify_out = match heddle_output(&["--output", "json", "verify"], Some(cwd)) {
+        Ok(out) => out,
+        Err(_) => return value,
+    };
+    let stream = if !verify_out.status.success() {
+        verify_out.stderr
+    } else {
+        verify_out.stdout
+    };
+    let text = std::str::from_utf8(&stream).unwrap_or("");
+    let parsed: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return value,
+    };
+    let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
+        parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else {
+        let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
+        obj_map.remove("output_kind");
+        obj_map.remove("repository_label");
+        obj_map.remove("repository_context");
+        obj_map.remove("clean");
+        Value::Object(obj_map)
+    };
+    obj.insert("verification".to_string(), verification);
+    value
+}
+
 #[test]
 fn test_cli_remote_operations() {
     let temp = TempDir::new().unwrap();
@@ -291,7 +335,10 @@ fn test_cli_pull_local_updates_requested_track() {
         1,
         "pull --output json must emit exactly one JSON value: {output}"
     );
-    let parsed: Value = serde_json::from_str(&output).expect("pull JSON should parse");
+    let parsed: Value = inject_post_verification_at(
+        target.path(),
+        serde_json::from_str(&output).expect("pull JSON should parse"),
+    );
     assert_eq!(parsed["output_kind"], "pull");
     assert_eq!(parsed["action"], "pull");
     assert_eq!(
@@ -653,7 +700,10 @@ fn test_cli_clone_local_attaches_head_to_cloned_thread() {
         None,
     )
     .expect("local clone succeeds");
-    let clone_output: Value = serde_json::from_str(&clone_json).expect("clone JSON parses");
+    let clone_output: Value = inject_post_verification_at(
+        &clone_dir,
+        serde_json::from_str(&clone_json).expect("clone JSON parses"),
+    );
     assert_eq!(clone_output["output_kind"], "clone");
     assert_eq!(clone_output["action"], "clone");
     assert_eq!(clone_output["status"], "cloned");
@@ -1246,7 +1296,10 @@ fn test_cli_clone_git_overlay_rewrites_origin_and_default_pull_keeps_git_clean()
 
     let pull_json =
         heddle(&["--output", "json", "pull"], Some(&work)).expect("default pull succeeds");
-    let pull: Value = serde_json::from_str(&pull_json).expect("pull JSON parses");
+    let pull: Value = inject_post_verification_at(
+        &work,
+        serde_json::from_str(&pull_json).expect("pull JSON parses"),
+    );
     assert_eq!(pull["output_kind"], "pull");
     assert_eq!(pull["action"], "pull");
     assert_eq!(pull["status"], "updated");
@@ -1364,7 +1417,10 @@ fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind()
 
     let fetch_json =
         heddle(&["--output", "json", "fetch", "origin"], Some(&work)).expect("fetch succeeds");
-    let fetch: Value = serde_json::from_str(&fetch_json).expect("fetch JSON parses");
+    let fetch: Value = inject_post_verification_at(
+        &work,
+        serde_json::from_str(&fetch_json).expect("fetch JSON parses"),
+    );
     assert_eq!(fetch["ref_scope"], "branches_and_heddle_notes", "{fetch}");
     assert_eq!(fetch["tags_included"], false, "{fetch}");
     assert_eq!(
@@ -1457,7 +1513,10 @@ fn test_cli_git_overlay_fetch_resolves_relative_local_git_remote_from_checkout_r
 
     let fetch_json =
         heddle(&["--output", "json", "fetch", "origin"], Some(&work)).expect("fetch succeeds");
-    let fetch: Value = serde_json::from_str(&fetch_json).expect("fetch JSON parses");
+    let fetch: Value = inject_post_verification_at(
+        &work,
+        serde_json::from_str(&fetch_json).expect("fetch JSON parses"),
+    );
     assert_eq!(
         fetch["verification"]["remote_drift"], "remote_behind",
         "fetch should resolve ../origin.git relative to the checkout root and surface behind drift: {fetch}"
@@ -1521,7 +1580,10 @@ fn test_cli_git_overlay_fetch_uses_configured_default_not_origin_fallback() {
 
     let fetch_json = heddle(&["--output", "json", "fetch"], Some(&work))
         .expect("bare fetch should use configured default backup, not bad origin");
-    let fetch: Value = serde_json::from_str(&fetch_json).expect("fetch JSON parses");
+    let fetch: Value = inject_post_verification_at(
+        &work,
+        serde_json::from_str(&fetch_json).expect("fetch JSON parses"),
+    );
     assert_eq!(
         fetch["remote"], "backup",
         "no-arg Git-overlay fetch should honor Heddle's configured default remote: {fetch}"
@@ -1717,7 +1779,10 @@ fn test_cli_git_overlay_current_push_carries_notes_for_cross_clone_identity() {
 
     let pull_json = heddle(&["--output", "json", "pull", "origin"], Some(&clone))
         .expect("clone pull should not hit mapping conflict");
-    let pull: Value = serde_json::from_str(&pull_json).expect("pull JSON parses");
+    let pull: Value = inject_post_verification_at(
+        &clone,
+        serde_json::from_str(&pull_json).expect("pull JSON parses"),
+    );
     assert_eq!(
         pull["verification"]["status"], "clean",
         "pull should preserve cross-clone Git/Heddle mapping agreement: {pull}"
@@ -1783,7 +1848,10 @@ fn test_cli_git_overlay_explicit_path_push_json_reports_configured_git_tracking_
     let origin_arg = origin.to_str().expect("origin path utf8");
     let push_json = heddle(&["--output", "json", "push", origin_arg], Some(&work))
         .expect("explicit path JSON push succeeds");
-    let push: Value = serde_json::from_str(&push_json).expect("push JSON parses");
+    let push: Value = inject_post_verification_at(
+        &work,
+        serde_json::from_str(&push_json).expect("push JSON parses"),
+    );
     assert_eq!(push["action"], "push");
     assert_eq!(push["remote"], origin_arg);
     assert_eq!(push["git_tracking_remote"], "origin");
@@ -1887,7 +1955,10 @@ fn test_cli_raw_git_clone_adopt_fetches_notes_before_import() {
     heddle(&["fetch", "origin"], Some(&work)).expect("original fetch succeeds");
     let pull_json = heddle(&["--output", "json", "pull", "origin"], Some(&work))
         .expect("original pull should not hit a mapping conflict");
-    let pull: Value = serde_json::from_str(&pull_json).expect("pull JSON parses");
+    let pull: Value = inject_post_verification_at(
+        &work,
+        serde_json::from_str(&pull_json).expect("pull JSON parses"),
+    );
     assert_eq!(
         pull["verification"]["status"], "clean",
         "pull should preserve cross-clone Git/Heddle mapping agreement after raw clone adoption: {pull}"
@@ -2605,7 +2676,10 @@ fn test_cli_push_defaults_to_current_attached_thread() {
         1,
         "push --output json must emit exactly one JSON value: {output}"
     );
-    let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
+    let parsed: Value = inject_post_verification_at(
+        &thread,
+        serde_json::from_str(&output).expect("push JSON should parse"),
+    );
     assert_eq!(
         parsed["success"], true,
         "push should report success: {parsed}"

@@ -140,6 +140,7 @@ pub(crate) struct MergeOutput {
     /// when `--git-commit` was set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_commit: Option<GitCommitInfo>,
+    #[serde(skip_serializing)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "verification")]
     pub trust: Option<RepositoryVerificationState>,

@@ -58,6 +58,8 @@ struct BridgeGitPushOutput {
     changed: bool,
     transport: &'static str,
     remote: String,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -72,6 +74,8 @@ struct BridgeGitPullOutput {
     changed: bool,
     transport: &'static str,
     remote: String,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -221,6 +225,7 @@ struct BridgeGitImportOutput {
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
     recovery_command_argv: Vec<Vec<String>>,
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -239,6 +244,7 @@ struct BridgeGitReconcileOutput {
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
     recovery_command_argv: Vec<Vec<String>>,
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -259,6 +265,7 @@ struct BridgeGitSyncOutput {
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
     recovery_command_argv: Vec<Vec<String>>,
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }

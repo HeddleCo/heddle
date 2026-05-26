@@ -290,7 +290,6 @@ fn emit_up_to_date_blocked_by_trust(
                 "recommended_action": recommended_action.clone(),
                 "recommended_action_argv": action_argv(&recommended_action),
                 "recovery_commands": trust.recovery_commands,
-                "verification": trust,
             }))?
         );
     } else {

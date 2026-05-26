@@ -133,6 +133,8 @@ struct PushOutput {
     recommended_action: Option<String>,
     recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }

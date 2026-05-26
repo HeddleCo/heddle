@@ -37,6 +37,8 @@ struct InitOutput {
     message: String,
     next_action: Option<String>,
     recommended_action: Option<String>,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }

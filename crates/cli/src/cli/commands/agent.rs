@@ -28,6 +28,8 @@ pub(crate) struct AgentServeOutput {
     pub status: String,
     pub socket_path: String,
     pub pid_path: String,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
 }
@@ -50,6 +52,8 @@ pub(crate) struct AgentStopOutput {
     swept_stale: bool,
     pid: Option<i32>,
     reason: Option<String>,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }

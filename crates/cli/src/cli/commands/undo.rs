@@ -55,6 +55,7 @@ struct UndoRedoOutput {
     recommended_action: Option<String>,
     recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
+    #[serde(skip_serializing)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "verification")]
     trust: Option<RepositoryVerificationState>,

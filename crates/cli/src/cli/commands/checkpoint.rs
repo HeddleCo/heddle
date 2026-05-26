@@ -55,6 +55,7 @@ struct CheckpointOutput {
     recommended_action: Option<String>,
     recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }

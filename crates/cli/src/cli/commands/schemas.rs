@@ -823,8 +823,6 @@ pub struct InitSchema {
     pub message: String,
     pub next_action: Option<String>,
     pub recommended_action: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -853,8 +851,6 @@ pub struct CaptureSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -877,8 +873,6 @@ pub struct CommitSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
     pub op_id: Option<String>,
     pub operation_record: Option<OperationRecordSchema>,
     pub idempotency_status: Option<String>,
@@ -920,8 +914,6 @@ pub struct CheckpointSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -953,8 +945,6 @@ pub struct UndoSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationStateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1021,8 +1011,6 @@ pub struct SwitchCheckoutSchema {
     pub thread: Option<ThreadSummarySchema>,
     pub path: Option<String>,
     pub execution_path: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationStateSchema>,
     pub target: Option<String>,
     pub intent: Option<String>,
 }
@@ -1058,8 +1046,6 @@ pub struct MergePreviewSchema {
     pub conflict_count: Option<usize>,
     pub thread_health: Option<String>,
     pub diff: Option<Value>,
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationStateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1114,8 +1100,6 @@ pub struct ReadySchema {
     pub captured: bool,
     pub captured_state: Option<String>,
     pub thread_state: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
     pub report: Value,
 }
 
@@ -1123,8 +1107,6 @@ pub struct ReadySchema {
 pub struct SyncSchema {
     #[serde(flatten)]
     pub operator: OperatorCommandSchema,
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationStateSchema>,
     pub thread: Option<String>,
     pub current_state: Option<String>,
     pub chosen_path: Option<String>,
@@ -1154,8 +1136,6 @@ pub struct ShipSchema {
     pub performed_steps: Vec<String>,
     pub skipped_steps: Vec<String>,
     pub merge_state: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
     pub chosen_path: String,
 }
 
@@ -1190,8 +1170,6 @@ pub struct ThreadStartSchema {
     pub thread: Option<ThreadSummarySchema>,
     pub path: Option<String>,
     pub execution_path: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationStateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1238,8 +1216,6 @@ pub struct ThreadCommandSchema {
     pub thread: Option<ThreadSummarySchema>,
     pub path: Option<String>,
     pub execution_path: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationStateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1437,8 +1413,6 @@ pub struct CloneSchema {
     pub states_created: Option<u64>,
     pub objects: Option<usize>,
     pub state: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationStateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1460,8 +1434,6 @@ pub struct AdoptSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1488,15 +1460,11 @@ pub struct RemoteMutationSchema {
     pub url: Option<String>,
     pub default: Option<String>,
     pub message: String,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ActorSingleSchema {
     pub actor: ActorEntrySchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1520,8 +1488,6 @@ pub struct ActorDoneSchema {
     pub recommended_action_argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1641,8 +1607,6 @@ pub struct AgentServeSchema {
     pub status: String,
     pub socket_path: String,
     pub pid_path: String,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1663,15 +1627,11 @@ pub struct AgentStopSchema {
     pub swept_stale: bool,
     pub pid: Option<i32>,
     pub reason: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AgentReservationEnvelopeSchema {
     pub reservation: AgentReservationSchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1704,15 +1664,11 @@ pub struct AgentReservationSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SessionEnvelopeSchema {
     pub session: SessionEntrySchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SessionSegmentEnvelopeSchema {
     pub segment: SessionSegmentSchema,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1754,8 +1710,6 @@ pub struct FetchSchema {
     pub tags_included: Option<bool>,
     pub refs_fetched: usize,
     pub objects_fetched: usize,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1793,8 +1747,6 @@ pub struct PullSchema {
     pub changed_path_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_paths: Option<Vec<String>>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1843,8 +1795,6 @@ pub struct PushSchema {
     pub recommended_action_argv: Option<Vec<String>>,
     #[schemars(required)]
     pub recommended_action_template: Option<ActionTemplateSchema>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2534,8 +2484,6 @@ pub struct BridgeImportSchema {
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
     pub recovery_command_argv: Vec<Vec<String>>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2553,8 +2501,6 @@ pub struct BridgeSyncSchema {
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
     pub recovery_command_argv: Vec<Vec<String>>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2571,8 +2517,6 @@ pub struct BridgeGitReconcileSchema {
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
     pub recovery_command_argv: Vec<Vec<String>>,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2585,8 +2529,6 @@ pub struct BridgePushSchema {
     pub changed: Option<bool>,
     pub transport: Option<String>,
     pub remote: String,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2599,8 +2541,6 @@ pub struct BridgePullSchema {
     pub changed: Option<bool>,
     pub transport: Option<String>,
     pub remote: String,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
 }
 
 // ---- stash / revert -------------------------------------------------------
@@ -3060,7 +3000,6 @@ mod tests {
             "recommended_action",
             "recommended_action_argv",
             "recommended_action_template",
-            "verification",
         ] {
             assert!(
                 required.contains(&stable_field),

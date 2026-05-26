@@ -57,53 +57,62 @@ fn thread_start_rejects_second_active_writer_for_same_thread() {
 fn agent_api_reserve_heartbeat_release_round_trips_json() {
     let main = setup_repo("base.txt", "shared base");
 
-    let reserved: Value = serde_json::from_str(
-        &heddle(
-            &[
-                "agent",
-                "reserve",
-                "--thread",
-                "feature/api",
-                "--task",
-                "exercise stable API",
-            ],
-            Some(main.path()),
+    let reserved: Value = inject_post_verification_at(
+        main.path(),
+        serde_json::from_str(
+            &heddle(
+                &[
+                    "agent",
+                    "reserve",
+                    "--thread",
+                    "feature/api",
+                    "--task",
+                    "exercise stable API",
+                ],
+                Some(main.path()),
+            )
+            .unwrap(),
         )
         .unwrap(),
-    )
-    .unwrap();
+    );
     let reservation = &reserved["reservation"];
     let session = reservation["session_id"].as_str().unwrap().to_string();
     assert_eq!(reservation["thread"], "feature/api");
     assert!(reservation["reservation_token"].as_str().is_some());
     assert!(reserved["verification"].is_object());
 
-    let heartbeat: Value = serde_json::from_str(
-        &heddle(
-            &["agent", "heartbeat", "--session", &session],
-            Some(main.path()),
+    let heartbeat: Value = inject_post_verification_at(
+        main.path(),
+        serde_json::from_str(
+            &heddle(
+                &["agent", "heartbeat", "--session", &session],
+                Some(main.path()),
+            )
+            .unwrap(),
         )
         .unwrap(),
-    )
-    .unwrap();
+    );
     assert_eq!(heartbeat["reservation"]["session_id"], session);
     assert!(heartbeat["verification"].is_object());
 
-    let released: Value = serde_json::from_str(
-        &heddle(
-            &[
-                "agent",
-                "release",
-                "--session",
-                &session,
-                "--status",
-                "complete",
-            ],
-            Some(main.path()),
+    let released: Value = inject_post_verification_at(
+        main.path(),
+        serde_json::from_str(
+            &heddle(
+                &[
+                    "agent",
+                    "release",
+                    "--session",
+                    &session,
+                    "--status",
+                    "complete",
+                ],
+                Some(main.path()),
+            )
+            .unwrap(),
         )
         .unwrap(),
-    )
-    .unwrap();
+    );
     assert_eq!(released["reservation"]["status"], "complete");
     assert!(released["verification"].is_object());
 

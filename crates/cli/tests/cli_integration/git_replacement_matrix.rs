@@ -34,8 +34,47 @@ fn assert_clean_json_without_git(args: &[&str], cwd: &std::path::Path) -> Value 
         stderr.is_empty(),
         "{args:?} JSON success must not write warnings/prose to stderr: {stderr}"
     );
-    serde_json::from_str(stdout)
-        .unwrap_or_else(|err| panic!("{args:?} should emit parseable JSON: {err}: {stdout}"))
+    let value: Value = serde_json::from_str(stdout)
+        .unwrap_or_else(|err| panic!("{args:?} should emit parseable JSON: {err}: {stdout}"));
+    inject_post_verification_without_git(cwd, value)
+}
+
+/// Mutation `--output json` replies no longer embed `verification`
+/// (the verification-claim gate still consults it in-memory, but it
+/// is omitted from the wire). This helper grafts the proof back onto
+/// the returned value for test ergonomics by invoking
+/// `heddle verify --output json` after the original call.
+fn inject_post_verification_without_git(cwd: &std::path::Path, mut value: Value) -> Value {
+    let obj = match value.as_object_mut() {
+        Some(obj) => obj,
+        None => return value,
+    };
+    if obj.contains_key("verification") {
+        return value;
+    }
+    let verify_out = heddle_output_without_git(&["--output", "json", "verify"], cwd);
+    let stream = if !verify_out.status.success() {
+        verify_out.stderr
+    } else {
+        verify_out.stdout
+    };
+    let text = str::from_utf8(&stream).unwrap_or("");
+    let parsed: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return value,
+    };
+    let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
+        parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else {
+        let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
+        obj_map.remove("output_kind");
+        obj_map.remove("repository_label");
+        obj_map.remove("repository_context");
+        obj_map.remove("clean");
+        Value::Object(obj_map)
+    };
+    obj.insert("verification".to_string(), verification);
+    value
 }
 
 fn assert_verify_failed_json_without_git(args: &[&str], cwd: &std::path::Path) -> Value {

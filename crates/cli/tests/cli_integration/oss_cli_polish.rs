@@ -3180,8 +3180,12 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
         commit_json.status.success(),
         "json commit should checkpoint already captured work"
     );
-    let committed: serde_json::Value = serde_json::from_slice(&commit_json.stdout)
-        .expect("captured-but-not-checkpointed commit should emit JSON success");
+    let committed: serde_json::Value = inject_post_verification_at(
+        temp.path(),
+        &["commit"],
+        serde_json::from_slice(&commit_json.stdout)
+            .expect("captured-but-not-checkpointed commit should emit JSON success"),
+    );
     assert_eq!(committed["included_pending_capture"], captured_again);
     assert_eq!(committed["verification"]["verified"], true);
     assert_eq!(
@@ -3846,9 +3850,10 @@ fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
     let stdout = std::str::from_utf8(&output.stdout).unwrap_or("");
     let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
     if output.status.success() || !stdout.trim().is_empty() {
-        return parse_exactly_one_json_value(stdout).unwrap_or_else(|err| {
+        let parsed = parse_exactly_one_json_value(stdout).unwrap_or_else(|err| {
             panic!("heddle {args:?} should emit one JSON value: {err}: {stdout}")
         });
+        return inject_post_verification_at(cwd, args, parsed);
     }
     if args.contains(&"verify") {
         let envelope: Value = serde_json::from_str(stderr).unwrap_or_else(|err| {
@@ -3873,6 +3878,55 @@ fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
         stdout,
         stderr
     );
+}
+
+/// Mutation `--output json` replies no longer embed `verification`
+/// (the verification-claim gate still consults it in-memory, but it
+/// is omitted from the wire). This helper grafts the proof back onto
+/// the returned value for test ergonomics by invoking
+/// `heddle verify --output json` after the original call. Real
+/// consumers see the field omitted.
+fn inject_post_verification_at(
+    cwd: &std::path::Path,
+    args: &[&str],
+    mut value: Value,
+) -> Value {
+    let obj = match value.as_object_mut() {
+        Some(obj) => obj,
+        None => return value,
+    };
+    if obj.contains_key("verification") {
+        return value;
+    }
+    if args.iter().any(|a| *a == "verify" || *a == "doctor") {
+        return value;
+    }
+    let verify_out = match heddle_output(&["--output", "json", "verify"], Some(cwd)) {
+        Ok(out) => out,
+        Err(_) => return value,
+    };
+    let stream = if !verify_out.status.success() {
+        verify_out.stderr
+    } else {
+        verify_out.stdout
+    };
+    let text = std::str::from_utf8(&stream).unwrap_or("");
+    let parsed: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return value,
+    };
+    let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
+        parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else {
+        let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
+        obj_map.remove("output_kind");
+        obj_map.remove("repository_label");
+        obj_map.remove("repository_context");
+        obj_map.remove("clean");
+        Value::Object(obj_map)
+    };
+    obj.insert("verification".to_string(), verification);
+    value
 }
 
 fn assert_no_json_key_named(value: &Value, forbidden: &str, context: &str) {
@@ -3930,7 +3984,12 @@ fn assert_schema_declares_runtime_top_level(verb: &[&str], runtime: &Value) {
         .unwrap_or_else(|| panic!("runtime output for {verb:?} should be an object: {runtime}"));
     let missing = runtime
         .keys()
-        .filter(|key| !properties.contains_key(*key))
+        // `verification` is no longer part of mutation schemas — the
+        // wire payload omits it. Test helpers (e.g.
+        // `inject_post_verification_at`) splice the proof back in for
+        // ergonomic assertions on `value["verification"][...]`, so
+        // skip it here to keep schema/runtime parity meaningful.
+        .filter(|key| key.as_str() != "verification" && !properties.contains_key(*key))
         .cloned()
         .collect::<Vec<_>>();
     assert!(
@@ -5797,8 +5856,9 @@ fn start_merge_undo_json_workflow_keeps_machine_streams_clean() {
             stderr.is_empty(),
             "{args:?} JSON success must keep stderr quiet: {stderr}"
         );
-        serde_json::from_str(stdout)
-            .unwrap_or_else(|_| panic!("{args:?} should emit parseable JSON: {stdout}"))
+        let parsed: Value = serde_json::from_str(stdout)
+            .unwrap_or_else(|_| panic!("{args:?} should emit parseable JSON: {stdout}"));
+        inject_post_verification_at(cwd, args, parsed)
     }
 
     let temp = TempDir::new().unwrap();
@@ -11037,7 +11097,11 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
         Some(temp.path()),
     )
     .expect("heddle clone");
-    let clone_output: Value = serde_json::from_str(&clone_json).expect("clone JSON parses");
+    let clone_output: Value = inject_post_verification_at(
+        &work,
+        &["clone"],
+        serde_json::from_str(&clone_json).expect("clone JSON parses"),
+    );
     assert_eq!(clone_output["output_kind"], "clone");
     assert_eq!(clone_output["action"], "clone");
     assert_eq!(clone_output["status"], "cloned");
@@ -11279,7 +11343,11 @@ fn bridge_git_sync_after_clone_reports_zero_imported() {
 
     let json = heddle(&["--output", "json", "bridge", "git", "sync"], Some(&work))
         .expect("bridge git sync JSON");
-    let parsed: Value = serde_json::from_str(&json).expect("sync JSON parses");
+    let parsed: Value = inject_post_verification_at(
+        &work,
+        &["bridge", "git", "sync"],
+        serde_json::from_str(&json).expect("sync JSON parses"),
+    );
     assert_eq!(parsed["output_kind"], "bridge_git_sync");
     assert_eq!(parsed["status"], "completed");
     assert_eq!(parsed["action"], "bridge git sync");

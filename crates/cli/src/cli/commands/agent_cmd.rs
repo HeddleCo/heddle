@@ -52,6 +52,8 @@ pub struct AgentReservationOutput {
 #[derive(Serialize, JsonSchema)]
 pub(crate) struct AgentReservationEnvelope {
     pub reservation: AgentReservationOutput,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
 }

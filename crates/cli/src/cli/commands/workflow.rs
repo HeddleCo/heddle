@@ -36,6 +36,7 @@ use crate::{
 struct SyncOutput {
     #[serde(flatten)]
     operator: OperatorCommandOutput,
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     thread: String,
@@ -58,6 +59,7 @@ struct ShipOutput {
     performed_steps: Vec<String>,
     skipped_steps: Vec<String>,
     merge_state: Option<String>,
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     chosen_path: String,

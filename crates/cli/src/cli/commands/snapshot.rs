@@ -56,6 +56,8 @@ pub(crate) struct SnapshotOutput {
     pub recommended_action: Option<String>,
     pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplate>,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
 }

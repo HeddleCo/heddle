@@ -38,6 +38,8 @@ struct FetchOutput {
     tags_included: Option<bool>,
     refs_fetched: usize,
     objects_fetched: usize,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: super::git_overlay_health::RepositoryVerificationState,
 }
