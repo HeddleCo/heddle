@@ -867,9 +867,13 @@ impl<'repo> DirectoryTreeHashLookup<'repo> {
 }
 
 fn split_parent_directory_key(dir_key: &str) -> Option<(String, &str)> {
-    let last_slash = dir_key.rfind('/')?;
-    let parent_key = &dir_key[..last_slash];
-    let name = &dir_key[last_slash + 1..];
+    if dir_key.is_empty() {
+        return None;
+    }
+    let (parent_key, name) = match dir_key.rfind('/') {
+        Some(idx) => (&dir_key[..idx], &dir_key[idx + 1..]),
+        None => ("", dir_key),
+    };
     if name.is_empty() {
         return None;
     }
