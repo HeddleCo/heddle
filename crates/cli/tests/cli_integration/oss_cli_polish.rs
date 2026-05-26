@@ -967,7 +967,10 @@ fn json_mode_parse_errors_emit_error_envelope() {
         .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
     assert_eq!(parsed["kind"], "parse_error");
     assert_eq!(parsed["code"], "parse_error");
-    assert_eq!(parsed["exit_code"], 2);
+    // EX_USAGE (sysexits) — unknown subcommand. The taxonomy in
+    // `crates/cli/src/exit.rs` reserves `2` for unhandled errors /
+    // panics, never intentional emission.
+    assert_eq!(parsed["exit_code"], 64);
     assert_eq!(
         parsed["primary_command_argv"],
         heddle_argv_json(["commands", "--output", "json"])
@@ -10055,7 +10058,9 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
     }
     assert_eq!(envelope["kind"], "repository_not_found");
     assert_eq!(envelope["code"], "repository_not_found");
-    assert_eq!(envelope["exit_code"], 1);
+    // EX_CONFIG (sysexits) — repository config missing. Matches the
+    // taxonomy in `crates/cli/src/exit.rs`.
+    assert_eq!(envelope["exit_code"], 78);
     assert_eq!(
         envelope["primary_command_argv"],
         heddle_argv_json(["init", temp.path().to_str().expect("temp path utf8")])
