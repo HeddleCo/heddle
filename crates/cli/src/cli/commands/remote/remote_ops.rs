@@ -231,7 +231,7 @@ pub async fn cmd_pull(
                 );
             } else {
                 println!(
-                    "{} already up to date with {}",
+                    "{} already up to date with {}; repository verification checked below",
                     style::ok_marker(),
                     style::bold(&remote_name)
                 );
