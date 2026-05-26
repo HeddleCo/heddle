@@ -23,7 +23,14 @@ use repo::daemon::{
 use serde::Serialize;
 
 use super::client::{rpc, sweep_stale_mounts};
-use crate::cli::{Cli, commands::advice::RecoveryAdvice, should_output_json};
+use crate::cli::{Cli, commands::advice::RecoveryAdvice, render::write_json_stdout, should_output_json};
+
+#[derive(Debug, Serialize)]
+struct DaemonStopOutput {
+    output_kind: &'static str,
+    action: &'static str,
+    status: &'static str,
+}
 
 #[derive(Debug, Serialize)]
 struct DaemonStatusOutput {
@@ -200,6 +207,7 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
 /// they make the integration-test assertions deterministic.
 pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
     let repo_root = resolve_repo_root(cli)?;
+    let json = should_output_json(cli, None);
     let endpoint_path = mount_daemon_endpoint_path(&repo_root);
     // Capture the daemon PID *before* sending shutdown so we can
     // probe it via `kill -0` after the endpoint file is gone. If the
@@ -228,7 +236,15 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
             )));
         }
         None => {
-            println!("daemon: not running");
+            if json {
+                write_json_stdout(&DaemonStopOutput {
+                    output_kind: "daemon_stop",
+                    action: "daemon stop",
+                    status: "not_running",
+                })?;
+            } else {
+                println!("daemon: not running");
+            }
             return Ok(());
         }
     }
@@ -262,7 +278,15 @@ pub fn cmd_daemon_stop(cli: &Cli) -> Result<()> {
     // happy path the daemon has already removed `mounts.json`, so
     // this is a no-op.
     sweep_stale_mounts(&repo_root);
-    println!("daemon: stopped");
+    if json {
+        write_json_stdout(&DaemonStopOutput {
+            output_kind: "daemon_stop",
+            action: "daemon stop",
+            status: "stopped",
+        })?;
+    } else {
+        println!("daemon: stopped");
+    }
     Ok(())
 }
 

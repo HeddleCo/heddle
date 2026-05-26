@@ -13,13 +13,40 @@
 
 use anyhow::Result;
 use repo::Repository;
+use serde::Serialize;
 
 #[cfg(feature = "git-overlay")]
 use crate::bridge::GitBridge;
-use crate::cli::Cli;
+use crate::cli::{Cli, render::write_json_stdout, should_output_json};
+
+#[derive(Serialize, Default)]
+struct GcOutput {
+    output_kind: &'static str,
+    action: &'static str,
+    status: &'static str,
+    dry_run: bool,
+    prune: bool,
+    packed_count: u64,
+    bytes_saved: u64,
+    pruned_loose: u64,
+    bytes_freed: u64,
+    pinned_redactions: usize,
+    preserved_redactions: usize,
+    #[cfg(feature = "git-overlay")]
+    pruned_git_mapping_entries: usize,
+}
 
 pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let json = should_output_json(cli, Some(repo.config()));
+    let mut summary = GcOutput {
+        output_kind: "gc",
+        action: "gc",
+        status: "ok",
+        dry_run,
+        prune,
+        ..Default::default()
+    };
 
     // Snapshot redactions before GC so we can both report the pinned
     // count and (post-GC) assert that no record was disturbed. The
@@ -31,35 +58,46 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
         .iter()
         .map(|(_, blob)| blob.redactions.len())
         .sum();
+    summary.pinned_redactions = pinned_redactions;
 
     if dry_run {
         let blobs = repo.store().list_blobs()?;
         let trees = repo.store().list_trees()?;
         let total_objects = blobs.len() + trees.len();
+        summary.packed_count = total_objects as u64;
+        summary.status = "dry_run";
 
-        println!(
-            "Would pack {} objects ({} blobs, {} trees)",
-            total_objects,
-            blobs.len(),
-            trees.len()
-        );
+        if !json {
+            println!(
+                "Would pack {} objects ({} blobs, {} trees)",
+                total_objects,
+                blobs.len(),
+                trees.len()
+            );
 
-        if prune {
-            println!("Would prune loose objects after packing");
-        }
-        if pinned_redactions > 0 {
-            println!("Pinned {pinned_redactions} redaction tombstone(s) — never collected by GC");
+            if prune {
+                println!("Would prune loose objects after packing");
+            }
+            if pinned_redactions > 0 {
+                println!(
+                    "Pinned {pinned_redactions} redaction tombstone(s) — never collected by GC"
+                );
+            }
         }
     } else {
         let (packed_count, bytes_saved) = repo.store().pack_objects(aggressive)?;
+        summary.packed_count = packed_count;
+        summary.bytes_saved = bytes_saved;
 
-        if packed_count > 0 {
-            println!(
-                "Packed {} objects (saved {} bytes)",
-                packed_count, bytes_saved
-            );
-        } else {
-            println!("No objects to pack");
+        if !json {
+            if packed_count > 0 {
+                println!(
+                    "Packed {} objects (saved {} bytes)",
+                    packed_count, bytes_saved
+                );
+            } else {
+                println!("No objects to pack");
+            }
         }
 
         repo.refs().pack_refs()?;
@@ -69,7 +107,8 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
             let mut bridge = GitBridge::new(&repo);
             if bridge.is_initialized() {
                 let removed = bridge.prune_unreachable_mapping_entries()?;
-                if removed > 0 {
+                summary.pruned_git_mapping_entries = removed;
+                if !json && removed > 0 {
                     println!("Pruned {removed} stale Git-overlay mapping entries");
                 }
             }
@@ -77,13 +116,17 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
 
         if prune {
             let (removed, bytes_freed) = repo.store().prune_loose_objects()?;
-            if removed > 0 {
-                println!(
-                    "Pruned {} loose objects (freed {} bytes)",
-                    removed, bytes_freed
-                );
-            } else {
-                println!("No loose objects to prune");
+            summary.pruned_loose = removed;
+            summary.bytes_freed = bytes_freed;
+            if !json {
+                if removed > 0 {
+                    println!(
+                        "Pruned {} loose objects (freed {} bytes)",
+                        removed, bytes_freed
+                    );
+                } else {
+                    println!("No loose objects to prune");
+                }
             }
         }
 
@@ -119,12 +162,18 @@ pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result
             }
         }
         if pinned_redactions > 0 {
-            println!(
-                "Preserved {pinned_redactions} redaction tombstone(s) across GC \
-                 (structurally outside the object store)"
-            );
+            summary.preserved_redactions = pinned_redactions;
+            if !json {
+                println!(
+                    "Preserved {pinned_redactions} redaction tombstone(s) across GC \
+                     (structurally outside the object store)"
+                );
+            }
         }
     }
 
+    if json {
+        write_json_stdout(&summary)?;
+    }
     Ok(())
 }
