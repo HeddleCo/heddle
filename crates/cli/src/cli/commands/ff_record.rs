@@ -17,7 +17,6 @@
 
 use anyhow::{Result, anyhow};
 use objects::object::ChangeId;
-use oplog::OpRecord;
 use refs::Head;
 use repo::Repository;
 
@@ -111,45 +110,3 @@ fn record_ff_advance_inner(
     Ok(())
 }
 
-/// Mutate the worktree to fast-forward the attached thread to
-/// `post_target_id` *without* writing to the oplog. Returns the
-/// `OpRecord` that [`record_ff_advance`] would have written so the
-/// caller can fold it into a larger batch.
-///
-/// Used by the rebase replay loop (heddle#198): per-commit FF records
-/// are accumulated and emitted as a single oplog batch at the end of
-/// the rebase, so `heddle undo` treats the whole rebase as one undo
-/// unit instead of one undo per replayed commit. The mutation half
-/// runs immediately (so the next replay step sees the advanced tip);
-/// the recording half is deferred to the batch flush.
-///
-/// Detached-HEAD fallback matches [`record_ff_advance`]: returns an
-/// `OpRecord::Goto` so the legacy `Goto` inverse correctly rewinds
-/// HEAD on undo without trying to restore a non-existent thread ref.
-pub(super) fn ff_advance_deferred(
-    repo: &Repository,
-    source_thread: &str,
-    post_target_id: &ChangeId,
-) -> Result<OpRecord> {
-    let head_before = repo.head_ref()?;
-    let pre_target_id = match &head_before {
-        Head::Attached { thread } => repo
-            .refs()
-            .get_thread(thread)?
-            .ok_or_else(|| anyhow!("attached thread '{}' has no ref before FF", thread))?,
-        Head::Detached { state } => *state,
-    };
-    repo.fast_forward_attached_without_record(post_target_id)?;
-    Ok(match head_before {
-        Head::Attached { thread } => OpRecord::FastForwardV2 {
-            source_thread: source_thread.to_string(),
-            target_thread: thread,
-            pre_target_id,
-            post_target_id: *post_target_id,
-        },
-        Head::Detached { state } => OpRecord::Goto {
-            target: *post_target_id,
-            prev_head: Some(state),
-        },
-    })
-}

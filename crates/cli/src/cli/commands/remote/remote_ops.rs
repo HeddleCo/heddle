@@ -810,11 +810,10 @@ pub(crate) fn resolve_default_remote_name(
     {
         return Ok(default.to_string());
     }
-    if repo.capability() == RepositoryCapability::GitOverlay {
-        if let Some(default) = git_overlay_default_remote_name(repo) {
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && let Some(default) = git_overlay_default_remote_name(repo) {
             return Ok(default);
         }
-    }
     Ok("origin".to_string())
 }
 
@@ -855,9 +854,6 @@ fn git_upstream_remote_name(repo: &Repository) -> Option<String> {
         .filter(|remote| !remote.is_empty())
 }
 
-pub(crate) fn is_known_remote_name(repo: &Repository, name: &str) -> Result<bool> {
-    Ok(merged_remote_items(repo)?.contains_key(name))
-}
 
 fn merged_remote_items(repo: &Repository) -> Result<BTreeMap<String, (String, String)>> {
     let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;

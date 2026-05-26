@@ -473,9 +473,8 @@ fn thread_resolve_rebase_followup_operator(
         .ok_or_else(|| anyhow!("Thread '{}' has no current state", thread_id))?;
     let next_action = "heddle continue".to_string();
     let mut blockers = Vec::new();
-    if !rebase_state
-        .pre_conflict_head
-        .is_some_and(|head| head != current_state.change_id)
+    if rebase_state
+        .pre_conflict_head.is_none_or(|head| head == current_state.change_id)
     {
         blockers.push(
             "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),

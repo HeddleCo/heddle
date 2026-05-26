@@ -2265,9 +2265,7 @@ fn apply_command_catalog_filters(output: &mut CommandCatalogOutput, args: &Comma
                 .iter()
                 .any(|filter| command_matches_filter(command, filter)))
             && (tier_filters.is_empty()
-                || tier_filters
-                    .iter()
-                    .any(|tier| command.tier.as_str() == *tier))
+                || tier_filters.contains(&command.tier.as_str()))
             && (!args.mutating || command.mutates)
             && (!args.supports_op_id || command.supports_op_id)
     });
@@ -2391,11 +2389,10 @@ fn catalog_entry(
     }
 
     let contract = command_contract(path);
-    if contract.supports_op_id {
-        if let Some(op_id_option) = op_id_option {
+    if contract.supports_op_id
+        && let Some(op_id_option) = op_id_option {
             options.push(op_id_option.clone());
         }
-    }
     CommandCatalogEntry {
         path: path.to_vec(),
         display: path.join(" "),
@@ -3483,6 +3480,275 @@ fn collect_schema_verbs(
     verbs
 }
 
+pub fn command_path(command: &Commands) -> Vec<&'static str> {
+    match command {
+        Commands::Init(_) => vec!["init"],
+        Commands::Adopt(_) => vec!["adopt"],
+        Commands::Help { .. } => vec!["help"],
+        Commands::Status { .. } => vec!["status"],
+        Commands::Watch(_) => vec!["watch"],
+        Commands::Diagnose(_) => vec!["diagnose"],
+        Commands::Verify => vec!["verify"],
+        Commands::Doctor(args) => match &args.command {
+            None => vec!["doctor"],
+            Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
+            Some(DoctorCommands::Schemas) => vec!["doctor", "schemas"],
+        },
+        #[cfg(feature = "git-overlay")]
+        Commands::GitOverlay => vec!["git-overlay"],
+        Commands::Schemas { .. } => vec!["schemas"],
+        Commands::Version => vec!["version"],
+        Commands::Commands(_) => vec!["commands"],
+        Commands::Start(_) => vec!["start"],
+        Commands::Try(_) => vec!["try"],
+        Commands::Attempt(_) => vec!["attempt"],
+        Commands::Run(_) => vec!["run"],
+        Commands::Sync(_) => vec!["sync"],
+        Commands::Continue => vec!["continue"],
+        Commands::Abort => vec!["abort"],
+        Commands::Ship(_) => vec!["ship"],
+        Commands::Delegate(_) => vec!["delegate"],
+        Commands::Ready(_) => vec!["ready"],
+        Commands::Capture(_) => vec!["capture"],
+        Commands::Commit(_) => vec!["commit"],
+        Commands::Checkpoint(_) => vec!["checkpoint"],
+        Commands::Log(_) => vec!["log"],
+        Commands::Show { .. } => vec!["show"],
+        Commands::Retro(_) => vec!["retro"],
+        Commands::Inspect { .. } => vec!["inspect"],
+        Commands::Goto { .. } => vec!["goto"],
+        Commands::Clean { .. } => vec!["clean"],
+        Commands::Diff(_) => vec!["diff"],
+        Commands::Branch(_) => vec!["branch"],
+        Commands::Switch(_) => vec!["switch"],
+        Commands::Checkout(_) => vec!["checkout"],
+        Commands::Discuss { command } => match command {
+            DiscussCommands::Open(_) => vec!["discuss", "open"],
+            DiscussCommands::Append(_) => vec!["discuss", "append"],
+            DiscussCommands::Resolve(_) => vec!["discuss", "resolve"],
+            DiscussCommands::List(_) => vec!["discuss", "list"],
+            DiscussCommands::Show(_) => vec!["discuss", "show"],
+        },
+        Commands::Query(_) => vec!["query"],
+        Commands::Transaction { command } => match command {
+            TransactionCommands::Begin(_) => vec!["transaction", "begin"],
+            TransactionCommands::Commit(_) => vec!["transaction", "commit"],
+            TransactionCommands::Abort(_) => vec!["transaction", "abort"],
+            TransactionCommands::Status(_) => vec!["transaction", "status"],
+        },
+        Commands::Conflict { command } => match command {
+            ConflictCommands::List => vec!["conflict", "list"],
+            ConflictCommands::Show(_) => vec!["conflict", "show"],
+        },
+        Commands::Review { command } => match command {
+            ReviewCommands::Show(_) => vec!["review", "show"],
+            ReviewCommands::Sign(_) => vec!["review", "sign"],
+            ReviewCommands::Next(_) => vec!["review", "next"],
+            ReviewCommands::Health(_) => vec!["review", "health"],
+        },
+        Commands::Redact { command } => match command {
+            RedactCommands::Apply(_) => vec!["redact", "apply"],
+            RedactCommands::List(_) => vec!["redact", "list"],
+            RedactCommands::Show(_) => vec!["redact", "show"],
+            RedactCommands::Trust(command) => match command {
+                RedactTrustCommands::Add(_) => vec!["redact", "trust", "add"],
+                RedactTrustCommands::List(_) => vec!["redact", "trust", "list"],
+                RedactTrustCommands::Remove(_) => vec!["redact", "trust", "remove"],
+            },
+        },
+        Commands::Purge { command } => match command {
+            PurgeCommands::Apply(_) => vec!["purge", "apply"],
+            PurgeCommands::List(_) => vec!["purge", "list"],
+        },
+        Commands::Revert(_) => vec!["revert"],
+        Commands::Undo(_) => vec!["undo"],
+        Commands::Redo { .. } => vec!["redo"],
+        Commands::Fork { .. } => vec!["fork"],
+        Commands::Collapse(_) => vec!["collapse"],
+        Commands::Compare { .. } => vec!["compare"],
+        Commands::Marker { command } => match command {
+            MarkerCommands::List { .. } => vec!["marker", "list"],
+            MarkerCommands::Create { .. } => vec!["marker", "create"],
+            MarkerCommands::Delete { .. } => vec!["marker", "delete"],
+            MarkerCommands::Show { .. } => vec!["marker", "show"],
+        },
+        Commands::Thread { command } => match command {
+            ThreadCommands::Create { .. } => vec!["thread", "create"],
+            ThreadCommands::Current => vec!["thread", "current"],
+            ThreadCommands::Switch { .. } => vec!["thread", "switch"],
+            ThreadCommands::Cd { .. } => vec!["thread", "cd"],
+            ThreadCommands::List(_) => vec!["thread", "list"],
+            ThreadCommands::Show(_) => vec!["thread", "show"],
+            ThreadCommands::Captures(_) => vec!["thread", "captures"],
+            ThreadCommands::Rename(_) => vec!["thread", "rename"],
+            ThreadCommands::Refresh(_) => vec!["thread", "refresh"],
+            ThreadCommands::Move(_) => vec!["thread", "move"],
+            ThreadCommands::Absorb(_) => vec!["thread", "absorb"],
+            ThreadCommands::Resolve(_) => vec!["thread", "resolve"],
+            ThreadCommands::Promote(_) => vec!["thread", "promote"],
+            ThreadCommands::Drop(_) => vec!["thread", "drop"],
+            ThreadCommands::Approve(_) => vec!["thread", "approve"],
+            ThreadCommands::Approvals(_) => vec!["thread", "approvals"],
+            ThreadCommands::RevokeApproval(_) => vec!["thread", "revoke-approval"],
+            ThreadCommands::CheckMerge(_) => vec!["thread", "check-merge"],
+            ThreadCommands::Cleanup(_) => vec!["thread", "cleanup"],
+        },
+        Commands::Shell { command } => match command {
+            ShellCommands::Init { .. } => vec!["shell", "init"],
+        },
+        Commands::Workspace { command } => match command {
+            None => vec!["workspace"],
+            Some(WorkspaceCommands::Show(_)) => vec!["workspace", "show"],
+        },
+        Commands::Merge(_) => vec!["merge"],
+        Commands::Stack(args) => match &args.command {
+            None => vec!["stack"],
+            Some(StackCommands::Ready { .. }) => vec!["stack", "ready"],
+            Some(StackCommands::Snapshot { .. }) => vec!["stack", "snapshot"],
+        },
+        Commands::Resolve(_) => vec!["resolve"],
+        Commands::Fsck { .. } => vec!["fsck"],
+        Commands::Fetch { .. } => vec!["fetch"],
+        Commands::Push(_) => vec!["push"],
+        Commands::Pull(_) => vec!["pull"],
+        Commands::Remote { command } => match command {
+            RemoteCommands::List => vec!["remote", "list"],
+            RemoteCommands::Add { .. } => vec!["remote", "add"],
+            RemoteCommands::Remove { .. } => vec!["remote", "remove"],
+            RemoteCommands::SetDefault { .. } => vec!["remote", "set-default"],
+            RemoteCommands::Show { .. } => vec!["remote", "show"],
+        },
+        #[cfg(feature = "client")]
+        Commands::Auth { command } => match command {
+            AuthCommands::Login { .. } => vec!["auth", "login"],
+            AuthCommands::Logout { .. } => vec!["auth", "logout"],
+            AuthCommands::Status { .. } => vec!["auth", "status"],
+            AuthCommands::CreateServiceToken { .. } => vec!["auth", "create-service-token"],
+        },
+        Commands::Context { command } => match command {
+            ContextCommands::Set(_) => vec!["context", "set"],
+            ContextCommands::Get(_) => vec!["context", "get"],
+            ContextCommands::List(_) => vec!["context", "list"],
+            ContextCommands::History(_) => vec!["context", "history"],
+            ContextCommands::Edit(_) => vec!["context", "edit"],
+            ContextCommands::Supersede(_) => vec!["context", "supersede"],
+            ContextCommands::Rm(_) => vec!["context", "rm"],
+            ContextCommands::Check(_) => vec!["context", "check"],
+            ContextCommands::Suggest(_) => vec!["context", "suggest"],
+            ContextCommands::Audit(_) => vec!["context", "audit"],
+        },
+        Commands::Integration { command } => match command {
+            IntegrationCommands::List => vec!["integration", "list"],
+            IntegrationCommands::Install(_) => vec!["integration", "install"],
+            IntegrationCommands::Doctor => vec!["integration", "doctor"],
+            IntegrationCommands::Uninstall(_) => vec!["integration", "uninstall"],
+            IntegrationCommands::Upgrade(_) => vec!["integration", "upgrade"],
+            IntegrationCommands::Relay(_) => vec!["integration", "relay"],
+        },
+        Commands::Stash { command } => match command {
+            StashCommands::Push { .. } => vec!["stash", "push"],
+            StashCommands::List => vec!["stash", "list"],
+            StashCommands::Pop => vec!["stash", "pop"],
+            StashCommands::Apply => vec!["stash", "apply"],
+            StashCommands::Drop => vec!["stash", "drop"],
+            StashCommands::Clear => vec!["stash", "clear"],
+            StashCommands::Show => vec!["stash", "show"],
+        },
+        #[cfg(feature = "client")]
+        Commands::Support { command } => match command {
+            SupportCommands::Grant(_) => vec!["support", "grant"],
+            SupportCommands::List(_) => vec!["support", "list"],
+            SupportCommands::Revoke(_) => vec!["support", "revoke"],
+        },
+        #[cfg(feature = "git-overlay")]
+        Commands::Bridge { command } => match command {
+            BridgeCommands::Git { command } => match command {
+                GitCommands::Status => vec!["bridge", "git", "status"],
+                GitCommands::Init { .. } => vec!["bridge", "git", "init"],
+                GitCommands::Export { .. } => vec!["bridge", "git", "export"],
+                GitCommands::Import { .. } => vec!["bridge", "git", "import"],
+                GitCommands::Sync { .. } => vec!["bridge", "git", "sync"],
+                GitCommands::Reconcile { .. } => vec!["bridge", "git", "reconcile"],
+                GitCommands::Push { .. } => vec!["bridge", "git", "push"],
+                GitCommands::Pull { .. } => vec!["bridge", "git", "pull"],
+                #[cfg(feature = "ingest")]
+                GitCommands::Ingest { .. } => vec!["bridge", "git", "ingest"],
+                #[cfg(feature = "ingest")]
+                GitCommands::Reason { .. } => vec!["bridge", "git", "reason"],
+            },
+        },
+        #[cfg(feature = "semantic")]
+        Commands::Semantic { command } => match command {
+            SemanticCommands::Hot { .. } => vec!["semantic", "hot"],
+        },
+        Commands::Completion { .. } => vec!["completion"],
+        Commands::Gc { .. } => vec!["gc"],
+        Commands::Index { .. } => vec!["index"],
+        Commands::Monitor { .. } => vec!["monitor"],
+        Commands::Daemon { command } => match command {
+            DaemonCommands::Serve => vec!["daemon", "serve"],
+            DaemonCommands::Status => vec!["daemon", "status"],
+            DaemonCommands::Stop => vec!["daemon", "stop"],
+        },
+        Commands::Agent { command } => match command {
+            AgentCommands::Serve(_) => vec!["agent", "serve"],
+            AgentCommands::Status => vec!["agent", "status"],
+            AgentCommands::Stop => vec!["agent", "stop"],
+            AgentCommands::Reserve(_) => vec!["agent", "reserve"],
+            AgentCommands::Heartbeat(_) => vec!["agent", "heartbeat"],
+            AgentCommands::Capture(_) => vec!["agent", "capture"],
+            AgentCommands::Ready(_) => vec!["agent", "ready"],
+            AgentCommands::Release(_) => vec!["agent", "release"],
+            AgentCommands::List(_) => vec!["agent", "list"],
+        },
+        Commands::Maintenance { command } => match command {
+            MaintenanceCommands::Inspect => vec!["maintenance", "inspect"],
+            MaintenanceCommands::Run => vec!["maintenance", "run"],
+            MaintenanceCommands::Gc { .. } => vec!["maintenance", "gc"],
+            MaintenanceCommands::Index { .. } => vec!["maintenance", "index"],
+            MaintenanceCommands::Monitor { .. } => vec!["maintenance", "monitor"],
+        },
+        Commands::Store { command } => match command {
+            StoreCommands::Warm { .. } => vec!["store", "warm"],
+        },
+        Commands::Blame { .. } => vec!["blame"],
+        Commands::Bisect { command } => match command {
+            BisectCommands::Start => vec!["bisect", "start"],
+            BisectCommands::Good { .. } => vec!["bisect", "good"],
+            BisectCommands::Bad { .. } => vec!["bisect", "bad"],
+            BisectCommands::Reset => vec!["bisect", "reset"],
+        },
+        Commands::CherryPick { .. } => vec!["cherry-pick"],
+        Commands::Clone(_) => vec!["clone"],
+        Commands::Rebase { .. } => vec!["rebase"],
+        Commands::Hook { command } => match command {
+            HookCommands::List => vec!["hook", "list"],
+            HookCommands::Install { .. } => vec!["hook", "install"],
+            HookCommands::Uninstall { .. } => vec!["hook", "uninstall"],
+            HookCommands::Events { .. } => vec!["hook", "events"],
+        },
+        Commands::HarnessBridge => vec!["harness-bridge"],
+        Commands::Actor { command } => match command {
+            ActorCommands::Spawn(_) => vec!["actor", "spawn"],
+            ActorCommands::List(_) => vec!["actor", "list"],
+            ActorCommands::Show(_) => vec!["actor", "show"],
+            ActorCommands::Explain(_) => vec!["actor", "explain"],
+            ActorCommands::Done(_) => vec!["actor", "done"],
+        },
+        Commands::Session { command } => match command {
+            SessionCommands::Start(_) => vec!["session", "start"],
+            SessionCommands::Segment(_) => vec!["session", "segment"],
+            SessionCommands::End(_) => vec!["session", "end"],
+            SessionCommands::Show(_) => vec!["session", "show"],
+            SessionCommands::List(_) => vec!["session", "list"],
+        },
+        #[cfg(feature = "client")]
+        Commands::Presence { command } => match command {
+            PresenceCommands::Publish { .. } => vec!["presence", "publish"],
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -4231,11 +4497,11 @@ mod tests {
             "runtime contract parse samples contain duplicate paths"
         );
 
-        let child_contract_paths = contract_paths_with_children(&active_contracts);
+        let child_contract_paths = contract_paths_with_children(active_contracts);
         let unsampled_contracts = active_contracts
             .iter()
-            .filter(|entry| !child_contract_paths.contains(&entry.path.to_vec()))
-            .filter(|entry| !sample_paths.contains(&entry.path.to_vec()))
+            .filter(|entry| !child_contract_paths.contains(entry.path))
+            .filter(|entry| !sample_paths.contains(entry.path))
             .map(|entry| entry.path.join(" "))
             .collect::<Vec<_>>();
         assert!(
@@ -4977,274 +5243,5 @@ mod tests {
     #[test]
     fn feature_gated_command_roots_are_catalog_owned() {
         assert_eq!(feature_gated_command_roots(), &["presence", "support"]);
-    }
-}
-
-pub fn command_path(command: &Commands) -> Vec<&'static str> {
-    match command {
-        Commands::Init(_) => vec!["init"],
-        Commands::Adopt(_) => vec!["adopt"],
-        Commands::Help { .. } => vec!["help"],
-        Commands::Status { .. } => vec!["status"],
-        Commands::Watch(_) => vec!["watch"],
-        Commands::Diagnose(_) => vec!["diagnose"],
-        Commands::Verify => vec!["verify"],
-        Commands::Doctor(args) => match &args.command {
-            None => vec!["doctor"],
-            Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
-            Some(DoctorCommands::Schemas) => vec!["doctor", "schemas"],
-        },
-        #[cfg(feature = "git-overlay")]
-        Commands::GitOverlay => vec!["git-overlay"],
-        Commands::Schemas { .. } => vec!["schemas"],
-        Commands::Version => vec!["version"],
-        Commands::Commands(_) => vec!["commands"],
-        Commands::Start(_) => vec!["start"],
-        Commands::Try(_) => vec!["try"],
-        Commands::Attempt(_) => vec!["attempt"],
-        Commands::Run(_) => vec!["run"],
-        Commands::Sync(_) => vec!["sync"],
-        Commands::Continue => vec!["continue"],
-        Commands::Abort => vec!["abort"],
-        Commands::Ship(_) => vec!["ship"],
-        Commands::Delegate(_) => vec!["delegate"],
-        Commands::Ready(_) => vec!["ready"],
-        Commands::Capture(_) => vec!["capture"],
-        Commands::Commit(_) => vec!["commit"],
-        Commands::Checkpoint(_) => vec!["checkpoint"],
-        Commands::Log(_) => vec!["log"],
-        Commands::Show { .. } => vec!["show"],
-        Commands::Retro(_) => vec!["retro"],
-        Commands::Inspect { .. } => vec!["inspect"],
-        Commands::Goto { .. } => vec!["goto"],
-        Commands::Clean { .. } => vec!["clean"],
-        Commands::Diff(_) => vec!["diff"],
-        Commands::Branch(_) => vec!["branch"],
-        Commands::Switch(_) => vec!["switch"],
-        Commands::Checkout(_) => vec!["checkout"],
-        Commands::Discuss { command } => match command {
-            DiscussCommands::Open(_) => vec!["discuss", "open"],
-            DiscussCommands::Append(_) => vec!["discuss", "append"],
-            DiscussCommands::Resolve(_) => vec!["discuss", "resolve"],
-            DiscussCommands::List(_) => vec!["discuss", "list"],
-            DiscussCommands::Show(_) => vec!["discuss", "show"],
-        },
-        Commands::Query(_) => vec!["query"],
-        Commands::Transaction { command } => match command {
-            TransactionCommands::Begin(_) => vec!["transaction", "begin"],
-            TransactionCommands::Commit(_) => vec!["transaction", "commit"],
-            TransactionCommands::Abort(_) => vec!["transaction", "abort"],
-            TransactionCommands::Status(_) => vec!["transaction", "status"],
-        },
-        Commands::Conflict { command } => match command {
-            ConflictCommands::List => vec!["conflict", "list"],
-            ConflictCommands::Show(_) => vec!["conflict", "show"],
-        },
-        Commands::Review { command } => match command {
-            ReviewCommands::Show(_) => vec!["review", "show"],
-            ReviewCommands::Sign(_) => vec!["review", "sign"],
-            ReviewCommands::Next(_) => vec!["review", "next"],
-            ReviewCommands::Health(_) => vec!["review", "health"],
-        },
-        Commands::Redact { command } => match command {
-            RedactCommands::Apply(_) => vec!["redact", "apply"],
-            RedactCommands::List(_) => vec!["redact", "list"],
-            RedactCommands::Show(_) => vec!["redact", "show"],
-            RedactCommands::Trust(command) => match command {
-                RedactTrustCommands::Add(_) => vec!["redact", "trust", "add"],
-                RedactTrustCommands::List(_) => vec!["redact", "trust", "list"],
-                RedactTrustCommands::Remove(_) => vec!["redact", "trust", "remove"],
-            },
-        },
-        Commands::Purge { command } => match command {
-            PurgeCommands::Apply(_) => vec!["purge", "apply"],
-            PurgeCommands::List(_) => vec!["purge", "list"],
-        },
-        Commands::Revert(_) => vec!["revert"],
-        Commands::Undo(_) => vec!["undo"],
-        Commands::Redo { .. } => vec!["redo"],
-        Commands::Fork { .. } => vec!["fork"],
-        Commands::Collapse(_) => vec!["collapse"],
-        Commands::Compare { .. } => vec!["compare"],
-        Commands::Marker { command } => match command {
-            MarkerCommands::List { .. } => vec!["marker", "list"],
-            MarkerCommands::Create { .. } => vec!["marker", "create"],
-            MarkerCommands::Delete { .. } => vec!["marker", "delete"],
-            MarkerCommands::Show { .. } => vec!["marker", "show"],
-        },
-        Commands::Thread { command } => match command {
-            ThreadCommands::Create { .. } => vec!["thread", "create"],
-            ThreadCommands::Current => vec!["thread", "current"],
-            ThreadCommands::Switch { .. } => vec!["thread", "switch"],
-            ThreadCommands::Cd { .. } => vec!["thread", "cd"],
-            ThreadCommands::List(_) => vec!["thread", "list"],
-            ThreadCommands::Show(_) => vec!["thread", "show"],
-            ThreadCommands::Captures(_) => vec!["thread", "captures"],
-            ThreadCommands::Rename(_) => vec!["thread", "rename"],
-            ThreadCommands::Refresh(_) => vec!["thread", "refresh"],
-            ThreadCommands::Move(_) => vec!["thread", "move"],
-            ThreadCommands::Absorb(_) => vec!["thread", "absorb"],
-            ThreadCommands::Resolve(_) => vec!["thread", "resolve"],
-            ThreadCommands::Promote(_) => vec!["thread", "promote"],
-            ThreadCommands::Drop(_) => vec!["thread", "drop"],
-            ThreadCommands::Approve(_) => vec!["thread", "approve"],
-            ThreadCommands::Approvals(_) => vec!["thread", "approvals"],
-            ThreadCommands::RevokeApproval(_) => vec!["thread", "revoke-approval"],
-            ThreadCommands::CheckMerge(_) => vec!["thread", "check-merge"],
-            ThreadCommands::Cleanup(_) => vec!["thread", "cleanup"],
-        },
-        Commands::Shell { command } => match command {
-            ShellCommands::Init { .. } => vec!["shell", "init"],
-        },
-        Commands::Workspace { command } => match command {
-            None => vec!["workspace"],
-            Some(WorkspaceCommands::Show(_)) => vec!["workspace", "show"],
-        },
-        Commands::Merge(_) => vec!["merge"],
-        Commands::Stack(args) => match &args.command {
-            None => vec!["stack"],
-            Some(StackCommands::Ready { .. }) => vec!["stack", "ready"],
-            Some(StackCommands::Snapshot { .. }) => vec!["stack", "snapshot"],
-        },
-        Commands::Resolve(_) => vec!["resolve"],
-        Commands::Fsck { .. } => vec!["fsck"],
-        Commands::Fetch { .. } => vec!["fetch"],
-        Commands::Push(_) => vec!["push"],
-        Commands::Pull(_) => vec!["pull"],
-        Commands::Remote { command } => match command {
-            RemoteCommands::List => vec!["remote", "list"],
-            RemoteCommands::Add { .. } => vec!["remote", "add"],
-            RemoteCommands::Remove { .. } => vec!["remote", "remove"],
-            RemoteCommands::SetDefault { .. } => vec!["remote", "set-default"],
-            RemoteCommands::Show { .. } => vec!["remote", "show"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Auth { command } => match command {
-            AuthCommands::Login { .. } => vec!["auth", "login"],
-            AuthCommands::Logout { .. } => vec!["auth", "logout"],
-            AuthCommands::Status { .. } => vec!["auth", "status"],
-            AuthCommands::CreateServiceToken { .. } => vec!["auth", "create-service-token"],
-        },
-        Commands::Context { command } => match command {
-            ContextCommands::Set(_) => vec!["context", "set"],
-            ContextCommands::Get(_) => vec!["context", "get"],
-            ContextCommands::List(_) => vec!["context", "list"],
-            ContextCommands::History(_) => vec!["context", "history"],
-            ContextCommands::Edit(_) => vec!["context", "edit"],
-            ContextCommands::Supersede(_) => vec!["context", "supersede"],
-            ContextCommands::Rm(_) => vec!["context", "rm"],
-            ContextCommands::Check(_) => vec!["context", "check"],
-            ContextCommands::Suggest(_) => vec!["context", "suggest"],
-            ContextCommands::Audit(_) => vec!["context", "audit"],
-        },
-        Commands::Integration { command } => match command {
-            IntegrationCommands::List => vec!["integration", "list"],
-            IntegrationCommands::Install(_) => vec!["integration", "install"],
-            IntegrationCommands::Doctor => vec!["integration", "doctor"],
-            IntegrationCommands::Uninstall(_) => vec!["integration", "uninstall"],
-            IntegrationCommands::Upgrade(_) => vec!["integration", "upgrade"],
-            IntegrationCommands::Relay(_) => vec!["integration", "relay"],
-        },
-        Commands::Stash { command } => match command {
-            StashCommands::Push { .. } => vec!["stash", "push"],
-            StashCommands::List => vec!["stash", "list"],
-            StashCommands::Pop => vec!["stash", "pop"],
-            StashCommands::Apply => vec!["stash", "apply"],
-            StashCommands::Drop => vec!["stash", "drop"],
-            StashCommands::Clear => vec!["stash", "clear"],
-            StashCommands::Show => vec!["stash", "show"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Support { command } => match command {
-            SupportCommands::Grant(_) => vec!["support", "grant"],
-            SupportCommands::List(_) => vec!["support", "list"],
-            SupportCommands::Revoke(_) => vec!["support", "revoke"],
-        },
-        #[cfg(feature = "git-overlay")]
-        Commands::Bridge { command } => match command {
-            BridgeCommands::Git { command } => match command {
-                GitCommands::Status => vec!["bridge", "git", "status"],
-                GitCommands::Init { .. } => vec!["bridge", "git", "init"],
-                GitCommands::Export { .. } => vec!["bridge", "git", "export"],
-                GitCommands::Import { .. } => vec!["bridge", "git", "import"],
-                GitCommands::Sync { .. } => vec!["bridge", "git", "sync"],
-                GitCommands::Reconcile { .. } => vec!["bridge", "git", "reconcile"],
-                GitCommands::Push { .. } => vec!["bridge", "git", "push"],
-                GitCommands::Pull { .. } => vec!["bridge", "git", "pull"],
-                #[cfg(feature = "ingest")]
-                GitCommands::Ingest { .. } => vec!["bridge", "git", "ingest"],
-                #[cfg(feature = "ingest")]
-                GitCommands::Reason { .. } => vec!["bridge", "git", "reason"],
-            },
-        },
-        #[cfg(feature = "semantic")]
-        Commands::Semantic { command } => match command {
-            SemanticCommands::Hot { .. } => vec!["semantic", "hot"],
-        },
-        Commands::Completion { .. } => vec!["completion"],
-        Commands::Gc { .. } => vec!["gc"],
-        Commands::Index { .. } => vec!["index"],
-        Commands::Monitor { .. } => vec!["monitor"],
-        Commands::Daemon { command } => match command {
-            DaemonCommands::Serve => vec!["daemon", "serve"],
-            DaemonCommands::Status => vec!["daemon", "status"],
-            DaemonCommands::Stop => vec!["daemon", "stop"],
-        },
-        Commands::Agent { command } => match command {
-            AgentCommands::Serve(_) => vec!["agent", "serve"],
-            AgentCommands::Status => vec!["agent", "status"],
-            AgentCommands::Stop => vec!["agent", "stop"],
-            AgentCommands::Reserve(_) => vec!["agent", "reserve"],
-            AgentCommands::Heartbeat(_) => vec!["agent", "heartbeat"],
-            AgentCommands::Capture(_) => vec!["agent", "capture"],
-            AgentCommands::Ready(_) => vec!["agent", "ready"],
-            AgentCommands::Release(_) => vec!["agent", "release"],
-            AgentCommands::List(_) => vec!["agent", "list"],
-        },
-        Commands::Maintenance { command } => match command {
-            MaintenanceCommands::Inspect => vec!["maintenance", "inspect"],
-            MaintenanceCommands::Run => vec!["maintenance", "run"],
-            MaintenanceCommands::Gc { .. } => vec!["maintenance", "gc"],
-            MaintenanceCommands::Index { .. } => vec!["maintenance", "index"],
-            MaintenanceCommands::Monitor { .. } => vec!["maintenance", "monitor"],
-        },
-        Commands::Store { command } => match command {
-            StoreCommands::Warm { .. } => vec!["store", "warm"],
-        },
-        Commands::Blame { .. } => vec!["blame"],
-        Commands::Bisect { command } => match command {
-            BisectCommands::Start => vec!["bisect", "start"],
-            BisectCommands::Good { .. } => vec!["bisect", "good"],
-            BisectCommands::Bad { .. } => vec!["bisect", "bad"],
-            BisectCommands::Reset => vec!["bisect", "reset"],
-        },
-        Commands::CherryPick { .. } => vec!["cherry-pick"],
-        Commands::Clone(_) => vec!["clone"],
-        Commands::Rebase { .. } => vec!["rebase"],
-        Commands::Hook { command } => match command {
-            HookCommands::List => vec!["hook", "list"],
-            HookCommands::Install { .. } => vec!["hook", "install"],
-            HookCommands::Uninstall { .. } => vec!["hook", "uninstall"],
-            HookCommands::Events { .. } => vec!["hook", "events"],
-        },
-        Commands::HarnessBridge => vec!["harness-bridge"],
-        Commands::Actor { command } => match command {
-            ActorCommands::Spawn(_) => vec!["actor", "spawn"],
-            ActorCommands::List(_) => vec!["actor", "list"],
-            ActorCommands::Show(_) => vec!["actor", "show"],
-            ActorCommands::Explain(_) => vec!["actor", "explain"],
-            ActorCommands::Done(_) => vec!["actor", "done"],
-        },
-        Commands::Session { command } => match command {
-            SessionCommands::Start(_) => vec!["session", "start"],
-            SessionCommands::Segment(_) => vec!["session", "segment"],
-            SessionCommands::End(_) => vec!["session", "end"],
-            SessionCommands::Show(_) => vec!["session", "show"],
-            SessionCommands::List(_) => vec!["session", "list"],
-        },
-        #[cfg(feature = "client")]
-        Commands::Presence { command } => match command {
-            PresenceCommands::Publish { .. } => vec!["presence", "publish"],
-        },
     }
 }

@@ -22,6 +22,7 @@ struct ConflictList {
     conflicts: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_resolve(
     cli: &Cli,
     path: Option<String>,

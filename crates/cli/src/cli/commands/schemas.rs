@@ -657,7 +657,7 @@ pub struct ResolveSchema {
     pub conflicts: Option<Vec<String>>,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::large_enum_variant)]
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum InspectSchema {

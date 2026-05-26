@@ -1362,6 +1362,7 @@ pub(crate) fn git_overlay_mutation_preflight_advice(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn repository_verification_blocked_advice(
     kind: &'static str,
     error: impl Into<String>,
@@ -3089,7 +3090,7 @@ fn tag_mapping_recovery_commands(check: &GitOverlayHealthCheck) -> Vec<String> {
         .or_else(|| check.details.get("unmapped_tags"))
         .map(|tags| {
             tags.split(',')
-                .filter_map(|tag| tag.trim().split_whitespace().next())
+                .filter_map(|tag| tag.split_whitespace().next())
                 .filter(|tag| !tag.is_empty())
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()

@@ -642,7 +642,7 @@ impl<'a> GitBridge<'a> {
         if !force {
             validate_ref_updates_fast_forward(&target_repo, updates)?;
         }
-        apply_ref_updates(&target_repo, &updates, log_message)?;
+        apply_ref_updates(&target_repo, updates, log_message)?;
         Ok(())
     }
 
@@ -1046,7 +1046,7 @@ impl<'a> GitBridge<'a> {
         thread: &str,
         state_id: &ChangeId,
     ) -> GitResult<WriteThroughOutcome> {
-        let Some(git_oid) = self.mapping.get_git(&state_id) else {
+        let Some(git_oid) = self.mapping.get_git(state_id) else {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::NoMappedCommit,
             ));
@@ -1456,11 +1456,10 @@ fn parse_configured_remote_url(value: &str, relative_base: &Path) -> GitResult<g
 }
 
 fn configured_remote_local_path(value: &str, relative_base: &Path) -> PathBuf {
-    if value == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
+    if value == "~"
+        && let Some(home) = std::env::var_os("HOME") {
             return PathBuf::from(home);
         }
-    }
     if let Some(rest) = value.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
     {
@@ -2259,7 +2258,17 @@ fn clone_url_to_bare_via_gix(
     let mut connection = remote
         .connect(gix::remote::Direction::Fetch)
         .map_err(git_err)?;
-    connection.set_credentials(|_| Ok(None));
+    // Suppress interactive credential prompts in CI/agent contexts.
+    // The closure never produces an `Err`; the `result_large_err` lint
+    // is fired by gix's 192-byte protocol error type we never return.
+    #[allow(clippy::result_large_err)]
+    fn no_creds(
+        _action: gix::credentials::helper::Action,
+    ) -> Result<Option<gix::credentials::protocol::Outcome>, gix::credentials::protocol::Error>
+    {
+        Ok(None)
+    }
+    connection.set_credentials(no_creds);
     let mut prepare = connection
         .prepare_fetch(
             gix::progress::Discard,
@@ -2403,7 +2412,17 @@ fn fetch_network_remote(
     let mut connection = remote
         .connect(gix::remote::Direction::Fetch)
         .map_err(git_err)?;
-    connection.set_credentials(|_| Ok(None));
+    // Suppress interactive credential prompts in CI/agent contexts.
+    // The closure never produces an `Err`; the `result_large_err` lint
+    // is fired by gix's 192-byte protocol error type we never return.
+    #[allow(clippy::result_large_err)]
+    fn no_creds(
+        _action: gix::credentials::helper::Action,
+    ) -> Result<Option<gix::credentials::protocol::Outcome>, gix::credentials::protocol::Error>
+    {
+        Ok(None)
+    }
+    connection.set_credentials(no_creds);
     let progress = gix::progress::Discard;
     let prepare = connection
         .prepare_fetch(progress, gix::remote::ref_map::Options::default())

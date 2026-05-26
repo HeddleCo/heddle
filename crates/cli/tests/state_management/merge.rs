@@ -320,7 +320,7 @@ fn test_continue_after_manual_marker_removal_says_mark_file_resolved() {
     );
     let blocked_continue = str::from_utf8(&blocked_continue.stdout).unwrap();
     let blocked_continue: serde_json::Value =
-        serde_json::from_str(&blocked_continue).expect("continue output should be JSON");
+        serde_json::from_str(blocked_continue).expect("continue output should be JSON");
     assert_eq!(blocked_continue["status"], "blocked");
     assert_eq!(blocked_continue["next_action"], "heddle resolve --list");
     assert_eq!(

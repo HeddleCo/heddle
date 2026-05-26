@@ -120,7 +120,7 @@ fn json(cwd: &std::path::Path, args: &[&str]) -> Value {
         return serde_json::from_str(stdout)
             .unwrap_or_else(|err| panic!("expected JSON for {:?}: {}", args, err));
     }
-    if args.iter().any(|arg| *arg == "verify") {
+    if args.contains(&"verify") {
         let envelope: Value = serde_json::from_str(stderr).unwrap_or_else(|err| {
             panic!(
                 "expected verify JSON envelope for {:?}: {err}: {stderr}",
@@ -2141,7 +2141,8 @@ fn git_overlay_matrix_init_excludes_only_heddle_metadata() {
     );
 
     let exclude = std::fs::read_to_string(temp.path().join(".git/info/exclude")).unwrap();
-    for pattern in [".heddle/"] {
+    {
+        let pattern = ".heddle/";
         assert!(
             exclude.lines().any(|line| line.trim() == pattern),
             "local Git exclude should contain {pattern:?}: {exclude}"

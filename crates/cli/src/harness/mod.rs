@@ -3425,11 +3425,13 @@ mod tests {
         drop(repo);
 
         let fresh_repo = Repository::open(temp.path()).unwrap();
-        let mut user_config = UserConfig::default();
-        user_config.principal = Some(crate::config::UserPrincipalConfig {
-            name: "Ada Lovelace".to_string(),
-            email: "ada@example.com".to_string(),
-        });
+        let user_config = UserConfig {
+            principal: Some(crate::config::UserPrincipalConfig {
+                name: "Ada Lovelace".to_string(),
+                email: "ada@example.com".to_string(),
+            }),
+            ..UserConfig::default()
+        };
         let mut runtime = HarnessBridgeRuntime::new(fresh_repo, user_config);
         let payload = serde_json::json!({
             "session_id": "claude-sess-123",

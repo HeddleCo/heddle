@@ -401,11 +401,6 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
                 &repo,
                 planned_push_remote.clone(),
                 Some(merge_state.clone()),
-                captured,
-                synced,
-                true,
-                checkpointed,
-                git_commit.as_deref(),
             )
             .await
             .map_err(|error| {
@@ -566,11 +561,6 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             &repo,
             planned_push_remote.clone(),
             merge_output.merge_state.clone(),
-            captured,
-            synced,
-            integrated,
-            checkpointed,
-            git_commit.as_deref(),
         )
         .await
         .map_err(|error| {
@@ -662,11 +652,6 @@ async fn push_after_ship(
     repo: &Repository,
     remote: Option<String>,
     state: Option<String>,
-    _captured: bool,
-    _synced: bool,
-    _integrated: bool,
-    _checkpointed: bool,
-    _git_commit: Option<&str>,
 ) -> Result<String> {
     if repo.capability() == repo::RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         let (remote_name, _, _, _, _) =
@@ -697,7 +682,7 @@ fn ship_performed_steps(
         (pushed, "push"),
     ]
     .into_iter()
-    .filter_map(|(done, step)| done.then(|| step.to_string()))
+    .filter(|&(done, _step)| done).map(|(_done, step)| step.to_string())
     .collect()
 }
 
@@ -718,7 +703,7 @@ fn ship_skipped_steps(
         (!pushed && !integrated, "push(not reached)"),
     ]
     .into_iter()
-    .filter_map(|(skipped, step)| skipped.then(|| step.to_string()))
+    .filter(|&(skipped, _step)| skipped).map(|(_skipped, step)| step.to_string())
     .collect()
 }
 
@@ -1197,8 +1182,8 @@ pub(crate) fn integration_blockers(
 pub(crate) fn auto_ship_policy_blockers(repo: &Repository, thread: &Thread) -> Vec<String> {
     let mut blockers = Vec::new();
     let agent_authored = thread_is_agent_authored(repo, thread);
-    if agent_authored {
-        if let Some(confidence) = thread.confidence_summary.value
+    if agent_authored
+        && let Some(confidence) = thread.confidence_summary.value
             && confidence < AUTO_SHIP_CONFIDENCE_THRESHOLD
         {
             blockers.push(format!(
@@ -1206,7 +1191,6 @@ pub(crate) fn auto_ship_policy_blockers(repo: &Repository, thread: &Thread) -> V
                 confidence
             ));
         }
-    }
     if matches!(thread.verification_summary.tests_passed, Some(false)) {
         blockers.push("verification summary reports failing tests".to_string());
     }

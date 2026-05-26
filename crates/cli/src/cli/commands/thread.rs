@@ -183,12 +183,12 @@ impl ThreadSummary {
                 .materialized_path
                 .as_ref()
                 .or(view.runtime.path.as_ref())
-                .and_then(display_path_string),
+                .and_then(|p| display_path_string(p)),
             execution_path: view
                 .runtime
                 .execution_path
                 .as_ref()
-                .and_then(display_path_string),
+                .and_then(|p| display_path_string(p)),
             session_id: view.runtime.session_id,
             heddle_session_id: view.runtime.heddle_session_id,
             actor: match (view.runtime.provider, view.runtime.model) {
@@ -248,7 +248,7 @@ impl ThreadSummary {
     }
 }
 
-fn display_path_string(path: &PathBuf) -> Option<String> {
+fn display_path_string(path: &Path) -> Option<String> {
     let rendered = path.display().to_string();
     if rendered.trim().is_empty() {
         None
@@ -3084,6 +3084,7 @@ fn non_empty_string(value: Option<&str>) -> Option<&str> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn thread_op_output(
     output_kind: &'static str,
     action: &'static str,

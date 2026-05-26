@@ -892,11 +892,9 @@ pub(crate) fn merge_thread_into_current(
             && thread
                 .as_ref()
                 .is_some_and(|thread| thread.state == ThreadState::Ready)
-        {
-            if let Some(thread) = thread.as_ref() {
+            && let Some(thread) = thread.as_ref() {
                 mark_merge_previewed(repo, &thread.id)?;
             }
-        }
         return Ok(merge_output_from_report(MergeOutputInput {
             repo,
             thread: &thread,

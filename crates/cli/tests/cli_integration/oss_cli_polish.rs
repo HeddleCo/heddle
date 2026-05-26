@@ -3330,11 +3330,11 @@ fn verify_reports_machine_contract_coverage() {
                 && check["clean"] == true
                 && check["recommended_action"] == serde_json::Value::Null
                 && check["details"]["coverage_status"] == coverage["status"]
-                && check["details"]["json_commands_total"]
+                && check["details"]["json_commands_total"].as_str()
                     == coverage["json_commands_total"]
                         .as_u64()
-                        .unwrap()
-                        .to_string()),
+                        .map(|n| n.to_string())
+                        .as_deref()),
         "machine contract check should mirror coverage details: {verify}"
     );
 }
@@ -3840,7 +3840,7 @@ fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
             panic!("heddle {args:?} should emit one JSON value: {err}: {stdout}")
         });
     }
-    if args.iter().any(|arg| *arg == "verify") {
+    if args.contains(&"verify") {
         let envelope: Value = serde_json::from_str(stderr).unwrap_or_else(|err| {
             panic!("heddle {args:?} should emit a verify error envelope: {err}: {stderr}")
         });
@@ -11037,7 +11037,8 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
         serde_json::json!([])
     );
     let exclude = std::fs::read_to_string(work.join(".git/info/exclude")).unwrap();
-    for pattern in [".heddle/"] {
+    {
+        let pattern = ".heddle/";
         assert!(
             exclude.lines().any(|line| line.trim() == pattern),
             "clone should install the same local Git exclude policy as init; missing {pattern:?}: {exclude}"

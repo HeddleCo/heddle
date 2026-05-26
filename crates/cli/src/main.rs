@@ -909,14 +909,10 @@ fn raw_wants_json(raw: &[String]) -> bool {
             index += 1;
             continue;
         };
-        match arg.get_id().as_str() {
-            "output" => {
-                if value.is_some_and(|value| value == "json") {
-                    wants_json = true;
-                }
+        if arg.get_id().as_str() == "output"
+            && value.is_some_and(|value| value == "json") {
+                wants_json = true;
             }
-            _ => {}
-        }
         index += consumed;
     }
 

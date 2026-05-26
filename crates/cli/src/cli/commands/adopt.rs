@@ -288,14 +288,14 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
         "  {}",
         style::field(
             "Branches ready",
-            &format!("{}", style::bold(&output.branches_synced.to_string()))
+            &style::bold(&output.branches_synced.to_string()).to_string()
         )
     );
     println!(
         "  {}",
         style::field(
             "Tags ready",
-            &format!("{}", style::bold(&output.tags_synced.to_string()))
+            &style::bold(&output.tags_synced.to_string()).to_string()
         )
     );
     if output.skipped_non_commit_refs > 0 {

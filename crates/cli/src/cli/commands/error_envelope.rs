@@ -357,11 +357,10 @@ fn classify_error(err: &anyhow::Error) -> ErrorClassification {
                 extra_json_fields: serde_json::Map::new(),
             };
         }
-        if let Some(git_error) = cause.downcast_ref::<crate::bridge::git_core::GitBridgeError>() {
-            if let Some(advice) = RecoveryAdvice::from_git_bridge_error(git_error) {
+        if let Some(git_error) = cause.downcast_ref::<crate::bridge::git_core::GitBridgeError>()
+            && let Some(advice) = RecoveryAdvice::from_git_bridge_error(git_error) {
                 return ErrorClassification::from_advice(&advice);
             }
-        }
         if let Some(heddle_err) = cause.downcast_ref::<HeddleError>() {
             match heddle_err {
                 HeddleError::RepositoryNotFound(path) => {

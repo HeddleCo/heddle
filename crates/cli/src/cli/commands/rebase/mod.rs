@@ -30,7 +30,8 @@ mod rebase_state;
 use rebase_ops::{mint_rebase_transaction_id, replay_commits, replay_commits_silent};
 pub(crate) use rebase_state::load_rebase_state as load_persisted_rebase_state;
 use rebase_state::{
-    RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state, save_rebase_state,
+    RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state,
+    load_rebase_state_for_abort, save_rebase_state,
 };
 
 const REBASE_STATE_FILE: &str = "REBASE_STATE";
@@ -345,7 +346,10 @@ fn handle_abort(
         return Err(anyhow!(no_rebase_in_progress_advice("abort rebase")));
     }
 
-    let state = load_rebase_state(rebase_state_path)?;
+    // Abort uses the tolerant loader so a crash mid-write to
+    // REBASE_STATE (malformed pending_advance entry) still lets the
+    // operator rewind via --abort; only `original_head` is required.
+    let state = load_rebase_state_for_abort(rebase_state_path)?;
     repo.goto_without_record(&state.original_head)?;
 
     fs::remove_file(rebase_state_path)?;

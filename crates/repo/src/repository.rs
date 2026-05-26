@@ -779,10 +779,10 @@ impl Repository {
         };
 
         let local_ref_name = format!("refs/heads/{branch}");
-        if let Some(local_ref) = git_find_reference(&git, &local_ref_name)? {
-            if let Some(tracking_ref_name) =
+        if let Some(local_ref) = git_find_reference(&git, &local_ref_name)?
+            && let Some(tracking_ref_name) =
                 local_ref.remote_tracking_ref_name(gix::remote::Direction::Fetch)
-            {
+        {
                 let tracking_ref_name = tracking_ref_name.map_err(|error| {
                     HeddleError::Config(format!(
                         "failed to inspect upstream branch at '{}': {error}",
@@ -827,7 +827,7 @@ impl Repository {
                     }));
                 }
             }
-        }
+
 
         let remotes = git_remote_names(&self.root)?;
         if remotes.is_empty() {
@@ -943,8 +943,8 @@ impl Repository {
         let mut missing_branches = branch_tips
             .into_iter()
             .filter(|tip| {
-                !tip.history_imported
-                    && !(threads_with_real_history.contains(&tip.branch)
+                !(tip.history_imported
+                    || threads_with_real_history.contains(&tip.branch)
                         && tip.mapped_change.is_some())
             })
             .map(|tip| tip.branch)

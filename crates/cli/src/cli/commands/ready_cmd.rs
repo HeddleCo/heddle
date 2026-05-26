@@ -481,9 +481,9 @@ pub(crate) fn worktree_dirty_paths(
     };
 
     let mut paths = Vec::new();
-    paths.extend(status.modified.into_iter());
-    paths.extend(status.added.into_iter());
-    paths.extend(status.deleted.into_iter());
+    paths.extend(status.modified);
+    paths.extend(status.added);
+    paths.extend(status.deleted);
     paths.sort();
     paths.dedup();
     Ok(paths

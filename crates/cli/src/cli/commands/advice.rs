@@ -23,6 +23,7 @@ pub struct RecoveryAdvice {
 }
 
 impl RecoveryAdvice {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn safety_refusal(
         kind: &'static str,
         error: impl Into<String>,

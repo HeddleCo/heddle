@@ -201,10 +201,10 @@ fn load_rebase_state_internal(
                     Err(e) => return Err(e),
                     Ok(advance) => match advance {
                         // heddle#198 r4 (Codex PR #218 P2): only the
-                        // variants `ff_advance_deferred` emits (FFV2,
-                        // Goto) plus the legacy V1 FastForward read-back
-                        // path can legitimately appear in a rebase
-                        // batch. Anything else — MarkerCreate, ThreadX,
+                        // FF-advance variants (FFV2, Goto) plus the
+                        // legacy V1 FastForward read-back path can
+                        // legitimately appear in a rebase batch.
+                        // Anything else — MarkerCreate, ThreadX,
                         // Snapshot — would land in the committed batch
                         // verbatim and pollute undo/redo with records
                         // the rebase never produced. Strict loader
@@ -606,9 +606,9 @@ mod tests {
     /// decodes can inject non-rebase operations (e.g. `MarkerCreate`,
     /// `ThreadDelete`) into the rebase's undo/redo history — undo would
     /// replay records the rebase never produced. The strict loader
-    /// must whitelist only the variants `ff_advance_deferred` emits
-    /// (`FastForwardV2` / `Goto`) plus the legacy V1 `FastForward` read-
-    /// back path, and reject anything else.
+    /// must whitelist only the FF-advance variants (`FastForwardV2`
+    /// / `Goto`) plus the legacy V1 `FastForward` read-back path,
+    /// and reject anything else.
     #[test]
     fn load_strict_rejects_non_advance_pending_record() {
         let tmp = TempDir::new().unwrap();

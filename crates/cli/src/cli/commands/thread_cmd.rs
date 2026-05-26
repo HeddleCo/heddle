@@ -429,9 +429,9 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     }
     let rebase_state_path = thread_repo.heddle_dir().join("REBASE_STATE");
     if rebase_state_path.exists() {
-        super::rebase::cmd_rebase_silent(&thread_repo, None, false, true)?;
+        super::rebase::cmd_rebase_silent(thread_repo, None, false, true)?;
     } else {
-        super::rebase::cmd_rebase_silent(&thread_repo, Some(&target_thread), false, false)?;
+        super::rebase::cmd_rebase_silent(thread_repo, Some(&target_thread), false, false)?;
     }
 
     if rebase_state_path.exists() {
@@ -462,9 +462,9 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             // paths: try the 3-way merge as a fallback. If it's clean
             // we apply it directly; if it actually conflicts we emit
             // a precise blocker pointing at the conflicting paths.
-            match try_three_way_merge_refresh(repo, &thread_repo, &thread, &target_thread) {
+            match try_three_way_merge_refresh(repo, thread_repo, &thread, &target_thread) {
                 Err(error) => {
-                    restore_refresh_rebase_abort(&thread_repo, &rebase_state_path)?;
+                    restore_refresh_rebase_abort(thread_repo, &rebase_state_path)?;
                     return Err(error);
                 }
                 Ok(ThreeWayMergeRefresh::Clean { new_state }) => {
@@ -482,9 +482,9 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
                     theirs,
                     base,
                 }) => {
-                    restore_refresh_rebase_abort(&thread_repo, &rebase_state_path)?;
+                    restore_refresh_rebase_abort(thread_repo, &rebase_state_path)?;
                     persist_refresh_conflict_state(
-                        &thread_repo,
+                        thread_repo,
                         tree,
                         ours,
                         theirs,

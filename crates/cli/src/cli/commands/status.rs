@@ -930,7 +930,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         .filter(|check| {
             !check.clean
                 && check.status != "not_checked"
-                && !(check.name == "Clone" && check.status == "blocked")
+                && (check.name != "Clone" || check.status != "blocked")
                 && !check
                     .summary
                     .contains("checked after the primary verification blocker")
@@ -1274,8 +1274,8 @@ fn render_status_operation(output: &StatusOutput) {
             println!("Remote drift: {}", style::warn(&remote_tracking.message));
         }
     }
-    if let Some(hint) = &output.git_overlay_import_hint {
-        if !hint
+    if let Some(hint) = &output.git_overlay_import_hint
+        && !hint
             .missing_branches
             .iter()
             .any(|branch| branch == &hint.current_branch)
@@ -1288,7 +1288,6 @@ fn render_status_operation(output: &StatusOutput) {
                 )
             );
         }
-    }
     if !output.git_overlay_health.clean {
         let label = if matches!(
             output.git_overlay_health.status.as_str(),
