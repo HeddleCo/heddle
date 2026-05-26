@@ -1236,6 +1236,9 @@ pub struct CloneArgs {
     pub thread: Option<String>,
 
     /// Create a shallow clone with the specified depth. `0` means full history.
+    /// Not yet supported for Git-overlay clones (plain `https://…/repo.git`
+    /// URLs and local-path clones) — those reject this flag with a clear
+    /// error and need a full clone for now. Planned for v0.3.1.
     #[arg(long)]
     pub depth: Option<u32>,
 

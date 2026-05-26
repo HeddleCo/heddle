@@ -92,15 +92,28 @@ impl HeddleExitCode {
         // path. Keep these short and exact so they don't false-positive on
         // unrelated messages that happen to mention "no upstream".
         let msg = format!("{err:#}");
-        if msg.contains("no upstream configured")
-            || msg.contains("no remote configured")
-            || msg.contains("workspace config invalid")
-            || msg.contains("repository not found")
+        let msg_lower = msg.to_ascii_lowercase();
+        if msg_lower.contains("no upstream configured")
+            || msg_lower.contains("no remote configured")
+            || msg_lower.contains("no default remote")
+            || msg_lower.contains("workspace config invalid")
+            || msg_lower.contains("repository not found")
         {
             return Self::Config;
         }
-        if msg.contains("dirty worktree") {
+        if msg_lower.contains("dirty worktree") || msg_lower.contains("shallow git repository") {
             return Self::DataErr;
+        }
+        // gix transport / network errors surface as plain anyhow strings
+        // rather than typed std::io::Error in the chain — match the
+        // phrasings gix produces so an agent can branch on TempFail.
+        if msg_lower.contains("receive-pack handshake failed")
+            || msg_lower.contains("upload-pack handshake failed")
+            || msg_lower.contains("could not connect to remote")
+            || msg_lower.contains("connection reset by peer")
+            || msg_lower.contains("temporary failure in name resolution")
+        {
+            return Self::TempFail;
         }
 
         Self::IoErr
@@ -150,6 +163,32 @@ mod tests {
     fn missing_repo_string_sentinel_is_config() {
         let err = anyhow::anyhow!("repository not found at /tmp/whatever");
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn no_default_remote_is_config() {
+        let err = anyhow::anyhow!("No default remote is configured for push");
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn shallow_git_is_data_err() {
+        let err = anyhow::anyhow!("Shallow Git repository cannot be imported");
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn gix_transport_handshake_is_tempfail() {
+        let err = anyhow::anyhow!(
+            "git error: receive-pack handshake failed for https://example.com/repo.git: connection refused"
+        );
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::TempFail);
+    }
+
+    #[test]
+    fn dns_failure_is_tempfail() {
+        let err = anyhow::anyhow!("git fetch failed: Temporary failure in name resolution");
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::TempFail);
     }
 
     #[test]
