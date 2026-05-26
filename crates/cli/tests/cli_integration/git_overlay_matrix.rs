@@ -6166,7 +6166,12 @@ fn git_overlay_matrix_ship_no_push_refuses_known_upstream_drift_before_mutation(
     let peer = temp.path().join("peer");
     std::fs::create_dir_all(&local).unwrap();
     let status = Command::new("git")
-        .args(["init", "--bare", origin.to_str().unwrap()])
+        .args([
+            "init",
+            "--bare",
+            "--initial-branch=main",
+            origin.to_str().unwrap(),
+        ])
         .status()
         .expect("git init --bare should run");
     assert!(status.success());

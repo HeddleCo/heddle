@@ -2864,9 +2864,13 @@ fn isolated_thread_json_outputs_match_registered_schemas() {
     );
     assert_schema_declares_runtime_top_level(&["thread", "show"], &show);
     assert_eq!(show["output_kind"], "thread_show");
-    assert!(show.get("session_id").is_some());
-    assert!(show.get("native_actor_key").is_some());
-    assert!(show.get("probe_source").is_some());
+    // `session_id`, `native_actor_key`, `probe_source` are populated
+    // by harness probes only when an AI tool (Claude Code / Codex /
+    // OpenCode) is the active parent — they are
+    // `skip_serializing_if = "Option::is_none"`, so they're absent in
+    // bare CI environments. The schema-registration check above pins
+    // their declared shape; runtime population is exercised in the
+    // probe-specific tests under `crates/cli/src/harness/probe/`.
     assert!(show.get("next_action").is_some());
     assert!(show.get("next_action_argv").is_some());
     assert!(show.get("next_action_template").is_some());

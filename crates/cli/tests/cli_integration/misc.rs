@@ -75,7 +75,7 @@ fn status_reports_uncaptured_for_freshly_initialized_repo() {
     let temp = TempDir::new().unwrap();
 
     let status = Command::new("git")
-        .arg("init")
+        .args(["init", "--initial-branch=main"])
         .current_dir(temp.path())
         .status()
         .expect("git init should run");
