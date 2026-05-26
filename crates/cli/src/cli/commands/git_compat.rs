@@ -1324,7 +1324,10 @@ mod tests {
                 &machine_contract_coverage,
             )
             .to_string(),
-            machine_contract_coverage,
+            machine_contract_coverage:
+                crate::cli::commands::git_overlay_health::MachineContractCoverageBrief::from(
+                    &machine_contract_coverage,
+                ),
             workflow_status: "clean".to_string(),
             workflow_summary: "no ready threads are waiting to land".to_string(),
             summary: "Git merge is in progress".to_string(),

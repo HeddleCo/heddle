@@ -848,7 +848,10 @@ mod tests {
                 &machine_contract_coverage,
             )
             .to_string(),
-            machine_contract_coverage,
+            machine_contract_coverage:
+                crate::cli::commands::git_overlay_health::MachineContractCoverageBrief::from(
+                    &machine_contract_coverage,
+                ),
             summary: check.summary.clone(),
             workflow_status: "clean".to_string(),
             workflow_summary: "no workflow attention needed".to_string(),

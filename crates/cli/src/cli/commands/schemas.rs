@@ -1971,8 +1971,10 @@ pub struct RepositoryVerificationStateSchema {
     pub default_remote: Option<String>,
     pub clone_verification: String,
     pub machine_contract: String,
+    /// Slim per-status view. Full catalog breakdown is on
+    /// `heddle doctor schemas --output json`. See PR 5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub machine_contract_coverage: Option<MachineContractCoverageSchema>,
+    pub machine_contract_coverage: Option<MachineContractCoverageBriefSchema>,
     pub workflow_status: String,
     pub workflow_summary: String,
     pub summary: String,
@@ -1985,63 +1987,23 @@ pub struct RepositoryVerificationStateSchema {
     pub checks: Vec<VerificationCheckSchema>,
 }
 
+/// Slim per-status view embedded in `heddle status`. The full
+/// breakdown (`MachineContractCoverageSchema`) is only emitted by
+/// `heddle doctor schemas`.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct MachineContractCoverageSchema {
+pub struct MachineContractCoverageBriefSchema {
     pub status: String,
     #[serde(rename = "verified_scope")]
     pub verified_scope: String,
     pub advanced_scope: String,
     pub summary: String,
-    pub catalog_commands_total: usize,
-    pub catalog_mutating_commands_total: usize,
-    pub json_commands_total: usize,
-    pub json_mutating_commands_total: usize,
-    pub json_commands_with_schema: usize,
-    pub json_commands_with_accepted_opaque_schema: usize,
-    pub json_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_total")]
-    pub verified_scope_json_commands_total: usize,
-    #[serde(rename = "verified_scope_json_commands_with_schema")]
-    pub verified_scope_json_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_with_accepted_opaque_schema")]
-    pub verified_scope_json_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_json_commands_without_schema")]
-    pub verified_scope_json_commands_without_schema: usize,
-    pub advanced_scope_json_commands_total: usize,
-    pub advanced_scope_json_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_total: usize,
-    pub mutating_commands_with_schema: usize,
-    pub mutating_commands_with_accepted_opaque_schema: usize,
-    pub mutating_commands_without_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_total")]
-    pub verified_scope_mutating_commands_total: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_schema")]
-    pub verified_scope_mutating_commands_with_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_with_accepted_opaque_schema")]
-    pub verified_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    #[serde(rename = "verified_scope_mutating_commands_without_schema")]
-    pub verified_scope_mutating_commands_without_schema: usize,
-    pub advanced_scope_mutating_commands_total: usize,
-    pub advanced_scope_mutating_commands_with_accepted_opaque_schema: usize,
-    pub schema_verbs_total: usize,
-    pub documented_schema_verbs_total: usize,
-    pub undocumented_schema_verbs_total: usize,
-    pub opaque_schema_verbs_total: usize,
-    pub accepted_opaque_schema_verbs_total: usize,
-    pub unaccepted_opaque_schema_verbs_total: usize,
-    pub supports_op_id_total: usize,
-    pub jsonl_commands_total: usize,
-    pub missing_schema_examples: Vec<String>,
-    pub missing_mutating_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_missing_schema_examples")]
-    pub verified_scope_missing_schema_examples: Vec<String>,
-    #[serde(rename = "verified_scope_accepted_opaque_schema_examples")]
-    pub verified_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub advanced_scope_accepted_opaque_schema_examples: Vec<String>,
-    pub accepted_opaque_schema_examples: Vec<String>,
-    pub unaccepted_opaque_schema_examples: Vec<String>,
-    pub undocumented_schema_examples: Vec<String>,
 }
+
+// MachineContractCoverageSchema (the heavy variant) used to live here
+// and shadow doctor_schemas' CommandContractSchemaCoverage. PR 5
+// trimmed status to the brief variant above and removed the dead
+// schema — `heddle doctor schemas --output json` remains the
+// canonical full-coverage surface.
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct VerificationCheckSchema {

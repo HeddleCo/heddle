@@ -64,7 +64,12 @@ pub(crate) struct RepositoryVerificationState {
     pub default_remote: Option<String>,
     pub clone_verification: String,
     pub machine_contract: String,
-    pub machine_contract_coverage: MachineContractCoverage,
+    /// Slim per-status view of catalog coverage. Was the full
+    /// `MachineContractCoverage` block (~30 fields, ~6KB) prior to PR 5;
+    /// trimmed because agents polling `heddle status` paid that cost on
+    /// every call. The full breakdown remains available via
+    /// `heddle doctor schemas --output json`.
+    pub machine_contract_coverage: MachineContractCoverageBrief,
     pub workflow_status: String,
     pub workflow_summary: String,
     pub summary: String,
@@ -90,6 +95,31 @@ where
         serializer.serialize_none()
     } else {
         serializer.serialize_some(action)
+    }
+}
+
+/// Per-status slim view of `MachineContractCoverage`. Embedded in
+/// every `heddle status` JSON response, so the four fields here are
+/// the absolute minimum agents need to know whether the machine
+/// contract is healthy. For the full breakdown (catalog counts,
+/// schema coverage, examples), call `heddle doctor schemas`.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub(crate) struct MachineContractCoverageBrief {
+    pub status: String,
+    #[serde(rename = "verified_scope")]
+    pub verified_scope: String,
+    pub advanced_scope: String,
+    pub summary: String,
+}
+
+impl From<&MachineContractCoverage> for MachineContractCoverageBrief {
+    fn from(coverage: &MachineContractCoverage) -> Self {
+        Self {
+            status: coverage.status.clone(),
+            verified_scope: coverage.verified_scope.clone(),
+            advanced_scope: coverage.advanced_scope.clone(),
+            summary: coverage.summary.clone(),
+        }
     }
 }
 
@@ -381,7 +411,7 @@ impl RepositoryVerificationState {
             default_remote: default_remote_name(repo),
             clone_verification,
             machine_contract: machine_contract_status(&machine_contract_coverage).to_string(),
-            machine_contract_coverage,
+            machine_contract_coverage: MachineContractCoverageBrief::from(&machine_contract_coverage),
             workflow_status,
             workflow_summary,
             summary,
@@ -572,33 +602,17 @@ fn machine_contract_verification_check(
     coverage: &MachineContractCoverage,
     action_plan: Option<&VerificationActionPlan>,
 ) -> VerificationCheck {
+    // The "Machine contract" check inside `git_overlay_health.checks[]`
+    // used to mirror the full 20+ field MachineContractCoverage as a
+    // string-keyed details map. Trimmed in PR 5 to four brief fields;
+    // the full breakdown is available from
+    // `heddle doctor schemas --output json`. Status calls pay ~1KB less
+    // per call now, agents lose nothing material — examples are still
+    // there for the failing-coverage case, and operators can still
+    // run `doctor schemas` when they need the deep view.
     let mut details = BTreeMap::new();
     details.insert("coverage_status".to_string(), coverage.status.clone());
     details.insert("coverage_summary".to_string(), coverage.summary.clone());
-    details.insert(
-        "catalog_commands_total".to_string(),
-        coverage.catalog_commands_total.to_string(),
-    );
-    details.insert(
-        "catalog_mutating_commands_total".to_string(),
-        coverage.catalog_mutating_commands_total.to_string(),
-    );
-    details.insert(
-        "json_commands_total".to_string(),
-        coverage.json_commands_total.to_string(),
-    );
-    details.insert(
-        "json_mutating_commands_total".to_string(),
-        coverage.json_mutating_commands_total.to_string(),
-    );
-    details.insert(
-        "json_commands_with_schema".to_string(),
-        coverage.json_commands_with_schema.to_string(),
-    );
-    details.insert(
-        "json_commands_without_schema".to_string(),
-        coverage.json_commands_without_schema.to_string(),
-    );
     details.insert(
         "verified_scope".to_string(),
         coverage.verified_scope.clone(),
@@ -607,86 +621,19 @@ fn machine_contract_verification_check(
         "advanced_scope".to_string(),
         coverage.advanced_scope.clone(),
     );
-    details.insert(
-        "verified_scope_json_commands_total".to_string(),
-        coverage.verified_scope_json_commands_total.to_string(),
-    );
-    details.insert(
-        "verified_scope_json_commands_without_schema".to_string(),
-        coverage
-            .verified_scope_json_commands_without_schema
-            .to_string(),
-    );
-    details.insert(
-        "verified_scope_json_commands_with_accepted_opaque_schema".to_string(),
-        coverage
-            .verified_scope_json_commands_with_accepted_opaque_schema
-            .to_string(),
-    );
-    details.insert(
-        "advanced_scope_json_commands_with_accepted_opaque_schema".to_string(),
-        coverage
-            .advanced_scope_json_commands_with_accepted_opaque_schema
-            .to_string(),
-    );
-    details.insert(
-        "mutating_commands_without_schema".to_string(),
-        coverage.mutating_commands_without_schema.to_string(),
-    );
-    details.insert(
-        "schema_verbs_total".to_string(),
-        coverage.schema_verbs_total.to_string(),
-    );
-    details.insert(
-        "documented_schema_verbs_total".to_string(),
-        coverage.documented_schema_verbs_total.to_string(),
-    );
-    details.insert(
-        "undocumented_schema_verbs_total".to_string(),
-        coverage.undocumented_schema_verbs_total.to_string(),
-    );
-    details.insert(
-        "supports_op_id_total".to_string(),
-        coverage.supports_op_id_total.to_string(),
-    );
+    // Examples are only useful on a failing coverage check; emit them
+    // there as a one-shot hint, but still skip the deep counts that
+    // belong in `doctor schemas`.
     if !coverage.missing_schema_examples.is_empty() {
         details.insert(
             "missing_schema_examples".to_string(),
             coverage.missing_schema_examples.join(", "),
         );
     }
-    if !coverage.missing_mutating_schema_examples.is_empty() {
-        details.insert(
-            "missing_mutating_schema_examples".to_string(),
-            coverage.missing_mutating_schema_examples.join(", "),
-        );
-    }
     if !coverage.verified_scope_missing_schema_examples.is_empty() {
         details.insert(
             "verified_scope_missing_schema_examples".to_string(),
             coverage.verified_scope_missing_schema_examples.join(", "),
-        );
-    }
-    if !coverage
-        .verified_scope_accepted_opaque_schema_examples
-        .is_empty()
-    {
-        details.insert(
-            "verified_scope_accepted_opaque_schema_examples".to_string(),
-            coverage
-                .verified_scope_accepted_opaque_schema_examples
-                .join(", "),
-        );
-    }
-    if !coverage
-        .advanced_scope_accepted_opaque_schema_examples
-        .is_empty()
-    {
-        details.insert(
-            "advanced_scope_accepted_opaque_schema_examples".to_string(),
-            coverage
-                .advanced_scope_accepted_opaque_schema_examples
-                .join(", "),
         );
     }
     if !coverage.undocumented_schema_examples.is_empty() {
@@ -1832,7 +1779,7 @@ pub(crate) fn build_plain_git_verification_probe(
         default_remote,
         clone_verification: "not_applicable".to_string(),
         machine_contract: machine_contract_status(&machine_contract_coverage).to_string(),
-        machine_contract_coverage,
+        machine_contract_coverage: MachineContractCoverageBrief::from(&machine_contract_coverage),
         workflow_status: "not_checked".to_string(),
         workflow_summary: "workflow readiness is checked after Heddle initialization".to_string(),
         summary: "Git repository has not been initialized for Heddle".to_string(),
@@ -3502,10 +3449,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        GitOverlayHealth, RepositoryVerificationState, VerificationActionPlan, action_argv,
-        canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
-        machine_contract_coverage, remote_drift_decision, remote_tracking_next_action,
-        repository_setup_guidance, repository_verification_blocked_advice,
+        GitOverlayHealth, MachineContractCoverageBrief, RepositoryVerificationState,
+        VerificationActionPlan, action_argv, canonical_bridge_import_ref_command,
+        canonical_bridge_reconcile_ref_preview_command, machine_contract_coverage,
+        remote_drift_decision, remote_tracking_next_action, repository_setup_guidance,
+        repository_verification_blocked_advice,
     };
     use crate::cli::commands::build_command_catalog;
 
@@ -3529,7 +3477,9 @@ mod tests {
             default_remote: None,
             clone_verification: "verified".to_string(),
             machine_contract: "verified".to_string(),
-            machine_contract_coverage: machine_contract_coverage(),
+            machine_contract_coverage: MachineContractCoverageBrief::from(
+                &machine_contract_coverage(),
+            ),
             workflow_status: "blocked".to_string(),
             workflow_summary: "Git and Heddle disagree".to_string(),
             summary: "Git and Heddle disagree".to_string(),

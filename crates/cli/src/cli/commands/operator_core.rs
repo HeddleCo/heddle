@@ -682,7 +682,10 @@ mod tests {
             default_remote: Some("origin".to_string()),
             clone_verification: "not_applicable".to_string(),
             machine_contract: "available".to_string(),
-            machine_contract_coverage: machine_contract_coverage(),
+            machine_contract_coverage:
+                crate::cli::commands::git_overlay_health::MachineContractCoverageBrief::from(
+                    &machine_contract_coverage(),
+                ),
             workflow_status: "clean".to_string(),
             workflow_summary: "workflow fixture".to_string(),
             summary: "repository verification fixture".to_string(),
