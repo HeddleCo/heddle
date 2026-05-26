@@ -3,6 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use objects::object::ThreadName;
 use objects::store::{
     AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ReserveOutcome, current_boot_id,
 };
@@ -180,7 +181,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     // must resolve before we hand them a fresh reservation. We surface
     // it here (rather than letting set_thread_cas fail later) so the
     // standard JSON error envelope can describe the conflict.
-    let existing_ref = repo.refs().get_thread(&thread_name)?;
+    let existing_ref = repo.refs().get_thread(&ThreadName::new(&thread_name))?;
     if let Some(existing) = existing_ref
         && existing != anchor
     {
@@ -301,13 +302,14 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     // causing `set_thread_cas` to return ExpectationViolated. The
     // fallible closure here ensures we abandon the orphaned reservation
     // before bubbling that error up.
+    let tn = ThreadName::new(&thread_name);
     let post_reserve = (|| -> Result<()> {
         if let Some(existing) = existing_ref {
             repo.refs()
-                .set_thread_cas(&thread_name, RefExpectation::Value(existing), &anchor)?;
+                .set_thread_cas(&tn, RefExpectation::Value(existing), &anchor)?;
         } else {
             repo.refs()
-                .set_thread_cas(&thread_name, RefExpectation::Missing, &anchor)?;
+                .set_thread_cas(&tn, RefExpectation::Missing, &anchor)?;
             // Agent-reservation flow writes the ThreadManager record via
             // `ensure_thread_record` below, after this op is recorded —
             // so there's no record to snapshot at recording time. Pass
@@ -316,7 +318,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             // that aren't expected to participate in human undo/redo
             // flows in 0.3. heddle#23 r2.
             repo.oplog().record_thread_create(
-                &thread_name,
+                &tn,
                 &anchor,
                 None,
                 Some(&repo.op_scope()),
@@ -384,7 +386,7 @@ fn ensure_thread_record(
     let base_short = anchor.short();
     let base_root = state.tree.short();
     let target_thread = match repo.head_ref()? {
-        Head::Attached { thread } if thread != thread_name => Some(thread),
+        Head::Attached { thread } if thread != thread_name => Some(thread.to_string()),
         _ => None,
     };
     let thread_state = Thread {

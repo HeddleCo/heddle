@@ -25,7 +25,7 @@ use gix_transport::{
 };
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ChangeIdParseError, Principal, Tree},
+    object::{ChangeId, ChangeIdParseError, Principal, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
@@ -571,7 +571,7 @@ impl<'a> GitBridge<'a> {
                 "attached thread '{thread}' has no state to push"
             )));
         }
-        Ok(thread)
+        Ok(thread.to_string())
     }
 
     /// Export current Heddle state into the internal mirror, then write it out
@@ -788,7 +788,7 @@ impl<'a> GitBridge<'a> {
                 .heddle_repo
                 .refs()
                 .get_thread(thread)?
-                .map(|state| (thread.clone(), state)),
+                .map(|state| (thread.to_string(), state)),
             Head::Detached { .. } => None,
         };
         let attached_thread = attached_before.as_ref().map(|(thread, _)| thread.clone());
@@ -803,19 +803,19 @@ impl<'a> GitBridge<'a> {
 
         let mut materialized_attached_thread = false;
         if let Some((thread, old_state)) = attached_before
-            && let Some(new_state) = self.heddle_repo.refs().get_thread(&thread)?
+            && let Some(new_state) = self.heddle_repo.refs().get_thread(&ThreadName::new(&thread))?
             && new_state != old_state
         {
-            self.heddle_repo.refs().set_thread(&thread, &old_state)?;
+            self.heddle_repo.refs().set_thread(&ThreadName::new(&thread), &old_state)?;
             self.heddle_repo.refs().write_head(&Head::Attached {
-                thread: thread.clone(),
+                thread: ThreadName::new(&thread),
             })?;
             self.heddle_repo
                 .goto_verified_clean_without_record(&new_state)?;
-            self.heddle_repo.refs().set_thread(&thread, &new_state)?;
+            self.heddle_repo.refs().set_thread(&ThreadName::new(&thread), &new_state)?;
             self.heddle_repo
                 .refs()
-                .write_head(&Head::Attached { thread })?;
+                .write_head(&Head::Attached { thread: ThreadName::new(&thread) })?;
             materialized_attached_thread = true;
         }
 
@@ -1033,7 +1033,7 @@ impl<'a> GitBridge<'a> {
         &mut self,
         thread: &str,
     ) -> GitResult<WriteThroughOutcome> {
-        let Some(state_id) = self.heddle_repo.refs().get_thread(thread)? else {
+        let Some(state_id) = self.heddle_repo.refs().get_thread(&ThreadName::new(thread))? else {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::NoAttachedThread,
             ));

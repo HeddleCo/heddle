@@ -6,8 +6,8 @@ use std::{
     net::{TcpListener, TcpStream},
     process::{Child, Command, Stdio},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     thread,
     time::Duration,
@@ -15,16 +15,18 @@ use std::{
 
 use base64::Engine;
 use gix::refs::transaction::PreviousValue;
-use objects::object::{Blob, ChangeId, EntryType, FileMode, Tree, TreeEntry};
+use objects::object::{
+    Blob, ChangeId, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
+};
 use repo::Repository;
 use tempfile::TempDir;
 
 use crate::bridge::{
-    GitBridge,
-    git_core::{GitPushScope, copy_local_repo_to_bare, delete_reference_if_present, set_reference},
+    git_core::{copy_local_repo_to_bare, delete_reference_if_present, set_reference, GitPushScope},
     git_export::export_tree,
     git_import::{import_all, import_git_tree},
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
+    GitBridge,
 };
 
 fn init_git_repo() -> (TempDir, gix::Repository) {
@@ -148,18 +150,16 @@ impl GitHttpBackend {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_signal = Arc::clone(&stop);
         let auth = basic_auth.clone();
-        let join = thread::spawn(move || {
-            loop {
-                if stop_signal.load(Ordering::Relaxed) {
-                    break;
+        let join = thread::spawn(move || loop {
+            if stop_signal.load(Ordering::Relaxed) {
+                break;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => handle_http_backend_connection(stream, &root, auth.as_ref()),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
                 }
-                match listener.accept() {
-                    Ok((stream, _)) => handle_http_backend_connection(stream, &root, auth.as_ref()),
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
+                Err(_) => break,
             }
         });
 
@@ -405,7 +405,10 @@ fn sync_tags_peels_annotated_tags() {
 
     let synced = sync_tags(&mut bridge).expect("sync tags");
     assert_eq!(synced, 1);
-    assert_eq!(repo.refs().get_marker("v1.0").unwrap(), Some(change_id));
+    assert_eq!(
+        repo.refs().get_marker(&MarkerName::new("v1.0")).unwrap(),
+        Some(change_id)
+    );
 }
 
 #[test]
@@ -901,8 +904,16 @@ fn pull_imports_remote_branches_and_tags_from_path_remote() {
         .pull(source_temp.path().to_str().expect("remote path"))
         .expect("pull remote");
 
-    assert!(repo.refs().get_thread("main").unwrap().is_some());
-    assert!(repo.refs().get_marker("v1.0").unwrap().is_some());
+    assert!(repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .is_some());
+    assert!(repo
+        .refs()
+        .get_marker(&MarkerName::new("v1.0"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -920,8 +931,16 @@ fn pull_imports_remote_branches_and_tags_from_file_url_remote() {
         .pull(&format!("file://{}", source_temp.path().display()))
         .expect("pull remote");
 
-    assert!(repo.refs().get_thread("main").unwrap().is_some());
-    assert!(repo.refs().get_marker("v1.0").unwrap().is_some());
+    assert!(repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .is_some());
+    assert!(repo
+        .refs()
+        .get_marker(&MarkerName::new("v1.0"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -940,8 +959,16 @@ fn pull_imports_remote_branches_and_tags_from_git_daemon() {
     let mut bridge = GitBridge::new(&repo);
     bridge.pull(&daemon.url("remote.git")).expect("pull remote");
 
-    assert!(repo.refs().get_thread("main").unwrap().is_some());
-    assert!(repo.refs().get_marker("v1.0").unwrap().is_some());
+    assert!(repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .is_some());
+    assert!(repo
+        .refs()
+        .get_marker(&MarkerName::new("v1.0"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -962,8 +989,16 @@ fn pull_imports_remote_branches_and_tags_from_git_http_backend() {
         .pull(&backend.url("remote.git"))
         .expect("pull remote over http");
 
-    assert!(repo.refs().get_thread("main").unwrap().is_some());
-    assert!(repo.refs().get_marker("v1.0").unwrap().is_some());
+    assert!(repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .is_some());
+    assert!(repo
+        .refs()
+        .get_marker(&MarkerName::new("v1.0"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -984,8 +1019,16 @@ fn pull_imports_remote_branches_and_tags_from_authenticated_git_http_backend() {
         .pull(&backend.url("remote.git"))
         .expect("pull remote over authenticated http");
 
-    assert!(repo.refs().get_thread("main").unwrap().is_some());
-    assert!(repo.refs().get_marker("v1.0").unwrap().is_some());
+    assert!(repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .is_some());
+    assert!(repo
+        .refs()
+        .get_marker(&MarkerName::new("v1.0"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -1024,7 +1067,7 @@ fn import_handles_merge_history_without_missing_parent_mappings() {
 
     assert_eq!(stats.commits_imported, 4);
     assert_eq!(
-        repo.refs().get_thread("main").unwrap(),
+        repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
         bridge.mapping.get_heddle(merge)
     );
     assert!(bridge.mapping.get_heddle(base).is_some());
@@ -1841,7 +1884,7 @@ fn round_trip_preserves_symlinks() {
     // checks to write a real symlink to the worktree.
     let head_change_id = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread");
     let state = repo

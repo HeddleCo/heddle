@@ -3,7 +3,7 @@
 
 use std::{fs, io::Write};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use objects::object::ChangeId;
 use oplog::OpRecord;
 use repo::Repository;
@@ -155,10 +155,7 @@ pub(crate) fn load_rebase_state_for_abort(path: &std::path::Path) -> Result<Reba
     load_rebase_state_internal(path, /* for_abort= */ true)
 }
 
-fn load_rebase_state_internal(
-    path: &std::path::Path,
-    for_abort: bool,
-) -> Result<RebaseState> {
+fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result<RebaseState> {
     let content = fs::read_to_string(path)?;
 
     let mut onto = None;
@@ -377,7 +374,10 @@ mod tests {
         assert_eq!(loaded.original_head, original.original_head);
         assert_eq!(loaded.current_index, original.current_index);
         assert_eq!(loaded.commits_to_replay, original.commits_to_replay);
-        assert_eq!(loaded.pending_manual_resolution, original.pending_manual_resolution);
+        assert_eq!(
+            loaded.pending_manual_resolution,
+            original.pending_manual_resolution
+        );
         assert_eq!(loaded.pre_conflict_head, original.pre_conflict_head);
         assert_eq!(loaded.pending_advances.len(), 3);
         for (got, want) in loaded.pending_advances.iter().zip(advances.iter()) {

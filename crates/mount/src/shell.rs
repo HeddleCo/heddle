@@ -272,12 +272,7 @@ pub trait PlatformShell {
     /// Create a symbolic link named `name` under `parent` whose
     /// target is the byte-equivalent of `target`. Returns the new
     /// link's [`Entry`].
-    fn create_symlink(
-        &self,
-        _parent: NodeId,
-        _name: &OsStr,
-        _target: &Path,
-    ) -> Result<Entry> {
+    fn create_symlink(&self, _parent: NodeId, _name: &OsStr, _target: &Path) -> Result<Entry> {
         Err(MountError::ReadOnly)
     }
 
@@ -352,10 +347,9 @@ pub struct RenameOptions {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, ffi::OsStr, time::UNIX_EPOCH};
+
     use super::*;
-    use std::cell::Cell;
-    use std::ffi::OsStr;
-    use std::time::UNIX_EPOCH;
 
     /// Minimal `PlatformShell` impl that supplies only the required
     /// methods, so the test pins the *default* trait bodies for
@@ -403,13 +397,7 @@ mod tests {
         }
         // Override rename_entry so we can observe that
         // `rename_entry_with_options`'s default delegates here.
-        fn rename_entry(
-            &self,
-            _op: NodeId,
-            _on: &OsStr,
-            _np: NodeId,
-            _nn: &OsStr,
-        ) -> Result<()> {
+        fn rename_entry(&self, _op: NodeId, _on: &OsStr, _np: NodeId, _nn: &OsStr) -> Result<()> {
             self.rename_calls.set(self.rename_calls.get() + 1);
             Ok(())
         }
@@ -425,16 +413,17 @@ mod tests {
         let p = NodeId::ROOT;
         let name = OsStr::new("x");
 
-        assert!(is_read_only(
-            s.create_file(p, name, FileMode::Normal, false),
-        ));
+        assert!(is_read_only(s.create_file(
+            p,
+            name,
+            FileMode::Normal,
+            false
+        ),));
         assert!(is_read_only(s.make_dir(p, name)));
         assert!(is_read_only(s.unlink_entry(p, name)));
         assert!(is_read_only(s.rmdir_entry(p, name)));
         assert!(is_read_only(s.set_attrs(NodeId(2), AttrUpdate::default())));
-        assert!(is_read_only(
-            s.create_symlink(p, name, Path::new("target")),
-        ));
+        assert!(is_read_only(s.create_symlink(p, name, Path::new("target")),));
         assert!(is_read_only(s.read_link(NodeId(2))));
     }
 
@@ -462,17 +451,14 @@ mod tests {
         let opts = RenameOptions { no_replace: true };
         // Default impl ignores the options and forwards to
         // `rename_entry` — observe the delegation via the call count.
-        s.rename_entry_with_options(
-            NodeId(1),
-            OsStr::new("a"),
-            NodeId(1),
-            OsStr::new("b"),
-            opts,
-        )
-        .expect("rename");
+        s.rename_entry_with_options(NodeId(1), OsStr::new("a"), NodeId(1), OsStr::new("b"), opts)
+            .expect("rename");
         assert_eq!(s.rename_calls.get(), 1);
         assert!(opts.no_replace, "RenameOptions field survives copy");
-        assert_eq!(RenameOptions::default(), RenameOptions { no_replace: false });
+        assert_eq!(
+            RenameOptions::default(),
+            RenameOptions { no_replace: false }
+        );
     }
 
     #[test]

@@ -137,7 +137,7 @@ impl Repository {
                                     &self.root,
                                 );
                             if m.worktree_path == self_root_canonical {
-                                Some((thread.clone(), m))
+                                Some((thread.to_string(), m))
                             } else {
                                 None
                             }

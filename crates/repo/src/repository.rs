@@ -72,7 +72,7 @@ use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
     lock::{RepoLock, RepositoryLockExt},
-    object::{Attribution, ChangeId, ContentHash, Principal, State, Tree},
+    object::{Attribution, ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, Tree},
     store::{FsStore, ObjectStore, ShallowInfo},
     worktree::{WorktreeStatus, should_ignore as should_ignore_path},
 };
@@ -454,7 +454,7 @@ impl Repository {
         config.save(&heddle_dir.join("config.toml"))?;
 
         refs.write_head(&Head::Attached {
-            thread: "main".to_string(),
+            thread: ThreadName::from("main"),
         })?;
 
         let capability = repository_capability_for_root(&root);
@@ -626,7 +626,7 @@ impl Repository {
                     if repo.capability() == RepositoryCapability::GitOverlay {
                         match detect_git_head_state(dir) {
                             Ok(Some(GitHeadState::Attached(thread))) => {
-                                let git_head = Head::Attached { thread };
+                                let git_head = Head::Attached { thread: ThreadName::from(thread) };
                                 // Avoid the disk write when our HEAD already matches
                                 // git's. Reading the existing head is a small file
                                 // read; the write that follows hits atomic-rename
@@ -748,7 +748,7 @@ impl Repository {
         }
 
         match self.head_ref()? {
-            Head::Attached { thread } => Ok(Some(thread)),
+            Head::Attached { thread } => Ok(Some(thread.to_string())),
             Head::Detached { .. } => Ok(None),
         }
     }
@@ -921,7 +921,7 @@ impl Repository {
             None => return Ok(None),
         };
         let branch_tips = self.git_overlay_branch_tips()?;
-        let imported_threads: std::collections::HashSet<String> =
+        let imported_threads: std::collections::HashSet<ThreadName> =
             self.refs().list_threads()?.into_iter().collect();
         let threads_with_real_history: std::collections::HashSet<String> = imported_threads
             .iter()
@@ -933,7 +933,7 @@ impl Repository {
                     .and_then(|change| self.store.get_state(&change).ok())
                     .flatten()
                     .filter(|state| !is_synthetic_root(state))
-                    .map(|_| thread.clone())
+                    .map(|_| thread.to_string())
             })
             .collect();
         let mut missing_branches = branch_tips
@@ -996,7 +996,7 @@ impl Repository {
             ))
         })?;
 
-        let imported_threads: std::collections::HashSet<String> =
+        let imported_threads: std::collections::HashSet<ThreadName> =
             self.refs().list_threads()?.into_iter().collect();
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
@@ -1039,11 +1039,12 @@ impl Repository {
                 &bridge_mapping,
                 &checkpoint_mapping,
             )?;
-            let history_imported = if imported_threads.contains(&name) {
+            let thread_name = ThreadName::from(name.as_str());
+            let history_imported = if imported_threads.contains(&thread_name) {
                 // Read the thread ref once; the mapped + checkpointed
                 // checks each used to re-read it, which doubled the
                 // ref-store hits per branch on a 60+ branch repo.
-                let existing_thread = self.refs().get_thread(&name)?;
+                let existing_thread = self.refs().get_thread(&thread_name)?;
                 let mapped = matches!(
                     (existing_thread.as_ref(), mapped_change.as_ref()),
                     (Some(existing), Some(mapped_change))
@@ -1089,7 +1090,7 @@ impl Repository {
             ))
         })?;
 
-        let imported_markers: std::collections::HashSet<String> =
+        let imported_markers: std::collections::HashSet<MarkerName> =
             self.refs().list_markers()?.into_iter().collect();
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
@@ -1132,9 +1133,10 @@ impl Repository {
                 &bridge_mapping,
                 &checkpoint_mapping,
             )?;
-            let history_imported = if imported_markers.contains(&name) {
+            let marker_name = MarkerName::from(name.as_str());
+            let history_imported = if imported_markers.contains(&marker_name) {
                 matches!(
-                    (self.refs().get_marker(&name)?, mapped_change.as_ref()),
+                    (self.refs().get_marker(&marker_name)?, mapped_change.as_ref()),
                     (Some(existing), Some(mapped_change)) if existing == *mapped_change
                 )
             } else {
@@ -1719,15 +1721,16 @@ impl Repository {
         let Some(branch) = self.git_overlay_current_branch()? else {
             return Ok(raw);
         };
-        if matches!(&raw, Head::Attached { thread } if thread == &branch) {
+        if matches!(&raw, Head::Attached { thread } if *thread == branch) {
             return Ok(raw);
         }
-        if self.refs.get_thread(&branch)?.is_some()
+        let branch_thread = ThreadName::from(branch.as_str());
+        if self.refs.get_thread(&branch_thread)?.is_some()
             || self
                 .git_overlay_mapped_change_for_branch(&branch)?
                 .is_some()
         {
-            return Ok(Head::Attached { thread: branch });
+            return Ok(Head::Attached { thread: branch_thread });
         }
         Ok(raw)
     }
@@ -1846,7 +1849,8 @@ impl Repository {
     /// a state owned by no one. The genesis state is also filtered out of
     /// user-facing log output (see `repository_history::is_synthetic_root`).
     pub fn seed_default_thread(&self) -> Result<()> {
-        if self.refs.get_thread("main")?.is_some() {
+        let main_thread = ThreadName::from("main");
+        if self.refs.get_thread(&main_thread)?.is_some() {
             return Ok(());
         }
 
@@ -1854,7 +1858,7 @@ impl Repository {
         let tree_hash = self.store.put_tree(&empty_tree)?;
         let state = State::new_snapshot(tree_hash, vec![], Attribution::human(seed_principal()));
         self.store.put_state(&state)?;
-        self.refs.set_thread("main", &state.change_id)?;
+        self.refs.set_thread(&main_thread, &state.change_id)?;
         Ok(())
     }
 
@@ -2411,7 +2415,7 @@ fn detect_git_head_state(path: &Path) -> Result<Option<GitHeadState>> {
 /// than guess).
 fn detect_git_head(path: &Path) -> Result<Option<Head>> {
     if let Some(GitHeadState::Attached(thread)) = detect_git_head_state(path)? {
-        return Ok(Some(Head::Attached { thread }));
+        return Ok(Some(Head::Attached { thread: ThreadName::from(thread) }));
     }
     Ok(None)
 }

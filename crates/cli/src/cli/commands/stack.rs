@@ -5,14 +5,12 @@
 //! cover `ready` (next-action verdict) and `snapshot` (JSON projection
 //! for agentic tooling). All commands are read-only.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use refs::Head;
-use repo::{
-    Repository, RepositorySnapshot, StackNextAction, StackNode, ThreadStack,
-};
+use repo::{Repository, RepositorySnapshot, StackNextAction, StackNode, ThreadStack};
 use serde::Serialize;
 
-use crate::cli::{Cli, StackArgs, StackCommands, should_output_json};
+use crate::cli::{should_output_json, Cli, StackArgs, StackCommands};
 
 pub fn cmd_stack(cli: &Cli, args: StackArgs) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
@@ -36,7 +34,7 @@ fn resolve_target_thread(repo: &Repository, explicit: Option<String>) -> Result<
         return Ok(name);
     }
     match repo.head_ref()? {
-        Head::Attached { thread } => Ok(thread),
+        Head::Attached { thread } => Ok(thread.to_string()),
         Head::Detached { .. } => Err(anyhow!(
             "No current thread (HEAD is detached); pass --thread <name>"
         )),
@@ -108,7 +106,7 @@ fn resolve_describe_target(repo: &Repository, explicit: Option<String>) -> Resul
     Ok(match explicit {
         Some(name) => Some(name),
         None => match repo.head_ref()? {
-            Head::Attached { thread } => Some(thread),
+            Head::Attached { thread } => Some(thread.to_string()),
             Head::Detached { .. } => None,
         },
     })
@@ -251,9 +249,7 @@ mod tests {
     use chrono::Utc;
     use objects::object::ChangeId;
     use refs::Head;
-    use repo::{
-        Repository, ThreadFreshness, ThreadManager, ThreadMode, ThreadRecord, ThreadState,
-    };
+    use repo::{Repository, ThreadFreshness, ThreadManager, ThreadMode, ThreadRecord, ThreadState};
 
     use super::*;
 

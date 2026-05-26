@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mount::worker::{Supervisor, PANIC_ON_INIT_ENV, STOP_GRACE_ENV};
+use mount::worker::{PANIC_ON_INIT_ENV, STOP_GRACE_ENV, Supervisor};
 use repo::Repository;
 use tempfile::TempDir;
 
@@ -136,8 +136,7 @@ fn panic_kills_only_worker_not_parent() {
     unsafe {
         std::env::set_var(PANIC_ON_INIT_ENV, "1");
     }
-    let spawn_result =
-        Supervisor::spawn(&bin, repo_dir.path(), "main", mountpoint.path());
+    let spawn_result = Supervisor::spawn(&bin, repo_dir.path(), "main", mountpoint.path());
     unsafe {
         std::env::remove_var(PANIC_ON_INIT_ENV);
     }
@@ -204,13 +203,16 @@ fn sigkill_worker_auto_unmounts() {
     let mountpoint = TempDir::new().expect("mountpoint tempdir");
 
     let bin = worker_binary();
-    let sup = Supervisor::spawn(&bin, repo_dir.path(), "main", mountpoint.path())
-        .expect("spawn worker");
+    let sup =
+        Supervisor::spawn(&bin, repo_dir.path(), "main", mountpoint.path()).expect("spawn worker");
 
     // Pre-condition: mountpoint serves the fixture file.
     let target = mountpoint.path().join("hello.txt");
     wait_for_path(&target, true, Duration::from_secs(5));
-    assert!(target.exists(), "fixture file must be visible before SIGKILL");
+    assert!(
+        target.exists(),
+        "fixture file must be visible before SIGKILL"
+    );
 
     // SIGKILL the worker.
     let pid = sup.pid();
@@ -228,7 +230,10 @@ fn sigkill_worker_auto_unmounts() {
         killed,
         "supervisor never observed worker exit after SIGKILL (is_alive still true)"
     );
-    assert!(!sup.is_alive(), "is_alive must be false after watcher reaps");
+    assert!(
+        !sup.is_alive(),
+        "is_alive must be false after watcher reaps"
+    );
 
     // (b) kernel must auto-unmount. The fixture file should no
     //     longer be visible (either the path resolves to the empty

@@ -8,6 +8,7 @@
 //! discovery API.
 
 use chrono::Utc;
+use objects::object::ThreadName;
 use repo::{
     Repository, RepositorySnapshot, StackNextAction, ThreadFreshness, ThreadManager, ThreadMode,
     ThreadRecord, ThreadState,
@@ -157,22 +158,22 @@ fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
 
     std::fs::write(temp.path().join("file.txt"), "base").unwrap();
     let base = repo.snapshot(Some("base".to_string()), None).unwrap();
-    repo.refs().set_thread("main", &base.change_id).unwrap();
-    repo.refs().set_thread("feat-a", &base.change_id).unwrap();
+    repo.refs().set_thread(&ThreadName::new("main"), &base.change_id).unwrap();
+    repo.refs().set_thread(&ThreadName::new("feat-a"), &base.change_id).unwrap();
 
     std::fs::write(temp.path().join("file.txt"), "feat-a content").unwrap();
     let feat_a_tip = repo.snapshot(Some("feat-a".to_string()), None).unwrap();
     repo.refs()
-        .set_thread("feat-a", &feat_a_tip.change_id)
+        .set_thread(&ThreadName::new("feat-a"), &feat_a_tip.change_id)
         .unwrap();
     repo.refs()
-        .set_thread("feat-b", &feat_a_tip.change_id)
+        .set_thread(&ThreadName::new("feat-b"), &feat_a_tip.change_id)
         .unwrap();
 
     std::fs::write(temp.path().join("file.txt"), "feat-b content").unwrap();
     let feat_b_tip = repo.snapshot(Some("feat-b".to_string()), None).unwrap();
     repo.refs()
-        .set_thread("feat-b", &feat_b_tip.change_id)
+        .set_thread(&ThreadName::new("feat-b"), &feat_b_tip.change_id)
         .unwrap();
 
     save_thread_record(
@@ -195,7 +196,7 @@ fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
     // Move main forward so the planner has somewhere to rebase onto.
     std::fs::write(temp.path().join("main-only.txt"), "main work").unwrap();
     let new_main = repo.snapshot(Some("main moved".to_string()), None).unwrap();
-    repo.refs().set_thread("main", &new_main.change_id).unwrap();
+    repo.refs().set_thread(&ThreadName::new("main"), &new_main.change_id).unwrap();
 
     let plan = repo
         .plan_thread_stack_rebase("feat-a", "main")
@@ -213,8 +214,14 @@ fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
     assert_eq!(plan.steps[1].parent_thread.as_deref(), Some("feat-a"));
 
     // Each step's `current_state` matches the live ref tip.
-    assert_eq!(plan.steps[0].current_state, feat_a_tip.change_id.to_string());
-    assert_eq!(plan.steps[1].current_state, feat_b_tip.change_id.to_string());
+    assert_eq!(
+        plan.steps[0].current_state,
+        feat_a_tip.change_id.to_string()
+    );
+    assert_eq!(
+        plan.steps[1].current_state,
+        feat_b_tip.change_id.to_string()
+    );
 
     assert!(!plan.is_no_op());
 }
@@ -442,9 +449,7 @@ fn repository_snapshot_for_stack_scopes_to_one_stack_only() {
     let full = RepositorySnapshot::capture(&repo).unwrap();
     assert_eq!(full.stacks.len(), 2, "fixture must have two stacks");
 
-    let scoped = full
-        .for_stack("feat-a")
-        .expect("feat-a belongs to a stack");
+    let scoped = full.for_stack("feat-a").expect("feat-a belongs to a stack");
     assert_eq!(scoped.stacks.len(), 1);
     assert_eq!(scoped.stacks[0].root_name(), "feat-a");
     let names: Vec<&str> = scoped.threads.iter().map(|t| t.thread.as_str()).collect();

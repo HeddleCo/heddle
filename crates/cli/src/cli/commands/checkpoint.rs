@@ -13,6 +13,7 @@
 //! convention.
 
 use anyhow::{Result, anyhow};
+use objects::object::ThreadName;
 use oplog::OpRecord;
 use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
@@ -240,7 +241,7 @@ fn git_checkpoint_can_close_integrated_remote_gap(
     if upstream.is_empty() {
         return false;
     }
-    let Ok(Some(upstream_state)) = repo.refs().get_thread(upstream) else {
+    let Ok(Some(upstream_state)) = repo.refs().get_thread(&ThreadName::new(upstream)) else {
         return false;
     };
     let Ok(Some(current_state)) = repo.head() else {

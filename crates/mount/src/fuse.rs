@@ -429,7 +429,10 @@ impl Filesystem for FuseShell {
         // guard; the cost of skipping the bookkeeping is correctness
         // under that pathological case, so we log and fail open.
         if let Err(err) = guard_call("open", || self.inner.on_open(NodeId(ino.0))) {
-            warn!(?err, "on_open bookkeeping failed; orphan cleanup may misfire");
+            warn!(
+                ?err,
+                "on_open bookkeeping failed; orphan cleanup may misfire"
+            );
         }
         // Open every file in `direct_io` mode so the kernel never
         // serves bytes from its page cache. The content-addressed
@@ -714,7 +717,8 @@ impl Filesystem for FuseShell {
         }
         let file_mode = file_mode_from_unix(mode);
         let result = guard_call("mknod", || {
-            self.inner.create_file(NodeId(parent.0), name, file_mode, true)
+            self.inner
+                .create_file(NodeId(parent.0), name, file_mode, true)
         });
         match result {
             Ok(entry) => {
@@ -726,18 +730,14 @@ impl Filesystem for FuseShell {
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        match guard_call("unlink", || {
-            self.inner.unlink_entry(NodeId(parent.0), name)
-        }) {
+        match guard_call("unlink", || self.inner.unlink_entry(NodeId(parent.0), name)) {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno_from_mount_error(err)),
         }
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        match guard_call("rmdir", || {
-            self.inner.rmdir_entry(NodeId(parent.0), name)
-        }) {
+        match guard_call("rmdir", || self.inner.rmdir_entry(NodeId(parent.0), name)) {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(errno_from_mount_error(err)),
         }
@@ -845,7 +845,8 @@ impl Filesystem for FuseShell {
         reply: ReplyEntry,
     ) {
         let result = guard_call("symlink", || {
-            self.inner.create_symlink(NodeId(parent.0), link_name, target)
+            self.inner
+                .create_symlink(NodeId(parent.0), link_name, target)
         });
         match result {
             Ok(entry) => {

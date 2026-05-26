@@ -18,12 +18,12 @@ use std::path::Path;
 use chrono::Utc;
 use objects::{
     error::HeddleError,
-    object::{ChangeId, State, Tree, Verification},
+    object::{ChangeId, State, ThreadName, Tree, Verification},
 };
 
 use crate::{
-    ConfidenceBand, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadImpactCategory,
-    ThreadManager, ThreadState, ThreadVerificationSummary, repository::Repository,
+    repository::Repository, ConfidenceBand, Thread, ThreadConfidenceSummary, ThreadFreshness,
+    ThreadImpactCategory, ThreadManager, ThreadState, ThreadVerificationSummary,
 };
 
 /// Result of a metadata refresh: derived signal the caller may want
@@ -144,7 +144,7 @@ pub fn summarize_verification(verification: Option<&Verification>) -> ThreadVeri
 /// CLI's `refresh_thread_freshness`.
 pub fn refresh_thread_freshness(repo: &Repository, thread: &mut Thread) -> Result<(), HeddleError> {
     thread.freshness = if let Some(target_thread) = thread.target_thread.as_deref() {
-        if let Some(target_state) = repo.refs().get_thread(target_thread)? {
+        if let Some(target_state) = repo.refs().get_thread(&ThreadName::from(target_thread))? {
             if target_state.short() == thread.base_state {
                 ThreadFreshness::Current
             } else {

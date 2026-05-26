@@ -12,7 +12,6 @@ use cli::cli::{
     BridgeCommands,
     commands::{cmd_bridge_git, cmd_git_overlay_guide},
 };
-use cli::exit::HeddleExitCode;
 use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
@@ -45,6 +44,7 @@ use cli::{
         render::write_json_stdout,
     },
     config::UserConfig,
+    exit::HeddleExitCode,
     logging::{LoggingConfig, init_logging},
     operation_id::{resolve_operation_id, run_local_idempotency_if_requested},
     perf::{ProfileField, emit_profile, profile_enabled},
@@ -443,7 +443,7 @@ async fn async_main() -> Result<()> {
             }
             let repo = repo::Repository::open(start)?;
             match target {
-                Some(name) if repo.refs().get_thread(name)?.is_some() => {
+                Some(name) if repo.refs().get_thread(&objects::object::ThreadName::new(name.as_str()))?.is_some() => {
                     cmd_thread_show(&cli, &repo, Some(name.clone()))
                 }
                 Some(state) => cmd_show(&cli, state.clone()),

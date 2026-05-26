@@ -1685,10 +1685,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(
-        &["stack"],
-        opaque_schemas(READ_JSON, &["stack"]),
-    ),
+    entry(&["stack"], opaque_schemas(READ_JSON, &["stack"])),
     entry(
         &["stack", "ready"],
         opaque_schemas(READ_JSON, &["stack ready"]),
@@ -1764,7 +1761,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[
                 (0, "ok"),
                 (75, "remote unreachable; safe to retry"),
-                (76, "remote rejected payload; do not retry without changing inputs"),
+                (
+                    76,
+                    "remote rejected payload; do not retry without changing inputs",
+                ),
                 (78, "no upstream configured"),
             ],
         ),

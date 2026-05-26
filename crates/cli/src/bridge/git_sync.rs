@@ -2,6 +2,7 @@
 //! Sync threads/markers functionality for Git bridge.
 
 use gix::refs::transaction::PreviousValue;
+use objects::object::{MarkerName, ThreadName};
 use refs::RefExpectation;
 
 use crate::bridge::{
@@ -63,7 +64,8 @@ pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
         let name = branch.name().shorten().to_string();
         let target = branch.peel_to_id().map_err(git_err)?.detach();
         if let Some(change_id) = bridge.mapping.get_heddle(target) {
-            if let Some(existing) = bridge.heddle_repo.refs().get_thread(&name)?
+            let tn = ThreadName::new(&name);
+            if let Some(existing) = bridge.heddle_repo.refs().get_thread(&tn)?
                 && !thread_can_adopt_change(bridge.heddle_repo, &existing, &change_id)?
             {
                 return Err(GitBridgeError::GitHeddleThreadDiverged {
@@ -74,7 +76,7 @@ pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
                 });
             }
 
-            bridge.heddle_repo.refs().set_thread(&name, &change_id)?;
+            bridge.heddle_repo.refs().set_thread(&tn, &change_id)?;
             stats += 1;
         }
     }
@@ -98,17 +100,18 @@ pub fn sync_tags(bridge: &mut GitBridge) -> GitResult<usize> {
         let oid = tag.peel_to_id().map_err(git_err)?.detach();
 
         if let Some(change_id) = bridge.mapping.get_heddle(oid) {
-            match bridge.heddle_repo.refs().get_marker(&name) {
+            let mn = MarkerName::new(&name);
+            match bridge.heddle_repo.refs().get_marker(&mn) {
                 Ok(Some(existing)) if existing != change_id => bridge
                     .heddle_repo
                     .refs()
-                    .set_marker_cas(&name, RefExpectation::Any, &change_id)?,
+                    .set_marker_cas(&mn, RefExpectation::Any, &change_id)?,
                 Ok(_) => {}
                 Err(err) => return Err(err.into()),
             }
 
-            if bridge.heddle_repo.refs().get_marker(&name)?.is_none() {
-                bridge.heddle_repo.refs().create_marker(&name, &change_id)?;
+            if bridge.heddle_repo.refs().get_marker(&mn)?.is_none() {
+                bridge.heddle_repo.refs().create_marker(&mn, &change_id)?;
             }
             stats += 1;
         }

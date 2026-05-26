@@ -11,14 +11,14 @@ use std::{
     ffi::OsStr,
     fs,
     sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     },
 };
 
 use objects::{
     error::HeddleError,
-    object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
+    object::{Action, ActionId, Blob, ChangeId, ContentHash, State, ThreadName, Tree},
     store::ObjectStore,
 };
 use repo::Repository;
@@ -47,15 +47,15 @@ pub(crate) mod mocks {
     use std::{
         ffi::OsStr,
         sync::{
-            Arc,
             atomic::{AtomicUsize, Ordering},
+            Arc,
         },
         time::UNIX_EPOCH,
     };
 
     use crate::{
         error::{MountError, Result},
-        shell::{Attrs, DIR_UNIX_MODE, Entry, NodeId, NodeKind, PlatformShell},
+        shell::{Attrs, Entry, NodeId, NodeKind, PlatformShell, DIR_UNIX_MODE},
     };
 
     /// Trivial in-memory shell that lets adapter unit tests validate
@@ -745,8 +745,15 @@ fn cross_thread_blob_dedup() {
     let temp = TempDir::new().unwrap();
     let repo_a = Repository::init_default(temp.path()).unwrap();
     // Add a sibling thread by reusing the seeded `main` head.
-    let main_id = repo_a.refs().get_thread("main").unwrap().unwrap();
-    repo_a.refs().set_thread("feature", &main_id).unwrap();
+    let main_id = repo_a
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    repo_a
+        .refs()
+        .set_thread(&ThreadName::new("feature"), &main_id)
+        .unwrap();
     drop(repo_a);
 
     // Open two independent mounts against the same backing store.
@@ -838,7 +845,11 @@ fn capture_builds_state_and_advances_thread() {
 
     // Thread HEAD has advanced.
     let repo_check = mount.repo_handle();
-    let head = repo_check.refs().get_thread("main").unwrap().unwrap();
+    let head = repo_check
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
     assert_eq!(head, new_id);
 }
 
@@ -1099,7 +1110,11 @@ fn capture_refreshes_thread_metadata_when_thread_record_exists() {
 
     let temp = TempDir::new().unwrap();
     let repo = Repository::init_default(temp.path()).unwrap();
-    let base_state_id = repo.refs().get_thread("main").unwrap().unwrap();
+    let base_state_id = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
     let base_root = repo
         .store()
         .get_state(&base_state_id)
@@ -1335,11 +1350,15 @@ fn crash_recovery_warm_durable_hot_lost() {
 fn cross_thread_blob_dedup_at_scale() {
     let temp = TempDir::new().unwrap();
     let repo = Repository::init_default(temp.path()).unwrap();
-    let main_id = repo.refs().get_thread("main").unwrap().unwrap();
+    let main_id = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
     // Make 9 sibling threads.
     for i in 0..9 {
         repo.refs()
-            .set_thread(&format!("feat-{i}"), &main_id)
+            .set_thread(&ThreadName::new(&format!("feat-{i}")), &main_id)
             .unwrap();
     }
     drop(repo);
@@ -1391,10 +1410,12 @@ fn cross_thread_blob_dedup_at_scale() {
 // Linux FUSE shell.
 // ---------------------------------------------------------------------------
 mod write_ops {
+    use std::path::Path;
+
+    use objects::object::FileMode;
+
     use super::*;
     use crate::shell::AttrUpdate;
-    use objects::object::FileMode;
-    use std::path::Path;
 
     /// `create_file` mints a fresh PendingFile under root, visible to
     /// subsequent `lookup` / `read` calls. The first `write` against
@@ -1404,7 +1425,12 @@ mod write_ops {
     fn create_file_in_root_then_write_and_read_back() {
         let (_temp, mount) = open_mount();
         let entry = mount
-            .create_file(NodeId::ROOT, OsStr::new("Cargo.lock"), FileMode::Normal, false)
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("Cargo.lock"),
+                FileMode::Normal,
+                false,
+            )
             .expect("create_file");
         assert_eq!(entry.kind, NodeKind::File);
         assert_eq!(entry.name, "Cargo.lock");
@@ -1430,7 +1456,12 @@ mod write_ops {
     fn create_file_exclusive_against_existing_returns_eexist() {
         let (_temp, mount) = open_mount();
         let err = mount
-            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, true)
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                FileMode::Normal,
+                true,
+            )
             .expect_err("exclusive create on existing must fail");
         assert!(matches!(err, MountError::AlreadyExists(_)), "got {err:?}");
         assert_eq!(err.to_errno(), libc::EEXIST);
@@ -1445,7 +1476,12 @@ mod write_ops {
     fn create_file_non_exclusive_returns_existing_entry() {
         let (_temp, mount) = open_mount();
         let entry = mount
-            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                FileMode::Normal,
+                false,
+            )
             .expect("non-exclusive create on existing returns entry");
         assert_eq!(entry.name, "hello.txt");
         let captured = mount
@@ -1465,7 +1501,10 @@ mod write_ops {
             let err = mount
                 .create_file(NodeId::ROOT, OsStr::new(bad), FileMode::Normal, false)
                 .expect_err(&format!("name {bad:?} must be rejected"));
-            assert!(matches!(err, MountError::InvalidArgument(_)), "{bad}: {err:?}");
+            assert!(
+                matches!(err, MountError::InvalidArgument(_)),
+                "{bad}: {err:?}"
+            );
             assert_eq!(err.to_errno(), libc::EINVAL);
         }
     }
@@ -1491,14 +1530,20 @@ mod write_ops {
         // Root enumerate must include the new directory.
         let root_entries = mount.enumerate(NodeId::ROOT).unwrap();
         assert!(
-            root_entries.iter().any(|e| e.name == "target"
-                && e.kind == NodeKind::Directory),
+            root_entries
+                .iter()
+                .any(|e| e.name == "target" && e.kind == NodeKind::Directory),
             "root enumerate did not include the new dir: {root_entries:?}"
         );
 
         // Create a file inside it; visible via lookup under the dir.
         let file = mount
-            .create_file(dir_entry.node, OsStr::new("out.bin"), FileMode::Normal, false)
+            .create_file(
+                dir_entry.node,
+                OsStr::new("out.bin"),
+                FileMode::Normal,
+                false,
+            )
             .expect("create_file under new dir");
         let from_lookup = mount
             .lookup(dir_entry.node, OsStr::new("out.bin"))
@@ -1544,7 +1589,12 @@ mod write_ops {
 
         // Recreate.
         let recreated = mount
-            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                FileMode::Normal,
+                false,
+            )
             .expect("recreate after unlink");
         mount.write(recreated.node, 0, b"REBORN").unwrap();
         let mut buf = vec![0u8; 16];
@@ -1582,12 +1632,10 @@ mod write_ops {
         mount
             .rmdir_entry(NodeId::ROOT, OsStr::new("scratch"))
             .expect("rmdir");
-        assert!(
-            mount
-                .lookup(NodeId::ROOT, OsStr::new("scratch"))
-                .unwrap()
-                .is_none()
-        );
+        assert!(mount
+            .lookup(NodeId::ROOT, OsStr::new("scratch"))
+            .unwrap()
+            .is_none());
     }
 
     /// `rmdir_entry` on a directory that has any visible child (pending
@@ -1620,7 +1668,12 @@ mod write_ops {
     fn rename_entry_file_same_dir() {
         let (_temp, mount) = open_mount();
         let src = mount
-            .create_file(NodeId::ROOT, OsStr::new("Cargo.lock.tmp"), FileMode::Normal, false)
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("Cargo.lock.tmp"),
+                FileMode::Normal,
+                false,
+            )
             .unwrap();
         mount.write(src.node, 0, b"[atomic]\n").unwrap();
         mount.flush(src.node).unwrap();
@@ -1729,7 +1782,12 @@ mod write_ops {
             .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
             .expect("unlink");
         let recreated = mount
-            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                FileMode::Normal,
+                false,
+            )
             .expect("recreate");
         assert_ne!(
             original.node, recreated.node,
@@ -1834,7 +1892,9 @@ mod write_ops {
             .create_file(NodeId::ROOT, OsStr::new("temp"), FileMode::Normal, false)
             .expect("recreate");
         assert_ne!(original.node, recreated.node);
-        mount.write(recreated.node, 0, b"v2-fresh").expect("write v2");
+        mount
+            .write(recreated.node, 0, b"v2-fresh")
+            .expect("write v2");
 
         // The new inode is the one that owns the path now.
         let hit = mount
@@ -1889,7 +1949,9 @@ mod write_ops {
         let (_temp, mount) = open_mount();
         // Build an overlay-only directory with a leaf so the rename
         // exercises `move_overlay_dir` + the inode rebase pass.
-        mount.make_dir(NodeId::ROOT, OsStr::new("from_dir")).unwrap();
+        mount
+            .make_dir(NodeId::ROOT, OsStr::new("from_dir"))
+            .unwrap();
         let from = mount
             .lookup(NodeId::ROOT, OsStr::new("from_dir"))
             .unwrap()
@@ -2066,11 +2128,7 @@ mod write_ops {
     fn rename_entry_moves_overlay_symlink() {
         let (_temp, mount) = open_mount();
         mount
-            .create_symlink(
-                NodeId::ROOT,
-                OsStr::new("alias"),
-                Path::new("hello.txt"),
-            )
+            .create_symlink(NodeId::ROOT, OsStr::new("alias"), Path::new("hello.txt"))
             .expect("create symlink");
         mount
             .rename_entry(
@@ -2081,7 +2139,10 @@ mod write_ops {
             )
             .expect("rename symlink");
         assert!(
-            mount.lookup(NodeId::ROOT, OsStr::new("alias")).unwrap().is_none(),
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("alias"))
+                .unwrap()
+                .is_none(),
             "source symlink path must be gone after rename",
         );
         let dst = mount
@@ -2164,9 +2225,16 @@ mod write_ops {
         // Two overlay dirs side by side; rename one. The other's
         // children/state — explicit_dirs, warm (via flushed write),
         // a symlink, and a tombstone — must all stay put.
-        mount.make_dir(NodeId::ROOT, OsStr::new("from_dir")).unwrap();
-        mount.make_dir(NodeId::ROOT, OsStr::new("keep_dir")).unwrap();
-        let keep = mount.lookup(NodeId::ROOT, OsStr::new("keep_dir")).unwrap().unwrap();
+        mount
+            .make_dir(NodeId::ROOT, OsStr::new("from_dir"))
+            .unwrap();
+        mount
+            .make_dir(NodeId::ROOT, OsStr::new("keep_dir"))
+            .unwrap();
+        let keep = mount
+            .lookup(NodeId::ROOT, OsStr::new("keep_dir"))
+            .unwrap()
+            .unwrap();
         // Warm (flushed) leaf under `keep_dir/`.
         let kept_file = mount
             .create_file(keep.node, OsStr::new("warm.txt"), FileMode::Normal, false)
@@ -2194,7 +2262,10 @@ mod write_ops {
             .expect("dir rename");
 
         // The sibling's children survive.
-        let keep_after = mount.lookup(NodeId::ROOT, OsStr::new("keep_dir")).unwrap().unwrap();
+        let keep_after = mount
+            .lookup(NodeId::ROOT, OsStr::new("keep_dir"))
+            .unwrap()
+            .unwrap();
         assert_eq!(keep_after.node, keep.node);
         let warm_after = mount
             .lookup(keep_after.node, OsStr::new("warm.txt"))
@@ -2210,16 +2281,25 @@ mod write_ops {
         assert_eq!(alias_after.kind, NodeKind::Symlink);
         // The unrelated tombstone survives.
         assert!(
-            mount.lookup(NodeId::ROOT, OsStr::new("hello.txt")).unwrap().is_none(),
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+                .unwrap()
+                .is_none(),
             "unrelated tombstone must survive the rename pass",
         );
         // And the rename itself landed.
         assert!(
-            mount.lookup(NodeId::ROOT, OsStr::new("from_dir")).unwrap().is_none(),
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("from_dir"))
+                .unwrap()
+                .is_none(),
             "source dir must be gone",
         );
         assert!(
-            mount.lookup(NodeId::ROOT, OsStr::new("to_dir")).unwrap().is_some(),
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("to_dir"))
+                .unwrap()
+                .is_some(),
             "destination dir must be present",
         );
     }
@@ -2293,9 +2373,17 @@ mod write_ops {
         let (_temp, mount) = open_mount();
         mount.make_dir(NodeId::ROOT, OsStr::new("srcdir")).unwrap();
         mount.make_dir(NodeId::ROOT, OsStr::new("dstdir")).unwrap();
-        let dstdir = mount.lookup(NodeId::ROOT, OsStr::new("dstdir")).unwrap().unwrap();
+        let dstdir = mount
+            .lookup(NodeId::ROOT, OsStr::new("dstdir"))
+            .unwrap()
+            .unwrap();
         mount
-            .create_file(dstdir.node, OsStr::new("child.txt"), FileMode::Normal, false)
+            .create_file(
+                dstdir.node,
+                OsStr::new("child.txt"),
+                FileMode::Normal,
+                false,
+            )
             .unwrap();
         let err = mount
             .rename_entry(
@@ -2432,13 +2520,17 @@ mod write_ops {
         // Open the captured "hello.txt", write through it, do NOT
         // flush. The hot buffer keyed by dest_id holds "ORIG-DATA".
         let dest_id = mount.lookup_path("hello.txt").unwrap();
-        mount.write(dest_id, 0, b"ORIG-DATA").expect("write to dest");
+        mount
+            .write(dest_id, 0, b"ORIG-DATA")
+            .expect("write to dest");
         // Build a source file with replacement bytes; flush so the
         // rename's start-of-move flush_node is a no-op.
         let src = mount
             .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
             .expect("create src");
-        mount.write(src.node, 0, b"REPLACE-DATA").expect("write src");
+        mount
+            .write(src.node, 0, b"REPLACE-DATA")
+            .expect("write src");
         mount.flush(src.node).expect("flush src");
         // Rename src over dest. dest's pathname is rebound to src;
         // dest's open fd must continue to see "ORIG-DATA".
@@ -2482,7 +2574,9 @@ mod write_ops {
         let src = mount
             .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
             .expect("create src");
-        mount.write(src.node, 0, b"REPLACE-DATA").expect("write src");
+        mount
+            .write(src.node, 0, b"REPLACE-DATA")
+            .expect("write src");
         mount.flush(src.node).expect("flush src");
         mount
             .rename_entry(
@@ -2537,7 +2631,12 @@ mod write_ops {
         // pathname. Writing some bytes guarantees the hot buffer
         // exists so a leak via `hot_by_path[path]` is visible.
         let fresh = mount
-            .create_file(NodeId::ROOT, OsStr::new("hello.txt"), FileMode::Normal, false)
+            .create_file(
+                NodeId::ROOT,
+                OsStr::new("hello.txt"),
+                FileMode::Normal,
+                false,
+            )
             .expect("recreate at same name");
         assert_ne!(orphan_id, fresh.node);
         mount
@@ -2720,7 +2819,9 @@ mod write_ops {
         // transition for `Released` destinations and the
         // warm-preservation path doesn't engage.
         mount.on_open(dest_id).expect("on_open");
-        mount.write(dest_id, 0, b"DEST-WARM-BYTES").expect("write dest");
+        mount
+            .write(dest_id, 0, b"DEST-WARM-BYTES")
+            .expect("write dest");
         mount.flush(dest_id).expect("flush dest — promote to warm");
         assert!(
             mount.warm_blob("hello.txt").is_some(),
@@ -2730,7 +2831,9 @@ mod write_ops {
         let src = mount
             .create_file(NodeId::ROOT, OsStr::new("draft"), FileMode::Normal, false)
             .expect("create src");
-        mount.write(src.node, 0, b"REPLACE-DATA").expect("write src");
+        mount
+            .write(src.node, 0, b"REPLACE-DATA")
+            .expect("write src");
         mount.flush(src.node).expect("flush src");
         // Rename src over dest. dest's pathname is rebound to src.
         // dest's open fd must keep seeing the displaced WARM bytes.
@@ -2953,9 +3056,7 @@ mod write_ops {
         // the unlink — POSIX open-unlinked. Pre-fix, hot[node] was
         // dropped at unlink and this returned "world" (captured blob).
         let mut buf = vec![0u8; 32];
-        let n = mount
-            .read(node, 0, &mut buf)
-            .expect("read via orphan fd");
+        let n = mount.read(node, 0, &mut buf).expect("read via orphan fd");
         assert_eq!(
             &buf[..n],
             b"DIRTY-BYTES",
@@ -3112,7 +3213,9 @@ mod write_ops {
 
         // Kernel drops its cached inode reference. The file's path still
         // exists from the user's POV; capture must still plant its bytes.
-        mount.invalidate(entry.node).expect("invalidate (kernel forget)");
+        mount
+            .invalidate(entry.node)
+            .expect("invalidate (kernel forget)");
 
         let change_id = mount
             .capture(Some("post-invalidate capture".into()))
@@ -3206,12 +3309,7 @@ mod write_ops {
         // isolation forbids rebinding a cached dir inode to a different
         // object type.
         let file = mount
-            .create_file(
-                NodeId::ROOT,
-                OsStr::new("scratch"),
-                FileMode::Normal,
-                false,
-            )
+            .create_file(NodeId::ROOT, OsStr::new("scratch"), FileMode::Normal, false)
             .expect("recreate as file");
         assert_ne!(
             file.node, dir.node,
@@ -3240,9 +3338,7 @@ mod write_ops {
         mount
             .create_symlink(NodeId::ROOT, OsStr::new("link"), Path::new("hello.txt"))
             .expect("create_symlink");
-        let _ = mount
-            .capture(Some("plant link".into()))
-            .expect("capture");
+        let _ = mount.capture(Some("plant link".into())).expect("capture");
         let entry = mount
             .lookup(NodeId::ROOT, OsStr::new("link"))
             .unwrap()
@@ -3370,8 +3466,10 @@ mod write_ops {
     /// paths), the race is structurally impossible.
     #[test]
     fn setattr_truncate_serializes_against_rename() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
+        use std::{
+            sync::{Arc, Barrier},
+            thread,
+        };
         const TRIALS: usize = 200;
         let mut resurrected: Vec<usize> = Vec::new();
         for trial in 0..TRIALS {
@@ -3469,9 +3567,8 @@ mod write_ops {
                 std::ffi::OsString::from(OsStr::from_bytes(bytes))
             };
             #[cfg(not(unix))]
-            let name = std::ffi::OsString::from(
-                std::str::from_utf8(bytes).expect("ascii test inputs"),
-            );
+            let name =
+                std::ffi::OsString::from(std::str::from_utf8(bytes).expect("ascii test inputs"));
 
             let err = mount
                 .create_file(NodeId::ROOT, &name, FileMode::Normal, false)
@@ -3941,7 +4038,9 @@ mod platform_shell_defaults {
             NodeId::ROOT,
             OsStr::new("b"),
         )));
-        assert!(is_readonly(s.set_attrs(NodeId::ROOT, AttrUpdate::default())));
+        assert!(is_readonly(
+            s.set_attrs(NodeId::ROOT, AttrUpdate::default())
+        ));
         assert!(is_readonly(s.create_symlink(
             NodeId::ROOT,
             OsStr::new("ln"),
@@ -4006,9 +4105,11 @@ mod platform_shell_defaults {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod capture_write_ops {
-    use super::*;
-    use objects::object::FileMode;
     use std::path::Path;
+
+    use objects::object::FileMode;
+
+    use super::*;
 
     fn dump_tree(store: &dyn ObjectStore, hash: &ContentHash) -> Tree {
         store.get_tree(hash).unwrap().unwrap()
@@ -4048,10 +4149,7 @@ mod capture_write_ops {
         let state = store.get_state(&id).unwrap().unwrap();
         let root = dump_tree(store, &state.tree);
         let alias = root.get("alias.txt").expect("symlink lands in tree");
-        assert!(matches!(
-            alias.mode,
-            objects::object::FileMode::Symlink
-        ));
+        assert!(matches!(alias.mode, objects::object::FileMode::Symlink));
     }
 
     /// A rmdir tombstone for a captured dir must drop the whole subtree

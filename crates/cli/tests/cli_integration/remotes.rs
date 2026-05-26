@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use objects::object::{MarkerName, ThreadName};
 
 fn heddle_without_git_for_remote_tests(args: &[&str], cwd: &std::path::Path) -> String {
     let output = heddle_output_with_env(args, Some(cwd), &[("PATH", ""), ("NO_COLOR", "1")])
@@ -360,7 +361,11 @@ fn test_cli_pull_local_updates_requested_track() {
 
     let target_repo = Repository::open(target.path()).unwrap();
     assert!(
-        target_repo.refs().get_thread("imported").unwrap().is_some(),
+        target_repo
+            .refs()
+            .get_thread(&ThreadName::new("imported"))
+            .unwrap()
+            .is_some(),
         "imported thread should be created"
     );
     heddle(&["thread", "switch", "imported"], Some(target.path())).unwrap();
@@ -454,11 +459,11 @@ fn git_overlay_push_all_threads_does_not_promote_remote_tracking_threads() {
     let repo = Repository::open(work.path()).expect("open work repo");
     let main = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .expect("read main thread")
         .expect("main thread exists");
     repo.refs()
-        .set_thread("origin/remote-only", &main)
+        .set_thread(&ThreadName::new("origin/remote-only"), &main)
         .expect("seed remote-tracking-shaped Heddle thread");
 
     let output = heddle(
@@ -805,8 +810,14 @@ fn test_cli_clone_local_bare_git_heddle_remote_skips_admin_files_and_sets_origin
     let clone_repo = Repository::open(&clone).expect("open clone repo");
     let remote_repo = Repository::open(&remote).expect("open remote repo");
     assert_eq!(
-        remote_repo.refs().get_thread("main").unwrap(),
-        clone_repo.refs().get_thread("main").unwrap(),
+        remote_repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap(),
+        clone_repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap(),
         "default origin should let a later `heddle push` update the cloned remote"
     );
 }
@@ -2572,13 +2583,16 @@ fn test_cli_fetch_local_creates_remote_thread_and_marker() {
     assert!(heddle(&["fetch", "origin"], Some(local.path())).is_ok());
 
     let repo = Repository::open(local.path()).unwrap();
-    assert!(
-        repo.refs()
-            .get_remote_thread("origin", "main")
-            .unwrap()
-            .is_some()
-    );
-    assert!(repo.refs().get_marker("v1.0").unwrap().is_some());
+    assert!(repo
+        .refs()
+        .get_remote_thread("origin", &ThreadName::new("main"))
+        .unwrap()
+        .is_some());
+    assert!(repo
+        .refs()
+        .get_marker(&MarkerName::new("v1.0"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -2690,7 +2704,7 @@ fn test_cli_push_defaults_to_current_attached_thread() {
     assert!(
         remote_repo
             .refs()
-            .get_thread("feature/push-default")
+            .get_thread(&ThreadName::new("feature/push-default"))
             .unwrap()
             .is_some(),
         "push without --thread should update the current attached thread"
@@ -2742,7 +2756,7 @@ fn test_cli_git_overlay_push_to_native_heddle_local_path_uses_heddle_sync() {
     let remote_repo = Repository::open(remote.path()).expect("open native target");
     let remote_state = remote_repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .expect("read target main")
         .expect("target main should be updated");
     assert_eq!(

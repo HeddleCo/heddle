@@ -5,11 +5,11 @@ use std::{collections::HashSet, path::PathBuf};
 
 use objects::{
     error::{HeddleError, Result},
-    object::ChangeId,
+    object::{ChangeId, ThreadName},
 };
 
 use super::{
-    RefManager, RefUpdate, format_change_id_text,
+    format_change_id_text,
     packed_refs::PackedRefs,
     parse_change_id_text,
     refs_storage::RefsLock,
@@ -17,6 +17,7 @@ use super::{
         describe_change_id, describe_expectation_change_id, describe_expectation_head,
         describe_head, matches_expectation,
     },
+    RefManager, RefUpdate,
 };
 use crate::fs_atomic::sync_directory;
 
@@ -37,7 +38,7 @@ struct RefUpdatePlan {
 impl RefManager {
     fn read_track_with_packed_fallback(
         &self,
-        name: &str,
+        name: &ThreadName,
     ) -> Result<(PathBuf, Option<ChangeId>, Option<String>)> {
         let path = self.thread_path(name)?;
         let raw = self.read_optional_string(&path)?;
@@ -134,7 +135,7 @@ impl RefManager {
 
                     let new_content = new.as_ref().map(format_change_id_text);
                     let packed_remove = if new.is_none() && current.is_some() {
-                        Some(PackedRemove::Thread(name.clone()))
+                        Some(PackedRemove::Thread(name.to_string()))
                     } else {
                         None
                     };
@@ -174,7 +175,7 @@ impl RefManager {
 
                     let new_content = new.as_ref().map(format_change_id_text);
                     let packed_remove = if new.is_none() && current.is_some() {
-                        Some(PackedRemove::Marker(name.clone()))
+                        Some(PackedRemove::Marker(name.to_string()))
                     } else {
                         None
                     };
@@ -341,12 +342,13 @@ mod tests {
     fn rollback_restores_packed_refs_snapshot() {
         let (_temp, refs) = create_ref_manager();
         let change_id = ChangeId::generate();
-        refs.set_thread("packed-only", &change_id).unwrap();
+        refs.set_thread(&ThreadName::new("packed-only"), &change_id)
+            .unwrap();
         refs.pack_refs().unwrap();
 
         let packed_path = refs.packed_refs_path();
         let packed_snapshot = std::fs::read_to_string(&packed_path).unwrap();
-        let thread_path = refs.thread_path("packed-only").unwrap();
+        let thread_path = refs.thread_path(&ThreadName::new("packed-only")).unwrap();
 
         let mut packed = PackedRefs::load(&packed_path).unwrap();
         packed.remove_track("packed-only");

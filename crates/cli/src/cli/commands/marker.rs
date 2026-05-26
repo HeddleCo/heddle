@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Marker commands.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
+use objects::object::MarkerName;
 use repo::Repository;
 use serde::Serialize;
 
 use super::{advice::RecoveryAdvice, snapshot::ensure_current_state};
 use crate::{
-    cli::{Cli, MarkerCommands, should_output_json},
+    cli::{should_output_json, Cli, MarkerCommands},
     config::UserConfig,
 };
 
@@ -75,9 +76,9 @@ fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Resu
             _ => true,
         })
         .filter_map(|name| {
-            let state = repo.refs().get_marker(name).ok()??;
+            let state = repo.refs().get_marker(&name).ok()??;
             Some(MarkerEntry {
-                name: name.clone(),
+                name: name.to_string(),
                 change_id: state.short(),
             })
         })
@@ -109,8 +110,9 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
         )),
     )?;
 
-    repo.refs().create_marker(&name, &current)?;
-    repo.oplog().record_marker_create(&name, &current)?;
+    let mn = MarkerName::new(&name);
+    repo.refs().create_marker(&mn, &current)?;
+    repo.oplog().record_marker_create(&mn, &current)?;
 
     let output = MarkerOpOutput {
         name: name.clone(),
@@ -128,12 +130,13 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
 }
 
 fn cmd_marker_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
+    let mn = MarkerName::new(&name);
     let state = repo
         .refs()
-        .delete_marker(&name)?
+        .delete_marker(&mn)?
         .ok_or_else(|| anyhow!("Marker not found: {}", name))?;
 
-    repo.oplog().record_marker_delete(&name, &state)?;
+    repo.oplog().record_marker_delete(&mn, &state)?;
 
     let output = MarkerOpOutput {
         name: name.clone(),
@@ -156,7 +159,7 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
     }
 
     let all = repo.refs().list_markers()?;
-    let matches: Vec<String> = all
+    let matches: Vec<MarkerName> = all
         .into_iter()
         .filter(|name| name.starts_with(&prefix))
         .collect();
@@ -167,7 +170,7 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
         if let Some(state) = repo.refs().delete_marker(name)? {
             repo.oplog().record_marker_delete(name, &state)?;
             deleted.push(MarkerEntry {
-                name: name.clone(),
+                name: name.to_string(),
                 change_id: state.short(),
             });
         }
@@ -251,7 +254,7 @@ fn marker_delete_selector_required_advice() -> RecoveryAdvice {
 fn cmd_marker_show(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     let state_id = repo
         .refs()
-        .get_marker(&name)?
+        .get_marker(&MarkerName::new(&name))?
         .ok_or_else(|| anyhow!("Marker not found: {}", name))?;
 
     let state = repo

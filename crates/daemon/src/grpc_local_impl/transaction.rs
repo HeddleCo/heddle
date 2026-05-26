@@ -23,7 +23,7 @@ use grpc::heddle::v1::{
 };
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{ChangeId, OperationId},
+    object::{ChangeId, OperationId, ThreadName},
 };
 use oplog::OpRecord;
 use prost::Message;
@@ -147,7 +147,7 @@ impl TransactionService for LocalTransactionService {
                 // repository has no snapshots yet — tests therefore seed at
                 // least one snapshot before calling `begin_transaction`.
                 let base_change_id = if !req.thread.is_empty() {
-                    repo.refs().get_thread(&req.thread).map_err(to_status)?
+                    repo.refs().get_thread(&ThreadName::from(req.thread.as_str())).map_err(to_status)?
                 } else {
                     repo.head().map_err(to_status)?
                 };

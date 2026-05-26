@@ -23,7 +23,9 @@ use repo::daemon::{
 use serde::Serialize;
 
 use super::client::{rpc, sweep_stale_mounts};
-use crate::cli::{Cli, commands::advice::RecoveryAdvice, render::write_json_stdout, should_output_json};
+use crate::cli::{
+    Cli, commands::advice::RecoveryAdvice, render::write_json_stdout, should_output_json,
+};
 
 #[derive(Debug, Serialize)]
 struct DaemonStopOutput {

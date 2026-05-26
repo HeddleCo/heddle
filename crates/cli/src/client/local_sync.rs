@@ -5,7 +5,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use objects::object::{ChangeId, ContentHash};
 use repo::Repository;
 
@@ -31,7 +31,7 @@ impl LocalSync {
         let mut threads = Vec::new();
         for thread in self.source.refs().list_threads()? {
             if let Some(state_id) = self.source.refs().get_thread(&thread)? {
-                threads.push((thread, state_id));
+                threads.push((thread.to_string(), state_id));
             }
         }
         Ok(threads)
@@ -42,7 +42,7 @@ impl LocalSync {
         let mut markers = Vec::new();
         for marker in self.source.refs().list_markers()? {
             if let Some(state_id) = self.source.refs().get_marker(&marker)? {
-                markers.push((marker, state_id));
+                markers.push((marker.to_string(), state_id));
             }
         }
         Ok(markers)

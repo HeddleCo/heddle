@@ -216,9 +216,11 @@ mod tests;
 /// ```
 #[doc(hidden)]
 pub mod __pending_substrate_for_doctest {
-    pub use crate::core::Pending;
-    pub use crate::pending::{
-        BrandedPending, KernelForgetWitness, Lifecycle, LiveNonZero, LiveZero, Orphan, Released,
-        Witness,
+    pub use crate::{
+        core::Pending,
+        pending::{
+            BrandedPending, KernelForgetWitness, Lifecycle, LiveNonZero, LiveZero, Orphan,
+            Released, Witness,
+        },
     };
 }

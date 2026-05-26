@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use objects::{
     error::{HeddleError, Result},
-    object::ChangeId,
+    object::{ChangeId, MarkerName, ThreadName},
 };
 use serde::Serialize;
 
@@ -233,17 +233,17 @@ impl RefSummaryIndex {
         }
     }
 
-    pub(super) fn thread_names(&self) -> Vec<String> {
+    pub(super) fn thread_names(&self) -> Vec<ThreadName> {
         self.threads
             .iter()
-            .map(|entry| entry.name.clone())
+            .map(|entry| ThreadName::new(&entry.name))
             .collect()
     }
 
-    pub(super) fn marker_names(&self) -> Vec<String> {
+    pub(super) fn marker_names(&self) -> Vec<MarkerName> {
         self.markers
             .iter()
-            .map(|entry| entry.name.clone())
+            .map(|entry| MarkerName::new(&entry.name))
             .collect()
     }
 
@@ -254,7 +254,7 @@ impl RefSummaryIndex {
             .collect()
     }
 
-    pub(super) fn remote_thread_names(&self, remote: &str) -> Vec<String> {
+    pub(super) fn remote_thread_names(&self, remote: &str) -> Vec<ThreadName> {
         self.remotes
             .iter()
             .find(|entry| entry.name == remote)
@@ -262,7 +262,7 @@ impl RefSummaryIndex {
                 entry
                     .threads
                     .iter()
-                    .map(|thread| thread.name.clone())
+                    .map(|thread| ThreadName::new(&thread.name))
                     .collect()
             })
             .unwrap_or_default()
@@ -327,26 +327,26 @@ impl RefManager {
         let _ = std::fs::remove_file(self.ref_summary_index_path());
     }
 
-    pub(super) fn list_threads_from_storage(&self) -> Result<Vec<String>> {
+    pub(super) fn list_threads_from_storage(&self) -> Result<Vec<ThreadName>> {
         let loose = self.scan_loose_threads()?;
         let packed = PackedRefs::load(&self.packed_refs_path())?;
-        let mut all: Vec<String> = loose.keys().cloned().collect();
+        let mut all: Vec<ThreadName> = loose.keys().map(|k| ThreadName::new(k.as_str())).collect();
         for name in packed.list_threads() {
             if !loose.contains_key(&name) {
-                all.push(name);
+                all.push(ThreadName::new(name));
             }
         }
         all.sort();
         Ok(all)
     }
 
-    pub(super) fn list_markers_from_storage(&self) -> Result<Vec<String>> {
+    pub(super) fn list_markers_from_storage(&self) -> Result<Vec<MarkerName>> {
         let loose = self.scan_loose_markers()?;
         let packed = PackedRefs::load(&self.packed_refs_path())?;
-        let mut all: Vec<String> = loose.keys().cloned().collect();
+        let mut all: Vec<MarkerName> = loose.keys().map(|k| MarkerName::new(k.as_str())).collect();
         for name in packed.list_markers() {
             if !loose.contains_key(&name) {
-                all.push(name);
+                all.push(MarkerName::new(name));
             }
         }
         all.sort();
@@ -371,7 +371,7 @@ impl RefManager {
         Ok(remotes)
     }
 
-    pub(super) fn list_remote_threads_from_storage(&self, remote: &str) -> Result<Vec<String>> {
+    pub(super) fn list_remote_threads_from_storage(&self, remote: &str) -> Result<Vec<ThreadName>> {
         self.list_refs_recursive(&self.remotes_dir().join(remote), "")
     }
 
@@ -469,14 +469,16 @@ impl RefManager {
     fn scan_loose_threads(&self) -> Result<BTreeMap<String, ChangeId>> {
         let mut loose = BTreeMap::new();
         for name in self.list_refs_recursive(&self.threads_dir(), "")? {
+            let name_str = name.to_string();
             let Some(decoded) = self
-                .decode_flat_thread_entry(&name)
-                .or_else(|| (!name.starts_with("__heddle_flat/")).then_some(name.clone()))
+                .decode_flat_thread_entry(&name_str)
+                .or_else(|| (!name_str.starts_with("__heddle_flat/")).then_some(name_str))
             else {
                 continue;
             };
+            let tname = ThreadName::new(&decoded);
             if let Some(change_id) =
-                self.read_change_id_at(&self.thread_path(&decoded)?, "thread", &decoded)?
+                self.read_change_id_at(&self.thread_path(&tname)?, "thread", &decoded)?
             {
                 loose.insert(decoded, change_id);
             }
@@ -487,10 +489,11 @@ impl RefManager {
     fn scan_loose_markers(&self) -> Result<BTreeMap<String, ChangeId>> {
         let mut markers = BTreeMap::new();
         for name in self.list_refs_recursive(&self.markers_dir(), "")? {
+            let name_str = name.to_string();
             if let Some(change_id) =
-                self.read_change_id_at(&self.marker_path(&name)?, "marker", &name)?
+                self.read_change_id_at(&self.marker_path(&name_str)?, "marker", &name_str)?
             {
-                markers.insert(name, change_id);
+                markers.insert(name_str, change_id);
             }
         }
         Ok(markers)
@@ -499,12 +502,13 @@ impl RefManager {
     fn scan_remote_threads(&self, remote: &str) -> Result<BTreeMap<String, ChangeId>> {
         let mut threads = BTreeMap::new();
         for name in self.list_remote_threads_from_storage(remote)? {
+            let name_str = name.to_string();
             if let Some(change_id) = self.read_change_id_at(
-                &self.remote_thread_path(remote, &name)?,
+                &self.remote_thread_path(remote, &name_str)?,
                 "remote thread",
-                &format!("{remote}/{name}"),
+                &format!("{remote}/{name_str}"),
             )? {
-                threads.insert(name, change_id);
+                threads.insert(name_str, change_id);
             }
         }
         Ok(threads)

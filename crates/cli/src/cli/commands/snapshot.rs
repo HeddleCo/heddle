@@ -289,7 +289,7 @@ fn missing_capture_identity_advice() -> RecoveryAdvice {
 fn current_thread_name(repo: &Repository) -> String {
     use refs::Head;
     match repo.head_ref() {
-        Ok(Head::Attached { thread }) => thread,
+        Ok(Head::Attached { thread }) => thread.to_string(),
         _ => String::new(),
     }
 }

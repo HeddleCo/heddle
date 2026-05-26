@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use objects::{fs_ops::remove_path_recursively, store::AgentRegistry};
+use objects::{fs_ops::remove_path_recursively, object::ThreadName, store::AgentRegistry};
 use refs::Head;
 use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
@@ -106,9 +106,10 @@ pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
         .map(|state| state.tree.short())
         .unwrap_or_default();
 
+    let thread_str = thread.to_string();
     Ok(Some(Thread {
-        id: thread.clone(),
-        thread,
+        id: thread_str.clone(),
+        thread: thread_str,
         target_thread: None,
         parent_thread: None,
         mode: ThreadMode::Materialized,
@@ -139,7 +140,7 @@ pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
 pub(crate) fn load_thread(repo: &Repository, thread_id: &str) -> Result<Thread> {
     match thread_manager(repo).load(thread_id)? {
         Some(thread) => Ok(thread),
-        None if repo.refs().get_thread(thread_id)?.is_some() => Err(anyhow!(
+        None if repo.refs().get_thread(&ThreadName::new(thread_id))?.is_some() => Err(anyhow!(
             imported_git_ref_not_managed_thread_advice(thread_id)
         )),
         None => Err(anyhow!(thread_not_found_advice(thread_id, "load thread"))),
@@ -446,7 +447,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             fs::remove_file(&rebase_state_path)?;
             thread_repo
                 .refs()
-                .set_thread(&thread.thread, &current_state)?;
+                .set_thread(&ThreadName::new(&thread.thread), &current_state)?;
             thread.integration_policy_result.status = Some("manual_resolved".to_string());
             thread.integration_policy_result.reason =
                 Some("manual integration resolution captured".to_string());
@@ -505,7 +506,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
         .ok_or_else(|| anyhow!("Thread '{}' has no current state after refresh", thread_id))?;
     let target_state = repo
         .refs()
-        .get_thread(&target_thread)?
+        .get_thread(&ThreadName::new(&target_thread))?
         .ok_or_else(|| anyhow!(thread_not_found_advice(&target_thread, "refresh thread")))?;
     let target_state_obj = repo
         .store()
@@ -904,7 +905,7 @@ fn preflight_three_way_refresh_conflict(
 
     let target_tip = parent_repo
         .refs()
-        .get_thread(target_thread_name)?
+        .get_thread(&ThreadName::new(target_thread_name))?
         .ok_or_else(|| {
             anyhow!(thread_not_found_advice(
                 target_thread_name,
@@ -913,7 +914,7 @@ fn preflight_three_way_refresh_conflict(
         })?;
     let thread_tip = parent_repo
         .refs()
-        .get_thread(&thread.thread)?
+        .get_thread(&ThreadName::new(&thread.thread))?
         .ok_or_else(|| {
             anyhow!(
                 "managed thread '{}' is missing its ref during refresh preflight",
@@ -975,7 +976,7 @@ fn try_three_way_merge_refresh(
 
     let target_tip = parent_repo
         .refs()
-        .get_thread(target_thread_name)?
+        .get_thread(&ThreadName::new(target_thread_name))?
         .ok_or_else(|| {
             anyhow!(thread_not_found_advice(
                 target_thread_name,
@@ -984,7 +985,7 @@ fn try_three_way_merge_refresh(
         })?;
     let thread_tip = parent_repo
         .refs()
-        .get_thread(&thread.thread)?
+        .get_thread(&ThreadName::new(&thread.thread))?
         .ok_or_else(|| {
             anyhow!(
                 "managed thread '{}' is missing its ref during refresh",
@@ -1022,7 +1023,7 @@ fn try_three_way_merge_refresh(
             // Thread is strictly behind target — fast-forward the
             // thread ref. We do this against the parent repo so the
             // ref move is visible to the caller's bookkeeping.
-            parent_repo.refs().set_thread(&thread.thread, &target)?;
+            parent_repo.refs().set_thread(&ThreadName::new(&thread.thread), &target)?;
             // Materialize the target tree to the thread's worktree.
             // Without this, HEAD metadata advances while the files on
             // disk stay stale and subsequent operations run against a
@@ -1057,7 +1058,7 @@ fn try_three_way_merge_refresh(
             )?;
             parent_repo
                 .refs()
-                .set_thread(&thread.thread, &new_state.change_id)?;
+                .set_thread(&ThreadName::new(&thread.thread), &new_state.change_id)?;
             Ok(ThreeWayMergeRefresh::Clean {
                 new_state: new_state.change_id,
             })
@@ -1085,7 +1086,7 @@ fn cmd_thread_promote(
     let mut thread = manager
         .load(thread_id)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "promote thread")))?;
-    let state_id = repo.refs().get_thread(&thread.thread)?.ok_or_else(|| {
+    let state_id = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.ok_or_else(|| {
         anyhow!(
             "managed thread '{}' is missing its ref during promote",
             thread.thread
@@ -1262,8 +1263,9 @@ pub(crate) fn drop_thread_silent(
             registry.delete(&entry.session_id)?;
         }
     }
-    if delete_thread && repo.refs().get_thread(&thread.thread)?.is_some() {
-        repo.refs().delete_thread(&thread.thread)?;
+    let tn = ThreadName::new(&thread.thread);
+    if delete_thread && repo.refs().get_thread(&tn)?.is_some() {
+        repo.refs().delete_thread(&tn)?;
     }
     Ok(DropOutcome::Dropped(Box::new(thread)))
 }
@@ -1771,8 +1773,9 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
     updated.state = ThreadState::Abandoned;
     updated.updated_at = Utc::now();
     manager.save(&updated)?;
-    if repo.refs().get_thread(&thread.thread)?.is_some() {
-        repo.refs().delete_thread(&thread.thread)?;
+    let tn = ThreadName::new(&thread.thread);
+    if repo.refs().get_thread(&tn)?.is_some() {
+        repo.refs().delete_thread(&tn)?;
     }
     let registry = AgentRegistry::new(repo.heddle_dir());
     for entry in registry.list()? {

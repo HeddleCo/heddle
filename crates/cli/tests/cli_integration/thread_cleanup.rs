@@ -21,6 +21,7 @@
 use std::fs;
 
 use chrono::{Duration, Utc};
+use objects::object::ThreadName;
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadIntegrationPolicy,
     ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,
@@ -98,7 +99,9 @@ fn seed_thread(
     // to round-trip, but `cmd_thread_list` reads from the record
     // store directly. Add the ref to keep us honest about what the
     // CLI sees.
-    repo.refs().set_thread(name, &head).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new(name), &head)
+        .unwrap();
     manager.save(&thread).unwrap();
 }
 
@@ -313,7 +316,7 @@ fn thread_cleanup_merged_drops_matching_threads() {
         dropped.state
     );
     assert!(
-        repo.refs().get_thread("feat/done").unwrap().is_none(),
+        repo.refs().get_thread(&ThreadName::new("feat/done")).unwrap().is_none(),
         "merged cleanup should remove the live thread ref so default surfaces stop treating it as active"
     );
     let default_view = list_thread_names(temp.path(), &[]);
@@ -615,7 +618,9 @@ fn thread_cleanup_handles_id_diverging_from_name() {
         auto: false,
         shared_target_dir: None,
     };
-    repo.refs().set_thread(&synthetic.thread, &head).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new(&synthetic.thread), &head)
+        .unwrap();
     manager.save(&synthetic).unwrap();
 
     let out = heddle(

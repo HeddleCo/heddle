@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use gix::bstr::ByteSlice;
 use objects::{
-    object::{ChangeId, State, Tree},
+    object::{ChangeId, State, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, current_boot_id},
 };
 use refs::{Head, RefExpectation, RefUpdate};
@@ -439,7 +439,7 @@ fn collect_thread_captures(
 ) -> Result<Vec<ThreadCaptureOutput>> {
     let current = repo
         .refs()
-        .get_thread(thread)?
+        .get_thread(&ThreadName::new(thread))?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread, "list thread captures")))?;
     let base = ThreadManager::new(repo.heddle_dir())
         .load(thread)?
@@ -535,7 +535,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
     }
     for mut thread in thread_manager.list()? {
         if thread.state == ThreadState::Abandoned
-            && repo.refs().get_thread(&thread.thread)?.is_none()
+            && repo.refs().get_thread(&ThreadName::new(&thread.thread))?.is_none()
         {
             continue;
         }
@@ -543,7 +543,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
         threads_by_name.insert(thread.thread.clone(), thread);
     }
 
-    let mut names: BTreeSet<String> = thread_refs.iter().cloned().collect();
+    let mut names: BTreeSet<String> = thread_refs.iter().map(|t| t.to_string()).collect();
     names.extend(current.iter().cloned());
     names.extend(entries_by_thread.keys().cloned());
     names.extend(threads_by_name.keys().cloned());
@@ -800,7 +800,7 @@ fn build_thread_view(
     thread: Option<Thread>,
     branch_tip: Option<GitOverlayBranchTip>,
 ) -> Result<(ThreadView, CoordinationStatus)> {
-    let ref_state = repo.refs().get_thread(&name)?;
+    let ref_state = repo.refs().get_thread(&ThreadName::new(&name))?;
     let current_state = ref_state
         .or_else(|| {
             (is_current && repo.capability() == repo::RepositoryCapability::GitOverlay)
@@ -1631,7 +1631,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         return Err(anyhow!(active_reservation_advice(&args.name, path)));
     }
 
-    let existing_thread_state = repo.refs().get_thread(&args.name)?;
+    let existing_thread_state = repo.refs().get_thread(&ThreadName::new(&args.name))?;
     let base_state = match (&args.from, existing_thread_state) {
         (Some(spec), Some(existing)) => {
             let requested = repo.resolve_state(spec)?.ok_or_else(|| {
@@ -1660,12 +1660,13 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 
     let actor_identity = resolve_start_actor_identity(repo, &args)?;
 
+    let thread_name = ThreadName::new(&args.name);
     if let Some(existing) = existing_thread_state {
         repo.refs()
-            .set_thread_cas(&args.name, RefExpectation::Value(existing), &base_state)?;
+            .set_thread_cas(&thread_name, RefExpectation::Value(existing), &base_state)?;
     } else {
         repo.refs()
-            .set_thread_cas(&args.name, RefExpectation::Missing, &base_state)?;
+            .set_thread_cas(&thread_name, RefExpectation::Missing, &base_state)?;
         // `cmd_start` writes the ThreadManager record only after
         // materializing the worktree below — there's no record yet to
         // snapshot, so pass `None`. The `ensure_thread_worktree_undo_safe`
@@ -1677,7 +1678,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         // thread start` re-establishes the record if the user wants
         // one. heddle#23 r2.
         repo.oplog()
-            .record_thread_create(&args.name, &base_state, None, Some(&repo.op_scope()))?;
+            .record_thread_create(&thread_name, &base_state, None, Some(&repo.op_scope()))?;
     }
 
     let thread_mode = resolve_thread_mode(repo, &args);
@@ -1824,7 +1825,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let path_for_entry = abs_path.clone();
     let thread_name = args.name.clone();
     let current_target_thread = match repo.head_ref()? {
-        Head::Attached { thread } => Some(thread),
+        Head::Attached { thread } => Some(thread.to_string()),
         Head::Detached { .. } => None,
     };
     let base_short = base_state.short();
@@ -2183,7 +2184,7 @@ pub(crate) fn cmd_thread_create(
     )?;
 
     repo.refs()
-        .set_thread_cas(&name, RefExpectation::Missing, &current)?;
+        .set_thread_cas(&ThreadName::new(&name), RefExpectation::Missing, &current)?;
 
     // Persist a Thread record so subsequent commands that go through
     // `ThreadManager::load` (delegate, ship, integration policy,
@@ -2216,7 +2217,7 @@ pub(crate) fn cmd_thread_create(
             ))
         })?;
     let target_thread = match repo.head_ref()? {
-        Head::Attached { thread } => Some(thread),
+        Head::Attached { thread } => Some(thread.to_string()),
         Head::Detached { .. } => None,
     };
     let thread_manager = ThreadManager::new(repo.heddle_dir());
@@ -2272,7 +2273,7 @@ pub(crate) fn cmd_thread_create(
     // contract bug, not a runtime condition.
     let manager_snapshot = thread_manager.snapshot_thread_record(&name)?;
     repo.oplog()
-        .record_thread_create(&name, &current, manager_snapshot, Some(&repo.op_scope()))?;
+        .record_thread_create(&ThreadName::new(&name), &current, manager_snapshot, Some(&repo.op_scope()))?;
 
     let output = thread_op_output(
         "thread_create",
@@ -2408,7 +2409,7 @@ pub(crate) fn cmd_thread_switch(
     // bail before mutating anything if the target doesn't exist.
     let state = repo
         .refs()
-        .get_thread(&name)?
+        .get_thread(&ThreadName::new(&name))?
         .ok_or_else(|| anyhow!(thread_not_found_advice(&name, "switch thread")))?;
 
     if !force {
@@ -2527,7 +2528,7 @@ pub(crate) fn cmd_thread_switch(
         let head_target_repo = open_main_repo_from_worktree_if_needed(repo)?;
         let head_repo = head_target_repo.as_ref().unwrap_or(repo);
         head_repo.refs().write_head(&Head::Attached {
-            thread: name.clone(),
+            thread: ThreadName::new(&name),
         })?;
     } else if open_main_repo_from_worktree_if_needed(repo)?.is_some() {
         // Switching to a target thread that has *no* dedicated
@@ -2554,7 +2555,7 @@ pub(crate) fn cmd_thread_switch(
         // attached thread, which is the wrong behavior here.
         repo.goto(&state)?;
         repo.refs().write_head(&Head::Attached {
-            thread: name.clone(),
+            thread: ThreadName::new(&name),
         })?;
         if repo.capability() == repo::RepositoryCapability::GitOverlay
             && repo.root().join(".git").exists()
@@ -2988,13 +2989,14 @@ pub(crate) fn cmd_thread_delete(cli: &Cli, repo: &Repository, name: String) -> R
         )));
     }
 
+    let thread_name = ThreadName::new(&name);
     let state = repo
         .refs()
-        .delete_thread(&name)?
+        .delete_thread(&thread_name)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(&name, "delete thread")))?;
 
     repo.oplog()
-        .record_thread_delete(&name, &state, Some(&repo.op_scope()))?;
+        .record_thread_delete(&thread_name, &state, Some(&repo.op_scope()))?;
 
     let output = thread_op_output(
         "thread_drop",
@@ -3016,19 +3018,21 @@ pub(crate) fn cmd_thread_rename(
     old: String,
     new: String,
 ) -> Result<()> {
+    let old_tn = ThreadName::new(&old);
+    let new_tn = ThreadName::new(&new);
     let state = repo
         .refs()
-        .get_thread(&old)?
+        .get_thread(&old_tn)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(&old, "rename thread")))?;
 
     let mut updates = vec![
         RefUpdate::Thread {
-            name: new.clone(),
+            name: new_tn.clone(),
             expected: RefExpectation::Missing,
             new: Some(state),
         },
         RefUpdate::Thread {
-            name: old.clone(),
+            name: old_tn.clone(),
             expected: RefExpectation::Value(state),
             new: None,
         },
@@ -3039,17 +3043,17 @@ pub(crate) fn cmd_thread_rename(
     {
         updates.push(RefUpdate::Head {
             expected: RefExpectation::Value(Head::Attached {
-                thread: old.clone(),
+                thread: old_tn.clone(),
             }),
             new: Head::Attached {
-                thread: new.clone(),
+                thread: new_tn.clone(),
             },
         });
     }
 
     repo.refs().update_refs(&updates)?;
     repo.oplog()
-        .record_thread_rename(&old, &new, &state, Some(&repo.op_scope()))?;
+        .record_thread_rename(&old_tn, &new_tn, &state, Some(&repo.op_scope()))?;
 
     let output = thread_op_output(
         "thread_rename",

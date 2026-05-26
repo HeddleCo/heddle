@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use objects::object::ThreadName;
 
 /// Convenience: read the current state's short change-id by opening the repo
 /// directly. Used by undo tests that assert HEAD has moved to a specific state.
@@ -110,11 +111,10 @@ fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
     assert!(!temp.path().join("main.rs").exists());
     assert!(!temp.path().join("web/index.html").exists());
     // Ignored siblings preserved across the apply.
-    assert!(
-        temp.path()
-            .join("web/node_modules/lodash/index.js")
-            .exists()
-    );
+    assert!(temp
+        .path()
+        .join("web/node_modules/lodash/index.js")
+        .exists());
     assert!(temp.path().join("target/foo.bin").exists());
 
     // HEAD advanced and disk matches state — no divergence.
@@ -544,7 +544,7 @@ fn test_undo_ff_merge_restores_head_and_thread_ref() {
     // Feature thread never moved during FF merge, so its tip is unchanged.
     let feature_tip = repo
         .refs()
-        .get_thread("feature")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
         .expect("feature thread still exists")
         .short();
@@ -559,7 +559,7 @@ fn test_undo_ff_merge_restores_head_and_thread_ref() {
     // inverse the thread context it needs.
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -662,7 +662,7 @@ fn test_redo_ff_merge_restores_head_and_thread_ref() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -672,7 +672,7 @@ fn test_redo_ff_merge_restores_head_and_thread_ref() {
     );
     let feature_tip = repo
         .refs()
-        .get_thread("feature")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
         .expect("feature thread still exists")
         .short();
@@ -737,7 +737,7 @@ fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -747,7 +747,7 @@ fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
     );
     let feature_tip = repo
         .refs()
-        .get_thread("feature")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
         .expect("feature thread still exists")
         .short();
@@ -800,7 +800,7 @@ fn test_redo_ff_merge_succeeds_when_source_deleted() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -901,7 +901,7 @@ fn test_stale_non_ff_merge_refuses_without_moving_threads() {
 
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -912,7 +912,7 @@ fn test_stale_non_ff_merge_refuses_without_moving_threads() {
 
     let feature_tip = repo
         .refs()
-        .get_thread("feature")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
         .expect("feature thread still exists")
         .short();
@@ -1653,7 +1653,10 @@ fn test_undo_thread_create_removes_record_when_no_worktree() {
 
     // The ref is gone — that part already worked pre-fix.
     assert!(
-        repo.refs().get_thread("feature").unwrap().is_none(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .is_none(),
         "undo of `thread create` must delete the thread ref"
     );
 
@@ -1698,7 +1701,10 @@ fn test_undo_thread_create_refuses_with_materialized_worktree() {
     {
         let repo = Repository::open(temp.path()).unwrap();
         assert!(
-            repo.refs().get_thread("feature").unwrap().is_some(),
+            repo.refs()
+                .get_thread(&ThreadName::new("feature"))
+                .unwrap()
+                .is_some(),
             "feature thread ref must exist after `start --path`"
         );
     }
@@ -1722,7 +1728,10 @@ fn test_undo_thread_create_refuses_with_materialized_worktree() {
     // Refusal must be pre-flight: nothing was mutated.
     let repo = Repository::open(temp.path()).unwrap();
     assert!(
-        repo.refs().get_thread("feature").unwrap().is_some(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .is_some(),
         "thread ref must survive a refused undo (pre-flight refusal — \
          consistent with the redaction/dirty-worktree gates)"
     );
@@ -1754,11 +1763,17 @@ fn test_undo_thread_rename_round_trips_refs_and_record() {
     {
         let repo = Repository::open(temp.path()).unwrap();
         assert!(
-            repo.refs().get_thread("feature-v2").unwrap().is_some(),
+            repo.refs()
+                .get_thread(&ThreadName::new("feature-v2"))
+                .unwrap()
+                .is_some(),
             "rename forward path must create `feature-v2`"
         );
         assert!(
-            repo.refs().get_thread("feature").unwrap().is_none(),
+            repo.refs()
+                .get_thread(&ThreadName::new("feature"))
+                .unwrap()
+                .is_none(),
             "rename forward path must remove `feature`"
         );
     }
@@ -1769,11 +1784,17 @@ fn test_undo_thread_rename_round_trips_refs_and_record() {
 
     // Refs: rename rolled back.
     assert!(
-        repo.refs().get_thread("feature").unwrap().is_some(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .is_some(),
         "undo of rename must restore the old name's ref"
     );
     assert!(
-        repo.refs().get_thread("feature-v2").unwrap().is_none(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature-v2"))
+            .unwrap()
+            .is_none(),
         "undo of rename must delete the new name's ref"
     );
 
@@ -1829,7 +1850,10 @@ fn test_redo_thread_create_restores_manager_record() {
 
     // The ref is back — that part already worked pre-fix.
     assert!(
-        repo.refs().get_thread("feature").unwrap().is_some(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .is_some(),
         "redo of `thread create` must restore the thread ref"
     );
 
@@ -1944,7 +1968,7 @@ fn test_undo_rebase_ancestor_ff_restores_thread_ref() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2009,7 +2033,7 @@ fn test_undo_rebase_replay_restores_thread_ref() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2072,7 +2096,7 @@ fn test_undo_pull_local_restores_thread_ref() {
     let repo = Repository::open(target.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2139,7 +2163,7 @@ fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
     let repo = Repository::open(temp.path()).unwrap();
     let feature_tip = repo
         .refs()
-        .get_thread("feature")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
         .expect("feature thread still exists")
         .short();
@@ -2231,7 +2255,7 @@ fn test_undo_ship_manual_resolution_restores_thread_ref() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2291,7 +2315,7 @@ fn test_redo_rebase_pins_recorded_tip_when_source_advances() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2404,7 +2428,7 @@ fn test_undo_rebase_replay_multi_commit_rewinds_whole_transaction() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2467,7 +2491,7 @@ fn test_redo_rebase_replay_multi_commit_restores_post_rebase_tip() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2565,10 +2589,7 @@ fn test_undo_rebase_refuses_when_pre_rebase_blob_purged() {
     // Need a state id for `redact apply <state> --path …`. After the
     // rebase, the current state contains config/secrets.toml at the
     // same blob hash as the pre-rebase tree.
-    let log_json = heddle_must_succeed(
-        &["--output", "json", "log", "--limit", "1"],
-        temp.path(),
-    );
+    let log_json = heddle_must_succeed(&["--output", "json", "log", "--limit", "1"], temp.path());
     let log: Value = serde_json::from_str(&log_json).unwrap();
     let current_state = log["states"][0]["change_id"].as_str().unwrap().to_string();
 
@@ -2599,8 +2620,7 @@ fn test_undo_rebase_refuses_when_pre_rebase_blob_purged() {
     let err = heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
         .expect_err("undo of rebase must refuse when a pre-rebase blob has been purged");
     assert!(
-        err.to_lowercase().contains("purge")
-            || err.to_lowercase().contains("purged"),
+        err.to_lowercase().contains("purge") || err.to_lowercase().contains("purged"),
         "refusal must name the purge concern: {err}"
     );
 }
@@ -2641,8 +2661,7 @@ fn test_undo_rebase_continue_preserves_pre_conflict_advances() {
     heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
     let main_tip_before = head_short(temp.path());
 
-    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path()))
-        .unwrap_or_else(|out| out);
+    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
     assert!(
         rebase_output.contains("Conflict applying")
             || rebase_output.contains("\"status\": \"conflict\""),
@@ -2683,7 +2702,7 @@ fn test_undo_rebase_continue_preserves_pre_conflict_advances() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2726,8 +2745,7 @@ fn test_redo_rebase_continue_restores_manual_resolution_tip() {
     heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
     let main_tip_before = head_short(temp.path());
 
-    let rebase_output =
-        heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
+    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
     assert!(
         rebase_output.contains("Conflict applying")
             || rebase_output.contains("\"status\": \"conflict\""),
@@ -2767,7 +2785,7 @@ fn test_redo_rebase_continue_restores_manual_resolution_tip() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2807,8 +2825,7 @@ fn test_rebase_abort_tolerates_corrupted_pending_advance_line() {
     heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
     let main_tip_before = head_short(temp.path());
 
-    let rebase_output =
-        heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
+    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
     assert!(
         rebase_output.contains("Conflict applying")
             || rebase_output.contains("\"status\": \"conflict\""),
@@ -2911,10 +2928,7 @@ fn test_undo_list_shows_multi_commit_rebase_as_single_batch() {
     // Every op in the batch must be a fast-forward — no foreign ops
     // should have been folded into the rebase batch.
     for op in ops {
-        let desc = op
-            .get("description")
-            .and_then(|d| d.as_str())
-            .unwrap_or("");
+        let desc = op.get("description").and_then(|d| d.as_str()).unwrap_or("");
         assert!(
             desc.starts_with("fast-forward") || desc.starts_with("transaction commit"),
             "rebase batch entry must be FF or txn-commit marker, got: {desc}"
@@ -3000,7 +3014,10 @@ fn test_rebase_fast_forwarded_json_lists_target_and_creates_batch() {
             .as_str()
             .is_some_and(|d| d.starts_with("transaction commit"))
     });
-    assert!(has_tc, "single-FF rebase batch must carry TransactionCommit marker");
+    assert!(
+        has_tc,
+        "single-FF rebase batch must carry TransactionCommit marker"
+    );
 }
 
 /// JSON output for the multi-commit replay entry path. Must emit
@@ -3069,8 +3086,7 @@ fn test_rebase_abort_json_clears_state_without_oplog_batch() {
         &["--output", "json", "undo", "--list", "--depth", "20"],
         temp.path(),
     );
-    let count_before = serde_json::from_str::<Value>(&batches_before_abort).unwrap()
-        ["batches"]
+    let count_before = serde_json::from_str::<Value>(&batches_before_abort).unwrap()["batches"]
         .as_array()
         .unwrap()
         .len();
@@ -3115,9 +3131,15 @@ fn test_rebase_abort_and_continue_without_state_error() {
 
     let abort_err = heddle(&["rebase", "--abort"], Some(temp.path()))
         .expect_err("abort with no rebase must error");
-    assert!(abort_err.contains("No rebase in progress"), "got: {abort_err}");
+    assert!(
+        abort_err.contains("No rebase in progress"),
+        "got: {abort_err}"
+    );
 
     let cont_err = heddle(&["rebase", "--continue"], Some(temp.path()))
         .expect_err("continue with no rebase must error");
-    assert!(cont_err.contains("No rebase in progress"), "got: {cont_err}");
+    assert!(
+        cont_err.contains("No rebase in progress"),
+        "got: {cont_err}"
+    );
 }

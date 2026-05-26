@@ -5,7 +5,7 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
-    object::{Attribution, ChangeId, Tree},
+    object::{Attribution, ChangeId, ThreadName, Tree},
     store::ObjectStore,
 };
 use oplog::{OpBatch, OpRecord};
@@ -315,7 +315,7 @@ fn quote_recommended_action_arg(value: &str) -> String {
 fn current_thread_name(repo: &Repository) -> String {
     use refs::Head;
     match repo.head_ref() {
-        Ok(Head::Attached { thread }) => thread,
+        Ok(Head::Attached { thread }) => thread.to_string(),
         _ => String::new(),
     }
 }
@@ -380,7 +380,7 @@ pub(crate) fn merge_thread_into_current(
 
     let merge_target_id = repo
         .refs()
-        .get_thread(track_name)?
+        .get_thread(&ThreadName::new(track_name))?
         .ok_or_else(|| anyhow!(thread_not_found_advice(track_name, "merge")))?;
 
     let current_change = ensure_current_state(
@@ -632,7 +632,7 @@ pub(crate) fn merge_thread_into_current(
                     thread: target_thread,
                 } => {
                     repo.oplog().record_fast_forward(
-                        track_name,
+                        &ThreadName::new(track_name),
                         target_thread,
                         &current_state.change_id,
                         &merge_target_id,
@@ -1792,7 +1792,7 @@ fn build_thread_preview_report_with_graph(
     } else if let Some(name) = thread.target_thread.as_deref() {
         let id = repo
             .refs()
-            .get_thread(name)?
+            .get_thread(&ThreadName::new(name))?
             .ok_or_else(|| anyhow!(thread_not_found_advice(name, "merge preview")))?;
         Some((name.to_string(), id))
     } else {
@@ -1803,7 +1803,7 @@ fn build_thread_preview_report_with_graph(
     let semantic_result = if let Some((target_label, target_id)) = resolved_target {
         let thread_id = repo
             .refs()
-            .get_thread(&thread.thread)?
+            .get_thread(&ThreadName::new(&thread.thread))?
             .ok_or_else(|| anyhow!(thread_not_found_advice(&thread.thread, "merge preview")))?;
         let current_label = format!("CURRENT ({target_label})");
         let incoming_label = format!("INCOMING ({})", thread.thread);
@@ -1838,7 +1838,7 @@ fn build_thread_preview_report_with_graph(
         advice.thread_health = "clean".to_string();
     }
 
-    let thread_tip = repo.refs().get_thread(&thread.thread)?.map(|id| id.short());
+    let thread_tip = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.map(|id| id.short());
     let manual_resolution_current = thread
         .integration_policy_result
         .manual_resolution_state

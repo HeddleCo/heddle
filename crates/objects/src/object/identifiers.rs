@@ -8,7 +8,7 @@
 //! is byte-identical to a bare `String`. Existing oplog entries,
 //! packed refs, and rmp-serde payloads decode unchanged.
 
-use std::fmt;
+use std::{fmt, hash::Hash};
 
 use serde::{Deserialize, Serialize};
 
@@ -118,8 +118,8 @@ mod tests {
     #[test]
     fn thread_name_display() {
         let t = ThreadName::new("main");
-        assert_eq!(t.to_string(), "main");
-        assert_eq!(t.as_str(), "main");
+        assert_eq!(t.0, "main");
+        assert_eq!(t.0, "main");
         assert_eq!(&*t, "main");
     }
 
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn comparison_with_str() {
-        let t = ThreadName::new("main");
+        let t = ThreadName::from("main");
         assert!(t == "main");
         assert!(t == *"main");
         assert!(t == String::from("main"));

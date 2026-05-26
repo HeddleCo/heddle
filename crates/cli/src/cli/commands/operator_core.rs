@@ -4,26 +4,27 @@ use std::{collections::BTreeSet, path::Path};
 use anyhow::Result;
 use chrono::Utc;
 use gix::bstr::ByteSlice;
+use objects::object::ThreadName;
 use repo::{
-    GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
-    RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadState, update_thread_state_from_state,
+    update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind,
+    OperationScope, Repository, RepositoryOperationStatus, ThreadFreshness,
+    ThreadIntegrationPolicy, ThreadManager, ThreadState,
 };
-use serde::{Serialize, Serializer, ser::SerializeStruct};
+use serde::{ser::SerializeStruct, Serialize, Serializer};
 
 use super::{
     bisect::reset_bisect_state,
     git_overlay_health::{
-        RepositoryVerificationState, action_argv, action_template,
-        repository_verification_blockers, repository_verification_primary_command,
+        action_argv, action_template, repository_verification_blockers,
+        repository_verification_primary_command, RepositoryVerificationState,
     },
-    next_action::{NextActionInput, effective_next_action},
+    next_action::{effective_next_action, NextActionInput},
     rebase::{
-        OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
-        has_persisted_rebase_state,
+        cmd_rebase_silent, continue_rebase_for_operator, has_persisted_rebase_state,
+        OperatorContinueStatus,
     },
     resolve::abort_merge_state,
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{create_snapshot, SnapshotAgentOverrides},
 };
 use crate::config::UserConfig;
 
@@ -323,7 +324,7 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
     let Some(target_thread) = thread.target_thread.clone() else {
         return Ok(None);
     };
-    let Some(target_state) = repo.refs().get_thread(&target_thread)? else {
+    let Some(target_state) = repo.refs().get_thread(&ThreadName::new(&target_thread))? else {
         return Ok(None);
     };
     let Some(target_state_obj) = repo.store().get_state(&target_state)? else {
@@ -547,7 +548,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::cli::commands::git_overlay_health::{VerificationCheck, machine_contract_coverage};
+    use crate::cli::commands::git_overlay_health::{machine_contract_coverage, VerificationCheck};
 
     #[test]
     fn raw_git_operation_handoff_recommends_heddle_preservation_not_git_cli() {
@@ -568,18 +569,14 @@ mod tests {
         );
         assert!(output.message.contains("no-git runtime"));
         assert!(output.message.contains("conflict.txt"));
-        assert!(
-            output
-                .blockers
-                .iter()
-                .any(|path| path == "unresolved: conflict.txt")
-        );
-        assert!(
-            !output
-                .recommended_action
-                .as_deref()
-                .is_some_and(|action| action.starts_with("git "))
-        );
+        assert!(output
+            .blockers
+            .iter()
+            .any(|path| path == "unresolved: conflict.txt"));
+        assert!(!output
+            .recommended_action
+            .as_deref()
+            .is_some_and(|action| action.starts_with("git ")));
     }
 
     #[test]
@@ -606,11 +603,9 @@ mod tests {
             output.recommended_action.as_deref(),
             Some("heddle checkpoint -m \"...\"")
         );
-        assert!(
-            output
-                .message
-                .contains("repository verification is blocked")
-        );
+        assert!(output
+            .message
+            .contains("repository verification is blocked"));
     }
 
     #[test]

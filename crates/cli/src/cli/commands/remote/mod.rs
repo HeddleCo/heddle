@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use gix::{bstr::ByteSlice, refs::transaction::PreviousValue};
+use objects::object::ThreadName;
 #[cfg(feature = "client")]
 use proto::AuthToken;
 use refs::Head;
@@ -64,7 +65,7 @@ pub(crate) fn push_git_overlay_refs(
     };
     let current_thread = if matches!(scope, GitPushScope::CurrentThread) {
         match repo.head_ref()? {
-            Head::Attached { thread } => Some(thread),
+            Head::Attached { thread } => Some(thread.to_string()),
             Head::Detached { .. } => None,
         }
     } else {
@@ -1037,7 +1038,7 @@ fn resolve_default_push_thread(repo: &Repository, requested: Option<&str>) -> Re
     }
 
     match repo.head_ref()? {
-        Head::Attached { thread } => Ok(thread),
+        Head::Attached { thread } => Ok(thread.to_string()),
         Head::Detached { .. } => Ok("main".to_string()),
     }
 }
@@ -1063,7 +1064,7 @@ async fn push_local(
     let sync = LocalSync::open(repo.root())?;
     let objects_copied = sync.fetch_state(&target_repo, state_id)?;
 
-    target_repo.refs().set_thread(track_name, state_id)?;
+    target_repo.refs().set_thread(&ThreadName::new(track_name), state_id)?;
 
     if should_output_json(cli, Some(repo.config())) {
         let trust = build_repository_verification_state(repo);

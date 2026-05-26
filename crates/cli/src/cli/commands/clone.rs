@@ -14,7 +14,7 @@ use anyhow::{Result, anyhow};
 use heddle_client::grpc_hosted::PullMaterialization;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
-    object::{Blob, ContentHash},
+    object::{Blob, ContentHash, ThreadName},
 };
 use refs::Head;
 use repo::{BlobHydrator, Repository};
@@ -357,7 +357,8 @@ fn finish_git_overlay_clone(
         read_git_head_branch(&local_path.join(".git")).as_deref(),
         &remote_label,
     )?;
-    let state_id = repo.refs().get_thread(&track_name)?.ok_or_else(|| {
+    let tn = ThreadName::new(&track_name);
+    let state_id = repo.refs().get_thread(&tn)?.ok_or_else(|| {
         anyhow!(clone_git_overlay_branch_not_imported_advice(
             &track_name,
             &remote_label
@@ -380,7 +381,7 @@ fn finish_git_overlay_clone(
     // `heddle log` to snapshot a "Bootstrap git-overlay before
     // viewing log" state instead of walking the imported history.
     repo.refs().write_head(&Head::Attached {
-        thread: track_name.clone(),
+        thread: ThreadName::new(&track_name),
     })?;
     write_git_head_branch(&local_path.join(".git"), &track_name)?;
     configure_git_overlay_origin_tracking(local_path, &track_name)?;
@@ -657,7 +658,7 @@ fn verify_git_overlay_clone(
         }
     }
 
-    let imported = repo.refs().get_thread(track_name)?;
+    let imported = repo.refs().get_thread(&ThreadName::new(track_name))?;
     if imported.as_ref() != Some(state_id) {
         return Err(anyhow!(clone_verification_failed_advice(
             format!(
@@ -930,6 +931,7 @@ fn select_clone_thread(
     threads
         .into_iter()
         .next()
+        .map(|t| t.to_string())
         .ok_or_else(|| anyhow!(clone_git_overlay_no_branch_refs_advice(remote_label)))
 }
 
@@ -991,9 +993,10 @@ async fn clone_local(
     let sync = LocalSync::open(remote_path)?;
     let remote_repo = sync.source();
     let track_name = thread.as_deref().unwrap_or("main");
+    let tn = ThreadName::new(track_name);
     let state_id = remote_repo
         .refs()
-        .get_thread(track_name)?
+        .get_thread(&tn)?
         .ok_or_else(|| clone_remote_thread_not_found_advice(track_name, remote_path))?;
 
     // Create and initialize the local repository only after all
@@ -1009,7 +1012,7 @@ async fn clone_local(
     };
 
     // Set up the thread locally
-    local_repo.refs().set_thread(track_name, &state_id)?;
+    local_repo.refs().set_thread(&tn, &state_id)?;
 
     // Intentional raw `goto`: a fresh `Repository::init` writes HEAD as
     // `Attached { thread: "main" }`, but we may be cloning a non-"main"
@@ -1018,7 +1021,7 @@ async fn clone_local(
     // post-HEAD-attach is tracked separately.
     local_repo.goto(&state_id)?;
     local_repo.refs().write_head(&Head::Attached {
-        thread: track_name.to_string(),
+        thread: ThreadName::new(track_name),
     })?;
 
     // Copy worktree files from ordinary local remotes. A Heddle repo may

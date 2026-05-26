@@ -11,7 +11,7 @@ use base64::Engine as _;
 use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{DiffKind, Session, Tree},
+    object::{DiffKind, Session, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary},
 };
 use proto::{
@@ -922,7 +922,7 @@ impl HarnessBridgeRuntime {
         }
 
         let current_attached = match self.repo.head_ref()? {
-            Head::Attached { thread } => Some(thread),
+            Head::Attached { thread } => Some(thread.to_string()),
             Head::Detached { .. } => None,
         };
 
@@ -989,16 +989,17 @@ impl HarnessBridgeRuntime {
         let base_state = self
             .resolve_harness_thread_base_state(target_thread, parent_thread)?
             .ok_or_else(|| anyhow!("No current state to start a thread from"))?;
-        if self.repo.refs().get_thread(name)?.is_none() {
+        let tn = ThreadName::new(name);
+        if self.repo.refs().get_thread(&tn)?.is_none() {
             self.repo
                 .refs()
-                .set_thread_cas(name, refs::RefExpectation::Missing, &base_state)?;
+                .set_thread_cas(&tn, refs::RefExpectation::Missing, &base_state)?;
             // Harness writes the ThreadManager record later in this
             // function (after materializing); no record exists to
             // snapshot at recording time. `None` matches the pattern
             // used by `cmd_start` / agent reservation. heddle#23 r2.
             self.repo.oplog().record_thread_create(
-                name,
+                &tn,
                 &base_state,
                 None,
                 Some(&self.repo.op_scope()),
@@ -2087,7 +2088,7 @@ fn resolve_named_thread_base_state(
         return Ok(Some(state_id));
     }
 
-    Ok(repo.refs().get_thread(thread_name)?)
+    Ok(repo.refs().get_thread(&ThreadName::new(thread_name))?)
 }
 
 fn resolve_parent_thread_for_subagent(
@@ -2129,7 +2130,7 @@ fn native_key_slug(value: &str) -> String {
 
 fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
     if ThreadManager::new(repo.heddle_dir()).load(base)?.is_none()
-        && repo.refs().get_thread(base)?.is_none()
+        && repo.refs().get_thread(&ThreadName::new(base))?.is_none()
     {
         return Ok(base.to_string());
     }
@@ -2138,7 +2139,7 @@ fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
         if ThreadManager::new(repo.heddle_dir())
             .load(&candidate)?
             .is_none()
-            && repo.refs().get_thread(&candidate)?.is_none()
+            && repo.refs().get_thread(&ThreadName::new(&candidate))?.is_none()
         {
             return Ok(candidate);
         }

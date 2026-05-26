@@ -1550,9 +1550,7 @@ impl ContentAddressedMount {
             pending.explicit_dirs.insert(child_path.clone());
         }
 
-        let node = self.intern(NodeRecord::PendingDir {
-            path: child_path,
-        });
+        let node = self.intern(NodeRecord::PendingDir { path: child_path });
         Ok(Entry {
             node,
             name: name.to_os_string(),
@@ -1988,9 +1986,7 @@ impl ContentAddressedMount {
         // source's NodeId; `apply_pending_to_tree` resolves its
         // current path through `inodes.by_path`.
         if let (Some(id), Some((blob, mode, size))) = (src_id, captured_seed) {
-            pending
-                .warm
-                .insert(id, PendingEntry { blob, mode, size });
+            pending.warm.insert(id, PendingEntry { blob, mode, size });
         }
         // Path-level bookkeeping: tombstone old_path so the captured
         // tree's old entry is hidden; clear any tombstone at
@@ -2030,7 +2026,9 @@ impl ContentAddressedMount {
         pending.hot_by_path.remove(new_path);
         pending.symlinks.remove(new_path);
         pending.symlinks.remove(old_path);
-        pending.symlinks.insert(new_path.to_path_buf(), target_bytes);
+        pending
+            .symlinks
+            .insert(new_path.to_path_buf(), target_bytes);
         pending.tombstones.remove(new_path);
         pending.tombstones.insert(old_path.to_path_buf());
         let _ = displaced_inode_id;
@@ -2211,9 +2209,8 @@ impl ContentAddressedMount {
                 FileMode::Normal
             };
             let mut inodes = self.inner.inodes.lock().expect("inode lock");
-            if let Some(
-                NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. },
-            ) = inodes.by_id.get_mut(&node.0)
+            if let Some(NodeRecord::File { mode, .. } | NodeRecord::PendingFile { mode, .. }) =
+                inodes.by_id.get_mut(&node.0)
             {
                 *mode = new_mode;
             }
@@ -2340,11 +2337,7 @@ impl ContentAddressedMount {
                     // own warm bytes live at `warm[node.0]`; fall
                     // back to the captured blob (this inode's own,
                     // not the sibling at the rebound name).
-                    pending
-                        .warm
-                        .get(&node.0)
-                        .map(|e| e.blob)
-                        .or(captured_blob)
+                    pending.warm.get(&node.0).map(|e| e.blob).or(captured_blob)
                 } else {
                     // Live: the path's bytes live at `warm[id]` where
                     // id is the Live owner via `inodes.by_path`.
@@ -2401,12 +2394,7 @@ impl ContentAddressedMount {
     /// Create a symbolic link under `parent`. Target bytes are kept
     /// in the pending tier verbatim; `capture` writes them as a CAS
     /// blob and emits a `Symlink` tree entry.
-    pub fn create_symlink(
-        &self,
-        parent: NodeId,
-        name: &OsStr,
-        target: &Path,
-    ) -> Result<Entry> {
+    pub fn create_symlink(&self, parent: NodeId, name: &OsStr, target: &Path) -> Result<Entry> {
         // R8: serialize with other write-side mutations.
         let _write_guard = self.inner.write_mu.lock().expect("write mu");
         let name_str = validate_entry_name(name)?;
@@ -2426,9 +2414,7 @@ impl ContentAddressedMount {
             pending.tombstones.remove(&child_path);
             pending.symlinks.insert(child_path.clone(), target_bytes);
         }
-        let node = self.intern(NodeRecord::PendingSymlink {
-            path: child_path,
-        });
+        let node = self.intern(NodeRecord::PendingSymlink { path: child_path });
         Ok(Entry {
             node,
             name: name.to_os_string(),
@@ -2962,7 +2948,9 @@ impl MountInner {
                     if n == 0 {
                         pending.state.remove(&node.0);
                     } else {
-                        pending.state.insert(node.0, NodeState::Live { open_count: n });
+                        pending
+                            .state
+                            .insert(node.0, NodeState::Live { open_count: n });
                     }
                     Outcome::Flush
                 }
@@ -2977,7 +2965,9 @@ impl MountInner {
                         pending.warm.remove(&node.0);
                         Outcome::OrphanFinalDone
                     } else {
-                        pending.state.insert(node.0, NodeState::Orphan { open_count: n });
+                        pending
+                            .state
+                            .insert(node.0, NodeState::Orphan { open_count: n });
                         // Mid-life Orphan release: forward to
                         // flush_node (which no-ops for orphans).
                         Outcome::Flush
@@ -3045,9 +3035,10 @@ fn sweep_worker_loop(
 }
 
 fn resolve_thread(repo: &Repository, thread: &str) -> Result<MountState> {
+    let thread_name = objects::object::ThreadName::from(thread);
     let change_id = repo
         .refs()
-        .get_thread(thread)?
+        .get_thread(&thread_name)?
         .ok_or_else(|| MountError::UnknownThread(thread.to_string()))?;
     let state = repo
         .store()
@@ -3270,11 +3261,9 @@ impl PlatformShell for ContentAddressedMount {
                         // Warm is NodeId-keyed; resolve path → id via
                         // the inode registry.
                         let inodes = self.inner.inodes.lock().expect("inode lock");
-                        inodes
-                            .by_path
-                            .get(path)
-                            .copied()
-                            .and_then(|id| pending.warm.get(&id).map(|warm| Overlay::Warm(warm.blob)))
+                        inodes.by_path.get(path).copied().and_then(|id| {
+                            pending.warm.get(&id).map(|warm| Overlay::Warm(warm.blob))
+                        })
                     }
                 };
                 match overlay {
@@ -3543,9 +3532,7 @@ impl PlatformShell for ContentAddressedMount {
                     continue;
                 }
                 Some(PendingHit::Symlink { target_len }) => {
-                    let node = self.intern(NodeRecord::PendingSymlink {
-                        path: entry_path,
-                    });
+                    let node = self.intern(NodeRecord::PendingSymlink { path: entry_path });
                     by_name.insert(
                         tree_entry.name.clone(),
                         Entry {
@@ -3622,9 +3609,7 @@ impl PlatformShell for ContentAddressedMount {
                     );
                 }
                 PendingChildKind::Symlink { size } => {
-                    let node = self.intern(NodeRecord::PendingSymlink {
-                        path: full_path,
-                    });
+                    let node = self.intern(NodeRecord::PendingSymlink { path: full_path });
                     by_name.insert(
                         name.clone(),
                         Entry {
@@ -3876,12 +3861,7 @@ impl PlatformShell for ContentAddressedMount {
         options: RenameOptions,
     ) -> Result<()> {
         ContentAddressedMount::rename_entry_with_options(
-            self,
-            old_parent,
-            old_name,
-            new_parent,
-            new_name,
-            options,
+            self, old_parent, old_name, new_parent, new_name, options,
         )
     }
 
@@ -3889,12 +3869,7 @@ impl PlatformShell for ContentAddressedMount {
         ContentAddressedMount::set_attrs(self, node, update)
     }
 
-    fn create_symlink(
-        &self,
-        parent: NodeId,
-        name: &OsStr,
-        target: &Path,
-    ) -> Result<Entry> {
+    fn create_symlink(&self, parent: NodeId, name: &OsStr, target: &Path) -> Result<Entry> {
         ContentAddressedMount::create_symlink(self, parent, name, target)
     }
 
@@ -4003,7 +3978,7 @@ impl ContentAddressedMount {
                 self.inner
                     .repo
                     .refs()
-                    .set_thread(&self.inner.thread, &change_id)
+                    .set_thread(&objects::object::ThreadName::from(self.inner.thread.as_str()), &change_id)
                     .map_err(MountError::Store)?;
             }
         }
@@ -4203,12 +4178,13 @@ fn apply_pending_to_tree(
             continue;
         };
         let parent_dir = descend(&mut root, dir_components);
-        parent_dir
-            .explicit_empty
-            .insert((*leaf_name).to_string());
+        parent_dir.explicit_empty.insert((*leaf_name).to_string());
         // Also ensure the dir's own VDir exists so materialize
         // visits it (descend into the leaf one extra step).
-        parent_dir.children.entry((*leaf_name).to_string()).or_default();
+        parent_dir
+            .children
+            .entry((*leaf_name).to_string())
+            .or_default();
     }
 
     // Plant tombstones. Each tombstone names a *file* the agent
@@ -4331,9 +4307,7 @@ fn apply_pending_to_tree(
                 }
                 None if force_empty => {
                     // Empty mkdir survives capture as a 0-entry tree.
-                    let hash = store
-                        .put_tree(&Tree::new())
-                        .map_err(MountError::Store)?;
+                    let hash = store.put_tree(&Tree::new()).map_err(MountError::Store)?;
                     let entry = TreeEntry::directory(name.clone(), hash).map_err(|e| {
                         MountError::Store(objects::error::HeddleError::InvalidObject(e.to_string()))
                     })?;

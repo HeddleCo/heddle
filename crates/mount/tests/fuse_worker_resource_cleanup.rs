@@ -52,23 +52,13 @@ fn child_ipc_fd_closed_on_spawn_failure() {
     // Warm-up: the first iteration may allocate libc / tracing
     // statics that look like an fd leak. Run once, then take the
     // baseline.
-    let _ = Supervisor::spawn(
-        &bogus_binary,
-        repo_dir.path(),
-        "main",
-        mountpoint.path(),
-    );
+    let _ = Supervisor::spawn(&bogus_binary, repo_dir.path(), "main", mountpoint.path());
 
     let baseline = count_open_fds();
 
     const ITERS: usize = 32;
     for _ in 0..ITERS {
-        let result = Supervisor::spawn(
-            &bogus_binary,
-            repo_dir.path(),
-            "main",
-            mountpoint.path(),
-        );
+        let result = Supervisor::spawn(&bogus_binary, repo_dir.path(), "main", mountpoint.path());
         assert!(
             result.is_err(),
             "spawn against {bogus_binary:?} must fail (binary does not exist)"

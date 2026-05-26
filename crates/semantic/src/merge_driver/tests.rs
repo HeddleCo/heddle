@@ -2971,9 +2971,7 @@ fn mixed_eol_add_add_marker_follows_item_bytes_not_whole_file() {
     let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
     assert_eq!(count, 1, "expected 1 conflict, got {count}: {text:?}");
     for line in text.split_inclusive('\n') {
-        if line.starts_with("<<<<<<<")
-            || line.starts_with("=======")
-            || line.starts_with(">>>>>>>")
+        if line.starts_with("<<<<<<<") || line.starts_with("=======") || line.starts_with(">>>>>>>")
         {
             assert!(
                 line.ends_with("\r\n"),

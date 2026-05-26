@@ -8,6 +8,7 @@ use std::{
 };
 
 use gix::bstr::{BStr, ByteSlice};
+use objects::object::ThreadName;
 use objects::worktree::WorktreeStatus;
 use refs::Head;
 use repo::{
@@ -2526,7 +2527,7 @@ pub(crate) fn remote_drift_decision(
             }
             let import = canonical_bridge_import_ref_command(upstream);
             let merge_preview = super::thread_landing::merge_preview_command(upstream);
-            let imported = repo.refs().get_thread(upstream).ok().flatten().is_some();
+            let imported = repo.refs().get_thread(&ThreadName::new(upstream)).ok().flatten().is_some();
             RemoteDriftDecision {
                 status,
                 verified_as_clean: false,
@@ -3004,7 +3005,7 @@ fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<GitOverlayHealt
     let mut unmapped = Vec::new();
 
     for tip in repo.git_overlay_tag_tips()? {
-        let marker = repo.refs().get_marker(&tip.tag)?;
+        let marker = repo.refs().get_marker(&objects::object::MarkerName::new(&tip.tag))?;
         match (marker, tip.mapped_change) {
             (Some(existing), Some(mapped)) if existing == mapped => {}
             (Some(existing), Some(mapped)) => mismatched.push(format!(
@@ -3118,7 +3119,7 @@ fn stale_integration_metadata_check(
         let Some(target_thread) = thread.target_thread.as_deref() else {
             continue;
         };
-        let Some(target_tip) = repo.refs().get_thread(target_thread)? else {
+        let Some(target_tip) = repo.refs().get_thread(&ThreadName::new(target_thread))? else {
             continue;
         };
         let candidate = thread
@@ -3126,7 +3127,7 @@ fn stale_integration_metadata_check(
             .as_deref()
             .or(thread.merged_state.as_deref())
             .and_then(|state| repo.resolve_state(state).ok().flatten())
-            .or_else(|| repo.refs().get_thread(&thread.thread).ok().flatten());
+            .or_else(|| repo.refs().get_thread(&ThreadName::new(&thread.thread)).ok().flatten());
         let Some(candidate) = candidate else {
             continue;
         };
@@ -3499,6 +3500,7 @@ fn mapped_change_relation(
 
 #[cfg(test)]
 mod tests {
+    use objects::object::ThreadName;
     use repo::{GitRemoteTrackingStatus, Repository};
     use tempfile::TempDir;
 
@@ -3764,7 +3766,7 @@ mod tests {
         );
 
         let head = repo.head().unwrap().expect("test repo should have a head");
-        repo.refs().set_thread("origin/main", &head).unwrap();
+        repo.refs().set_thread(&ThreadName::new("origin/main"), &head).unwrap();
         let imported = remote_drift_decision(&repo, &diverged);
         assert_eq!(
             imported.primary_action.as_deref(),

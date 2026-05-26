@@ -15,8 +15,8 @@
 //! thread ref to strand, and the legacy `Goto` inverse correctly
 //! rewinds HEAD on its own.
 
-use anyhow::{Result, anyhow};
-use objects::object::ChangeId;
+use anyhow::{anyhow, Result};
+use objects::object::{ChangeId, ThreadName};
 use oplog::OpRecord;
 use refs::Head;
 use repo::Repository;
@@ -117,7 +117,7 @@ pub(super) fn ff_advance_deferred(
     Ok(match head_before {
         Head::Attached { thread } => OpRecord::FastForwardV2 {
             source_thread: source_thread.to_string(),
-            target_thread: thread,
+            target_thread: thread.to_string(),
             pre_target_id,
             post_target_id: *post_target_id,
         },
@@ -139,7 +139,7 @@ fn record_ff_advance_inner(
     match head_before {
         Head::Attached { thread } => {
             repo.oplog().record_fast_forward(
-                source_thread,
+                &ThreadName::new(source_thread),
                 thread,
                 pre_target_id,
                 post_target_id,
@@ -153,4 +153,3 @@ fn record_ff_advance_inner(
     }
     Ok(())
 }
-

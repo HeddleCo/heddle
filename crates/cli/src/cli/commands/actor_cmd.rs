@@ -7,6 +7,7 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use objects::object::ThreadName;
 use objects::store::{ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary};
 use refs::Head;
 use repo::Repository;
@@ -306,9 +307,9 @@ pub async fn cmd_actor_spawn(
 
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = registry.create_generated_entry(|session_id| {
-        let thread_name = thread
+        let thread_name = ThreadName::new(thread
             .clone()
-            .unwrap_or_else(|| format!("actor/{session_id}"));
+            .unwrap_or_else(|| format!("actor/{session_id}")));
 
         if repo.refs().get_thread(&thread_name)?.is_none() {
             repo.refs().set_thread(&thread_name, &base_state)?;
@@ -322,7 +323,7 @@ pub async fn cmd_actor_spawn(
             native_instance_key: None,
             heddle_session_id: None,
             thread_id: None,
-            thread: thread_name.clone(),
+            thread: thread_name.to_string(),
             pid: Some(std::process::id()),
             boot_id: None,
             liveness_path: None,
@@ -734,7 +735,7 @@ fn resolve_actor_entry(
         && let Some(entry) = registry
             .list()?
             .into_iter()
-            .filter(|entry| entry.status == AgentStatus::Active && entry.thread == thread)
+            .filter(|entry| entry.status == AgentStatus::Active && thread == entry.thread)
             .max_by_key(|entry| entry.started_at)
     {
         return Ok(entry);

@@ -36,7 +36,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
 
@@ -46,12 +46,12 @@ use super::{
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{action_templates, command_argvs},
     merge::merge_thread_into_current,
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{create_snapshot, SnapshotAgentOverrides},
     thread::start_thread,
-    thread_cmd::{DropOutcome, drop_thread_silent},
+    thread_cmd::{drop_thread_silent, DropOutcome},
 };
 use crate::{
-    cli::{Cli, ThreadStartArgs, TryArgs, WorkspaceModeArg, should_output_json, style},
+    cli::{should_output_json, style, Cli, ThreadStartArgs, TryArgs, WorkspaceModeArg},
     config::UserConfig,
 };
 
@@ -454,7 +454,11 @@ pub(crate) fn thread_name_in_use(repo: &Repository, name: &str) -> Result<bool> 
     if manager.find_by_thread(name)?.is_some() || manager.load(name)?.is_some() {
         return Ok(true);
     }
-    if repo.refs().get_thread(name)?.is_some() {
+    if repo
+        .refs()
+        .get_thread(&objects::object::ThreadName::new(name))?
+        .is_some()
+    {
         return Ok(true);
     }
     Ok(false)
@@ -567,7 +571,7 @@ fn interpret_drop_result(
 
 #[cfg(test)]
 mod tests {
-    use objects::object::ChangeId;
+    use objects::object::{ChangeId, ThreadName};
 
     use super::*;
 
@@ -590,7 +594,9 @@ mod tests {
         // missed. `thread_name_in_use` must catch it.
         let (_temp, repo) = init_repo();
         let id = ChangeId::generate();
-        repo.refs().set_thread("ref-only-thread", &id).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("ref-only-thread"), &id)
+            .unwrap();
 
         // ThreadManager has no record (we didn't go through start_thread).
         let manager = ThreadManager::new(repo.heddle_dir());
@@ -610,7 +616,9 @@ mod tests {
         // the guard short-circuits with the precise message.
         let (_temp, repo) = init_repo();
         let id = ChangeId::generate();
-        repo.refs().set_thread("legacy-ref-thread", &id).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("legacy-ref-thread"), &id)
+            .unwrap();
 
         let make_args = || TryArgs {
             name: Some("legacy-ref-thread".into()),

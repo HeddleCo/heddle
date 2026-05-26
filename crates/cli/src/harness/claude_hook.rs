@@ -139,17 +139,18 @@ fn format_stack_context(
     body.push_str(&members.join(" → "));
     body.push('\n');
     let verdict = match action {
-        StackNextAction::Ready => {
-            "next-action: ready — every thread is shippable.".to_string()
-        }
+        StackNextAction::Ready => "next-action: ready — every thread is shippable.".to_string(),
         StackNextAction::Blocked { thread } => {
-            format!("next-action: blocked — `{thread}` is in Blocked state; resolve before shipping.")
+            format!(
+                "next-action: blocked — `{thread}` is in Blocked state; resolve before shipping."
+            )
         }
         StackNextAction::WaitingOnReview { thread } => {
             format!("next-action: waiting-on-review — `{thread}` is still in flight.")
         }
         StackNextAction::Unknown => {
-            "next-action: unknown — stack state is exotic; run `heddle stack ready` for details.".to_string()
+            "next-action: unknown — stack state is exotic; run `heddle stack ready` for details."
+                .to_string()
         }
     };
     body.push_str(&verdict);

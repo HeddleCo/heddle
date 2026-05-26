@@ -7,6 +7,7 @@ use std::collections::HashSet;
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::Result;
+use objects::object::{MarkerName, ThreadName};
 #[cfg(feature = "client")]
 use objects::object::ChangeId;
 #[cfg(feature = "client")]
@@ -228,7 +229,7 @@ async fn fetch_local(
         let count = source.fetch_state(repo, &change_id)?;
         objects_fetched += count;
         repo.refs()
-            .set_remote_thread(remote_name, &track_name, &change_id)?;
+            .set_remote_thread(remote_name, &ThreadName::new(&track_name), &change_id)?;
         refs_fetched += 1;
     }
 
@@ -237,8 +238,9 @@ async fn fetch_local(
         let count = source.fetch_state(repo, &change_id)?;
         objects_fetched += count;
         // Create local marker if it doesn't exist
-        if repo.refs().get_marker(&marker_name)?.is_none() {
-            repo.refs().create_marker(&marker_name, &change_id)?;
+        let mn = MarkerName::new(&marker_name);
+        if repo.refs().get_marker(&mn)?.is_none() {
+            repo.refs().create_marker(&mn, &change_id)?;
         }
     }
 
@@ -314,12 +316,13 @@ async fn fetch_network(
     let refs_fetched = refs_to_update.len();
     for (track_name, change_id) in refs_to_update {
         repo.refs()
-            .set_remote_thread(options.remote_name, &track_name, &change_id)?;
+            .set_remote_thread(options.remote_name, &ThreadName::new(&track_name), &change_id)?;
     }
 
     for (marker_name, change_id) in markers_to_create {
-        if repo.refs().get_marker(&marker_name)?.is_none() {
-            repo.refs().create_marker(&marker_name, &change_id)?;
+        let mn = MarkerName::new(&marker_name);
+        if repo.refs().get_marker(&mn)?.is_none() {
+            repo.refs().create_marker(&mn, &change_id)?;
         }
     }
     Ok((refs_fetched, objects_fetched))

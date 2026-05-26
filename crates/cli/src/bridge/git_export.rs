@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use gix::bstr::ByteSlice;
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ContentHash, FileMode},
+    object::{ChangeId, ContentHash, FileMode, ThreadName},
 };
 use repo::Repository as HeddleRepository;
 
@@ -182,7 +182,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
 
     let states = match thread {
         Some(thread) => {
-            let Some(state_id) = bridge.heddle_repo.refs().get_thread(thread)? else {
+            let Some(state_id) = bridge.heddle_repo.refs().get_thread(&ThreadName::new(thread))? else {
                 return Err(GitBridgeError::Git(format!(
                     "thread '{thread}' has no state to export"
                 )));
@@ -248,7 +248,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         }
     }
 
-    let threads = match thread {
+    let threads: Vec<String> = match thread {
         Some(thread) => vec![thread.to_string()],
         None => {
             let remote_names = git_remote_names(bridge.heddle_repo);
@@ -258,11 +258,12 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 .list_threads()?
                 .into_iter()
                 .filter(|thread| !is_remote_tracking_thread_name(thread, &remote_names))
+                .map(|t| t.to_string())
                 .collect()
         }
     };
     for track_name in threads {
-        if let Some(state_id) = bridge.heddle_repo.refs().get_thread(&track_name)?
+        if let Some(state_id) = bridge.heddle_repo.refs().get_thread(&ThreadName::new(&track_name))?
             && let Some(git_oid) = bridge.mapping.get_git(&state_id)
         {
             sync_track_to_branch(&repo, &track_name, git_oid)?;

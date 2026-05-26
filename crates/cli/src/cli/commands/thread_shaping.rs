@@ -4,7 +4,7 @@
 use std::{fs, path::Path};
 
 use anyhow::{Result, anyhow};
-use objects::{fs_ops::remove_path_recursively, object::ChangeId};
+use objects::{fs_ops::remove_path_recursively, object::{ChangeId, ThreadName}};
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;
 
@@ -274,7 +274,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 })?;
                 let resolved_state = repo
                     .refs()
-                    .get_thread(&refreshed_thread.thread)?
+                    .get_thread(&ThreadName::new(&refreshed_thread.thread))?
                     .map(|id| id.short());
                 refreshed_thread.integration_policy_result.status =
                     Some("manual_resolved".to_string());
@@ -390,7 +390,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         thread.integration_policy_result.reason =
             Some("manual integration resolution captured".to_string());
         thread.integration_policy_result.manual_resolution_state =
-            repo.refs().get_thread(&thread.thread)?.map(|id| id.short());
+            repo.refs().get_thread(&ThreadName::new(&thread.thread))?.map(|id| id.short());
         manager.save(&thread)?;
     }
     let recommended_action = if blockers.is_empty() {

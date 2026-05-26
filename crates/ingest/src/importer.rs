@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use objects::{
     object::{Blob, ChangeId, ContentHash, Tree, TreeEntry},
     store::{
-        CompressionConfig, ObjectStore,
         pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
+        CompressionConfig, ObjectStore,
     },
 };
 use oplog::oplog::OpLogBackend;
@@ -29,12 +29,12 @@ use refs::refs::RefBackend;
 use tracing::info;
 
 use crate::{
-    IngestError,
     git_walk::{CommitEntry, GitSource, RefDiscoveryStats, TreeChild, TreeChildKind},
     oplog_emit::{OplogEmitStats, OplogEmitter},
     ref_emit::{RefEmitStats, RefEmitter},
     sha_map::ShaMap,
     state_writer::state_from_commit,
+    IngestError,
 };
 
 /// Counters reported back from [`Importer::run`] — the post-import
@@ -514,7 +514,7 @@ pub fn import_git_into(
 mod tests {
     use std::{path::Path, process::Command};
 
-    use objects::store::InMemoryStore;
+    use objects::{object::ThreadName, store::InMemoryStore};
     use refs::refs::RefManager;
     use tempfile::TempDir;
 
@@ -582,8 +582,11 @@ mod tests {
         assert_eq!(stats.refs.threads_written, 2); // main + feature/x
         assert_eq!(stats.refs.markers_written, 1); // v0.1
         assert_eq!(stats.refs.skipped_unmapped, 0);
-        assert!(refs.get_thread("main").unwrap().is_some());
-        assert!(refs.get_thread("feature/x").unwrap().is_some());
+        assert!(refs.get_thread(&ThreadName::new("main")).unwrap().is_some());
+        assert!(refs
+            .get_thread(&ThreadName::new("feature/x"))
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -748,7 +751,7 @@ mod tests {
         let store = repo.store();
         let main_cid = repo
             .refs()
-            .get_thread("main")
+            .get_thread(&ThreadName::new("main"))
             .unwrap()
             .expect("main thread should resolve to a state");
         let state = store

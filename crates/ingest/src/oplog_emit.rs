@@ -47,10 +47,11 @@
 //!   no `MarkerUpdate` variant. We emit `MarkerDelete` + `MarkerCreate` in
 //!   that case to keep the log faithful.
 
+use objects::object::{MarkerName, ThreadName};
 use oplog::oplog::OpLogBackend;
 use tracing::warn;
 
-use crate::{IngestError, git_walk::ReflogEntry, sha_map::ShaMap};
+use crate::{git_walk::ReflogEntry, sha_map::ShaMap, IngestError};
 
 /// Rolling tally returned by [`OplogEmitter::emit`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -175,8 +176,9 @@ impl<'a> OplogEmitter<'a> {
                 // `None` for the snapshot; the recorded
                 // `ThreadCreateV2` carries no record body to restore
                 // on redo. heddle#23 r2.
+                let thread_name = ThreadName::from(short_name);
                 self.oplog
-                    .record_thread_create(short_name, &cid, None, scope)
+                    .record_thread_create(&thread_name, &cid, None, scope)
                     .map_err(IngestError::from)?;
                 stats.thread_creates += 1;
             }
@@ -185,8 +187,9 @@ impl<'a> OplogEmitter<'a> {
                     stats.skipped_unmapped += 1;
                     return Ok(());
                 };
+                let thread_name = ThreadName::from(short_name);
                 self.oplog
-                    .record_thread_delete(short_name, &cid, scope)
+                    .record_thread_delete(&thread_name, &cid, scope)
                     .map_err(IngestError::from)?;
                 stats.thread_deletes += 1;
             }
@@ -224,6 +227,7 @@ impl<'a> OplogEmitter<'a> {
         short_name: &str,
         stats: &mut OplogEmitStats,
     ) -> crate::Result<()> {
+        let marker_name = MarkerName::from(short_name);
         match (&entry.previous_sha, &entry.new_sha) {
             (None, Some(new)) => {
                 let Some(cid) = self.map.get_commit(new) else {
@@ -231,7 +235,7 @@ impl<'a> OplogEmitter<'a> {
                     return Ok(());
                 };
                 self.oplog
-                    .record_marker_create(short_name, &cid)
+                    .record_marker_create(&marker_name, &cid)
                     .map_err(IngestError::from)?;
                 stats.marker_creates += 1;
             }
@@ -241,7 +245,7 @@ impl<'a> OplogEmitter<'a> {
                     return Ok(());
                 };
                 self.oplog
-                    .record_marker_delete(short_name, &cid)
+                    .record_marker_delete(&marker_name, &cid)
                     .map_err(IngestError::from)?;
                 stats.marker_deletes += 1;
             }

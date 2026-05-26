@@ -1804,7 +1804,7 @@ fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo>
     summaries
         .into_iter()
         .map(|summary| {
-            let stale = match repo.refs().get_thread(&summary.thread) {
+            let stale = match repo.refs().get_thread(&objects::object::ThreadName::new(&summary.thread)) {
                 Ok(Some(head)) => head != summary.state_id,
                 _ => false,
             };

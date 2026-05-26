@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::fs;
 
-use objects::object::ChangeId;
+use objects::object::{ChangeId, ThreadName};
 use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
@@ -28,7 +28,7 @@ fn test_init_creates_structure() {
     assert!(temp_dir.path().join(".heddle/objects/trees").exists());
     assert!(temp_dir.path().join(".heddle/objects/states").exists());
     let root_state = repo.head().unwrap().expect("init should seed main state");
-    assert_eq!(repo.refs().get_thread("main").unwrap(), Some(root_state));
+    assert_eq!(repo.refs().get_thread(&ThreadName::new("main")).unwrap(), Some(root_state));
     let state = repo.store().get_state(&root_state).unwrap().unwrap();
     assert!(state.parents.is_empty());
     let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
@@ -950,10 +950,10 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
     // Repo::init_default attaches HEAD to "main"; explicitly rewind the
     // thread ref to state1 so a fast-forward to state2 is meaningful.
     let state1 = repo.head().unwrap().expect("base state should exist");
-    repo.refs().set_thread("main", &state1).unwrap();
+    repo.refs().set_thread(&ThreadName::new("main"), &state1).unwrap();
     repo.refs()
         .write_head(&Head::Attached {
-            thread: "main".to_string(),
+            thread: ThreadName::new("main"),
         })
         .unwrap();
 
@@ -961,7 +961,7 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
 
     // Thread ref must advance to the target.
     assert_eq!(
-        repo.refs().get_thread("main").unwrap(),
+        repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
         Some(state2.change_id),
         "main ref must advance to fast-forward target"
     );

@@ -2,7 +2,7 @@
 //! Fork command: create exploration branch.
 
 use anyhow::Result;
-use objects::object::State;
+use objects::object::{State, ThreadName};
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::Repository;
 use serde::Serialize;
@@ -12,7 +12,7 @@ use super::{
     snapshot::{ensure_current_state, resolve_attribution},
 };
 use crate::{
-    cli::{Cli, should_output_json},
+    cli::{should_output_json, Cli},
     config::UserConfig,
 };
 
@@ -68,17 +68,16 @@ pub fn cmd_fork(cli: &Cli, name: Option<String>, from: Option<String>) -> Result
 
     // If a name was provided, create a new thread
     if let Some(ref track_name) = name {
+        let tn = ThreadName::new(track_name.as_str());
         let updates = vec![
             RefUpdate::Thread {
-                name: track_name.clone(),
+                name: tn.clone(),
                 expected: RefExpectation::Missing,
                 new: Some(new_state.change_id),
             },
             RefUpdate::Head {
                 expected: RefExpectation::Any,
-                new: Head::Attached {
-                    thread: track_name.clone(),
-                },
+                new: Head::Attached { thread: tn },
             },
         ];
         repo.refs().update_refs(&updates)?;

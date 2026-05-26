@@ -15,7 +15,7 @@ use gix::{
         transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
     },
 };
-use objects::object::ChangeId;
+use objects::object::{ChangeId, MarkerName, ThreadName};
 use oplog::{OpBatch, OpEntry, OpRecord};
 use refs::Head;
 use repo::{
@@ -143,9 +143,9 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         } => {
             repo.goto_without_record(prev)?;
             if let Some(thread) = thread {
-                repo.refs().set_thread(thread, prev)?;
+                repo.refs().set_thread(&ThreadName::new(thread.as_str()), prev)?;
                 repo.refs().write_head(&Head::Attached {
-                    thread: thread.clone(),
+                    thread: ThreadName::new(thread.as_str()),
                 })?;
                 sync_thread_record_state(repo, thread, *prev)?;
                 mark_merged_threads_unintegrated_for_target(repo, thread, new_state, prev)?;
@@ -164,7 +164,7 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             prev_head: None, ..
         } => {}
         OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
-            delete_thread_safely(repo, name)?;
+            delete_thread_safely(repo, &ThreadName::new(name.as_str()))?;
             // Cross-thread contract rule 4 (docs/design/cross-thread-undo.md):
             // the inverse of `ThreadCreate` must also remove the matching
             // ThreadManager record so `heddle thread show` and the record-
@@ -184,18 +184,18 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             remove_thread_manager_record(repo, name)?;
         }
         OpRecord::ThreadDelete { name, state } => {
-            repo.refs().set_thread(name, state)?;
+            repo.refs().set_thread(&ThreadName::new(name.as_str()), state)?;
         }
         OpRecord::ThreadUpdate {
             name, old_state, ..
         } => {
-            repo.refs().set_thread(name, old_state)?;
+            repo.refs().set_thread(&ThreadName::new(name.as_str()), old_state)?;
         }
         OpRecord::MarkerCreate { name, .. } => {
-            repo.refs().delete_marker(name)?;
+            repo.refs().delete_marker(&MarkerName::new(name.as_str()))?;
         }
         OpRecord::MarkerDelete { name, state } => {
-            repo.refs().create_marker(name, state)?;
+            repo.refs().create_marker(&MarkerName::new(name.as_str()), state)?;
         }
         // Redaction inverse: drop the specific redaction record so
         // subsequent materialize calls restore the original blob
@@ -262,9 +262,9 @@ fn apply_ff_undo(
     pre_target_id: &ChangeId,
 ) -> Result<()> {
     repo.goto_without_record(pre_target_id)?;
-    repo.refs().set_thread(target_thread, pre_target_id)?;
+    repo.refs().set_thread(&ThreadName::new(target_thread), pre_target_id)?;
     repo.refs().write_head(&Head::Attached {
-        thread: target_thread.to_string(),
+        thread: ThreadName::new(target_thread),
     })?;
     sync_thread_record_state(repo, target_thread, *pre_target_id)?;
     mark_source_thread_unintegrated(repo, source_thread, pre_target_id)
@@ -279,9 +279,9 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         } => {
             repo.goto_without_record(new_state)?;
             if let Some(thread) = thread {
-                repo.refs().set_thread(thread, new_state)?;
+                repo.refs().set_thread(&ThreadName::new(thread.as_str()), new_state)?;
                 repo.refs().write_head(&Head::Attached {
-                    thread: thread.clone(),
+                    thread: ThreadName::new(thread.as_str()),
                 })?;
                 sync_thread_record_state(repo, thread, *new_state)?;
                 mark_ready_threads_integrated_for_target(repo, thread, new_state, prev_head)?;
@@ -301,7 +301,7 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         // <name>` if they want the record back. V1 ages out as the
         // live oplog window slides forward.
         OpRecord::ThreadCreate { name, state } => {
-            repo.refs().set_thread(name, state)?;
+            repo.refs().set_thread(&ThreadName::new(name.as_str()), state)?;
             eprintln!(
                 "warning: redo of legacy V1 `ThreadCreate` for '{}' restores the ref only — \
                  the matching ThreadManager record body was not snapshotted by this oplog entry. \
@@ -324,7 +324,7 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             state,
             manager_snapshot,
         } => {
-            repo.refs().set_thread(name, state)?;
+            repo.refs().set_thread(&ThreadName::new(name.as_str()), state)?;
             if let Some(bytes) = manager_snapshot {
                 let manager = ThreadManager::new(repo.heddle_dir());
                 match manager.restore_thread_record_from_snapshot(bytes) {
@@ -343,18 +343,18 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             }
         }
         OpRecord::ThreadDelete { name, .. } => {
-            delete_thread_safely(repo, name)?;
+            delete_thread_safely(repo, &ThreadName::new(name.as_str()))?;
         }
         OpRecord::ThreadUpdate {
             name, new_state, ..
         } => {
-            repo.refs().set_thread(name, new_state)?;
+            repo.refs().set_thread(&ThreadName::new(name.as_str()), new_state)?;
         }
         OpRecord::MarkerCreate { name, state } => {
-            repo.refs().create_marker(name, state)?;
+            repo.refs().create_marker(&MarkerName::new(name.as_str()), state)?;
         }
         OpRecord::MarkerDelete { name, .. } => {
-            repo.refs().delete_marker(name)?;
+            repo.refs().delete_marker(&MarkerName::new(name.as_str()))?;
         }
         // FF merge redo (V2): replay the *recorded* FF target. We do
         // not re-read `source_thread` — the recorded `post_target_id`
@@ -391,7 +391,7 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             target_thread,
             ..
         } => {
-            let source_tip = repo.refs().get_thread(source_thread)?.ok_or_else(|| {
+            let source_tip = repo.refs().get_thread(&ThreadName::new(source_thread.as_str()))?.ok_or_else(|| {
                 anyhow!(
                     "cannot redo fast-forward: source thread '{}' no longer exists \
                      (legacy V1 oplog record; re-run the merge or `heddle gc oplog` to prune)",
@@ -413,9 +413,9 @@ fn apply_ff_redo(
     post_target_id: &ChangeId,
 ) -> Result<()> {
     repo.goto_without_record(post_target_id)?;
-    repo.refs().set_thread(target_thread, post_target_id)?;
+    repo.refs().set_thread(&ThreadName::new(target_thread), post_target_id)?;
     repo.refs().write_head(&Head::Attached {
-        thread: target_thread.to_string(),
+        thread: ThreadName::new(target_thread),
     })?;
     sync_thread_record_state(repo, target_thread, *post_target_id)?;
     mark_source_thread_integrated(repo, source_thread, post_target_id)
@@ -724,14 +724,14 @@ fn fsync_file_and_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn delete_thread_safely(repo: &Repository, name: &str) -> Result<()> {
+fn delete_thread_safely(repo: &Repository, name: &ThreadName) -> Result<()> {
     if let Head::Attached { thread } = repo.head_ref()?
-        && thread == name
+        && thread == *name
     {
         let state = repo
             .refs()
             .get_thread(name)?
-            .ok_or_else(|| anyhow!(thread_not_found_advice(name, "delete thread")))?;
+            .ok_or_else(|| anyhow!(thread_not_found_advice(name.as_str(), "delete thread")))?;
         repo.refs().write_head(&Head::Detached { state })?;
     }
 
@@ -762,7 +762,7 @@ fn mark_source_thread_unintegrated(
     let Some(mut thread) = manager.find_by_thread(source_thread)? else {
         return Ok(());
     };
-    let source_tip = repo.refs().get_thread(source_thread)?;
+    let source_tip = repo.refs().get_thread(&ThreadName::new(source_thread))?;
     let still_integrated = source_tip
         .as_ref()
         .is_some_and(|source_tip| change_contains(repo, source_tip, target_after_undo));
@@ -828,7 +828,7 @@ fn mark_source_thread_integrated(
     let Some(mut thread) = manager.find_by_thread(source_thread)? else {
         return Ok(());
     };
-    let source_tip = repo.refs().get_thread(source_thread)?;
+    let source_tip = repo.refs().get_thread(&ThreadName::new(source_thread))?;
     let integrated = source_tip
         .as_ref()
         .is_some_and(|source_tip| change_contains(repo, source_tip, target_after_redo));
@@ -866,7 +866,7 @@ fn mark_ready_threads_integrated_for_target(
         {
             continue;
         }
-        let Some(source_tip) = repo.refs().get_thread(&thread.thread)? else {
+        let Some(source_tip) = repo.refs().get_thread(&ThreadName::new(&thread.thread))? else {
             continue;
         };
         let newly_integrated = change_contains(repo, &source_tip, integrated_state)

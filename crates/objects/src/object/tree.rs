@@ -29,8 +29,8 @@ impl fmt::Display for TreeError {
 
 // ── FileMode ────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileMode {
     Normal,
     Executable,
@@ -66,6 +66,7 @@ impl FileMode {
 
 // ── EntryType ───────────────────────────────────────────────────────
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryType {
     Blob,
@@ -188,7 +189,7 @@ impl TreeEntry {
     }
 
     pub(crate) fn update_hasher(&self, hasher: &mut blake3::Hasher) {
-        hasher.update(&[self.mode.into()]);
+        hasher.update(&[self.mode.to_byte()]);
         hasher.update(&[self.entry_type.to_byte()]);
         hasher.update(self.hash.as_bytes());
         hasher.update(self.name.as_bytes());

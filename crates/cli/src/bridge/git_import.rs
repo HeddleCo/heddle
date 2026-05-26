@@ -4,7 +4,7 @@
 use std::{collections::HashSet, path::Path};
 
 use chrono::{TimeZone, Utc};
-use objects::object::{Agent, Attribution, ChangeId, Principal, State, Status};
+use objects::object::{Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName};
 use refs::{Head, RefExpectation};
 use repo::Repository as HeddleRepository;
 use tracing::warn;
@@ -550,7 +550,7 @@ fn import_with_ref_filter(
             continue;
         }
         if let Some(change_id) = bridge.mapping.get_heddle(plan.peeled_commit_oid) {
-            let existing = bridge.heddle_repo.refs().get_thread(name.as_str())?;
+            let existing = bridge.heddle_repo.refs().get_thread(&ThreadName::new(name.as_str()))?;
             if let Some(existing_change) = existing
                 && !thread_can_adopt_change(bridge.heddle_repo, &existing_change, &change_id)?
             {
@@ -576,7 +576,7 @@ fn import_with_ref_filter(
                 bridge
                     .heddle_repo
                     .refs()
-                    .set_thread(name.as_str(), &change_id)
+                    .set_thread(&ThreadName::new(name.as_str()), &change_id)
                     .map_err(|e| {
                         GitBridgeError::InvalidMapping(format!(
                             "set_thread failed for '{}': {}",
@@ -626,12 +626,13 @@ fn sync_marker_from_git_tag(
     name: &str,
     change_id: &ChangeId,
 ) -> GitResult<()> {
-    match bridge.heddle_repo.refs().get_marker(name) {
+    let mn = MarkerName::new(name);
+    match bridge.heddle_repo.refs().get_marker(&mn) {
         Ok(Some(existing)) if existing == *change_id => Ok(()),
         Ok(Some(_)) => bridge
             .heddle_repo
             .refs()
-            .set_marker_cas(name, RefExpectation::Any, change_id)
+            .set_marker_cas(&mn, RefExpectation::Any, change_id)
             .map_err(|error| {
                 GitBridgeError::InvalidMapping(format!(
                     "failed to update marker '{}' during git import: {}",
@@ -641,7 +642,7 @@ fn sync_marker_from_git_tag(
         Ok(None) => bridge
             .heddle_repo
             .refs()
-            .create_marker(name, change_id)
+            .create_marker(&mn, change_id)
             .map_err(|error| {
                 GitBridgeError::InvalidMapping(format!(
                     "failed to create marker '{}' during git import: {}",

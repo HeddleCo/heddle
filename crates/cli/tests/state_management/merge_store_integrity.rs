@@ -13,6 +13,7 @@
 //! asserts the new error path doesn't false-positive.
 use std::{fs, path::Path};
 
+use objects::object::ThreadName;
 use repo::Repository;
 use tempfile::TempDir;
 
@@ -80,12 +81,20 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
     // guarantees no in-process tree cache hides the corruption.
     let sub_hash_hex = {
         let repo = Repository::open(temp.path()).unwrap();
-        let main_tip = repo.refs().get_thread("main").unwrap().unwrap();
+        let main_tip = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .unwrap();
         let main_state = repo.store().get_state(&main_tip).unwrap().unwrap();
         // The merge base IS the initial state: main and feature both
         // forked from the initial capture, then captured once on each
         // side. We need the base state's tree, not main's tip tree.
-        let feature_tip = repo.refs().get_thread("feature").unwrap().unwrap();
+        let feature_tip = repo
+            .refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .unwrap();
         let feature_state = repo.store().get_state(&feature_tip).unwrap().unwrap();
         // Both tips have a single parent — the base capture.
         let base_change_id = main_state.parents[0];

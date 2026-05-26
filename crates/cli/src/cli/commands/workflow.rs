@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use anyhow::{Context, Result, anyhow};
-use objects::object::ChangeId;
+use objects::object::{ChangeId, ThreadName};
 use oplog::{OpBatch, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy};
 use serde::Serialize;
@@ -1146,7 +1146,7 @@ fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String>
             "adopt manual resolution"
         ))
     })?;
-    let target = repo.refs().get_thread(&thread.thread)?.ok_or_else(|| {
+    let target = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.ok_or_else(|| {
         anyhow!(
             "Thread '{}' has no current state to integrate",
             thread.thread
@@ -1234,7 +1234,7 @@ fn ship_blockers_for_preview(
 fn manual_resolution_current(repo: &Repository, thread: &Thread) -> bool {
     let thread_tip = repo
         .refs()
-        .get_thread(&thread.thread)
+        .get_thread(&ThreadName::new(&thread.thread))
         .ok()
         .flatten()
         .map(|id| id.short());
@@ -1252,7 +1252,7 @@ fn thread_is_agent_authored(repo: &Repository, thread: &Thread) -> bool {
         .current_state
         .as_deref()
         .and_then(|state| repo.resolve_state(state).ok().flatten())
-        .or_else(|| repo.refs().get_thread(&thread.thread).ok().flatten());
+        .or_else(|| repo.refs().get_thread(&ThreadName::new(&thread.thread)).ok().flatten());
     current_state
         .and_then(|id| repo.store().get_state(&id).ok().flatten())
         .map(|state| state.attribution.agent.is_some())

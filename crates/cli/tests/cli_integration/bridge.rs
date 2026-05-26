@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use objects::object::ThreadName;
 
 #[test]
 fn test_cli_bridge_git_init() {
@@ -47,7 +48,11 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
     assert!(pull.is_ok(), "Bridge pull failed: {:?}", pull.err());
 
     let target_repo = Repository::open(target.path()).unwrap();
-    assert!(target_repo.refs().get_thread("main").unwrap().is_some());
+    assert!(target_repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -77,7 +82,11 @@ fn test_cli_bridge_git_import_from_external_repo() {
     assert!(result.is_ok(), "Bridge import failed: {:?}", result.err());
 
     let repo = Repository::open(heddle_repo_dir.path()).unwrap();
-    assert!(repo.refs().get_thread("main").unwrap().is_some());
+    assert!(repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -123,7 +132,13 @@ fn test_cli_push_mirror_dual_push_to_weft_and_git_remote() {
     // would never execute and codecov/patch would miss it.
     let stdout = heddle(
         &[
-            "--output", "text", "push", &weft_path, "--thread", "main", &mirror_arg,
+            "--output",
+            "text",
+            "push",
+            &weft_path,
+            "--thread",
+            "main",
+            &mirror_arg,
         ],
         Some(source.path()),
     )
@@ -178,7 +193,13 @@ fn test_cli_push_mirror_failure_does_not_abort_primary_push() {
     // failure on stdout).
     let result = heddle(
         &[
-            "--output", "text", "push", &weft_path, "--thread", "main", &mirror_arg,
+            "--output",
+            "text",
+            "push",
+            &weft_path,
+            "--thread",
+            "main",
+            &mirror_arg,
         ],
         Some(source.path()),
     );
@@ -342,14 +363,12 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
     // Plain `git init` → RepositoryCapability::GitOverlay,
     // hosted_enabled() == false. This is the drop-in case the
     // early-return in cmd_push handles.
-    assert!(
-        Command::new("git")
-            .arg("init")
-            .current_dir(source.path())
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(Command::new("git")
+        .arg("init")
+        .current_dir(source.path())
+        .status()
+        .unwrap()
+        .success());
     for (k, v) in [
         ("user.name", "Heddle Test"),
         ("user.email", "heddle@example.com"),
@@ -390,11 +409,8 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
     let primary_path = primary_remote.path().to_string_lossy().to_string();
     let mirror_path = mirror_remote.path().to_string_lossy().to_string();
     let mirror_arg = format!("--mirror={}", mirror_path);
-    heddle(
-        &["push", &primary_path, &mirror_arg],
-        Some(source.path()),
-    )
-    .expect("push --mirror in GitOverlay repo should succeed");
+    heddle(&["push", &primary_path, &mirror_arg], Some(source.path()))
+        .expect("push --mirror in GitOverlay repo should succeed");
 
     assert!(
         primary_repo.find_reference("refs/heads/main").is_ok(),

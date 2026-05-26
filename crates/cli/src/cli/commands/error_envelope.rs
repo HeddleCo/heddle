@@ -8,8 +8,10 @@ use super::{
     command_catalog::{ActionTemplate, recommended_action_template, validate_recommended_action},
     recommended_action_argv,
 };
-use crate::cli::{Cli, render::shell_quote, should_output_json};
-use crate::exit::HeddleExitCode;
+use crate::{
+    cli::{Cli, render::shell_quote, should_output_json},
+    exit::HeddleExitCode,
+};
 
 /// Print an error to stderr with a one-line next-step hint when the error
 /// chain matches a known recoverable condition. Stays out of the way

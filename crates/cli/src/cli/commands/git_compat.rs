@@ -11,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use gix::bstr::{BStr, ByteSlice};
 use gix_index::entry::{Mode, Stage};
 use objects::{
-    object::{Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, Tree, TreeEntry},
+    object::{Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree, TreeEntry},
     worktree::should_ignore as should_ignore_path,
 };
 use oplog::{OpBatch, OpRecord};
@@ -1240,7 +1240,7 @@ pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
         )));
     }
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
-    if repo.refs().get_thread(&args.target)?.is_some() {
+    if repo.refs().get_thread(&ThreadName::new(&args.target))?.is_some() {
         return cmd_thread(
             cli,
             ThreadCommands::Switch {

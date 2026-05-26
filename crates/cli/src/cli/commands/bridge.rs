@@ -6,7 +6,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
+use objects::object::ThreadName;
 use refs::Head;
 use repo::Repository;
 use serde::Serialize;
@@ -15,23 +16,23 @@ use super::{
     action_line::{print_next, print_next_step, print_optional},
     advice::RecoveryAdvice,
     git_overlay_health::{
-        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_argv,
-        action_template, build_git_overlay_health, build_plain_git_verification_probe,
+        action_argv, action_template, build_git_overlay_health, build_plain_git_verification_probe,
         build_repository_verification_state, canonical_adopt_ref_command,
         canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_command,
         canonical_bridge_reconcile_ref_preview_command, serialize_empty_action_as_null,
+        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState,
     },
     import_progress::ImportProgress,
     remote::resolve_default_remote_name,
 };
 use crate::{
     bridge::{
-        GitBridge,
         git_core::clone_url_to_bare,
         git_export::export_all,
         git_import::{import_all, import_selected_refs},
+        GitBridge,
     },
-    cli::{Cli, GitCommands, cli_args::GitSource, should_output_json, style},
+    cli::{cli_args::GitSource, should_output_json, style, Cli, GitCommands},
 };
 
 /// A `GitSource` resolved to an on-disk path. For URL sources we own a
@@ -853,7 +854,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                         if repo.git_overlay_current_branch()?.as_deref() == Some(ref_name.as_str())
                         {
                             repo.refs().write_head(&Head::Attached {
-                                thread: ref_name.clone(),
+                                thread: ThreadName::new(&ref_name),
                             })?;
                         }
                         let trust = build_repository_verification_state(&repo);
@@ -884,14 +885,13 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                         return Ok(());
                     }
                     "heddle" => {
+                        let tn = ThreadName::new(&ref_name);
                         let state = repo
                             .refs()
-                            .get_thread(&ref_name)?
+                            .get_thread(&tn)?
                             .ok_or_else(|| reconcile_missing_heddle_thread_advice(&ref_name))?;
                         repo.goto_without_record(&state)?;
-                        repo.refs().write_head(&Head::Attached {
-                            thread: ref_name.clone(),
-                        })?;
+                        repo.refs().write_head(&Head::Attached { thread: tn })?;
                         match bridge.write_through_current_checkout()? {
                             crate::bridge::WriteThroughOutcome::Wrote(git_oid) => {
                                 let trust = build_repository_verification_state(&repo);
@@ -1210,8 +1210,8 @@ fn run_reason(
     use std::path::PathBuf;
 
     use ingest::{
-        GitSource, ReasoningPipeline, ReasoningPipelineParams, ShaMap, TranscriptRoots,
-        load_transcripts, pipeline_default_commits,
+        load_transcripts, pipeline_default_commits, GitSource, ReasoningPipeline,
+        ReasoningPipelineParams, ShaMap, TranscriptRoots,
     };
 
     let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");

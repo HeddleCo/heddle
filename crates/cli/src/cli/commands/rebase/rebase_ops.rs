@@ -255,7 +255,7 @@ fn resume_manual_resolution_if_present(
     let resolution_advance = match repo.head_ref()? {
         Head::Attached { thread } => OpRecord::FastForwardV2 {
             source_thread: REBASE_REPLAY_SOURCE.to_string(),
-            target_thread: thread,
+            target_thread: thread.to_string(),
             pre_target_id: pre_conflict_head,
             post_target_id: current_state.change_id,
         },

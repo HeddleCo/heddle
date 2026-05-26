@@ -136,7 +136,9 @@ mod tests {
 
     #[test]
     fn serde_json_is_data_err() {
-        let err: anyhow::Error = serde_json::from_str::<serde_json::Value>("{").unwrap_err().into();
+        let err: anyhow::Error = serde_json::from_str::<serde_json::Value>("{")
+            .unwrap_err()
+            .into();
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
     }
 

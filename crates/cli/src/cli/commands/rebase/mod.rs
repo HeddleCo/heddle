@@ -4,6 +4,7 @@
 use std::fs;
 
 use anyhow::{Result, anyhow};
+use objects::object::ThreadName;
 use refs::Head;
 use repo::Repository;
 use serde_json::json;
@@ -173,7 +174,7 @@ fn run_rebase(
 
     let target_change_id = repo
         .refs()
-        .get_thread(target_thread)?
+        .get_thread(&ThreadName::new(target_thread))?
         .ok_or_else(|| rebase_target_not_found_advice(target_thread))?;
 
     if current_state.change_id == target_change_id {

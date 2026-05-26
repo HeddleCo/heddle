@@ -719,7 +719,12 @@ mod tests {
     #[test]
     fn witness_live_nonzero_some_for_high_refcount() {
         let mut p = Pending::default();
-        p.test_insert_state(11, NodeState::Live { open_count: u32::MAX });
+        p.test_insert_state(
+            11,
+            NodeState::Live {
+                open_count: u32::MAX,
+            },
+        );
         let id = p
             .with_brand(|bp| bp.witness_live_nonzero(11).map(|w| w.id()))
             .expect("LiveNonZero witness");
@@ -1068,7 +1073,12 @@ mod tests {
     #[test]
     fn drain_for_capture_preserves_live_nonzero_with_high_refcount() {
         let mut p = Pending::default();
-        p.test_insert_state(11, NodeState::Live { open_count: u32::MAX });
+        p.test_insert_state(
+            11,
+            NodeState::Live {
+                open_count: u32::MAX,
+            },
+        );
         p.drain_for_capture();
         assert_eq!(
             p.lookup_state(11),
@@ -1172,10 +1182,7 @@ mod tests {
 
         p.drain_for_capture();
 
-        assert_eq!(
-            p.lookup_state(100),
-            Some(NodeState::Live { open_count: 1 })
-        );
+        assert_eq!(p.lookup_state(100), Some(NodeState::Live { open_count: 1 }));
         assert!(p.lookup_state(101).is_none(), "LiveZero must retire");
         assert_eq!(
             p.lookup_state(102),
@@ -1185,10 +1192,7 @@ mod tests {
             p.lookup_state(103),
             Some(NodeState::Orphan { open_count: 0 })
         );
-        assert_eq!(
-            p.lookup_state(104),
-            Some(NodeState::Live { open_count: 7 })
-        );
+        assert_eq!(p.lookup_state(104), Some(NodeState::Live { open_count: 7 }));
     }
 
     // ------- kernel_forget_inode (heddle#211 — r11 #3 retrofit) ---------------

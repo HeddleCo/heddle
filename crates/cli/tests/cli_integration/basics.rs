@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use cli::config::UserConfig;
+use objects::object::ThreadName;
 
 use super::*;
 
@@ -3012,7 +3013,7 @@ fn test_cli_show_renders_absent_confidence_as_em_dash() {
     // Advance the seeded `main` thread to our `None`-confidence state so
     // `heddle log` (which walks from HEAD) actually traverses it.
     repo.refs()
-        .set_thread("main", &state.change_id)
+        .set_thread(&ThreadName::new("main"), &state.change_id)
         .expect("set main thread");
     drop(repo);
 

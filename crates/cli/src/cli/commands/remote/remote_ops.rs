@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use heddle_client::grpc_hosted::PullMaterialization;
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{ChangeId, Tree},
+    object::{ChangeId, ThreadName, Tree},
 };
 #[cfg(feature = "client")]
 use proto::AuthToken;
@@ -317,7 +317,7 @@ pub async fn cmd_pull(
     let remote_thread = thread.unwrap_or_else(|| "main".to_string());
     let local_thread_name = local_thread.as_deref();
     let should_materialize = match repo.head_ref()? {
-        Head::Attached { thread } => local_thread_name.is_none_or(|local| local == thread),
+        Head::Attached { thread } => local_thread_name.is_none_or(|local| thread == local),
         Head::Detached { .. } => local_thread_name.is_none(),
     };
     if should_materialize {
@@ -383,12 +383,13 @@ async fn pull_local(
     let state_id = source
         .source()
         .refs()
-        .get_thread(remote_thread)?
+        .get_thread(&ThreadName::new(remote_thread))?
         .context(format!("Thread {} not found in source", remote_thread))?;
 
     let objects_copied = source.fetch_state(repo, &state_id)?;
 
     let track_to_update = local_thread.unwrap_or(remote_thread);
+    let track_tn = ThreadName::new(track_to_update);
 
     // Capture the local thread's pre-pull tip *before* mutating it
     // (heddle#110). The materializing branch records an
@@ -397,9 +398,9 @@ async fn pull_local(
     // ref. Reading the ref after `set_thread` would return the
     // post-pull state and silently strand the thread on undo —
     // exactly the bug we're closing.
-    let pre_target = repo.refs().get_thread(track_to_update)?;
+    let pre_target = repo.refs().get_thread(&track_tn)?;
     let changed = pre_target.as_ref() != Some(&state_id) || objects_copied > 0;
-    repo.refs().set_thread(track_to_update, &state_id)?;
+    repo.refs().set_thread(&track_tn, &state_id)?;
 
     // Preserve attached-HEAD semantics only when the pull target is the
     // current checkout. Pulling a remote into a side thread must not move
