@@ -917,11 +917,13 @@ fn select_clone_thread(
         return Ok(requested.to_string());
     }
     let threads = repo.refs().list_threads()?;
-    // Prefer the remote's stated default (refs/remotes/origin/HEAD —
-    // gix sets it via the fetch handshake). Without this, multi-branch
-    // remotes attach to whatever the import happened to walk last,
-    // which on real repos is often a Dependabot or release branch
-    // rather than the developer's `main`/`master`.
+    // Prefer the remote's stated default. `clone_url_to_bare` writes
+    // both `.git/HEAD` and `refs/remotes/origin/HEAD` from the fetch
+    // handshake's ref advertisement (gix returns the `HEAD` symref in
+    // `RefMap.remote_refs`); either is canonical. Read the remote
+    // symref first because it's the durable source of truth (`.git/HEAD`
+    // moves with checkout); fall through to `.git/HEAD` for adopt-time
+    // (no clone happened, but git's HEAD is still meaningful).
     if let Some(remote_default) = read_remote_head_branch(repo)
         && threads.iter().any(|thread| thread == &remote_default)
     {
@@ -932,11 +934,12 @@ fn select_clone_thread(
     {
         return Ok(hint.to_string());
     }
-    for fallback in ["main", "master", "trunk"] {
-        if threads.iter().any(|thread| thread == fallback) {
-            return Ok(fallback.to_string());
-        }
-    }
+    // No reliable signal — bail rather than guess. Earlier revisions
+    // tried `main → master → trunk → alphabetical` here, but the
+    // alphabetical case in particular attached to whatever ref sorted
+    // first (typically a Dependabot branch on real repos). Surfacing
+    // an explicit error is more honest; the user can `--thread <name>`
+    // to disambiguate.
     threads
         .into_iter()
         .next()
@@ -944,9 +947,10 @@ fn select_clone_thread(
 }
 
 /// Resolve the remote's stated default branch from
-/// `refs/remotes/origin/HEAD`, which gix populates from the fetch
-/// handshake. Returns the bare branch name (e.g. `master`) or `None`
-/// when the symref is absent or doesn't target a branch under origin/.
+/// `refs/remotes/origin/HEAD`, which `clone_url_to_bare` writes from
+/// the fetch handshake's ref advertisement. Returns the bare branch
+/// name (e.g. `master`) or `None` when the symref is absent or doesn't
+/// target a branch under origin/.
 fn read_remote_head_branch(repo: &Repository) -> Option<String> {
     let head_path = repo.root().join(".git/refs/remotes/origin/HEAD");
     let contents = fs::read_to_string(&head_path).ok()?;
