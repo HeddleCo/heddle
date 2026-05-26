@@ -112,6 +112,15 @@ reference. New codes need both a contract entry and a table row — the
 `exit_codes_declared_have_doc_entry` lint catches the missing-row
 case.
 
+**Stdout/stderr split under `--output json`.** Machine output goes to
+stdout (either one well-formed JSON document terminated by a newline,
+or NDJSON for streaming commands). Diagnostics, progress, and the
+JSON error envelope go to stderr. Mixing the two breaks scripted
+callers — a stray `println!` on the JSON happy path leaks a
+diagnostic into the parsed stream. The contract is enforced by
+[`crates/cli/tests/cli_integration/stdout_stderr_split.rs`](crates/cli/tests/cli_integration/stdout_stderr_split.rs),
+which sweeps every catalog entry with `supports_json: true`.
+
 ## Short-flag conventions
 
 Documented in
