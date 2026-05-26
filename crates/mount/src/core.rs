@@ -2564,7 +2564,7 @@ impl ContentAddressedMount {
                     return false;
                 };
                 match warm_path_of_record(record) {
-                    Some(p) => !pending.tombstones.contains(&p) && probe(&p),
+                    Some(p) => !pending.tombstones.contains(p) && probe(p),
                     None => false,
                 }
             })
@@ -2637,10 +2637,10 @@ impl ContentAddressedMount {
             let Some(path) = warm_path_of_record(record) else {
                 continue;
             };
-            if pending.tombstones.contains(&path) {
+            if pending.tombstones.contains(path) {
                 continue;
             }
-            let Some((name, is_dir)) = project(&path) else {
+            let Some((name, is_dir)) = project(path) else {
                 continue;
             };
             if is_dir {
@@ -2711,9 +2711,9 @@ fn validate_entry_name(name: &OsStr) -> Result<&str> {
 /// `pending_children_at` resolve it via the inode registry. Only
 /// file-like records (`File`, `PendingFile`) carry warm bytes; the
 /// other variants return `None`.
-fn warm_path_of_record(record: &NodeRecord) -> Option<PathBuf> {
+fn warm_path_of_record(record: &NodeRecord) -> Option<&Path> {
     match record {
-        NodeRecord::File { path, .. } | NodeRecord::PendingFile { path, .. } => Some(path.clone()),
+        NodeRecord::File { path, .. } | NodeRecord::PendingFile { path, .. } => Some(path),
         _ => None,
     }
 }
@@ -2747,6 +2747,7 @@ fn symlink_target_from_bytes(bytes: &[u8]) -> Result<OsString> {
 /// Join a parent mount-relative path with a leaf name. Mirrors the
 /// shape every write-side op uses, so the construction stays
 /// consistent across the file.
+#[inline]
 fn join_child(parent: &Path, name: &str) -> PathBuf {
     if parent.as_os_str().is_empty() {
         PathBuf::from(name)
@@ -2775,10 +2776,6 @@ fn copy_into(src: &[u8], offset: u64, buf: &mut [u8]) -> usize {
 /// to decide whether to serve the captured blob (`None` returned by
 /// the lookup) or the pending overlay's bytes.
 enum Overlay {
-    /// In-flight hot buffer keyed at a sibling NodeId for the same
-    /// path — typically a coalesced write through a different inode
-    /// number than the captured `File` record.
-    Hot(Vec<u8>),
     /// Promoted warm-tier blob. Same path now points at this blob in
     /// the pending tier; the captured `File` record's blob is
     /// effectively stale until capture folds the warm tier in.
@@ -3242,11 +3239,6 @@ impl PlatformShell for ContentAddressedMount {
                 let overlay = {
                     let pending = self.inner.pending.lock().expect("pending lock");
                     if pending.is_orphan(node.0) {
-                        // Serve the inode's own warm bytes first
-                        // (unified shape: `warm[node.0]`). With none,
-                        // fall through to the captured blob — that's
-                        // still the orphan's own data (rename-over of
-                        // a captured-only file).
                         pending
                             .warm
                             .get(&node.0)
@@ -3256,10 +3248,8 @@ impl PlatformShell for ContentAddressedMount {
                     } else if let Some(other_id) = pending.hot_by_path.get(path).copied()
                         && let Some(hot) = pending.hot.get(&other_id)
                     {
-                        Some(Overlay::Hot(hot.bytes.clone()))
+                        return Ok(copy_into(&hot.bytes, offset, buf));
                     } else {
-                        // Warm is NodeId-keyed; resolve path → id via
-                        // the inode registry.
                         let inodes = self.inner.inodes.lock().expect("inode lock");
                         inodes.by_path.get(path).copied().and_then(|id| {
                             pending.warm.get(&id).map(|warm| Overlay::Warm(warm.blob))
@@ -3271,7 +3261,6 @@ impl PlatformShell for ContentAddressedMount {
                         "file {} was unlinked through the mount",
                         path.display()
                     ))),
-                    Some(Overlay::Hot(bytes)) => Ok(copy_into(&bytes, offset, buf)),
                     Some(Overlay::Warm(blob)) => {
                         let bytes = self.load_blob_bytes(&blob)?;
                         Ok(copy_into(&bytes, offset, buf))
@@ -3595,7 +3584,6 @@ impl PlatformShell for ContentAddressedMount {
                     );
                 }
                 PendingChildKind::Dir => {
-                    let child_count = self.pending_children_at(&full_path).len() as u64;
                     let node = self.intern(NodeRecord::PendingDir { path: full_path });
                     by_name.insert(
                         name.clone(),
@@ -3603,7 +3591,7 @@ impl PlatformShell for ContentAddressedMount {
                             node,
                             name: OsString::from(&name),
                             kind: NodeKind::Directory,
-                            size: child_count,
+                            size: 0,
                             unix_mode: DIR_UNIX_MODE,
                         },
                     );
@@ -4099,7 +4087,10 @@ fn apply_pending_to_tree(
     fn descend<'a>(node: &'a mut VDir, components: &[&str]) -> &'a mut VDir {
         let mut cursor = node;
         for c in components {
-            cursor = cursor.children.entry((*c).to_string()).or_default();
+            if !cursor.children.contains_key(*c) {
+                cursor.children.insert((*c).to_string(), VDir::default());
+            }
+            cursor = cursor.children.get_mut(*c).unwrap();
         }
         cursor
     }
@@ -4123,7 +4114,7 @@ fn apply_pending_to_tree(
         // a different inode the record is stale (e.g. a Live → Orphan
         // transition that didn't update the state map yet) and we
         // skip rather than plant phantom bytes.
-        if inodes.by_path.get(&path) != Some(id) {
+        if inodes.by_path.get(path) != Some(id) {
             continue;
         }
         let comps: Vec<&str> = path
@@ -4351,6 +4342,7 @@ impl ContentAddressedMount {
             .keys()
             .filter(|id| !pending.is_orphan(**id))
             .filter_map(|id| inodes.by_id.get(id).and_then(warm_path_of_record))
+            .map(Path::to_path_buf)
             .collect()
     }
 
