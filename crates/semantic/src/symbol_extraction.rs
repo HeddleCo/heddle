@@ -5,6 +5,8 @@
 //! matching definition nodes (functions, structs, classes, methods, etc.)
 //! against a target symbol name across all supported languages.
 
+use std::rc::Rc;
+
 use crate::symbol_resolver::ResolvedSymbol;
 
 /// Walk tree-sitter AST to find function/method/struct/enum definitions
@@ -23,7 +25,7 @@ pub(crate) fn find_definitions(
     target_name: &str,
 ) -> Vec<ResolvedSymbol> {
     let mut results = Vec::new();
-    let mut stack: Vec<(tree_sitter::Node, Option<String>)> = vec![(*node, None)];
+    let mut stack: Vec<(tree_sitter::Node, Option<Rc<str>>)> = vec![(*node, None)];
 
     while let Some((node, parent)) = stack.pop() {
         let current_parent = parent.as_deref();
@@ -54,7 +56,8 @@ pub(crate) fn find_definitions(
                 // children with that name as their parent scope. Push in
                 // reverse so popping yields the original child order — the
                 // public API documents matches in source order.
-                let impl_type_name = extract_impl_type_name(&node, source);
+                let impl_type_name: Option<Rc<str>> =
+                    extract_impl_type_name(&node, source).map(Rc::from);
                 let mut cursor = node.walk();
                 let children: Vec<_> = node.children(&mut cursor).collect();
                 for child in children.into_iter().rev() {
@@ -91,23 +94,21 @@ pub(crate) fn find_definitions(
                 }
             }
             "class_definition" => {
-                let class_name = node
+                let class_name: Option<Rc<str>> = node
                     .child_by_field_name("name")
-                    .map(|n| node_text(&n, source).to_string());
+                    .map(|n| Rc::from(node_text(&n, source)));
 
-                // The class itself is a definition.
                 if let Some(ref name) = class_name
-                    && name == target_name
+                    && &**name == target_name
                 {
                     results.push(ResolvedSymbol {
-                        name: name.clone(),
+                        name: name.to_string(),
                         start_line: node.start_position().row as u32 + 1,
                         end_line: node.end_position().row as u32 + 1,
                         parent_name: current_parent.map(String::from),
                     });
                 }
 
-                // Schedule the class body with class name as parent scope.
                 let mut cursor = node.walk();
                 let children: Vec<_> = node.children(&mut cursor).collect();
                 for child in children.into_iter().rev() {
@@ -181,15 +182,15 @@ pub(crate) fn find_definitions(
                 }
             }
             "class_declaration" => {
-                let class_name = node
+                let class_name: Option<Rc<str>> = node
                     .child_by_field_name("name")
-                    .map(|n| node_text(&n, source).to_string());
+                    .map(|n| Rc::from(node_text(&n, source)));
 
                 if let Some(ref name) = class_name
-                    && name == target_name
+                    && &**name == target_name
                 {
                     results.push(ResolvedSymbol {
-                        name: name.clone(),
+                        name: name.to_string(),
                         start_line: node.start_position().row as u32 + 1,
                         end_line: node.end_position().row as u32 + 1,
                         parent_name: current_parent.map(String::from),

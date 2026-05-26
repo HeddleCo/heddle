@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Types for the operation log.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use objects::object::{ChangeId, ContentHash, OperationId, Principal};
 use serde::{Deserialize, Serialize};
@@ -371,7 +373,7 @@ pub struct OpEntry {
     /// Principal that performed this operation. Required; every callsite
     /// that records an `OpEntry` must supply a real actor (typically the
     /// repository's configured principal).
-    pub actor: Principal,
+    pub actor: Arc<Principal>,
     /// Client-supplied operation id, when available. The dedup store uses
     /// this to make repeated calls with the same id idempotent. `None`
     /// when the caller didn't supply one (no dedup applied).

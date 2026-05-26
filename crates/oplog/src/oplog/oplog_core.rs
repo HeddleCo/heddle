@@ -3,7 +3,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use chrono::Utc;
@@ -23,27 +23,15 @@ use super::{
 pub struct OpLog {
     pub(crate) root: PathBuf,
     cached: Mutex<Option<PackedOpLog>>,
-    /// Principal stamped on every newly recorded `OpEntry`. Set at
-    /// construction from `RepoConfig.principal`; the open path in
-    /// `Repository::open_raw` always supplies one. Per-operation
-    /// principal threading (e.g. distinct agents within one repo) is a
-    /// future refactor — see the `--op-id` wiring follow-up — at which
-    /// point this field becomes the default and individual record_*
-    /// calls override it.
-    actor: Principal,
+    actor: Arc<Principal>,
 }
 
 impl OpLog {
-    /// Create an oplog whose entries are recorded under `actor`. The
-    /// `Repository` open path always passes the configured principal;
-    /// when the repo has no principal configured, callers should pass
-    /// [`Principal::new("<unknown>", "")`] explicitly rather than
-    /// reaching for a sentinel.
     pub fn new(heddle_dir: impl AsRef<Path>, actor: Principal) -> Self {
         Self {
             root: heddle_dir.as_ref().to_path_buf(),
             cached: Mutex::new(None),
-            actor,
+            actor: Arc::new(actor),
         }
     }
 
@@ -82,6 +70,30 @@ impl OpLog {
             .map_err(|err| HeddleError::Config(format!("failed to acquire oplog lock: {err}")))
     }
 
+    fn build_entries(
+        actor: &Arc<Principal>,
+        operations: Vec<OpRecord>,
+        start_id: u64,
+        timestamp: chrono::DateTime<Utc>,
+        scope: &Option<String>,
+    ) -> Vec<OpEntry> {
+        operations
+            .into_iter()
+            .enumerate()
+            .map(|(index, operation)| OpEntry {
+                id: start_id + index as u64,
+                timestamp,
+                operation,
+                undone: false,
+                batch_id: start_id,
+                batch_index: index as u32,
+                scope: scope.clone(),
+                actor: Arc::clone(actor),
+                operation_id: None,
+            })
+            .collect()
+    }
+
     /// Load from disk, bypassing cache (used after acquiring write lock).
     fn load_fresh(&self) -> Result<PackedOpLog> {
         let path = self.oplog_path();
@@ -113,18 +125,8 @@ impl OpLog {
         Ok(guard.as_ref().unwrap().recent_entries(count))
     }
 
-    /// Get the most recent N batches.
-    pub fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        self.collect_batches(count, |_| true)
-    }
-
     pub fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         self.collect_batches_scoped(count, |_| true, scope)
-    }
-
-    /// Get the next undoable batches (most recent first).
-    pub fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        self.collect_batches(count, |batch| batch.entries.iter().any(|e| !e.undone))
     }
 
     pub fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
@@ -133,11 +135,6 @@ impl OpLog {
             |batch| batch.entries.iter().any(|e| !e.undone),
             scope,
         )
-    }
-
-    /// Get the next redoable batches (most recent first).
-    pub fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        self.collect_batches(count, |batch| batch.entries.iter().any(|e| e.undone))
     }
 
     pub fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
@@ -239,29 +236,13 @@ impl OpLog {
 
         let start_id = packed.head_id + 1;
         let timestamp = Utc::now();
-        let mut new_entries = Vec::with_capacity(operations.len());
-        let mut ids = Vec::with_capacity(operations.len());
-
-        for (index, operation) in operations.into_iter().enumerate() {
-            let id = start_id + index as u64;
-            new_entries.push(OpEntry {
-                id,
-                timestamp,
-                operation,
-                undone: false,
-                batch_id: start_id,
-                batch_index: index as u32,
-                scope: scope.map(str::to_string),
-                actor: self.actor.clone(),
-                operation_id: None,
-            });
-            ids.push(id);
-        }
+        let scope_owned = scope.map(str::to_string);
+        let new_entries =
+            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         packed.append(new_entries);
         packed.save()?;
-
-        // Update in-process cache
         *self.cached.lock().unwrap() = Some(packed);
 
         Ok(ids)
@@ -299,8 +280,7 @@ impl OpLog {
         let _lock = self.write_lock()?;
         let mut packed = self.load_fresh()?;
 
-        let recent =
-            packed.collect_batches_scoped(recent_window, |_| true, scope);
+        let recent = packed.collect_batches_scoped(recent_window, |_| true, scope);
         if recent.iter().any(|batch| {
             batch.entries.iter().any(|entry| {
                 matches!(
@@ -315,23 +295,10 @@ impl OpLog {
 
         let start_id = packed.head_id + 1;
         let timestamp = Utc::now();
-        let mut new_entries = Vec::with_capacity(operations.len());
-        let mut ids = Vec::with_capacity(operations.len());
-        for (index, operation) in operations.into_iter().enumerate() {
-            let id = start_id + index as u64;
-            new_entries.push(OpEntry {
-                id,
-                timestamp,
-                operation,
-                undone: false,
-                batch_id: start_id,
-                batch_index: index as u32,
-                scope: scope.map(str::to_string),
-                actor: self.actor.clone(),
-                operation_id: None,
-            });
-            ids.push(id);
-        }
+        let scope_owned = scope.map(str::to_string);
+        let new_entries =
+            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
         packed.append(new_entries);
         packed.save()?;
@@ -378,15 +345,10 @@ impl OpLog {
         packed.set_undone(batch.id, undone);
         packed.save()?;
 
-        // Return updated batch
-        let updated_entries: Vec<OpEntry> = batch
-            .entries
-            .iter()
-            .map(|e| OpEntry {
-                undone,
-                ..e.clone()
-            })
-            .collect();
+        let mut updated_entries = batch.entries.clone();
+        for e in &mut updated_entries {
+            e.undone = undone;
+        }
 
         *self.cached.lock().unwrap() = Some(packed);
 
@@ -394,13 +356,6 @@ impl OpLog {
             id: batch.id,
             entries: updated_entries,
         })
-    }
-
-    fn collect_batches<F>(&self, count: usize, predicate: F) -> Result<Vec<OpBatch>>
-    where
-        F: Fn(&OpBatch) -> bool,
-    {
-        self.collect_batches_scoped(count, predicate, None)
     }
 
     fn collect_batches_scoped<F>(
@@ -421,10 +376,6 @@ impl OpLog {
 }
 
 impl OpLogBackend for OpLog {
-    fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
-        OpLog::record_batch(self, operations)
-    }
-
     fn record_batch_scoped(
         &self,
         operations: Vec<OpRecord>,
@@ -457,24 +408,12 @@ impl OpLogBackend for OpLog {
         OpLog::recent(self, count)
     }
 
-    fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        OpLog::recent_batches(self, count)
-    }
-
     fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         OpLog::recent_batches_scoped(self, count, scope)
     }
 
-    fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        OpLog::undo_batches(self, count)
-    }
-
     fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         OpLog::undo_batches_scoped(self, count, scope)
-    }
-
-    fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        OpLog::redo_batches(self, count)
     }
 
     fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Packed binary oplog: all entries in a single file, loaded into memory.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
@@ -142,10 +143,10 @@ impl PackedOpLog {
             let actor_email = String::from_utf8(c.read_bytes(actor_email_len)?).map_err(|_| {
                 HeddleError::InvalidObject("invalid UTF-8 in actor.email".to_string())
             })?;
-            let actor = objects::object::Principal {
+            let actor = std::sync::Arc::new(objects::object::Principal {
                 name: actor_name,
                 email: actor_email,
-            };
+            });
             let operation_id_tag = c.read_u8()?;
             let operation_id = match operation_id_tag {
                 0 => None,
@@ -235,21 +236,30 @@ impl PackedOpLog {
         }
 
         let mut batches: Vec<OpBatch> = Vec::new();
-        let mut seen_batch_ids: Vec<u64> = Vec::new();
+        let mut seen_batch_ids: HashSet<u64> = HashSet::new();
 
-        // Walk entries in reverse (most recent first)
         for entry in self.entries.iter().rev() {
             let batch_id = if entry.batch_id == 0 {
                 entry.id
             } else {
                 entry.batch_id
             };
-            if seen_batch_ids.contains(&batch_id) {
+            if !seen_batch_ids.insert(batch_id) {
                 continue;
             }
 
-            // Collect all entries for this batch
-            let batch_entries: Vec<OpEntry> = self
+            // Check scope filter before cloning
+            if let Some(scope) = scope {
+                let all_match = self.entries.iter().all(|e| {
+                    let bid = if e.batch_id == 0 { e.id } else { e.batch_id };
+                    bid != batch_id || e.scope.as_deref() == Some(scope)
+                });
+                if !all_match {
+                    continue;
+                }
+            }
+
+            let mut batch_entries: Vec<OpEntry> = self
                 .entries
                 .iter()
                 .filter(|e| {
@@ -263,22 +273,10 @@ impl PackedOpLog {
                 continue;
             }
 
-            // Check scope filter
-            if let Some(scope) = scope {
-                let all_match = batch_entries
-                    .iter()
-                    .all(|e| e.scope.as_deref() == Some(scope));
-                if !all_match {
-                    seen_batch_ids.push(batch_id);
-                    continue;
-                }
-            }
-
-            let mut sorted = batch_entries;
-            sorted.sort_by_key(|e| e.batch_index);
+            batch_entries.sort_by_key(|e| e.batch_index);
             let batch = OpBatch {
                 id: batch_id,
-                entries: sorted,
+                entries: batch_entries,
             };
 
             if predicate(&batch) {
@@ -287,7 +285,6 @@ impl PackedOpLog {
                     break;
                 }
             }
-            seen_batch_ids.push(batch_id);
         }
 
         batches
@@ -364,7 +361,7 @@ mod tests {
             batch_id: id,
             batch_index: 0,
             scope: scope.map(str::to_string),
-            actor: objects::object::Principal::new("Test", "test@example.com"),
+            actor: std::sync::Arc::new(objects::object::Principal::new("Test", "test@example.com")),
             operation_id: None,
         }
     }

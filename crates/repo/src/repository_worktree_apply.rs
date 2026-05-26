@@ -867,10 +867,13 @@ impl<'repo> DirectoryTreeHashLookup<'repo> {
 }
 
 fn split_parent_directory_key(dir_key: &str) -> Option<(String, &str)> {
-    let path = Path::new(dir_key);
-    let name = path.file_name()?.to_str()?;
-    let parent_key = path.parent().map(cache_key).unwrap_or_default();
-    Some((parent_key, name))
+    let last_slash = dir_key.rfind('/')?;
+    let parent_key = &dir_key[..last_slash];
+    let name = &dir_key[last_slash + 1..];
+    if name.is_empty() {
+        return None;
+    }
+    Some((parent_key.to_string(), name))
 }
 
 fn extend_ancestor_directory_keys(keys: &mut BTreeSet<String>, rel_path: Option<&Path>) {

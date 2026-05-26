@@ -14,19 +14,18 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::Path,
 };
 
 use objects::object::{ProducerId, RiskSignal, RiskSignalKind, SignalAnchor, State};
-use semantic::{Language, parser::FunctionDef};
+use semantic::{parser::FunctionDef, Language};
 
 use crate::{config::ReviewSignalsConfig, registry::SemanticContext};
 
 const VERSION: u32 = 1;
 const MODULE_ID: &str = "test_reachability.tree_sitter";
-/// Required reason-text marker. Asserted by tests so the rendering stays
-/// honest about what the signal is measuring.
-const REASON_TEXT: &str = "no test reaches this symbol via static reachability via tree-sitter call graph; \
+const REASON_TEXT: &str =
+    "no test reaches this symbol via static reachability via tree-sitter call graph; \
      this is not runtime coverage";
 
 pub fn run(
@@ -43,14 +42,13 @@ pub fn run(
         .map(|dt| dt.timestamp())
         .unwrap_or_else(|| new.created_at.timestamp());
 
-    // Identify all test functions across the corpus.
-    let mut test_set: HashSet<(PathBuf, String)> = HashSet::new();
-    let mut all_fns: HashMap<(PathBuf, String), FunctionDef> = HashMap::new();
+    let mut test_set: HashSet<(&Path, &str)> = HashSet::new();
+    let mut all_fns: HashMap<(&Path, &str), &FunctionDef> = HashMap::new();
     for (path, fns) in &ctx.new_functions {
         let lang = Language::from_path(path);
         for fn_def in fns {
-            let key = (path.clone(), fn_def.name.clone());
-            all_fns.insert(key.clone(), fn_def.clone());
+            let key = (path.as_path(), fn_def.name.as_str());
+            all_fns.insert(key, fn_def);
             if is_test_function(&fn_def.name, lang) {
                 test_set.insert(key);
             }
@@ -61,70 +59,61 @@ pub fn run(
         return Vec::new();
     }
 
-    // Build a callee → callers index by scanning every function body for
-    // identifiers that match other function names. Cheap-and-good — a
-    // real call graph would resolve namespaces; the tradeoff is documented
-    // by the module id (`.tree_sitter`).
-    let mut callers_of: HashMap<String, Vec<(PathBuf, String)>> = HashMap::new();
-    let names: Vec<String> = all_fns.keys().map(|(_, n)| n.clone()).collect();
-    for ((caller_path, caller_name), caller_def) in &all_fns {
-        for callee_name in &names {
+    let mut callers_of: HashMap<&str, Vec<(&Path, &str)>> = HashMap::new();
+    let names: Vec<&str> = all_fns.keys().map(|(_, n)| *n).collect();
+    for (&(caller_path, caller_name), caller_def) in &all_fns {
+        for &callee_name in &names {
             if callee_name == caller_name {
                 continue;
             }
             if body_mentions(&caller_def.content, callee_name) {
                 callers_of
-                    .entry(callee_name.clone())
+                    .entry(callee_name)
                     .or_default()
-                    .push((caller_path.clone(), caller_name.clone()));
+                    .push((caller_path, caller_name));
             }
         }
     }
 
-    // For each non-test function, BFS through callers. If any path lands
-    // in a test, the symbol is reachable. Otherwise emit the signal.
     let mut out = Vec::new();
-    let flat: Vec<(PathBuf, FunctionDef)> = ctx
-        .new_functions
-        .iter()
-        .flat_map(|(p, fns)| fns.iter().map(move |fd| (p.clone(), fd.clone())))
-        .collect();
-    for (path, fn_def) in &flat {
-        let key = (path.clone(), fn_def.name.clone());
-        if test_set.contains(&key) {
-            continue;
-        }
-        if !reaches_test(&key, &callers_of, &test_set) {
-            out.push(RiskSignal {
-                kind: RiskSignalKind::TestReachability,
-                anchor: SignalAnchor::symbol(path.to_string_lossy(), &fn_def.name),
-                reason: REASON_TEXT.to_string(),
-                producer: ProducerId::new(MODULE_ID, VERSION),
-                computed_at,
-                computed_against: Some(new.change_id),
-            });
+    for (path, fns) in &ctx.new_functions {
+        for fn_def in fns {
+            let key = (path.as_path(), fn_def.name.as_str());
+            if test_set.contains(&key) {
+                continue;
+            }
+            if !reaches_test(key, &callers_of, &test_set) {
+                out.push(RiskSignal {
+                    kind: RiskSignalKind::TestReachability,
+                    anchor: SignalAnchor::symbol(path.to_string_lossy(), &fn_def.name),
+                    reason: REASON_TEXT.to_string(),
+                    producer: ProducerId::new(MODULE_ID, VERSION),
+                    computed_at,
+                    computed_against: Some(new.change_id),
+                });
+            }
         }
     }
     out
 }
 
-fn reaches_test(
-    start: &(PathBuf, String),
-    callers_of: &HashMap<String, Vec<(PathBuf, String)>>,
-    test_set: &HashSet<(PathBuf, String)>,
+fn reaches_test<'a>(
+    start: (&'a Path, &'a str),
+    callers_of: &HashMap<&str, Vec<(&'a Path, &'a str)>>,
+    test_set: &HashSet<(&Path, &str)>,
 ) -> bool {
-    let mut visited: HashSet<(PathBuf, String)> = HashSet::new();
-    let mut queue: VecDeque<(PathBuf, String)> = VecDeque::new();
-    queue.push_back(start.clone());
-    visited.insert(start.clone());
+    let mut visited: HashSet<(&Path, &str)> = HashSet::new();
+    let mut queue: VecDeque<(&Path, &str)> = VecDeque::new();
+    queue.push_back(start);
+    visited.insert(start);
     while let Some(node) = queue.pop_front() {
         if test_set.contains(&node) {
             return true;
         }
-        if let Some(callers) = callers_of.get(&node.1) {
-            for caller in callers {
-                if visited.insert(caller.clone()) {
-                    queue.push_back(caller.clone());
+        if let Some(callers) = callers_of.get(node.1) {
+            for &caller in callers {
+                if visited.insert(caller) {
+                    queue.push_back(caller);
                 }
             }
         }
@@ -134,13 +123,7 @@ fn reaches_test(
 
 fn is_test_function(name: &str, lang: Language) -> bool {
     match lang {
-        Language::Rust => {
-            // We don't see attribute macros from tree-sitter's function
-            // body alone, so use the conventional `_test` suffix or
-            // `test_` prefix. The `#[test]` attribute case lands when
-            // semantic exposes attribute info.
-            name.starts_with("test_") || name.ends_with("_test")
-        }
+        Language::Rust => name.starts_with("test_") || name.ends_with("_test"),
         Language::Python => name.starts_with("test_") || name == "setUp",
         Language::JavaScript | Language::TypeScript => {
             name.starts_with("test") || name.starts_with("it") || name.starts_with("describe")
@@ -151,7 +134,6 @@ fn is_test_function(name: &str, lang: Language) -> bool {
 }
 
 fn body_mentions(body: &str, name: &str) -> bool {
-    // Identifier-boundary check: we want `foo(` not `foobar(`.
     let needle = format!("{name}(");
     body.contains(&needle)
 }
@@ -189,11 +171,6 @@ mod tests {
 
     #[test]
     fn reason_text_marks_static_reachability() {
-        // The contract: when this module fires, the reason text MUST
-        // clarify it's static-reachability via tree-sitter, not runtime
-        // coverage. We assert against the constant directly because
-        // building a SemanticContext with parsed files would require
-        // tree-sitter setup; the constant guards the wire-level promise.
         assert!(REASON_TEXT.contains("static reachability"));
         assert!(REASON_TEXT.contains("not runtime coverage"));
     }

@@ -3,7 +3,7 @@
 
 use pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePublicKey};
 use rsa::{
-    Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey, pkcs1::DecodeRsaPrivateKey, rand_core::OsRng,
+    pkcs1::DecodeRsaPrivateKey, rand_core::OsRng, Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey,
 };
 use sha2::{Digest, Sha256};
 
@@ -13,34 +13,46 @@ use crate::{Signer, SignerError};
 pub struct RsaSigner {
     private_key: RsaPrivateKey,
     public_key: RsaPublicKey,
+    cached_public_key_pem: Vec<u8>,
 }
 
 impl RsaSigner {
+    fn from_key_pair(
+        private_key: RsaPrivateKey,
+        public_key: RsaPublicKey,
+    ) -> Result<Self, SignerError> {
+        let cached_public_key_pem = public_key
+            .to_public_key_pem(pkcs8::LineEnding::LF)
+            .map_err(|e| SignerError::Pkcs8(e.to_string()))?
+            .into_bytes();
+        Ok(Self {
+            private_key,
+            public_key,
+            cached_public_key_pem,
+        })
+    }
+
     pub fn generate(key_size: usize) -> Result<Self, SignerError> {
         let private_key = RsaPrivateKey::new(&mut OsRng, key_size)
             .map_err(|e| SignerError::Rsa(e.to_string()))?;
         let public_key = private_key.to_public_key();
-
-        Ok(Self {
-            private_key,
-            public_key,
-        })
+        Self::from_key_pair(private_key, public_key)
     }
 
     pub fn from_pem(pem: &str) -> Result<Self, SignerError> {
-        let private_key = if pem.contains("-----BEGIN RSA PRIVATE KEY-----") {
-            RsaPrivateKey::from_pkcs1_pem(pem).map_err(|e| SignerError::Rsa(e.to_string()))?
-        } else if pem.contains("-----BEGIN PRIVATE KEY-----") {
-            RsaPrivateKey::from_pkcs8_pem(pem).map_err(|e| SignerError::Pkcs8(e.to_string()))?
-        } else {
-            return Err(SignerError::UnknownKeyFormat);
-        };
+        use crate::pem_loader::{classify_pem, PemKind};
+
+        let private_key =
+            match classify_pem(pem) {
+                PemKind::Pkcs1Rsa => RsaPrivateKey::from_pkcs1_pem(pem)
+                    .map_err(|e| SignerError::Rsa(e.to_string()))?,
+                PemKind::Pkcs8 => RsaPrivateKey::from_pkcs8_pem(pem)
+                    .map_err(|e| SignerError::Pkcs8(e.to_string()))?,
+                _ => return Err(SignerError::UnknownKeyFormat),
+            };
 
         let public_key = private_key.to_public_key();
-        Ok(Self {
-            private_key,
-            public_key,
-        })
+        Self::from_key_pair(private_key, public_key)
     }
 
     pub fn to_pem(&self) -> Result<String, SignerError> {
@@ -79,11 +91,8 @@ impl Signer for RsaSigner {
         "rsa"
     }
 
-    fn public_key(&self) -> Vec<u8> {
-        self.public_key_to_pem()
-            .unwrap_or_default()
-            .as_bytes()
-            .to_vec()
+    fn public_key(&self) -> &[u8] {
+        &self.cached_public_key_pem
     }
 
     fn sign(&self, data: &[u8]) -> Result<Vec<u8>, SignerError> {

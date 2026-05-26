@@ -378,7 +378,12 @@ fn is_executable(metadata: &fs::Metadata) -> bool {
 }
 
 pub(crate) fn cache_key(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let lossy = path.to_string_lossy();
+    if lossy.contains('\\') {
+        lossy.replace('\\', "/")
+    } else {
+        lossy.into_owned()
+    }
 }
 
 pub(crate) fn modified_parts(metadata: &fs::Metadata) -> Option<(i64, u32)> {

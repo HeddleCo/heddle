@@ -77,7 +77,7 @@ impl Repository {
             }
             let theirs = merge_state.theirs;
             let base = merge_state.base;
-            let intent = intent.or(Some(format!("Merge {}", theirs.short())));
+            let intent = intent.or_else(|| Some(format!("Merge {}", theirs.short())));
             let state = self.snapshot_merge_with_attribution(
                 &theirs,
                 intent,

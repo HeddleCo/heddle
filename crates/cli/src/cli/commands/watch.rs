@@ -740,7 +740,7 @@ mod tests {
             batch_id: id,
             batch_index: 0,
             scope: None,
-            actor: objects::object::Principal::new("Test", "test@example.com"),
+            actor: std::sync::Arc::new(objects::object::Principal::new("Test", "test@example.com")),
             operation_id: None,
         }
     }

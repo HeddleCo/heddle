@@ -8,7 +8,7 @@
 
 use objects::object::{ProducerId, RiskSignal, RiskSignalKind, SignalAnchor, State};
 use semantic::{
-    analysis::{SimilarityMethod, compute_similarity},
+    analysis::{compute_similarity, SimilarityMethod},
     parser::FunctionDef,
 };
 
@@ -111,16 +111,7 @@ fn make_signal(
     }
 }
 
-fn truncate_reason(reason: &str) -> String {
-    if reason.len() <= objects::object::MAX_REASON_LEN {
-        reason.to_string()
-    } else {
-        let take = objects::object::MAX_REASON_LEN.saturating_sub(1);
-        let mut out: String = reason.chars().take(take).collect();
-        out.push('…');
-        out
-    }
-}
+use crate::truncate_reason;
 
 #[cfg(test)]
 mod tests {

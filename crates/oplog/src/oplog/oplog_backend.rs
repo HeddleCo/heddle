@@ -14,7 +14,9 @@ use super::oplog_types::{OpBatch, OpEntry, OpRecord};
 /// Backend-agnostic interface for the operation log.
 pub trait OpLogBackend: Send + Sync {
     /// Append a batch of operations atomically. Returns the assigned IDs.
-    fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>>;
+    fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
+        self.record_batch_scoped(operations, None)
+    }
     fn record_batch_scoped(
         &self,
         operations: Vec<OpRecord>,
@@ -59,12 +61,18 @@ pub trait OpLogBackend: Send + Sync {
 
     fn last(&self) -> Result<Option<OpEntry>>;
     fn recent(&self, count: usize) -> Result<Vec<OpEntry>>;
-    fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>>;
+    fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.recent_batches_scoped(count, None)
+    }
     fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>>;
 
-    fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>>;
+    fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.undo_batches_scoped(count, None)
+    }
     fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>>;
-    fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>>;
+    fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.redo_batches_scoped(count, None)
+    }
     fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>>;
     fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch>;
     fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch>;

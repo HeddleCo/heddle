@@ -21,13 +21,13 @@
 //!
 //! See HeddleCo/heddle#133 for the audit motivation.
 
+use std::rc::Rc;
+
 use tree_sitter::Node;
 
-use crate::parser::{Language, ParsedFile};
-
-use super::language_rules::{Classified, MetadataBinding, rules_for};
-
 pub(super) use super::language_rules::ItemKind;
+use super::language_rules::{rules_for, Classified, MetadataBinding};
+use crate::parser::{Language, ParsedFile};
 
 /// Stable identifier for an item across the three sides. Two items match iff
 /// their `ItemKey`s are equal.
@@ -123,7 +123,9 @@ fn collect_items(
     // entry is (node-whose-children-to-walk, scope-at-that-node,
     // depth-from-root); the depth guard bails out beyond
     // `MAX_TRAVERSAL_DEPTH` rather than running unbounded work.
-    let mut stack: Vec<(Node<'_>, Vec<String>, usize)> = vec![(root, base_scope.to_vec(), 0)];
+    let base_rc: Rc<Vec<String>> = Rc::new(base_scope.to_vec());
+    let mut stack: Vec<(Node<'_>, Rc<Vec<String>>, usize)> = vec![(root, Rc::clone(&base_rc), 0)];
+
     while let Some((node, scope, depth)) = stack.pop() {
         if depth > MAX_TRAVERSAL_DEPTH {
             continue;
@@ -139,21 +141,11 @@ fn collect_items(
                     extra_scope,
                 } = classified;
                 if let Some(body) = container_body {
-                    // Container with body (impl / trait / class / mod
-                    // with `{ ... }`): the container ITSELF is not an
-                    // item — its bytes become inter-item content
-                    // surrounding the per-method items inside. This
-                    // gives each method its own merge resolution
-                    // instead of forcing the whole container through
-                    // text_hunk_merge as a single unit.
-                    let mut next_scope = scope.clone();
+                    let mut next_scope = (*scope).clone();
                     next_scope.push(name);
-                    stack.push((body, next_scope, depth + 1));
+                    stack.push((body, Rc::new(next_scope), depth + 1));
                 } else {
-                    // Leaf item — top-level fn, struct, const, mod
-                    // header, etc. Push as item; nothing inside is
-                    // independently tracked.
-                    let mut item_scope = scope.clone();
+                    let mut item_scope = (*scope).clone();
                     item_scope.extend(extra_scope);
                     let item_key = ItemKey {
                         kind,
@@ -169,10 +161,7 @@ fn collect_items(
                     });
                 }
             } else {
-                // Unclassified at this level: walk it later so we still
-                // find items in anonymous wrapper nodes (e.g.
-                // `source_file` children, declaration_list wrappers).
-                stack.push((child, scope.clone(), depth + 1));
+                stack.push((child, Rc::clone(&scope), depth + 1));
             }
         }
     }

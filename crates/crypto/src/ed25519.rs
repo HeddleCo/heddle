@@ -9,40 +9,42 @@ use crate::{Signer, SignerError};
 /// Ed25519 signer.
 pub struct Ed25519Signer {
     signing_key: SigningKey,
+    cached_public_key: [u8; 32],
 }
 
 impl Ed25519Signer {
     pub fn generate() -> Result<Self, SignerError> {
+        let signing_key = SigningKey::generate(&mut OsRng);
+        let cached_public_key = signing_key.verifying_key().to_bytes();
         Ok(Self {
-            signing_key: SigningKey::generate(&mut OsRng),
+            signing_key,
+            cached_public_key,
         })
     }
 
     pub fn from_pem(pem: &str) -> Result<Self, SignerError> {
-        if pem.contains("-----BEGIN PRIVATE KEY-----") {
-            return Self::from_pkcs8_pem(pem);
-        }
-        if pem.contains("-----BEGIN OPENSSH PRIVATE KEY-----") {
-            return Self::from_openssh_pem(pem);
-        }
+        use crate::pem_loader::{classify_pem, PemKind};
 
-        let trimmed = pem.trim();
-        if let Ok(bytes) = hex::decode(trimmed)
-            && bytes.len() == 32
-        {
-            return Self::from_seed(&bytes);
-        }
-
-        if let Ok(bytes) = base64_decode(trimmed) {
-            if bytes.len() == 32 {
-                return Self::from_seed(&bytes);
+        match classify_pem(pem) {
+            PemKind::Pkcs8 => Self::from_pkcs8_pem(pem),
+            PemKind::OpenSsh => Self::from_openssh_pem(pem),
+            PemKind::Ed25519HexSeed => {
+                let bytes = hex::decode(pem.trim()).map_err(|e| SignerError::Pem(e.to_string()))?;
+                Self::from_seed(&bytes)
             }
-            if bytes.len() == 64 {
-                return Self::from_seed(&bytes[..32]);
+            PemKind::Ed25519Base64Seed => {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(pem.trim())
+                    .map_err(|e| SignerError::Pem(e.to_string()))?;
+                if bytes.len() == 64 {
+                    Self::from_seed(&bytes[..32])
+                } else {
+                    Self::from_seed(&bytes)
+                }
             }
+            _ => Err(SignerError::UnknownKeyFormat),
         }
-
-        Err(SignerError::UnknownKeyFormat)
     }
 
     pub fn from_seed(seed: &[u8]) -> Result<Self, SignerError> {
@@ -50,14 +52,22 @@ impl Ed25519Signer {
             .try_into()
             .map_err(|_| SignerError::InvalidKey("seed must be 32 bytes".to_string()))?;
         let signing_key = SigningKey::from_bytes(&seed_bytes);
-        Ok(Self { signing_key })
+        let cached_public_key = signing_key.verifying_key().to_bytes();
+        Ok(Self {
+            signing_key,
+            cached_public_key,
+        })
     }
 
     fn from_pkcs8_pem(pem: &str) -> Result<Self, SignerError> {
         use pkcs8::DecodePrivateKey;
 
         let signing_key = SigningKey::from_pkcs8_pem(pem)?;
-        Ok(Self { signing_key })
+        let cached_public_key = signing_key.verifying_key().to_bytes();
+        Ok(Self {
+            signing_key,
+            cached_public_key,
+        })
     }
 
     fn from_openssh_pem(_pem: &str) -> Result<Self, SignerError> {
@@ -96,8 +106,8 @@ impl Signer for Ed25519Signer {
         "ed25519"
     }
 
-    fn public_key(&self) -> Vec<u8> {
-        self.signing_key.verifying_key().to_bytes().to_vec()
+    fn public_key(&self) -> &[u8] {
+        &self.cached_public_key
     }
 
     fn sign(&self, data: &[u8]) -> Result<Vec<u8>, SignerError> {
@@ -108,11 +118,4 @@ impl Signer for Ed25519Signer {
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), SignerError> {
         Self::verify_with_public_key(data, &self.public_key(), signature)
     }
-}
-
-fn base64_decode(input: &str) -> Result<Vec<u8>, SignerError> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD
-        .decode(input)
-        .map_err(|e| SignerError::Pem(e.to_string()))
 }

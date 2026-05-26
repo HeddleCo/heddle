@@ -83,17 +83,29 @@ pub struct ReadingOrderPartition {
 /// preserves order within each partition so the client gets a stable
 /// rendering.
 pub fn build_review_payload_partition(symbols: &[PathSymbol]) -> ReadingOrderPartition {
-    let mut out = ReadingOrderPartition::default();
+    build_review_payload_partition_owned(symbols.to_vec())
+}
+
+pub fn build_review_payload_partition_owned(symbols: Vec<PathSymbol>) -> ReadingOrderPartition {
+    let mut structural = Vec::new();
+    let mut consequence = Vec::new();
+    let mut tests_and_docs = Vec::new();
+
     for sym in symbols {
         if is_test_or_docs_path(&sym.file) {
-            out.tests_and_docs.push(sym.clone());
+            tests_and_docs.push(sym);
         } else if sym.kind.is_structural() {
-            out.structural.push(sym.clone());
+            structural.push(sym);
         } else {
-            out.consequence.push(sym.clone());
+            consequence.push(sym);
         }
     }
-    out
+
+    ReadingOrderPartition {
+        structural,
+        consequence,
+        tests_and_docs,
+    }
 }
 
 /// Match paths the plan says always belong in the tests_and_docs tier:

@@ -783,51 +783,47 @@ impl Repository {
             && let Some(tracking_ref_name) =
                 local_ref.remote_tracking_ref_name(gix::remote::Direction::Fetch)
         {
-                let tracking_ref_name = tracking_ref_name.map_err(|error| {
-                    HeddleError::Config(format!(
-                        "failed to inspect upstream branch at '{}': {error}",
-                        self.root.display()
-                    ))
-                })?;
-                let tracking_ref = tracking_ref_name.as_ref();
-                let tracking_name = tracking_ref.as_bstr().to_str_lossy().into_owned();
-                if let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)? {
-                    let (ahead, behind) = git_ahead_behind(&self.root, &git, upstream_head, head)?;
-                    if ahead == 0 && behind == 0 {
-                        return Ok(None);
-                    }
-                    let upstream = git_remote_tracking_display_name(&tracking_name);
-                    let local_oid = head.to_string();
-                    let upstream_oid = upstream_head.to_string();
-                    let upstream_is_undone_checkpoint = self.remote_tracks_undone_git_checkpoint(
+            let tracking_ref_name = tracking_ref_name.map_err(|error| {
+                HeddleError::Config(format!(
+                    "failed to inspect upstream branch at '{}': {error}",
+                    self.root.display()
+                ))
+            })?;
+            let tracking_ref = tracking_ref_name.as_ref();
+            let tracking_name = tracking_ref.as_bstr().to_str_lossy().into_owned();
+            if let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)? {
+                let (ahead, behind) = git_ahead_behind(&self.root, &git, upstream_head, head)?;
+                if ahead == 0 && behind == 0 {
+                    return Ok(None);
+                }
+                let upstream = git_remote_tracking_display_name(&tracking_name);
+                let local_oid = head.to_string();
+                let upstream_oid = upstream_head.to_string();
+                let upstream_is_undone_checkpoint =
+                    self.remote_tracks_undone_git_checkpoint(&branch, &local_oid, &upstream_oid)?;
+                return Ok(Some(GitRemoteTrackingStatus {
+                    branch: branch.clone(),
+                    upstream: upstream.clone(),
+                    ahead,
+                    behind,
+                    local_oid: Some(local_oid),
+                    upstream_oid: Some(upstream_oid),
+                    upstream_is_undone_checkpoint,
+                    message: git_remote_tracking_message(
                         &branch,
-                        &local_oid,
-                        &upstream_oid,
-                    )?;
-                    return Ok(Some(GitRemoteTrackingStatus {
-                        branch: branch.clone(),
-                        upstream: upstream.clone(),
+                        &upstream,
                         ahead,
                         behind,
-                        local_oid: Some(local_oid),
-                        upstream_oid: Some(upstream_oid),
                         upstream_is_undone_checkpoint,
-                        message: git_remote_tracking_message(
-                            &branch,
-                            &upstream,
-                            ahead,
-                            behind,
-                            upstream_is_undone_checkpoint,
-                        ),
-                        next_action: git_remote_tracking_next_action(
-                            ahead,
-                            behind,
-                            upstream_is_undone_checkpoint,
-                        ),
-                    }));
-                }
+                    ),
+                    next_action: git_remote_tracking_next_action(
+                        ahead,
+                        behind,
+                        upstream_is_undone_checkpoint,
+                    ),
+                }));
             }
-
+        }
 
         let remotes = git_remote_names(&self.root)?;
         if remotes.is_empty() {

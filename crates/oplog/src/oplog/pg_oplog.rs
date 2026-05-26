@@ -124,7 +124,7 @@ impl PgOpLogBackend {
             batch_id: batch_id as u64,
             batch_index: batch_index as u32,
             scope,
-            actor: objects::object::Principal::new("<unknown>", ""),
+            actor: std::sync::Arc::new(objects::object::Principal::new("<unknown>", "")),
             operation_id: None,
         })
     }
@@ -186,13 +186,51 @@ impl PgOpLogBackend {
         .await
         .map_err(sqlx_err)
     }
+
+    fn fetch_scoped_batches(
+        &self,
+        count: usize,
+        scope: Option<&str>,
+        extra_where: &str,
+        order: &str,
+        asc: bool,
+    ) -> Result<Vec<OpBatch>> {
+        let pool = Arc::clone(&self.pool);
+        let repo_id = self.repo_id;
+        let scope = scope.map(str::to_string);
+        self.block(async move {
+            let batch_ids: Vec<i64> = if let Some(scope) = scope.as_deref() {
+                let sql = format!(
+                    "SELECT DISTINCT batch_id FROM oplog
+                     WHERE repo_id = $1 {extra_where} AND scope = $2
+                     ORDER BY batch_id {order} LIMIT $3"
+                );
+                sqlx::query_scalar::<_, i64>(&sql)
+                    .bind(repo_id)
+                    .bind(scope)
+                    .bind(count as i64)
+                    .fetch_all(pool.as_ref())
+                    .await
+                    .map_err(sqlx_err)?
+            } else {
+                let sql = format!(
+                    "SELECT DISTINCT batch_id FROM oplog
+                     WHERE repo_id = $1 {extra_where}
+                     ORDER BY batch_id {order} LIMIT $2"
+                );
+                sqlx::query_scalar::<_, i64>(&sql)
+                    .bind(repo_id)
+                    .bind(count as i64)
+                    .fetch_all(pool.as_ref())
+                    .await
+                    .map_err(sqlx_err)?
+            };
+            Self::fetch_batches_by_ids(&pool, repo_id, &batch_ids, asc).await
+        })
+    }
 }
 
 impl OpLogBackend for PgOpLogBackend {
-    fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
-        self.record_batch_scoped(operations, None)
-    }
-
     fn record_batch_scoped(
         &self,
         operations: Vec<OpRecord>,
@@ -267,113 +305,16 @@ impl OpLogBackend for PgOpLogBackend {
         })
     }
 
-    fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        self.recent_batches_scoped(count, None)
-    }
-
     fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
-        let pool = Arc::clone(&self.pool);
-        let repo_id = self.repo_id;
-        let scope = scope.map(str::to_string);
-        self.block(async move {
-            let batch_ids: Vec<i64> = if let Some(scope) = scope.as_deref() {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT DISTINCT batch_id FROM oplog WHERE repo_id = $1 AND scope = $2
-                     ORDER BY batch_id DESC LIMIT $3",
-                )
-                .bind(repo_id)
-                .bind(scope)
-                .bind(count as i64)
-                .fetch_all(pool.as_ref())
-                .await
-                .map_err(sqlx_err)?
-            } else {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT DISTINCT batch_id FROM oplog WHERE repo_id = $1
-                     ORDER BY batch_id DESC LIMIT $2",
-                )
-                .bind(repo_id)
-                .bind(count as i64)
-                .fetch_all(pool.as_ref())
-                .await
-                .map_err(sqlx_err)?
-            };
-            Self::fetch_batches_by_ids(&pool, repo_id, &batch_ids, false).await
-        })
-    }
-
-    fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        self.undo_batches_scoped(count, None)
+        self.fetch_scoped_batches(count, scope, "", "DESC", false)
     }
 
     fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
-        let pool = Arc::clone(&self.pool);
-        let repo_id = self.repo_id;
-        let scope = scope.map(str::to_string);
-        self.block(async move {
-            let batch_ids: Vec<i64> = if let Some(scope) = scope.as_deref() {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT DISTINCT batch_id FROM oplog
-                     WHERE repo_id = $1 AND undone = false AND scope = $2
-                     ORDER BY batch_id DESC LIMIT $3",
-                )
-                .bind(repo_id)
-                .bind(scope)
-                .bind(count as i64)
-                .fetch_all(pool.as_ref())
-                .await
-                .map_err(sqlx_err)?
-            } else {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT DISTINCT batch_id FROM oplog
-                     WHERE repo_id = $1 AND undone = false
-                     ORDER BY batch_id DESC LIMIT $2",
-                )
-                .bind(repo_id)
-                .bind(count as i64)
-                .fetch_all(pool.as_ref())
-                .await
-                .map_err(sqlx_err)?
-            };
-            Self::fetch_batches_by_ids(&pool, repo_id, &batch_ids, false).await
-        })
-    }
-
-    fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
-        self.redo_batches_scoped(count, None)
+        self.fetch_scoped_batches(count, scope, "AND undone = false", "DESC", false)
     }
 
     fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
-        let pool = Arc::clone(&self.pool);
-        let repo_id = self.repo_id;
-        let scope = scope.map(str::to_string);
-        self.block(async move {
-            let batch_ids: Vec<i64> = if let Some(scope) = scope.as_deref() {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT DISTINCT batch_id FROM oplog
-                     WHERE repo_id = $1 AND undone = true AND scope = $2
-                     ORDER BY batch_id ASC LIMIT $3",
-                )
-                .bind(repo_id)
-                .bind(scope)
-                .bind(count as i64)
-                .fetch_all(pool.as_ref())
-                .await
-                .map_err(sqlx_err)?
-            } else {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT DISTINCT batch_id FROM oplog
-                     WHERE repo_id = $1 AND undone = true
-                     ORDER BY batch_id ASC LIMIT $2",
-                )
-                .bind(repo_id)
-                .bind(count as i64)
-                .fetch_all(pool.as_ref())
-                .await
-                .map_err(sqlx_err)?
-            };
-            Self::fetch_batches_by_ids(&pool, repo_id, &batch_ids, true).await
-        })
+        self.fetch_scoped_batches(count, scope, "AND undone = true", "ASC", true)
     }
 
     fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch> {

@@ -2,11 +2,11 @@
 //! P-256 (ECDSA) signature implementation.
 
 use p256::{
-    SecretKey,
     ecdsa::{
-        Signature, SigningKey, VerifyingKey,
         signature::{Signer as SignatureSigner, Verifier as SignatureVerifier},
+        Signature, SigningKey, VerifyingKey,
     },
+    SecretKey,
 };
 use pkcs8::DecodePrivateKey;
 use rsa::{pkcs1::DecodeRsaPrivateKey, rand_core::OsRng};
@@ -16,28 +16,37 @@ use crate::{Signer, SignerError};
 /// P-256 (ECDSA) signer.
 pub struct P256Signer {
     signing_key: SigningKey,
+    cached_public_key: Vec<u8>,
 }
 
 impl P256Signer {
+    fn from_signing_key(signing_key: SigningKey) -> Self {
+        let cached_public_key = signing_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        Self {
+            signing_key,
+            cached_public_key,
+        }
+    }
+
     pub fn generate() -> Result<Self, SignerError> {
-        Ok(Self {
-            signing_key: SigningKey::random(&mut OsRng),
-        })
+        Ok(Self::from_signing_key(SigningKey::random(&mut OsRng)))
     }
 
     pub fn from_pem(pem: &str) -> Result<Self, SignerError> {
         if let Ok(signing_key) = SigningKey::from_pkcs8_pem(pem) {
-            return Ok(Self { signing_key });
+            return Ok(Self::from_signing_key(signing_key));
         }
 
         if let Ok(signing_key) = SigningKey::from_pkcs1_pem(pem) {
-            return Ok(Self { signing_key });
+            return Ok(Self::from_signing_key(signing_key));
         }
 
         if let Ok(ec_sk) = SecretKey::from_sec1_pem(pem) {
-            // Convert curve SecretKey -> ECDSA SigningKey
-            let signing_key = SigningKey::from(ec_sk);
-            return Ok(Self { signing_key });
+            return Ok(Self::from_signing_key(SigningKey::from(ec_sk)));
         }
 
         Err(SignerError::UnknownKeyFormat)
@@ -77,12 +86,8 @@ impl Signer for P256Signer {
         "p256"
     }
 
-    fn public_key(&self) -> Vec<u8> {
-        self.signing_key
-            .verifying_key()
-            .to_encoded_point(false)
-            .as_bytes()
-            .to_vec()
+    fn public_key(&self) -> &[u8] {
+        &self.cached_public_key
     }
 
     fn sign(&self, data: &[u8]) -> Result<Vec<u8>, SignerError> {

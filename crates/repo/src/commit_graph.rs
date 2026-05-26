@@ -7,15 +7,15 @@ use std::{
 };
 
 use anyhow::Result;
-use objects::object::{ChangeId, ContentHash, Tree, diff_trees};
+use objects::object::{diff_trees, ChangeId, ContentHash, Tree};
 use tracing::warn;
 
 use super::{
-    Repository,
     bloom_filter::bloom_insert,
     commit_graph_persistence::{
-        PersistedCommitGraphNode, commit_graph_path, load_commit_graph, save_commit_graph,
+        commit_graph_path, load_commit_graph, save_commit_graph, PersistedCommitGraphNode,
     },
+    Repository,
 };
 
 #[derive(Clone, Debug)]
@@ -145,15 +145,16 @@ impl<'repo> CommitGraphIndex<'repo> {
 
         let ancestors_a = self.collect_ancestors(*state_a)?;
         let ancestors_b = self.collect_ancestors(*state_b)?;
-        let mut common: Vec<ChangeId> = ancestors_a.intersection(&ancestors_b).copied().collect();
+        let best = ancestors_a
+            .intersection(&ancestors_b)
+            .copied()
+            .max_by(|left, right| {
+                self.generation(*left)
+                    .cmp(&self.generation(*right))
+                    .then_with(|| right.as_bytes().cmp(left.as_bytes()))
+            });
 
-        common.sort_by(|left, right| {
-            self.generation(*right)
-                .cmp(&self.generation(*left))
-                .then_with(|| left.as_bytes().cmp(right.as_bytes()))
-        });
-
-        Ok(common.into_iter().next())
+        Ok(best)
     }
 
     fn collect_ancestors(&mut self, start: ChangeId) -> Result<HashSet<ChangeId>> {
