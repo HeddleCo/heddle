@@ -7,7 +7,7 @@ use chrono::{TimeZone, Utc};
 use objects::object::{Agent, Attribution, ChangeId, Principal, State, Status};
 use refs::{Head, RefExpectation};
 use repo::Repository as HeddleRepository;
-use tracing::warn;
+use tracing::{info_span, warn};
 
 pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
 use crate::bridge::{
@@ -262,6 +262,11 @@ fn import_with_ref_filter(
     git_path: Option<&Path>,
     wanted_refs: Option<&HashSet<String>>,
 ) -> GitResult<ImportStats> {
+    let _span = info_span!(
+        "git_import.with_ref_filter",
+        wanted = wanted_refs.map(HashSet::len).unwrap_or(0)
+    )
+    .entered();
     let repo = if let Some(path) = git_path {
         open_repo(path)?
     } else {

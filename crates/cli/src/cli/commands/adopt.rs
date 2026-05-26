@@ -49,6 +49,12 @@ struct AdoptOutput {
 pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     let start = resolve_path(cli, args.path.as_deref())?;
     let git_root = git_worktree_root(&start)?;
+    // Shallow detect MUST happen before any Heddle sidecar bootstrap or
+    // remote-note hydration. Without this, a `heddle adopt` against a
+    // shallow clone burns a full `git fetch` from origin (network IO,
+    // minutes on a real repo) before discovering the repo can't be
+    // imported. Costs one `stat()` on the happy path.
+    preflight_not_shallow(&git_root, &args.refs)?;
     let initialized = !git_root.join(".heddle").exists();
     if initialized {
         preflight_importable_git_history(&git_root, &args.refs)?;
@@ -72,14 +78,32 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     };
     let source_label = repo.root().display().to_string();
     let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
-    progress.advance("importing commits");
     let mut bridge = GitBridge::new(&repo);
+    // The hydrate fetch is the slowest thing in adopt on a real-world
+    // repo (it walks every configured remote looking for a Heddle-notes
+    // ref). Tell the user before it runs so the silence makes sense.
+    if checkout_has_remote(&repo) {
+        progress.note(
+            "checking configured Git remotes for shared Heddle notes (network)",
+        );
+    }
+    let hydrate_span =
+        tracing::info_span!("adopt.hydrate_notes", path = %repo.root().display()).entered();
     let _ = bridge.hydrate_checkout_heddle_notes_from_configured_remotes();
+    drop(hydrate_span);
+    progress.advance("importing commits");
+    let import_span = tracing::info_span!(
+        "adopt.import",
+        path = %repo.root().display(),
+        refs = args.refs.len()
+    )
+    .entered();
     let stats = if args.refs.is_empty() {
         import_all(&mut bridge, Some(repo.root()))?
     } else {
         import_selected_refs(&mut bridge, Some(repo.root()), &args.refs)?
     };
+    drop(import_span);
     progress.advance("writing refs");
     progress.finish();
     let trust = build_repository_verification_state(&repo);
@@ -110,6 +134,29 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
 
 fn action_value(trust: &RepositoryVerificationState) -> Option<String> {
     (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone())
+}
+
+fn checkout_has_remote(repo: &Repository) -> bool {
+    let Ok(git) = gix::discover(repo.root()) else {
+        return false;
+    };
+    git.remote_names().into_iter().next().is_some()
+}
+
+fn preflight_not_shallow(git_root: &Path, refs: &[String]) -> Result<()> {
+    let git = gix::discover(git_root)
+        .map_err(|error| anyhow!("failed to inspect Git for shallow status: {error}"))?;
+    if git.git_dir().join("shallow").is_file() {
+        let retry_command = if refs.is_empty() {
+            "heddle bridge git import --path <full-git-repo>".to_string()
+        } else {
+            "heddle bridge git import --path <full-git-repo> --ref <ref>".to_string()
+        };
+        bail!(
+            "Shallow Git repository cannot be imported. Re-clone without --depth, or run: {retry_command}"
+        );
+    }
+    Ok(())
 }
 
 fn preflight_importable_git_history(git_root: &Path, refs: &[String]) -> Result<()> {

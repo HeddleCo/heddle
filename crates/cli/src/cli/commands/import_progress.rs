@@ -38,6 +38,20 @@ impl ImportProgress {
         self.step(label);
     }
 
+    /// Print a sub-line beneath the current step. Useful when a phase
+    /// has a long-running operation users would otherwise read as a
+    /// hang — e.g. a network fetch during the hydrate step.
+    pub(crate) fn note(&self, message: &str) {
+        if !self.enabled {
+            return;
+        }
+        // Drop any in-flight \r-line first so the note doesn't overwrite it.
+        if io::stdout().is_terminal() {
+            println!();
+        }
+        println!("    {}", style::dim(&format!("· {message}")));
+    }
+
     pub(crate) fn finish(&mut self) {
         if !self.enabled {
             return;
