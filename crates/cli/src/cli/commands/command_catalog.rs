@@ -262,6 +262,7 @@ struct CommandContract {
     requires_git_executable: bool,
     destructive_data: bool,
     json_kind: &'static str,
+    json_discriminators: &'static [CommandJsonDiscriminatorSpec],
     schema_verbs: &'static [&'static str],
     documented_schema_verbs: &'static [&'static str],
     opaque_schema_verbs: &'static [&'static str],
@@ -272,6 +273,15 @@ struct CommandContract {
     canonical_kind: Option<&'static str>,
     canonical_note: Option<&'static str>,
     advertised_action: Option<AdvertisedAction>,
+    feature_gate: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommandJsonDiscriminatorSpec {
+    schema_verb: Option<&'static str>,
+    field: &'static str,
+    value: &'static str,
+    no_schema_reason: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,6 +310,7 @@ pub struct CommandRuntimeContract {
     pub canonical_kind: Option<&'static str>,
     pub canonical_note: Option<&'static str>,
     pub advertised_action: Option<AdvertisedAction>,
+    pub feature_gate: Option<&'static str>,
     pub side_effects: Vec<&'static str>,
     pub side_effect_class: &'static str,
     pub first_run_behavior: &'static str,
@@ -331,15 +342,6 @@ struct CommandContractEntry {
     contract: CommandContract,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CommandJsonDiscriminatorEntry {
-    path: &'static [&'static str],
-    schema_verb: Option<&'static str>,
-    field: &'static str,
-    value: &'static str,
-    no_schema_reason: Option<&'static str>,
-}
-
 const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     // Message templates are display-only until the caller supplies a
     // real message. They must not be exposed as directly executable
@@ -348,8 +350,17 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle capture -m \"...\" --confidence <confidence>",
     "heddle checkpoint -m \"...\"",
     "heddle commit -m \"...\"",
+    "heddle init --principal-name <name> --principal-email <email>",
     "heddle ready -m \"...\"",
+    "heddle context get --path <path>",
+    "heddle context set --path <path> --scope file -m \"...\"",
+    "heddle session start",
+    "heddle start <name> --workspace materialized",
+    "heddle start <name> --path <empty-path>",
+    "heddle start <name> --path ../<name>",
+    "heddle actor show <session>",
     "heddle stash push -m \"...\"",
+    "heddle thread show <THREAD>",
     // Choice placeholders: the user must choose one command and fill
     // in the state after inspecting the bisect result.
     "heddle bisect good <state> or heddle bisect bad <state>",
@@ -372,11 +383,6 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle switch <branch>",
     // Merge recovery placeholders require choosing the source thread.
     "heddle merge <thread> --git-commit",
-];
-
-const FEATURE_GATED_COMMAND_ROOTS: &[&str] = &[
-    // `presence publish` and `support` are gated behind `client`.
-    "presence", "support",
 ];
 
 const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
@@ -418,9 +424,82 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
+        "heddle init --principal-name <name> --principal-email <email>",
+        &[
+            "heddle",
+            "init",
+            "--principal-name",
+            "<name>",
+            "--principal-email",
+            "<email>",
+        ],
+        &["name", "email"],
+        true,
+    ),
+    (
         "heddle ready -m \"...\"",
         &["heddle", "ready", "-m", "<message>"],
         &["message"],
+        true,
+    ),
+    (
+        "heddle context get --path <path>",
+        &["heddle", "context", "get", "--path", "<path>"],
+        &["path"],
+        true,
+    ),
+    (
+        "heddle context set --path <path> --scope file -m \"...\"",
+        &[
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "<path>",
+            "--scope",
+            "file",
+            "-m",
+            "<message>",
+        ],
+        &["path", "message"],
+        true,
+    ),
+    (
+        "heddle session start",
+        &[
+            "heddle",
+            "session",
+            "start",
+            "--provider",
+            "<provider>",
+            "--model",
+            "<model>",
+        ],
+        &["provider", "model"],
+        true,
+    ),
+    (
+        "heddle start <name> --workspace materialized",
+        &["heddle", "start", "<name>", "--workspace", "materialized"],
+        &["name"],
+        true,
+    ),
+    (
+        "heddle start <name> --path <empty-path>",
+        &["heddle", "start", "<name>", "--path", "<empty-path>"],
+        &["name", "path"],
+        true,
+    ),
+    (
+        "heddle start <name> --path ../<name>",
+        &["heddle", "start", "<name>", "--path", "../<name>"],
+        &["name", "path"],
+        true,
+    ),
+    (
+        "heddle actor show <session>",
+        &["heddle", "actor", "show", "<session>"],
+        &["session"],
         true,
     ),
     (
@@ -450,6 +529,12 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
     (
         "heddle thread switch <name>",
         &["heddle", "thread", "switch", "<thread>"],
+        &["thread"],
+        true,
+    ),
+    (
+        "heddle thread show <THREAD>",
+        &["heddle", "thread", "show", "<thread>"],
         &["thread"],
         true,
     ),
@@ -580,6 +665,7 @@ const READ_JSON: CommandContract = CommandContract {
     requires_git_executable: false,
     destructive_data: false,
     json_kind: "json",
+    json_discriminators: &[],
     schema_verbs: &[],
     documented_schema_verbs: &[],
     opaque_schema_verbs: &[],
@@ -590,6 +676,7 @@ const READ_JSON: CommandContract = CommandContract {
     canonical_kind: None,
     canonical_note: None,
     advertised_action: None,
+    feature_gate: None,
 };
 
 const READ_TEXT: CommandContract = CommandContract {
@@ -637,6 +724,7 @@ const MUTATING: CommandContract = CommandContract {
     requires_git_executable: false,
     destructive_data: false,
     json_kind: "json",
+    json_discriminators: &[],
     schema_verbs: &[],
     documented_schema_verbs: &[],
     opaque_schema_verbs: &[],
@@ -647,6 +735,7 @@ const MUTATING: CommandContract = CommandContract {
     canonical_kind: None,
     canonical_note: None,
     advertised_action: None,
+    feature_gate: None,
 };
 
 const MUTATING_NO_OP_ID: CommandContract = CommandContract {
@@ -785,6 +874,29 @@ const fn opaque_schemas(
     }
 }
 
+const fn json_discriminators(
+    contract: CommandContract,
+    discriminators: &'static [CommandJsonDiscriminatorSpec],
+) -> CommandContract {
+    CommandContract {
+        json_discriminators: discriminators,
+        ..contract
+    }
+}
+
+const fn json_discriminator(
+    schema_verb: Option<&'static str>,
+    field: &'static str,
+    value: &'static str,
+) -> CommandJsonDiscriminatorSpec {
+    CommandJsonDiscriminatorSpec {
+        schema_verb,
+        field,
+        value,
+        no_schema_reason: None,
+    }
+}
+
 const fn front_door(contract: CommandContract, help_rank: u16) -> CommandContract {
     CommandContract {
         help_visibility: "everyday",
@@ -804,6 +916,13 @@ const fn hidden(contract: CommandContract) -> CommandContract {
 const fn surface(contract: CommandContract, surface: &'static str) -> CommandContract {
     CommandContract {
         surface,
+        ..contract
+    }
+}
+
+const fn feature_gated(contract: CommandContract, feature_gate: &'static str) -> CommandContract {
+    CommandContract {
+        feature_gate: Some(feature_gate),
         ..contract
     }
 }
@@ -1000,7 +1119,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["bridge", "git", "status"],
         git_adapter_alias(
-            documented_schemas(READ_JSON, &["bridge git status"]),
+            json_discriminators(
+                documented_schemas(READ_JSON, &["bridge git status"]),
+                &[json_discriminator(
+                    Some("bridge git status"),
+                    "output_kind",
+                    "bridge_git_status",
+                )],
+            ),
             "status",
         ),
     ),
@@ -1024,7 +1150,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["bridge", "git", "import"],
         git_adapter_action(
-            documented_schemas(IMPORTING_MUTATION, &["bridge git import"]),
+            json_discriminators(
+                documented_schemas(IMPORTING_MUTATION, &["bridge git import"]),
+                &[json_discriminator(
+                    Some("bridge git import"),
+                    "output_kind",
+                    "bridge_git_import",
+                )],
+            ),
             "adopt",
             "workflow",
             "Use adopt for the guided Git-to-Heddle conversion workflow.",
@@ -1033,7 +1166,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["bridge", "git", "sync"],
         git_adapter_action(
-            documented_schemas(IMPORTING_MUTATION, &["bridge git sync"]),
+            json_discriminators(
+                documented_schemas(IMPORTING_MUTATION, &["bridge git sync"]),
+                &[json_discriminator(
+                    Some("bridge git sync"),
+                    "output_kind",
+                    "bridge_git_sync",
+                )],
+            ),
             "adopt",
             "workflow",
             "Use adopt for the guided Git-to-Heddle conversion workflow.",
@@ -1042,7 +1182,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["bridge", "git", "reconcile"],
         git_adapter_action(
-            documented_schemas(IMPORTING_MUTATION, &["bridge git reconcile"]),
+            json_discriminators(
+                documented_schemas(IMPORTING_MUTATION, &["bridge git reconcile"]),
+                &[json_discriminator(
+                    Some("bridge git reconcile"),
+                    "output_kind",
+                    "bridge_git_reconcile",
+                )],
+            ),
             "adopt",
             "workflow",
             "Use adopt for the guided Git-to-Heddle conversion workflow.",
@@ -1091,15 +1238,32 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "git_adapter",
         ),
     ),
-    entry(&["capture"], documented_schemas(CAPTURE, &["capture"])),
+    entry(
+        &["capture"],
+        json_discriminators(
+            documented_schemas(CAPTURE, &["capture"]),
+            &[json_discriminator(
+                Some("capture"),
+                "output_kind",
+                "capture",
+            )],
+        ),
+    ),
     entry(
         &["checkpoint"],
-        documented_schemas(
-            CommandContract {
-                writes_git_refs: true,
-                ..CAPTURE
-            },
-            &["checkpoint"],
+        json_discriminators(
+            documented_schemas(
+                CommandContract {
+                    writes_git_refs: true,
+                    ..CAPTURE
+                },
+                &["checkpoint"],
+            ),
+            &[json_discriminator(
+                Some("checkpoint"),
+                "output_kind",
+                "checkpoint",
+            )],
         ),
     ),
     entry(
@@ -1139,12 +1303,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["commit"],
         front_door(
             advertised_action(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        ..CAPTURE
-                    },
-                    &["commit"],
+                json_discriminators(
+                    documented_schemas(
+                        CommandContract {
+                            writes_git_refs: true,
+                            ..CAPTURE
+                        },
+                        &["commit"],
+                    ),
+                    &[json_discriminator(Some("commit"), "output_kind", "commit")],
                 ),
                 "heddle commit -m <message>",
                 &["heddle", "commit", "-m", "<message>"],
@@ -1157,7 +1324,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["commands"],
-        surface(documented_schemas(READ_JSON, &["commands"]), "automation"),
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["commands"]),
+                &[json_discriminator(
+                    Some("commands"),
+                    "kind",
+                    "command_catalog",
+                )],
+            ),
+            "automation",
+        ),
     ),
     entry(&["compare"], opaque_schemas(READ_JSON, &["compare"])),
     entry(&["completion"], READ_TEXT),
@@ -1232,7 +1409,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["diagnose"], documented_schemas(READ_JSON, &["diagnose"])),
     entry(
         &["diff"],
-        front_door(documented_schemas(READ_JSON, &["diff"]), 20),
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["diff"]),
+                &[json_discriminator(Some("diff"), "output_kind", "diff")],
+            ),
+            20,
+        ),
     ),
     entry(&["discuss"], GROUP),
     entry(
@@ -1261,11 +1444,25 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["doctor", "docs"],
-        documented_schemas(READ_JSON, &["doctor docs"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["doctor docs"]),
+            &[json_discriminator(
+                Some("doctor docs"),
+                "output_kind",
+                "doctor_docs",
+            )],
+        ),
     ),
     entry(
         &["doctor", "schemas"],
-        documented_schemas(READ_JSON, &["doctor schemas"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["doctor schemas"]),
+            &[json_discriminator(
+                Some("doctor schemas"),
+                "output_kind",
+                "doctor_schemas",
+            )],
+        ),
     ),
     entry(
         &["fetch"],
@@ -1422,10 +1619,8 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["monitor"],
         hidden(opaque_schemas(READ_JSON, &["monitor"])),
     ),
-    #[cfg(feature = "client")]
-    entry(&["presence"], READ_JSON),
-    #[cfg(feature = "client")]
-    entry(&["presence", "publish"], READ_JSON),
+    entry(&["presence"], feature_gated(READ_JSON, "client")),
+    entry(&["presence", "publish"], feature_gated(READ_JSON, "client")),
     entry(
         &["pull"],
         front_door(
@@ -1508,7 +1703,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["redact", "trust", "remove"],
         opaque_schemas(DATA_MUTATION, &["redact trust remove"]),
     ),
-    entry(&["redo"], documented_schemas(WORKTREE_MUTATION, &["redo"])),
+    entry(
+        &["redo"],
+        json_discriminators(
+            documented_schemas(WORKTREE_MUTATION, &["redo"]),
+            &[json_discriminator(Some("redo"), "output_kind", "redo")],
+        ),
+    ),
     entry(&["remote"], surface(GROUP, "native")),
     entry(
         &["remote", "list"],
@@ -1559,7 +1760,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["run"], surface(EXTERNAL_WORKTREE_COMMAND, "automation")),
     entry(
         &["schemas"],
-        surface(documented_schemas(READ_JSON, &["schemas"]), "automation"),
+        surface(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["schemas"]),
+                &[json_discriminator(
+                    Some("schemas"),
+                    "output_kind",
+                    "schemas",
+                )],
+            ),
+            "automation",
+        ),
     ),
     entry(&["semantic"], GROUP),
     entry(
@@ -1698,21 +1909,29 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["status"],
-        front_door(documented_schemas(READ_JSON_OR_JSONL, &["status"]), 10),
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON_OR_JSONL, &["status"]),
+                &[json_discriminator(Some("status"), "output_kind", "status")],
+            ),
+            10,
+        ),
     ),
     entry(&["store"], surface(GROUP, "admin")),
     entry(
         &["store", "warm"],
         surface(opaque_schemas(MUTATING, &["store warm"]), "admin"),
     ),
-    #[cfg(feature = "client")]
-    entry(&["support"], MUTATING),
-    #[cfg(feature = "client")]
-    entry(&["support", "grant"], MUTATING_NO_OP_ID),
-    #[cfg(feature = "client")]
-    entry(&["support", "list"], READ_JSON),
-    #[cfg(feature = "client")]
-    entry(&["support", "revoke"], MUTATING_NO_OP_ID),
+    entry(&["support"], feature_gated(MUTATING, "client")),
+    entry(
+        &["support", "grant"],
+        feature_gated(MUTATING_NO_OP_ID, "client"),
+    ),
+    entry(&["support", "list"], feature_gated(READ_JSON, "client")),
+    entry(
+        &["support", "revoke"],
+        feature_gated(MUTATING_NO_OP_ID, "client"),
+    ),
     entry(
         &["switch"],
         git_adapter_alias(
@@ -1737,11 +1956,25 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["thread", "cd"], READ_TEXT),
     entry(
         &["thread", "list"],
-        documented_schemas(READ_JSON, &["thread list"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["thread list"]),
+            &[json_discriminator(
+                Some("thread list"),
+                "output_kind",
+                "thread_list",
+            )],
+        ),
     ),
     entry(
         &["thread", "show"],
-        documented_schemas(READ_JSON_OR_JSONL, &["thread show"]),
+        json_discriminators(
+            documented_schemas(READ_JSON_OR_JSONL, &["thread show"]),
+            &[json_discriminator(
+                Some("thread show"),
+                "output_kind",
+                "thread_show",
+            )],
+        ),
     ),
     entry(
         &["thread", "captures"],
@@ -1822,7 +2055,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["undo"],
-        front_door(documented_schemas(WORKTREE_MUTATION, &["undo"]), 100),
+        front_door(
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["undo"]),
+                &[json_discriminator(Some("undo"), "output_kind", "undo")],
+            ),
+            100,
+        ),
     ),
     entry(&["version"], documented_schemas(READ_JSON, &["version"])),
     entry(
@@ -1835,97 +2074,22 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["workspace", "show"],
-        documented_schemas(READ_JSON_OR_JSONL, &["workspace show"]),
-    ),
-];
-
-const JSON_DISCRIMINATORS: &[CommandJsonDiscriminatorEntry] = &[
-    json_discriminator(&["commands"], Some("commands"), "kind", "command_catalog"),
-    json_discriminator(&["schemas"], Some("schemas"), "output_kind", "schemas"),
-    json_discriminator(&["status"], Some("status"), "output_kind", "status"),
-    json_discriminator(&["diff"], Some("diff"), "output_kind", "diff"),
-    json_discriminator(&["capture"], Some("capture"), "output_kind", "capture"),
-    json_discriminator(&["commit"], Some("commit"), "output_kind", "commit"),
-    json_discriminator(
-        &["checkpoint"],
-        Some("checkpoint"),
-        "output_kind",
-        "checkpoint",
-    ),
-    json_discriminator(&["undo"], Some("undo"), "output_kind", "undo"),
-    json_discriminator(&["redo"], Some("redo"), "output_kind", "redo"),
-    json_discriminator(
-        &["doctor", "schemas"],
-        Some("doctor schemas"),
-        "output_kind",
-        "doctor_schemas",
-    ),
-    json_discriminator(
-        &["doctor", "docs"],
-        Some("doctor docs"),
-        "output_kind",
-        "doctor_docs",
-    ),
-    json_discriminator(
-        &["bridge", "git", "status"],
-        Some("bridge git status"),
-        "output_kind",
-        "bridge_git_status",
-    ),
-    json_discriminator(
-        &["bridge", "git", "sync"],
-        Some("bridge git sync"),
-        "output_kind",
-        "bridge_git_sync",
-    ),
-    json_discriminator(
-        &["bridge", "git", "reconcile"],
-        Some("bridge git reconcile"),
-        "output_kind",
-        "bridge_git_reconcile",
-    ),
-    json_discriminator(
-        &["thread", "list"],
-        Some("thread list"),
-        "output_kind",
-        "thread_list",
-    ),
-    json_discriminator(
-        &["thread", "show"],
-        Some("thread show"),
-        "output_kind",
-        "thread_show",
-    ),
-    json_discriminator(
-        &["workspace", "show"],
-        Some("workspace show"),
-        "output_kind",
-        "workspace_summary",
+        json_discriminators(
+            documented_schemas(READ_JSON_OR_JSONL, &["workspace show"]),
+            &[json_discriminator(
+                Some("workspace show"),
+                "output_kind",
+                "workspace_summary",
+            )],
+        ),
     ),
 ];
 
 static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =
     OnceLock::new();
-static ACTIVE_JSON_DISCRIMINATOR_ENTRIES: OnceLock<Vec<&'static CommandJsonDiscriminatorEntry>> =
-    OnceLock::new();
 
 const fn entry(path: &'static [&'static str], contract: CommandContract) -> CommandContractEntry {
     CommandContractEntry { path, contract }
-}
-
-const fn json_discriminator(
-    path: &'static [&'static str],
-    schema_verb: Option<&'static str>,
-    field: &'static str,
-    value: &'static str,
-) -> CommandJsonDiscriminatorEntry {
-    CommandJsonDiscriminatorEntry {
-        path,
-        schema_verb,
-        field,
-        value,
-        no_schema_reason: None,
-    }
 }
 
 pub fn cmd_commands(cli: &Cli, args: &CommandCatalogArgs) -> Result<()> {
@@ -2644,18 +2808,6 @@ fn active_command_contract_entries() -> &'static [&'static CommandContractEntry]
         .as_slice()
 }
 
-fn active_json_discriminator_entries() -> &'static [&'static CommandJsonDiscriminatorEntry] {
-    ACTIVE_JSON_DISCRIMINATOR_ENTRIES
-        .get_or_init(|| {
-            let command = Cli::command();
-            JSON_DISCRIMINATORS
-                .iter()
-                .filter(|entry| clap_command_path_exists(&command, entry.path))
-                .collect()
-        })
-        .as_slice()
-}
-
 fn clap_command_path_exists(command: &clap::Command, path: &[&str]) -> bool {
     let mut current = command;
     for part in path {
@@ -2671,45 +2823,65 @@ fn clap_command_path_exists(command: &clap::Command, path: &[&str]) -> bool {
 }
 
 pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
-    active_json_discriminator_entries()
+    active_command_contract_entries()
         .iter()
         .copied()
-        .map(json_discriminator_metadata)
+        .flat_map(|entry| {
+            entry
+                .contract
+                .json_discriminators
+                .iter()
+                .map(move |discriminator| json_discriminator_metadata(entry.path, discriminator))
+        })
         .collect()
 }
 
 pub fn command_json_discriminator_for_schema_verb(
     schema_verb: &str,
 ) -> Option<CommandJsonDiscriminator> {
-    active_json_discriminator_entries()
+    active_command_contract_entries()
         .iter()
         .copied()
-        .find(|entry| entry.schema_verb == Some(schema_verb))
-        .map(json_discriminator_metadata)
+        .flat_map(|entry| {
+            entry
+                .contract
+                .json_discriminators
+                .iter()
+                .map(move |discriminator| (entry.path, discriminator))
+        })
+        .find(|(_, discriminator)| discriminator.schema_verb == Some(schema_verb))
+        .map(|(path, discriminator)| json_discriminator_metadata(path, discriminator))
 }
 
 fn json_discriminators_for_path<'a>(
     path: impl IntoIterator<Item = &'a str>,
 ) -> Vec<CommandJsonDiscriminator> {
     let path = path.into_iter().collect::<Vec<_>>();
-    active_json_discriminator_entries()
+    active_command_contract_entries()
         .iter()
         .copied()
         .filter(|entry| entry.path == path.as_slice())
-        .map(json_discriminator_metadata)
+        .flat_map(|entry| {
+            entry
+                .contract
+                .json_discriminators
+                .iter()
+                .map(move |discriminator| json_discriminator_metadata(entry.path, discriminator))
+        })
         .collect()
 }
 
 fn json_discriminator_metadata(
-    entry: &'static CommandJsonDiscriminatorEntry,
+    path: &'static [&'static str],
+    discriminator: &CommandJsonDiscriminatorSpec,
 ) -> CommandJsonDiscriminator {
     CommandJsonDiscriminator {
-        path: entry.path.iter().map(|part| (*part).to_string()).collect(),
-        display: entry.path.join(" "),
-        schema_verb: entry.schema_verb.map(str::to_string),
-        field: entry.field.to_string(),
-        value: entry.value.to_string(),
-        no_schema_reason: entry.no_schema_reason.map(str::to_string),
+        path: path.iter().map(|part| (*part).to_string()).collect(),
+        display: path.join(" "),
+        schema_verb: discriminator.schema_verb.map(str::to_string),
+        field: discriminator.field.to_string(),
+        value: discriminator.value.to_string(),
+        no_schema_reason: discriminator.no_schema_reason.map(str::to_string),
     }
 }
 
@@ -2754,6 +2926,7 @@ fn runtime_contract(
         canonical_kind: contract.canonical_kind,
         canonical_note: contract.canonical_note,
         advertised_action: contract.advertised_action,
+        feature_gate: contract.feature_gate,
         side_effects: side_effects(contract),
         side_effect_class: side_effect_class(contract),
         first_run_behavior: first_run_behavior(contract),
@@ -2798,8 +2971,15 @@ pub fn command_uses_bootstrap_op_id_store(command_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn feature_gated_command_roots() -> &'static [&'static str] {
-    FEATURE_GATED_COMMAND_ROOTS
+pub(crate) fn feature_gated_command_roots() -> Vec<&'static str> {
+    let mut roots = CONTRACTS
+        .iter()
+        .filter(|entry| entry.path.len() == 1 && entry.contract.feature_gate.is_some())
+        .map(|entry| entry.path[0])
+        .collect::<Vec<_>>();
+    roots.sort_unstable();
+    roots.dedup();
+    roots
 }
 
 pub fn command_supports_op_id_for_command(command: &Commands) -> bool {
@@ -2912,6 +3092,27 @@ fn dynamic_recommended_action_template(action: &str) -> Option<ActionTemplate> {
                 ],
                 vec![placeholder_input_name(path)],
                 false,
+            ))
+        }
+        [heddle, thread_cmd, absorb, thread_name, into_flag, parent]
+            if heddle == "heddle"
+                && thread_cmd == "thread"
+                && absorb == "absorb"
+                && into_flag == "--into"
+                && is_placeholder_arg(parent) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    "thread".to_string(),
+                    "absorb".to_string(),
+                    thread_name.clone(),
+                    "--into".to_string(),
+                    parent.clone(),
+                ],
+                vec![placeholder_input_name(parent)],
+                true,
             ))
         }
         _ => None,
@@ -4219,29 +4420,30 @@ mod tests {
 
     #[test]
     fn json_discriminator_table_starts_with_bounded_command_slice() {
-        let displays = JSON_DISCRIMINATORS
+        let displays = raw_json_discriminator_specs()
             .iter()
-            .map(|entry| entry.path.join(" "))
+            .map(|(path, _)| path.join(" "))
             .collect::<Vec<_>>();
         assert_eq!(
             displays,
             vec![
-                "commands",
-                "schemas",
-                "status",
-                "diff",
-                "capture",
-                "commit",
-                "checkpoint",
-                "undo",
-                "redo",
-                "doctor schemas",
-                "doctor docs",
                 "bridge git status",
+                "bridge git import",
                 "bridge git sync",
                 "bridge git reconcile",
+                "capture",
+                "checkpoint",
+                "commit",
+                "commands",
+                "diff",
+                "doctor docs",
+                "doctor schemas",
+                "redo",
+                "schemas",
+                "status",
                 "thread list",
                 "thread show",
+                "undo",
                 "workspace show",
             ]
         );
@@ -4249,37 +4451,38 @@ mod tests {
 
     #[test]
     fn json_discriminator_metadata_is_internally_consistent() {
-        let raw_paths = JSON_DISCRIMINATORS
+        let raw_discriminators = raw_json_discriminator_specs();
+        let raw_paths = raw_discriminators
             .iter()
-            .map(|entry| entry.path.to_vec())
+            .map(|(path, _)| path.to_vec())
             .collect::<BTreeSet<_>>();
         assert_eq!(
             raw_paths.len(),
-            JSON_DISCRIMINATORS.len(),
+            raw_discriminators.len(),
             "JSON discriminator table contains duplicate command paths"
         );
 
         let mut schema_verbs = BTreeSet::new();
-        for entry in JSON_DISCRIMINATORS {
-            let display = entry.path.join(" ");
-            let contract = raw_command_contract_for_path(entry.path.iter().copied())
+        for (path, discriminator) in raw_discriminators {
+            let display = path.join(" ");
+            let contract = raw_command_contract_for_path(path.iter().copied())
                 .unwrap_or_else(|| panic!("JSON discriminator references unknown `{display}`"));
             assert!(
                 contract.supports_json,
                 "`{display}` advertises JSON discriminator `{}` but does not support JSON",
-                entry.value
+                discriminator.value
             );
             assert!(
-                matches!(entry.field, "kind" | "output_kind"),
+                matches!(discriminator.field, "kind" | "output_kind"),
                 "`{display}` advertises unsupported discriminator field `{}`",
-                entry.field
+                discriminator.field
             );
             assert!(
-                !entry.value.is_empty(),
+                !discriminator.value.is_empty(),
                 "`{display}` discriminator value must be non-empty"
             );
 
-            if let Some(schema_verb) = entry.schema_verb {
+            if let Some(schema_verb) = discriminator.schema_verb {
                 assert!(
                     schema_verbs.insert(schema_verb),
                     "JSON discriminator schema verb `{schema_verb}` is registered more than once"
@@ -4289,12 +4492,12 @@ mod tests {
                     "`{display}` advertises discriminator schema verb `{schema_verb}` not present in its command contract"
                 );
                 assert!(
-                    entry.no_schema_reason.is_none(),
+                    discriminator.no_schema_reason.is_none(),
                     "`{display}` cannot have both a schema verb and a no-schema reason"
                 );
             } else {
                 assert!(
-                    entry
+                    discriminator
                         .no_schema_reason
                         .is_some_and(|reason| !reason.is_empty()),
                     "`{display}` discriminator without a schema verb must document why"
@@ -4337,6 +4540,22 @@ mod tests {
         assert_eq!(status.json_discriminators.len(), 1);
         assert_eq!(status.json_discriminators[0].field, "output_kind");
         assert_eq!(status.json_discriminators[0].value, "status");
+    }
+
+    fn raw_json_discriminator_specs() -> Vec<(
+        &'static [&'static str],
+        &'static CommandJsonDiscriminatorSpec,
+    )> {
+        CONTRACTS
+            .iter()
+            .flat_map(|entry| {
+                entry
+                    .contract
+                    .json_discriminators
+                    .iter()
+                    .map(move |discriminator| (entry.path, discriminator))
+            })
+            .collect()
     }
 
     #[test]

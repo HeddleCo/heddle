@@ -203,6 +203,29 @@ struct BridgeGitImportHintOutput {
 }
 
 #[derive(Serialize)]
+struct BridgeGitImportOutput {
+    output_kind: &'static str,
+    status: String,
+    action: &'static str,
+    summary: String,
+    commits_imported: usize,
+    states_created: usize,
+    branches_synced: usize,
+    tags_synced: usize,
+    skipped_non_commit_refs: usize,
+    partial_mirror_refs: usize,
+    already_in_sync: bool,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
+    recommended_action: String,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<super::command_catalog::ActionTemplate>,
+    recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize)]
 struct BridgeGitReconcileOutput {
     output_kind: &'static str,
     status: String,
@@ -216,6 +239,8 @@ struct BridgeGitReconcileOutput {
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
     recovery_command_argv: Vec<Vec<String>>,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
 }
 
 #[derive(Serialize)]
@@ -355,6 +380,79 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
     }
 }
 
+fn render_bridge_git_import(
+    cli: &Cli,
+    repo: &Repository,
+    output: &BridgeGitImportOutput,
+) -> Result<()> {
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(output)?);
+        return Ok(());
+    }
+
+    println!("{}", output.summary);
+    println!(
+        "  {}",
+        style::field(
+            "commits",
+            &style::bold(&output.commits_imported.to_string())
+        )
+    );
+    println!(
+        "  {}",
+        style::field(
+            "states created",
+            &style::bold(&output.states_created.to_string())
+        )
+    );
+    println!(
+        "  {}",
+        style::field(
+            "branches",
+            &format!(
+                "{} synced to threads",
+                style::bold(&output.branches_synced.to_string())
+            )
+        )
+    );
+    println!(
+        "  {}",
+        style::field(
+            "tags",
+            &format!(
+                "{} synced to markers",
+                style::bold(&output.tags_synced.to_string())
+            )
+        )
+    );
+    if output.skipped_non_commit_refs > 0 {
+        println!(
+            "{} skipped {} non-commit-pointing refs",
+            style::warn_marker(),
+            style::bold(&output.skipped_non_commit_refs.to_string())
+        );
+    }
+    if output.partial_mirror_refs > 0 {
+        println!(
+            "{} partial mirror for {} refs; SHA-stable export degraded",
+            style::warn_marker(),
+            style::bold(&output.partial_mirror_refs.to_string())
+        );
+    }
+    println!();
+    println!("{}", style::section("Verification"));
+    println!(
+        "  {}",
+        style::field("status", &style::thread_state(&output.trust.status))
+    );
+    println!("  {}", output.trust.summary);
+    if !output.recommended_action.is_empty() {
+        println!();
+        print_next(&output.recommended_action);
+    }
+    Ok(())
+}
+
 fn render_bridge_git_reconcile(
     cli: &Cli,
     repo: &Repository,
@@ -364,6 +462,14 @@ fn render_bridge_git_reconcile(
         println!("{}", serde_json::to_string(output)?);
     } else {
         println!("{}", output.summary);
+        println!(
+            "Verification: {}",
+            if output.trust.verified {
+                style::accent(&output.trust.summary)
+            } else {
+                style::warn(&output.trust.summary)
+            }
+        );
         for command in &output.recovery_commands {
             if output.preview && output.prefer.is_none() {
                 println!("Option: {}", style::bold(command));
@@ -551,78 +657,52 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             progress.finish();
 
             let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
-            if should_output_json(cli, Some(repo.config())) {
-                let out = serde_json::json!({
-                    "commits_imported": stats.commits_imported,
-                    "states_created": stats.states_created,
-                    "branches_synced": stats.branches_synced,
-                    "tags_synced": stats.tags_synced,
-                    "skipped_non_commit_refs": stats.skipped_non_commit_refs.len(),
-                    "partial_mirror_refs": stats.partial_mirror_refs.len(),
-                    "already_in_sync": already_in_sync,
-                });
-                println!("{out}");
-            } else {
-                if already_in_sync {
-                    println!(
-                        "{} already in sync with {} — every commit was \
-                         already imported",
-                        style::ok_marker(),
-                        style::dim(&source_label)
-                    );
+            let trust = build_repository_verification_state(&repo);
+            let summary = if already_in_sync {
+                if trust.verified {
+                    format!(
+                        "Git import already in sync with {source_label}: every commit already imported; repository verification is clean"
+                    )
                 } else {
-                    println!(
-                        "{} imported Git history from {}",
-                        style::ok_marker(),
-                        style::dim(&source_label)
-                    );
-                }
-                println!(
-                    "  {}",
-                    style::field("commits", &style::bold(&stats.commits_imported.to_string()))
-                );
-                println!(
-                    "  {}",
-                    style::field(
-                        "states created",
-                        &style::bold(&stats.states_created.to_string())
+                    format!(
+                        "Git import already in sync with {source_label}: every commit already imported, but repository verification is blocked: {}",
+                        trust.summary
                     )
-                );
-                println!(
-                    "  {}",
-                    style::field(
-                        "branches",
-                        &format!(
-                            "{} synced to threads",
-                            style::bold(&stats.branches_synced.to_string())
-                        )
-                    )
-                );
-                println!(
-                    "  {}",
-                    style::field(
-                        "tags",
-                        &format!(
-                            "{} synced to markers",
-                            style::bold(&stats.tags_synced.to_string())
-                        )
-                    )
-                );
-                if !stats.skipped_non_commit_refs.is_empty() {
-                    println!(
-                        "{} skipped {} non-commit-pointing refs",
-                        style::warn_marker(),
-                        style::bold(&stats.skipped_non_commit_refs.len().to_string())
-                    );
                 }
-                if !stats.partial_mirror_refs.is_empty() {
-                    println!(
-                        "{} partial mirror for {} refs; SHA-stable export degraded",
-                        style::warn_marker(),
-                        style::bold(&stats.partial_mirror_refs.len().to_string())
-                    );
-                }
-            }
+            } else if trust.verified {
+                format!(
+                    "Imported Git history from {source_label}; repository verification is clean"
+                )
+            } else {
+                format!(
+                    "Imported Git history from {source_label}, but repository verification is blocked: {}",
+                    trust.summary
+                )
+            };
+            let output = BridgeGitImportOutput {
+                output_kind: "bridge_git_import",
+                status: if trust.verified {
+                    "completed".to_string()
+                } else {
+                    "blocked".to_string()
+                },
+                action: "bridge git import",
+                summary,
+                commits_imported: stats.commits_imported,
+                states_created: stats.states_created,
+                branches_synced: stats.branches_synced,
+                tags_synced: stats.tags_synced,
+                skipped_non_commit_refs: stats.skipped_non_commit_refs.len(),
+                partial_mirror_refs: stats.partial_mirror_refs.len(),
+                already_in_sync,
+                recommended_action: trust.recommended_action.clone(),
+                recommended_action_argv: trust.recommended_action_argv.clone(),
+                recommended_action_template: trust.recommended_action_template.clone(),
+                recovery_commands: trust.recovery_commands.clone(),
+                recovery_command_argv: trust.recovery_command_argv.clone(),
+                trust,
+            };
+            render_bridge_git_import(cli, &repo, &output)?;
         }
 
         GitCommands::Sync { path } => {
@@ -769,9 +849,14 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                                 thread: ref_name.clone(),
                             })?;
                         }
+                        let trust = build_repository_verification_state(&repo);
                         let output = BridgeGitReconcileOutput {
                             output_kind: "bridge_git_reconcile",
-                            status: "completed".to_string(),
+                            status: if trust.verified {
+                                "completed".to_string()
+                            } else {
+                                "blocked".to_string()
+                            },
                             action: "bridge git reconcile",
                             prefer: Some(prefer.to_string()),
                             ref_name: ref_name.clone(),
@@ -780,11 +865,13 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                                 "Reconciled '{ref_name}' by importing {} Git commit(s) into Heddle",
                                 stats.commits_imported
                             ),
-                            recommended_action: None,
-                            recommended_action_argv: None,
-                            recommended_action_template: None,
-                            recovery_commands: Vec::new(),
-                            recovery_command_argv: Vec::new(),
+                            recommended_action: (!trust.recommended_action.is_empty())
+                                .then(|| trust.recommended_action.clone()),
+                            recommended_action_argv: trust.recommended_action_argv.clone(),
+                            recommended_action_template: trust.recommended_action_template.clone(),
+                            recovery_commands: trust.recovery_commands.clone(),
+                            recovery_command_argv: trust.recovery_command_argv.clone(),
+                            trust,
                         };
                         render_bridge_git_reconcile(cli, &repo, &output)?;
                         return Ok(());
@@ -800,9 +887,14 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                         })?;
                         match bridge.write_through_current_checkout()? {
                             crate::bridge::WriteThroughOutcome::Wrote(git_oid) => {
+                                let trust = build_repository_verification_state(&repo);
                                 let output = BridgeGitReconcileOutput {
                                     output_kind: "bridge_git_reconcile",
-                                    status: "completed".to_string(),
+                                    status: if trust.verified {
+                                        "completed".to_string()
+                                    } else {
+                                        "blocked".to_string()
+                                    },
                                     action: "bridge git reconcile",
                                     prefer: Some(prefer.to_string()),
                                     ref_name: ref_name.clone(),
@@ -812,11 +904,15 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                                         state.short(),
                                         git_oid
                                     ),
-                                    recommended_action: None,
-                                    recommended_action_argv: None,
-                                    recommended_action_template: None,
-                                    recovery_commands: Vec::new(),
-                                    recovery_command_argv: Vec::new(),
+                                    recommended_action: (!trust.recommended_action.is_empty())
+                                        .then(|| trust.recommended_action.clone()),
+                                    recommended_action_argv: trust.recommended_action_argv.clone(),
+                                    recommended_action_template: trust
+                                        .recommended_action_template
+                                        .clone(),
+                                    recovery_commands: trust.recovery_commands.clone(),
+                                    recovery_command_argv: trust.recovery_command_argv.clone(),
+                                    trust,
                                 };
                                 render_bridge_git_reconcile(cli, &repo, &output)?;
                                 return Ok(());
@@ -832,6 +928,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     _ => unreachable!("clap restricts --prefer values"),
                 }
             }
+            let trust = build_repository_verification_state(&repo);
             let output = BridgeGitReconcileOutput {
                 output_kind: "bridge_git_reconcile",
                 status: "preview".to_string(),
@@ -858,6 +955,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     .filter_map(|action| action_argv(action))
                     .collect(),
                 recovery_commands,
+                trust,
             };
             render_bridge_git_reconcile(cli, &repo, &output)?;
         }
@@ -865,10 +963,10 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
         GitCommands::Push { remote } => {
             let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
             bridge.push(&remote_name)?;
+            let trust = build_repository_verification_state(&repo);
 
             if should_output_json(cli, Some(repo.config())) {
-                let output =
-                    bridge_git_push_output(remote_name, build_repository_verification_state(&repo));
+                let output = bridge_git_push_output(remote_name, trust);
                 crate::cli::render::write_json_stdout(&output)?;
             } else {
                 println!(
@@ -876,19 +974,24 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     style::ok_marker(),
                     style::bold(&remote_name)
                 );
+                println!(
+                    "Verification: {}",
+                    if trust.verified {
+                        style::accent(&trust.summary)
+                    } else {
+                        style::warn(&trust.summary)
+                    }
+                );
             }
         }
 
         GitCommands::Pull { remote } => {
             let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;
             let outcome = bridge.pull(&remote_name)?;
+            let trust = build_repository_verification_state(&repo);
 
             if should_output_json(cli, Some(repo.config())) {
-                let output = bridge_git_pull_output(
-                    remote_name,
-                    outcome.changed,
-                    build_repository_verification_state(&repo),
-                );
+                let output = bridge_git_pull_output(remote_name, outcome.changed, trust);
                 crate::cli::render::write_json_stdout(&output)?;
             } else {
                 if outcome.changed {
@@ -899,11 +1002,19 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     );
                 } else {
                     println!(
-                        "{} already up to date with remote {}",
+                        "{} remote {} made no pull changes",
                         style::ok_marker(),
                         style::bold(&remote_name)
                     );
                 }
+                println!(
+                    "Verification: {}",
+                    if trust.verified {
+                        style::accent(&trust.summary)
+                    } else {
+                        style::warn(&trust.summary)
+                    }
+                );
             }
         }
 

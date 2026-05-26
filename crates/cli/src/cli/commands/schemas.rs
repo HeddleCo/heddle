@@ -2518,6 +2518,10 @@ pub struct BridgeExportSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BridgeImportSchema {
+    pub output_kind: Option<String>,
+    pub status: String,
+    pub action: Option<String>,
+    pub summary: String,
     pub commits_imported: u64,
     pub states_created: u64,
     pub branches_synced: u64,
@@ -2525,6 +2529,13 @@ pub struct BridgeImportSchema {
     pub skipped_non_commit_refs: u64,
     pub partial_mirror_refs: u64,
     pub already_in_sync: bool,
+    pub recommended_action: Option<String>,
+    pub recommended_action_argv: Option<Vec<String>>,
+    pub recommended_action_template: Option<ActionTemplateSchema>,
+    pub recovery_commands: Vec<String>,
+    pub recovery_command_argv: Vec<Vec<String>>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2560,6 +2571,8 @@ pub struct BridgeGitReconcileSchema {
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
     pub recovery_command_argv: Vec<Vec<String>>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

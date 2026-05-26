@@ -686,6 +686,11 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
         import["commits_imported"].as_u64().unwrap_or(0) >= 1,
         "explicit bridge import should walk Git commits natively: {import}"
     );
+    assert_eq!(import["output_kind"], "bridge_git_import");
+    assert_eq!(
+        import["verification"]["verified"], true,
+        "bridge import should embed post-operation verification: {import}"
+    );
 
     let export_path = temp.path().join("exported.git");
     let export = assert_clean_json_without_git(
@@ -733,6 +738,10 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
     );
     assert_eq!(reconcile["status"], "preview");
     assert_eq!(reconcile["preview"], true);
+    assert!(
+        reconcile["verification"].is_object(),
+        "bridge reconcile should embed verification proof: {reconcile}"
+    );
 
     let verify = assert_clean_json_without_git(&["--output", "json", "verify"], &work);
     assert_eq!(
