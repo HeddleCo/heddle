@@ -337,8 +337,10 @@ Core nouns:
   provenance. States are what `log`, `show`, `diff`, `undo`, and agents can
   reason about.
 - Thread: a named line of work with its own checkout and captured history.
-  Use it for risky edits, agent work, or parallel experiments without stash
-  juggling.
+  Closer to `git worktree` than to `git branch` — every thread gets its own
+  directory on disk (default: a sibling of the repo), not a ref in your
+  existing checkout. Use one for risky edits, agent work, or parallel
+  experiments without stash juggling.
 - Capture: a cheap recoverable save point on the current thread.
 - Commit: the normal human save path. In native Heddle it saves the state; in a
   Git-overlay repo it saves the Heddle state and writes the matching Git
