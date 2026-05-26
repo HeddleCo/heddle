@@ -41,7 +41,6 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use objects::object::ThreadName;
 use repo::Repository;
 use serde::Serialize;
 
@@ -833,7 +832,7 @@ fn emit(cli: &Cli, repo: &Repository, output: &AttemptOutput) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::ChangeId;
+    use objects::object::{ChangeId, ThreadName};
 
     use super::*;
 

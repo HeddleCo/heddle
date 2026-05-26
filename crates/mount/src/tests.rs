@@ -1358,7 +1358,7 @@ fn cross_thread_blob_dedup_at_scale() {
     // Make 9 sibling threads.
     for i in 0..9 {
         repo.refs()
-            .set_thread(&ThreadName::new(&format!("feat-{i}")), &main_id)
+            .set_thread(&ThreadName::new(format!("feat-{i}")), &main_id)
             .unwrap();
     }
     drop(repo);

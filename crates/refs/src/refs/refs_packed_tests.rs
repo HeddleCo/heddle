@@ -48,7 +48,7 @@ fn test_pack_refs_consolidates_loose() {
     let (_temp, refs) = create_ref_manager();
     let ids: Vec<ChangeId> = (0..5).map(|_| ChangeId::generate()).collect();
     for (i, id) in ids.iter().enumerate() {
-        refs.set_thread(&ThreadName::new(&format!("branch-{}", i)), id)
+        refs.set_thread(&ThreadName::new(format!("branch-{}", i)), id)
             .unwrap();
     }
     refs.pack_refs().unwrap();
@@ -56,7 +56,7 @@ fn test_pack_refs_consolidates_loose() {
     assert!(packed_path.exists(), "packed-refs file should exist");
     for (i, id) in ids.iter().enumerate() {
         assert_eq!(
-            refs.get_thread(&ThreadName::new(&format!("branch-{}", i)))
+            refs.get_thread(&ThreadName::new(format!("branch-{}", i)))
                 .unwrap(),
             Some(*id)
         );

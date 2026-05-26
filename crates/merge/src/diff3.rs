@@ -154,9 +154,7 @@ fn emit_hunk(
 ) {
     if our_slice == base_slice {
         emit_lines(out, their_slice);
-    } else if their_slice == base_slice {
-        emit_lines(out, our_slice);
-    } else if our_slice == their_slice {
+    } else if their_slice == base_slice || our_slice == their_slice {
         emit_lines(out, our_slice);
     } else if let Some(clean) = compare_trailing_ws(our_slice, their_slice) {
         emit_lines(out, clean);

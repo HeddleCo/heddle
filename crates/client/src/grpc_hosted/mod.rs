@@ -14,6 +14,7 @@ use grpc::heddle::v1::{
     hosted_user_service_client::HostedUserServiceClient, mint_biscuit_request::Proof,
     repo_sync_service_client::RepoSyncServiceClient,
 };
+use objects::object::MarkerName;
 use proto::ProtocolError;
 use repo::Repository;
 use tonic::{
@@ -297,7 +298,7 @@ impl HostedGrpcClient {
                 continue;
             }
 
-            let old_value = remote_markers.get(&marker).copied();
+            let old_value = remote_markers.get(marker.as_str()).copied();
             if old_value == Some(change_id) {
                 continue;
             }
@@ -326,14 +327,15 @@ impl HostedGrpcClient {
             if !repo.store().has_state(&marker.change_id)? {
                 continue;
             }
-            match repo.refs().get_marker(&marker.name)? {
+            let marker_name = MarkerName::from(marker.name.as_str());
+            match repo.refs().get_marker(&marker_name)? {
                 Some(existing) if existing == marker.change_id => {}
                 Some(existing) => repo.refs().set_marker_cas(
-                    &marker.name,
+                    &marker_name,
                     refs::RefExpectation::Value(existing),
                     &marker.change_id,
                 )?,
-                None => repo.refs().create_marker(&marker.name, &marker.change_id)?,
+                None => repo.refs().create_marker(&marker_name, &marker.change_id)?,
             }
         }
         Ok(())

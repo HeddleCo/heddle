@@ -96,6 +96,6 @@ impl Signer for P256Signer {
     }
 
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), SignerError> {
-        Self::verify_with_public_key(data, &self.public_key(), signature)
+        Self::verify_with_public_key(data, self.public_key(), signature)
     }
 }

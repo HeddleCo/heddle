@@ -11,7 +11,7 @@ use grpc::heddle::v1::{
     push_message,
 };
 use objects::{
-    object::{ChangeId, ContentHash},
+    object::{ChangeId, ContentHash, MarkerName, ThreadName},
     store::PackObjectId,
 };
 use proto::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
@@ -584,7 +584,7 @@ impl HostedGrpcClient {
         let exchange_start = Instant::now();
         let mut exclude_states = Vec::new();
         if let Some(local_thread) = options.local_thread
-            && let Some(head) = repo.refs().get_thread(local_thread)?
+            && let Some(head) = repo.refs().get_thread(&ThreadName::from(local_thread))?
         {
             exclude_states.push(head);
         }
@@ -799,7 +799,7 @@ impl HostedGrpcClient {
                         if let Some(local_thread) = options.local_thread
                             && let Some(state) = final_state
                         {
-                            repo.refs().set_thread(local_thread, &state)?;
+                            repo.refs().set_thread(&ThreadName::from(local_thread), &state)?;
                         }
                         if let Some(state) = final_state
                             && allow_partial_fetch
@@ -1045,14 +1045,15 @@ fn apply_marker_snapshot(repo: &Repository, checkpoint: &[u8]) -> Result<bool, P
         if !repo.store().has_state(&change_id)? {
             continue;
         }
-        match repo.refs().get_marker(name)? {
+        let name = MarkerName::from(name);
+        match repo.refs().get_marker(&name)? {
             Some(existing) if existing == change_id => {}
             Some(existing) => repo.refs().set_marker_cas(
-                name,
+                &name,
                 refs::RefExpectation::Value(existing),
                 &change_id,
             )?,
-            None => repo.refs().create_marker(name, &change_id)?,
+            None => repo.refs().create_marker(&name, &change_id)?,
         }
     }
 

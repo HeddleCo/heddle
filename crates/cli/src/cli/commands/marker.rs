@@ -76,7 +76,7 @@ fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Resu
             _ => true,
         })
         .filter_map(|name| {
-            let state = repo.refs().get_marker(&name).ok()??;
+            let state = repo.refs().get_marker(name).ok()??;
             Some(MarkerEntry {
                 name: name.to_string(),
                 change_id: state.short(),

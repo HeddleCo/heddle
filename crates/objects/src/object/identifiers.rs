@@ -140,6 +140,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cmp_owned)] // exercising PartialEq<String> impl by design
     fn comparison_with_str() {
         let t = ThreadName::from("main");
         assert!(t == "main");

@@ -4,7 +4,7 @@ use std::{env, hint::black_box, path::Path};
 use cli::bench::{detect_renames_for_bench, find_merge_base_for_bench, three_way_merge_for_bench};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use objects::{
-    object::{Blob, ChangeId, Tree, TreeEntry},
+    object::{Blob, ChangeId, MarkerName, ThreadName, Tree, TreeEntry},
     store::{InMemoryStore, ObjectStore},
 };
 use refs::{Head, RefExpectation, RefManager};
@@ -188,22 +188,32 @@ fn setup_ref_manager() -> (TempDir, RefManager) {
 
 fn populate_threads(refs: &RefManager, count: usize) {
     for index in 0..count {
-        refs.set_thread(&format!("branch-{index:05}"), &ChangeId::generate())
-            .unwrap();
+        refs.set_thread(
+            &ThreadName::new(format!("branch-{index:05}")),
+            &ChangeId::generate(),
+        )
+        .unwrap();
     }
 }
 
 fn populate_markers(refs: &RefManager, count: usize) {
     for index in 0..count {
-        refs.create_marker(&format!("marker-{index:05}"), &ChangeId::generate())
-            .unwrap();
+        refs.create_marker(
+            &MarkerName::new(format!("marker-{index:05}")),
+            &ChangeId::generate(),
+        )
+        .unwrap();
     }
 }
 
 fn populate_remote_threads(refs: &RefManager, remote: &str, count: usize) {
     for index in 0..count {
-        refs.set_remote_thread(remote, &format!("branch-{index:05}"), &ChangeId::generate())
-            .unwrap();
+        refs.set_remote_thread(
+            remote,
+            &ThreadName::new(format!("branch-{index:05}")),
+            &ChangeId::generate(),
+        )
+        .unwrap();
     }
 }
 
@@ -497,7 +507,7 @@ fn bench_refs_update_thread_rebuild_summary(c: &mut Criterion) {
     for count in ref_scale_counts() {
         let (_temp, refs) = setup_ref_manager();
         populate_threads(&refs, count);
-        let hot = format!("branch-{:05}", count / 2);
+        let hot = ThreadName::new(format!("branch-{:05}", count / 2));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
                 refs.set_thread(&hot, &ChangeId::generate()).unwrap();
@@ -512,7 +522,7 @@ fn bench_refs_update_marker_rebuild_summary(c: &mut Criterion) {
     for count in ref_scale_counts() {
         let (_temp, refs) = setup_ref_manager();
         populate_markers(&refs, count);
-        let hot = format!("marker-{:05}", count / 2);
+        let hot = MarkerName::new(format!("marker-{:05}", count / 2));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
                 refs.set_marker_cas(&hot, RefExpectation::Any, &ChangeId::generate())
@@ -528,7 +538,7 @@ fn bench_refs_update_remote_thread_rebuild_summary(c: &mut Criterion) {
     for count in ref_scale_counts() {
         let (_temp, refs) = setup_ref_manager();
         populate_remote_threads(&refs, "origin", count);
-        let hot = format!("branch-{:05}", count / 2);
+        let hot = ThreadName::new(format!("branch-{:05}", count / 2));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, _| {
             b.iter(|| {
                 refs.set_remote_thread("origin", &hot, &ChangeId::generate())
@@ -907,14 +917,16 @@ fn setup_divergent_history() -> (
     std::fs::write(temp.path().join("shared.txt"), "base\n").unwrap();
     let base = repo.snapshot(Some("base".to_string()), None).unwrap();
 
-    repo.refs().set_thread("topic", &base.change_id).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("topic"), &base.change_id)
+        .unwrap();
 
     std::fs::write(temp.path().join("main-only.txt"), "main\n").unwrap();
     let main_tip = repo.snapshot(Some("main tip".to_string()), None).unwrap();
 
     repo.refs()
         .write_head(&Head::Attached {
-            thread: "topic".to_string(),
+            thread: ThreadName::new("topic"),
         })
         .unwrap();
     repo.goto(&base.change_id).unwrap();
@@ -923,7 +935,7 @@ fn setup_divergent_history() -> (
 
     repo.refs()
         .write_head(&Head::Attached {
-            thread: "main".to_string(),
+            thread: ThreadName::new("main"),
         })
         .unwrap();
     repo.goto(&main_tip.change_id).unwrap();
