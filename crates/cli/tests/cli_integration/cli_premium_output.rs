@@ -248,9 +248,12 @@ fn status_output_modes_are_explicit_under_non_tty_capture() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
+    // Default is text — no surprise JSON on pipes/subprocesses/`| less`.
     let default = heddle(&["status"], Some(temp.path())).unwrap();
-    serde_json::from_str::<Value>(&default)
-        .unwrap_or_else(|err| panic!("default non-TTY status should be JSON: {err}: {default}"));
+    assert!(
+        default.contains("Heddle status") && serde_json::from_str::<Value>(&default).is_err(),
+        "default status should be text, not JSON: {default}"
+    );
 
     let json = heddle(&["--output", "json", "status"], Some(temp.path())).unwrap();
     serde_json::from_str::<Value>(&json)
@@ -259,7 +262,7 @@ fn status_output_modes_are_explicit_under_non_tty_capture() {
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
         text.contains("Heddle status") && serde_json::from_str::<Value>(&text).is_err(),
-        "--output text should force human output: {text}"
+        "--output text should match the default: {text}"
     );
 }
 

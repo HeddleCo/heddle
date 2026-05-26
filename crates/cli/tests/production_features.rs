@@ -127,7 +127,10 @@ fn assert_stale_merge_refuses(path: &std::path::Path, thread: &str) {
 
 fn refresh_thread_expect_conflict(path: &std::path::Path, thread: &str) -> String {
     heddle(&["thread", "switch", thread], Some(path)).unwrap();
-    let refresh = heddle(&["thread", "refresh", thread], Some(path));
+    let refresh = heddle(
+        &["--output", "json", "thread", "refresh", thread],
+        Some(path),
+    );
     assert!(
         refresh
             .as_ref()
@@ -1676,7 +1679,7 @@ mod rebase {
         // …) rather than a single `completed` summary, so we treat
         // exit success + the emitted progress events as the
         // completion contract.
-        let result = heddle(&["rebase", "main"], Some(temp.path()));
+        let result = heddle(&["--output", "json", "rebase", "main"], Some(temp.path()));
         assert!(
             result.is_ok(),
             "rebase with conflicting file should complete: {:?}",

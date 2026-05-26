@@ -107,8 +107,10 @@ fn agent_api_reserve_heartbeat_release_round_trips_json() {
     assert_eq!(released["reservation"]["status"], "complete");
     assert!(released["verification"].is_object());
 
-    let listed: Value =
-        serde_json::from_str(&heddle(&["agent", "list"], Some(main.path())).unwrap()).unwrap();
+    let listed: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "agent", "list"], Some(main.path())).unwrap(),
+    )
+    .unwrap();
     assert_eq!(listed["reservations"].as_array().unwrap().len(), 1);
     assert!(listed["verification"].is_object());
 }

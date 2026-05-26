@@ -61,7 +61,10 @@ fn git_overlay_imports_explicit_remote_tracking_branch_ref() {
 
     let import_output = heddle(
         &[
+            "--output",
+            "json",
             "bridge",
+            "git",
             "import",
             "--path",
             ".",

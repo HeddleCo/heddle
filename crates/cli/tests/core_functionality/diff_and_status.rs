@@ -12,7 +12,11 @@ fn test_diff_between_arbitrary_states() {
     std::fs::write(temp.path().join("file.txt"), "version3\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "State C"], temp.path());
 
-    let result = heddle(&["diff", "HEAD~2", "HEAD"], Some(temp.path())).unwrap();
+    let result = heddle(
+        &["diff", "HEAD~2", "HEAD", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     // Pre-fix this assertion was just `is_ok()`, so the test passed even
     // when state-to-state diffs fell through to the
@@ -78,7 +82,7 @@ fn test_diff_stat_detects_clear_rename_with_small_edit() {
     )
     .unwrap();
 
-    let json = heddle(&["diff", "--stat"], Some(temp.path())).unwrap();
+    let json = heddle(&["diff", "--stat", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json)
         .unwrap_or_else(|_| panic!("diff --stat should emit JSON in tests. Got: {json}"));
     let changes = parsed["changes"]
@@ -248,7 +252,8 @@ fn test_native_status_warms_helper_for_second_run() {
 
     let mut helper_ready = false;
     for _ in 0..10 {
-        let output = heddle_with_env(&["monitor"], Some(temp.path()), &envs).unwrap();
+        let output =
+            heddle_with_env(&["monitor", "--output", "json"], Some(temp.path()), &envs).unwrap();
         let monitor: Value = serde_json::from_str(&output).unwrap();
         if monitor["backend"] == "native-helper" {
             assert_eq!(monitor["status"], "usable");

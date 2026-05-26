@@ -29,7 +29,10 @@ fn refresh_then_merge(temp: &TempDir, thread: &str, extra_args: &[&str]) -> Resu
 
 fn refresh_thread_expect_conflict(temp: &TempDir, thread: &str) -> String {
     heddle(&["thread", "switch", thread], Some(temp.path())).unwrap();
-    let result = heddle(&["thread", "refresh", thread], Some(temp.path()));
+    let result = heddle(
+        &["--output", "json", "thread", "refresh", thread],
+        Some(temp.path()),
+    );
     let err = result.expect_err("stale conflicting thread refresh should block");
     assert!(
         err.contains("thread_refresh_conflicted"),

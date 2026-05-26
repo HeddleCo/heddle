@@ -619,7 +619,11 @@ fn test_cherry_pick_with_subdirectories() {
     heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
     fs::create_dir_all(temp.path().join("src/models")).unwrap();
     fs::write(temp.path().join("src/models/user.rs"), "struct User {}").unwrap();
-    let snapshot_output = heddle(&["capture", "-m", "Add nested file"], Some(temp.path())).unwrap();
+    let snapshot_output = heddle(
+        &["capture", "-m", "Add nested file", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let snap: Value = serde_json::from_str(&snapshot_output).unwrap();
     let change_id = snap["change_id"].as_str().unwrap().to_string();
 

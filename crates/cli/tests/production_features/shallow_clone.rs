@@ -87,7 +87,7 @@ fn test_shallow_clone_depth_0() {
         result.err()
     );
 
-    let log_result = heddle(&["log"], Some(&local_path)).unwrap();
+    let log_result = heddle(&["log", "--output", "json"], Some(&local_path)).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&log_result).expect("log should be JSON");
     let states = parsed["states"].as_array().expect("states should be array");
     // 2 user snapshots. `init` does not create a persisted bootstrap state.
@@ -134,7 +134,7 @@ fn test_normal_clone_no_depth() {
     );
     assert!(result.is_ok(), "normal clone failed: {:?}", result.err());
 
-    let log_result = heddle(&["log"], Some(&local_path)).unwrap();
+    let log_result = heddle(&["log", "--output", "json"], Some(&local_path)).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&log_result).expect("log should be JSON");
     let states = parsed["states"].as_array().expect("states should be array");
     // 3 user snapshots. `init` does not create a persisted bootstrap state.

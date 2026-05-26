@@ -46,7 +46,19 @@ fn git_overlay_interop_bridge_shorthand_imports_current_branch() {
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert!(parsed["current_state"].is_null());
 
-    let import = heddle(&["bridge", "import", "--ref", "main"], Some(temp.path())).unwrap();
+    let import = heddle(
+        &[
+            "--output",
+            "json",
+            "bridge",
+            "git",
+            "import",
+            "--ref",
+            "main",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed_import: Value = serde_json::from_str(&import).unwrap_or(Value::Null);
     assert!(
         parsed_import["branches_synced"].as_u64() == Some(1)

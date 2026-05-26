@@ -115,7 +115,10 @@ fn create_merge_conflict(temp: &TempDir) {
     heddle(&["capture", "-m", "Main commit"], Some(temp.path())).unwrap();
 
     heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-    let refresh = heddle(&["thread", "refresh", "feature"], Some(temp.path()));
+    let refresh = heddle(
+        &["--output", "json", "thread", "refresh", "feature"],
+        Some(temp.path()),
+    );
     assert!(
         refresh
             .as_ref()

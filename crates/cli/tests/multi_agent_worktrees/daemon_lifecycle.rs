@@ -718,7 +718,7 @@ fn daemon_status_is_noop_success_when_daemon_absent() {
     let main = TempDir::new().unwrap();
     heddle(&["init"], Some(main.path())).unwrap();
 
-    let status = heddle(&["daemon", "status"], Some(main.path()))
+    let status = heddle(&["--output", "json", "daemon", "status"], Some(main.path()))
         .expect("daemon status must succeed even with no daemon running");
     let status: serde_json::Value =
         serde_json::from_str(&status).expect("captured daemon status should use the JSON contract");

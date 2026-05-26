@@ -118,7 +118,7 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
 
     // The merge MUST fail. Pre-fix it succeeded and `sub/a.txt`
     // vanished from the merged tree without conflict markers.
-    let result = heddle(&["merge", "feature"], Some(temp.path()));
+    let result = heddle(&["--output", "json", "merge", "feature"], Some(temp.path()));
     let err = result.expect_err(
         "merge against a corrupt subtree must fail loud; \
          a clean Ok here means the silent-corruption bug regressed",

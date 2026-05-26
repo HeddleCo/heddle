@@ -4955,7 +4955,7 @@ mod tests {
             .iter()
             .find(|option| option.long.as_deref() == Some("output"))
             .expect("global --output should be included in command options");
-        assert_eq!(output.possible_values, vec!["auto", "json", "text"]);
+        assert_eq!(output.possible_values, vec!["json", "text"]);
         for command in &catalog.commands {
             assert!(
                 !command

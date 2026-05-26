@@ -62,31 +62,28 @@ pub fn load_user_config_or_exit() -> UserConfig {
 /// Determine if output should be JSON.
 ///
 /// Resolution order (later wins):
-/// 1. user config `output.format` (or `auto` if unset)
+/// 1. user config `output.format` (default: `text`)
 /// 2. repo config `output.format` (falls back to user config)
-/// 3. `--output {auto|json|text}` CLI flag
+/// 3. `--output {json|text}` CLI flag
 ///
-/// `auto` resolves by stream type: text on a TTY, JSON when piped.
+/// No TTY/pipe auto-detection: the default is always text, and JSON
+/// is opt-in. Surprises like `heddle status | less` rendering JSON
+/// are gone.
 pub fn should_output_json(cli: &Cli, config: Option<&Config>) -> bool {
     let user_config = user_config_or_exit();
     let mut format = Some(user_config)
         .map(|cfg| cfg.output.format)
         .or_else(|| config.map(|cfg| cfg.output.format))
-        .unwrap_or(OutputFormat::Auto);
+        .unwrap_or_default();
 
     if let Some(output) = cli.output {
         format = match output {
-            OutputMode::Auto => OutputFormat::Auto,
             OutputMode::Json => OutputFormat::Json,
             OutputMode::Text => OutputFormat::Text,
         };
     }
 
-    match format {
-        OutputFormat::Json => true,
-        OutputFormat::Text => false,
-        OutputFormat::Auto => !is_tty(),
-    }
+    matches!(format, OutputFormat::Json)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

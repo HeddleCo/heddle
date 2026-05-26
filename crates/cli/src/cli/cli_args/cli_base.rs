@@ -47,8 +47,10 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output format. `auto` (default) renders text on a TTY and JSON when piped;
-    /// `json` and `text` override regardless of stream.
+    /// Output format. Default is `text`. Pass `--output json` for the
+    /// machine contract (stable `output_kind`, exit codes, recovery
+    /// templates). No TTY/pipe auto-detection — the default never
+    /// switches under you.
     #[arg(long, global = true, value_enum)]
     pub output: Option<OutputMode>,
 
@@ -83,7 +85,6 @@ pub struct Cli {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum OutputMode {
-    Auto,
     Json,
     Text,
 }

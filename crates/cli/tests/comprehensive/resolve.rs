@@ -52,7 +52,10 @@ fn test_resolve_multiple_conflicting_files() {
     heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
 
     heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
-    let refresh = heddle(&["thread", "refresh", "feature"], Some(temp.path()));
+    let refresh = heddle(
+        &["--output", "json", "thread", "refresh", "feature"],
+        Some(temp.path()),
+    );
     assert!(
         refresh
             .as_ref()

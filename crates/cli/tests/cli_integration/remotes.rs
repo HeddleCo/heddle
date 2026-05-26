@@ -2559,7 +2559,7 @@ fn test_cli_fetch_all_uses_discovered_remotes() {
     .unwrap();
     heddle(&["fetch", "origin"], Some(local.path())).unwrap();
 
-    let output = heddle(&["fetch", "--all"], Some(local.path())).unwrap();
+    let output = heddle(&["--output", "json", "fetch", "--all"], Some(local.path())).unwrap();
     assert!(
         output.contains("Fetched") || output.contains("\"refs_fetched\""),
         "fetch --all should report summary"

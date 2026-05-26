@@ -140,8 +140,11 @@ fn test_undo_refuses_when_untracked_file_present() {
     let untracked = temp.path().join("my-notes.md");
     std::fs::write(&untracked, "user-written content").unwrap();
 
-    let err = heddle(&["undo", "-n", "1"], Some(temp.path()))
-        .expect_err("undo must refuse on dirty worktree");
+    let err = heddle(
+        &["undo", "-n", "1", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("undo must refuse on dirty worktree");
     assert!(
         err.contains("untracked"),
         "error should mention untracked: {err}"
@@ -165,8 +168,11 @@ fn test_undo_refuses_when_tracked_file_modified() {
 
     std::fs::write(temp.path().join("a.txt"), "uncommitted edit").unwrap();
 
-    let err = heddle(&["undo", "-n", "1"], Some(temp.path()))
-        .expect_err("undo must refuse with modified file");
+    let err = heddle(
+        &["undo", "-n", "1", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("undo must refuse with modified file");
     assert!(
         err.contains("modified"),
         "error should mention modified: {err}"
@@ -215,8 +221,11 @@ fn test_cherry_pick_refuses_when_untracked_file_present() {
     let untracked = temp.path().join("user-notes.md");
     std::fs::write(&untracked, "user-written content").unwrap();
 
-    let err = heddle(&["cherry-pick", &feature_commit], Some(temp.path()))
-        .expect_err("cherry-pick must refuse on dirty worktree");
+    let err = heddle(
+        &["cherry-pick", &feature_commit, "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("cherry-pick must refuse on dirty worktree");
     assert!(
         err.contains("untracked"),
         "error should mention untracked: {err}"
@@ -254,8 +263,11 @@ fn test_cherry_pick_refuses_when_tracked_file_modified() {
     // Modify a tracked file without snapshotting.
     std::fs::write(temp.path().join("base.txt"), "uncommitted edit").unwrap();
 
-    let err = heddle(&["cherry-pick", &feature_commit], Some(temp.path()))
-        .expect_err("cherry-pick must refuse with modified file");
+    let err = heddle(
+        &["cherry-pick", &feature_commit, "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("cherry-pick must refuse with modified file");
     assert!(
         err.contains("modified"),
         "error should mention modified: {err}"
@@ -327,8 +339,11 @@ fn test_rebase_refuses_when_untracked_file_present() {
     let untracked = temp.path().join("user-notes.md");
     std::fs::write(&untracked, "user-written content").unwrap();
 
-    let err = heddle(&["rebase", "feature"], Some(temp.path()))
-        .expect_err("rebase must refuse on dirty worktree");
+    let err = heddle(
+        &["rebase", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("rebase must refuse on dirty worktree");
     assert!(
         err.contains("untracked"),
         "error should mention untracked: {err}"
@@ -355,8 +370,11 @@ fn test_rebase_refuses_when_tracked_file_modified() {
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
     std::fs::write(temp.path().join("base.txt"), "uncommitted edit").unwrap();
 
-    let err = heddle(&["rebase", "feature"], Some(temp.path()))
-        .expect_err("rebase must refuse with modified file");
+    let err = heddle(
+        &["rebase", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("rebase must refuse with modified file");
     assert!(
         err.contains("modified"),
         "error should mention modified: {err}"
@@ -2097,7 +2115,10 @@ fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
     heddle_must_succeed(&["capture", "-m", "main edit"], temp.path());
     heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
     let feature_tip_before = head_short(temp.path());
-    let refresh = heddle(&["thread", "refresh", "feature"], Some(temp.path()));
+    let refresh = heddle(
+        &["thread", "refresh", "feature", "--output", "json"],
+        Some(temp.path()),
+    );
     assert!(
         refresh
             .as_ref()
@@ -2489,7 +2510,7 @@ fn test_undo_rebase_refuses_when_worktree_dirty() {
     // sync with HEAD. The rebase batch must NOT be undone while this
     // edit could be silently destroyed by the rewind.
     std::fs::write(temp.path().join("a.txt"), "uncommitted change").unwrap();
-    let err = heddle(&["undo"], Some(temp.path()))
+    let err = heddle(&["undo", "--output", "json"], Some(temp.path()))
         .expect_err("undo of rebase must refuse on dirty worktree");
     assert!(
         err.contains("modified") || err.contains("dirty") || err.contains("untracked"),

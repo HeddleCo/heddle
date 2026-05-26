@@ -78,6 +78,13 @@ pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
                 .unwrap_or(error.as_str())
         );
         eprintln!("Next: {}", classification.primary_command);
+        // Always surface the rest of the typed recovery commands in
+        // text mode. JSON callers got them in `recovery_commands`;
+        // human readers shouldn't have to re-run with --output json
+        // to discover the escape hatch (e.g. `--force` variants).
+        if classification.recovery_commands.len() > 1 {
+            eprintln!("Also: {}", classification.recovery_commands[1..].join(", "));
+        }
         if matches!(
             kind.as_str(),
             "dirty_worktree" | "source_thread_uncaptured_work"
@@ -89,19 +96,10 @@ pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
             );
             eprintln!("Reason: {}", classification.would_change);
             eprintln!("Kept: {}", classification.preserved);
-            if classification.recovery_commands.len() > 1 {
-                eprintln!("Also: {}", classification.recovery_commands[1..].join(", "));
-            }
         } else if cli.verbose > 0 {
             eprintln!("Unsafe: {}", classification.unsafe_condition);
             eprintln!("Would change: {}", classification.would_change);
             eprintln!("Preserved: {}", classification.preserved);
-            if classification.recovery_commands.len() > 1 {
-                eprintln!(
-                    "Other recovery: {}",
-                    classification.recovery_commands[1..].join(", ")
-                );
-            }
             eprintln!("Hint: {hint}");
         }
     }

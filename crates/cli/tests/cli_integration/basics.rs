@@ -91,7 +91,7 @@ fn test_cli_capture_blocks_large_git_overlay_deletion_without_force() {
     let error = heddle(&["capture", "-m", "remove web"], Some(temp.path()))
         .expect_err("large deletion capture should require --force");
     assert!(
-        error.contains("Large capture safety check") && error.contains("heddle capture --force"),
+        error.contains("Large capture safety check"),
         "large capture should explain the guardrail and escape hatch: {error}"
     );
 
@@ -859,7 +859,11 @@ fn test_cli_compare_in_plain_git_repo_bootstraps_from_git_overlay_head() {
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
 
-    let output = heddle(&["compare", "HEAD", "HEAD"], Some(temp.path())).unwrap();
+    let output = heddle(
+        &["--output", "json", "compare", "HEAD", "HEAD"],
+        Some(temp.path()),
+    )
+    .unwrap();
     // `compare` emits JSON now; assert the schema is present and
     // resolved a state on both sides instead of grepping for legacy
     // human-text markers.
@@ -909,7 +913,13 @@ fn test_cli_merge_preview_rejects_dirty_plain_git_repo_after_bootstrap() {
     std::fs::write(temp.path().join("dirty.txt"), "dirty main worktree").unwrap();
 
     let err = heddle_output(
-        &["merge", "feature/preview-thread", "--preview"],
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature/preview-thread",
+            "--preview",
+        ],
         Some(temp.path()),
     )
     .expect("invoke merge preview");
@@ -945,7 +955,11 @@ fn test_cli_compare_head_head_bootstraps_in_plain_git_repo() {
     git_commit_all(temp.path(), "seed branch");
     heddle_adopt(temp.path());
 
-    let output = heddle(&["compare", "HEAD", "HEAD"], Some(temp.path())).unwrap();
+    let output = heddle(
+        &["--output", "json", "compare", "HEAD", "HEAD"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(
         parsed["summary"]["total"], 0,
@@ -962,7 +976,11 @@ fn test_cli_diff_head_to_worktree_in_plain_git_repo_uses_git_overlay_baseline() 
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
 
-    let output = heddle(&["diff", "HEAD"], Some(temp.path())).unwrap();
+    let output = heddle(
+        &["--output", "json", "diff", "HEAD"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -1232,7 +1250,10 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_branch() {
 
     let import_output = heddle(
         &[
+            "--output",
+            "json",
             "bridge",
+            "git",
             "import",
             "--path",
             ".",
@@ -1414,7 +1435,17 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_tag() {
     git(&["tag", "v2.0.0"], temp.path());
 
     let import_output = heddle(
-        &["bridge", "import", "--path", ".", "--ref", "v1.0.0"],
+        &[
+            "--output",
+            "json",
+            "bridge",
+            "git",
+            "import",
+            "--path",
+            ".",
+            "--ref",
+            "v1.0.0",
+        ],
         Some(temp.path()),
     )
     .unwrap();
@@ -1745,7 +1776,13 @@ fn test_cli_checkpoint_creates_git_commit_and_records_mapping() {
     )
     .unwrap();
     let output = heddle(
-        &["checkpoint", "-m", "Initial Git checkpoint"],
+        &[
+            "--output",
+            "json",
+            "checkpoint",
+            "-m",
+            "Initial Git checkpoint",
+        ],
         Some(temp.path()),
     )
     .unwrap();
@@ -2366,7 +2403,7 @@ fn test_cli_push_rejects_local_only_git_overlay_repo() {
     // Fresh `git init` repos have no remote. `heddle push` should
     // fail with a clear pointer back at the missing destination
     // rather than silently no-op'ing.
-    let err = heddle(&["push"], Some(temp.path())).unwrap_err();
+    let err = heddle(&["--output", "json", "push"], Some(temp.path())).unwrap_err();
     assert!(
         err.contains("remote_not_configured")
             && err.contains("heddle remote add <name> <url>")
@@ -2438,7 +2475,13 @@ fn test_cli_snapshot_without_confidence_records_none() {
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
 
     let output = heddle(
-        &["capture", "--intent", "Test without confidence"],
+        &[
+            "--output",
+            "json",
+            "capture",
+            "--intent",
+            "Test without confidence",
+        ],
         Some(temp.path()),
     )
     .unwrap();

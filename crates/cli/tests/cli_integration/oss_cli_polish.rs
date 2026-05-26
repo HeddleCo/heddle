@@ -3835,8 +3835,14 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
 }
 
 fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
-    let output =
-        heddle_output(args, Some(cwd)).unwrap_or_else(|err| panic!("heddle {args:?}: {err}"));
+    let mut full_args: Vec<&str> = Vec::with_capacity(args.len() + 2);
+    if !args.iter().any(|arg| *arg == "json" || *arg == "text") {
+        full_args.push("--output");
+        full_args.push("json");
+    }
+    full_args.extend_from_slice(args);
+    let output = heddle_output(&full_args, Some(cwd))
+        .unwrap_or_else(|err| panic!("heddle {full_args:?}: {err}"));
     let stdout = std::str::from_utf8(&output.stdout).unwrap_or("");
     let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
     if output.status.success() || !stdout.trim().is_empty() {
@@ -4297,9 +4303,8 @@ fn thread_switch_refuses_dirty_worktree_without_force() {
             && verbose_stderr.contains("Unsafe:")
             && verbose_stderr.contains("Would change:")
             && verbose_stderr.contains("Preserved:")
-            && verbose_stderr.contains(
-                "Other recovery: heddle capture -m \"...\", heddle stash push -m \"...\""
-            )
+            && verbose_stderr
+                .contains("Also: heddle capture -m \"...\", heddle stash push -m \"...\"")
             && verbose_stderr.contains("Hint:"),
         "dirty switch verbose should expose full preservation detail: {verbose_stderr}"
     );
@@ -4997,7 +5002,8 @@ fn dirty_goto_start_path_and_drop_refuse_without_force() {
     heddle(&["capture", "-m", "next"], Some(temp.path())).unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
-    let goto = heddle_output(&["goto", &base], Some(temp.path())).expect("invoke goto");
+    let goto = heddle_output(&["--output", "json", "goto", &base], Some(temp.path()))
+        .expect("invoke goto");
     assert!(!goto.status.success(), "dirty goto should fail");
     let envelope: Value = serde_json::from_slice(&goto.stderr)
         .unwrap_or_else(|err| panic!("dirty goto should emit JSON advice: {err}; {goto:?}"));
@@ -5019,7 +5025,14 @@ fn dirty_goto_start_path_and_drop_refuse_without_force() {
     );
 
     let start = heddle_output(
-        &["start", "dirty-start", "--path", checkout_arg],
+        &[
+            "--output",
+            "json",
+            "start",
+            "dirty-start",
+            "--path",
+            checkout_arg,
+        ],
         Some(temp.path()),
     )
     .expect("invoke start");
@@ -5042,8 +5055,11 @@ fn dirty_goto_start_path_and_drop_refuse_without_force() {
     )
     .unwrap();
     std::fs::write(checkout.join("tracked.txt"), "dirty worker\n").unwrap();
-    let drop = heddle_output(&["thread", "drop", "drop-target"], Some(temp.path()))
-        .expect("invoke thread drop");
+    let drop = heddle_output(
+        &["--output", "json", "thread", "drop", "drop-target"],
+        Some(temp.path()),
+    )
+    .expect("invoke thread drop");
     assert!(!drop.status.success(), "dirty drop should fail");
     let envelope: Value = serde_json::from_slice(&drop.stderr)
         .unwrap_or_else(|err| panic!("dirty drop should emit JSON advice: {err}; {drop:?}"));
@@ -5214,7 +5230,11 @@ fn revert_refuses_dirty_worktree_with_shared_advice() {
         .to_string();
 
     std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
-    let output = heddle_output(&["revert", &target], Some(temp.path())).expect("invoke revert");
+    let output = heddle_output(
+        &["--output", "json", "revert", &target],
+        Some(temp.path()),
+    )
+    .expect("invoke revert");
     assert!(!output.status.success(), "dirty revert should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let envelope: Value =
@@ -6558,6 +6578,8 @@ fn heavy_thread_start_explains_non_empty_workspace_recovery() {
     std::fs::write(target.join("draft.txt"), "uncaptured").unwrap();
     let output = heddle_output(
         &[
+            "--output",
+            "json",
             "start",
             "ux-thread",
             "--path",
@@ -9402,33 +9424,37 @@ fn index_json_emits_one_value_even_for_hidden_compat_alias() {
 }
 
 #[test]
-fn default_auto_output_is_json_when_stdout_is_piped_and_text_when_forced() {
+fn default_output_is_text_and_json_requires_explicit_flag() {
+    // Persona feedback (heddle#???): the old `--output auto` mode
+    // emitted JSON whenever stdout wasn't a TTY (pipes, subprocesses,
+    // `| less`). That surprised every interactive user. The contract
+    // is now: default = text, `--output json` for JSON, no
+    // auto-switching.
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("work.txt"), "pending").unwrap();
 
-    let auto = heddle_output(&["status"], Some(temp.path())).expect("invoke auto status");
-    assert!(auto.status.success(), "auto status should succeed");
+    let default = heddle_output(&["status"], Some(temp.path())).expect("invoke default status");
+    assert!(default.status.success(), "default status should succeed");
+    let default_stdout = String::from_utf8_lossy(&default.stdout);
     assert!(
-        auto.stderr.is_empty(),
-        "auto JSON stdout must not be accompanied by stderr prose: {}",
-        String::from_utf8_lossy(&auto.stderr)
+        default_stdout.contains("Heddle status"),
+        "default status should render text, not JSON: {default_stdout}"
     );
-    let auto_stdout = String::from_utf8_lossy(&auto.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&auto_stdout)
-        .unwrap_or_else(|_| panic!("piped auto status should emit JSON: {auto_stdout}"));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&default_stdout).is_err(),
+        "default status must not be JSON-parseable (would prove the old auto-mode regressed): {default_stdout}"
+    );
+
+    let json = heddle_output(&["--output", "json", "status"], Some(temp.path()))
+        .expect("invoke explicit-json status");
+    assert!(json.status.success(), "explicit-json status should succeed");
+    let json_stdout = String::from_utf8_lossy(&json.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&json_stdout)
+        .unwrap_or_else(|_| panic!("--output json should emit JSON: {json_stdout}"));
     assert_eq!(parsed["thread_health"], "uncaptured");
     assert_eq!(parsed["changed_path_count"], 1);
     assert_eq!(parsed["changes"]["added"].as_array().map(Vec::len), Some(1));
-
-    let text = heddle_output(&["--output", "text", "status"], Some(temp.path()))
-        .expect("invoke forced-text status");
-    assert!(text.status.success(), "forced text status should succeed");
-    let text_stdout = String::from_utf8_lossy(&text.stdout);
-    assert!(
-        text_stdout.contains("Heddle status"),
-        "--output text should override piped auto JSON: {text_stdout}"
-    );
 }
 
 #[test]

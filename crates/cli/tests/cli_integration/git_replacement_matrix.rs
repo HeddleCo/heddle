@@ -571,6 +571,8 @@ fn git_replacement_matrix_clone_status_capture_push_without_git_on_path() {
 
     let clone = heddle_without_git(
         &[
+            "--output",
+            "json",
             "clone",
             origin.to_str().expect("origin path should be utf8"),
             work.to_str().expect("work path should be utf8"),
@@ -616,8 +618,17 @@ fn git_replacement_matrix_file_url_clone_and_import_without_git_on_path() {
     std::fs::create_dir(&import_work).expect("create import workdir");
     let origin_url = format!("file://{}", origin.display());
 
-    let clone = heddle_without_git(&["clone", &origin_url, work.to_str().unwrap()], temp.path())
-        .unwrap_or_else(|err| panic!("file:// clone should not require git helpers: {err}"));
+    let clone = heddle_without_git(
+        &[
+            "--output",
+            "json",
+            "clone",
+            &origin_url,
+            work.to_str().unwrap(),
+        ],
+        temp.path(),
+    )
+    .unwrap_or_else(|err| panic!("file:// clone should not require git helpers: {err}"));
     assert!(
         clone.contains("Imported 1 Git commits") || clone.contains("\"commits_imported\":1"),
         "file:// clone output should describe native Git import: {clone}"

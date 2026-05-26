@@ -279,9 +279,12 @@ impl Default for DefaultsConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
-    #[default]
-    Auto,
     Json,
+    // `auto` is the historical name for the default; accept it as an
+    // alias so user configs from before the TTY-detection rip survive
+    // an upgrade without a hard error. New writes use `text`.
+    #[serde(alias = "auto")]
+    #[default]
     Text,
 }
 
@@ -420,7 +423,7 @@ mod tests {
 
         assert_eq!(config.worktree.ignore, vec![".heddle".to_string()]);
         assert_eq!(config.worktree.fsmonitor.mode, crate::FsMonitorMode::Off);
-        assert_eq!(config.output.format, OutputFormat::Auto);
+        assert_eq!(config.output.format, OutputFormat::Text);
         assert!(config.policies.default_policy.is_none());
     }
 
@@ -433,7 +436,7 @@ version = 1
         let config: RepoConfig = toml::from_str(toml).expect("config should deserialize");
 
         assert_eq!(config.repository.version, 1);
-        assert_eq!(config.output.format, OutputFormat::Auto);
+        assert_eq!(config.output.format, OutputFormat::Text);
         assert!(config.policies.default_policy.is_none());
         assert!(config.agent.provider.is_none());
         assert!(config.agent.model.is_none());

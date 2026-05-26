@@ -112,8 +112,17 @@ fn raw_git_preservation_action() -> &'static str {
 }
 
 fn json(cwd: &std::path::Path, args: &[&str]) -> Value {
-    let output =
-        heddle_output(args, Some(cwd)).unwrap_or_else(|err| panic!("heddle {args:?}: {err}"));
+    // Helper exists to parse JSON; explicit --output json is now
+    // required (no more auto-on-pipe). Inject it if the caller
+    // didn't already supply it so existing call sites Just Work.
+    let mut full_args: Vec<&str> = Vec::with_capacity(args.len() + 2);
+    if !args.iter().any(|arg| *arg == "json" || *arg == "text") {
+        full_args.push("--output");
+        full_args.push("json");
+    }
+    full_args.extend_from_slice(args);
+    let output = heddle_output(&full_args, Some(cwd))
+        .unwrap_or_else(|err| panic!("heddle {full_args:?}: {err}"));
     let stdout = std::str::from_utf8(&output.stdout).unwrap_or("");
     let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
     if output.status.success() || !stdout.trim().is_empty() {
@@ -4598,8 +4607,11 @@ fn git_overlay_matrix_commit_refuses_detached_head_without_advancing_branch() {
     git(&["checkout", "--detach", "HEAD"], temp.path());
     std::fs::write(temp.path().join("detached-commit.txt"), "detached work").unwrap();
 
-    let output = heddle_output(&["commit", "-m", "detached commit"], Some(temp.path()))
-        .expect("heddle commit should run");
+    let output = heddle_output(
+        &["--output", "json", "commit", "-m", "detached commit"],
+        Some(temp.path()),
+    )
+    .expect("heddle commit should run");
     assert!(
         !output.status.success(),
         "commit must refuse on detached Git HEAD: stdout={} stderr={}",
@@ -6908,7 +6920,13 @@ fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
     assert_operator_json_contract(&blocked, "ship");
 
     let refresh_error = heddle(
-        &["thread", "refresh", "feature/manual-recover"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "refresh",
+            "feature/manual-recover",
+        ],
         Some(temp.path()),
     )
     .expect_err("refresh should materialize durable conflict state before manual resolution");
@@ -7048,7 +7066,13 @@ fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
     assert_operator_json_contract(&blocked, "ship");
 
     let refresh_error = heddle(
-        &["thread", "refresh", "feature/manual-push"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "refresh",
+            "feature/manual-push",
+        ],
         Some(temp.path()),
     )
     .expect_err("refresh should materialize durable conflict state before manual resolution");
