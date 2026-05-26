@@ -30,14 +30,18 @@ use std::{fs, path::Path};
 /// The PR C-0 audit reported 237 via a broader regex; this test's
 /// detector is narrower (requires literal `anyhow!("…"`, `bail!("…"`,
 /// or `anyhow!(format!(`), which is what we actually want to police.
-/// 172 is the count the narrow detector finds against the same source
-/// tree at the time of PR C-2.
+/// 172 was the count the narrow detector found against the source tree
+/// at the time of PR C-2; PR C-3 migrated the top 24 ranked sites (the
+/// 6 typed `RecoveryAdvice` variants `missing_target_thread`,
+/// `merge_no_common_ancestor`, `rebase_referenced_state_missing`,
+/// `rebase_state_corrupted`, `thread_referenced_state_missing`, and
+/// `thread_checkout_unavailable`), dropping the count to 152.
 ///
 /// Decrease when you migrate sites to typed `RecoveryAdvice` (PR C-3
 /// and follow-ups). Only increase with explicit justification — every
 /// new untyped site is a future Priya-style "run heddle status" dead
 /// end.
-const MAX_UNTYPED_ANYHOW_SITES: usize = 172;
+const MAX_UNTYPED_ANYHOW_SITES: usize = 152;
 
 #[test]
 fn untyped_error_sites_do_not_regress() {

@@ -95,7 +95,12 @@ impl MergePlan {
 
         let merge_base_id = graph
             .find_merge_base(current_change_id, target_change_id)?
-            .ok_or_else(|| anyhow!("No common ancestor found"))?;
+            .ok_or_else(|| {
+                anyhow!(RecoveryAdvice::merge_no_common_ancestor(
+                    &current_change_id.short(),
+                    &target_change_id.short(),
+                ))
+            })?;
         let base_tree = load_tree(repo, &merge_base_id)?;
         let current_tree = load_tree(repo, current_change_id)?;
         let target_tree = load_tree(repo, target_change_id)?;

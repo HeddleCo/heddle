@@ -377,14 +377,20 @@ pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
 /// callers that pass `--print-cd-path` and get an error should fall back to
 /// `heddle start foo` for the full report.
 fn render_cd_path(output: &ThreadOpOutput) -> Result<()> {
+    let thread_name = output
+        .thread
+        .as_ref()
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| output.name.clone());
     let path = output
         .thread
         .as_ref()
         .and_then(|t| t.path.as_deref())
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "this thread has no filesystem checkout path; `--print-cd-path` only works for materialized workspaces"
-            )
+            anyhow!(RecoveryAdvice::thread_checkout_unavailable(
+                &thread_name,
+                "--print-cd-path",
+            ))
         })?;
     println!("{path}");
     Ok(())
@@ -1628,9 +1634,9 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let existing_thread_state = repo.refs().get_thread(&args.name)?;
     let base_state = match (&args.from, existing_thread_state) {
         (Some(spec), Some(existing)) => {
-            let requested = repo
-                .resolve_state(spec)?
-                .ok_or_else(|| anyhow!("State '{}' not found", spec))?;
+            let requested = repo.resolve_state(spec)?.ok_or_else(|| {
+                anyhow!(RecoveryAdvice::thread_referenced_state_missing(spec, "State"))
+            })?;
             if requested != existing {
                 return Err(anyhow!(thread_anchor_mismatch_advice(
                     &args.name, &existing, &requested
@@ -1639,9 +1645,9 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             existing
         }
         (None, Some(existing)) => existing,
-        (Some(spec), None) => repo
-            .resolve_state(spec)?
-            .ok_or_else(|| anyhow!("State '{}' not found", spec))?,
+        (Some(spec), None) => repo.resolve_state(spec)?.ok_or_else(|| {
+            anyhow!(RecoveryAdvice::thread_referenced_state_missing(spec, "State"))
+        })?,
         (None, None) => ensure_current_state(
             repo,
             &UserConfig::load_default().unwrap_or_default(),
@@ -1832,7 +1838,12 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
                 summarize_confidence(state.confidence),
             )
         })
-        .ok_or_else(|| anyhow!("Base state '{}' not found", base_state.short()))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::thread_referenced_state_missing(
+                &base_state.short(),
+                "Base state",
+            ))
+        })?;
     let (base_root, verification_summary, confidence_summary) = base_state_summary;
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let thread_state = Thread {
@@ -2198,7 +2209,12 @@ pub(crate) fn cmd_thread_create(
                 summarize_confidence(state.confidence),
             )
         })
-        .ok_or_else(|| anyhow!("Base state '{}' not found", base_short))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::thread_referenced_state_missing(
+                &base_short,
+                "Base state",
+            ))
+        })?;
     let target_thread = match repo.head_ref()? {
         Head::Attached { thread } => Some(thread),
         Head::Detached { .. } => None,
@@ -2566,9 +2582,10 @@ pub(crate) fn cmd_thread_switch(
             .as_ref()
             .and_then(|t| t.execution_path.clone())
             .ok_or_else(|| {
-                anyhow!(
-                    "thread '{name}' has no on-disk worktree; `--print-cd-path` only works for materialized threads"
-                )
+                anyhow!(RecoveryAdvice::thread_checkout_unavailable(
+                    &name,
+                    "--print-cd-path",
+                ))
             })?;
         println!("{path}");
         return Ok(());

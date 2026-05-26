@@ -384,7 +384,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     let target_thread = thread
         .target_thread
         .clone()
-        .ok_or_else(|| anyhow!("Thread '{}' has no target thread", thread_id))?;
+        .ok_or_else(|| anyhow!(RecoveryAdvice::missing_target_thread(thread_id, "refresh thread")))?;
 
     refresh_thread_freshness(repo, &mut thread)?;
     if thread.freshness == ThreadFreshness::Current {

@@ -1167,6 +1167,179 @@ impl RecoveryAdvice {
         )
     }
 
+    /// `thread refresh` was asked to refresh a thread that has no
+    /// recorded `target_thread`. The thread metadata lives on disk but
+    /// the integration target was never written, so the refresh has no
+    /// concrete destination to rebase onto.
+    ///
+    /// Surfaces Priya's #1 untyped error site: the bare
+    /// `Thread '<id>' has no target thread` line gave the operator no
+    /// next step. The typed envelope hands back the inspection commands
+    /// (`heddle thread show`, `heddle thread list`) and the
+    /// re-configuration command shape so the JSON envelope's
+    /// `recovery_action_templates` field carries executable argv.
+    pub(crate) fn missing_target_thread(thread_id: &str, attempted_verb: &str) -> Self {
+        let show_command = format!("heddle thread show {thread_id}");
+        let refresh_command = format!("heddle thread refresh {thread_id}");
+        Self::safety_refusal(
+            "missing_target_thread",
+            format!("Thread '{thread_id}' has no target thread"),
+            format!(
+                "Inspect the thread's metadata with `{show_command}` to see which target_thread to set, then retry the refresh once the thread has a recorded target."
+            ),
+            format!(
+                "{attempted_verb} was requested for thread '{thread_id}', but the thread record has no `target_thread` field"
+            ),
+            format!(
+                "{attempted_verb} needs a concrete target thread to rebase onto and cannot safely guess one"
+            ),
+            "no thread refs, checkout directories, mounts, or agent reservations were changed",
+            show_command.clone(),
+            vec![
+                show_command,
+                refresh_command,
+                "heddle thread list".to_string(),
+            ],
+        )
+    }
+
+    /// Merge planning could not find a common ancestor between the
+    /// current change and the target change. This usually means the two
+    /// histories are completely disjoint — typically because the
+    /// repositories were imported separately or one side was rewritten
+    /// without preserving identity.
+    pub(crate) fn merge_no_common_ancestor(current_ref: &str, target_ref: &str) -> Self {
+        let current_show = format!("heddle thread show {current_ref}");
+        let target_show = format!("heddle thread show {target_ref}");
+        Self::safety_refusal(
+            "merge_no_common_ancestor",
+            format!(
+                "No common ancestor between '{current_ref}' and '{target_ref}' — the two histories are disjoint"
+            ),
+            format!(
+                "Inspect each side with `{current_show}` and `{target_show}` to confirm whether one history was imported separately, then choose an integration path that doesn't require a shared base."
+            ),
+            format!(
+                "merge planning needs a shared base commit, but the commit graph for '{current_ref}' and '{target_ref}' has no common ancestor"
+            ),
+            "merging two disjoint histories without an explicit reconciliation strategy could overwrite one side's commits",
+            "repository state, refs, metadata, and worktree files were left unchanged",
+            current_show.clone(),
+            vec![current_show, target_show, "heddle log".to_string()],
+        )
+    }
+
+    /// A rebase replay step referenced a state, commit, or tree the
+    /// object store no longer has. Usually means a pruning operation
+    /// ran between rebase start and rebase resume, or the persisted
+    /// `REBASE_STATE` references objects from a sibling repository.
+    /// Abort recovers — the tolerant loader will rewind to
+    /// `original_head` without needing the missing objects.
+    pub(crate) fn rebase_referenced_state_missing(state_id: &str, role: &str) -> Self {
+        let primary = "heddle abort".to_string();
+        Self::safety_refusal(
+            "rebase_referenced_state_missing",
+            format!("{role} '{state_id}' not found while continuing rebase"),
+            format!(
+                "Abort with `{primary}` to rewind to the pre-rebase head, then inspect the object store with `heddle log` and `heddle gc --dry-run` before restarting the rebase."
+            ),
+            format!(
+                "rebase replay referenced {role} '{state_id}', but the object store does not contain it (possibly pruned or imported from a sibling repository)"
+            ),
+            "continuing the rebase without the referenced object could replay against the wrong tree or leave the rebase half-applied",
+            "the working tree, refs, and rebase state were left at the failure point so the abort path can rewind cleanly",
+            primary.clone(),
+            vec![primary, "heddle log".to_string()],
+        )
+    }
+
+    /// A persisted `REBASE_STATE` file could not be parsed or violated
+    /// an invariant. The strict loader (used by `--continue`) hard-fails
+    /// so a half-applied batch never reaches the oplog; the tolerant
+    /// loader (used by `--abort`) absorbs most of these cases and rewinds
+    /// to `original_head`.
+    ///
+    /// `field` describes which part of REBASE_STATE failed validation
+    /// (e.g. `"Missing 'onto'"`, `"decode pending_advance"`,
+    /// `"Inconsistent rebase state"`); `detail` carries the underlying
+    /// cause when there is one (e.g. a hex/msgpack decode error) and may
+    /// be empty. Tests assert on the `field` substring, so the user-
+    /// visible `error` always starts with `field`.
+    pub(crate) fn rebase_state_corrupted(field: &str, detail: impl fmt::Display) -> Self {
+        let primary = "heddle abort".to_string();
+        let detail_str = detail.to_string();
+        let error = if detail_str.trim().is_empty() {
+            field.to_string()
+        } else {
+            format!("{field}: {detail_str}")
+        };
+        Self::safety_refusal(
+            "rebase_state_corrupted",
+            error.clone(),
+            format!(
+                "Abort with `{primary}` — the tolerant loader rewinds to the pre-rebase head even when the strict --continue loader rejects this file."
+            ),
+            format!("REBASE_STATE failed strict validation: {error}"),
+            "resuming a corrupted rebase could replay an incomplete batch or commit a blank transaction id, polluting the oplog",
+            "the working tree, refs, and rebase state were left untouched so the abort path can read original_head",
+            primary.clone(),
+            vec![primary],
+        )
+    }
+
+    /// A thread command resolved a state spec or anchor and the
+    /// referenced state was not in the object store. Distinct from
+    /// `state_not_found` because the lookup happens inside thread
+    /// command flow (start/create/anchor) rather than the generic state
+    /// resolver.
+    pub(crate) fn thread_referenced_state_missing(state_id: &str, role: &str) -> Self {
+        let show = format!("heddle thread show {state_id}");
+        Self::safety_refusal(
+            "thread_referenced_state_missing",
+            format!("{role} '{state_id}' not found"),
+            format!(
+                "List recent states with `heddle log` to find a reachable id, inspect threads with `heddle thread list`, or use `{show}` if the id is a thread name."
+            ),
+            format!("{role} '{state_id}' is not in the object store"),
+            "starting or anchoring a thread to a missing state would create thread metadata that no inspection path can resolve",
+            "thread refs, checkout directories, and thread metadata were left unchanged",
+            "heddle log",
+            vec![
+                "heddle log".to_string(),
+                "heddle thread list".to_string(),
+                show,
+            ],
+        )
+    }
+
+    /// `--print-cd-path` (or another path-only output mode) was passed
+    /// to a thread command but the thread has no on-disk worktree to
+    /// `cd` into. Lightweight (non-materialized) threads do not own a
+    /// directory — the operator needs to materialize the thread or use
+    /// a different command that doesn't require a checkout path.
+    pub(crate) fn thread_checkout_unavailable(thread_name: &str, attempted_verb: &str) -> Self {
+        let start_command = format!("heddle thread start {thread_name} --path ../{thread_name}");
+        let show_command = format!("heddle thread show {thread_name}");
+        Self::safety_refusal(
+            "thread_checkout_unavailable",
+            format!(
+                "thread '{thread_name}' has no on-disk worktree; `--print-cd-path` only works for materialized threads"
+            ),
+            format!(
+                "Materialize the thread with `{start_command}`, or inspect its mode with `{show_command}` to see whether it should be promoted from lightweight."
+            ),
+            format!(
+                "{attempted_verb} requires a concrete filesystem path, but thread '{thread_name}' is registered as lightweight (no materialized checkout)"
+            ),
+            format!(
+                "{attempted_verb} cannot print a checkout path for a thread that never had one materialized"
+            ),
+            "thread refs, checkout directories, and thread metadata were left unchanged",
+            show_command.clone(),
+            vec![show_command, "heddle thread list".to_string()],
+        )
+    }
+
     pub fn primary_hint(&self) -> &str {
         &self.hint
     }
