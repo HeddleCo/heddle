@@ -20,7 +20,8 @@ use crate::exit::HeddleExitCode;
 /// parse it cleanly. The envelope is a stderr-only contract — the stdout schemas in
 /// `crates/cli/src/cli/commands/schemas.rs` are untouched.
 pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
-    let classification = classify_error(err);
+    let verb_help = verb_specific_help_command(cli);
+    let classification = classify_error_with_verb(err, verb_help.as_deref());
     let hint = classification.hint.clone();
     let kind = classification.kind.clone();
     let error = display_error_message(err, &kind);
@@ -336,7 +337,39 @@ fn command_templates(commands: &[String]) -> Vec<ActionTemplate> {
 /// `objects::fs_atomic` predicates we promise actionable hints for. Returns
 /// structured recovery details for the matched class. Generic failures still
 /// get a non-empty envelope so JSON callers never have to scrape stderr.
+/// Build the verb-specific help command for the active CLI invocation,
+/// or `None` if no concrete verb path resolves. Used as a per-call
+/// fallback recovery template so even untyped error envelopes ship a
+/// "where to learn more" entry tied to the command that just failed
+/// — replacing the historical bare `heddle status` hint for everything.
+fn verb_specific_help_command(cli: &Cli) -> Option<String> {
+    let path = crate::cli::commands::command_catalog::command_path(&cli.command);
+    if path.is_empty() {
+        return None;
+    }
+    Some(format!("heddle help {}", path.join(" ")))
+}
+
+#[cfg(test)]
 fn classify_error(err: &anyhow::Error) -> ErrorClassification {
+    classify_error_with_verb(err, None)
+}
+
+fn classify_error_with_verb(
+    err: &anyhow::Error,
+    verb_help: Option<&str>,
+) -> ErrorClassification {
+    let mut classification = classify_error_inner(err);
+    if classification.kind == "runtime_error"
+        && let Some(help) = verb_help
+        && !classification.recovery_commands.iter().any(|c| c == help)
+    {
+        classification.recovery_commands.push(help.to_string());
+    }
+    classification
+}
+
+fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
     use objects::error::HeddleError;
     for cause in err.chain() {
         if let Some(advice) = cause.downcast_ref::<RecoveryAdvice>() {
