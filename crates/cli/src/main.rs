@@ -527,10 +527,7 @@ async fn async_main() -> Result<()> {
 
         Commands::Workspace { command } => cmd_workspace(&cli, command.clone()).await,
 
-        Commands::Stack(args) => {
-            resolve_operation_id(&cli)?;
-            cmd_stack(&cli, args.clone())
-        }
+        Commands::Stack(args) => cmd_stack(&cli, args.clone()),
 
         Commands::Merge(MergeArgs {
             thread,

@@ -56,6 +56,11 @@ fn heddle_with_env(
 ) -> Result<String, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
     cmd.args(translate_legacy_args(args));
+    // Pin a principal identity so captures don't refuse under bare
+    // CI environments. Explicit `envs` overrides win because they're
+    // applied after.
+    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
     cmd.envs(envs.iter().copied());
 
     if let Some(dir) = cwd {

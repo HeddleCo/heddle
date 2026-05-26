@@ -27,7 +27,11 @@ use crate::{
 mod rebase_ops;
 mod rebase_state;
 
-use rebase_ops::{mint_rebase_transaction_id, replay_commits, replay_commits_silent};
+use rebase_ops::{
+    flush_rebase_batch, mint_rebase_transaction_id, replay_commits, replay_commits_silent,
+};
+
+use super::ff_record::ff_advance_deferred;
 pub(crate) use rebase_state::load_rebase_state as load_persisted_rebase_state;
 use rebase_state::{
     RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state,
@@ -180,7 +184,11 @@ fn run_rebase(
     let is_ancestor = is_ancestor_of(repo, &current_state.change_id, &target_change_id)?;
 
     if is_ancestor {
-        record_ff_advance(repo, target_thread, &target_change_id)?;
+        // Wrap the single-FF arm in the same TransactionCommit-bracketed
+        // batch shape replay_commits uses, so `heddle undo` treats this
+        // path identically to a multi-commit rebase (heddle#198).
+        let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
+        flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))

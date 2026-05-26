@@ -2057,19 +2057,15 @@ fn log_never_surfaces_unknown_principal_after_init() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    // Write the repo-level principal AFTER `init` but BEFORE the first
-    // snapshot. This matches the demo flow exactly. Before the fix,
-    // the seed-root state stamped during `init` already carried the
-    // `Unknown` fallback, so `log` would surface it on every thread.
-    let principal_name = "Adam";
-    let principal_email = "adam@heddle.sh";
-    fs::write(
-        temp.path().join(".heddle/config.toml"),
-        format!(
-            "[repository]\nversion = 1\n\n[principal]\nname = \"{principal_name}\"\nemail = \"{principal_email}\"\n\n[agent]\n\n[defaults]\nconfidence = 0.85\n"
-        ),
-    )
-    .unwrap();
+    // The test invocation inherits the test helper's principal env
+    // (`HEDDLE_PRINCIPAL_NAME` / `_EMAIL`), which takes precedence
+    // over the synthetic Unknown fallback. The historical regression
+    // this test pins was that the seed-root state stamped during
+    // `init` carried `Unknown <unknown@example.com>` even when a
+    // principal was available — verify every reachable log state
+    // carries a real principal and never the Unknown fallback.
+    let principal_name = "Heddle Test";
+    let principal_email = "test@heddle.dev";
 
     fs::write(temp.path().join("base.txt"), "base").unwrap();
     heddle(

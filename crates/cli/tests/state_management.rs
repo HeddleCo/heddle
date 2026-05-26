@@ -47,6 +47,8 @@ fn translate_legacy_args(args: &[&str]) -> Vec<String> {
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
     cmd.args(translate_legacy_args(args));
+    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
 
     if let Some(dir) = cwd {
         cmd.current_dir(dir);

@@ -67,6 +67,11 @@ fn heddle(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    // Heddle refuses captures without an accountable principal. Pin
+    // the identity here so the suite is deterministic regardless of
+    // the runner's git global config or shell env.
+    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
 
     let output = cmd.output().map_err(|e| e.to_string())?;
     let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();
