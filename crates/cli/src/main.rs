@@ -12,6 +12,7 @@ use cli::cli::{
     BridgeCommands,
     commands::{cmd_bridge_git, cmd_git_overlay_guide},
 };
+use cli::exit::HeddleExitCode;
 use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
@@ -166,10 +167,10 @@ async fn async_main() -> Result<()> {
                 )
             {
                 print_parse_error_json_envelope(&err);
-                std::process::exit(err.exit_code());
+                std::process::exit(HeddleExitCode::from_clap(&err).into());
             }
             err.print()?;
-            std::process::exit(err.exit_code());
+            std::process::exit(HeddleExitCode::from_clap(&err).into());
         }
     };
     // Resolve color decision once, before any rendering site fires.
@@ -206,13 +207,11 @@ async fn async_main() -> Result<()> {
 
     if explicit_json_requested(&cli) && !command_contract.supports_json {
         telemetry.shutdown();
-        print_error_with_hint(
-            &cli,
-            &anyhow::anyhow!(cli::cli::commands::RecoveryAdvice::json_unsupported(
-                &command_name
-            )),
-        );
-        std::process::exit(1);
+        let err = anyhow::anyhow!(cli::cli::commands::RecoveryAdvice::json_unsupported(
+            &command_name
+        ));
+        print_error_with_hint(&cli, &err);
+        std::process::exit(HeddleExitCode::Usage.into());
     }
 
     match run_local_idempotency_if_requested(&cli, &command_name, command_supports_op_id) {
@@ -223,8 +222,9 @@ async fn async_main() -> Result<()> {
         Ok(false) => {}
         Err(err) => {
             telemetry.shutdown();
+            let code = HeddleExitCode::from_error(&err);
             print_error_with_hint(&cli, &err);
-            std::process::exit(1);
+            std::process::exit(code.into());
         }
     }
 
@@ -869,8 +869,9 @@ async fn async_main() -> Result<()> {
         Ok(()) => Ok(()),
         Err(err) if is_broken_pipe_error(&err) => Ok(()),
         Err(err) => {
+            let code = HeddleExitCode::from_error(&err);
             print_error_with_hint(&cli, &err);
-            std::process::exit(1);
+            std::process::exit(code.into());
         }
     }
 }

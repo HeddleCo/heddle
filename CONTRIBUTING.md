@@ -103,6 +103,15 @@ takes that struct. The same struct serializes to JSON via
 `serde_json::to_string`; selection is decided by
 `cli::cli::should_output_json(cli, Some(repo.config()))`.
 
+**Exit codes.** Use `crate::exit::HeddleExitCode` rather than `1`. The
+shell sink in `main.rs` already routes through `from_error` /
+`from_clap`; per-command contracts declare the codes they may emit
+via `CommandContract.exit_codes`, and the table in
+[`docs/exit-codes.md`](docs/exit-codes.md) is the agent-facing
+reference. New codes need both a contract entry and a table row — the
+`exit_codes_declared_have_doc_entry` lint catches the missing-row
+case.
+
 ## Short-flag conventions
 
 Documented in
