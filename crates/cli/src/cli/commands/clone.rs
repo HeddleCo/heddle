@@ -917,18 +917,47 @@ fn select_clone_thread(
         return Ok(requested.to_string());
     }
     let threads = repo.refs().list_threads()?;
+    // Prefer the remote's stated default (refs/remotes/origin/HEAD —
+    // gix sets it via the fetch handshake). Without this, multi-branch
+    // remotes attach to whatever the import happened to walk last,
+    // which on real repos is often a Dependabot or release branch
+    // rather than the developer's `main`/`master`.
+    if let Some(remote_default) = read_remote_head_branch(repo)
+        && threads.iter().any(|thread| thread == &remote_default)
+    {
+        return Ok(remote_default);
+    }
     if let Some(hint) = git_head_branch_hint
         && threads.iter().any(|thread| thread == hint)
     {
         return Ok(hint.to_string());
     }
-    if threads.iter().any(|thread| thread == "main") {
-        return Ok("main".to_string());
+    for fallback in ["main", "master", "trunk"] {
+        if threads.iter().any(|thread| thread == fallback) {
+            return Ok(fallback.to_string());
+        }
     }
     threads
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!(clone_git_overlay_no_branch_refs_advice(remote_label)))
+}
+
+/// Resolve the remote's stated default branch from
+/// `refs/remotes/origin/HEAD`, which gix populates from the fetch
+/// handshake. Returns the bare branch name (e.g. `master`) or `None`
+/// when the symref is absent or doesn't target a branch under origin/.
+fn read_remote_head_branch(repo: &Repository) -> Option<String> {
+    let head_path = repo.root().join(".git/refs/remotes/origin/HEAD");
+    let contents = fs::read_to_string(&head_path).ok()?;
+    let trimmed = contents.trim();
+    let suffix = trimmed.strip_prefix("ref: ")?;
+    let branch = suffix.strip_prefix("refs/remotes/origin/")?;
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch.to_string())
+    }
 }
 
 /// Read `.git/HEAD` as a symbolic ref into `refs/heads/`, returning
