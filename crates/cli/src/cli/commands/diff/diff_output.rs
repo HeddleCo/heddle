@@ -888,11 +888,228 @@ fn semantic_path(change: &SemanticChangeEntry) -> String {
 mod tests {
     use super::{
         SIGNATURE_CHANGE_SEPARATOR, aligned_added_tokens, group_semantic_changes, paint_line,
-        paint_signature_change_item_lines, signature_change_display_segments,
+        paint_signature_change_item_lines, render_diff_patch,
+        signature_change_display_segments,
     };
     use crate::cli::commands::diff::diff_types::{
-        LineDiff, SemanticChangeEntry, change_line_counts, should_render_modified_pair,
+        DiffOutput, FileChange, FileEolState, LineDiff, SemanticChangeEntry, change_line_counts,
+        should_render_modified_pair,
     };
+
+    fn modified_change_with_eol(
+        path: &str,
+        lines: Vec<LineDiff>,
+        eol: FileEolState,
+    ) -> FileChange {
+        FileChange {
+            path: path.to_string(),
+            kind: "modified".to_string(),
+            lines: Some(lines),
+            eol,
+            ..Default::default()
+        }
+    }
+
+    fn diff_output_with(changes: Vec<FileChange>) -> DiffOutput {
+        DiffOutput::new(None, None, changes, None, None, None)
+    }
+
+    /// `lines: None` is the binary / unreadable case. The patch
+    /// renderer must skip it without emitting a header (otherwise
+    /// downstream tools would see `--- a/foo` `+++ b/foo` followed by
+    /// nothing, which `patch(1)` reads as a malformed hunk).
+    #[test]
+    fn render_diff_patch_skips_change_with_no_lines() {
+        let change = FileChange {
+            path: "binary.bin".to_string(),
+            kind: "modified".to_string(),
+            binary: true,
+            lines: None,
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.is_empty(),
+            "binary-only change must emit nothing: {rendered:?}"
+        );
+    }
+
+    /// A change whose `lines` vector is present but empty must also
+    /// be skipped — the file path is known but there's no hunk body
+    /// to render. Mixed batches (one renderable, one empty) must keep
+    /// rendering the renderable change.
+    #[test]
+    fn render_diff_patch_skips_change_with_empty_lines() {
+        let empty = FileChange {
+            path: "empty.txt".to_string(),
+            kind: "modified".to_string(),
+            lines: Some(Vec::new()),
+            ..Default::default()
+        };
+        let real = modified_change_with_eol(
+            "real.txt",
+            vec![
+                LineDiff::with_lines("@", "@ -1,1 +1,1 @@", None, None),
+                LineDiff::with_lines("-", "old", Some(1), None),
+                LineDiff::with_lines("+", "new", None, Some(1)),
+            ],
+            FileEolState::default(),
+        );
+        let rendered = render_diff_patch(&diff_output_with(vec![empty, real]));
+        assert!(
+            !rendered.contains("empty.txt"),
+            "skipped change must not emit a header: {rendered}"
+        );
+        assert!(
+            rendered.contains("--- a/real.txt"),
+            "renderable change must still be emitted: {rendered}"
+        );
+    }
+
+    /// When both sides lack a trailing newline AND their tails land on
+    /// the same context line, the renderer emits the line once and a
+    /// single `\ No newline at end of file` marker that documents both
+    /// sides' state. `git diff` does the same — two markers in a row
+    /// would be a corruption.
+    #[test]
+    fn render_diff_patch_collapses_both_side_no_eol_marker_on_shared_tail() {
+        // `more` is the tail for both sides; the change is on the line
+        // above (hello -> world). Both blobs end without `\n`.
+        let lines = vec![
+            LineDiff::with_lines("@", "@ -1,2 +1,2 @@", None, None),
+            LineDiff::with_lines("-", "hello", Some(1), None),
+            LineDiff::with_lines("+", "world", None, Some(1)),
+            LineDiff::with_lines(" ", "more", Some(2), Some(2)),
+        ];
+        let eol = FileEolState {
+            old_has_final_newline: false,
+            new_has_final_newline: false,
+            old_line_count: 2,
+            new_line_count: 2,
+        };
+        let change = modified_change_with_eol("tail.txt", lines, eol);
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+
+        let marker_count = rendered.matches("\\ No newline at end of file").count();
+        assert_eq!(
+            marker_count, 1,
+            "shared-tail double-no-eol must emit exactly one marker, got:\n{rendered}"
+        );
+        // The context line must NOT be split into `-more`/`+more` —
+        // that's the wrong branch and would confuse `git apply` about
+        // whether the line is being modified.
+        assert!(
+            !rendered.contains("-more\n"),
+            "context tail must not be split when both sides agree:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("+more\n"),
+            "context tail must not be split when both sides agree:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(" more\n\\ No newline at end of file\n"),
+            "marker must sit immediately after the shared context line:\n{rendered}"
+        );
+    }
+
+    /// When only the OLD side lacks a trailing newline and its tail is
+    /// a context line, the renderer must split that line into a
+    /// `-content` (with the marker after it) + `+content` pair so the
+    /// patch unambiguously documents that the OLD file ends without
+    /// `\n` while the NEW file ends with one.
+    #[test]
+    fn render_diff_patch_splits_context_tail_when_only_old_lacks_newline() {
+        // Diff for OLD `hello` (no eol) -> NEW `hello\nmore\n`:
+        // ` hello` is the old tail; `+more` is the trailing addition.
+        let lines = vec![
+            LineDiff::with_lines("@", "@ -1,1 +1,2 @@", None, None),
+            LineDiff::with_lines(" ", "hello", Some(1), Some(1)),
+            LineDiff::with_lines("+", "more", None, Some(2)),
+        ];
+        let eol = FileEolState {
+            old_has_final_newline: false,
+            new_has_final_newline: true,
+            old_line_count: 1,
+            new_line_count: 2,
+        };
+        let change = modified_change_with_eol("old.txt", lines, eol);
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+
+        assert!(
+            rendered.contains("-hello\n\\ No newline at end of file\n+hello\n"),
+            "OLD-side context-tail split must emit `-hello` + marker + `+hello`:\n{rendered}"
+        );
+        // Only the OLD side carries a marker — the NEW side ends with
+        // `\n` so its tail line must NOT be followed by a marker.
+        let marker_count = rendered.matches("\\ No newline at end of file").count();
+        assert_eq!(
+            marker_count, 1,
+            "exactly one marker expected (OLD side only):\n{rendered}"
+        );
+    }
+
+    /// Mirror of the OLD-only case: when only the NEW side lacks a
+    /// trailing newline and its tail is a shared context line, the
+    /// split emits `-content` + `+content` + marker so the patch
+    /// states "the file ends without `\n` after applying".
+    #[test]
+    fn render_diff_patch_splits_context_tail_when_only_new_lacks_newline() {
+        // Diff for OLD `hello\nmore\n` -> NEW `hello` (no eol):
+        // ` hello` is the new tail; `-more` is the removal.
+        let lines = vec![
+            LineDiff::with_lines("@", "@ -1,2 +1,1 @@", None, None),
+            LineDiff::with_lines(" ", "hello", Some(1), Some(1)),
+            LineDiff::with_lines("-", "more", Some(2), None),
+        ];
+        let eol = FileEolState {
+            old_has_final_newline: true,
+            new_has_final_newline: false,
+            old_line_count: 2,
+            new_line_count: 1,
+        };
+        let change = modified_change_with_eol("new.txt", lines, eol);
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+
+        assert!(
+            rendered.contains("-hello\n+hello\n\\ No newline at end of file\n"),
+            "NEW-side context-tail split must emit `-hello` + `+hello` + marker:\n{rendered}"
+        );
+        let marker_count = rendered.matches("\\ No newline at end of file").count();
+        assert_eq!(
+            marker_count, 1,
+            "exactly one marker expected (NEW side only):\n{rendered}"
+        );
+    }
+
+    /// When the tail is a `-` (deletion) on the OLD side and the OLD
+    /// blob lacked a trailing newline, the marker goes right after the
+    /// `-line` — same as `git diff` for a delete-the-last-line patch
+    /// against a no-eol source. The `+` branch is the mirror.
+    #[test]
+    fn render_diff_patch_marker_after_minus_line_when_old_tail_is_deletion() {
+        // OLD has 2 lines (no eol on `tail`), NEW has 1 line (`only`,
+        // with eol). The diff is two replacements; the second `-tail`
+        // is the OLD tail.
+        let lines = vec![
+            LineDiff::with_lines("@", "@ -1,2 +1,1 @@", None, None),
+            LineDiff::with_lines("-", "only", Some(1), None),
+            LineDiff::with_lines("-", "tail", Some(2), None),
+            LineDiff::with_lines("+", "only", None, Some(1)),
+        ];
+        let eol = FileEolState {
+            old_has_final_newline: false,
+            new_has_final_newline: true,
+            old_line_count: 2,
+            new_line_count: 1,
+        };
+        let change = modified_change_with_eol("del.txt", lines, eol);
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+
+        assert!(
+            rendered.contains("-tail\n\\ No newline at end of file\n"),
+            "marker must follow the OLD tail deletion line:\n{rendered}"
+        );
+    }
 
     #[test]
     fn modified_pair_compacts_only_when_lines_share_context() {

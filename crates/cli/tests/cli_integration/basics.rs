@@ -3384,3 +3384,200 @@ fn test_cli_diff_patch_works_on_plain_git_fast_path() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Plain-Git `--patch` for a NEW file (no entry in HEAD, present in
+/// the worktree) must emit a `--- /dev/null`-style add hunk via the
+/// gix path. The status-only fast path used to silently drop the body
+/// for every kind, not just modified, so the added branch needs its
+/// own coverage. We additionally assert the patch applies through
+/// `git apply --check` against a clone of the seed state.
+#[test]
+fn test_cli_diff_patch_plain_git_added_file_emits_hunk() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("kept.txt"), "anchor\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    std::fs::write(temp.path().join("new.txt"), "alpha\nbeta\n").unwrap();
+    // git status sees an untracked file as "added" only once staged.
+    git(&["add", "new.txt"], temp.path());
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    assert!(
+        patch.contains("+++ b/new.txt"),
+        "ADDED file must produce a `+++ b/<path>` header:\n{patch}"
+    );
+    assert!(
+        patch.contains("+alpha") && patch.contains("+beta"),
+        "ADDED file body must include every new line:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("kept.txt"), "anchor\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed apply");
+
+    let mut child = Command::new("git")
+        .args(["apply", "--check"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("git apply should finish");
+    assert!(
+        out.status.success(),
+        "git apply --check must accept a plain-Git add patch;\npatch=\n{patch}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Plain-Git `--patch` for a DELETED file (present in HEAD, missing
+/// from the worktree) must emit a `--- a/...`-style delete hunk with
+/// every old line marked `-`. Mirror of the ADDED case above; the
+/// status-only fallback used to drop the body here too.
+#[test]
+fn test_cli_diff_patch_plain_git_deleted_file_emits_hunk() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("doomed.txt"), "gamma\ndelta\n").unwrap();
+    std::fs::write(temp.path().join("kept.txt"), "anchor\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    std::fs::remove_file(temp.path().join("doomed.txt")).unwrap();
+    git(&["add", "-A"], temp.path());
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    assert!(
+        patch.contains("--- a/doomed.txt"),
+        "DELETED file must produce a `--- a/<path>` header:\n{patch}"
+    );
+    assert!(
+        patch.contains("-gamma") && patch.contains("-delta"),
+        "DELETED file body must include every removed line:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("doomed.txt"), "gamma\ndelta\n").unwrap();
+    std::fs::write(apply_dir.path().join("kept.txt"), "anchor\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed apply");
+
+    let mut child = Command::new("git")
+        .args(["apply", "--check"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("git apply should finish");
+    assert!(
+        out.status.success(),
+        "git apply --check must accept a plain-Git delete patch;\npatch=\n{patch}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `heddle --output json diff` from a plain-Git checkout (no `heddle
+/// init`) must carry the rendered unified diff in the top-level
+/// `patch` field — same contract as the heddle path. Without this,
+/// structured consumers reading the JSON would have to reconstruct
+/// the patch from the per-line array, defeating the field's purpose.
+#[test]
+fn test_cli_diff_json_plain_git_patch_field_round_trips() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    let original = "a\nb\nc\n";
+    std::fs::write(temp.path().join("file.txt"), original).unwrap();
+    git_commit_all(temp.path(), "seed plain-git json");
+    let modified = "a\nB\nc\n";
+    std::fs::write(temp.path().join("file.txt"), modified).unwrap();
+
+    let output = heddle_output(&["--output", "json", "diff", "--patch"], Some(temp.path()))
+        .expect("heddle diff --patch should run");
+    assert!(
+        output.status.success(),
+        "heddle diff --patch should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = json_stdout(&output, "plain-git --patch json");
+    let patch_field = value
+        .get("patch")
+        .and_then(Value::as_str)
+        .expect("JSON output must include top-level `patch` field");
+    assert!(
+        patch_field.contains("--- a/file.txt"),
+        "patch field must carry the unified-diff body: {patch_field}"
+    );
+    assert!(
+        patch_field.contains("-b") && patch_field.contains("+B"),
+        "patch field must include the actual edit: {patch_field}"
+    );
+}
+
+/// The JSON `.patch` field is populated for the heddle (state-to-worktree)
+/// path too, even when the CLI flag is the default (no `--patch`). This
+/// is the round-trip contract for structured consumers: they should
+/// never have to reassemble the patch from the per-line array.
+#[test]
+fn test_cli_diff_json_heddle_patch_field_present_without_flag() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("file.txt"), "x\ny\nz\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("file.txt"), "x\nY\nz\n").unwrap();
+
+    let output =
+        heddle_output(&["--output", "json", "diff"], Some(temp.path())).expect("heddle should run");
+    assert!(output.status.success());
+    let value = json_stdout(&output, "heddle diff json");
+    let patch_field = value
+        .get("patch")
+        .and_then(Value::as_str)
+        .expect("JSON output must include top-level `patch` field");
+    assert!(
+        patch_field.contains("--- a/file.txt") && patch_field.contains("+++ b/file.txt"),
+        "patch field must carry the standard headers: {patch_field}"
+    );
+}
+
+/// `--name-only` must NOT trigger patch rendering — the printer only
+/// reads `change.path`. Asserting "no headers, no `@@`, file paths
+/// only" pins the disjointness from `--patch` so a future refactor
+/// that accidentally always populates the patch text still doesn't
+/// leak it into the name-only printer.
+#[test]
+fn test_cli_diff_name_only_does_not_emit_patch_body() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("a.txt"), "alpha\n").unwrap();
+    std::fs::write(temp.path().join("b.txt"), "beta\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("a.txt"), "ALPHA\n").unwrap();
+    std::fs::write(temp.path().join("b.txt"), "BETA\n").unwrap();
+
+    let listing = heddle(&["diff", "--name-only"], Some(temp.path())).unwrap();
+
+    assert!(
+        !listing.contains("--- a/") && !listing.contains("+++ b/") && !listing.contains("@@"),
+        "name-only output must not include unified-diff headers:\n{listing}"
+    );
+    assert!(
+        listing.contains("a.txt") && listing.contains("b.txt"),
+        "name-only output must still list each changed path:\n{listing}"
+    );
+}
