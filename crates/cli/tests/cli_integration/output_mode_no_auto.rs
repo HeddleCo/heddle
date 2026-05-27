@@ -99,11 +99,13 @@ fn repo_config_with_output_format_auto_errors_with_typed_envelope() {
 
     let config_path = temp.path().join(".heddle").join("config.toml");
     let existing = std::fs::read_to_string(&config_path).expect("repo config exists after init");
-    assert!(
-        !existing.contains("[output]"),
-        "init shouldn't write an [output] section by default: {existing}"
+    // `init` writes an empty `[output]` section. Inject `format = "auto"`
+    // into it so the toml parser hits the rejection path.
+    let mutated = existing.replace("[output]\n", "[output]\nformat = \"auto\"\n");
+    assert_ne!(
+        mutated, existing,
+        "test fixture should mutate the [output] section: {existing}"
     );
-    let mutated = format!("{existing}\n[output]\nformat = \"auto\"\n");
     std::fs::write(&config_path, &mutated).expect("write mutated config");
 
     // Any command that loads the repo config exercises the parse path.
@@ -143,8 +145,7 @@ fn repo_config_with_output_format_auto_errors_with_typed_envelope() {
     let stderr_json_text = String::from_utf8_lossy(&json_out.stderr);
     let last_line = stderr_json_text
         .lines()
-        .filter(|line| line.trim_start().starts_with('{'))
-        .next_back()
+        .rfind(|line| line.trim_start().starts_with('{'))
         .unwrap_or_else(|| panic!("expected a JSON envelope on stderr; got: {stderr_json_text}"));
     let envelope: Value = serde_json::from_str(last_line.trim()).unwrap_or_else(|err| {
         panic!("stderr JSON envelope should parse: {err}: {last_line}")

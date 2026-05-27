@@ -108,6 +108,21 @@ pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
     }
 }
 
+/// Pull the `invalid output.format: '<value>' — ...` sentence out of a
+/// multi-line toml-parser error so the user-facing envelope stays
+/// focused on the field name, the bad value, and the valid set. The
+/// surrounding `TOML parse error at line ...` framing is dropped because
+/// the `Next:` line names the recovery step and the JSON envelope
+/// carries the structured fields.
+fn extract_invalid_output_format_message(raw: &str) -> String {
+    raw.lines()
+        .rev()
+        .map(|line| line.trim())
+        .find(|line| line.starts_with("invalid output.format"))
+        .map(|line| line.to_string())
+        .unwrap_or_else(|| raw.to_string())
+}
+
 fn compact_dirty_worktree_condition(condition: &str) -> String {
     const PREFIX: &str = "unsaved worktree path(s): ";
     let Some(paths) = condition.strip_prefix(PREFIX) else {
@@ -395,6 +410,34 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 return ErrorClassification::from_advice(&advice);
             }
         if let Some(heddle_err) = cause.downcast_ref::<HeddleError>() {
+            // `output.format = "auto"` is rejected at config-parse time by
+            // the hand-rolled `OutputFormat` deserializer (see
+            // `crates/repo/src/repo_config.rs`). The error string carries
+            // the field-and-value contract; we match on it here so the
+            // user gets a typed `Next:` envelope instead of a generic
+            // runtime fallback.
+            if let HeddleError::Config(message) = heddle_err
+                && message.contains("invalid output.format")
+            {
+                return ErrorClassification {
+                    kind: "invalid_repo_config_output_format".to_string(),
+                    human_error: Some(extract_invalid_output_format_message(message)),
+                    hint: "Edit `.heddle/config.toml` and set `output.format` to `text` or `json`."
+                        .to_string(),
+                    unsafe_condition:
+                        "repository configuration declares an unknown output.format value"
+                            .to_string(),
+                    would_change:
+                        "the requested command did not run because Heddle could not load the repository config"
+                            .to_string(),
+                    preserved:
+                        "no repository objects, refs, metadata, or worktree files were changed"
+                            .to_string(),
+                    primary_command: "heddle status".to_string(),
+                    recovery_commands: vec!["heddle status".to_string()],
+                    extra_json_fields: serde_json::Map::new(),
+                };
+            }
             match heddle_err {
                 HeddleError::RepositoryNotFound(path) => {
                     let command =

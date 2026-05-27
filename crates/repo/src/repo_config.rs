@@ -276,16 +276,48 @@ impl Default for DefaultsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     Json,
-    // `auto` is the historical name for the default; accept it as an
-    // alias so user configs from before the TTY-detection rip survive
-    // an upgrade without a hard error. New writes use `text`.
-    #[serde(alias = "auto")]
     #[default]
     Text,
+}
+
+// Hand-written Deserialize so a legacy `output.format = "auto"` fails
+// with a field-named, value-named message instead of the default serde
+// "unknown variant" wording. The bug class #271 closes is the silent
+// JSON-when-piped surprise the old `auto` mode produced; rather than
+// keeping an alias that would re-route it to `text`, pre-1.0 we error
+// loudly so the operator updates the config. The error string is the
+// load-bearing contract — the CLI's error envelope (see
+// `print_error_with_hint`) classifies it by substring match.
+impl<'de> Deserialize<'de> for OutputFormat {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct OutputFormatVisitor;
+        impl<'de> serde::de::Visitor<'de> for OutputFormatVisitor {
+            type Value = OutputFormat;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("'text' or 'json'")
+            }
+            fn visit_str<E>(self, value: &str) -> std::result::Result<OutputFormat, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "text" => Ok(OutputFormat::Text),
+                    "json" => Ok(OutputFormat::Json),
+                    other => Err(E::custom(format!(
+                        "invalid output.format: '{other}' — valid values are 'text' or 'json'"
+                    ))),
+                }
+            }
+        }
+        deserializer.deserialize_str(OutputFormatVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
