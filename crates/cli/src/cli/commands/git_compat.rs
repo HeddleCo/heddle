@@ -592,12 +592,20 @@ fn git_index_intent_for_root_with_ignore(
     }
 
     let tracked_paths: BTreeSet<String> = index_entries.keys().cloned().collect();
+    let gitlink_paths: BTreeSet<String> = index_entries
+        .iter()
+        .filter(|(_, entry)| entry.mode == Mode::COMMIT)
+        .map(|(path, _)| path.clone())
+        .collect();
     for (path, entry) in &index_entries {
+        if entry.mode == Mode::COMMIT {
+            continue;
+        }
         if worktree_entry_changed(root, path, entry)? {
             intent.extra_paths.push(format!("unstaged: {path}"));
         }
     }
-    for path in untracked_worktree_paths(root, &tracked_paths, ignore_patterns)? {
+    for path in untracked_worktree_paths(root, &tracked_paths, &gitlink_paths, ignore_patterns)? {
         intent.extra_paths.push(format!("untracked: {path}"));
     }
 
@@ -839,6 +847,7 @@ fn worktree_entry_changed(root: &Path, path: &str, entry: &IndexEntryIntent) -> 
 fn untracked_worktree_paths(
     root: &Path,
     tracked_paths: &BTreeSet<String>,
+    gitlink_paths: &BTreeSet<String>,
     ignore_patterns: &[String],
 ) -> Result<Vec<String>> {
     // The `ignore` crate walks the tree honoring per-directory
@@ -849,12 +858,31 @@ fn untracked_worktree_paths(
     // would have failed to ignore `src/foo.tmp`. The `ignore_patterns`
     // arg layers heddle's own ignore policy on top.
     let extra_patterns: Vec<String> = ignore_patterns.to_vec();
+    // Clone the gitlink set into the closure so the walker prunes
+    // any submodule subtree — `tracked_paths` only contains the
+    // submodule path itself, so without this prune every file under
+    // a clean submodule worktree would be reported as untracked.
+    let gitlinks = gitlink_paths.clone();
+    let root_owned = root.to_path_buf();
     let walker = ignore::WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
         .git_exclude(true)
         .git_global(true)
-        .filter_entry(move |entry| !is_git_or_heddle_dir(entry.path()))
+        .filter_entry(move |entry| {
+            if is_git_or_heddle_dir(entry.path()) {
+                return false;
+            }
+            if let Ok(relative) = entry.path().strip_prefix(&root_owned)
+                && !relative.as_os_str().is_empty()
+            {
+                let rel = pathbuf_to_git_path(relative);
+                if gitlinks.contains(&rel) {
+                    return false;
+                }
+            }
+            true
+        })
         .build();
     let mut paths = Vec::new();
     for entry in walker {
