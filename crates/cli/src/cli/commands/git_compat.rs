@@ -139,7 +139,16 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             &tree,
             &worktree_status_options(Some(repo.config())),
         )?;
-        if status.is_clean() {
+        // A clean worktree (matches Heddle's current tree) can still
+        // hide real index-only intent on a Git-overlay checkout — e.g.
+        // `git rm --cached path` stages a deletion without touching
+        // the file on disk. Treating that as "nothing to commit" would
+        // silently drop the staged removal, so fall through to the
+        // Git-overlay staged-index path below when one exists.
+        let has_staged_index_intent = !args.all
+            && repo.capability() == RepositoryCapability::GitOverlay
+            && !git_index_intent(&repo)?.staged_paths.is_empty();
+        if status.is_clean() && !has_staged_index_intent {
             let trust = build_repository_verification_state(&repo);
             if trust.status == "needs_checkpoint" {
                 preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;

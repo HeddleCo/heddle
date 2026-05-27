@@ -945,6 +945,63 @@ fn git_replacement_matrix_commit_staged_index_without_git_on_path() {
     assert!(temp.path().join("scratch.txt").exists());
 }
 
+/// `git rm --cached path` stages a deletion without changing the
+/// worktree, so `compare_worktree_cached_with_options` reports clean
+/// even though the Git index has real intent. `heddle commit -m ...`
+/// must consult the staged-index plan instead of short-circuiting on
+/// the clean worktree and either reporting "nothing to commit" or
+/// writing a generic checkpoint.
+#[test]
+fn git_replacement_matrix_commit_staged_removal_with_clean_worktree_without_git_on_path() {
+    let temp = TempDir::new().unwrap();
+    git_ok(&["init", "--initial-branch", "main"], temp.path());
+    configure_repo_local_git_identity(temp.path());
+    std::fs::write(temp.path().join("file.txt"), "keep\n").unwrap();
+    git_ok(&["add", "file.txt"], temp.path());
+    git_ok(&["commit", "-m", "seed"], temp.path());
+
+    assert_clean_json_without_git(&["--output", "json", "adopt", "--ref", "main"], temp.path());
+
+    git_ok(&["rm", "--cached", "file.txt"], temp.path());
+
+    let status = assert_clean_json_without_git(&["--output", "json", "status"], temp.path());
+    assert_eq!(status["git_index"]["commit_mode"], "staged_index");
+    assert_eq!(
+        status["git_index"]["staged_paths"],
+        serde_json::json!(["file.txt"]),
+        "staged removal must surface in the staged-index plan: {status}"
+    );
+
+    let commit = assert_clean_json_without_git(
+        &["--output", "json", "commit", "-m", "drop staged"],
+        temp.path(),
+    );
+    assert_eq!(
+        commit["output_kind"], "commit",
+        "clean-worktree+staged-removal must reach commit_staged_index, not the nothing-to-commit \
+         or generic-checkpoint branch: {commit}"
+    );
+    assert_eq!(commit["git_index"]["commit_mode"], "staged_index");
+    assert_eq!(
+        commit["git_index"]["staged_paths"],
+        serde_json::json!(["file.txt"])
+    );
+    assert_eq!(
+        commit["git_index"]["will_commit"],
+        serde_json::json!(["file.txt"])
+    );
+
+    assert_eq!(
+        git_stdout(&["ls-tree", "HEAD", "file.txt"], temp.path()),
+        "",
+        "HEAD tree should no longer contain the removed path"
+    );
+    assert!(
+        temp.path().join("file.txt").exists(),
+        "git rm --cached must leave the worktree copy in place"
+    );
+}
+
 #[test]
 fn git_replacement_matrix_merge_git_commit_pushes_checkpoint_without_git_on_path() {
     let temp = TempDir::new().unwrap();
