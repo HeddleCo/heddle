@@ -290,8 +290,12 @@ pub enum OutputFormat {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OutputConfig {
+    // Optional so callers can distinguish "repo explicitly set
+    // `output.format`" from "repo left it at the default" — needed
+    // to layer repo config on top of user config without the
+    // repo's default overwriting a user-configured value.
     #[serde(default)]
-    pub format: OutputFormat,
+    pub format: Option<OutputFormat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -423,7 +427,7 @@ mod tests {
 
         assert_eq!(config.worktree.ignore, vec![".heddle".to_string()]);
         assert_eq!(config.worktree.fsmonitor.mode, crate::FsMonitorMode::Off);
-        assert_eq!(config.output.format, OutputFormat::Text);
+        assert_eq!(config.output.format, None);
         assert!(config.policies.default_policy.is_none());
     }
 
@@ -436,7 +440,7 @@ version = 1
         let config: RepoConfig = toml::from_str(toml).expect("config should deserialize");
 
         assert_eq!(config.repository.version, 1);
-        assert_eq!(config.output.format, OutputFormat::Text);
+        assert_eq!(config.output.format, None);
         assert!(config.policies.default_policy.is_none());
         assert!(config.agent.provider.is_none());
         assert!(config.agent.model.is_none());

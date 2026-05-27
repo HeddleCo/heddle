@@ -71,10 +71,9 @@ pub fn load_user_config_or_exit() -> UserConfig {
 /// are gone.
 pub fn should_output_json(cli: &Cli, config: Option<&Config>) -> bool {
     let user_config = user_config_or_exit();
-    let mut format = Some(user_config)
-        .map(|cfg| cfg.output.format)
-        .or_else(|| config.map(|cfg| cfg.output.format))
-        .unwrap_or_default();
+    let mut format = config
+        .and_then(|cfg| cfg.output.format)
+        .unwrap_or(user_config.output.format);
 
     if let Some(output) = cli.output {
         format = match output {

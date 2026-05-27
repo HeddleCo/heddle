@@ -29,20 +29,23 @@ struct VerifyOutput {
 pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
-    let (trust, presentation) = if let Some(probe) = build_plain_git_verification_probe(start)? {
-        (
-            probe.trust,
-            crate::cli::render::RepositoryPresentation {
-                label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
-                context: None,
-            },
-        )
-    } else {
-        let repo = Repository::open(start)?;
-        let trust = build_repository_verification_state(&repo);
-        let presentation = crate::cli::render::repository_presentation(&repo, None, None);
-        (trust, presentation)
-    };
+    let (trust, presentation, repo_config) =
+        if let Some(probe) = build_plain_git_verification_probe(start)? {
+            (
+                probe.trust,
+                crate::cli::render::RepositoryPresentation {
+                    label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
+                    context: None,
+                },
+                None,
+            )
+        } else {
+            let repo = Repository::open(start)?;
+            let trust = build_repository_verification_state(&repo);
+            let presentation = crate::cli::render::repository_presentation(&repo, None, None);
+            let config = repo.config().clone();
+            (trust, presentation, Some(config))
+        };
     let output = VerifyOutput {
         output_kind: "verify",
         clean: trust.verified,
@@ -50,18 +53,19 @@ pub fn cmd_verify(cli: &Cli, verbose: bool) -> Result<()> {
         repository_context: presentation.context,
         trust,
     };
-    if !output.clean && should_output_json(cli, None) {
+    let as_json = should_output_json(cli, repo_config.as_ref());
+    if !output.clean && as_json {
         return Err(anyhow!(verify_failed_advice(&output.trust)));
     }
-    render_verify(cli, &output, verbose)?;
+    render_verify(&output, verbose, as_json)?;
     if !output.clean {
         return Err(anyhow!(verify_failed_advice(&output.trust)));
     }
     Ok(())
 }
 
-fn render_verify(cli: &Cli, output: &VerifyOutput, verbose: bool) -> Result<()> {
-    if should_output_json(cli, None) {
+fn render_verify(output: &VerifyOutput, verbose: bool, as_json: bool) -> Result<()> {
+    if as_json {
         crate::cli::render::write_json_stdout(output)?;
         return Ok(());
     }
