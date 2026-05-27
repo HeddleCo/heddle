@@ -1667,6 +1667,126 @@ fn op_id_replays_local_mutating_command_and_rejects_arg_conflict() {
     );
 }
 
+/// Two parallel `heddle capture --op-id <same>` invocations must NOT both
+/// execute the underlying command. Before r9 each CLI process opened its
+/// own `OperationDedupStore`, took only an in-process `Mutex`, read an
+/// empty `operation_dedup.bin`, and both proceeded to execute — defeating
+/// the local idempotency guarantee for the retry/concurrent-submit case
+/// the store exists for. The fix locks the dedup file via `RepoLock` and
+/// reloads from disk inside every read-modify-write so the second process
+/// observes the first's pending reservation.
+#[test]
+fn op_id_local_dedup_is_cross_process_safe() {
+    use std::sync::{Arc, Barrier};
+
+    let temp = TempDir::new().unwrap();
+    let op_id = "1d4d8e92-58a1-4f73-9d4c-2d97a8e1b9aa";
+
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("tracked.txt"), "first\n").unwrap();
+
+    let repo_path = temp.path().to_path_buf();
+    let config_path = default_test_user_config_path(&repo_path);
+    seed_default_test_user_config(&config_path, &repo_path).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let repo_path = repo_path.clone();
+        let config_path = config_path.clone();
+        let barrier = Arc::clone(&barrier);
+        let op_id = op_id.to_string();
+        handles.push(std::thread::spawn(move || {
+            // Sync both processes as close to the reserve() call as
+            // possible so the race window is real, not just sequential
+            // serialization.
+            barrier.wait();
+            std::process::Command::new(env!("CARGO_BIN_EXE_heddle"))
+                .args([
+                    "--output",
+                    "json",
+                    "--op-id",
+                    &op_id,
+                    "capture",
+                    "-m",
+                    "concurrent race",
+                ])
+                .current_dir(&repo_path)
+                .env("HEDDLE_CONFIG", &config_path)
+                .output()
+                .expect("spawn heddle")
+        }));
+    }
+    let outputs: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    let mut executed = 0;
+    let mut deduped = 0;
+    for output in &outputs {
+        let stdout = std::str::from_utf8(&output.stdout).unwrap_or("");
+        let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
+        // Successful executions write the envelope to stdout; in-flight
+        // rejections write a typed error envelope to stderr.
+        let envelope_text = if output.status.success() {
+            stdout
+        } else {
+            stderr
+        };
+        let envelope: Value = serde_json::from_str(envelope_text).unwrap_or_else(|err| {
+            panic!(
+                "expected JSON envelope from racing heddle: {err}\nstatus: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+                output.status.code(),
+            )
+        });
+        match envelope["idempotency_status"].as_str() {
+            Some("executed") => executed += 1,
+            Some("replayed") => deduped += 1,
+            _ if envelope["kind"] == "op_id_in_flight" => deduped += 1,
+            _ => panic!(
+                "unexpected racing envelope (success={}): {envelope}",
+                output.status.success()
+            ),
+        }
+    }
+    assert_eq!(
+        executed, 1,
+        "exactly one CLI must execute the underlying capture; outputs: {outputs:?}"
+    );
+    assert_eq!(
+        deduped, 1,
+        "the losing CLI must surface a dedup-hit envelope (replay or in-flight); outputs: {outputs:?}"
+    );
+
+    // After both finish, the dedup store holds exactly one record for the
+    // shared op-id — proving the file-level serialization prevented a
+    // second `(op-id, verb)` slot from being claimed.
+    let store = OperationDedupStore::open(repo_path.join(".heddle")).unwrap();
+    assert_eq!(
+        store.len(),
+        1,
+        "exactly one dedup entry should persist for the shared op-id"
+    );
+
+    // And the capture's side effect — the committed state — must have
+    // landed exactly once. Reusing the op-id should now replay instead
+    // of executing a second mutation.
+    let replay = heddle(
+        &[
+            "--output",
+            "json",
+            "--op-id",
+            op_id,
+            "capture",
+            "-m",
+            "concurrent race",
+        ],
+        Some(temp.path()),
+    )
+    .expect("replay must succeed after the race resolves");
+    let replay_value: Value = serde_json::from_str(&replay).expect("replay JSON");
+    assert_eq!(replay_value["idempotency_status"], "replayed");
+    assert_eq!(replay_value["replayed"], true);
+}
+
 #[test]
 fn op_id_replays_first_contact_init_adopt_and_clone() {
     let init_repo = TempDir::new().unwrap();

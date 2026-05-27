@@ -29,12 +29,14 @@ use std::{
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
+    lock::{RepoLock, WriteLockGuard},
     object::OperationId,
 };
 use serde::{Deserialize, Serialize};
 
 const DEDUP_FORMAT_VERSION: u8 = 1;
 const DEDUP_FILE_NAME: &str = "operation_dedup.bin";
+const DEDUP_LOCK_FILE_NAME: &str = "operation_dedup.lock";
 /// Default retention. Configurable via `[idempotency] retention_days` in
 /// repo config; that wiring lives in the server crate.
 pub const DEFAULT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
@@ -118,42 +120,79 @@ pub struct DedupConflictMetadata {
     pub pending: bool,
 }
 
-/// File-backed dedup store. Cheap to clone — the heavy lifting is behind a
-/// [`Mutex`] that serializes writes.
+/// File-backed dedup store.
+///
+/// Concurrency uses two layers:
+/// - An in-process [`Mutex`] serializes calls from threads sharing the same
+///   `OperationDedupStore` handle. Without it, two threads inside one process
+///   could interleave the load → decide → persist sequence.
+/// - An OS-level exclusive file lock on `<heddle_dir>/state/operation_dedup.lock`
+///   serializes *different* `OperationDedupStore` instances — including those
+///   in separate CLI processes. Without it, two concurrent `heddle …
+///   --op-id <same>` invocations would each open their own store, each read
+///   an empty `operation_dedup.bin`, each reserve, and each execute the
+///   child command before either pending entry was visible to the other.
+///   The file lock plus a reload-from-disk inside every read/modify/write
+///   method closes that cross-process race.
 pub struct OperationDedupStore {
     path: PathBuf,
+    lock: RepoLock,
     inner: Mutex<DedupFile>,
 }
 
 impl OperationDedupStore {
     /// Open (or initialise) the store at `<heddle_dir>/state/operation_dedup.bin`.
     pub fn open(heddle_dir: impl AsRef<Path>) -> Result<Self> {
-        let path = heddle_dir.as_ref().join("state").join(DEDUP_FILE_NAME);
-        let inner = if path.exists() {
-            let bytes = std::fs::read(&path).map_err(HeddleError::from)?;
-            let file: DedupFile = rmp_serde::from_slice(&bytes).map_err(|err| {
-                HeddleError::InvalidObject(format!(
-                    "operation_dedup.bin at {} is malformed: {err}",
-                    path.display()
-                ))
-            })?;
-            if file.format_version > DEDUP_FORMAT_VERSION {
-                return Err(HeddleError::InvalidObject(format!(
-                    "operation dedup format version {} > supported {}",
-                    file.format_version, DEDUP_FORMAT_VERSION
-                )));
-            }
-            file
-        } else {
-            DedupFile {
-                format_version: DEDUP_FORMAT_VERSION,
-                entries: BTreeMap::new(),
-            }
-        };
+        let state_dir = heddle_dir.as_ref().join("state");
+        let path = state_dir.join(DEDUP_FILE_NAME);
+        let lock_path = state_dir.join(DEDUP_LOCK_FILE_NAME);
+        let inner = Self::load_or_init(&path)?;
         Ok(Self {
             path,
+            lock: RepoLock::at(lock_path),
             inner: Mutex::new(inner),
         })
+    }
+
+    fn load_or_init(path: &Path) -> Result<DedupFile> {
+        if !path.exists() {
+            return Ok(DedupFile {
+                format_version: DEDUP_FORMAT_VERSION,
+                entries: BTreeMap::new(),
+            });
+        }
+        let bytes = std::fs::read(path).map_err(HeddleError::from)?;
+        let file: DedupFile = rmp_serde::from_slice(&bytes).map_err(|err| {
+            HeddleError::InvalidObject(format!(
+                "operation_dedup.bin at {} is malformed: {err}",
+                path.display()
+            ))
+        })?;
+        if file.format_version > DEDUP_FORMAT_VERSION {
+            return Err(HeddleError::InvalidObject(format!(
+                "operation dedup format version {} > supported {}",
+                file.format_version, DEDUP_FORMAT_VERSION
+            )));
+        }
+        Ok(file)
+    }
+
+    /// Acquire the OS-level exclusive lock on the sibling `.lock` file.
+    /// Held across each read-modify-write so concurrent `OperationDedupStore`
+    /// instances (in this or other processes) cannot interleave reads and
+    /// writes against the same `operation_dedup.bin`.
+    fn acquire_file_lock(&self) -> Result<WriteLockGuard> {
+        self.lock.write().map_err(|err| {
+            HeddleError::InvalidObject(format!("acquire operation dedup file lock: {err}"))
+        })
+    }
+
+    /// Refresh the in-memory cache from disk. MUST be called while holding
+    /// the file lock — otherwise a concurrent writer could persist between
+    /// the read and the subsequent decision.
+    fn reload_under_lock(&self, inner: &mut DedupFile) -> Result<()> {
+        *inner = Self::load_or_init(&self.path)?;
+        Ok(())
     }
 
     /// Probe the store and atomically claim a slot if no entry exists.
@@ -182,6 +221,8 @@ impl OperationDedupStore {
     ) -> Result<DedupOutcome> {
         let key = key_for(verb, operation_id);
         let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let _file_guard = self.acquire_file_lock()?;
+        self.reload_under_lock(&mut inner)?;
         match inner.entries.get(&key) {
             Some(existing) if existing.pending && existing.request_hash == request_hash => {
                 Ok(DedupOutcome::InFlight)
@@ -234,6 +275,8 @@ impl OperationDedupStore {
             pending: false,
         };
         let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let _file_guard = self.acquire_file_lock()?;
+        self.reload_under_lock(&mut inner)?;
         inner.entries.insert(key, entry);
         self.persist(&inner)
     }
@@ -245,6 +288,8 @@ impl OperationDedupStore {
     pub fn cancel(&self, operation_id: OperationId, verb: &str) -> Result<()> {
         let key = key_for(verb, operation_id);
         let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let _file_guard = self.acquire_file_lock()?;
+        self.reload_under_lock(&mut inner)?;
         if let Some(existing) = inner.entries.get(&key)
             && existing.pending
         {
@@ -259,6 +304,8 @@ impl OperationDedupStore {
     pub fn compact(&self, retention_secs: i64) -> Result<usize> {
         let cutoff = now_secs() - retention_secs;
         let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let _file_guard = self.acquire_file_lock()?;
+        self.reload_under_lock(&mut inner)?;
         let before = inner.entries.len();
         inner.entries.retain(|_, e| e.created_at_secs >= cutoff);
         let pruned = before - inner.entries.len();
@@ -268,13 +315,19 @@ impl OperationDedupStore {
         Ok(pruned)
     }
 
-    /// Total entries currently stored. Mostly useful for tests.
+    /// Total entries currently stored. Mostly useful for tests. Reloads
+    /// from disk under the file lock so writes from sibling processes are
+    /// reflected.
     pub fn len(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("dedup mutex poisoned")
-            .entries
-            .len()
+        let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        let _file_guard = match self.acquire_file_lock() {
+            Ok(guard) => guard,
+            Err(_) => return inner.entries.len(),
+        };
+        if self.reload_under_lock(&mut inner).is_err() {
+            return inner.entries.len();
+        }
+        inner.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -288,7 +341,10 @@ impl OperationDedupStore {
         verb: &str,
     ) -> Option<DedupConflictMetadata> {
         let key = key_for(verb, operation_id);
-        let inner = self.inner.lock().expect("dedup mutex poisoned");
+        let mut inner = self.inner.lock().expect("dedup mutex poisoned");
+        if let Ok(_file_guard) = self.acquire_file_lock() {
+            let _ = self.reload_under_lock(&mut inner);
+        }
         inner
             .entries
             .get(&key)
@@ -497,6 +553,90 @@ mod tests {
         assert_eq!(
             store.reserve(op, "capture", hash).unwrap(),
             DedupOutcome::Reserved
+        );
+    }
+
+    /// Two `OperationDedupStore` handles pointing at the same `.heddle` dir
+    /// stand in for two CLI processes opening the same store. Without the
+    /// OS-level file lock + reload-from-disk, both handles read an empty
+    /// `operation_dedup.bin` from their own in-memory cache, both reserve,
+    /// and the second `reserve` returns `Reserved` instead of seeing the
+    /// first's pending entry. With the file lock + reload, the second
+    /// reload sees the first handle's pending write and returns `InFlight`.
+    #[test]
+    fn second_store_handle_sees_first_handles_reservation() {
+        let temp = TempDir::new().unwrap();
+        let heddle = temp.path().join(".heddle");
+        std::fs::create_dir_all(&heddle).unwrap();
+        let op = OperationId::new();
+        let hash = hash_request_body(b"x");
+
+        let store_a = OperationDedupStore::open(&heddle).unwrap();
+        let store_b = OperationDedupStore::open(&heddle).unwrap();
+
+        assert_eq!(
+            store_a.reserve(op, "capture", hash).unwrap(),
+            DedupOutcome::Reserved
+        );
+        assert_eq!(
+            store_b.reserve(op, "capture", hash).unwrap(),
+            DedupOutcome::InFlight,
+            "store B must observe store A's pending reservation across handles"
+        );
+
+        store_a
+            .record(op, "capture", hash, b"resp".to_vec())
+            .unwrap();
+        match store_b.reserve(op, "capture", hash).unwrap() {
+            DedupOutcome::Replay { response } => assert_eq!(response, b"resp"),
+            other => panic!("expected replay after record, got {other:?}"),
+        }
+    }
+
+    /// Race two `OperationDedupStore` handles with a thread barrier so they
+    /// hit `reserve` as close to simultaneously as the OS allows. Exactly
+    /// one must observe `Reserved`; the loser must observe `InFlight`
+    /// (matching body) — never both `Reserved`, which would let two
+    /// callers execute the same client_operation_id.
+    #[test]
+    fn parallel_reserves_across_handles_serialize() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = TempDir::new().unwrap();
+        let heddle = temp.path().join(".heddle");
+        std::fs::create_dir_all(&heddle).unwrap();
+        let op = OperationId::new();
+        let hash = hash_request_body(b"x");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let heddle = heddle.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let store = OperationDedupStore::open(&heddle).unwrap();
+                barrier.wait();
+                store.reserve(op, "capture", hash).unwrap()
+            }));
+        }
+        let outcomes: Vec<DedupOutcome> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let reserved = outcomes
+            .iter()
+            .filter(|o| matches!(o, DedupOutcome::Reserved))
+            .count();
+        let in_flight = outcomes
+            .iter()
+            .filter(|o| matches!(o, DedupOutcome::InFlight))
+            .count();
+        assert_eq!(
+            reserved, 1,
+            "exactly one parallel reserve must win: {outcomes:?}"
+        );
+        assert_eq!(
+            in_flight, 1,
+            "the losing reserve must see InFlight: {outcomes:?}"
         );
     }
 }
