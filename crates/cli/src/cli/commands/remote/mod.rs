@@ -232,6 +232,28 @@ pub async fn cmd_push(
             run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
             return Ok(());
         }
+        // The git-overlay refs path pushes whatever's attached to HEAD
+        // when scope is CurrentThread. If the user named a different
+        // thread explicitly (positional or `--thread`) we must NOT
+        // silently push the wrong branch — refuse and tell them to
+        // switch first or use `--all-threads`.
+        if !all_threads
+            && let Some(requested) = thread.as_deref()
+        {
+            let attached = match repo.head_ref()? {
+                Head::Attached { thread } => Some(thread.to_string()),
+                Head::Detached { .. } => None,
+            };
+            if attached.as_deref() != Some(requested) {
+                let attached_label = attached
+                    .as_deref()
+                    .map(|t| format!("'{t}'"))
+                    .unwrap_or_else(|| "detached HEAD".to_string());
+                return Err(anyhow!(
+                    "git-overlay push targets the attached thread; requested '{requested}' but HEAD is {attached_label}.\nNext: heddle thread switch {requested} && heddle push, or pass --all-threads"
+                ));
+            }
+        }
         let (remote_name, scope, current_thread, tracking_refresh, trust) =
             push_git_overlay_refs(&repo, remote.as_deref(), all_threads, force)?;
         if should_output_json(cli, Some(repo.config())) {
@@ -433,11 +455,16 @@ fn render_mirror_outcome(
     match outcome {
         Ok(()) => {
             if json {
+                // Stderr (not stdout): the primary push already wrote
+                // the documented single JSON object to stdout. Emitting
+                // a second JSON object there would break the
+                // `heddle push --output json` parse-as-one-object
+                // contract for any caller using `--mirror`.
                 let record = serde_json::json!({
                     "mirrored": true,
                     "remote": mirror_remote,
                 });
-                println!("{}", record);
+                eprintln!("{}", record);
             } else {
                 println!(
                     "{} mirrored to {}",
@@ -453,7 +480,7 @@ fn render_mirror_outcome(
                     "remote": mirror_remote,
                     "error": err.to_string(),
                 });
-                println!("{}", record);
+                eprintln!("{}", record);
             } else {
                 eprintln!(
                     "{} mirror push to {} failed (primary push still succeeded): {}",

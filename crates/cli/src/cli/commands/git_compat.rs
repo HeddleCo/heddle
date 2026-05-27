@@ -882,16 +882,35 @@ fn untracked_worktree_paths(
     tracked_paths: &BTreeSet<String>,
     ignore_patterns: &[String],
 ) -> Result<Vec<String>> {
+    // The `ignore` crate walks the tree honoring per-directory
+    // `.gitignore` files at every level (plus `.git/info/exclude` and
+    // the user-global gitignore) — matching git-commit's own rules.
+    // The previous walkdir+flat-list approach only loaded the
+    // top-level `.gitignore`, so a nested `src/.gitignore *.tmp`
+    // would have failed to ignore `src/foo.tmp`. The `ignore_patterns`
+    // arg layers heddle's own ignore policy on top.
+    let extra_patterns: Vec<String> = ignore_patterns.to_vec();
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .filter_entry(move |entry| !is_git_or_heddle_dir(entry.path()))
+        .build();
     let mut paths = Vec::new();
-    for entry in walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|entry| {
-            should_descend_for_git_index_intent(root, entry.path(), ignore_patterns)
-        })
-    {
+    for entry in walker {
         let entry = entry.context("failed to inspect worktree before commit")?;
         let file_type = entry.file_type();
-        if !(file_type.is_file() || file_type.is_symlink()) {
+        if !file_type.is_some_and(|file_type| file_type.is_file() || file_type.is_symlink()) {
+            continue;
+        }
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            continue;
+        };
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        if should_ignore_path(relative, &extra_patterns) {
             continue;
         }
         let path = repo_relative_string(root, entry.path())?;
@@ -900,23 +919,6 @@ fn untracked_worktree_paths(
         }
     }
     Ok(paths)
-}
-
-fn should_descend_for_git_index_intent(
-    root: &Path,
-    path: &Path,
-    ignore_patterns: &[String],
-) -> bool {
-    if is_git_or_heddle_dir(path) {
-        return false;
-    }
-    let Ok(relative) = path.strip_prefix(root) else {
-        return true;
-    };
-    if relative.as_os_str().is_empty() {
-        return true;
-    }
-    !should_ignore_path(relative, ignore_patterns)
 }
 
 fn is_git_or_heddle_dir(path: &Path) -> bool {

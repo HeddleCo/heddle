@@ -1434,6 +1434,8 @@ pub struct AdoptSchema {
     pub recommended_action: Option<String>,
     pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationStateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

@@ -2026,6 +2026,8 @@ fn plain_git_worktree_entry_state(
 ) -> anyhow::Result<PlainGitWorktreeEntryState> {
     const GIT_MODE_SYMLINK: u32 = 0o120000;
     const GIT_MODE_COMMIT: u32 = 0o160000;
+    const GIT_MODE_REGULAR: u32 = 0o100644;
+    const GIT_MODE_EXECUTABLE: u32 = 0o100755;
 
     let absolute = root.join(path);
     if !absolute.exists() {
@@ -2041,6 +2043,24 @@ fn plain_git_worktree_entry_state(
     if absolute.is_dir() {
         return Ok(PlainGitWorktreeEntryState::Modified);
     }
+
+    // Filemode comparison for regular files: a chmod-only change (e.g.
+    // `chmod +x foo.sh`) leaves blob bytes identical but flips the
+    // index/worktree exec bit, which git-status reports as Modified.
+    // Skipped on Windows (no exec bit) and when the indexed mode is
+    // neither regular nor executable (symlinks/commits handled above).
+    #[cfg(unix)]
+    if matches!(mode, GIT_MODE_REGULAR | GIT_MODE_EXECUTABLE) {
+        use std::os::unix::fs::PermissionsExt;
+        let worktree_mode = absolute.metadata()?.permissions().mode();
+        let worktree_executable = worktree_mode & 0o111 != 0;
+        let indexed_executable = mode == GIT_MODE_EXECUTABLE;
+        if worktree_executable != indexed_executable {
+            return Ok(PlainGitWorktreeEntryState::Modified);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (GIT_MODE_REGULAR, GIT_MODE_EXECUTABLE);
 
     let bytes = if mode == GIT_MODE_SYMLINK {
         match fs::read_link(&absolute) {

@@ -42,7 +42,10 @@ struct AdoptOutput {
     recommended_action: Option<String>,
     recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
-    #[serde(skip_serializing)]
+    // Adopt is a one-time bootstrap, not a per-mutation hot path, so it
+    // keeps the verification block (PR B's serialize-skip applies only to
+    // recurring mutations). Agents adopting a repo need to know whether
+    // the post-adoption state is verified or still requires follow-up.
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
