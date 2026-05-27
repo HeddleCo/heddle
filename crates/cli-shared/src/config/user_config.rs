@@ -278,7 +278,14 @@ impl UserConfig {
         let mut file = fs::File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        Ok(toml::from_str(&contents)?)
+        // Route TOML parse failures through `HeddleError::Config` so the
+        // CLI error envelope (see `print_error_with_hint`) can classify
+        // them by substring — same path the repo-config loader uses.
+        // Without this wrap, a global `output.format = "auto"` (the
+        // exact regression #271 closed for repo configs) would surface
+        // as a raw `toml::de::Error` and bypass the typed `Next:` envelope.
+        toml::from_str::<Self>(&contents)
+            .map_err(|err| objects::error::HeddleError::Config(err.to_string()).into())
     }
 
     pub fn load_default() -> anyhow::Result<Self> {

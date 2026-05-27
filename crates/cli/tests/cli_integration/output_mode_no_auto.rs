@@ -12,7 +12,7 @@
 //! No backcompat alias. Pre-1.0; legacy configs error loudly with a typed
 //! `Next:` envelope rather than silently mapping to text.
 
-use std::str;
+use std::{process::Command, str};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -161,6 +161,150 @@ fn repo_config_with_output_format_auto_errors_with_typed_envelope() {
         "JSON envelope error message should name field and value: {envelope}"
     );
     assert_json_recovery_advice_fields(&envelope, "repo config output.format=auto");
+}
+
+#[test]
+fn user_config_with_output_format_auto_via_heddle_config_env_errors_with_typed_envelope() {
+    // Codex R2: the deserializer rejection only produced a typed envelope
+    // when `output.format = "auto"` lived in `.heddle/config.toml`. The
+    // same value in the GLOBAL user config (`HEDDLE_CONFIG` / `~/.config`)
+    // hit a parse failure during `UserConfig::load_default` in `main`
+    // before the error printer was wired, so every command exited with
+    // a raw TOML parse error instead of the promised `Next:` envelope.
+    // This test pins the contract for the `HEDDLE_CONFIG` route.
+    let temp = TempDir::new().unwrap();
+    let bad_user_config = temp.path().join("user-config.toml");
+    std::fs::write(&bad_user_config, "[output]\nformat = \"auto\"\n")
+        .expect("write bad user config");
+
+    let text_out = run_with_bad_user_config(&bad_user_config, None, &["status"]);
+    assert!(
+        !text_out.status.success(),
+        "status with user output.format='auto' must fail loudly: stdout={}; stderr={}",
+        String::from_utf8_lossy(&text_out.stdout),
+        String::from_utf8_lossy(&text_out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&text_out.stderr);
+    assert_typed_output_format_envelope(&stderr, "HEDDLE_CONFIG user config");
+
+    let json_out =
+        run_with_bad_user_config(&bad_user_config, None, &["--output", "json", "status"]);
+    assert!(
+        !json_out.status.success(),
+        "status --output json with user output.format='auto' must fail too: stderr={}",
+        String::from_utf8_lossy(&json_out.stderr)
+    );
+    let envelope = parse_envelope(&json_out.stderr);
+    assert_eq!(
+        envelope["kind"], "invalid_repo_config_output_format",
+        "JSON envelope kind should classify the field-specific failure: {envelope}"
+    );
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|err| err.contains("output.format") && err.contains("'auto'")),
+        "JSON envelope error message should name field and value: {envelope}"
+    );
+    assert_json_recovery_advice_fields(&envelope, "user config HEDDLE_CONFIG output.format=auto");
+}
+
+#[test]
+fn user_config_with_output_format_auto_via_home_path_errors_with_typed_envelope() {
+    // Mirror case: the same failure must surface a typed envelope when
+    // the user config is discovered via `$HOME/.config/heddle/config.toml`
+    // (the no-env-var fallback). Without `HEDDLE_CONFIG` and
+    // `XDG_CONFIG_HOME` overrides, `UserConfig::default_path` walks down
+    // to the HOME-based path; we set HOME explicitly so the test does
+    // not depend on the developer's real `~/.config/heddle/`.
+    let temp = TempDir::new().unwrap();
+    let fake_home = temp.path();
+    let config_path = fake_home.join(".config").join("heddle").join("config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).expect("mkdir config parent");
+    std::fs::write(&config_path, "[output]\nformat = \"auto\"\n")
+        .expect("write bad home config");
+
+    let text_out = run_with_home_user_config(fake_home, None, &["status"]);
+    assert!(
+        !text_out.status.success(),
+        "status with HOME user output.format='auto' must fail loudly: stdout={}; stderr={}",
+        String::from_utf8_lossy(&text_out.stdout),
+        String::from_utf8_lossy(&text_out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&text_out.stderr);
+    assert_typed_output_format_envelope(&stderr, "HOME-based user config");
+}
+
+fn run_with_bad_user_config(
+    config_path: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+    args: &[&str],
+) -> std::process::Output {
+    let temp;
+    let dir = match cwd {
+        Some(dir) => dir.to_path_buf(),
+        None => {
+            temp = TempDir::new().expect("tempdir for cwd");
+            temp.path().to_path_buf()
+        }
+    };
+    Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(args)
+        .current_dir(&dir)
+        .env("HEDDLE_CONFIG", config_path)
+        .output()
+        .expect("spawn heddle")
+}
+
+fn run_with_home_user_config(
+    home: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+    args: &[&str],
+) -> std::process::Output {
+    let temp;
+    let dir = match cwd {
+        Some(dir) => dir.to_path_buf(),
+        None => {
+            temp = TempDir::new().expect("tempdir for cwd");
+            temp.path().to_path_buf()
+        }
+    };
+    Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(args)
+        .current_dir(&dir)
+        .env_remove("HEDDLE_CONFIG")
+        .env_remove("XDG_CONFIG_HOME")
+        .env("HOME", home)
+        .output()
+        .expect("spawn heddle")
+}
+
+fn assert_typed_output_format_envelope(stderr: &str, context: &str) {
+    assert!(
+        stderr.contains("output.format") && stderr.contains("'auto'"),
+        "{context}: text envelope should name the field and the rejected value: {stderr}"
+    );
+    assert!(
+        stderr.contains("'text'") && stderr.contains("'json'"),
+        "{context}: text envelope should list the valid values: {stderr}"
+    );
+    assert!(
+        stderr.contains("Next:"),
+        "{context}: text envelope should carry a typed Next: line: {stderr}"
+    );
+    assert!(
+        !stderr.contains("TOML parse error"),
+        "{context}: raw TOML parse error must not leak past the typed envelope: {stderr}"
+    );
+}
+
+fn parse_envelope(stderr_bytes: &[u8]) -> Value {
+    let stderr = String::from_utf8_lossy(stderr_bytes);
+    let line = stderr
+        .lines()
+        .rfind(|line| line.trim_start().starts_with('{'))
+        .unwrap_or_else(|| panic!("expected JSON envelope on stderr; got: {stderr}"));
+    serde_json::from_str(line.trim())
+        .unwrap_or_else(|err| panic!("stderr JSON envelope should parse: {err}: {line}"))
 }
 
 #[test]

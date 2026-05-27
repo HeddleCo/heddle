@@ -48,10 +48,15 @@ pub fn is_tty() -> bool {
 pub fn user_config_or_exit() -> &'static UserConfig {
     static USER_CONFIG: OnceLock<UserConfig> = OnceLock::new();
     USER_CONFIG.get_or_init(|| {
-        UserConfig::load_default().unwrap_or_else(|err| {
-            eprintln!("failed to load Heddle user config: {err}");
-            std::process::exit(2);
-        })
+        // Failure here MUST NOT short-circuit with a raw `eprintln` +
+        // exit(2) — that path bypassed the typed `Next:` envelope when
+        // the global user config carried `output.format = "auto"`
+        // (Codex R2 on #271). The early-load in `main` already routes
+        // that failure through `print_error_with_hint`; this fallback
+        // exists only so re-entrant callers (e.g. `should_output_json`
+        // invoked from inside the error printer itself) get a usable
+        // default instead of a recursive load failure.
+        UserConfig::load_default().unwrap_or_default()
     })
 }
 
