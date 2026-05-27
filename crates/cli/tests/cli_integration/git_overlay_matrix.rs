@@ -4104,6 +4104,108 @@ fn git_overlay_matrix_remote_remove_unknown_returns_not_found() {
 }
 
 #[test]
+fn git_overlay_matrix_remote_set_default_accepts_git_only_remote() {
+    let temp = TempDir::new().unwrap();
+    let backup = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    git(&["init", "--bare", "--initial-branch=main"], backup.path());
+    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle_adopt(temp.path());
+
+    let backup_arg = backup.path().to_str().expect("backup path should be utf8");
+    git(&["remote", "add", "backup", backup_arg], temp.path());
+
+    let set_default = json(
+        temp.path(),
+        &["--output", "json", "remote", "set-default", "backup"],
+    );
+    assert_eq!(set_default["output_kind"], "remote_set_default");
+    assert_eq!(set_default["status"], "completed");
+    assert_eq!(set_default["name"], "backup");
+    assert_eq!(set_default["default"], "backup");
+
+    let listed = json(temp.path(), &["--output", "json", "remote", "list"]);
+    assert!(
+        listed["remotes"]
+            .as_array()
+            .expect("remotes array")
+            .iter()
+            .any(|item| item["name"] == "backup" && item["is_default"] == true),
+        "Git-only remote should be selectable as default: {listed}"
+    );
+
+    let verify = json(temp.path(), &["--output", "json", "verify"]);
+    assert_eq!(
+        verify["default_remote"], "backup",
+        "verify should report the configured default remote: {verify}"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_remote_set_default_works_for_dual_location_remote() {
+    let temp = TempDir::new().unwrap();
+    let origin = TempDir::new().unwrap();
+    let staging = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    git(&["init", "--bare", "--initial-branch=main"], origin.path());
+    git(&["init", "--bare", "--initial-branch=main"], staging.path());
+    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle_adopt(temp.path());
+
+    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
+    let staging_arg = staging.path().to_str().expect("staging path should be utf8");
+    json(
+        temp.path(),
+        &["--output", "json", "remote", "add", "origin", origin_arg],
+    );
+    json(
+        temp.path(),
+        &["--output", "json", "remote", "add", "staging", staging_arg],
+    );
+
+    let set_default = json(
+        temp.path(),
+        &["--output", "json", "remote", "set-default", "staging"],
+    );
+    assert_eq!(set_default["default"], "staging");
+
+    let verify = json(temp.path(), &["--output", "json", "verify"]);
+    assert_eq!(verify["default_remote"], "staging");
+}
+
+#[test]
+fn git_overlay_matrix_remote_set_default_unknown_returns_not_found() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle_adopt(temp.path());
+
+    let output = heddle_output(
+        &["--output", "json", "remote", "set-default", "bogus"],
+        Some(temp.path()),
+    )
+    .expect("invoke remote set-default with unknown name");
+    assert!(
+        !output.status.success(),
+        "remote set-default on a missing name should fail"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr).unwrap_or_else(|err| {
+        panic!("remote set-default failure should emit JSON: {err}: {stderr}")
+    });
+    assert_eq!(envelope["kind"], "remote_not_found");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("bogus")),
+        "remote_not_found error should name the requested remote: {envelope}"
+    );
+}
+
+#[test]
 fn git_overlay_matrix_local_ahead_noop_merge_preserves_semantic_result() {
     let temp = TempDir::new().unwrap();
     let origin = TempDir::new().unwrap();

@@ -714,7 +714,23 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             Ok(())
         }
         RemoteCommands::SetDefault { name } => {
+            let items = merged_remote_items(&repo)?;
+            let (url, _source) = items
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| RecoveryAdvice::remote_not_found(&name))?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
+            // Git-overlay remotes added via `git remote add` only live in
+            // `.git/config`. `merged_remote_items` surfaces them in
+            // `remote list/show`, but `RemoteConfig::set_default` would
+            // reject them as NotFound. Adopt the URL into
+            // `.heddle/remotes.toml` first so `default_name()`-driven
+            // readers (including `resolve_remote_with_key`) can resolve
+            // it, then set the default explicitly.
+            if cfg.get(&name).is_err() {
+                cfg.add(&name, Remote { url })
+                    .map_err(anyhow::Error::msg)?;
+            }
             cfg.set_default(&name).map_err(anyhow::Error::msg)?;
             render_remote_mutation(
                 RemoteMutationOutput {
