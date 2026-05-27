@@ -3069,3 +3069,170 @@ fn test_cli_show_renders_absent_confidence_as_em_dash() {
         "the absent-confidence state should still appear in the log; got:\n{log_text}"
     );
 }
+
+/// `heddle diff --patch` must emit a clean unified-diff body — no gutter,
+/// no `~`-flagged modified-pair lines, standard `--- a/`/`+++ b/`/`@@`
+/// headers. The default rendering (with the line-number gutter) is great
+/// for humans and useless to `patch(1)`/`git apply`/AI pair tools; the
+/// flag carves out a machine-friendly mode without touching the default.
+#[test]
+fn test_cli_diff_patch_flag_emits_clean_unified_diff() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let original = "line one\nline two\nline three\nline four\nline five\n";
+    std::fs::write(temp.path().join("file.txt"), original).unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    let modified = "line one\nline TWO\nline three\nline four\nline five\n";
+    std::fs::write(temp.path().join("file.txt"), modified).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    assert!(
+        !patch.lines().any(|line| line.contains(" | ")),
+        "patch output must not carry the prettified gutter: {patch}"
+    );
+    assert!(
+        !patch.contains("\x1b["),
+        "patch output must not carry ANSI styling: {patch:?}"
+    );
+    assert!(
+        patch.contains("--- a/file.txt"),
+        "patch output must carry the standard `--- a/<path>` header: {patch}"
+    );
+    assert!(
+        patch.contains("+++ b/file.txt"),
+        "patch output must carry the standard `+++ b/<path>` header: {patch}"
+    );
+    assert!(
+        patch.contains("@@ "),
+        "patch output must carry the `@@` hunk header: {patch}"
+    );
+    assert!(
+        patch.contains("-line two"),
+        "patch output must carry the removed line with a `-` prefix: {patch}"
+    );
+    assert!(
+        patch.contains("+line TWO"),
+        "patch output must carry the added line with a `+` prefix: {patch}"
+    );
+}
+
+/// `-p` is the short alias for `--patch`, matching `git diff -p`.
+#[test]
+fn test_cli_diff_patch_short_alias_matches_long_form() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("file.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("file.txt"), "alpha\nBETA\ngamma\n").unwrap();
+
+    let long_form = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+    let short_form = heddle(&["diff", "-p"], Some(temp.path())).unwrap();
+
+    assert_eq!(
+        long_form, short_form,
+        "`-p` must be a pure alias for `--patch`"
+    );
+}
+
+/// `heddle diff` (no flag) must keep its prettified gutter. The
+/// machine-friendly mode is strictly opt-in; flipping the default would
+/// break the human reading loop the gutter exists to serve.
+#[test]
+fn test_cli_diff_default_retains_line_number_gutter() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("file.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("file.txt"), "alpha\nBETA\ngamma\n").unwrap();
+
+    let default = heddle(&["diff"], Some(temp.path())).unwrap();
+
+    assert!(
+        default.lines().any(|line| line.contains(" | ")),
+        "default `heddle diff` must keep its line-number gutter: {default}"
+    );
+}
+
+/// `git apply --check` must accept the `--patch` output for a simple
+/// modify. The point of the flag: round-trip through standard tools.
+#[test]
+fn test_cli_diff_patch_output_applies_with_git_apply() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let original = "line one\nline two\nline three\nline four\nline five\n";
+    std::fs::write(temp.path().join("file.txt"), original).unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    let modified = "line one\nline TWO\nline three\nline four\nline five\n";
+    std::fs::write(temp.path().join("file.txt"), modified).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("file.txt"), original).unwrap();
+    git_commit_all(apply_dir.path(), "seed pre-patch content");
+
+    let mut child = Command::new("git")
+        .args(["apply", "--check"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("git apply should finish");
+    assert!(
+        out.status.success(),
+        "git apply --check should accept --patch output;\npatch=\n{patch}\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `patch(1) -p1 --dry-run` must accept the `--patch` output. This is
+/// the canonical "copy the diff into the chat, ask the AI to apply it"
+/// loop — it's broken today and the flag exists to fix it.
+#[test]
+fn test_cli_diff_patch_output_applies_with_patch_command() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let original = "line one\nline two\nline three\nline four\nline five\n";
+    std::fs::write(temp.path().join("file.txt"), original).unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    let modified = "line one\nline TWO\nline three\nline four\nline five\n";
+    std::fs::write(temp.path().join("file.txt"), modified).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    let apply_dir = TempDir::new().unwrap();
+    std::fs::write(apply_dir.path().join("file.txt"), original).unwrap();
+
+    let mut child = Command::new("patch")
+        .args(["-p1", "--dry-run"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("patch should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("patch should finish");
+    assert!(
+        out.status.success(),
+        "patch -p1 --dry-run should accept --patch output;\npatch=\n{patch}\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
