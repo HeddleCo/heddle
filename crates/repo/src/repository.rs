@@ -2094,6 +2094,8 @@ fn git_overlay_worktree_entry_state(
 ) -> Result<GitOverlayWorktreeEntryState> {
     const GIT_MODE_SYMLINK: u32 = 0o120000;
     const GIT_MODE_COMMIT: u32 = 0o160000;
+    const GIT_MODE_REGULAR: u32 = 0o100644;
+    const GIT_MODE_EXECUTABLE: u32 = 0o100755;
 
     let absolute = root.join(path);
     let metadata = match fs::symlink_metadata(&absolute) {
@@ -2113,6 +2115,25 @@ fn git_overlay_worktree_entry_state(
     if metadata.file_type().is_dir() {
         return Ok(GitOverlayWorktreeEntryState::Modified);
     }
+
+    // Filemode comparison for regular file entries: a chmod-only change
+    // (e.g. `chmod +x foo.sh`) leaves the blob bytes identical but flips
+    // the worktree exec bit, which git-status reports as ` M f` /
+    // porcelain-v2 `<mH>`. Without this branch downstream
+    // status/verify/commit would treat such a worktree as Clean.
+    // Skipped on Windows (no exec bit) and when the indexed mode is
+    // neither regular nor executable (symlinks / commits handled above).
+    #[cfg(unix)]
+    if matches!(mode, GIT_MODE_REGULAR | GIT_MODE_EXECUTABLE) {
+        use std::os::unix::fs::PermissionsExt;
+        let worktree_executable = metadata.permissions().mode() & 0o111 != 0;
+        let indexed_executable = mode == GIT_MODE_EXECUTABLE;
+        if worktree_executable != indexed_executable {
+            return Ok(GitOverlayWorktreeEntryState::Modified);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (GIT_MODE_REGULAR, GIT_MODE_EXECUTABLE);
 
     let bytes = if mode == GIT_MODE_SYMLINK {
         match fs::read_link(&absolute) {
