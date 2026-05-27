@@ -1997,9 +1997,14 @@ fn plain_git_worktree_status(
         added.insert(PathBuf::from(path));
     }
 
+    // `git rm --cached path` produces both an index-vs-HEAD deletion
+    // and a fresh untracked entry for the same path; both signals are
+    // load-bearing for `heddle status`/`diff`/verification. Only
+    // suppress `modified` duplicates here — `added` and `deleted` for
+    // the same path are two different views (worktree-vs-index and
+    // index-vs-HEAD) of the same intentional change.
     for path in &added {
         modified.remove(path);
-        deleted.remove(path);
     }
     for path in &deleted {
         modified.remove(path);
@@ -3767,6 +3772,76 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         (temp, repo)
+    }
+
+    /// `git rm --cached path` keeps the file in the worktree but
+    /// stages the deletion: Git reports both `D path` (index vs HEAD)
+    /// and `?? path` (worktree). Both signals must survive the
+    /// dedup step or downstream code mistakes a tracked removal for a
+    /// new file.
+    #[test]
+    fn plain_git_worktree_status_preserves_staged_removal_alongside_untracked() {
+        use std::path::PathBuf;
+        use std::process::Command;
+
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+
+        let run_git = |args: &[&str]| -> Option<bool> {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .ok()?;
+            Some(output.status.success())
+        };
+
+        let Some(true) = run_git(&["init", "--quiet"]) else {
+            eprintln!("git not on PATH or init failed — skipping");
+            return;
+        };
+        for cmd in [
+            ["config", "user.email", "test@example.com"].as_slice(),
+            ["config", "user.name", "Test"].as_slice(),
+        ] {
+            if !matches!(run_git(cmd), Some(true)) {
+                eprintln!("git config failed — skipping");
+                return;
+            }
+        }
+        std::fs::write(root.join("file.txt"), "hello").expect("write file");
+        for cmd in [
+            ["add", "file.txt"].as_slice(),
+            ["commit", "-m", "initial", "--quiet"].as_slice(),
+            ["rm", "--cached", "--quiet", "file.txt"].as_slice(),
+        ] {
+            if !matches!(run_git(cmd), Some(true)) {
+                eprintln!("git command failed — skipping");
+                return;
+            }
+        }
+
+        let git_repo = gix::open(root).expect("open gix");
+        let status = super::plain_git_worktree_status(root, &git_repo).expect("status");
+
+        let target = PathBuf::from("file.txt");
+        assert!(
+            status.added.iter().any(|path| path == &target),
+            "untracked worktree copy must still appear as added: {status:?}"
+        );
+        assert!(
+            status.deleted.iter().any(|path| path == &target),
+            "staged removal must not be wiped by the untracked entry: {status:?}"
+        );
+        assert!(
+            !status.modified.iter().any(|path| path == &target),
+            "no modified entry for `git rm --cached` path: {status:?}"
+        );
     }
 
     #[test]
