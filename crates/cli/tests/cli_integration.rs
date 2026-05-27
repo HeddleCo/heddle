@@ -49,6 +49,8 @@ mod hooks;
 mod misc;
 #[path = "cli_integration/oss_cli_polish.rs"]
 mod oss_cli_polish;
+#[path = "cli_integration/output_mode_no_auto.rs"]
+mod output_mode_no_auto;
 #[path = "cli_integration/perf_core_loop.rs"]
 mod perf_core_loop;
 #[path = "cli_integration/realworld_git.rs"]

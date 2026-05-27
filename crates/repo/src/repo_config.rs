@@ -447,6 +447,56 @@ version = 1
     }
 
     #[test]
+    fn output_format_text_and_json_parse_normally() {
+        let toml_text = r#"
+[repository]
+version = 1
+[output]
+format = "text"
+"#;
+        let config: RepoConfig = toml::from_str(toml_text).expect("text should parse");
+        assert_eq!(config.output.format, Some(OutputFormat::Text));
+
+        let toml_json = r#"
+[repository]
+version = 1
+[output]
+format = "json"
+"#;
+        let config: RepoConfig = toml::from_str(toml_json).expect("json should parse");
+        assert_eq!(config.output.format, Some(OutputFormat::Json));
+    }
+
+    #[test]
+    fn output_format_auto_is_rejected_with_field_specific_message() {
+        // Pre-1.0: no silent alias. A repo config with `output.format =
+        // "auto"` must fail loudly so the operator updates it to `text`
+        // or `json` rather than silently inheriting the
+        // JSON-when-piped surprise that motivated #271.
+        let toml_auto = r#"
+[repository]
+version = 1
+[output]
+format = "auto"
+"#;
+        let err = toml::from_str::<RepoConfig>(toml_auto)
+            .expect_err("output.format='auto' must reject");
+        let message = err.to_string();
+        assert!(
+            message.contains("output.format"),
+            "error should name the field: {message}"
+        );
+        assert!(
+            message.contains("'auto'"),
+            "error should name the rejected value: {message}"
+        );
+        assert!(
+            message.contains("'text'") && message.contains("'json'"),
+            "error should list the valid values: {message}"
+        );
+    }
+
+    #[test]
     fn test_save_overwrites_atomically() {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("config.toml");
