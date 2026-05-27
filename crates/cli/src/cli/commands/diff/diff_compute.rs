@@ -432,17 +432,28 @@ fn render_status_changes(
 /// Build one `FileChange` per status entry in the plain-Git probe,
 /// computing real hunks against the gix-read HEAD blobs so `--patch`
 /// emits a body the regular renderer can stamp newline markers onto.
+///
+/// Unborn HEAD (plain `git init` + staged file, no commit yet) has
+/// no tree to read; in that case we pass `None` and the add-only path
+/// in `compute_plain_git_hunks` renders against `/dev/null`. Without
+/// this check, `head_tree()?` propagates a "no HEAD commit" error and
+/// the whole `--patch` render fails, even though the only honest diff
+/// is "everything is new."
 fn plain_git_file_changes_with_hunks(
     probe: &PlainGitVerificationProbe,
     unified: usize,
 ) -> Result<Vec<FileChange>> {
     let git_repo = gix::discover(&probe.root)?;
-    let mut head_tree = git_repo.head_tree()?;
+    let mut head_tree = if git_repo.head()?.is_unborn() {
+        None
+    } else {
+        Some(git_repo.head_tree()?)
+    };
     let mut changes = Vec::with_capacity(probe.changes.change_count());
     for path in &probe.changes.modified {
         changes.push(plain_git_file_change(
             &git_repo,
-            Some(&mut head_tree),
+            head_tree.as_mut(),
             &probe.root,
             path,
             "modified",
@@ -453,7 +464,7 @@ fn plain_git_file_changes_with_hunks(
     for path in &probe.changes.added {
         changes.push(plain_git_file_change(
             &git_repo,
-            Some(&mut head_tree),
+            head_tree.as_mut(),
             &probe.root,
             path,
             "added",
@@ -464,7 +475,7 @@ fn plain_git_file_changes_with_hunks(
     for path in &probe.changes.deleted {
         changes.push(plain_git_file_change(
             &git_repo,
-            Some(&mut head_tree),
+            head_tree.as_mut(),
             &probe.root,
             path,
             "deleted",

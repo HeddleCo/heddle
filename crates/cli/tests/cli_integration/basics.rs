@@ -3688,6 +3688,79 @@ fn test_cli_diff_patch_rename_with_edit_round_trips() {
     );
 }
 
+/// `heddle diff --patch` from an unborn plain-Git repo (no commits,
+/// staged file) must render an add hunk against `/dev/null` instead of
+/// erroring on the missing HEAD tree. The plain-Git fast path used to
+/// call `head_tree()?` unconditionally — fine for an established repo,
+/// fatal for a fresh `git init` where the only honest diff is "every
+/// file is new."
+#[test]
+fn test_cli_diff_patch_plain_git_unborn_head_emits_add_hunk() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    // No commit — HEAD is unborn. Stage the new file so the probe
+    // sees it (untracked-only files aren't reported as added).
+    std::fs::write(temp.path().join("first.txt"), "alpha\nbeta\n").unwrap();
+    git(&["add", "first.txt"], temp.path());
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    assert!(
+        !patch.trim().is_empty(),
+        "unborn-HEAD --patch must emit a non-empty body; got:\n{patch:?}"
+    );
+    assert!(
+        patch.contains("diff --git a/first.txt b/first.txt"),
+        "unborn-HEAD add patch must carry the `diff --git` extended header:\n{patch}"
+    );
+    assert!(
+        patch.contains("new file mode 100644"),
+        "unborn-HEAD add patch must carry the `new file mode` header:\n{patch}"
+    );
+    assert!(
+        patch.contains("--- /dev/null"),
+        "unborn-HEAD add patch must source from `/dev/null`:\n{patch}"
+    );
+    assert!(
+        patch.contains("+++ b/first.txt"),
+        "unborn-HEAD add patch must target `+++ b/<path>`:\n{patch}"
+    );
+    assert!(
+        patch.contains("+alpha") && patch.contains("+beta"),
+        "unborn-HEAD add patch body must include every new line:\n{patch}"
+    );
+
+    // Round-trip: apply against an empty target.
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    // The target needs at least one commit so `git apply --check` has
+    // a baseline; the file under test is absent, which is the case
+    // the new-file mode header is designed for.
+    std::fs::write(apply_dir.path().join("anchor.txt"), "anchor\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed apply baseline");
+
+    let mut child = Command::new("git")
+        .args(["apply", "--check"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("git apply should finish");
+    assert!(
+        out.status.success(),
+        "git apply --check must accept an unborn-HEAD add patch;\npatch=\n{patch}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// `--name-only` must NOT trigger patch rendering — the printer only
 /// reads `change.path`. Asserting "no headers, no `@@`, file paths
 /// only" pins the disjointness from `--patch` so a future refactor
