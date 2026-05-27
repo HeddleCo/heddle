@@ -174,6 +174,28 @@ pub async fn cmd_push(
     if let Some(remote_name) = remote.as_deref() {
         ensure_remote_arg_resolves(&repo, remote_name)?;
     }
+
+    // `pre_push` JSON-protocol hook fires before any push work, on every
+    // path (git-overlay local target, git-overlay refs push, and native
+    // remote). Veto via non-empty `abort` aborts the push before any
+    // mutation or remote round-trip.
+    let hook_manager = repo::HookManager::new(&repo);
+    let hook_ctx = repo::HookContext::new(&repo);
+    let pre_push_payload = serde_json::json!({
+        "remote": remote.clone().unwrap_or_default(),
+    });
+    if let Ok(Some(resp)) = hook_manager.run_with_payload(
+        repo::Hook::PrePush,
+        &hook_ctx,
+        &pre_push_payload,
+        std::time::Duration::from_secs(5),
+    ) && !resp.abort.is_empty()
+    {
+        return Err(anyhow!(RecoveryAdvice::hook_veto(
+            "pre_push", "push", resp.abort
+        )));
+    }
+
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         let default_remote_name = if remote.is_none() {
             resolved_default_remote_name(&repo)?
@@ -200,6 +222,14 @@ pub async fn cmd_push(
             };
             let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
             push_local(&repo, &target_path, &state_id, &track_name, force, cli).await?;
+            // Ad-hoc dual-push parity (heddle#25): mirror runs on the
+            // local-target overlay path too, best-effort.
+            if let Some(mirror_remote) = mirror.as_deref() {
+                let mut bridge = GitBridge::new(&repo);
+                let outcome = bridge.push(mirror_remote);
+                render_mirror_outcome(cli, &repo, mirror_remote, outcome);
+            }
+            run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
             return Ok(());
         }
         let (remote_name, scope, current_thread, tracking_refresh, trust) =
@@ -276,29 +306,11 @@ pub async fn cmd_push(
             let outcome = bridge.push(mirror_remote);
             render_mirror_outcome(cli, &repo, mirror_remote, outcome);
         }
+        run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
         return Ok(());
     }
 
     preflight_native_remote_transport(&repo, remote.as_deref(), "push")?;
-
-    // `pre_push` JSON-protocol hook. Veto via non-empty
-    // `abort` aborts the push before any remote round-trip.
-    let hook_manager = repo::HookManager::new(&repo);
-    let hook_ctx = repo::HookContext::new(&repo);
-    let pre_push_payload = serde_json::json!({
-        "remote": remote.clone().unwrap_or_default(),
-    });
-    if let Ok(Some(resp)) = hook_manager.run_with_payload(
-        repo::Hook::PrePush,
-        &hook_ctx,
-        &pre_push_payload,
-        std::time::Duration::from_secs(5),
-    ) && !resp.abort.is_empty()
-    {
-        return Err(anyhow!(RecoveryAdvice::hook_veto(
-            "pre_push", "push", resp.abort
-        )));
-    }
 
     let state_id = if let Some(state_str) = state {
         if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
@@ -381,21 +393,31 @@ pub async fn cmd_push(
         render_mirror_outcome(cli, &repo, mirror_remote, outcome);
     }
 
-    // `post_push` JSON-protocol hook. Best-effort; fires after
-    // a successful push.
-    let post_push_payload = serde_json::json!({
+    run_post_push_hook(&hook_manager, &hook_ctx, remote.as_deref());
+
+    Ok(())
+}
+
+/// `post_push` JSON-protocol hook. Best-effort; fires after a successful
+/// push regardless of which transport path served it (git-overlay local,
+/// git-overlay refs, or native). Errors are swallowed so a misbehaving
+/// hook never masks a push that already succeeded.
+fn run_post_push_hook(
+    hook_manager: &repo::HookManager,
+    hook_ctx: &repo::HookContext,
+    remote: Option<&str>,
+) {
+    let payload = serde_json::json!({
         "remote": remote.unwrap_or_default(),
     });
     if let Err(err) = hook_manager.run_with_payload(
         repo::Hook::PostPush,
-        &hook_ctx,
-        &post_push_payload,
+        hook_ctx,
+        &payload,
         std::time::Duration::from_secs(5),
     ) {
         tracing::warn!(error = %err, "post_push hook error swallowed");
     }
-
-    Ok(())
 }
 
 /// Print the outcome of the ad-hoc mirror push (heddle#25). Mirror
