@@ -178,3 +178,97 @@ fn materialized_thread_full_lifecycle() {
         "dropped thread must vanish from status inventory: {materialized_after:?}"
     );
 }
+
+/// Regression: the `--short` fast path used to return
+/// `materialized_threads: Vec::new()` unconditionally, so the
+/// downstream `render_materialized_advisory` had nothing to warn on
+/// even when a materialised thread's checkout lagged its head. Users
+/// running `heddle status --short` (the common shell-prompt path)
+/// silently missed the staleness signal. This test materialises a
+/// thread, rewrites its manifest to point at a different state_id
+/// (the same condition `assess_materialized_threads` keys off when
+/// the on-disk head advances past a manifest), and asserts the short
+/// output now surfaces the "lag their head" advisory line.
+#[test]
+fn short_status_surfaces_stale_materialized_thread_advisory() {
+    let main = setup_repo("hello.txt", "hello\n");
+
+    let thread_dir = TempDir::new().unwrap();
+    let thread_path = thread_dir.path();
+
+    heddle(
+        &[
+            "start",
+            "feature/short-stale",
+            "--workspace",
+            "materialized",
+            "--path",
+            thread_path.to_str().unwrap(),
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+
+    // Force the manifest stale by rewriting its `state_id` field to
+    // an all-zero ChangeId. `assess_materialized_threads` compares
+    // the manifest's recorded `state_id` against the live thread head
+    // via `refs().get_thread(...)` — any mismatch flips the stale bit.
+    // This is the same observable condition produced when the head
+    // advances past a manifest without the manifest being refreshed
+    // (the unit test in status.rs exercises that path directly).
+    let manifest_path = main
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("feature/short-stale")
+        .join("manifest.toml");
+    assert!(
+        manifest_path.is_file(),
+        "manifest expected at {} after start --workspace materialized",
+        manifest_path.display()
+    );
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    // ChangeId is `[u8; 16]` with the default serde derive, so the
+    // manifest's `state_id` is a 16-element integer array. Parse the
+    // TOML, replace the bytes with a distinct 16-byte value (every
+    // byte differs from `rand::random()` with vanishing probability),
+    // and write it back.
+    let mut doc: toml::Value = toml::from_str(&manifest).unwrap();
+    let stale_state_id = toml::Value::Array(
+        (0u8..16)
+            .map(|b| toml::Value::Integer((b ^ 0xa5) as i64))
+            .collect(),
+    );
+    doc.as_table_mut()
+        .unwrap()
+        .insert("state_id".to_string(), stale_state_id);
+    fs::write(&manifest_path, toml::to_string(&doc).unwrap()).unwrap();
+
+    // Sanity: status JSON should now report the thread as stale. If
+    // this fails the `--short` assertion below is meaningless.
+    let json_out = heddle(&["--output", "json", "status"], Some(main.path())).unwrap();
+    let json: Value = serde_json::from_str(&json_out).unwrap();
+    let entry = json["materialized_threads"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|m| m["name"] == "feature/short-stale"))
+        .unwrap_or_else(|| {
+            panic!(
+                "json status must list feature/short-stale after manifest rewrite:\n{json_out}"
+            )
+        });
+    assert_eq!(
+        entry["stale"], true,
+        "manifest rewrite should mark thread stale in JSON output too"
+    );
+
+    let short = heddle(&["status", "--short"], Some(main.path())).unwrap();
+    assert!(
+        short.contains("materialized thread(s) lag their head"),
+        "`heddle status --short` must emit the materialised-thread \
+         staleness advisory when a checkout lags its head; got:\n{short}"
+    );
+    assert!(
+        short.contains("feature/short-stale"),
+        "advisory must name the stale thread; got:\n{short}"
+    );
+}

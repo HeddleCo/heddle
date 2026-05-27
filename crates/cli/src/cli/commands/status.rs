@@ -583,7 +583,11 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             state: None,
             git_checkpoint: None,
             changes,
-            materialized_threads: Vec::new(),
+            // Short text still renders the materialized-thread advisory
+            // (see `render_short_status` → `render_materialized_advisory`).
+            // The check is cheap (one ref lookup per manifest), so keep
+            // the fast path honest and let stale threads surface.
+            materialized_threads: assess_materialized_threads(&repo),
         });
     }
 
