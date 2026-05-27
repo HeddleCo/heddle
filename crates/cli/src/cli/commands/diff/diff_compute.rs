@@ -26,7 +26,7 @@ use super::{
     diff_output::{print_context, print_diff, print_semantic_changes, print_stat},
     diff_types::{
         ContextSnippet, DiffOutput, DiffStats, FileChange, FileContextEntry, LineDiff,
-        SemanticChangeEntry,
+        SemanticChangeEntry, change_line_counts,
     },
 };
 #[cfg(feature = "semantic")]
@@ -218,6 +218,7 @@ pub fn cmd_diff(
                 old_path: None,
                 binary: false,
                 lines: None,
+                line_counts: None,
             })
             .collect()
     } else {
@@ -245,7 +246,18 @@ pub fn cmd_diff(
                     .as_ref()
                     .err()
                     .is_some_and(is_binary_diff_error);
-                let lines = lines_result.ok().map(|lines| unified_hunks(lines, unified));
+                let raw_lines = lines_result.ok();
+                // `--stat` only needs the per-file tally; the unified
+                // hunks would be allocated only for `strip_line_hunks`
+                // to throw them away. Count once and drop the vector
+                // immediately so a 10MB diff costs ~24 bytes/file in
+                // retained memory instead of Vec<LineDiff>-per-file.
+                let (lines, line_counts) = if stat {
+                    let counts = change_line_counts(raw_lines.as_deref());
+                    (None, Some(counts))
+                } else {
+                    (raw_lines.map(|lines| unified_hunks(lines, unified)), None)
+                };
 
                 FileChange {
                     path: change.path.clone(),
@@ -253,6 +265,7 @@ pub fn cmd_diff(
                     old_path: None,
                     binary,
                     lines,
+                    line_counts,
                 }
             })
             .collect()
@@ -354,6 +367,7 @@ fn render_worktree_status_diff(
             old_path: None,
             binary: false,
             lines: None,
+            line_counts: None,
         })
         .chain(status.added.iter().map(|path| FileChange {
             path: path.display().to_string(),
@@ -361,6 +375,7 @@ fn render_worktree_status_diff(
             old_path: None,
             binary: false,
             lines: None,
+            line_counts: None,
         }))
         .chain(status.deleted.iter().map(|path| FileChange {
             path: path.display().to_string(),
@@ -368,6 +383,7 @@ fn render_worktree_status_diff(
             old_path: None,
             binary: false,
             lines: None,
+            line_counts: None,
         }))
         .collect::<Vec<_>>();
     let changes = if detect_renames {
@@ -474,6 +490,7 @@ pub fn compute_state_diff(
                 old_path: None,
                 binary,
                 lines,
+                line_counts: None,
             }
         })
         .collect();
@@ -574,6 +591,7 @@ pub fn compute_tree_diff(
                 old_path: None,
                 binary,
                 lines,
+                line_counts: None,
             }
         })
         .collect();
@@ -988,6 +1006,13 @@ fn detect_clear_renames(
             change.kind = "renamed".to_string();
             change.old_path = Some((*old_path).to_string());
             change.lines = lines;
+            // The original `added` carried a stat-path tally that
+            // counted the file as a pure insertion; after we collapse
+            // the (added, deleted) pair into one rename, those line
+            // counts double-count the move. Drop them so DiffStats
+            // falls back to walking the (possibly None) `lines`
+            // payload chosen above.
+            change.line_counts = None;
         }
         output.push(change);
     }
@@ -1225,7 +1250,83 @@ fn find_blob_recursive(repo: &Repository, tree: &Tree, parts: &[&str]) -> Result
 #[cfg(test)]
 mod tests {
     use super::unified_hunks;
-    use crate::cli::commands::diff::diff_types::LineDiff;
+    use crate::cli::commands::diff::diff_types::{
+        DiffStats, FileChange, LineCounts, LineDiff, change_line_counts,
+    };
+
+    fn stat_change(kind: &str, counts: LineCounts) -> FileChange {
+        FileChange {
+            path: "notes.txt".to_string(),
+            kind: kind.to_string(),
+            old_path: None,
+            binary: false,
+            lines: None,
+            line_counts: Some(counts),
+        }
+    }
+
+    /// The stat-only branch is supposed to count once and then drop
+    /// the hunk vector. `DiffStats` must read the pre-computed tally
+    /// off the FileChange so a 10MB diff renders as
+    /// "1 files changed, 1 additions, 0 modifications" even though
+    /// `lines` is `None`. Regressing this re-introduces the cheap-
+    /// branch behaviour that treated the file like name-only.
+    #[test]
+    fn diff_stats_reads_line_counts_when_hunks_dropped() {
+        let changes = vec![stat_change(
+            "modified",
+            LineCounts {
+                added: 1,
+                modified: 0,
+                deleted: 0,
+            },
+        )];
+
+        let stats = DiffStats::from_changes(&changes, None);
+
+        assert_eq!(stats.files_changed, 1);
+        assert_eq!(stats.additions, 1);
+        assert_eq!(stats.modifications, 0);
+        assert_eq!(stats.deletions, 0);
+        assert_eq!(stats.renames, 0);
+    }
+
+    /// The file-level kind fallback must not fire when a stat-path
+    /// FileChange has an empty `line_counts` payload — empty means
+    /// "we counted and there were no eligible lines" (the binary or
+    /// empty-diff case), not "we never counted".
+    #[test]
+    fn diff_stats_treats_zero_line_counts_as_authoritative() {
+        let changes = vec![stat_change(
+            "modified",
+            LineCounts {
+                added: 0,
+                modified: 0,
+                deleted: 0,
+            },
+        )];
+
+        let stats = DiffStats::from_changes(&changes, None);
+
+        assert_eq!(stats.modifications, 0);
+        assert_eq!(stats.additions, 0);
+        assert_eq!(stats.deletions, 0);
+    }
+
+    /// Sanity-check the underlying counter so the stat closure that
+    /// feeds `line_counts` produces matching output.
+    #[test]
+    fn change_line_counts_pairs_modified_lines() {
+        let lines = vec![
+            LineDiff::with_lines("-", "alpha", Some(1), None),
+            LineDiff::with_lines("+", "alpha-changed", None, Some(1)),
+            LineDiff::with_lines("+", "fresh", None, Some(2)),
+        ];
+        let counts = change_line_counts(Some(&lines));
+        assert_eq!(counts.modified, 1);
+        assert_eq!(counts.added, 1);
+        assert_eq!(counts.deleted, 0);
+    }
 
     #[test]
     fn unified_hunks_keeps_context_decoration_when_added_block_ends_before_matching_item() {

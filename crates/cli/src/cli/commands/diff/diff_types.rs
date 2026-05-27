@@ -89,15 +89,23 @@ impl DiffStats {
             ..Self::default()
         };
         for change in changes {
-            let line_counts = change_line_counts(change.lines.as_deref());
-            stats.additions += line_counts.added;
-            stats.modifications += line_counts.modified;
-            stats.deletions += line_counts.deleted;
+            // The `--stat` path runs the source-pair diff but drops the
+            // hunk vector immediately; `line_counts` carries the tally
+            // it computed before discarding. Prefer it so the summary
+            // stays line-accurate without the per-file RAM cost.
+            let counts = change
+                .line_counts
+                .clone()
+                .unwrap_or_else(|| change_line_counts(change.lines.as_deref()));
+            stats.additions += counts.added;
+            stats.modifications += counts.modified;
+            stats.deletions += counts.deleted;
 
+            let has_detail = change.line_counts.is_some() || change.lines.is_some();
             match change.kind.as_str() {
-                "added" if change.lines.is_none() => stats.additions += 1,
-                "modified" if change.lines.is_none() => stats.modifications += 1,
-                "deleted" if change.lines.is_none() => stats.deletions += 1,
+                "added" if !has_detail => stats.additions += 1,
+                "modified" if !has_detail => stats.modifications += 1,
+                "deleted" if !has_detail => stats.deletions += 1,
                 "renamed" => stats.renames += 1,
                 _ => {}
             }
@@ -122,6 +130,12 @@ pub struct FileChange {
     pub binary: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<Vec<LineDiff>>,
+    /// Pre-computed line tally for paths where we counted before
+    /// dropping the hunk vector (the `--stat` path). When present
+    /// `DiffStats` reads it instead of walking `lines`, so the
+    /// summary remains accurate without us retaining the hunks.
+    #[serde(skip)]
+    pub line_counts: Option<LineCounts>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -173,8 +187,8 @@ pub struct ContextSnippet {
     pub revision_count: usize,
 }
 
-#[derive(Default)]
-pub(crate) struct LineCounts {
+#[derive(Clone, Debug, Default)]
+pub struct LineCounts {
     pub added: usize,
     pub modified: usize,
     pub deleted: usize,
