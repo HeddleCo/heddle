@@ -285,11 +285,50 @@ fn bootstrap_op_id_scope(cli: &Cli) -> Result<BootstrapOpIdScope> {
     let root = match &cli.command {
         crate::cli::Commands::Init(args) => args.path.clone().or_else(|| cli.repo.clone()),
         crate::cli::Commands::Adopt(args) => args.path.clone().or_else(|| cli.repo.clone()),
-        crate::cli::Commands::Clone(args) => Some(PathBuf::from(&args.local)),
+        // Clone destinations normally don't exist yet, so feeding the
+        // raw string into the hasher (and relying on the canonicalize
+        // fallback) lets two different cwds with `./repo` collide in
+        // the bootstrap cache. Resolve the destination against the
+        // current directory up front so the scope is cwd-specific.
+        crate::cli::Commands::Clone(args) => {
+            let cwd = std::env::current_dir()
+                .context("resolve current directory for clone op-id scope")?;
+            Some(absolutize_clone_destination(&args.local, &cwd))
+        }
         _ => cli.repo.clone(),
     }
     .unwrap_or(std::env::current_dir().context("resolve current directory for op-id scope")?);
     bootstrap_op_id_scope_for_root(root)
+}
+
+/// Anchor a (possibly relative, possibly non-existent) clone destination
+/// to an absolute path that's stable across cwds. `canonicalize` only
+/// works on paths that exist, so for the typical `heddle clone ./repo`
+/// case we walk up to the longest existing prefix, canonicalize it, then
+/// re-attach the remainder verbatim.
+fn absolutize_clone_destination(dest: &str, cwd: &std::path::Path) -> PathBuf {
+    let path = PathBuf::from(dest);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    let mut existing = absolute.clone();
+    let mut remainder: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name().map(|s| s.to_os_string()) else {
+            break;
+        };
+        if !existing.pop() {
+            break;
+        }
+        remainder.push(name);
+    }
+    let mut result = std::fs::canonicalize(&existing).unwrap_or(existing);
+    for component in remainder.into_iter().rev() {
+        result.push(component);
+    }
+    result
 }
 
 fn bootstrap_op_id_scope_for_root(root: PathBuf) -> Result<BootstrapOpIdScope> {
@@ -466,5 +505,56 @@ mod tests {
         let id = OperationId::new();
         let cli = cli_with(Some(&id.to_string()));
         assert_eq!(wire(&cli), id.to_string());
+    }
+
+    /// Two clones with the same `--op-id` and same relative destination
+    /// but launched from different working directories must hash to
+    /// different bootstrap scopes, otherwise the cache replays the
+    /// wrong checkout.
+    #[test]
+    fn clone_destination_resolves_relative_to_supplied_cwd() {
+        let cwd_a = tempfile::tempdir().expect("tempdir a");
+        let cwd_b = tempfile::tempdir().expect("tempdir b");
+
+        let from_a = super::absolutize_clone_destination("./repo", cwd_a.path());
+        let from_b = super::absolutize_clone_destination("./repo", cwd_b.path());
+
+        assert_ne!(
+            from_a, from_b,
+            "same relative dest from different cwds must absolutize differently"
+        );
+        assert!(from_a.ends_with("repo"));
+        assert!(from_b.ends_with("repo"));
+
+        // Same cwd + different relative leaves also stay distinct.
+        let leaf_x = super::absolutize_clone_destination("./repo-x", cwd_a.path());
+        let leaf_y = super::absolutize_clone_destination("./repo-y", cwd_a.path());
+        assert_ne!(leaf_x, leaf_y);
+    }
+
+    #[test]
+    fn clone_destination_preserves_absolute_paths() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let resolved =
+            super::absolutize_clone_destination("/var/empty/heddle-clone-target", cwd.path());
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with("heddle-clone-target"));
+    }
+
+    /// Bootstrap scopes derived from the absolutized destination must
+    /// also disagree, since the hasher consumes the canonical path
+    /// label. Confirms the fix flows through to `BootstrapOpIdScope`.
+    #[test]
+    fn bootstrap_scope_for_relative_clone_dest_is_cwd_specific() {
+        let cwd_a = tempfile::tempdir().expect("tempdir a");
+        let cwd_b = tempfile::tempdir().expect("tempdir b");
+
+        let dest_a = super::absolutize_clone_destination("./repo", cwd_a.path());
+        let dest_b = super::absolutize_clone_destination("./repo", cwd_b.path());
+        let scope_a = super::bootstrap_op_id_scope_for_root(dest_a).expect("scope a");
+        let scope_b = super::bootstrap_op_id_scope_for_root(dest_b).expect("scope b");
+
+        assert_ne!(scope_a.id, scope_b.id);
+        assert_ne!(scope_a.hash_material, scope_b.hash_material);
     }
 }
