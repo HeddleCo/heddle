@@ -15,7 +15,7 @@ use objects::{
     worktree::should_ignore as should_ignore_path,
 };
 use oplog::{OpBatch, OpRecord};
-use repo::{Repository, RepositoryCapability};
+use repo::{Repository, RepositoryCapability, git_worktree_status::GitWorktreeEntryState};
 use serde::Serialize;
 
 use super::{
@@ -827,54 +827,14 @@ fn index_entries_by_path(index: &gix_index::File) -> BTreeMap<String, IndexEntry
 }
 
 fn worktree_entry_changed(root: &Path, path: &str, entry: &IndexEntryIntent) -> Result<bool> {
-    let absolute = root.join(path);
-    let metadata = match fs::symlink_metadata(&absolute) {
-        Ok(metadata) => metadata,
-        Err(_) => {
-            return Ok(true);
-        }
-    };
-    if entry.mode == Mode::SYMLINK {
-        if !metadata.file_type().is_symlink() {
-            return Ok(true);
-        }
-        let target = fs::read_link(&absolute)
-            .with_context(|| format!("failed to inspect worktree symlink before commit: {path}"))?;
-        let target_bytes = symlink_target_bytes(&target);
-        let actual = compute_git_blob_hash(entry.id.kind(), &target_bytes)
-            .context("failed to inspect Git index before commit")?;
-        return Ok(actual != entry.id);
-    }
-    if metadata.file_type().is_symlink() {
-        return Ok(true);
-    }
-    if entry.mode == Mode::COMMIT {
-        return Ok(!metadata.is_dir());
-    }
-    if metadata.is_dir() {
-        return Ok(true);
-    }
-    let bytes = fs::read(&absolute)
-        .with_context(|| format!("failed to inspect worktree path before commit: {path}"))?;
-    let actual = compute_git_blob_hash(entry.id.kind(), &bytes)
-        .context("failed to inspect Git index before commit")?;
-    Ok(actual != entry.id)
-}
-
-fn compute_git_blob_hash(kind: gix::hash::Kind, bytes: &[u8]) -> Result<gix::ObjectId> {
-    Ok(gix::objs::compute_hash(kind, gix::objs::Kind::Blob, bytes)?)
-}
-
-fn symlink_target_bytes(target: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        target.as_os_str().as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    {
-        target.to_string_lossy().as_bytes().to_vec()
-    }
+    let state = repo::git_worktree_status::git_worktree_entry_state(
+        root,
+        path,
+        entry.id,
+        entry.mode.bits(),
+    )
+    .with_context(|| format!("failed to inspect worktree path before commit: {path}"))?;
+    Ok(state != GitWorktreeEntryState::Clean)
 }
 
 fn untracked_worktree_paths(

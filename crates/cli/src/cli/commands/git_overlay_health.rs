@@ -3,7 +3,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -14,7 +14,7 @@ use refs::Head;
 use repo::{
     CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
     OperationKind, OperationScope, Repository, ThreadManager, ThreadState, describe_thread_advice,
-    refresh_thread_freshness,
+    git_worktree_status::GitWorktreeEntryState, refresh_thread_freshness,
 };
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
@@ -1981,12 +1981,12 @@ fn plain_git_worktree_status(
     }
 
     for (path, (oid, mode)) in &index_entries {
-        match plain_git_worktree_entry_state(root, path, *oid, *mode)? {
-            PlainGitWorktreeEntryState::Clean => {}
-            PlainGitWorktreeEntryState::Deleted => {
+        match repo::git_worktree_status::git_worktree_entry_state(root, path, *oid, *mode)? {
+            GitWorktreeEntryState::Clean => {}
+            GitWorktreeEntryState::Deleted => {
                 deleted.insert(PathBuf::from(path));
             }
-            PlainGitWorktreeEntryState::Modified => {
+            GitWorktreeEntryState::Modified => {
                 modified.insert(PathBuf::from(path));
             }
         }
@@ -2009,74 +2009,6 @@ fn plain_git_worktree_status(
         modified: modified.into_iter().collect(),
         added: added.into_iter().collect(),
         deleted: deleted.into_iter().collect(),
-    })
-}
-
-enum PlainGitWorktreeEntryState {
-    Clean,
-    Modified,
-    Deleted,
-}
-
-fn plain_git_worktree_entry_state(
-    root: &Path,
-    path: &str,
-    expected_oid: gix::ObjectId,
-    mode: u32,
-) -> anyhow::Result<PlainGitWorktreeEntryState> {
-    const GIT_MODE_SYMLINK: u32 = 0o120000;
-    const GIT_MODE_COMMIT: u32 = 0o160000;
-    const GIT_MODE_REGULAR: u32 = 0o100644;
-    const GIT_MODE_EXECUTABLE: u32 = 0o100755;
-
-    let absolute = root.join(path);
-    if !absolute.exists() {
-        return Ok(PlainGitWorktreeEntryState::Deleted);
-    }
-    if mode == GIT_MODE_COMMIT {
-        return Ok(if absolute.is_dir() {
-            PlainGitWorktreeEntryState::Clean
-        } else {
-            PlainGitWorktreeEntryState::Modified
-        });
-    }
-    if absolute.is_dir() {
-        return Ok(PlainGitWorktreeEntryState::Modified);
-    }
-
-    // Filemode comparison for regular files: a chmod-only change (e.g.
-    // `chmod +x foo.sh`) leaves blob bytes identical but flips the
-    // index/worktree exec bit, which git-status reports as Modified.
-    // Skipped on Windows (no exec bit) and when the indexed mode is
-    // neither regular nor executable (symlinks/commits handled above).
-    #[cfg(unix)]
-    if matches!(mode, GIT_MODE_REGULAR | GIT_MODE_EXECUTABLE) {
-        use std::os::unix::fs::PermissionsExt;
-        let worktree_mode = absolute.metadata()?.permissions().mode();
-        let worktree_executable = worktree_mode & 0o111 != 0;
-        let indexed_executable = mode == GIT_MODE_EXECUTABLE;
-        if worktree_executable != indexed_executable {
-            return Ok(PlainGitWorktreeEntryState::Modified);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (GIT_MODE_REGULAR, GIT_MODE_EXECUTABLE);
-
-    let bytes = if mode == GIT_MODE_SYMLINK {
-        match fs::read_link(&absolute) {
-            Ok(target) => target.to_string_lossy().into_owned().into_bytes(),
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput => fs::read(&absolute)?,
-            Err(error) => return Err(error.into()),
-        }
-    } else {
-        fs::read(&absolute)?
-    };
-    let actual_oid = gix::objs::compute_hash(expected_oid.kind(), gix::objs::Kind::Blob, &bytes)
-        .map_err(|error| anyhow::anyhow!("failed to hash Git worktree path '{path}': {error}"))?;
-    Ok(if actual_oid == expected_oid {
-        PlainGitWorktreeEntryState::Clean
-    } else {
-        PlainGitWorktreeEntryState::Modified
     })
 }
 

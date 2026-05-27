@@ -51,7 +51,7 @@ mod status_untracked_scan;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs, io,
+    fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
@@ -79,6 +79,8 @@ use objects::{
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefManager};
+
+use crate::git_worktree_status::GitWorktreeEntryState;
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
@@ -1262,12 +1264,17 @@ impl Repository {
             if ignored_git_overlay_status_path(path) {
                 continue;
             }
-            match git_overlay_worktree_entry_state(&self.root, path, *oid, *mode)? {
-                GitOverlayWorktreeEntryState::Clean => {}
-                GitOverlayWorktreeEntryState::Deleted => {
+            match crate::git_worktree_status::git_worktree_entry_state(
+                &self.root,
+                path,
+                *oid,
+                *mode,
+            )? {
+                GitWorktreeEntryState::Clean => {}
+                GitWorktreeEntryState::Deleted => {
                     deleted.insert(PathBuf::from(path));
                 }
-                GitOverlayWorktreeEntryState::Modified => {
+                GitWorktreeEntryState::Modified => {
                     modified.insert(PathBuf::from(path));
                 }
             }
@@ -2078,83 +2085,6 @@ fn git_config_principal(root: &Path) -> Option<Principal> {
         return None;
     }
     Some(Principal::new(&name, &email))
-}
-
-enum GitOverlayWorktreeEntryState {
-    Clean,
-    Modified,
-    Deleted,
-}
-
-fn git_overlay_worktree_entry_state(
-    root: &Path,
-    path: &str,
-    expected_oid: gix::ObjectId,
-    mode: u32,
-) -> Result<GitOverlayWorktreeEntryState> {
-    const GIT_MODE_SYMLINK: u32 = 0o120000;
-    const GIT_MODE_COMMIT: u32 = 0o160000;
-    const GIT_MODE_REGULAR: u32 = 0o100644;
-    const GIT_MODE_EXECUTABLE: u32 = 0o100755;
-
-    let absolute = root.join(path);
-    let metadata = match fs::symlink_metadata(&absolute) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(GitOverlayWorktreeEntryState::Deleted);
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if mode == GIT_MODE_COMMIT {
-        return Ok(if metadata.file_type().is_dir() {
-            GitOverlayWorktreeEntryState::Clean
-        } else {
-            GitOverlayWorktreeEntryState::Modified
-        });
-    }
-    if metadata.file_type().is_dir() {
-        return Ok(GitOverlayWorktreeEntryState::Modified);
-    }
-
-    // Filemode comparison for regular file entries: a chmod-only change
-    // (e.g. `chmod +x foo.sh`) leaves the blob bytes identical but flips
-    // the worktree exec bit, which git-status reports as ` M f` /
-    // porcelain-v2 `<mH>`. Without this branch downstream
-    // status/verify/commit would treat such a worktree as Clean.
-    // Skipped on Windows (no exec bit) and when the indexed mode is
-    // neither regular nor executable (symlinks / commits handled above).
-    #[cfg(unix)]
-    if matches!(mode, GIT_MODE_REGULAR | GIT_MODE_EXECUTABLE) {
-        use std::os::unix::fs::PermissionsExt;
-        let worktree_executable = metadata.permissions().mode() & 0o111 != 0;
-        let indexed_executable = mode == GIT_MODE_EXECUTABLE;
-        if worktree_executable != indexed_executable {
-            return Ok(GitOverlayWorktreeEntryState::Modified);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = (GIT_MODE_REGULAR, GIT_MODE_EXECUTABLE);
-
-    let bytes = if mode == GIT_MODE_SYMLINK {
-        match fs::read_link(&absolute) {
-            Ok(target) => target.to_string_lossy().into_owned().into_bytes(),
-            Err(error) if error.kind() == io::ErrorKind::InvalidInput => fs::read(&absolute)?,
-            Err(error) => return Err(error.into()),
-        }
-    } else {
-        fs::read(&absolute)?
-    };
-    let actual_oid = gix::objs::compute_hash(expected_oid.kind(), gix::objs::Kind::Blob, &bytes)
-        .map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to hash Git worktree path '{path}': {error}"
-            ))
-        })?;
-    Ok(if actual_oid == expected_oid {
-        GitOverlayWorktreeEntryState::Clean
-    } else {
-        GitOverlayWorktreeEntryState::Modified
-    })
 }
 
 fn git_overlay_untracked_paths(

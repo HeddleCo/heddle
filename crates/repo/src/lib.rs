@@ -10,6 +10,7 @@ compile_error!(
 pub mod daemon;
 mod ephemeral_thread;
 mod fsmonitor;
+pub mod git_worktree_status;
 mod hooks;
 pub mod lazy_hydrator;
 mod merge_state;
