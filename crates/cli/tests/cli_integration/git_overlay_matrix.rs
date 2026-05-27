@@ -3967,6 +3967,143 @@ fn git_overlay_matrix_remote_add_configures_default_push_remote() {
 }
 
 #[test]
+fn git_overlay_matrix_remote_remove_clears_git_only_origin() {
+    let temp = TempDir::new().unwrap();
+    let origin = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    git(&["init", "--bare", "--initial-branch=main"], origin.path());
+    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle_adopt(temp.path());
+
+    let origin_arg = origin.path().to_str().expect("origin path should be utf8");
+    git(&["remote", "add", "origin", origin_arg], temp.path());
+
+    let listed_before = json(temp.path(), &["--output", "json", "remote", "list"]);
+    assert_eq!(
+        listed_before["remotes"]
+            .as_array()
+            .expect("remotes array")
+            .iter()
+            .filter(|item| item["name"] == "origin")
+            .count(),
+        1,
+        "Git-only origin should appear in heddle remote list: {listed_before}"
+    );
+
+    let removed = json(
+        temp.path(),
+        &["--output", "json", "remote", "remove", "origin"],
+    );
+    assert_eq!(removed["output_kind"], "remote_remove");
+    assert_eq!(removed["status"], "completed");
+    assert_eq!(removed["action"], "remote_remove");
+    assert_eq!(removed["name"], "origin");
+
+    let listed_after = json(temp.path(), &["--output", "json", "remote", "list"]);
+    assert!(
+        listed_after["remotes"]
+            .as_array()
+            .expect("remotes array")
+            .iter()
+            .all(|item| item["name"] != "origin"),
+        "origin should be gone from heddle remote list after remove: {listed_after}"
+    );
+
+    let get_url = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git remote get-url should run");
+    assert!(
+        !get_url.status.success(),
+        "git remote get-url origin should fail after heddle remote remove: stdout={} stderr={}",
+        String::from_utf8_lossy(&get_url.stdout),
+        String::from_utf8_lossy(&get_url.stderr),
+    );
+}
+
+#[test]
+fn git_overlay_matrix_remote_remove_clears_both_sources() {
+    let temp = TempDir::new().unwrap();
+    let staging = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    git(&["init", "--bare", "--initial-branch=main"], staging.path());
+    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle_adopt(temp.path());
+
+    let staging_arg = staging.path().to_str().expect("staging path should be utf8");
+    let added = json(
+        temp.path(),
+        &["--output", "json", "remote", "add", "staging", staging_arg],
+    );
+    assert_eq!(added["output_kind"], "remote_add");
+    assert_eq!(
+        git_stdout(temp.path(), &["remote", "get-url", "staging"]),
+        staging_arg,
+        "remote add should populate Git-overlay .git/config"
+    );
+
+    let removed = json(
+        temp.path(),
+        &["--output", "json", "remote", "remove", "staging"],
+    );
+    assert_eq!(removed["output_kind"], "remote_remove");
+    assert_eq!(removed["status"], "completed");
+    assert_eq!(removed["name"], "staging");
+
+    let listed = json(temp.path(), &["--output", "json", "remote", "list"]);
+    assert!(
+        listed["remotes"]
+            .as_array()
+            .expect("remotes array")
+            .iter()
+            .all(|item| item["name"] != "staging"),
+        "staging should not reappear from .git/config after remove: {listed}"
+    );
+
+    let get_url = Command::new("git")
+        .args(["remote", "get-url", "staging"])
+        .current_dir(temp.path())
+        .output()
+        .expect("git remote get-url should run");
+    assert!(
+        !get_url.status.success(),
+        "Git-overlay .git/config should also drop the staging remote",
+    );
+}
+
+#[test]
+fn git_overlay_matrix_remote_remove_unknown_returns_not_found() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "one\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle_adopt(temp.path());
+
+    let output = heddle_output(
+        &["--output", "json", "remote", "remove", "bogus"],
+        Some(temp.path()),
+    )
+    .expect("invoke remote remove with unknown name");
+    assert!(
+        !output.status.success(),
+        "remote remove on a missing name should fail"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr)
+        .unwrap_or_else(|err| panic!("remote remove failure should emit JSON: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "remote_not_found");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("bogus")),
+        "remote_not_found error should name the requested remote: {envelope}"
+    );
+}
+
+#[test]
 fn git_overlay_matrix_local_ahead_noop_merge_preserves_semantic_result() {
     let temp = TempDir::new().unwrap();
     let origin = TempDir::new().unwrap();

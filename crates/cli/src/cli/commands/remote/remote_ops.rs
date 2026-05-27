@@ -34,7 +34,7 @@ use crate::{
     cli::{Cli, RemoteCommands, should_output_json, style},
     client::LocalSync,
     config::UserConfig,
-    remote::{Remote, RemoteConfig, RemoteTarget, resolve_remote_with_key},
+    remote::{Remote, RemoteConfig, RemoteError, RemoteTarget, resolve_remote_with_key},
 };
 
 #[derive(Serialize)]
@@ -689,8 +689,15 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             Ok(())
         }
         RemoteCommands::Remove { name } => {
+            if !merged_remote_items(&repo)?.contains_key(&name) {
+                return Err(RecoveryAdvice::remote_not_found(&name).into());
+            }
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
-            cfg.remove(&name).map_err(anyhow::Error::msg)?;
+            match cfg.remove(&name) {
+                Ok(()) | Err(RemoteError::NotFound(_)) => {}
+                Err(err) => return Err(anyhow::Error::msg(err)),
+            }
+            sync_git_overlay_remote_remove(&repo, &name)?;
             render_remote_mutation(
                 RemoteMutationOutput {
                     output_kind: "remote_remove",
@@ -1024,6 +1031,16 @@ fn sync_git_overlay_remote_add(repo: &Repository, name: &str, url: &str) -> Resu
     upsert_git_remote_config(&config_path, name, url)
 }
 
+fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Ok(());
+    }
+    let Some(config_path) = git_overlay_config_path_for_write(repo) else {
+        return Ok(());
+    };
+    remove_git_remote_config(&config_path, name)
+}
+
 fn git_overlay_config_path_for_write(repo: &Repository) -> Option<std::path::PathBuf> {
     let dot_git = repo.root().join(".git");
     if dot_git.is_dir() {
@@ -1082,6 +1099,35 @@ fn upsert_git_remote_config(config_path: &Path, name: &str, url: &str) -> Result
         git_config_quoted_value(url),
         git_config_quoted_value(&format!("+refs/heads/*:refs/remotes/{name}/*"))
     ));
+    write_file_atomic(config_path, rewritten.as_bytes())?;
+    Ok(())
+}
+
+fn remove_git_remote_config(config_path: &Path, name: &str) -> Result<()> {
+    let Ok(original) = fs::read_to_string(config_path) else {
+        return Ok(());
+    };
+    let mut rewritten = String::new();
+    let mut skipping_remote = false;
+    let mut removed = false;
+    for line in original.lines() {
+        if let Some(section_name) = parse_git_remote_section_name(line) {
+            skipping_remote = section_name == name;
+            if skipping_remote {
+                removed = true;
+                continue;
+            }
+        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
+            skipping_remote = false;
+        }
+        if !skipping_remote {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+    }
+    if !removed {
+        return Ok(());
+    }
     write_file_atomic(config_path, rewritten.as_bytes())?;
     Ok(())
 }
