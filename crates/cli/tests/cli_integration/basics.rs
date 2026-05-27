@@ -3333,3 +3333,54 @@ fn test_cli_diff_patch_preserves_missing_new_final_newline() {
     );
 }
 
+/// `heddle diff --patch` from a plain-Git checkout (no `heddle init`)
+/// must emit a real unified-diff body. The status-only fast path
+/// constructed every `FileChange` with `lines: None`, so the patch
+/// printer skipped them all and produced an empty string — useless
+/// to `patch(1)` / `git apply`. When `--patch` is requested we now
+/// delegate to `git diff -p` for the body.
+#[test]
+fn test_cli_diff_patch_works_on_plain_git_fast_path() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    let original = "line one\nline two\nline three\nline four\nline five\n";
+    std::fs::write(temp.path().join("file.txt"), original).unwrap();
+    git_commit_all(temp.path(), "seed plain-git content");
+    let modified = "line one\nline TWO\nline three\nline four\nline five\n";
+    std::fs::write(temp.path().join("file.txt"), modified).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    assert!(
+        !patch.trim().is_empty(),
+        "plain-Git fast path must emit a non-empty patch body when files changed; got:\n{patch:?}"
+    );
+    assert!(
+        patch.contains("-line two") && patch.contains("+line TWO"),
+        "patch body must include the actual edit:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    std::fs::write(apply_dir.path().join("file.txt"), original).unwrap();
+    let mut child = Command::new("patch")
+        .args(["-p1", "--dry-run"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("patch should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("patch should finish");
+    assert!(
+        out.status.success(),
+        "patch -p1 --dry-run must accept the plain-Git fast-path body;\npatch=\n{patch}\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

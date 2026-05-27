@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Core diff command logic.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Result, anyhow};
 use objects::{
@@ -73,7 +73,7 @@ pub fn cmd_diff(
         if probe.changes.is_clean() {
             return Err(anyhow!(plain_git_setup_advice(&probe, "diff", None)));
         }
-        return render_plain_git_head_diff(cli, &probe, stat, name_only, patch);
+        return render_plain_git_head_diff(cli, &probe, stat, name_only, patch, unified);
     }
 
     let repo = Repository::open(start)?;
@@ -82,7 +82,16 @@ pub fn cmd_diff(
         && from_is_head_or_default
         && let Some(status) = trust_visible_worktree_status(&repo, &trust)?
     {
-        return render_worktree_status_diff(cli, &status, stat, name_only, true, patch);
+        return render_worktree_status_diff(
+            cli,
+            &status,
+            stat,
+            name_only,
+            true,
+            patch,
+            unified,
+            Some(&repo),
+        );
     }
     let git_overlay_head_worktree_diff = repo.current_state()?.is_none()
         && to.is_none()
@@ -370,10 +379,219 @@ fn render_plain_git_head_diff(
     stat: bool,
     name_only: bool,
     patch: bool,
+    unified: usize,
 ) -> Result<()> {
-    render_worktree_status_diff(cli, &probe.changes, stat, name_only, false, patch)
+    // The plain-Git fast path has no heddle Repository, so there is
+    // no in-tree blob source `get_worktree_diff` can read from. When
+    // `--patch` is requested we read the HEAD blobs through `gix`
+    // and feed them through the same `diff_blobs` + renderer pipeline
+    // the heddle paths use — that way the `\ No newline at end of
+    // file` handling stays in one place.
+    if patch && !stat && !name_only {
+        let changes = plain_git_file_changes_with_hunks(probe, unified)?;
+        return render_status_changes(cli, changes, stat, name_only, patch);
+    }
+    render_worktree_status_diff(
+        cli,
+        &probe.changes,
+        stat,
+        name_only,
+        false,
+        patch,
+        unified,
+        None,
+    )
 }
 
+fn render_status_changes(
+    cli: &Cli,
+    changes: Vec<FileChange>,
+    stat: bool,
+    name_only: bool,
+    patch: bool,
+) -> Result<()> {
+    let mut output = DiffOutput::new(Some("HEAD".to_string()), None, changes, None, None, None);
+    populate_patch_text(&mut output);
+
+    if should_output_json(cli, None) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else if name_only {
+        for change in &output.changes {
+            println!("{}", change.path);
+        }
+    } else if stat {
+        print_stat(&output);
+    } else if patch {
+        print_diff_patch(&output);
+    } else {
+        print_diff(&output);
+    }
+    Ok(())
+}
+
+/// Build one `FileChange` per status entry in the plain-Git probe,
+/// computing real hunks against the gix-read HEAD blobs so `--patch`
+/// emits a body the regular renderer can stamp newline markers onto.
+fn plain_git_file_changes_with_hunks(
+    probe: &PlainGitVerificationProbe,
+    unified: usize,
+) -> Result<Vec<FileChange>> {
+    let git_repo = gix::discover(&probe.root)?;
+    let mut head_tree = git_repo.head_tree()?;
+    let mut changes = Vec::with_capacity(probe.changes.change_count());
+    for path in &probe.changes.modified {
+        changes.push(plain_git_file_change(
+            &git_repo,
+            Some(&mut head_tree),
+            &probe.root,
+            path,
+            "modified",
+            DiffKind::Modified,
+            unified,
+        )?);
+    }
+    for path in &probe.changes.added {
+        changes.push(plain_git_file_change(
+            &git_repo,
+            Some(&mut head_tree),
+            &probe.root,
+            path,
+            "added",
+            DiffKind::Added,
+            unified,
+        )?);
+    }
+    for path in &probe.changes.deleted {
+        changes.push(plain_git_file_change(
+            &git_repo,
+            Some(&mut head_tree),
+            &probe.root,
+            path,
+            "deleted",
+            DiffKind::Deleted,
+            unified,
+        )?);
+    }
+    Ok(changes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plain_git_file_change(
+    git_repo: &gix::Repository,
+    head_tree: Option<&mut gix::Tree<'_>>,
+    root: &Path,
+    path: &std::path::Path,
+    kind: &str,
+    diff_kind: DiffKind,
+    unified: usize,
+) -> Result<FileChange> {
+    let old_blob = match (head_tree, &diff_kind) {
+        (Some(tree), DiffKind::Modified | DiffKind::Deleted) => {
+            plain_git_lookup_blob(git_repo, tree, path)?
+        }
+        _ => None,
+    };
+    let new_blob = match diff_kind {
+        DiffKind::Added | DiffKind::Modified => {
+            // A read error here means the file vanished between the
+            // status scan and the diff attempt — fall back to status-
+            // only so the rendered patch at least names the path.
+            read_worktree_blob_for_diff(&root.join(path)).ok()
+        }
+        _ => None,
+    };
+    let (lines, eol, binary) = compute_plain_git_hunks(
+        old_blob.as_ref(),
+        new_blob.as_ref(),
+        &diff_kind,
+        unified,
+    );
+    Ok(FileChange {
+        path: path.display().to_string(),
+        kind: kind.to_string(),
+        binary,
+        lines,
+        eol,
+        ..Default::default()
+    })
+}
+
+fn plain_git_lookup_blob(
+    git_repo: &gix::Repository,
+    tree: &mut gix::Tree<'_>,
+    path: &std::path::Path,
+) -> Result<Option<Blob>> {
+    let Some(entry) = tree.peel_to_entry_by_path(path)? else {
+        return Ok(None);
+    };
+    if !entry.mode().is_blob() {
+        return Ok(None);
+    }
+    let object = git_repo.find_object(entry.object_id())?;
+    Ok(Some(Blob::new(object.data.clone())))
+}
+
+fn compute_plain_git_hunks(
+    old: Option<&Blob>,
+    new: Option<&Blob>,
+    diff_kind: &DiffKind,
+    unified: usize,
+) -> (Option<Vec<LineDiff>>, FileEolState, bool) {
+    let attempt = || -> Result<(Vec<LineDiff>, FileEolState)> {
+        match diff_kind {
+            DiffKind::Added => {
+                let Some(new) = new else {
+                    return Ok((Vec::new(), FileEolState::default()));
+                };
+                ensure_text_diffable(new)?;
+                let eol = eol_for_added(new);
+                Ok((number_lines(blob_lines(new, "+")?), eol))
+            }
+            DiffKind::Deleted => {
+                let Some(old) = old else {
+                    return Ok((Vec::new(), FileEolState::default()));
+                };
+                ensure_text_diffable(old)?;
+                let eol = eol_for_deleted(old);
+                Ok((number_lines(blob_lines(old, "-")?), eol))
+            }
+            DiffKind::Modified => match (old, new) {
+                (Some(old), Some(new)) => {
+                    ensure_text_diffable(old)?;
+                    ensure_text_diffable(new)?;
+                    let eol = eol_for_modified(old, new);
+                    let diff = diff_blobs(old, new);
+                    let lines = diff
+                        .iter()
+                        .map(|l| LineDiff::new(l.prefix(), l.content()))
+                        .collect();
+                    Ok((number_lines(lines), eol))
+                }
+                (None, Some(new)) => {
+                    ensure_text_diffable(new)?;
+                    let eol = eol_for_added(new);
+                    Ok((number_lines(blob_lines(new, "+")?), eol))
+                }
+                (Some(old), None) => {
+                    ensure_text_diffable(old)?;
+                    let eol = eol_for_deleted(old);
+                    Ok((number_lines(blob_lines(old, "-")?), eol))
+                }
+                (None, None) => Ok((Vec::new(), FileEolState::default())),
+            },
+            DiffKind::Unchanged => Ok((Vec::new(), FileEolState::default())),
+        }
+    };
+    match attempt() {
+        Ok((lines, eol)) => (Some(unified_hunks(lines, unified)), eol, false),
+        Err(error) if is_binary_diff_error(&error) => {
+            (None, FileEolState::default(), true)
+        }
+        Err(_) => (None, FileEolState::default(), false),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_worktree_status_diff(
     cli: &Cli,
     status: &objects::worktree::WorktreeStatus,
@@ -381,26 +599,27 @@ fn render_worktree_status_diff(
     name_only: bool,
     detect_renames: bool,
     patch: bool,
+    unified: usize,
+    repo: Option<&Repository>,
 ) -> Result<()> {
-    let changes = status
-        .modified
-        .iter()
-        .map(|path| FileChange {
-            path: path.display().to_string(),
-            kind: "modified".to_string(),
-            ..Default::default()
-        })
-        .chain(status.added.iter().map(|path| FileChange {
-            path: path.display().to_string(),
-            kind: "added".to_string(),
-            ..Default::default()
-        }))
-        .chain(status.deleted.iter().map(|path| FileChange {
-            path: path.display().to_string(),
-            kind: "deleted".to_string(),
-            ..Default::default()
-        }))
-        .collect::<Vec<_>>();
+    // `--patch` is the only printer that actually needs the hunk
+    // vector. The other printers — `--stat`, `--name-only`, the
+    // default pretty printer — read only kind/path off the status
+    // entries, so we keep the cheap status-only construction for
+    // them. JSON consumers always get a `patch` field when hunks
+    // are available, which is why we also inflate when we know a
+    // heddle Repository is around.
+    let want_hunks = patch
+        && !stat
+        && !name_only
+        && repo.is_some();
+    let from_tree = if want_hunks && let Some(repo) = repo {
+        head_from_tree(repo)?
+    } else {
+        None
+    };
+
+    let changes = file_changes_from_status(status, want_hunks, repo, from_tree.as_ref(), unified);
     let changes = if detect_renames {
         detect_clear_renames_for_worktree_status(cli, changes)?
     } else {
@@ -423,6 +642,101 @@ fn render_worktree_status_diff(
         print_diff(&output);
     }
     Ok(())
+}
+
+/// Build `FileChange` entries from a `WorktreeStatus`, optionally
+/// computing the per-file hunk vector (with EOL metadata) so the
+/// patch renderer has something to render. When `want_hunks` is
+/// false the entries are status-only — same as the old behaviour.
+fn file_changes_from_status(
+    status: &objects::worktree::WorktreeStatus,
+    want_hunks: bool,
+    repo: Option<&Repository>,
+    from_tree: Option<&Tree>,
+    unified: usize,
+) -> Vec<FileChange> {
+    let mut changes = Vec::with_capacity(status.change_count());
+    for path in &status.modified {
+        changes.push(make_status_file_change(
+            path,
+            "modified",
+            DiffKind::Modified,
+            want_hunks,
+            repo,
+            from_tree,
+            unified,
+        ));
+    }
+    for path in &status.added {
+        changes.push(make_status_file_change(
+            path,
+            "added",
+            DiffKind::Added,
+            want_hunks,
+            repo,
+            from_tree,
+            unified,
+        ));
+    }
+    for path in &status.deleted {
+        changes.push(make_status_file_change(
+            path,
+            "deleted",
+            DiffKind::Deleted,
+            want_hunks,
+            repo,
+            from_tree,
+            unified,
+        ));
+    }
+    changes
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_status_file_change(
+    path: &std::path::Path,
+    kind: &str,
+    diff_kind: DiffKind,
+    want_hunks: bool,
+    repo: Option<&Repository>,
+    from_tree: Option<&Tree>,
+    unified: usize,
+) -> FileChange {
+    let path_str = path.display().to_string();
+    let (lines, eol, binary) = if want_hunks && let Some(repo) = repo {
+        match get_worktree_diff(repo, from_tree, &path_str, &diff_kind) {
+            Ok((raw, eol)) => (Some(unified_hunks(raw, unified)), eol, false),
+            Err(error) if is_binary_diff_error(&error) => {
+                (None, FileEolState::default(), true)
+            }
+            // Worktree read errors on a status-listed file mean the
+            // file vanished between the status scan and the diff
+            // attempt. Fall back to status-only; the renderer prints
+            // the file header without a body, matching git's
+            // behaviour for transient races.
+            Err(_) => (None, FileEolState::default(), false),
+        }
+    } else {
+        (None, FileEolState::default(), false)
+    };
+    FileChange {
+        path: path_str,
+        kind: kind.to_string(),
+        binary,
+        lines,
+        eol,
+        ..Default::default()
+    }
+}
+
+fn head_from_tree(repo: &Repository) -> Result<Option<Tree>> {
+    let Some(head_id) = repo.head()? else {
+        return Ok(None);
+    };
+    let Some(state) = repo.store().get_state(&head_id)? else {
+        return Ok(None);
+    };
+    Ok(repo.store().get_tree(&state.tree)?)
 }
 
 /// Compute a state-to-state diff payload without printing.
