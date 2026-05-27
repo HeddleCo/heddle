@@ -20,8 +20,7 @@
 //! `cli` because their git-overlay-without-hosted code paths must
 //! work in OSS-only builds too.
 
-use std::any::Any;
-use std::path::Path;
+use std::{any::Any, error::Error, fmt, path::Path};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -56,6 +55,99 @@ pub trait CliContext: Send + Sync {
     /// otherwise.
     fn should_output_json(&self, repo_config: Option<&repo::Config>) -> bool;
 }
+
+/// Typed hosted-command recovery advice that the OSS CLI can render as the
+/// same JSON/text envelope used by native commands without depending on the
+/// hosted client implementation.
+#[derive(Debug, Clone)]
+pub struct HostedRecoveryAdvice {
+    pub kind: &'static str,
+    pub error: String,
+    pub hint: String,
+    pub unsafe_condition: String,
+    pub would_change: String,
+    pub preserved: String,
+    pub primary_command: String,
+    pub recovery_commands: Vec<String>,
+}
+
+impl HostedRecoveryAdvice {
+    pub fn invalid_usage(
+        kind: &'static str,
+        error: impl Into<String>,
+        hint: impl Into<String>,
+        primary_command: impl Into<String>,
+    ) -> Self {
+        let primary_command = primary_command.into();
+        Self {
+            kind,
+            error: error.into(),
+            hint: hint.into(),
+            unsafe_condition: "the command arguments do not describe a valid hosted operation"
+                .to_string(),
+            would_change:
+                "running with ambiguous or invalid arguments could target the wrong hosted resource"
+                    .to_string(),
+            preserved: "no hosted request was sent and local repository state was left unchanged"
+                .to_string(),
+            primary_command: primary_command.clone(),
+            recovery_commands: vec![primary_command],
+        }
+    }
+
+    pub fn auth_required(server: &str) -> Self {
+        let primary_command = format!("heddle auth login --server {server}");
+        Self {
+            kind: "auth_required",
+            error: format!("Not authenticated with {server}"),
+            hint: format!(
+                "Run `{primary_command}` to authenticate, then retry the hosted command."
+            ),
+            unsafe_condition: "no usable hosted credential is available for the selected server"
+                .to_string(),
+            would_change:
+                "continuing without credentials would send an unauthenticated hosted mutation"
+                    .to_string(),
+            preserved: "no hosted request was sent and local repository state was left unchanged"
+                .to_string(),
+            primary_command: primary_command.clone(),
+            recovery_commands: vec![primary_command],
+        }
+    }
+
+    pub fn hosted_remote_required(remote: &str, feature: &str) -> Self {
+        Self {
+            kind: "hosted_remote_required",
+            error: format!("{feature} requires a hosted remote; remote '{remote}' is local"),
+            hint: "Configure a hosted remote or retry against one that resolves to a network target."
+                .to_string(),
+            unsafe_condition: format!("remote '{remote}' is local, but {feature} runs on the hosted server"),
+            would_change:
+                "running locally would imply a hosted policy or support change that no server recorded"
+                    .to_string(),
+            preserved: "no hosted request was sent and local repository state was left unchanged"
+                .to_string(),
+            primary_command: "heddle remote list".to_string(),
+            recovery_commands: vec!["heddle remote list".to_string()],
+        }
+    }
+}
+
+impl fmt::Display for HostedRecoveryAdvice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}. Unsafe: {}. Would change: {}. Preserved: {}. Primary recovery: `{}`.",
+            self.error,
+            self.unsafe_condition,
+            self.would_change,
+            self.preserved,
+            self.primary_command
+        )
+    }
+}
+
+impl Error for HostedRecoveryAdvice {}
 
 /// Hosted-side command implementations. The CLI dispatches through a
 /// `&dyn WeftExtensions` reference; the active impl is selected at

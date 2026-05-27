@@ -4,32 +4,35 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 
-Heddle is an AI-native version control CLI written in Rust. It runs as a Git overlay on top of an existing Git repository, adding:
+Heddle is an AI-native version control CLI written in Rust. It keeps its own state model and uses the Git bridge/adapter when you want to adopt an existing Git repository, adding:
 
 - thread-first agent workflows (lightweight named work units with lifecycle, freshness, and promotion semantics)
-- local captures and checkpoints with explicit human and agent attribution
+- local captures and Git-compatible commits with explicit human and agent attribution
 - content-addressed immutable history with stable change identifiers that survive rewrites
 - provenance-aware inspection (`heddle blame`, `heddle inspect`, `heddle compare --semantic`)
 
 ```bash
 cargo install heddle-cli
 cd /path/to/your/git/repo
-heddle status        # bootstraps a .heddle/ sidecar and adopts the current branch
+heddle status            # inspect Git safely; Heddle will print the exact adopt command
+heddle adopt --ref main  # initialize Heddle and import the active branch
+heddle verify
 ```
 
 This repository ships the OSS CLI. The hosted backend (`weft`) and the web product (`tapestry`) are separate, closed-source repositories — see [Related projects](#related-projects).
 
 ## What `heddle` does today
 
-In a plain Git repo, `heddle` auto-adopts:
+In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle status` first reports:
 
-- the current checkout and dirty state
-- the active local branch as the current Heddle thread
-- other local branch tips as lightweight thread mirrors
+- the current Git branch
+- dirty worktree/index state
+- whether Heddle has been initialized
+- the exact next command to adopt the repo
 
-That means `heddle status`, `heddle thread list`, and `heddle workspace show` work immediately, with no `init` step. `heddle bridge git import` is the explicit step when you want richer ancestry or full Heddle history semantics for a specific branch or tag (`heddle bridge git import --ref <branch-or-tag>`).
+Run the exact `heddle adopt --ref <branch>` command printed by `heddle status` to create Heddle's local data and import the active Git branch in one step. After adoption, `heddle status`, `heddle verify`, `heddle thread list`, and `heddle workspace show` all report from the same verification state. Lower-level `heddle bridge git ...` commands are available for explicit Git-adapter import/export/sync work, not the default first-run path.
 
-Heddle's CLI follows five operating principles — trust, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
+Heddle's CLI follows five operating principles — verification, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
 
 ## Capability status
 
@@ -41,13 +44,13 @@ Heddle's CLI follows five operating principles — trust, disposability, composa
 - Explicit principal and agent attribution
 - Provenance-backed local blame with rewrite preservation across snapshot, collapse, and merge flows
 - Semantic diff and compare
-- Git overlay: adopt, import, export, sync
+- Git adapter/bridge: adopt, import, export, sync
 - Multi-agent worktrees and agent registry
 
 ### Foundation in place
 
 - Hosted client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to a hosted backend; `weft-client-shim` is always present as a non-optional dep)
-- Verification and trust metadata across the wire protocol
+- Verification and verification metadata across the wire protocol
 
 ### Planned
 
@@ -64,7 +67,7 @@ The 1.0 stability criterion — coverage thresholds, performance budgets, format
 cargo install heddle-cli
 ```
 
-The default feature set is `git-overlay`, `native`, `local`, `semantic`, `zstd`. To build a Git-overlay-only or native-only flavor, pass `--no-default-features --features git-overlay` or `--no-default-features --features native`.
+The default feature set is `git-overlay`, `native`, `local`, `semantic`, `zstd`. To build a Git-adapter-only or native-only flavor, pass `--no-default-features --features git-overlay` or `--no-default-features --features native`.
 
 ### From source
 
@@ -79,18 +82,23 @@ Prerequisites: Rust 1.85+, `cargo`, `rustfmt`, `clippy`.
 ## Quickstart
 
 ```bash
-# In an ordinary Git repo: bootstrap and inspect
+# In an ordinary Git repo: inspect, adopt, and verify
 heddle status
+heddle adopt --ref main
+heddle verify
 
-# Start a thread, capture work, checkpoint to a Git-facing commit
-heddle start feature/auth
-heddle capture -m "add auth validation"
-heddle checkpoint -m "add user authentication"
+# Save work as one verified Heddle change plus a matching Git commit
+heddle commit -m "add user authentication"
+
+# Start isolated work and prove it is ready
+heddle start feature/auth --path ../feature-auth
+cd ../feature-auth
+heddle commit -m "add auth validation"
+heddle ready
 
 # Preview a merge, then merge and push
 heddle merge feature/auth --preview
-heddle merge feature/auth
-heddle push
+heddle ship --thread feature/auth --push
 
 # Inspect history and provenance
 heddle log
@@ -98,7 +106,7 @@ heddle compare HEAD~1 HEAD --semantic
 heddle blame path/to/file.rs
 ```
 
-`heddle status` is the control tower: it reports the current branch or thread, what is dirty, whether another operation is in progress, and the recommended next command. The same `recommended_action` field is carried through `heddle diagnose`, `heddle thread show`, and `heddle workspace show` for programmatic use.
+`heddle status` reports the current branch or thread, what is dirty, whether another operation is in progress, and the recommended next command. The same `recommended_action` field is carried through `heddle diagnose`, `heddle thread show`, and `heddle workspace show` for programmatic use.
 
 ## Core concepts
 
@@ -114,7 +122,7 @@ heddle blame path/to/file.rs
 
 ## Agent-friendly output
 
-Heddle is designed for programmatic use by agents and automation. Most read-shaped commands take `--output json` (the legacy `--json` flag is deprecated; `--output auto` — the default — renders text on a TTY and JSON when stdout is piped):
+Heddle is designed for programmatic use by agents and automation. Most read-shaped commands take `--output json`; `--output auto` — the default — renders text on a TTY and JSON when stdout is piped:
 
 ```bash
 heddle status --output json
@@ -125,6 +133,16 @@ heddle show HEAD --output json
 ```
 
 See [.agents/agent-workflows.md](.agents/agent-workflows.md) for durable automation guidance.
+
+For idempotent retries, inspect `heddle commands --output json` before
+using `--op-id` or `HEDDLE_OPERATION_ID`. Commands with
+`supports_op_id: true` support caller-supplied explicit replay: the same
+id plus the same arguments replays the recorded outcome, while the same
+id with different arguments fails with a typed conflict. `persists_op_id`
+is reserved for commands that generate and save an id across interrupted
+retry loops; current replay-safe automation should supply an explicit
+UUID. `--op-id` is intentionally not advertised as a broad global option
+in the command catalog; use each command's `op_id_behavior` field.
 
 ## Configuration
 

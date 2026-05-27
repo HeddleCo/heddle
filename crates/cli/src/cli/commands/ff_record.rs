@@ -15,8 +15,8 @@
 //! thread ref to strand, and the legacy `Goto` inverse correctly
 //! rewinds HEAD on its own.
 
-use anyhow::{Result, anyhow};
-use objects::object::ChangeId;
+use anyhow::{anyhow, Result};
+use objects::object::{ChangeId, ThreadName};
 use oplog::OpRecord;
 use refs::Head;
 use repo::Repository;
@@ -85,32 +85,6 @@ pub(super) fn record_ff_advance_explicit(
     )
 }
 
-fn record_ff_advance_inner(
-    repo: &Repository,
-    source_thread: &str,
-    head_before: &Head,
-    pre_target_id: &ChangeId,
-    post_target_id: &ChangeId,
-) -> Result<()> {
-    repo.fast_forward_attached_without_record(post_target_id)?;
-    match head_before {
-        Head::Attached { thread } => {
-            repo.oplog().record_fast_forward(
-                source_thread,
-                thread,
-                pre_target_id,
-                post_target_id,
-                Some(&repo.op_scope()),
-            )?;
-        }
-        Head::Detached { state } => {
-            repo.oplog()
-                .record_goto(post_target_id, Some(state), Some(&repo.op_scope()))?;
-        }
-    }
-    Ok(())
-}
-
 /// Mutate the worktree to fast-forward the attached thread to
 /// `post_target_id` *without* writing to the oplog. Returns the
 /// `OpRecord` that [`record_ff_advance`] would have written so the
@@ -143,7 +117,7 @@ pub(super) fn ff_advance_deferred(
     Ok(match head_before {
         Head::Attached { thread } => OpRecord::FastForwardV2 {
             source_thread: source_thread.to_string(),
-            target_thread: thread,
+            target_thread: thread.to_string(),
             pre_target_id,
             post_target_id: *post_target_id,
         },
@@ -152,4 +126,30 @@ pub(super) fn ff_advance_deferred(
             prev_head: Some(state),
         },
     })
+}
+
+fn record_ff_advance_inner(
+    repo: &Repository,
+    source_thread: &str,
+    head_before: &Head,
+    pre_target_id: &ChangeId,
+    post_target_id: &ChangeId,
+) -> Result<()> {
+    repo.fast_forward_attached_without_record(post_target_id)?;
+    match head_before {
+        Head::Attached { thread } => {
+            repo.oplog().record_fast_forward(
+                &ThreadName::new(source_thread),
+                thread,
+                pre_target_id,
+                post_target_id,
+                Some(&repo.op_scope()),
+            )?;
+        }
+        Head::Detached { state } => {
+            repo.oplog()
+                .record_goto(post_target_id, Some(state), Some(&repo.op_scope()))?;
+        }
+    }
+    Ok(())
 }

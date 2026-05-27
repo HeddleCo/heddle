@@ -79,16 +79,7 @@ fn parse_flag_body(body: &str) -> (SignalAnchor, &str) {
     (SignalAnchor::file("*"), body)
 }
 
-fn truncate_reason(reason: &str) -> String {
-    if reason.len() <= objects::object::MAX_REASON_LEN {
-        reason.to_string()
-    } else {
-        let take = objects::object::MAX_REASON_LEN.saturating_sub(1);
-        let mut out: String = reason.chars().take(take).collect();
-        out.push('…');
-        out
-    }
-}
+use crate::truncate_reason;
 
 #[cfg(test)]
 mod tests {

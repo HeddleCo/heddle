@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle query` handler — structured query over the operation log (A10).
+//! `heddle query` handler — structured query over the operation log.
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, TimeZone, Utc};
+use daemon::grpc_local_impl::{GrpcLocalService, LocalOperationLogQueryService};
 use grpc::heddle::v1::{
     QueryOperationsRequest, operation_log_query_service_server::OperationLogQueryService,
 };
 use repo::{Repository, operation_dedup::OperationDedupStore};
 use serde::Serialize;
-use daemon::grpc_local_impl::{GrpcLocalService, LocalOperationLogQueryService};
 
 use crate::cli::{
     cli_args::{Cli, QueryArgs},
@@ -19,6 +19,7 @@ use crate::cli::{
 
 #[derive(Serialize)]
 struct QueryOutput {
+    output_kind: &'static str,
     hits: Vec<HitView>,
 }
 
@@ -55,6 +56,7 @@ pub async fn run(cli: &Cli, args: &QueryArgs) -> Result<()> {
         .map_err(status_to_anyhow)?
         .into_inner();
     let output = QueryOutput {
+        output_kind: "query",
         hits: resp
             .hits
             .iter()

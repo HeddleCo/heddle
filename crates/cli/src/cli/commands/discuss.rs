@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+use daemon::grpc_local_impl::{GrpcLocalService, LocalDiscussionService};
 use grpc::heddle::v1::{
     AppendTurnRequest, GetDiscussionRequest, ListDiscussionsByStateRequest,
     ListDiscussionsBySymbolRequest, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
@@ -16,9 +17,8 @@ use grpc::heddle::v1::{
 };
 use repo::{Repository, operation_dedup::OperationDedupStore};
 use serde::Serialize;
-use daemon::grpc_local_impl::{GrpcLocalService, LocalDiscussionService};
 
-use super::history_target::resolve_state_id;
+use super::{advice::RecoveryAdvice, history_target::resolve_state_id};
 use crate::cli::{
     cli_args::{
         Cli, DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
@@ -131,15 +131,13 @@ async fn run_resolve(
     };
     let resolution = match args.mode {
         ResolveModeArg::IntoAnnotation => {
-            let kind_str = args
-                .annotation_kind
-                .as_deref()
-                .ok_or_else(|| anyhow!("--annotation-kind is required for into-annotation"))?;
+            let kind_str = args.annotation_kind.as_deref().ok_or_else(|| {
+                anyhow!(RecoveryAdvice::discuss_resolve_missing_annotation_kind())
+            })?;
             let kind = parse_annotation_kind(kind_str)?;
-            let content = args
-                .annotation_content
-                .clone()
-                .ok_or_else(|| anyhow!("--annotation-content is required for into-annotation"))?;
+            let content = args.annotation_content.clone().ok_or_else(|| {
+                anyhow!(RecoveryAdvice::discuss_resolve_missing_annotation_content())
+            })?;
             let tags = args
                 .annotation_tags
                 .as_deref()
@@ -163,7 +161,7 @@ async fn run_resolve(
             reason: args
                 .reason
                 .clone()
-                .ok_or_else(|| anyhow!("--reason is required for dismiss"))?,
+                .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_resolve_missing_dismiss_reason()))?,
         }),
     };
     let req = ResolveDiscussionRequest {
@@ -351,13 +349,13 @@ fn resolve_state(explicit: Option<&str>) -> Result<Vec<u8>> {
     let repo = Repository::open(&cwd).context("open Heddle repository")?;
     if let Some(s) = explicit {
         // Routes through the canonical resolver so short/full IDs and
-        // marker names all work — matches `heddle log --json` output.
+        // marker names all work — matches `heddle log --output json` output.
         return Ok(resolve_state_id(&repo, s)?.as_bytes().to_vec());
     }
     let head = repo
         .head()
         .context("read HEAD")?
-        .ok_or_else(|| anyhow!("repository has no HEAD; capture a state first"))?;
+        .ok_or_else(|| anyhow!(RecoveryAdvice::repository_no_head_capture_first("discuss")))?;
     Ok(head.as_bytes().to_vec())
 }
 

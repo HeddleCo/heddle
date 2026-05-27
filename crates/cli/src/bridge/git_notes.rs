@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 
 use super::git_core::{GitBridgeError, GitResult, git_err, set_reference};
 
-/// The notes ref heddle uses. Standard `git notes --ref=heddle` reads
-/// from this location, and `git log --notes=heddle` displays them inline.
+/// The notes ref heddle uses. Git-compatible notes readers can opt into
+/// this location, while Heddle reads and writes it natively.
 pub const NOTES_REF: &str = "refs/notes/heddle";
 
 /// JSON payload stored inside each note blob.

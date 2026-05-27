@@ -103,7 +103,7 @@ proportional to the changed 4 KiB blocks).
 
 ### Materialization (eager)
 
-On `heddle thread start <name>`:
+On `heddle start <name>`:
 
 1. Resolve `<name>` to a state via `RefManager`.
 2. Resolve the state to a tree via `ObjectStore::get_state`.
@@ -191,7 +191,7 @@ walk (~91 ms for the heddle workspace).
 
 `heddle shell init zsh|bash|fish` emits a shell function that:
 
-- Wraps `heddle thread start/switch/drop` to detect path changes and
+- Wraps `heddle start / heddle thread switch / heddle thread drop` to detect path changes and
   auto-`cd`.
 - Sets `$HEDDLE_THREAD` to the current thread name (drives the
   prompt).
@@ -200,14 +200,14 @@ walk (~91 ms for the heddle workspace).
 User installs once (`heddle shell init zsh >> ~/.zshrc`). After that:
 
 ```
-$ heddle thread start feature-x          # materialize + cd
+$ heddle start feature-x          # materialize + cd
 [heddle:feature-x] $ cargo build         # vanilla speed
 [heddle:feature-x] $ heddle thread switch main
 [heddle:main]      $                     # cd'd back to main's root
 ```
 
 Without the hook the user gets the dest path on stdout
-(`heddle thread start feature-x --print-path`) and `cd`s themselves.
+(`heddle start feature-x --path <dir>`) and `cd`s themselves.
 
 ### CLI surface
 
@@ -219,7 +219,7 @@ Add a `--workspace` value:
 | `virtualized`  | FUSE/FSKit/ProjFS mount over the CAS (today's "light")       | Very large repos, remote-backed CAS  |
 | `solid`        | Full file copies, no shared extents (today's worktree)       | Strong isolation, ext4/NTFS hosts    |
 
-`heddle thread start <name>` picks `materialized` by default when:
+`heddle start <name>` picks `materialized` by default when:
 - The repo's filesystem supports reflinks (APFS, btrfs, XFS w/ reflinks,
   bcachefs, ReFS).
 - The repo isn't flagged as virtualization-required (config knob for
@@ -297,7 +297,7 @@ that's the whole point.
 
 For lightweight threads the eager path wins on every axis except "no
 upfront cost." 91 ms upfront is below the perceptual threshold for
-"instant" — the user types `heddle thread start X` and is in the new
+"instant" — the user types `heddle start X` and is in the new
 thread before the shell prompt has fully redrawn.
 
 ### Why scan-on-capture over a write overlay
@@ -376,7 +376,7 @@ The manifest is small (~one line per file) and rewritten atomically.
 
 - **User does `rm -rf .` inside the thread.** Thread is broken; manifest
   is orphaned (lives in `.heddle/`, survived the wipe). Re-run
-  `heddle thread start <thread>` — it's idempotent, re-materializes.
+  `heddle start <thread>` — it's idempotent, re-materializes.
 
 - **Capture races a still-open writer.** Window where the file is
   partially-written but the writer hasn't yet flushed mtime forward.
@@ -384,7 +384,7 @@ The manifest is small (~one line per file) and rewritten atomically.
   - The walk's stat reads `mtime_ns + ctime_ns`; if a writer has the
     file open with pending writes the mtime usually updates as it
     writes. Not guaranteed, just typical.
-  - `heddle capture --paranoid` re-hashes every file regardless of
+  - `heddle capture --confidence 1.0` re-hashes every file regardless of
     stat-cache. For the user who explicitly wants belt-and-braces.
   - Long-term: the daemon can probe with `lsof` / per-platform open-fd
     queries and warn if a write is in flight.
@@ -392,7 +392,7 @@ The manifest is small (~one line per file) and rewritten atomically.
 - **APFS snapshot pins the old blocks.** If Time Machine has a
   snapshot that includes the original blocks, deleting a thread keeps
   the blocks reachable until the snapshot rolls off. Surfaceable via
-  `heddle status --disk` but not actionable from heddle. Document.
+  `heddle status --verbose` but not actionable from heddle. Document.
 
 ## Performance expectations
 
@@ -604,7 +604,7 @@ such.
    this design's benchmarks proved the math; the rest is shape.
 
 2. **CLI surface** (1 day): `--workspace materialized` flag on
-   `heddle thread start`, plumbed through `mount_lifecycle.rs`.
+   `heddle start`, plumbed through `mount_lifecycle.rs`.
    Keep existing `light`/`solid` working.
 
 3. **Shell hooks** (1 day): `heddle shell init {zsh,bash,fish}`,

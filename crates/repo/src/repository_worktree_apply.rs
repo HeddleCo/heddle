@@ -650,12 +650,12 @@ impl Repository {
     }
 
     /// Remove only the heddle-tracked descendants beneath `path`, preserving
-    /// any heddle-ignored siblings (`.git/`, `target/`, `node_modules/`, …).
+    /// any untracked or explicitly ignored siblings.
     ///
     /// This exists so commands that mutate the worktree at the top-level
     /// tree-entry granularity (`merge`, `cherry-pick`, `revert`) can drop a
     /// tracked directory without recursively destroying the user's local
-    /// build artifacts, dependencies, or co-located git state. The shape
+    /// build artifacts, dependencies, or co-located Git state. The shape
     /// matches `remove_existing_path` in this module: tracked content is
     /// removed, then the directory itself is removed *if empty*; if ignored
     /// content keeps it occupied, the dir is left in place. That keeps disk
@@ -867,10 +867,17 @@ impl<'repo> DirectoryTreeHashLookup<'repo> {
 }
 
 fn split_parent_directory_key(dir_key: &str) -> Option<(String, &str)> {
-    let path = Path::new(dir_key);
-    let name = path.file_name()?.to_str()?;
-    let parent_key = path.parent().map(cache_key).unwrap_or_default();
-    Some((parent_key, name))
+    if dir_key.is_empty() {
+        return None;
+    }
+    let (parent_key, name) = match dir_key.rfind('/') {
+        Some(idx) => (&dir_key[..idx], &dir_key[idx + 1..]),
+        None => ("", dir_key),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some((parent_key.to_string(), name))
 }
 
 fn extend_ancestor_directory_keys(keys: &mut BTreeSet<String>, rel_path: Option<&Path>) {
@@ -902,11 +909,10 @@ fn remove_existing_path(path: &Path) -> Result<()> {
                 match fs::remove_dir(path) {
                     Ok(()) => {}
                     // The directory still holds entries the apply
-                    // intentionally preserved — heddle-ignored content
-                    // like `.git/`, `target/`, or `node_modules/` that
-                    // the planner skipped over. Leave the directory in
-                    // place: its tracked children are already gone and
-                    // the ignored children must survive the apply.
+                    // intentionally preserved — untracked or explicitly
+                    // ignored content that the planner skipped over. Leave
+                    // the directory in place: its tracked children are
+                    // already gone and the local children must survive the apply.
                     // Without this tolerance, an undo over a real-world
                     // worktree with a `.git` or `target` dir aborts mid-
                     // run with `os error 66` after destroying the tracked
@@ -969,10 +975,10 @@ fn remove_tracked_descendants_inner_by_ignore(
 }
 
 /// Walk the entries listed in `source_subtree` and remove the matching
-/// children of `dir` from disk. Anything not present in the subtree (a
-/// heddle-ignored sibling like `.git/`, `target/`, `node_modules/`, OR
-/// previously-tracked content that the subtree doesn't list — there is
-/// none, by construction) is left untouched. After draining tracked
+/// children of `dir` from disk. Anything not present in the subtree (an
+/// untracked or explicitly ignored sibling, OR previously-tracked content
+/// that the subtree doesn't list — there is none, by construction) is left
+/// untouched. After draining tracked
 /// descendants, `dir` itself is removed if it ended up empty; otherwise it
 /// is left in place for the same reason `remove_existing_path` tolerates
 /// `ENOTEMPTY`.
@@ -1050,9 +1056,8 @@ fn remove_tracked_descendants_inner(
 
 /// Detects an `ENOTEMPTY`-equivalent error from `remove_dir`.
 ///
-/// The apply planner intentionally skips heddle-ignored entries
-/// (`.git/`, `target/`, `node_modules/`, etc.). When tracked content
-/// is removed, the parent directory may still hold those ignored
+/// The apply planner only removes tracked descendants. When tracked content is
+/// removed, the parent directory may still hold untracked or explicitly ignored
 /// siblings; `remove_dir` then errors. Callers tolerate that error
 /// by leaving the directory in place — the tracked children are
 /// already gone and the ignored ones must survive the apply.
@@ -1280,9 +1285,9 @@ mod tests {
         );
     }
 
-    /// The tree-driven walker must preserve heddle-ignored siblings —
-    /// the original purpose of `remove_tracked_descendants` is "drop
-    /// tracked content without nuking `.git/`, `target/`, `node_modules/`".
+    /// The tree-driven walker must preserve untracked or explicitly ignored
+    /// siblings — the original purpose of `remove_tracked_descendants` is "drop
+    /// tracked content without nuking local-only build/dependency output".
     /// Tree-driven removal achieves this by *not visiting* paths absent
     /// from the source tree.
     #[test]

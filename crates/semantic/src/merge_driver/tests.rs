@@ -116,10 +116,7 @@ fn theirs_new() {
 }
 ";
     let merged = assert_clean(merge_rust(base, ours, theirs));
-    assert!(
-        merged.contains("ours_new"),
-        "ours_new missing: {merged}"
-    );
+    assert!(merged.contains("ours_new"), "ours_new missing: {merged}");
     assert!(
         merged.contains("theirs_new"),
         "theirs_new missing: {merged}"
@@ -382,10 +379,7 @@ impl Foo {
     match outcome {
         MergeOutcome::Clean(bytes) => {
             let text = String::from_utf8(bytes).unwrap();
-            assert!(
-                text.contains("ours_method"),
-                "ours method missing: {text}"
-            );
+            assert!(text.contains("ours_method"), "ours method missing: {text}");
             assert!(
                 text.contains("theirs_method"),
                 "theirs method missing: {text}"
@@ -498,10 +492,7 @@ fn keep() { println!(\"k\"); }
 fn newcomer() { println!(\"theirs-newcomer\"); }
 ";
     match merge_rust(base, ours, theirs) {
-        MergeOutcome::Conflicts {
-            conflict_count,
-            ..
-        } => {
+        MergeOutcome::Conflicts { conflict_count, .. } => {
             assert!(conflict_count >= 1);
         }
         other => panic!("expected Conflicts, got {other:?}"),
@@ -626,10 +617,7 @@ fn heddle_54_replay_shape_resolves_with_at_most_one_conflict() {
     let merged = assert_clean(outcome);
     // All 20 edits land.
     for i in 0..10 {
-        assert!(
-            merged.contains(&format!("{i}_OURS")),
-            "ours edit {i} lost"
-        );
+        assert!(merged.contains(&format!("{i}_OURS")), "ours edit {i} lost");
     }
     for i in 10..20 {
         assert!(
@@ -831,7 +819,10 @@ fn modify_delete_clean_when_modifier_preserved_base() {
     let ours = "fn keep() { 2 }\nfn target() { 1 }\n";
     let theirs = "fn keep() { 1 }\n";
     let merged = assert_clean(merge_rust(base, ours, theirs));
-    assert!(!merged.contains("fn target"), "target should be deleted: {merged}");
+    assert!(
+        !merged.contains("fn target"),
+        "target should be deleted: {merged}"
+    );
     assert!(merged.contains("fn keep() { 2 }"));
 }
 
@@ -871,12 +862,16 @@ fn both_sides_delete_same_function_clean() {
     let outcome = merge_rust(base, ours, theirs);
     let text = match outcome {
         MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
-        MergeOutcome::Conflicts { merged_bytes_with_markers, .. } => {
-            String::from_utf8(merged_bytes_with_markers).unwrap()
-        }
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
         other => panic!("unexpected: {other:?}"),
     };
-    assert!(!text.contains("fn gone"), "gone() should be removed: {text}");
+    assert!(
+        !text.contains("fn gone"),
+        "gone() should be removed: {text}"
+    );
 }
 
 #[test]
@@ -1365,7 +1360,10 @@ function foo(x: string): string { return \"AAA\"; }
     );
     // Each side's disjoint edit must land.
     assert!(merged.contains("return 100"), "ours edit lost: {merged}");
-    assert!(merged.contains("return \"AAA\""), "theirs edit lost: {merged}");
+    assert!(
+        merged.contains("return \"AAA\""),
+        "theirs edit lost: {merged}"
+    );
 }
 
 // =====================================================================
@@ -1412,14 +1410,8 @@ func (b B) String() string { return \"B-THEIRS\" }
         other => panic!("expected Clean, got {other:?}"),
     };
     // Both methods must survive with their respective edits.
-    assert!(
-        merged.contains("(a A) String()"),
-        "A.String lost: {merged}"
-    );
-    assert!(
-        merged.contains("(b B) String()"),
-        "B.String lost: {merged}"
-    );
+    assert!(merged.contains("(a A) String()"), "A.String lost: {merged}");
+    assert!(merged.contains("(b B) String()"), "B.String lost: {merged}");
     assert!(merged.contains("A-OURS"), "ours edit lost: {merged}");
     assert!(merged.contains("B-THEIRS"), "theirs edit lost: {merged}");
 }
@@ -1444,10 +1436,7 @@ fn impl_block_single_line_disjoint_method_edits_merge_cleanly() {
     let ours = "impl A { fn x() { 11 } fn y() { 0 } }\n";
     let theirs = "impl A { fn x() { 0 } fn y() { 22 } }\n";
     let merged = assert_clean(merge_rust(base, ours, theirs));
-    assert!(
-        merged.contains("fn x() { 11 }"),
-        "ours edit lost: {merged}"
-    );
+    assert!(merged.contains("fn x() { 11 }"), "ours edit lost: {merged}");
     assert!(
         merged.contains("fn y() { 22 }"),
         "theirs edit lost: {merged}"
@@ -1623,8 +1612,14 @@ func Sub(a, b int) int { return a - b - 0 }
         MergeOutcome::Clean(bytes) => String::from_utf8(bytes).unwrap(),
         other => panic!("expected Clean, got {other:?}"),
     };
-    assert!(merged.contains("return a + b + 0"), "ours edit lost: {merged}");
-    assert!(merged.contains("return a - b - 0"), "theirs edit lost: {merged}");
+    assert!(
+        merged.contains("return a + b + 0"),
+        "ours edit lost: {merged}"
+    );
+    assert!(
+        merged.contains("return a - b - 0"),
+        "theirs edit lost: {merged}"
+    );
 }
 
 #[test]
@@ -1735,7 +1730,10 @@ function foo(x, y) { return x * y; }
     );
     // Both disjoint edits must land.
     assert!(merged.contains("return x + 10"), "ours edit lost: {merged}");
-    assert!(merged.contains("return x * y"), "theirs edit lost: {merged}");
+    assert!(
+        merged.contains("return x * y"),
+        "theirs edit lost: {merged}"
+    );
 }
 
 // =====================================================================
@@ -2095,10 +2093,7 @@ impl std::vec::Vec<T> {
     let outcome = merge_rust(base, ours, theirs);
     let text = assert_clean(outcome);
     // alpha's body reflects theirs's modification.
-    assert!(
-        text.contains("{ 2 }"),
-        "alpha body should be `2`: {text}"
-    );
+    assert!(text.contains("{ 2 }"), "alpha body should be `2`: {text}");
     // alpha appears exactly once — no spurious add/delete pair.
     let alpha_count = text.matches("fn alpha").count();
     assert_eq!(
@@ -2140,10 +2135,7 @@ impl MyTrait for *const Foo {
 ";
     let outcome = merge_rust(base, ours, theirs);
     let text = assert_clean(outcome);
-    assert!(
-        text.contains("{ 2 }"),
-        "alpha body should be `2`: {text}"
-    );
+    assert!(text.contains("{ 2 }"), "alpha body should be `2`: {text}");
     let alpha_count = text.matches("fn alpha").count();
     assert_eq!(
         alpha_count, 1,
@@ -2196,8 +2188,14 @@ fn foo() { 2 }
         attr_count, 1,
         "expected #[test] exactly once, got {attr_count}: {text}"
     );
-    assert!(!text.contains("fn alpha"), "alpha should be deleted: {text}");
-    assert!(text.contains("fn foo() { 2 }"), "foo body should reflect theirs: {text}");
+    assert!(
+        !text.contains("fn alpha"),
+        "alpha should be deleted: {text}"
+    );
+    assert!(
+        text.contains("fn foo() { 2 }"),
+        "foo body should reflect theirs: {text}"
+    );
 }
 
 // =====================================================================
@@ -2657,8 +2655,14 @@ class C {
         other => panic!("unexpected: {other:?}"),
     };
     // Both added methods land.
-    assert!(text.contains("middle()"), "ours's middle() must land: {text}");
-    assert!(text.contains("other()"), "theirs's other() must land: {text}");
+    assert!(
+        text.contains("middle()"),
+        "ours's middle() must land: {text}"
+    );
+    assert!(
+        text.contains("other()"),
+        "theirs's other() must land: {text}"
+    );
     // Both decorators land — each EXACTLY once.
     let get_count = text.matches("@Get(").count();
     let post_count = text.matches("@Post(").count();
@@ -2676,28 +2680,20 @@ class C {
     let middle_idx = text.find("middle()").expect("middle present");
     let post_idx = text.find("@Post").expect("@Post present");
     let other_idx = text.find("other()").expect("other present");
-    assert!(
-        get_idx < middle_idx,
-        "@Get must precede middle: {text}"
-    );
-    assert!(
-        post_idx < other_idx,
-        "@Post must precede other: {text}"
-    );
+    assert!(get_idx < middle_idx, "@Get must precede middle: {text}");
+    assert!(post_idx < other_idx, "@Post must precede other: {text}");
     // Critical: each decorator binds to its OWN method, not the
     // adjacent one. Concretely, between @Get and middle there should
     // be no `bar` or `other` token; between @Post and other there
     // should be no `bar` or `middle` token.
     let between_get_and_middle = &text[get_idx..middle_idx];
     assert!(
-        !between_get_and_middle.contains("other")
-            && !between_get_and_middle.contains("bar"),
+        !between_get_and_middle.contains("other") && !between_get_and_middle.contains("bar"),
         "@Get must bind directly to middle, found stray tokens: {between_get_and_middle:?}"
     );
     let between_post_and_other = &text[post_idx..other_idx];
     assert!(
-        !between_post_and_other.contains("middle")
-            && !between_post_and_other.contains("bar"),
+        !between_post_and_other.contains("middle") && !between_post_and_other.contains("bar"),
         "@Post must bind directly to other, found stray tokens: {between_post_and_other:?}"
     );
     assert!(
@@ -2922,9 +2918,7 @@ fn crlf_add_add_conflict_markers_use_crlf() {
     assert_eq!(count, 1, "expected 1 conflict, got {count}: {text:?}");
     // Find every marker line and assert it ends with `\r\n`.
     for line in text.split_inclusive('\n') {
-        if line.starts_with("<<<<<<<")
-            || line.starts_with("=======")
-            || line.starts_with(">>>>>>>")
+        if line.starts_with("<<<<<<<") || line.starts_with("=======") || line.starts_with(">>>>>>>")
         {
             assert!(
                 line.ends_with("\r\n"),
@@ -2977,9 +2971,7 @@ fn mixed_eol_add_add_marker_follows_item_bytes_not_whole_file() {
     let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
     assert_eq!(count, 1, "expected 1 conflict, got {count}: {text:?}");
     for line in text.split_inclusive('\n') {
-        if line.starts_with("<<<<<<<")
-            || line.starts_with("=======")
-            || line.starts_with(">>>>>>>")
+        if line.starts_with("<<<<<<<") || line.starts_with("=======") || line.starts_with(">>>>>>>")
         {
             assert!(
                 line.ends_with("\r\n"),
@@ -3473,9 +3465,7 @@ fn addadd_conflict_markers_use_crlf_for_single_line_items_in_crlf_file() {
     let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
     assert_eq!(count, 1, "expected 1 conflict, got {count}: {text:?}");
     for line in text.split_inclusive('\n') {
-        if line.starts_with("<<<<<<<")
-            || line.starts_with("=======")
-            || line.starts_with(">>>>>>>")
+        if line.starts_with("<<<<<<<") || line.starts_with("=======") || line.starts_with(">>>>>>>")
         {
             assert!(
                 line.ends_with("\r\n"),
@@ -3824,9 +3814,7 @@ void A<float>::foo() {
     // Slice the merged text by specialization header and assert each
     // slice's content.
     fn body_for(text: &str, header: &str) -> String {
-        let start = text.find(header).expect(
-            "expected header in merged output",
-        );
+        let start = text.find(header).expect("expected header in merged output");
         let after = &text[start..];
         // Body ends at the matching closing brace at column 0 (next "}").
         let close = after.find("\n}\n").expect("expected close brace");
@@ -4002,9 +3990,7 @@ void A<int(*)(double)>::foo(char y) {
     // the char overload must hold theirs's `bb` edit; neither may
     // leak the other's body.
     fn body_for(text: &str, header: &str) -> String {
-        let start = text.find(header).expect(
-            "expected header in merged output",
-        );
+        let start = text.find(header).expect("expected header in merged output");
         let after = &text[start..];
         let close = after.find("\n}\n").expect("expected close brace");
         after[..close + 3].to_string()

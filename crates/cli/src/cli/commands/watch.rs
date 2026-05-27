@@ -6,7 +6,7 @@
 //! merge, thread create/update, marker, fork, collapse, goto. Default
 //! behavior tails forever and exits on SIGINT (Ctrl-C). `--since 5m`
 //! replays the last N before tailing live; `--filter` restricts to
-//! the named kinds; `--json` emits one JSON object per line for
+//! the named kinds; `--output json` emits one JSON object per line for
 //! piping to `jq` or downstream tooling.
 //!
 //! ## Tailing strategy
@@ -29,7 +29,7 @@
 //! (CLI `--no-color` flag, `NO_COLOR` env, `CLICOLOR_FORCE` env, TTY
 //! detection) is initialized once in `main` and consulted by the
 //! shared helpers. JSON output is uncolored unconditionally because
-//! the print sites short-circuit on `--json` before any styled
+//! the print sites short-circuit on JSON mode before any styled
 //! helper runs.
 
 use std::{
@@ -50,9 +50,9 @@ use oplog::{OpEntry, OpLog, OpRecord};
 use repo::Repository;
 use serde::Serialize;
 
+use super::{advice::RecoveryAdvice, command_runtime_contract};
 use crate::cli::{
-    Cli, WatchArgs,
-    cli_args::OutputMode,
+    Cli, JsonOutputMode, WatchArgs, json_output_mode_for_kind,
     style::{accent, change_id as style_change_id, confidence as style_confidence, dim, warn},
 };
 
@@ -74,7 +74,7 @@ const MAX_TAIL_WINDOW: usize = 100_000;
 
 /// Entry kinds the user can pass to `--filter`. Names match the
 /// `kind` field emitted in JSON mode so a `--filter snapshot` pipes
-/// cleanly into `--json` for downstream tooling.
+/// cleanly into `--output json` for downstream tooling.
 const FILTER_KINDS: &[&str] = &[
     "snapshot",
     "goto",
@@ -107,13 +107,16 @@ pub async fn cmd_watch(cli: &Cli, args: WatchArgs) -> Result<()> {
     // notify watcher attaches to the parent directory in that case
     // so the first append doesn't get lost.
     if !oplog_path.parent().is_some_and(Path::is_dir) {
-        return Err(anyhow!(
-            "oplog directory missing at {}; run `heddle init` first",
-            oplog_path
-                .parent()
-                .map(Path::display)
-                .map_or_else(|| "<unknown>".to_string(), |display| display.to_string(),)
-        ));
+        let path = oplog_path
+            .parent()
+            .map(Path::display)
+            .map_or_else(|| "<unknown>".to_string(), |display| display.to_string());
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "watch_oplog_missing",
+            format!("oplog directory missing at {path}; run `heddle init` first"),
+            "Run `heddle init` in this repository before watching oplog events.",
+            "heddle init",
+        )));
     }
 
     let json_mode = json_mode(cli, &args);
@@ -174,18 +177,16 @@ fn oplog_file_path(heddle_dir: &Path) -> PathBuf {
     heddle_dir.join("oplog").join("oplog.bin")
 }
 
-/// Resolve JSON-vs-text mode. Either the global `--json` flag or
-/// the watch-specific `--json` flag turns it on; explicit `--output`
-/// overrides both. We deliberately *don't* call `should_output_json`
-/// here because that helper auto-flips to JSON on a non-TTY, which
-/// would make `heddle watch | tee log.txt` silently change format.
-/// `watch` is opinionated: human-readable by default, JSON only when
-/// the user asks.
-fn json_mode(cli: &Cli, args: &WatchArgs) -> bool {
-    if args.json || cli.json {
-        return true;
-    }
-    matches!(cli.output, Some(OutputMode::Json))
+/// Resolve JSON-vs-text mode from the command contract. `watch`
+/// advertises `jsonl`, so the shared resolver keeps the stream
+/// human-readable unless the user explicitly asks for JSON.
+fn json_mode(cli: &Cli, _args: &WatchArgs) -> bool {
+    let contract =
+        command_runtime_contract("watch").expect("watch command contract should be registered");
+    matches!(
+        json_output_mode_for_kind(cli, None, contract.json_kind),
+        JsonOutputMode::Jsonl
+    )
 }
 
 /// Parse `--filter snapshot,merge,thread_create` into a set of kinds.
@@ -206,10 +207,15 @@ fn parse_filter(spec: Option<&str>) -> Result<Option<Vec<String>>> {
     }
     for kind in &kinds {
         if !FILTER_KINDS.contains(&kind.as_str()) {
-            return Err(anyhow!(
-                "unknown event kind in --filter: {kind:?} (valid: {})",
-                FILTER_KINDS.join(", ")
-            ));
+            return Err(anyhow!(RecoveryAdvice::invalid_usage(
+                "watch_filter_invalid",
+                format!(
+                    "unknown event kind in --filter: {kind:?} (valid: {})",
+                    FILTER_KINDS.join(", ")
+                ),
+                "Use one of the valid watch event kinds, or omit `--filter`.",
+                "heddle watch --filter snapshot",
+            )));
         }
     }
     Ok(Some(kinds))
@@ -222,7 +228,12 @@ fn parse_filter(spec: Option<&str>) -> Result<Option<Vec<String>>> {
 fn parse_since(spec: &str) -> Result<DateTime<Utc>> {
     let trimmed = spec.trim();
     if trimmed.is_empty() {
-        return Err(anyhow!("--since cannot be empty"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "watch_since_empty",
+            "--since cannot be empty",
+            "Use a duration like `30s`, `5m`, `1h`, or `2d`, or omit `--since`.",
+            "heddle watch --since 5m",
+        )));
     }
     let (num_part, unit) = trimmed.split_at(
         trimmed
@@ -449,6 +460,7 @@ fn kind_for(op: &OpRecord) -> String {
         OpRecord::Redact { .. } => "redact".into(),
         OpRecord::Purge { .. } => "purge".into(),
         OpRecord::FastForward { .. } | OpRecord::FastForwardV2 { .. } => "fast_forward".into(),
+        OpRecord::GitCheckpoint { .. } => "git_checkpoint".into(),
     }
 }
 
@@ -469,6 +481,7 @@ fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
         OpRecord::EphemeralThreadCollapse { thread, .. } => Some(thread.clone()),
         OpRecord::FastForward { target_thread, .. }
         | OpRecord::FastForwardV2 { target_thread, .. } => Some(target_thread.clone()),
+        OpRecord::GitCheckpoint { branch, .. } => Some(branch.clone()),
         OpRecord::Goto { .. }
         | OpRecord::Fork { .. }
         | OpRecord::Collapse { .. }
@@ -497,6 +510,7 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
         OpRecord::MarkerCreate { state, .. } => Some(*state),
         OpRecord::MarkerDelete { state, .. } => Some(*state),
         OpRecord::Checkpoint { state, .. } => Some(*state),
+        OpRecord::GitCheckpoint { state, .. } => Some(*state),
         OpRecord::EphemeralThreadCollapse { final_state, .. } => Some(*final_state),
         OpRecord::Redact { state, .. } => Some(*state),
         OpRecord::TransactionAbort { .. }
@@ -523,7 +537,7 @@ struct EmittedEntry {
 }
 
 /// JSON-mode view of an actor (agent provider/model). Mirrors the
-/// shape rendered by `heddle status --json` so consumers can join
+/// shape rendered by `heddle status --output json` so consumers can join
 /// `watch` events with `status` outputs without renaming fields.
 #[derive(Clone, Debug, Serialize)]
 struct ActorInfo {
@@ -726,7 +740,7 @@ mod tests {
             batch_id: id,
             batch_index: 0,
             scope: None,
-            actor: objects::object::Principal::new("Test", "test@example.com"),
+            actor: std::sync::Arc::new(objects::object::Principal::new("Test", "test@example.com")),
             operation_id: None,
         }
     }

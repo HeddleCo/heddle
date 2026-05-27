@@ -4,13 +4,13 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+use daemon::grpc_local_impl::{GrpcLocalService, LocalTransactionService};
 use grpc::heddle::v1::{
     AbortTransactionRequest, BeginTransactionRequest, CommitTransactionRequest,
     GetTransactionStatusRequest, transaction_service_server::TransactionService,
 };
 use repo::{Repository, operation_dedup::OperationDedupStore};
 use serde::Serialize;
-use daemon::grpc_local_impl::{GrpcLocalService, LocalTransactionService};
 
 use crate::cli::{
     cli_args::{

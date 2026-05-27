@@ -11,8 +11,8 @@ use tracing::{debug, instrument, trace};
 use crate::{
     object::ContentHash,
     store::{
-        pack::{ObjectType, PackObjectId, PackReader},
         Result,
+        pack::{ObjectType, PackObjectId, PackReader},
     },
 };
 

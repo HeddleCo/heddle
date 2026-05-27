@@ -91,14 +91,14 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
-        atomic::{AtomicU8, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -173,7 +173,7 @@ pub enum WorkerEvent {
 pub mod framing {
     use std::io::{self, Read, Write};
 
-    use serde::{de::DeserializeOwned, Serialize};
+    use serde::{Serialize, de::DeserializeOwned};
 
     /// Maximum payload size we'll accept on the wire. Sized large
     /// enough for any plausible control-plane message; refuses to
@@ -209,9 +209,7 @@ pub mod framing {
         if len > MAX_FRAME_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "frame body claims {len} bytes, exceeds MAX_FRAME_BYTES {MAX_FRAME_BYTES}"
-                ),
+                format!("frame body claims {len} bytes, exceeds MAX_FRAME_BYTES {MAX_FRAME_BYTES}"),
             ));
         }
         let mut buf = vec![0u8; len];
@@ -296,8 +294,9 @@ impl WorkerArgs {
 /// the panic propagates to a clean process exit, the parent
 /// observes it on the IPC socket EOF, the kernel auto-unmounts.
 pub fn run_worker(args: WorkerArgs) -> Result<()> {
-    use crate::FuseShell;
     use repo::Repository;
+
+    use crate::FuseShell;
 
     // SAFETY: ipc_fd was inherited from the parent over fork+exec
     // (see [`Supervisor::spawn`]). It's a valid UDS file descriptor
@@ -621,8 +620,8 @@ impl Supervisor {
                     .expect("watcher closure ran without a child in the slot");
                 watch_child(c, watcher_liveness, watcher_mount);
             });
-        let watcher = supervise_watcher_spawn(child_slot, spawn_result)
-            .context("spawn watcher thread")?;
+        let watcher =
+            supervise_watcher_spawn(child_slot, spawn_result).context("spawn watcher thread")?;
 
         Ok(Supervisor {
             ipc: Mutex::new(Some(ipc)),
@@ -641,11 +640,7 @@ impl Supervisor {
     pub fn unmount(&self) -> Result<()> {
         // `take()` the IPC stream so a concurrent caller (or a
         // re-entry via Drop) sees the supervisor as already shut.
-        let ipc_opt = self
-            .ipc
-            .lock()
-            .expect("supervisor ipc lock")
-            .take();
+        let ipc_opt = self.ipc.lock().expect("supervisor ipc lock").take();
         let Some(mut ipc) = ipc_opt else {
             // Already shut down; still try to join the watcher.
             self.join_watcher();
@@ -816,11 +811,7 @@ fn supervise_watcher_spawn(
     match spawn_result {
         Ok(handle) => Ok(handle),
         Err(e) => {
-            if let Some(mut child) = child_slot
-                .lock()
-                .expect("watcher child slot lock")
-                .take()
-            {
+            if let Some(mut child) = child_slot.lock().expect("watcher child slot lock").take() {
                 // `kill` may fail with ESRCH if the worker raced
                 // us and already exited; either way `wait` reaps
                 // the entry so we don't leave a zombie behind.

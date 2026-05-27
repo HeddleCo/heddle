@@ -3,6 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
+use objects::object::ThreadName;
 use objects::store::{
     AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ReserveOutcome, current_boot_id,
 };
@@ -14,6 +15,10 @@ use repo::{
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use super::{
+    advice::RecoveryAdvice,
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+};
 use crate::cli::{
     Cli,
     cli_args::{
@@ -37,6 +42,30 @@ pub struct AgentReservationOutput {
     pub status: String,
     pub path: Option<String>,
     pub task: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub harness: Option<String>,
+    pub thinking_level: Option<String>,
+    pub probe_source: Option<String>,
+    pub probe_confidence: Option<f32>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentReservationEnvelope {
+    pub reservation: AgentReservationOutput,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub(crate) struct AgentReservationListOutput {
+    pub reservations: Vec<AgentReservationOutput>,
+    pub alive_only: bool,
+    pub thread: Option<String>,
+    #[serde(rename = "verification")]
+    pub trust: RepositoryVerificationState,
 }
 
 impl From<&AgentEntry> for AgentReservationOutput {
@@ -50,90 +79,83 @@ impl From<&AgentEntry> for AgentReservationOutput {
             status: entry.status.to_string(),
             path: entry.path.as_ref().map(|path| path.display().to_string()),
             task: entry.attach_reason.clone(),
+            provider: entry.provider.clone(),
+            model: entry.model.clone(),
+            harness: entry.harness.clone(),
+            thinking_level: entry.thinking_level.clone(),
+            probe_source: entry.probe_source.clone(),
+            probe_confidence: entry.probe_confidence,
         }
     }
 }
 
-/// Stable structured conflict shape emitted on stdout when `agent
-/// reserve` cannot proceed. Orchestrators parse this; humans see the
-/// shorter `Error: ...` message anyhow renders to stderr.
-#[derive(Serialize, JsonSchema)]
-pub struct AgentReservationConflict {
-    /// `"live_owner"` (existing reservation matches the requested
-    /// anchor — wait or release) or `"anchor_drift"` (existing
-    /// reservation is on a different anchor — refresh and retry).
-    pub kind: &'static str,
-    pub thread: String,
-    pub requested_anchor: String,
-    /// `Some` when a live agent already holds the thread; `None` when
-    /// the thread ref exists at a different state with no live owner.
-    pub owner: Option<AgentReservationOutput>,
-    /// Anchor recorded against the existing reservation or thread ref,
-    /// when known. Always present for anchor-drift conflicts so
-    /// orchestrators can decide whether to refresh.
-    pub reserved_anchor: Option<String>,
-    pub message: String,
-}
-
-fn emit_live_owner_conflict(
+fn live_owner_conflict_advice(
     thread: &str,
     requested_anchor_full: &str,
     owner: &AgentEntry,
-) -> anyhow::Error {
+) -> RecoveryAdvice {
     let kind = if owner.anchor_state.as_deref() == Some(requested_anchor_full) {
         "live_owner"
     } else {
         "anchor_drift"
     };
-    let message = if kind == "live_owner" {
-        format!(
-            "thread '{}' already has a live reservation on session '{}'. Use `heddle thread show {}` or release the session before starting another writer.",
-            thread, owner.session_id, thread
+    let primary_command = format!("heddle thread show {thread}");
+    if kind == "live_owner" {
+        RecoveryAdvice::safety_refusal(
+            "live_owner",
+            format!(
+                "thread '{thread}' already has a live reservation on session '{}'",
+                owner.session_id
+            ),
+            format!(
+                "Inspect it with `{primary_command}`, or release that session before starting another writer."
+            ),
+            format!(
+                "thread '{thread}' is reserved by live session '{}' at anchor {}",
+                owner.session_id,
+                owner.anchor_state.as_deref().unwrap_or("<unknown>")
+            ),
+            "starting another writer could create competing histories for the same thread",
+            "no thread refs or reservation records were changed",
+            primary_command.clone(),
+            vec![primary_command],
         )
     } else {
-        format!(
-            "thread '{}' is reserved by session '{}' on anchor {}, but you requested {}. Refresh the thread or rebase before retrying.",
-            thread,
-            owner.session_id,
-            owner.anchor_state.as_deref().unwrap_or("<unknown>"),
-            requested_anchor_full
+        RecoveryAdvice::safety_refusal(
+            "anchor_drift",
+            format!(
+                "thread '{thread}' is reserved by session '{}' on anchor {}, but reservation requested {requested_anchor_full}",
+                owner.session_id,
+                owner.anchor_state.as_deref().unwrap_or("<unknown>")
+            ),
+            "Refresh the thread or rebase before retrying.".to_string(),
+            format!("thread '{thread}' has an active reservation at a different anchor"),
+            "starting from the requested anchor could fork the same thread name into competing histories",
+            "no thread refs or reservation records were changed",
+            primary_command.clone(),
+            vec![primary_command],
         )
-    };
-    let conflict = AgentReservationConflict {
-        kind,
-        thread: thread.to_string(),
-        requested_anchor: requested_anchor_full.to_string(),
-        owner: Some(AgentReservationOutput::from(owner)),
-        reserved_anchor: owner.anchor_state.clone(),
-        message: message.clone(),
-    };
-    if let Ok(json) = serde_json::to_string(&conflict) {
-        println!("{}", json);
     }
-    anyhow!(message)
 }
 
-fn emit_anchor_drift_no_owner(
+fn anchor_drift_no_owner_advice(
     thread: &str,
     requested_anchor_full: &str,
     reserved_anchor: &str,
-) -> anyhow::Error {
-    let message = format!(
-        "thread '{}' is anchored at {}, but reservation requested {}. Refresh the thread or rebase before retrying.",
-        thread, reserved_anchor, requested_anchor_full
-    );
-    let conflict = AgentReservationConflict {
-        kind: "anchor_drift",
-        thread: thread.to_string(),
-        requested_anchor: requested_anchor_full.to_string(),
-        owner: None,
-        reserved_anchor: Some(reserved_anchor.to_string()),
-        message: message.clone(),
-    };
-    if let Ok(json) = serde_json::to_string(&conflict) {
-        println!("{}", json);
-    }
-    anyhow!(message)
+) -> RecoveryAdvice {
+    let primary_command = format!("heddle thread show {thread}");
+    RecoveryAdvice::safety_refusal(
+        "anchor_drift",
+        format!(
+            "thread '{thread}' is anchored at {reserved_anchor}, but reservation requested {requested_anchor_full}"
+        ),
+        "Refresh the thread or rebase before retrying.".to_string(),
+        format!("thread '{thread}' already points at a different anchor"),
+        "starting from the requested anchor could fork the same thread name into competing histories",
+        "no thread refs or reservation records were changed",
+        primary_command.clone(),
+        vec![primary_command],
+    )
 }
 
 pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
@@ -158,14 +180,14 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     // state without any live owner is an anchor-drift case the caller
     // must resolve before we hand them a fresh reservation. We surface
     // it here (rather than letting set_thread_cas fail later) so the
-    // structured JSON conflict is emitted on stdout.
-    let existing_ref = repo.refs().get_thread(&thread_name)?;
+    // standard JSON error envelope can describe the conflict.
+    let existing_ref = repo.refs().get_thread(&ThreadName::new(&thread_name))?;
     if let Some(existing) = existing_ref
         && existing != anchor
     {
         // Look for a live owner first — if one exists, route through
-        // emit_live_owner_conflict so the caller sees the owner's
-        // session_id alongside the drift.
+        // the shared reservation advice so the caller sees the owner's
+        // session_id alongside the drift in the standard error envelope.
         let registry = AgentRegistry::new(repo.heddle_dir());
         registry.reap_dead_for_thread(&thread_name)?;
         if let Some(owner) = registry
@@ -173,19 +195,30 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             .into_iter()
             .find(|entry| entry.status == AgentStatus::Active && entry.thread == thread_name)
         {
-            return Err(emit_live_owner_conflict(&thread_name, &anchor_full, &owner));
+            return Err(anyhow!(live_owner_conflict_advice(
+                &thread_name,
+                &anchor_full,
+                &owner
+            )));
         }
-        return Err(emit_anchor_drift_no_owner(
+        return Err(anyhow!(anchor_drift_no_owner_advice(
             &thread_name,
             &anchor_full,
             &existing.to_string_full(),
-        ));
+        )));
     }
 
     let registry = AgentRegistry::new(repo.heddle_dir());
     let task = args.task.clone();
     let anchor_full_for_entry = anchor_full.clone();
     let anchor_short = anchor.short();
+    let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
+    let probe = crate::harness::probe_current_process_harness(
+        &repo,
+        std::env::var("HEDDLE_AGENT_PROVIDER").ok(),
+        std::env::var("HEDDLE_AGENT_MODEL").ok(),
+        std::env::var("HEDDLE_AGENT_POLICY").ok(),
+    )?;
     // `--hold-for-pid PID` binds the reservation to an external
     // process (typically the orchestrator that wraps the heddle
     // CLI). Without it we record this one-shot CLI's pid, which
@@ -216,21 +249,27 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             anchor_state: Some(anchor_full_for_entry.clone()),
             anchor_root: Some(anchor_root.clone()),
             reservation_token: Some(objects::store::generate_agent_id()),
-            path: None,
+            path: reservation_path.clone(),
             base_state: anchor_short.clone(),
             started_at: Utc::now(),
-            provider: None,
-            model: None,
-            harness: Some("heddle-agent-api".to_string()),
-            thinking_level: None,
+            provider: probe.provider.clone(),
+            model: probe.model.clone(),
+            harness: probe
+                .harness
+                .clone()
+                .or_else(|| Some("heddle-agent-api".to_string())),
+            thinking_level: probe.thinking_level.clone(),
             usage_summary: AgentUsageSummary::default(),
             last_progress_at: None,
             report_flush_state: None,
             attach_reason: task.clone(),
             attach_precedence: vec!["agent-reserve".to_string()],
             winning_attach_rule: Some("agent-reserve".to_string()),
-            probe_source: Some("agent_api".to_string()),
-            probe_confidence: Some(1.0),
+            probe_source: probe
+                .probe_source
+                .clone()
+                .or_else(|| Some("agent_api".to_string())),
+            probe_confidence: probe.confidence.or(Some(1.0)),
             status: AgentStatus::Active,
             completed_at: None,
             context_queries: vec![],
@@ -240,11 +279,11 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     let entry = match outcome {
         ReserveOutcome::Reserved(entry) => entry,
         ReserveOutcome::LiveOwner(existing) => {
-            return Err(emit_live_owner_conflict(
+            return Err(anyhow!(live_owner_conflict_advice(
                 &thread_name,
                 &anchor_full,
                 &existing,
-            ));
+            )));
         }
     };
 
@@ -263,13 +302,14 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     // causing `set_thread_cas` to return ExpectationViolated. The
     // fallible closure here ensures we abandon the orphaned reservation
     // before bubbling that error up.
+    let tn = ThreadName::new(&thread_name);
     let post_reserve = (|| -> Result<()> {
         if let Some(existing) = existing_ref {
             repo.refs()
-                .set_thread_cas(&thread_name, RefExpectation::Value(existing), &anchor)?;
+                .set_thread_cas(&tn, RefExpectation::Value(existing), &anchor)?;
         } else {
             repo.refs()
-                .set_thread_cas(&thread_name, RefExpectation::Missing, &anchor)?;
+                .set_thread_cas(&tn, RefExpectation::Missing, &anchor)?;
             // Agent-reservation flow writes the ThreadManager record via
             // `ensure_thread_record` below, after this op is recorded —
             // so there's no record to snapshot at recording time. Pass
@@ -278,7 +318,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             // that aren't expected to participate in human undo/redo
             // flows in 0.3. heddle#23 r2.
             repo.oplog().record_thread_create(
-                &thread_name,
+                &tn,
                 &anchor,
                 None,
                 Some(&repo.op_scope()),
@@ -291,10 +331,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
         // same; we mirror just the minimum required for the agent API.
         ensure_thread_record(&repo, &thread_name, &anchor, &args.task)?;
 
-        println!(
-            "{}",
-            serde_json::to_string(&AgentReservationOutput::from(&entry))?
-        );
+        render_agent_reservation_envelope(&repo, &entry)?;
         Ok(())
     })();
 
@@ -313,6 +350,21 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn existing_thread_execution_path(
+    repo: &Repository,
+    thread_name: &str,
+) -> Result<Option<std::path::PathBuf>> {
+    let Some(thread) = ThreadManager::new(repo.heddle_dir()).find_by_thread(thread_name)? else {
+        return Ok(None);
+    };
+    let path = if !thread.execution_path.as_os_str().is_empty() {
+        Some(thread.execution_path)
+    } else {
+        thread.materialized_path
+    };
+    Ok(path.map(|path| path.canonicalize().unwrap_or(path)))
 }
 
 /// Persist a minimal `Thread` record for `thread_name` if one does not
@@ -334,7 +386,7 @@ fn ensure_thread_record(
     let base_short = anchor.short();
     let base_root = state.tree.short();
     let target_thread = match repo.head_ref()? {
-        Head::Attached { thread } if thread != thread_name => Some(thread),
+        Head::Attached { thread } if thread != thread_name => Some(thread.to_string()),
         _ => None,
     };
     let thread_state = Thread {
@@ -383,12 +435,8 @@ pub fn cmd_agent_heartbeat(cli: &Cli, args: AgentHeartbeatArgs) -> Result<()> {
             entry.heartbeat_at = Some(Utc::now());
             entry.last_progress_at = Some(Utc::now());
         })?
-        .ok_or_else(|| anyhow!("agent session '{}' not found", args.session))?;
-    println!(
-        "{}",
-        serde_json::to_string(&AgentReservationOutput::from(&entry))?
-    );
-    Ok(())
+        .ok_or_else(|| anyhow!(agent_session_not_found_advice(&args.session)))?;
+    render_agent_reservation_envelope(&repo, &entry)
 }
 
 pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
@@ -408,12 +456,8 @@ pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
                 }
             };
         })?
-        .ok_or_else(|| anyhow!("agent session '{}' not found", args.session))?;
-    println!(
-        "{}",
-        serde_json::to_string(&AgentReservationOutput::from(&entry))?
-    );
-    Ok(())
+        .ok_or_else(|| anyhow!(agent_session_not_found_advice(&args.session)))?;
+    render_agent_reservation_envelope(&repo, &entry)
 }
 
 pub fn cmd_agent_list(cli: &Cli, args: AgentApiListArgs) -> Result<()> {
@@ -435,14 +479,23 @@ pub fn cmd_agent_list(cli: &Cli, args: AgentApiListArgs) -> Result<()> {
         .filter(|entry| !args.alive_only || entry.status == AgentStatus::Active)
         .map(|entry| AgentReservationOutput::from(&entry))
         .collect();
-    render_agent_list(&entries, should_output_json(cli, Some(repo.config())))
+    render_agent_list(
+        AgentReservationListOutput {
+            reservations: entries,
+            alive_only: args.alive_only,
+            thread: args.thread.clone(),
+            trust: build_repository_verification_state(&repo),
+        },
+        should_output_json(cli, Some(repo.config())),
+    )
 }
 
-fn render_agent_list(entries: &[AgentReservationOutput], json: bool) -> Result<()> {
+fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(entries)?);
+        println!("{}", serde_json::to_string(&output)?);
         return Ok(());
     }
+    let entries = output.reservations;
     if entries.is_empty() {
         println!("No agent reservations.");
         return Ok(());
@@ -467,6 +520,34 @@ fn render_agent_list(entries: &[AgentReservationOutput], json: bool) -> Result<(
     Ok(())
 }
 
+fn reservation_envelope(repo: &Repository, entry: &AgentEntry) -> AgentReservationEnvelope {
+    AgentReservationEnvelope {
+        reservation: AgentReservationOutput::from(entry),
+        trust: build_repository_verification_state(repo),
+    }
+}
+
+fn render_agent_reservation_envelope(repo: &Repository, entry: &AgentEntry) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::to_string(&reservation_envelope(repo, entry))?
+    );
+    Ok(())
+}
+
+fn agent_session_not_found_advice(session_id: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "agent_session_not_found",
+        format!("agent session '{session_id}' not found"),
+        "Reserve the thread again before retrying the guarded agent command.",
+        format!("no reservation entry exists for session {session_id}"),
+        "continuing would let an unknown session mutate repository state",
+        "no session heartbeat, capture, readiness, refs, or worktree changes were applied",
+        "heddle agent reserve --thread <thread>",
+        vec!["heddle agent reserve --thread <thread>".to_string()],
+    )
+}
+
 /// Resolve `--session SID` to an Active reservation, refresh its
 /// heartbeat, and return the entry. Errors out cleanly when the
 /// session is missing, terminal, or reaped between calls — that's the
@@ -480,13 +561,21 @@ fn validate_active_session(
             entry.heartbeat_at = Some(Utc::now());
             entry.last_progress_at = Some(Utc::now());
         })?
-        .ok_or_else(|| anyhow!("agent session '{}' not found", session_id))?;
+        .ok_or_else(|| anyhow!(agent_session_not_found_advice(session_id)))?;
     if entry.status != AgentStatus::Active {
-        return Err(anyhow!(
-            "agent session '{}' is no longer active (status: {}). Re-reserve the thread before retrying.",
-            session_id,
-            entry.status
-        ));
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "agent_session_inactive",
+            format!(
+                "agent session '{}' is no longer active (status: {})",
+                session_id, entry.status
+            ),
+            "Reserve the thread again before retrying the guarded agent command.",
+            format!("session {session_id} has terminal status {}", entry.status),
+            "continuing would let a stale reservation write or mark readiness after ownership ended",
+            "the session heartbeat was refreshed, but no capture, ready, refs, or worktree changes were applied",
+            "heddle agent reserve --thread <thread>",
+            vec!["heddle agent reserve --thread <thread>".to_string()],
+        )));
     }
     Ok(entry)
 }
@@ -512,12 +601,25 @@ pub async fn cmd_agent_capture(
     if let Some(current) = repo.current_lane()?
         && current != entry.thread
     {
-        return Err(anyhow!(
-            "agent session '{}' reserved thread '{}', but the current thread is '{}'. Switch threads before capturing.",
-            args.session,
-            entry.thread,
-            current
-        ));
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "agent_session_thread_mismatch",
+            format!(
+                "agent session '{}' reserved thread '{}', but the current thread is '{}'",
+                args.session, entry.thread, current
+            ),
+            format!(
+                "Switch to the reserved thread with `heddle switch {}` before capturing.",
+                entry.thread
+            ),
+            format!(
+                "session {} owns thread {}, current checkout is attached to {}",
+                args.session, entry.thread, current
+            ),
+            "capturing from the wrong thread would attribute work to a reservation that does not own this checkout",
+            "the session heartbeat was refreshed, but no capture, refs, or worktree changes were applied",
+            format!("heddle switch {}", entry.thread),
+            vec![format!("heddle switch {}", entry.thread)],
+        )));
     }
 
     super::snapshot::cmd_snapshot(
@@ -532,7 +634,7 @@ pub async fn cmd_agent_capture(
             segment: None,
             policy: None,
             no_policy: false,
-            no_agent: entry.provider.is_none() && entry.model.is_none(),
+            no_agent: false,
         },
     )
     .await
@@ -555,6 +657,7 @@ pub async fn cmd_agent_ready(cli: &Cli, args: crate::cli::cli_args::AgentReadyAr
         crate::cli::cli_args::ReadyArgs {
             thread: Some(entry.thread.clone()),
             message: args.message.clone(),
+            confidence: args.confidence,
         },
     )
     .await
@@ -565,7 +668,8 @@ pub async fn cmd_agent_ready(cli: &Cli, args: crate::cli::cli_args::AgentReadyAr
 /// breaking change to the wire shape is caught at PR review.
 pub fn agent_api_schema() -> serde_json::Value {
     serde_json::json!({
+        "AgentReservationEnvelope": schemars::schema_for!(AgentReservationEnvelope),
+        "AgentReservationListOutput": schemars::schema_for!(AgentReservationListOutput),
         "AgentReservationOutput": schemars::schema_for!(AgentReservationOutput),
-        "AgentReservationConflict": schemars::schema_for!(AgentReservationConflict),
     })
 }

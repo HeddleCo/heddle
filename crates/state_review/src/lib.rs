@@ -29,3 +29,14 @@ pub use health::{SignalHealth, StateSignalSnapshot, compute_health};
 pub use objects::object::{MAX_REASON_LEN, ProducerId, RiskSignal, RiskSignalKind, SignalAnchor};
 pub use payload::{PathSymbol, ReadingOrderPartition, SymbolKind, build_review_payload_partition};
 pub use registry::{ALL_MODULES, ModuleId, RiskSignalModule, SemanticContext, run_all};
+
+pub(crate) fn truncate_reason(reason: &str) -> String {
+    if reason.len() <= objects::object::MAX_REASON_LEN {
+        reason.to_string()
+    } else {
+        let take = objects::object::MAX_REASON_LEN.saturating_sub(1);
+        let mut out: String = reason.chars().take(take).collect();
+        out.push('\u{2026}');
+        out
+    }
+}

@@ -10,6 +10,7 @@ compile_error!(
 pub mod daemon;
 mod ephemeral_thread;
 mod fsmonitor;
+pub mod git_worktree_status;
 mod hooks;
 pub mod lazy_hydrator;
 mod merge_state;
@@ -68,9 +69,9 @@ pub use repository::{
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,
     RepositoryPerformanceInspectionReport, SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile,
     ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree,
-    WarmCanonicalStoreStats,
-    WorktreeCompareProfile, WorktreeIndexInspection, WorktreeStatusDetailed, compute_rewrite_pct,
-    find_merge_base, is_major_rewrite, is_synthetic_root,
+    WarmCanonicalStoreStats, WorktreeCompareProfile, WorktreeIndexInspection,
+    WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base, is_major_rewrite,
+    is_synthetic_root,
 };
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
 pub use session_storage::SessionManager;

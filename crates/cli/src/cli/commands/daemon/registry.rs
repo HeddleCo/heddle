@@ -15,11 +15,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use mount::{BlobCachePool, ContentAddressedMount, FuseShell, MountOptions, PrewarmHandle};
 use repo::{
-    daemon::{mount_daemon_registry_path, MountRegistryFile, PersistedMount},
     Repository,
+    daemon::{MountRegistryFile, PersistedMount, mount_daemon_registry_path},
 };
 use tracing::{debug, warn};
 

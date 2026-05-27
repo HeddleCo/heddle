@@ -8,6 +8,7 @@ mod blob;
 mod diff;
 mod discussion;
 mod hash;
+mod identifiers;
 mod operation_id;
 mod redaction;
 mod risk_signal;
@@ -18,14 +19,9 @@ mod state_context;
 mod state_core;
 mod state_provenance;
 mod state_review;
-mod state_signature;
-mod state_status;
-mod state_verification;
 mod structured_conflict;
+mod tree;
 mod tree_diff;
-mod tree_entry;
-mod tree_struct;
-mod tree_types;
 
 pub use action_id::ActionId;
 pub use action_operation::Operation;
@@ -37,6 +33,7 @@ pub use discussion::{
     DiscussionsBlob,
 };
 pub use hash::{ChangeId, ChangeIdParseError, ContentHash};
+pub use identifiers::{MarkerName, Scope, ThreadName};
 pub use operation_id::{OperationId, OperationIdParseError};
 pub use redaction::{
     REDACTION_SIGNING_PAYLOAD_VERSION_TAG, Redaction, RedactionError, RedactionsBlob,
@@ -52,19 +49,16 @@ pub use state_context::{
     Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus,
     AnnotationVisibility, ContextBlob, ContextError, ContextTarget,
 };
-pub use state_core::State;
+pub use state_core::{
+    SignatureStatus, State, StateSignature, Status, Verification,
+};
 pub use state_provenance::{FileProvenance, LineSpan, Origin, OriginSet, ProvenanceError};
 pub use state_review::{
     ReviewKind, ReviewScope, ReviewSignature, ReviewSignatureError, ReviewSignaturesBlob,
     SymbolAnchor, signing_payload,
 };
-pub use state_signature::{SignatureStatus, StateSignature};
-pub use state_status::Status;
-pub use state_verification::Verification;
 pub use structured_conflict::{
     ConflictError, ConflictResolution, ConflictSide, ConflictSymbol, StructuredConflict,
 };
+pub use tree::{EntryType, FileMode, Tree, TreeEntry, TreeError, validate_name as validate_tree_entry_name};
 pub use tree_diff::diff_trees;
-pub use tree_entry::{TreeEntry, validate_name as validate_tree_entry_name};
-pub use tree_struct::Tree;
-pub use tree_types::{EntryType, FileMode, TreeError};

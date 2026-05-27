@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Every `Commands` variant must have an explicit tier in
-//! [`cli::cli::help::tier_of`].
+//! Every `Commands` variant must have an explicit root command contract.
 //!
-//! `tier_of` falls back to `Tier::Advanced` on unknown verbs (a
-//! deliberate forward-compat behaviour for scripts that wrap a new
-//! verb before the table catches up). That fallback is a real
-//! escape hatch — but it should never apply to a verb that already
-//! exists in the codebase. This test enumerates every variant of
-//! `Commands` from `commands_main.rs` and asserts the verb name is
-//! classified by the explicit arms of `tier_of`, not the wildcard.
+//! Help tiers now come from the command contract table, so this test
+//! enumerates every variant of `Commands` from `commands_main.rs` and
+//! asserts the root verb name is present in that table. The runtime
+//! `command_help_tier` lookup still has an advanced fallback for
+//! unknown wrappers, but existing verbs must never rely on it.
 //!
 //! The check is text-based for the same reason
 //! [`op_id_coverage`](super::op_id_coverage) is: avoids dragging
@@ -16,8 +13,10 @@
 
 use std::{collections::BTreeSet, path::PathBuf};
 
+use cli::cli::commands::command_contract_root_commands;
+
 #[test]
-fn every_commands_variant_has_explicit_tier() {
+fn every_commands_variant_has_explicit_root_contract() {
     let commands_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("cli")
@@ -33,30 +32,31 @@ fn every_commands_variant_has_explicit_tier() {
         commands_rs.display()
     );
 
-    let help_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("cli")
-        .join("help.rs");
-    let help_source = std::fs::read_to_string(&help_rs)
-        .unwrap_or_else(|e| panic!("read {}: {e}", help_rs.display()));
-    let classified = classified_verbs(&help_source);
+    let contracted = command_contract_root_commands()
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
 
     let mut missing = Vec::new();
     for variant in &variants {
+        if cfg!(not(feature = "client"))
+            && matches!(variant.as_str(), "Auth" | "Support" | "Presence")
+        {
+            continue;
+        }
         let kebab = variant_to_verb(variant);
-        if !classified.contains(&kebab) {
+        if !contracted.contains(&kebab) {
             missing.push(format!("{variant} (verb name `{kebab}`)"));
         }
     }
 
     assert!(
         missing.is_empty(),
-        "the following Commands variants don't appear in any explicit \
-         arm of `tier_of` and would fall through to the wildcard \
-         (Tier::Advanced):\n  {}\n\n\
-         Add each verb name to the appropriate arm in \
-         crates/cli/src/cli/help.rs::tier_of, or — if it really \
-         should be advanced-by-default — to the Advanced arm.",
+        "the following Commands variants don't have an explicit root \
+         entry in the command contract table and would fall through to \
+         runtime help/contract defaults:\n  {}\n\n\
+         Add each root verb to CONTRACTS in \
+         crates/cli/src/cli/commands/command_catalog.rs.",
         missing.join("\n  ")
     );
 }
@@ -229,49 +229,4 @@ fn variant_to_verb(variant: &str) -> String {
         }
     }
     out
-}
-
-/// Extract every quoted string literal from `tier_of`'s explicit arms
-/// and the everyday/advanced verb tables. The wildcard `_ => ...` arm
-/// is intentionally not matched — that's the path we want this test
-/// to flag.
-fn classified_verbs(help_source: &str) -> BTreeSet<String> {
-    let mut set = BTreeSet::new();
-    let bytes = help_source.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'"' {
-            let lit_start = i + 1;
-            let mut j = lit_start;
-            while j < bytes.len() && bytes[j] != b'"' {
-                if bytes[j] == b'\\' {
-                    j += 2;
-                    continue;
-                }
-                j += 1;
-            }
-            if j < bytes.len() {
-                let lit = std::str::from_utf8(&bytes[lit_start..j]).unwrap_or("");
-                if is_verb_like(lit) {
-                    set.insert(lit.to_string());
-                }
-                i = j + 1;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    set
-}
-
-/// Filter for plausible verb names. Verb names are kebab-case ASCII;
-/// rejects multi-word descriptions and topic-page bodies that the
-/// extractor would otherwise pick up.
-fn is_verb_like(s: &str) -> bool {
-    if s.is_empty() || s.len() > 32 {
-        return false;
-    }
-    s.chars().all(|c| c.is_ascii_lowercase() || c == '-')
-        && !s.starts_with('-')
-        && !s.ends_with('-')
 }

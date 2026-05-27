@@ -153,11 +153,7 @@ pub(super) trait LanguageRules: Sync {
 /// hash the parameter list at the `"parameters"` field. Use from the
 /// impl body so the decision is documented at the call site:
 /// `fn signature_hash(...) -> u64 { generic_signature_hash(...) }`.
-pub(super) fn generic_signature_hash(
-    language: Language,
-    source: &str,
-    item_node: Node<'_>,
-) -> u64 {
+pub(super) fn generic_signature_hash(language: Language, source: &str, item_node: Node<'_>) -> u64 {
     signature_hash_from_field(language, source, item_node, "parameters")
 }
 
@@ -987,11 +983,7 @@ fn c_function_scope(
 /// Partial specialization patterns (`A<T*>`, `A<T&>`) and concrete
 /// specialization args (`A<int>`) fail the usage test and survive
 /// verbatim so distinct specializations get distinct keys.
-fn scope_component_text(
-    source: &str,
-    scope_node: Node<'_>,
-    param_lists: &[Vec<String>],
-) -> String {
+fn scope_component_text(source: &str, scope_node: Node<'_>, param_lists: &[Vec<String>]) -> String {
     let raw = strip_whitespace(&source[scope_node.byte_range()]);
     if scope_node.kind() != "template_type" || param_lists.is_empty() {
         return raw;
@@ -1372,12 +1364,7 @@ fn strip_whitespace(s: &str) -> String {
 /// Hash the parameter list at field `field`, keying on arity + types
 /// only. Returns 0 when the field is absent (e.g. parameterless
 /// declarations).
-fn signature_hash_from_field(
-    language: Language,
-    source: &str,
-    node: Node<'_>,
-    field: &str,
-) -> u64 {
+fn signature_hash_from_field(language: Language, source: &str, node: Node<'_>, field: &str) -> u64 {
     let Some(params) = node.child_by_field_name(field) else {
         return 0;
     };
@@ -1425,11 +1412,7 @@ fn signature_hash_from_field(
 ///   have `type`.
 /// * C/C++ `parameter_declaration` has `type` (the type specifier);
 ///   modifiers come from the declarator shape, not the `type` field.
-fn signature_hash_from_parameter_list(
-    language: Language,
-    source: &str,
-    params: Node<'_>,
-) -> u64 {
+fn signature_hash_from_parameter_list(language: Language, source: &str, params: Node<'_>) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     let mut cursor = params.walk();
     let mut arity: u64 = 0;

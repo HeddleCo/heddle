@@ -13,6 +13,7 @@
 //! asserts the new error path doesn't false-positive.
 use std::{fs, path::Path};
 
+use objects::object::ThreadName;
 use repo::Repository;
 use tempfile::TempDir;
 
@@ -80,12 +81,20 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
     // guarantees no in-process tree cache hides the corruption.
     let sub_hash_hex = {
         let repo = Repository::open(temp.path()).unwrap();
-        let main_tip = repo.refs().get_thread("main").unwrap().unwrap();
+        let main_tip = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .unwrap();
         let main_state = repo.store().get_state(&main_tip).unwrap().unwrap();
         // The merge base IS the initial state: main and feature both
         // forked from the initial capture, then captured once on each
         // side. We need the base state's tree, not main's tip tree.
-        let feature_tip = repo.refs().get_thread("feature").unwrap().unwrap();
+        let feature_tip = repo
+            .refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .unwrap();
         let feature_state = repo.store().get_state(&feature_tip).unwrap().unwrap();
         // Both tips have a single parent — the base capture.
         let base_change_id = main_state.parents[0];
@@ -118,7 +127,7 @@ fn test_merge_missing_base_subtree_fails_loud_not_silent_erase() {
 
     // The merge MUST fail. Pre-fix it succeeded and `sub/a.txt`
     // vanished from the merged tree without conflict markers.
-    let result = heddle(&["merge", "feature"], Some(temp.path()));
+    let result = heddle(&["--output", "json", "merge", "feature"], Some(temp.path()));
     let err = result.expect_err(
         "merge against a corrupt subtree must fail loud; \
          a clean Ok here means the silent-corruption bug regressed",
@@ -200,6 +209,13 @@ fn test_merge_with_directory_rename_succeeds_no_false_positive() {
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
     fs::write(temp.path().join("keep.txt"), "keep edited\n").unwrap();
     heddle(&["capture", "-m", "main edits keep"], Some(temp.path())).unwrap();
+
+    // Direct merge now refuses stale threads before doing semantic
+    // planning. Refresh first so this test keeps exercising the store
+    // integrity path, not the freshness gate.
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "refresh", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
 
     // The merge MUST succeed; the directory rename is a legitimate
     // "this subtree path doesn't exist on the other side" scenario,

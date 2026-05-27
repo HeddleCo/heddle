@@ -25,6 +25,10 @@ mod basics;
 mod bridge;
 #[path = "cli_integration/cli_premium_output.rs"]
 mod cli_premium_output;
+#[path = "cli_integration/context_recovery_advice.rs"]
+mod context_recovery_advice;
+#[path = "cli_integration/current_context_advice.rs"]
+mod current_context_advice;
 #[path = "cli_integration/doctor_docs.rs"]
 mod doctor_docs;
 #[path = "cli_integration/fault_injection.rs"]
@@ -45,6 +49,8 @@ mod hooks;
 mod misc;
 #[path = "cli_integration/oss_cli_polish.rs"]
 mod oss_cli_polish;
+#[path = "cli_integration/perf_core_loop.rs"]
+mod perf_core_loop;
 #[path = "cli_integration/realworld_git.rs"]
 mod realworld_git;
 #[path = "cli_integration/redact_purge.rs"]
@@ -57,6 +63,8 @@ mod remotes;
 mod shared_target;
 #[path = "cli_integration/state_id_acceptance.rs"]
 mod state_id_acceptance;
+#[path = "cli_integration/stdout_stderr_split.rs"]
+mod stdout_stderr_split;
 #[path = "cli_integration/thread_cleanup.rs"]
 mod thread_cleanup;
 #[path = "cli_integration/thread_default_current.rs"]
@@ -67,6 +75,8 @@ mod try_cmd;
 mod unrelated_histories_recovery;
 #[path = "cli_integration/watch.rs"]
 mod watch;
+#[path = "cli_integration/worktree_target_advice.rs"]
+mod worktree_target_advice;
 
 fn translate_legacy_args(args: &[&str]) -> Vec<String> {
     let mut prefix = Vec::new();
@@ -104,6 +114,61 @@ fn translate_legacy_args(args: &[&str]) -> Vec<String> {
     prefix
 }
 
+pub(crate) fn assert_json_recovery_advice_fields(envelope: &Value, context: &str) {
+    for field in [
+        "unsafe_condition",
+        "would_change",
+        "preserved",
+        "primary_command",
+        "recovery_commands",
+        "hint",
+    ] {
+        assert!(
+            envelope[field]
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+                || envelope[field]
+                    .as_array()
+                    .is_some_and(|value| !value.is_empty()),
+            "JSON recovery advice should expose `{field}` through structured fields: {context}"
+        );
+    }
+    assert!(
+        envelope["error"].as_str().is_some_and(|error| {
+            !error.contains("Unsafe:")
+                && !error.contains("Would change:")
+                && !error.contains("Preserved:")
+                && !error.contains("Primary recovery:")
+                && !error.contains("Other recovery:")
+        }),
+        "JSON `error` should stay concise; recovery detail belongs in structured fields: {context}"
+    );
+    assert!(
+        envelope.get("primary_command_argv").is_some_and(|argv| {
+            argv.is_null() || argv.as_array().is_some_and(|parts| !parts.is_empty())
+        }),
+        "JSON recovery advice should expose `primary_command_argv` as argv array or null: {context}"
+    );
+    assert!(
+        envelope
+            .get("primary_command_template")
+            .is_some_and(|template| template.is_null() || template.is_object()),
+        "JSON recovery advice should expose `primary_command_template` as object or null: {context}"
+    );
+    assert!(
+        envelope["recovery_command_argv"]
+            .as_array()
+            .is_some_and(|commands| commands.iter().all(|command| command.is_array())),
+        "JSON recovery advice should expose `recovery_command_argv` as an array of argv arrays: {context}"
+    );
+    assert!(
+        envelope["recovery_action_templates"]
+            .as_array()
+            .is_some_and(|templates| templates.iter().all(|template| template.is_object())),
+        "JSON recovery advice should expose `recovery_action_templates` as an array of template objects: {context}"
+    );
+}
+
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     let output = heddle_output(args, cwd)?;
     let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();
@@ -133,9 +198,22 @@ fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output,
         temp.path().to_path_buf()
     };
     cmd.current_dir(&dir);
-    cmd.env("HEDDLE_CONFIG", dir.join(".heddle-user/config.toml"));
+    let config_path = default_test_user_config_path(&dir);
+    seed_default_test_user_config(&config_path, &dir)?;
+    cmd.env("HEDDLE_CONFIG", config_path);
 
     cmd.output().map_err(|e| e.to_string())
+}
+
+fn heddle_argv_json<I, S>(args: I) -> Value
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let argv = std::iter::once(env!("CARGO_BIN_EXE_heddle").to_string())
+        .chain(args.into_iter().map(|arg| arg.as_ref().to_string()))
+        .collect::<Vec<_>>();
+    serde_json::json!(argv)
 }
 
 fn heddle_output_with_env(
@@ -154,7 +232,9 @@ fn heddle_output_with_env(
         temp.path().to_path_buf()
     };
     cmd.current_dir(&dir);
-    cmd.env("HEDDLE_CONFIG", dir.join(".heddle-user/config.toml"));
+    let config_path = default_test_user_config_path(&dir);
+    seed_default_test_user_config(&config_path, &dir)?;
+    cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env_remove("NO_COLOR");
     for (key, value) in envs {
         cmd.env(key, value);
@@ -171,7 +251,9 @@ fn heddle_output_with_stdin(
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
     cmd.args(translate_legacy_args(args));
     cmd.current_dir(cwd);
-    cmd.env("HEDDLE_CONFIG", cwd.join(".heddle-user/config.toml"));
+    let config_path = default_test_user_config_path(cwd);
+    seed_default_test_user_config(&config_path, cwd)?;
+    cmd.env("HEDDLE_CONFIG", config_path);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -211,7 +293,7 @@ fn state_chain_ids(path: &std::path::Path, count: usize) -> Vec<String> {
 }
 
 fn status_json(path: &std::path::Path) -> Value {
-    let output = heddle(&["status", "--json"], Some(path)).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(path)).unwrap();
     serde_json::from_str(&output).expect("status output should be JSON")
 }
 
@@ -224,6 +306,41 @@ fn git_test_signature() -> gix::actor::Signature {
             offset: 0,
         },
     }
+}
+
+fn seed_default_test_user_config(
+    config_path: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<(), String> {
+    if config_path.exists() {
+        return Ok(());
+    }
+    if cwd.join(".git").exists() {
+        return Ok(());
+    }
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    std::fs::write(
+        config_path,
+        "[principal]\nname = \"Heddle Test\"\nemail = \"heddle@example.com\"\n",
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn default_test_user_config_path(cwd: &std::path::Path) -> std::path::PathBuf {
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
+
+    let mut hasher = DefaultHasher::new();
+    cwd.hash(&mut hasher);
+    std::env::temp_dir().join(format!(
+        "heddle-cli-test-user-{}-{:016x}.toml",
+        std::process::id(),
+        hasher.finish()
+    ))
 }
 
 fn git_empty_tree_oid(repo: &gix::Repository) -> gix::hash::ObjectId {

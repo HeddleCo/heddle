@@ -27,7 +27,7 @@ pub use state_signing::StateSigningExt;
 /// Trait for cryptographic signers.
 pub trait Signer: Send + Sync {
     fn algorithm(&self) -> &'static str;
-    fn public_key(&self) -> Vec<u8>;
+    fn public_key(&self) -> &[u8];
     fn sign(&self, data: &[u8]) -> Result<Vec<u8>, SignerError>;
     fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), SignerError>;
 }

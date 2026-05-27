@@ -56,9 +56,7 @@ fn main() {
     }
     let path = Path::new("synth.rs");
 
-    eprintln!(
-        "profiling: n={n} functions, iters={iters}, out={out_path}"
-    );
+    eprintln!("profiling: n={n} functions, iters={iters}, out={out_path}");
 
     let guard = ProfilerGuardBuilder::default()
         .frequency(997)

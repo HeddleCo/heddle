@@ -7,31 +7,57 @@ use grpc::heddle::v1::{
     ExchangeDeviceAuthorizationRequest, IssueServiceAccountCredentialRequest,
     WaitForDeviceAuthorizationRequest, auth_service_client::AuthServiceClient,
 };
+use serde::Serialize;
 use tonic::{
     metadata::MetadataValue,
     transport::{Channel, Endpoint},
 };
+use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
-use crate::credentials::ServerCredential;
-use crate::{auth_args::AuthCommands, credentials};
-use weft_client_shim::CliContext;
+use crate::{auth_args::AuthCommands, credentials, credentials::ServerCredential};
 
 /// Top-level dispatch for `heddle auth <subcommand>`. `_ctx` is
 /// reserved for future hosted commands that need repo path / output
 /// mode — today's auth subcommands all operate on global credential
 /// state and don't read it.
-pub async fn cmd_auth(_ctx: &dyn CliContext, command: AuthCommands) -> Result<()> {
+#[derive(Serialize)]
+struct AuthLogoutOutput {
+    output_kind: &'static str,
+    server: String,
+    removed: bool,
+}
+
+#[derive(Serialize)]
+struct AuthStatusOutput {
+    output_kind: &'static str,
+    server: String,
+    authenticated: bool,
+    subject: Option<String>,
+    credential_id: Option<String>,
+    expires_at: Option<String>,
+    recommended_action: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ServiceTokenOutput {
+    output_kind: &'static str,
+    name: String,
+    namespace: String,
+    scope: String,
+    token: String,
+    expires_in_days: u32,
+}
+
+pub async fn cmd_auth(ctx: &dyn CliContext, command: AuthCommands) -> Result<()> {
     match command {
-        AuthCommands::Login { server, no_browser } => {
-            cmd_auth_login(&server, no_browser).await
-        }
-        AuthCommands::Logout { server } => cmd_auth_logout(server.as_deref()),
-        AuthCommands::Status { server } => cmd_auth_status(server.as_deref()),
+        AuthCommands::Login { server, no_browser } => cmd_auth_login(&server, no_browser).await,
+        AuthCommands::Logout { server } => cmd_auth_logout(ctx, server.as_deref()),
+        AuthCommands::Status { server } => cmd_auth_status(ctx, server.as_deref()),
         AuthCommands::CreateServiceToken {
             name,
             namespace,
             server,
-        } => cmd_create_service_token(server.as_deref(), name, namespace).await,
+        } => cmd_create_service_token(ctx, server.as_deref(), name, namespace).await,
     }
 }
 
@@ -125,30 +151,66 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
 }
 
 /// Remove stored credentials.
-fn cmd_auth_logout(server: Option<&str>) -> Result<()> {
+fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     let server = resolve_server(server)?;
     credentials::remove_server_credential(&server)?;
-    println!("Credentials removed for {server}.");
+    if ctx.should_output_json(None) {
+        let output = AuthLogoutOutput {
+            output_kind: "auth_logout",
+            server,
+            removed: true,
+        };
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!("Credentials removed for {server}.");
+    }
     Ok(())
 }
 
 /// Show current authentication status.
-fn cmd_auth_status(server: Option<&str>) -> Result<()> {
+fn cmd_auth_status(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     let server = resolve_server(server)?;
     match credentials::get_server_credential(&server)? {
         Some(cred) => {
-            println!("Server:        {server}");
-            println!("Subject:       {}", cred.subject);
-            if let Some(ref cred_id) = cred.credential_id {
-                println!("Credential:    {cred_id}");
-            }
-            if let Some(ref expires) = cred.expires_at {
-                println!("Expires:       {expires}");
+            if ctx.should_output_json(None) {
+                let output = AuthStatusOutput {
+                    output_kind: "auth_status",
+                    server,
+                    authenticated: true,
+                    subject: Some(cred.subject),
+                    credential_id: cred.credential_id,
+                    expires_at: cred.expires_at,
+                    recommended_action: None,
+                };
+                println!("{}", serde_json::to_string(&output)?);
+            } else {
+                println!("Server:        {server}");
+                println!("Subject:       {}", cred.subject);
+                if let Some(ref cred_id) = cred.credential_id {
+                    println!("Credential:    {cred_id}");
+                }
+                if let Some(ref expires) = cred.expires_at {
+                    println!("Expires:       {expires}");
+                }
             }
         }
         None => {
-            println!("Not authenticated with {server}.");
-            println!("Run `heddle auth login --server {server}` to authenticate.");
+            let recommended_action = format!("heddle auth login --server {server}");
+            if ctx.should_output_json(None) {
+                let output = AuthStatusOutput {
+                    output_kind: "auth_status",
+                    server,
+                    authenticated: false,
+                    subject: None,
+                    credential_id: None,
+                    expires_at: None,
+                    recommended_action: Some(recommended_action),
+                };
+                println!("{}", serde_json::to_string(&output)?);
+            } else {
+                println!("Not authenticated with {server}.");
+                println!("Run `{recommended_action}` to authenticate.");
+            }
         }
     }
     Ok(())
@@ -160,6 +222,7 @@ fn cmd_auth_status(server: Option<&str>) -> Result<()> {
 
 /// Create a namespace-scoped service token for CI/ephemeral runners.
 async fn cmd_create_service_token(
+    ctx: &dyn CliContext,
     server: Option<&str>,
     name: String,
     namespace: String,
@@ -168,9 +231,8 @@ async fn cmd_create_service_token(
     let scope = format!("repo:{namespace}/*");
 
     // Load the calling user's token to authenticate with the server.
-    let cred = credentials::get_server_credential(&server)?.ok_or_else(|| {
-        anyhow::anyhow!("not authenticated with {server}; run `heddle auth login`")
-    })?;
+    let cred = credentials::get_server_credential(&server)?
+        .ok_or_else(|| anyhow::anyhow!(HostedRecoveryAdvice::auth_required(&server)))?;
 
     // Generate a fresh Ed25519 keypair for the service account credential.
     let signer = Ed25519Signer::generate()
@@ -233,14 +295,25 @@ async fn cmd_create_service_token(
         })?
         .into_inner();
 
-    // 3. Print token for the user to capture.
-    println!();
-    println!("Service token created for \"{}\" (scope: {scope})", name);
-    println!();
-    println!("Token: {}", issued.token);
-    println!();
-    println!("Set this as HEDDLE_REMOTE_TOKEN in your CI environment.");
-    println!("This token is scoped to the {namespace} namespace.");
+    if ctx.should_output_json(None) {
+        let output = ServiceTokenOutput {
+            output_kind: "auth_create_service_token",
+            name,
+            namespace,
+            scope,
+            token: issued.token,
+            expires_in_days: 30,
+        };
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!();
+        println!("Service token created for \"{}\" (scope: {scope})", name);
+        println!();
+        println!("Token: {}", issued.token);
+        println!();
+        println!("Set this as HEDDLE_REMOTE_TOKEN in your CI environment.");
+        println!("This token is scoped to the {namespace} namespace.");
+    }
 
     Ok(())
 }

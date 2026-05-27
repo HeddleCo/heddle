@@ -44,7 +44,10 @@ fn test_gc_dry_run() {
     let packs_dir = temp.path().join(".heddle").join("packs");
     let pack_count_before = pack_count_in(&packs_dir);
 
-    let result = heddle(&["maintenance", "gc", "--dry-run"], Some(temp.path()));
+    let result = heddle(
+        &["maintenance", "gc", "--dry-run", "--output", "text"],
+        Some(temp.path()),
+    );
     assert!(result.is_ok(), "gc --dry-run failed: {:?}", result.err());
 
     let output = result.unwrap();
@@ -110,7 +113,7 @@ fn test_read_from_packfile() {
         show_result.err()
     );
 
-    let log_json = heddle(&["--json", "log"], Some(temp.path())).unwrap();
+    let log_json = heddle(&["--output", "json", "log"], Some(temp.path())).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&log_json).unwrap();
     let parent = parsed["states"][0]["parents"][0]
         .as_str()

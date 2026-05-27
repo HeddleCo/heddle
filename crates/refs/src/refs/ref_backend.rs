@@ -6,18 +6,18 @@
 
 use objects::{
     error::{HeddleError, Result},
-    object::ChangeId,
+    object::{ChangeId, ThreadName},
 };
 
-use super::{RefSummaryIndexInspection, backend::CoreRefBackend};
+use super::{backend::CoreRefBackend, RefSummaryIndexInspection};
 
 /// Backend-agnostic interface for reading and writing repository references.
 pub trait RefBackend: CoreRefBackend<Error = HeddleError> {
-    fn get_remote_thread(&self, remote: &str, thread: &str) -> Result<Option<ChangeId>>;
-    fn set_remote_thread(&self, remote: &str, thread: &str, state: &ChangeId) -> Result<()>;
-    fn delete_remote_thread(&self, remote: &str, thread: &str) -> Result<Option<ChangeId>>;
+    fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>>;
+    fn set_remote_thread(&self, remote: &str, thread: &ThreadName, state: &ChangeId) -> Result<()>;
+    fn delete_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>>;
     fn list_remotes(&self) -> Result<Vec<String>>;
-    fn list_remote_threads(&self, remote: &str) -> Result<Vec<String>>;
+    fn list_remote_threads(&self, remote: &str) -> Result<Vec<ThreadName>>;
 
     fn inspect_ref_summary_index(&self) -> Result<RefSummaryIndexInspection> {
         Ok(RefSummaryIndexInspection::absent())

@@ -3,20 +3,21 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
 };
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use gix::bstr::ByteSlice;
 use objects::{
-    object::{ChangeId, State},
+    object::{ChangeId, State, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, current_boot_id},
 };
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
-    AgentUsageSummary, GitOverlayBranchTip, GitRemoteTrackingStatus, Repository,
-    RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
+    AgentUsageSummary, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
+    Repository, RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
     ThreadFreshness, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadManager, ThreadMode,
     ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
     describe_thread_advice,
@@ -24,19 +25,37 @@ use repo::{
 use serde::Serialize;
 
 use super::{
+    action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
+    advice::RecoveryAdvice,
+    command_catalog::{ActionTemplate, recommended_action_template},
+    git_overlay_health::{
+        RepositoryVerificationState, action_argv, build_repository_verification_state,
+        canonical_adopt_ref_command, canonical_bridge_reconcile_ref_preview_command, command_argvs,
+        override_trust_recommended_action, serialize_empty_action_as_null,
+    },
     mount_lifecycle,
-    operator_loop::primary_next_action,
+    next_action::{
+        NextActionInput, effective_next_action,
+        thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
+    },
+    operator_loop::{primary_next_action, primary_next_action_with_verification},
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
-    thread_cmd::refresh_thread_freshness,
+    thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
     worktree_cmd::{
         helpers::{prepare_worktree_target, write_isolated_checkout},
         shared_target,
     },
+    worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    cli::{Cli, ThreadListArgs, ThreadStartArgs, WorkspaceModeArg, should_output_json, style},
+    cli::{
+        Cli, ThreadListArgs, ThreadStartArgs, WorkspaceModeArg, should_output_json, style,
+        worktree_status_options,
+    },
     config::{UserConfig, UserThreadWorkspaceMode},
 };
+
+pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -70,14 +89,20 @@ pub struct ThreadSummary {
     pub current_state: Option<String>,
     pub path: Option<String>,
     pub execution_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub heddle_session_id: Option<String>,
     pub actor: Option<ThreadActorInfo>,
     pub harness: Option<String>,
     pub thinking_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub native_actor_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub native_parent_actor_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_confidence: Option<f32>,
     pub usage_summary: Option<AgentUsageSummary>,
     pub last_progress_at: Option<String>,
@@ -107,7 +132,10 @@ pub struct ThreadSummary {
     pub is_isolated: bool,
     pub thread_health: String,
     pub blockers: Vec<String>,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     pub recommended_action: String,
+    pub recommended_action_argv: Option<Vec<String>>,
+    pub recommended_action_template: Option<ActionTemplate>,
     pub git_branch_tip: Option<String>,
     pub history_imported: bool,
     /// Mirror of [`repo::ThreadRecord::auto`]. `true` when the thread
@@ -124,8 +152,19 @@ pub struct ThreadSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AvailableGitRef {
+    pub name: String,
+    pub git_commit: String,
+    pub recommended_action: String,
+    pub recommended_action_argv: Option<Vec<String>>,
+    pub recommended_action_template: Option<ActionTemplate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ThreadActorInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 }
 
@@ -144,12 +183,12 @@ impl ThreadSummary {
                 .materialized_path
                 .as_ref()
                 .or(view.runtime.path.as_ref())
-                .map(|path| path.display().to_string()),
+                .and_then(|p| display_path_string(p)),
             execution_path: view
                 .runtime
                 .execution_path
                 .as_ref()
-                .map(|path| path.display().to_string()),
+                .and_then(|p| display_path_string(p)),
             session_id: view.runtime.session_id,
             heddle_session_id: view.runtime.heddle_session_id,
             actor: match (view.runtime.provider, view.runtime.model) {
@@ -170,7 +209,11 @@ impl ThreadSummary {
             thread_mode: Some(mode.clone()),
             thread_state: Some(view.record.state),
             freshness: Some(view.record.freshness),
-            visibility: visibility_label(&mode).to_string(),
+            visibility: if view.is_isolated {
+                visibility_label(&mode).to_string()
+            } else {
+                "ref_only".to_string()
+            },
             target_thread: view.record.target_thread,
             parent_thread: view.record.parent_thread,
             child_threads: Vec::new(),
@@ -191,6 +234,8 @@ impl ThreadSummary {
             thread_health: "clean".to_string(),
             blockers: Vec::new(),
             recommended_action: String::new(),
+            recommended_action_argv: None,
+            recommended_action_template: None,
             git_branch_tip: None,
             history_imported: true,
             auto: view.record.auto,
@@ -203,16 +248,39 @@ impl ThreadSummary {
     }
 }
 
+fn display_path_string(path: &Path) -> Option<String> {
+    let rendered = path.display().to_string();
+    if rendered.trim().is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
+}
+
 #[derive(Serialize)]
 struct ThreadListOutput {
+    output_kind: &'static str,
     repository_capability: String,
+    repository_label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
     storage_model: String,
     hosted_enabled: bool,
     threads: Vec<ThreadSummary>,
+    available_git_refs: Vec<AvailableGitRef>,
     current: Option<String>,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
+    recommended_action: String,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<ActionTemplate>,
+    recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
+    recovery_action_templates: Vec<ActionTemplate>,
     /// Carried for the human-readable renderer only. Not part of the
     /// JSON contract: import-hint information is exposed via
-    /// `heddle bridge git status --json` instead.
+    /// `heddle bridge git status --output json` instead.
     #[serde(skip)]
     git_overlay_import_hint: Option<ThreadListGitOverlayImportHintOutput>,
 }
@@ -226,12 +294,45 @@ struct ThreadListGitOverlayImportHintOutput {
 }
 
 #[derive(Serialize)]
+struct ThreadShowOutput {
+    output_kind: &'static str,
+    repository_label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository_context: Option<crate::cli::render::RepositoryContextInfo>,
+    #[serde(flatten)]
+    summary: ThreadSummary,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
+    next_action: String,
+    next_action_argv: Option<Vec<String>>,
+    next_action_template: Option<ActionTemplate>,
+    recommended_action_template: Option<ActionTemplate>,
+    #[serde(rename = "verification")]
+    trust: RepositoryVerificationState,
+    recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
+}
+
+#[derive(Serialize)]
 pub(crate) struct ThreadOpOutput {
+    pub output_kind: &'static str,
+    pub status: &'static str,
+    pub action: &'static str,
     pub name: String,
     pub message: String,
+    pub next_action: Option<String>,
+    pub next_action_argv: Option<Vec<String>>,
+    pub next_action_template: Option<ActionTemplate>,
+    pub recommended_action: Option<String>,
+    pub recommended_action_argv: Option<Vec<String>>,
+    pub recommended_action_template: Option<ActionTemplate>,
     pub thread: Option<ThreadSummary>,
     pub path: Option<String>,
     pub execution_path: Option<String>,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "verification")]
+    pub trust: Option<RepositoryVerificationState>,
 }
 
 #[derive(Serialize)]
@@ -259,6 +360,9 @@ pub(crate) struct ThreadCaptureSummary {
 
 pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    if args.path.is_some() {
+        ensure_worktree_clean(&repo, "start thread")?;
+    }
     let print_cd = args.print_cd_path;
     let output = start_thread(&repo, args)?;
     if print_cd {
@@ -273,14 +377,20 @@ pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
 /// callers that pass `--print-cd-path` and get an error should fall back to
 /// `heddle start foo` for the full report.
 fn render_cd_path(output: &ThreadOpOutput) -> Result<()> {
+    let thread_name = output
+        .thread
+        .as_ref()
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| output.name.clone());
     let path = output
         .thread
         .as_ref()
         .and_then(|t| t.path.as_deref())
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "this thread has no filesystem checkout path; `--print-cd-path` only works for materialized workspaces"
-            )
+            anyhow!(RecoveryAdvice::thread_checkout_unavailable(
+                &thread_name,
+                "--print-cd-path",
+            ))
         })?;
     println!("{path}");
     Ok(())
@@ -298,12 +408,9 @@ pub(crate) fn cmd_thread_captures(
         return Ok(());
     }
 
-    println!("{}", style::section(&format!("Captures on {thread}")));
+    println!("{}", style::section(&format!("Saved states on {thread}")));
     if captures.is_empty() {
-        println!(
-            "  {}",
-            style::dim("No captures recorded on this thread yet.")
-        );
+        println!("{}", style::dim("  No saved states on this thread yet."));
         return Ok(());
     }
     for capture in captures {
@@ -332,8 +439,8 @@ fn collect_thread_captures(
 ) -> Result<Vec<ThreadCaptureOutput>> {
     let current = repo
         .refs()
-        .get_thread(thread)?
-        .ok_or_else(|| anyhow!("Thread not found: {thread}"))?;
+        .get_thread(&ThreadName::new(thread))?
+        .ok_or_else(|| anyhow!(thread_not_found_advice(thread, "list thread captures")))?;
     let base = ThreadManager::new(repo.heddle_dir())
         .load(thread)?
         .map(|thread| thread.base_state);
@@ -405,7 +512,7 @@ fn thread_capture_output(
 }
 
 pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>> {
-    let threads = repo.refs().list_threads()?;
+    let thread_refs = repo.refs().list_threads()?;
     let current = repo.current_lane()?;
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status().unwrap_or(None);
@@ -428,7 +535,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
     }
     for mut thread in thread_manager.list()? {
         if thread.state == ThreadState::Abandoned
-            && repo.refs().get_thread(&thread.thread)?.is_none()
+            && repo.refs().get_thread(&ThreadName::new(&thread.thread))?.is_none()
         {
             continue;
         }
@@ -436,7 +543,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
         threads_by_name.insert(thread.thread.clone(), thread);
     }
 
-    let mut names: BTreeSet<String> = threads.into_iter().collect();
+    let mut names: BTreeSet<String> = thread_refs.iter().map(|t| t.to_string()).collect();
     names.extend(current.iter().cloned());
     names.extend(entries_by_thread.keys().cloned());
     names.extend(threads_by_name.keys().cloned());
@@ -457,6 +564,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
             summary.git_branch_tip = Some(branch_tip.git_commit.clone());
             summary.history_imported = branch_tip.history_imported;
         }
+        let has_heddle_tip = thread_refs.iter().any(|thread| thread == &summary.name);
         let thread = Thread {
             id: summary.name.clone(),
             thread: summary.name.clone(),
@@ -499,33 +607,53 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
         summary.thread_health = advice.thread_health;
         summary.blockers = advice.blockers;
         summary.recommended_action = advice.recommended_action;
-        if matches!(
-            summary.thread_state,
-            Some(ThreadState::Merged | ThreadState::Abandoned)
-        ) {
-            summary.thread_health = "clean".to_string();
-            summary.blockers.clear();
-            summary.recommended_action.clear();
-            summary.coordination_status = CoordinationStatus::Clean;
-        }
+        apply_terminal_thread_advice(&mut summary);
         if let Some(branch_tip) = branch_tips.get(&summary.name)
-            && !branch_tip.history_imported
+            && !has_heddle_tip
         {
-            summary.thread_health = "tip_only".to_string();
-            summary.blockers = vec![
-                "Git branch is visible as a tip-only mirror; import its history to use history-oriented Heddle commands".to_string(),
-            ];
+            if branch_tip.history_imported {
+                summary.blockers.clear();
+                if !summary.is_current {
+                    summary.recommended_action = canonical_adopt_ref_command(&branch_tip.branch);
+                }
+            } else {
+                summary.thread_health = "tip_only".to_string();
+                summary.recommended_action = canonical_adopt_ref_command(&branch_tip.branch);
+                if summary.is_current {
+                    summary.blockers = vec![
+                        "Heddle has not imported this Git branch history yet; import before using history-oriented commands".to_string(),
+                    ];
+                } else {
+                    summary.blockers.clear();
+                }
+            }
+        }
+        if summary.history_imported
+            && summary.current_state.is_some()
+            && remote_tracking_local_ref(repo, &summary.name).is_some()
+        {
+            summary.thread_health = "remote_tracking".to_string();
+            summary.coordination_status = CoordinationStatus::Clean;
+            summary.blockers.clear();
             summary.recommended_action =
-                format!("heddle bridge git import --ref {}", branch_tip.branch);
+                super::thread_landing::merge_preview_command(&summary.name);
         }
         if summary.is_current {
+            enrich_current_summary_with_dirty_paths(repo, &mut summary)?;
             summary.operation = operation.clone();
             summary.remote_tracking = remote_tracking.clone();
-            summary.recommended_action = primary_next_action(
+            summary.recommended_action = current_thread_next_action(
                 operation.as_ref(),
                 remote_tracking.as_ref(),
                 import_hint.as_ref(),
+                Some(&summary.thread_health),
                 Some(&summary.recommended_action),
+            );
+            summary.recommended_action = contextual_thread_action(
+                repo,
+                &summary.name,
+                summary.target_thread.as_deref(),
+                &summary.recommended_action,
             );
         }
         summaries.push(summary);
@@ -572,10 +700,82 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
         if summary.last_progress_at.is_some() {
             summary.last_activity_at = summary.last_progress_at.clone();
         }
+        summary.recommended_action_argv = action_argv(&summary.recommended_action);
+        summary.recommended_action_template =
+            recommended_action_template(&summary.recommended_action);
     }
 
     summaries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(summaries)
+}
+
+fn enrich_current_summary_with_dirty_paths(
+    repo: &Repository,
+    summary: &mut ThreadSummary,
+) -> Result<()> {
+    let baseline = match repo.current_state()? {
+        Some(state) => repo.require_tree(&state.tree)?,
+        None => Tree::new(),
+    };
+    let status = repo.compare_worktree_cached_with_options(
+        &baseline,
+        &worktree_status_options(Some(repo.config())),
+    )?;
+    let mut paths = summary
+        .changed_paths
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    paths.extend(
+        status
+            .modified
+            .iter()
+            .chain(status.added.iter())
+            .chain(status.deleted.iter())
+            .map(|path| path.to_string_lossy().to_string()),
+    );
+    summary.changed_paths = paths.into_iter().collect();
+    Ok(())
+}
+
+pub(crate) fn suppress_thread_actions_while_trust_blocked(
+    summaries: &mut [ThreadSummary],
+    trust: &RepositoryVerificationState,
+) {
+    if trust.verified {
+        return;
+    }
+    let blocker = if trust.summary.trim().is_empty() {
+        format!("Repository verification is {}", trust.status)
+    } else {
+        trust.summary.clone()
+    };
+    for summary in summaries {
+        if summary.thread_health == "remote_tracking" {
+            summary.recommended_action_argv = action_argv(&summary.recommended_action);
+            summary.recommended_action_template =
+                recommended_action_template(&summary.recommended_action);
+            continue;
+        }
+        summary.thread_health = trust.status.clone();
+        summary.coordination_status = CoordinationStatus::Blocked;
+        if !summary.blockers.iter().any(|existing| existing == &blocker) {
+            summary.blockers.insert(0, blocker.clone());
+        }
+        if trust.status == "needs_import"
+            && summary
+                .recommended_action
+                .starts_with("heddle adopt --ref ")
+        {
+            summary.recommended_action_argv = action_argv(&summary.recommended_action);
+            summary.recommended_action_template =
+                recommended_action_template(&summary.recommended_action);
+            continue;
+        }
+        summary.recommended_action.clear();
+        summary.recommended_action_argv = None;
+        summary.recommended_action_template = None;
+    }
 }
 
 fn stack_depth(summaries_by_name: &HashMap<String, ThreadSummary>, thread: &str) -> usize {
@@ -600,7 +800,23 @@ fn build_thread_view(
     thread: Option<Thread>,
     branch_tip: Option<GitOverlayBranchTip>,
 ) -> Result<(ThreadView, CoordinationStatus)> {
-    let current_state = repo.refs().get_thread(&name)?.map(|id| id.short());
+    let ref_state = repo.refs().get_thread(&ThreadName::new(&name))?;
+    let current_state = ref_state
+        .or_else(|| {
+            (is_current && repo.capability() == repo::RepositoryCapability::GitOverlay)
+                .then(|| {
+                    branch_tip
+                        .as_ref()
+                        .and_then(|tip| tip.mapped_change)
+                        .or_else(|| {
+                            repo.git_overlay_mapped_change_for_branch(&name)
+                                .ok()
+                                .flatten()
+                        })
+                })
+                .flatten()
+        })
+        .map(|id| id.short());
     let has_heddle_tip = current_state.is_some();
     let active: Vec<&AgentEntry> = entries
         .iter()
@@ -827,15 +1043,7 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
     summary.thread_health = advice.thread_health;
     summary.blockers = advice.blockers;
     summary.recommended_action = advice.recommended_action;
-    if matches!(
-        summary.thread_state,
-        Some(ThreadState::Merged | ThreadState::Abandoned)
-    ) {
-        summary.thread_health = "clean".to_string();
-        summary.blockers.clear();
-        summary.recommended_action.clear();
-        summary.coordination_status = CoordinationStatus::Clean;
-    }
+    apply_terminal_thread_advice(&mut summary);
     if is_current {
         // Current-thread next-action enrichment. Same as the full path,
         // but we skip the operation/remote_tracking/import_hint reads
@@ -843,8 +1051,84 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
         // through different fields anyway.
         summary.recommended_action =
             primary_next_action(None, None, None, Some(&summary.recommended_action));
+        summary.recommended_action = contextual_thread_action(
+            repo,
+            &summary.name,
+            summary.target_thread.as_deref(),
+            &summary.recommended_action,
+        );
     }
+    summary.recommended_action_argv = action_argv(&summary.recommended_action);
+    summary.recommended_action_template = recommended_action_template(&summary.recommended_action);
     Ok(Some(summary))
+}
+
+pub(crate) fn contextual_thread_action(
+    repo: &Repository,
+    thread_id: &str,
+    target_thread: Option<&str>,
+    action: &str,
+) -> String {
+    super::thread_landing::contextual_thread_action(repo, thread_id, target_thread, action)
+}
+
+pub(crate) fn current_thread_next_action_with_verification(
+    operation: Option<&RepositoryOperationStatus>,
+    remote_tracking: Option<&GitRemoteTrackingStatus>,
+    import_hint: Option<&GitOverlayImportHint>,
+    thread_health: Option<&str>,
+    thread_action: Option<&str>,
+    trust: &RepositoryVerificationState,
+) -> String {
+    let fallback = non_empty_action_ref(thread_action)
+        .or_else(|| non_empty_action_ref(Some(trust.recommended_action.as_str())));
+    effective_next_action(
+        NextActionInput::default(operation, remote_tracking, import_hint, fallback)
+            .current_thread(thread_health)
+            .with_verification(trust),
+    )
+}
+
+pub(crate) fn current_thread_next_action(
+    operation: Option<&RepositoryOperationStatus>,
+    remote_tracking: Option<&GitRemoteTrackingStatus>,
+    import_hint: Option<&GitOverlayImportHint>,
+    thread_health: Option<&str>,
+    thread_action: Option<&str>,
+) -> String {
+    effective_next_action(
+        NextActionInput::default(operation, remote_tracking, import_hint, thread_action)
+            .current_thread(thread_health),
+    )
+}
+
+pub(crate) fn thread_recovery_action_is_primary(
+    thread_health: Option<&str>,
+    thread_action: &str,
+) -> bool {
+    shared_thread_recovery_action_is_primary(thread_health, thread_action)
+}
+
+fn non_empty_action_ref(action: Option<&str>) -> Option<&str> {
+    action.filter(|action| !action.trim().is_empty())
+}
+
+fn apply_terminal_thread_advice(summary: &mut ThreadSummary) {
+    match summary.thread_state {
+        Some(ThreadState::Merged) => {
+            summary.thread_health = "clean".to_string();
+            summary.blockers.clear();
+            summary.recommended_action = "heddle thread cleanup --merged --dry-run".to_string();
+            summary.coordination_status = CoordinationStatus::Clean;
+        }
+        Some(ThreadState::Abandoned) => {
+            summary.thread_health = "clean".to_string();
+            summary.blockers.clear();
+            summary.recommended_action.clear();
+            summary.coordination_status = CoordinationStatus::Clean;
+        }
+        _ => {}
+    }
 }
 
 pub(crate) fn visibility_label(mode: &ThreadMode) -> &'static str {
@@ -853,6 +1137,28 @@ pub(crate) fn visibility_label(mode: &ThreadMode) -> &'static str {
         ThreadMode::Virtualized => "virtualized",
         ThreadMode::Solid => "solid",
     }
+}
+
+pub(crate) fn thread_workspace_label(mode: &ThreadMode) -> &'static str {
+    match mode {
+        ThreadMode::Materialized => "main checkout",
+        ThreadMode::Virtualized => "virtual checkout",
+        ThreadMode::Solid => "isolated checkout",
+    }
+}
+
+pub(crate) fn thread_human_visibility(summary: &ThreadSummary) -> &str {
+    if thread_is_imported_git_ref(summary) {
+        return "imported Git branch";
+    }
+    if !summary.is_isolated && summary.path.is_none() && summary.execution_path.is_none() {
+        return "no dedicated checkout";
+    }
+    summary
+        .thread_mode
+        .as_ref()
+        .map(thread_workspace_label)
+        .unwrap_or(&summary.visibility)
 }
 
 /// Compact glyph appended to a thread-list row to indicate whether
@@ -873,10 +1179,7 @@ pub(crate) fn visibility_label(mode: &ThreadMode) -> &'static str {
 /// dead the mount directory is still a real (empty) dir, so this
 /// is honest. A `(stale)` advisory would be misleading.
 fn thread_liveness_glyph(entry: &ThreadSummary) -> String {
-    let path = entry
-        .path
-        .as_deref()
-        .or(entry.execution_path.as_deref());
+    let path = entry.path.as_deref().or(entry.execution_path.as_deref());
     let Some(path) = path else {
         return String::new();
     };
@@ -895,59 +1198,170 @@ pub(crate) fn git_history_label(history_imported: bool) -> &'static str {
     }
 }
 
+fn render_repository_context_lines(context: Option<&crate::cli::render::RepositoryContextInfo>) {
+    let Some(context) = context else {
+        return;
+    };
+    if let Some(parent_repository) = &context.parent_repository {
+        println!("Parent repo: {}", parent_repository);
+    }
+    if let Some(target_thread) = &context.target_thread {
+        println!("Target thread: {}", target_thread);
+    }
+    if let Some(parent_thread) = &context.parent_thread {
+        println!("Parent thread: {}", parent_thread);
+    }
+}
+
+pub(crate) fn split_available_git_refs(summaries: &mut Vec<ThreadSummary>) -> Vec<AvailableGitRef> {
+    let mut available = Vec::new();
+    summaries.retain(|summary| {
+        if thread_is_available_git_ref(summary) {
+            available.push(available_git_ref_from_summary(summary));
+            false
+        } else {
+            true
+        }
+    });
+    available
+}
+
+fn available_git_ref_from_summary(summary: &ThreadSummary) -> AvailableGitRef {
+    AvailableGitRef {
+        name: summary.name.clone(),
+        git_commit: summary.git_branch_tip.clone().unwrap_or_default(),
+        recommended_action: summary.recommended_action.clone(),
+        recommended_action_argv: summary
+            .recommended_action_argv
+            .clone()
+            .or_else(|| action_argv(&summary.recommended_action)),
+        recommended_action_template: summary
+            .recommended_action_template
+            .clone()
+            .or_else(|| recommended_action_template(&summary.recommended_action)),
+    }
+}
+
 pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs) -> Result<()> {
+    let as_json = should_output_json(cli, Some(repo.config()));
     let current = repo.current_lane()?;
     let mut summaries = collect_thread_summaries(repo)?;
+    let mut trust = build_repository_verification_state(repo);
     if !args.include_auto {
         // Always keep the current thread visible even if it's auto:
         // hiding it from the user who is *standing in it* would be
         // worse than the noise it adds.
         summaries.retain(|summary| summary.is_current || !summary.auto);
     }
+    let available_git_refs = split_available_git_refs(&mut summaries);
+    suppress_thread_actions_while_trust_blocked(&mut summaries, &trust);
+    let current_summary = summaries.iter().find(|summary| summary.is_current);
+    if let Some(current) = current_summary
+        && !trust.recommended_action.is_empty()
+    {
+        let contextual = contextual_thread_action(
+            repo,
+            &current.name,
+            current.target_thread.as_deref(),
+            &trust.recommended_action,
+        );
+        if contextual != trust.recommended_action {
+            override_trust_recommended_action(&mut trust, contextual);
+        }
+    }
+    let current_action = summaries
+        .iter()
+        .find(|summary| summary.is_current)
+        .map(|summary| summary.recommended_action.as_str());
+    let recommended_action =
+        primary_next_action_with_verification(None, None, None, current_action, &trust);
+    if let Some(current) = current_summary
+        && trust.verified
+        && !recommended_action.is_empty()
+        && trust.recommended_action != recommended_action
+        && thread_recovery_action_is_primary(Some(&current.thread_health), &recommended_action)
+    {
+        override_trust_recommended_action(&mut trust, recommended_action.clone());
+    }
+    let presentation = crate::cli::render::repository_presentation(
+        repo,
+        current_summary.and_then(|summary| summary.target_thread.as_deref()),
+        current_summary.and_then(|summary| summary.parent_thread.as_deref()),
+    );
+    let current = current_summary
+        .map(|summary| summary.name.clone())
+        .or(current);
     let output = ThreadListOutput {
+        output_kind: "thread_list",
         repository_capability: repo.capability_label().to_string(),
+        repository_label: presentation.label,
+        repository_context: presentation.context,
         storage_model: repo.storage_model_label().to_string(),
         hosted_enabled: repo.hosted_enabled(),
-        git_overlay_import_hint: repo.git_overlay_import_hint()?.map(|hint| {
-            ThreadListGitOverlayImportHintOutput {
-                current_branch: hint.current_branch,
-                missing_branch_count: hint.missing_branch_count,
-                missing_branches: hint.missing_branches,
-                recommended_command: hint.recommended_command,
-            }
-        }),
+        recommended_action: recommended_action.clone(),
+        recommended_action_argv: action_argv(&recommended_action),
+        recommended_action_template: recommended_action_template(&recommended_action),
+        recovery_commands: trust.recovery_commands.clone(),
+        recovery_command_argv: command_argvs(&trust.recovery_commands),
+        recovery_action_templates: trust.recovery_action_templates.clone(),
+        trust,
+        git_overlay_import_hint: if as_json {
+            None
+        } else {
+            repo.git_overlay_import_hint()?
+                .map(|hint| ThreadListGitOverlayImportHintOutput {
+                    current_branch: hint.current_branch,
+                    missing_branch_count: hint.missing_branch_count,
+                    missing_branches: hint.missing_branches,
+                    recommended_command: hint.recommended_command,
+                })
+        },
         threads: summaries,
+        available_git_refs,
         current,
     };
 
-    if should_output_json(cli, Some(repo.config())) {
+    if as_json {
         println!("{}", serde_json::to_string(&output)?);
-    } else if output.threads.is_empty() {
+    } else if output.threads.is_empty() && output.available_git_refs.is_empty() {
         println!("No threads");
     } else {
         println!(
             "{} {} {}",
             style::bold("Threads"),
             style::dim("in"),
-            output.repository_capability
+            output.repository_label
         );
-        println!(
-            "Repository mode: {} {}",
-            output.repository_capability,
-            style::dim(&format!("({})", output.storage_model))
-        );
+        println!("Repository: {}", output.repository_label);
+        render_repository_context_lines(output.repository_context.as_ref());
         if output.hosted_enabled {
             println!("Hosted: {}", style::accent("enabled"));
         }
-        if let Some(hint) = &output.git_overlay_import_hint {
-            println!(
-                "Git import: {} other Git branch(es) are available to import ({})",
-                hint.missing_branch_count,
-                crate::cli::render::preview_list(&hint.missing_branches, hint.missing_branch_count,)
-            );
-            println!("Next step: {}", style::bold(&hint.recommended_command));
+        let trust_only_blocks_on_this_ready_thread = output.trust.workflow_status == "ready"
+            && output.trust.recommended_action == output.recommended_action;
+        if !output.trust.verified
+            && !trust_only_blocks_on_this_ready_thread
+            && !output.recommended_action.is_empty()
+        {
+            println!("Verification: {}", style::warn(&output.trust.summary));
+            print_next_step(&output.recommended_action);
         }
-        render_thread_sections(&output.threads);
+        if output.trust.verified
+            && let Some(hint) = &output.git_overlay_import_hint
+        {
+            println!(
+                "{}",
+                crate::cli::render::git_only_branch_summary(
+                    &hint.missing_branches,
+                    hint.missing_branch_count,
+                )
+            );
+            if output.available_git_refs.is_empty() {
+                print_optional(&hint.recommended_command);
+            }
+        }
+        render_thread_sections(&output.threads, cli.verbose > 0);
+        render_available_git_refs(&output.available_git_refs, cli.verbose > 0);
     }
 
     Ok(())
@@ -956,7 +1370,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
 type ThreadSectionPredicate = fn(&ThreadSummary) -> bool;
 type ThreadSection = (&'static str, ThreadSectionPredicate);
 
-fn render_thread_sections(threads: &[ThreadSummary]) {
+fn render_thread_sections(threads: &[ThreadSummary], verbose: bool) {
     let sections: [ThreadSection; 5] = [
         ("Current", |entry| entry.is_current),
         ("Needs attention", thread_needs_attention),
@@ -979,7 +1393,7 @@ fn render_thread_sections(threads: &[ThreadSummary]) {
         println!("{}", style::bold(label));
         for index in indexes {
             printed[index] = true;
-            render_thread_entry(&threads[index]);
+            render_thread_entry(&threads[index], verbose);
         }
     }
 }
@@ -998,50 +1412,127 @@ fn thread_ready_to_merge(entry: &ThreadSummary) -> bool {
             && entry.target_thread.is_some())
 }
 
-fn thread_is_imported_git_ref(entry: &ThreadSummary) -> bool {
-    entry.git_branch_tip.is_some()
-        || (entry.path.is_none()
-            && entry.execution_path.is_none()
-            && entry.target_thread.is_none()
-            && entry.history_imported
-            && entry.name.starts_with("origin/"))
+pub(crate) fn thread_is_imported_git_ref(entry: &ThreadSummary) -> bool {
+    !entry.is_current
+        && entry.path.is_none()
+        && entry.execution_path.is_none()
+        && entry.target_thread.is_none()
+        && entry.current_state.is_some()
+        && entry.history_imported
+        && (entry.git_branch_tip.is_some() || entry.name.starts_with("origin/"))
 }
 
-fn render_thread_entry(entry: &ThreadSummary) {
+pub(crate) fn thread_is_available_git_ref(entry: &ThreadSummary) -> bool {
+    !entry.is_current
+        && entry.path.is_none()
+        && entry.execution_path.is_none()
+        && entry.target_thread.is_none()
+        && entry.current_state.is_none()
+        && entry.git_branch_tip.is_some()
+}
+
+fn remote_tracking_local_ref(repo: &Repository, thread_name: &str) -> Option<String> {
+    let git = gix::discover(repo.root()).ok()?;
+    let remotes = git
+        .remote_names()
+        .into_iter()
+        .map(|name| name.to_str_lossy().into_owned())
+        .collect::<Vec<_>>();
+    remotes
+        .iter()
+        .find_map(|remote| thread_name.strip_prefix(&format!("{remote}/")))
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+}
+
+fn render_available_git_refs(refs: &[AvailableGitRef], verbose: bool) {
+    if refs.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", style::bold("Optional Git-only branches"));
+    let visible_count = if verbose {
+        refs.len()
+    } else {
+        refs.len().min(DEFAULT_AVAILABLE_GIT_REF_LIMIT)
+    };
+    for entry in refs.iter().take(visible_count) {
+        println!(
+            "{} {} {}",
+            style::dim("-"),
+            style::bold(&entry.name),
+            style::dim("(available)")
+        );
+        if verbose {
+            println!("    git tip: {}", style::dim(&entry.git_commit));
+        }
+        if !entry.recommended_action.is_empty() {
+            print_nested_optional(&entry.recommended_action);
+        }
+    }
+    println!(
+        "  {}",
+        style::dim("adopt when you want to work on this branch in Heddle")
+    );
+    if !verbose && refs.len() > visible_count {
+        let remaining = refs.len() - visible_count;
+        println!(
+            "  {}",
+            style::dim(&format!(
+                "... {remaining} more Git-only branch(es); use --output json or -v to inspect all"
+            ))
+        );
+    }
+}
+
+fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
     let prefix = if entry.is_current {
         style::accent("*")
     } else {
         style::dim("-")
     };
-    let state = entry.current_state.as_deref().unwrap_or("(no state)");
     // Worktree-liveness glyph after the mode label. Lets the user
     // tell at a glance which threads have an actual on-disk worktree
     // they can `cd` to vs. which are pure refs (or virtual mounts
     // whose daemon may or may not be up). One stat per row — cheap
     // for any sane thread count, no I/O at all on ref-only threads.
     let liveness = thread_liveness_glyph(entry);
-    println!(
-        "{} {} {} {} {}{}",
-        prefix,
-        style::bold(&entry.name),
-        style::dim(state),
-        style::thread_state(&entry.coordination_status.to_string()),
-        style::dim(&entry.visibility),
-        liveness,
-    );
+    if verbose {
+        let state = entry.current_state.as_deref().unwrap_or("(no state)");
+        println!(
+            "{} {} {} {} {}{}",
+            prefix,
+            style::bold(&entry.name),
+            style::dim(state),
+            style::thread_state(&entry.coordination_status.to_string()),
+            style::dim(thread_human_visibility(entry)),
+            liveness,
+        );
+    } else {
+        println!(
+            "{} {} {} {}{}",
+            prefix,
+            style::bold(&entry.name),
+            style::thread_state(&entry.coordination_status.to_string()),
+            style::dim(thread_human_visibility(entry)),
+            liveness,
+        );
+    }
     if let Some(path) = &entry.path {
         println!("    path: {}", path);
     } else if let Some(path) = &entry.execution_path {
         println!("    execution root: {}", path);
     }
-    if let Some(git_branch_tip) = &entry.git_branch_tip {
+    if verbose && let Some(git_branch_tip) = &entry.git_branch_tip {
         println!(
             "    git tip: {} {}",
             style::dim(git_branch_tip),
             style::dim(&format!("({})", git_history_label(entry.history_imported)))
         );
     }
-    if let Some(state) = &entry.thread_state {
+    if let Some(state) = &entry.thread_state
+        && (verbose || matches!(state, ThreadState::Merged | ThreadState::Abandoned))
+    {
         println!("    lifecycle: {}", style::thread_state(&state.to_string()));
     }
     if let Some(freshness) = &entry.freshness
@@ -1062,9 +1553,14 @@ fn render_thread_entry(entry: &ThreadSummary) {
         );
     }
     if let Some(remote_tracking) = &entry.remote_tracking {
-        println!("    sync: {}", style::warn(&remote_tracking.message));
+        if remote_tracking.behind == 0 && remote_tracking.ahead > 0 {
+            println!("    sync: {}", style::accent(&remote_tracking.message));
+        } else {
+            println!("    sync: {}", style::warn(&remote_tracking.message));
+        }
     }
-    if let Some(actor) = &entry.actor
+    if verbose
+        && let Some(actor) = &entry.actor
         && let Some(text) =
             crate::cli::render::actor_display(actor.provider.as_deref(), actor.model.as_deref())
     {
@@ -1073,13 +1569,13 @@ fn render_thread_entry(entry: &ThreadSummary) {
     if let Some(task) = &entry.task {
         println!("    task: {}", task);
     }
-    if let Some(parent) = &entry.parent_thread {
+    if verbose && let Some(parent) = &entry.parent_thread {
         println!("    parent: {}", parent);
     }
-    if !entry.child_threads.is_empty() {
+    if verbose && !entry.child_threads.is_empty() {
         println!("    children: {}", entry.child_threads.join(", "));
     }
-    if entry.promotion_suggested && !entry.heavy_impact_paths.is_empty() {
+    if verbose && entry.promotion_suggested && !entry.heavy_impact_paths.is_empty() {
         println!(
             "    promotion: suggested ({})",
             crate::cli::render::preview_list(
@@ -1088,7 +1584,7 @@ fn render_thread_entry(entry: &ThreadSummary) {
             )
         );
     }
-    if !entry.impact_categories.is_empty() {
+    if verbose && !entry.impact_categories.is_empty() {
         println!(
             "    impacts: {}",
             entry
@@ -1105,8 +1601,10 @@ fn render_thread_entry(entry: &ThreadSummary) {
             style::warn(&entry.blockers.join(" | "))
         );
     }
-    if !entry.recommended_action.is_empty() {
-        println!("    next step: {}", style::bold(&entry.recommended_action));
+    if !entry.recommended_action.is_empty() && thread_is_available_git_ref(entry) {
+        print_nested_optional(&entry.recommended_action);
+    } else if !entry.recommended_action.is_empty() {
+        print_nested_next_step(&entry.recommended_action);
     }
 }
 
@@ -1114,57 +1612,42 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let existing = find_active_thread_entry(repo, &args.name)?;
     if let Some(entry) = existing {
         if let Some(ref requested_path) = args.path {
-            let requested = absolute_path(requested_path)?;
+            let requested = normalize_path_for_containment(&absolute_path(requested_path)?)?;
             let existing_path = entry
                 .path
                 .as_ref()
-                .ok_or_else(|| anyhow!("Thread '{}' is already active", args.name))?;
-            if *existing_path != requested {
-                return Err(anyhow!(
-                    "Thread '{}' already has an active reservation at '{}'. Use `heddle thread show {}` to inspect it, or release that session before starting another writer.",
-                    args.name,
-                    existing_path.display(),
-                    args.name
-                ));
+                .ok_or_else(|| anyhow!(active_reservation_advice(&args.name, None)))?;
+            let existing_path_normalized = normalize_path_for_containment(existing_path)
+                .unwrap_or_else(|_| existing_path.clone());
+            if existing_path_normalized != requested {
+                return Err(anyhow!(active_reservation_advice(
+                    &args.name,
+                    Some(existing_path.display().to_string())
+                )));
             }
         }
 
-        let message = if let Some(path) = entry.path {
-            format!(
-                "Thread '{}' already has an active reservation at '{}'. Use `heddle thread show {}` to inspect it, or release that session before starting another writer.",
-                args.name,
-                path.display(),
-                args.name
-            )
-        } else {
-            format!(
-                "Thread '{}' already has an active reservation. Use `heddle thread show {}` to inspect it, or release that session before starting another writer.",
-                args.name, args.name
-            )
-        };
-        return Err(anyhow!(message));
+        let path = entry.path.map(|path| path.display().to_string());
+        return Err(anyhow!(active_reservation_advice(&args.name, path)));
     }
 
-    let existing_thread_state = repo.refs().get_thread(&args.name)?;
+    let existing_thread_state = repo.refs().get_thread(&ThreadName::new(&args.name))?;
     let base_state = match (&args.from, existing_thread_state) {
         (Some(spec), Some(existing)) => {
-            let requested = repo
-                .resolve_state(spec)?
-                .ok_or_else(|| anyhow!("State '{}' not found", spec))?;
+            let requested = repo.resolve_state(spec)?.ok_or_else(|| {
+                anyhow!(RecoveryAdvice::thread_referenced_state_missing(spec, "State"))
+            })?;
             if requested != existing {
-                return Err(anyhow!(
-                    "Thread '{}' is anchored at {}, but --from resolved to {}. Start a new thread name or refresh/rebase this thread before attaching another workspace.",
-                    args.name,
-                    existing.short(),
-                    requested.short()
-                ));
+                return Err(anyhow!(thread_anchor_mismatch_advice(
+                    &args.name, &existing, &requested
+                )));
             }
             existing
         }
         (None, Some(existing)) => existing,
-        (Some(spec), None) => repo
-            .resolve_state(spec)?
-            .ok_or_else(|| anyhow!("State '{}' not found", spec))?,
+        (Some(spec), None) => repo.resolve_state(spec)?.ok_or_else(|| {
+            anyhow!(RecoveryAdvice::thread_referenced_state_missing(spec, "State"))
+        })?,
         (None, None) => ensure_current_state(
             repo,
             &UserConfig::load_default().unwrap_or_default(),
@@ -1175,12 +1658,15 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         )?,
     };
 
+    let actor_identity = resolve_start_actor_identity(repo, &args)?;
+
+    let thread_name = ThreadName::new(&args.name);
     if let Some(existing) = existing_thread_state {
         repo.refs()
-            .set_thread_cas(&args.name, RefExpectation::Value(existing), &base_state)?;
+            .set_thread_cas(&thread_name, RefExpectation::Value(existing), &base_state)?;
     } else {
         repo.refs()
-            .set_thread_cas(&args.name, RefExpectation::Missing, &base_state)?;
+            .set_thread_cas(&thread_name, RefExpectation::Missing, &base_state)?;
         // `cmd_start` writes the ThreadManager record only after
         // materializing the worktree below — there's no record yet to
         // snapshot, so pass `None`. The `ensure_thread_worktree_undo_safe`
@@ -1192,7 +1678,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         // thread start` re-establishes the record if the user wants
         // one. heddle#23 r2.
         repo.oplog()
-            .record_thread_create(&args.name, &base_state, None, Some(&repo.op_scope()))?;
+            .record_thread_create(&thread_name, &base_state, None, Some(&repo.op_scope()))?;
     }
 
     let thread_mode = resolve_thread_mode(repo, &args);
@@ -1236,7 +1722,10 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         // user-named directory never gets shadowed by a kernel mount.
         ThreadMode::Virtualized => default_virtualized_thread_path(repo, &args.name),
     };
-    let abs_path = prepare_worktree_target(repo, &path)?;
+    if args.path.is_some() {
+        ensure_explicit_start_path_outside_repo(repo, &args.name, &path)?;
+    }
+    let abs_path = normalize_path_for_containment(&prepare_worktree_target(repo, &path)?)?;
 
     // Item 2.1 of the heddle 6→8 plan: when starting a heavy
     // (materialized/lightweight) thread in a Rust workspace, redirect
@@ -1255,10 +1744,8 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // every non-cargo project. We log a debug-level note so a curious
     // operator can still see it landed silently.
     let shared_target_dir_path: Option<PathBuf> = if args.shared_target
-        && matches!(
-            thread_mode,
-            ThreadMode::Solid | ThreadMode::Materialized
-        ) {
+        && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized)
+    {
         if shared_target::workspace_root_is_rust(repo) {
             Some(shared_target::shared_target_dir(repo)?)
         } else {
@@ -1276,10 +1763,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // thread in a Rust workspace without `--shared-target`, nudge the
     // user toward the flag. Doesn't fail the start; just stderr.
     if !args.shared_target
-        && matches!(
-            thread_mode,
-            ThreadMode::Solid | ThreadMode::Materialized
-        )
+        && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized)
         && shared_target::should_advise_shared_target(repo)
     {
         shared_target::print_advisory(&args.name);
@@ -1337,13 +1821,11 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     }
 
     let registry = AgentRegistry::new(repo.heddle_dir());
-    let provider = args.agent_provider.clone();
-    let model = args.agent_model.clone();
     let task = args.task.clone();
     let path_for_entry = abs_path.clone();
     let thread_name = args.name.clone();
     let current_target_thread = match repo.head_ref()? {
-        Head::Attached { thread } => Some(thread),
+        Head::Attached { thread } => Some(thread.to_string()),
         Head::Detached { .. } => None,
     };
     let base_short = base_state.short();
@@ -1357,7 +1839,12 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
                 summarize_confidence(state.confidence),
             )
         })
-        .ok_or_else(|| anyhow!("Base state '{}' not found", base_state.short()))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::thread_referenced_state_missing(
+                &base_state.short(),
+                "Base state",
+            ))
+        })?;
     let (base_root, verification_summary, confidence_summary) = base_state_summary;
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let thread_state = Thread {
@@ -1399,9 +1886,9 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         Ok(AgentEntry {
             session_id: session_id.to_string(),
             client_instance_id: None,
-            native_actor_key: None,
-            native_parent_actor_key: None,
-            native_instance_key: None,
+            native_actor_key: actor_identity.native_actor_key.clone(),
+            native_parent_actor_key: actor_identity.native_parent_actor_key.clone(),
+            native_instance_key: actor_identity.native_instance_key.clone(),
             heddle_session_id: None,
             thread_id: Some(thread_name.clone()),
             thread: thread_name.clone(),
@@ -1423,10 +1910,10 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             },
             base_state: base_short.clone(),
             started_at: Utc::now(),
-            provider: provider.clone(),
-            model: model.clone(),
-            harness: None,
-            thinking_level: None,
+            provider: actor_identity.provider.clone(),
+            model: actor_identity.model.clone(),
+            harness: actor_identity.harness.clone(),
+            thinking_level: actor_identity.thinking_level.clone(),
             usage_summary: AgentUsageSummary::default(),
             last_progress_at: None,
             report_flush_state: None,
@@ -1436,8 +1923,8 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             )),
             attach_precedence: vec!["thread-start".to_string()],
             winning_attach_rule: Some("thread-start".to_string()),
-            probe_source: Some("explicit_payload".to_string()),
-            probe_confidence: Some(1.0),
+            probe_source: actor_identity.probe_source.clone(),
+            probe_confidence: actor_identity.probe_confidence,
             status: AgentStatus::Active,
             completed_at: None,
             context_queries: vec![],
@@ -1448,7 +1935,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let message = match thread_mode {
         ThreadMode::Materialized | ThreadMode::Solid => {
             format!(
-                "Started heavy thread '{}' at '{}'",
+                "Started isolated thread '{}' at '{}' (Heddle-managed checkout, no .git directory)",
                 args.name,
                 abs_path.display()
             )
@@ -1458,23 +1945,149 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             // The trailing newline before the next status line keeps
             // the path easy to copy-paste from terminal output.
             format!(
-                "Started light thread '{}' mounted at '{}'",
+                "Started virtualized thread '{}' mounted at '{}'",
                 args.name,
                 abs_path.display()
             )
         }
     };
 
-    Ok(ThreadOpOutput {
-        name: args.name,
+    Ok(thread_op_output(
+        "thread_start",
+        "start",
+        args.name,
         message,
-        path: summary.as_ref().and_then(|thread| thread.path.clone()),
-        execution_path: Some(abs_path.display().to_string()),
-        thread: summary.map(|mut thread| {
+        summary.as_ref().and_then(|thread| thread.path.clone()),
+        Some(abs_path.display().to_string()),
+        Some(build_repository_verification_state(repo)),
+        summary.map(|mut thread| {
             thread.session_id = Some(entry.session_id.clone());
             thread
         }),
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct StartActorIdentity {
+    provider: Option<String>,
+    model: Option<String>,
+    harness: Option<String>,
+    thinking_level: Option<String>,
+    native_actor_key: Option<String>,
+    native_parent_actor_key: Option<String>,
+    native_instance_key: Option<String>,
+    probe_source: Option<String>,
+    probe_confidence: Option<f32>,
+}
+
+fn resolve_start_actor_identity(
+    repo: &Repository,
+    args: &ThreadStartArgs,
+) -> Result<StartActorIdentity> {
+    let explicit_provider = non_empty_identity_value(args.agent_provider.clone());
+    let explicit_model = non_empty_identity_value(args.agent_model.clone());
+    let probe = crate::harness::probe_current_process_harness(
+        repo,
+        explicit_provider.clone(),
+        explicit_model.clone(),
+        None,
+    )?;
+    let explicit_identity = explicit_provider.is_some() || explicit_model.is_some();
+    let provider = explicit_provider.or_else(|| non_empty_identity_value(probe.provider.clone()));
+    let model = explicit_model.or_else(|| non_empty_identity_value(probe.model.clone()));
+    let harness = non_empty_identity_value(probe.harness.clone());
+    let thinking_level = non_empty_identity_value(probe.thinking_level.clone());
+    let native_actor_key = non_empty_identity_value(probe.native_actor_key.clone());
+    let native_parent_actor_key = non_empty_identity_value(probe.native_parent_actor_key.clone());
+    let native_instance_key = non_empty_identity_value(probe.native_instance_key.clone());
+    let detected_identity = provider.is_some()
+        || model.is_some()
+        || harness.is_some()
+        || thinking_level.is_some()
+        || native_actor_key.is_some()
+        || native_parent_actor_key.is_some()
+        || native_instance_key.is_some();
+
+    Ok(StartActorIdentity {
+        provider,
+        model,
+        harness,
+        thinking_level,
+        native_actor_key,
+        native_parent_actor_key,
+        native_instance_key,
+        probe_source: if explicit_identity {
+            Some("explicit_payload".to_string())
+        } else if detected_identity {
+            probe.probe_source
+        } else {
+            Some("explicit_payload".to_string())
+        },
+        probe_confidence: if explicit_identity {
+            Some(1.0)
+        } else if detected_identity {
+            probe.confidence
+        } else {
+            Some(1.0)
+        },
     })
+}
+
+fn non_empty_identity_value(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+fn active_reservation_advice(thread: &str, existing_path: Option<String>) -> RecoveryAdvice {
+    let location = existing_path
+        .as_ref()
+        .map(|path| format!(" at '{path}'"))
+        .unwrap_or_default();
+    let primary_command = format!("heddle thread show {thread}");
+    RecoveryAdvice::safety_refusal(
+        "active_thread_reservation",
+        format!("Thread '{thread}' already has an active reservation{location}"),
+        format!(
+            "Inspect it with `{primary_command}`, or release that session before starting another writer."
+        ),
+        format!("thread '{thread}' already has an active writer reservation{location}"),
+        "starting another writer could create competing worktree materializations for the same thread",
+        "no worktree, refs, or reservation records were changed",
+        primary_command.clone(),
+        vec![primary_command],
+    )
+}
+
+fn thread_anchor_mismatch_advice(
+    thread: &str,
+    existing: &ChangeId,
+    requested: &ChangeId,
+) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "thread_anchor_mismatch",
+        format!(
+            "Thread '{thread}' is anchored at {}, but --from resolved to {}",
+            existing.short(),
+            requested.short()
+        ),
+        format!(
+            "Start a new thread name, or inspect this thread with `heddle thread show {thread}` before refreshing or rebasing it."
+        ),
+        format!(
+            "thread '{thread}' already points at {}, while --from resolved to {}",
+            existing.short(),
+            requested.short()
+        ),
+        "attaching another workspace from a different base could fork the same thread name into competing histories",
+        "no worktree, refs, or reservation records were changed",
+        format!("heddle thread show {thread}"),
+        vec![format!("heddle thread show {thread}")],
+    )
 }
 
 fn resolve_thread_mode(repo: &Repository, args: &ThreadStartArgs) -> ThreadMode {
@@ -1571,7 +2184,7 @@ pub(crate) fn cmd_thread_create(
     )?;
 
     repo.refs()
-        .set_thread_cas(&name, RefExpectation::Missing, &current)?;
+        .set_thread_cas(&ThreadName::new(&name), RefExpectation::Missing, &current)?;
 
     // Persist a Thread record so subsequent commands that go through
     // `ThreadManager::load` (delegate, ship, integration policy,
@@ -1597,9 +2210,14 @@ pub(crate) fn cmd_thread_create(
                 summarize_confidence(state.confidence),
             )
         })
-        .ok_or_else(|| anyhow!("Base state '{}' not found", base_short))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::thread_referenced_state_missing(
+                &base_short,
+                "Base state",
+            ))
+        })?;
     let target_thread = match repo.head_ref()? {
-        Head::Attached { thread } => Some(thread),
+        Head::Attached { thread } => Some(thread.to_string()),
         Head::Detached { .. } => None,
     };
     let thread_manager = ThreadManager::new(repo.heddle_dir());
@@ -1654,20 +2272,19 @@ pub(crate) fn cmd_thread_create(
     // round-trip-encode that can't read its own write is a serde
     // contract bug, not a runtime condition.
     let manager_snapshot = thread_manager.snapshot_thread_record(&name)?;
-    repo.oplog().record_thread_create(
-        &name,
-        &current,
-        manager_snapshot,
-        Some(&repo.op_scope()),
-    )?;
+    repo.oplog()
+        .record_thread_create(&ThreadName::new(&name), &current, manager_snapshot, Some(&repo.op_scope()))?;
 
-    let output = ThreadOpOutput {
-        name: name.clone(),
-        message: format!("Created thread '{}' at {}", name, current.short()),
-        path: None,
-        execution_path: None,
-        thread: find_thread_summary(repo, &name)?,
-    };
+    let output = thread_op_output(
+        "thread_create",
+        "thread create",
+        name.clone(),
+        format!("Created thread '{}' at {}", name, current.short()),
+        None,
+        None,
+        Some(build_repository_verification_state(repo)),
+        find_thread_summary(repo, &name)?,
+    );
 
     render_thread_op(cli, output)
 }
@@ -1717,9 +2334,11 @@ pub(crate) fn cmd_thread_current(cli: &Cli, repo: &Repository) -> Result<()> {
     } else if let Some(thread) = super::thread_cmd::current_thread(repo)? {
         thread.thread
     } else {
-        return Err(anyhow!(
-            "no current thread (HEAD is detached). Use `heddle thread switch <name>` to attach."
-        ));
+        return Err(anyhow!(RecoveryAdvice::no_current_thread(
+            "thread current",
+            None,
+            "heddle thread list",
+        )));
     };
 
     // `thread current` is a single-token printer designed for shell
@@ -1728,14 +2347,16 @@ pub(crate) fn cmd_thread_current(cli: &Cli, repo: &Repository) -> Result<()> {
     // stdout is piped — would be actively counterproductive here. Match
     // `thread cd` and emit plain text by default; only honor an
     // *explicit* request for JSON.
-    let explicit_json =
-        cli.json || matches!(cli.output, Some(crate::cli::OutputMode::Json));
+    let explicit_json = matches!(cli.output, Some(crate::cli::OutputMode::Json));
     if explicit_json {
         #[derive(Serialize)]
         struct CurrentOutput<'a> {
             thread: &'a str,
         }
-        println!("{}", serde_json::to_string(&CurrentOutput { thread: &name })?);
+        println!(
+            "{}",
+            serde_json::to_string(&CurrentOutput { thread: &name })?
+        );
     } else {
         println!("{name}");
     }
@@ -1746,19 +2367,28 @@ pub(crate) fn cmd_thread_cd(repo: &Repository, name: String) -> Result<()> {
     let manager = ThreadManager::new(repo.heddle_dir());
     let thread = manager
         .find_by_thread(&name)?
-        .ok_or_else(|| anyhow!("Thread not found: {}", name))?;
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&name, "locate thread worktree")))?;
     let path = thread.execution_path;
     if path.as_os_str().is_empty() {
-        return Err(anyhow!(
-            "thread '{name}' has no on-disk worktree (was it started with `--workspace virtualized`?)"
-        ));
+        return Err(anyhow!(RecoveryAdvice::thread_worktree_unavailable(
+            &name,
+            "thread cd",
+            format!(
+                "thread `{name}` has no recorded on-disk worktree; it may be virtualized or metadata-only"
+            ),
+            format!("heddle thread show {name}"),
+        )));
     }
     if !path.exists() {
-        return Err(anyhow!(
-            "thread '{name}' was registered at '{}' but that path no longer exists; \
-             re-run `heddle start --workspace materialized {name}` to re-materialize",
-            path.display()
-        ));
+        return Err(anyhow!(RecoveryAdvice::thread_worktree_unavailable(
+            &name,
+            "thread cd",
+            format!(
+                "thread `{name}` is registered at `{}` but that path no longer exists",
+                path.display()
+            ),
+            format!("heddle start {name} --path <dir>"),
+        )));
     }
     println!("{}", path.display());
     Ok(())
@@ -1769,6 +2399,7 @@ pub(crate) fn cmd_thread_switch(
     repo: &Repository,
     name: String,
     print_cd_path: bool,
+    force: bool,
 ) -> Result<()> {
     // Resolve the *target* before touching the source. A typo'd
     // thread name otherwise produces (1) a new state on the source
@@ -1778,8 +2409,12 @@ pub(crate) fn cmd_thread_switch(
     // bail before mutating anything if the target doesn't exist.
     let state = repo
         .refs()
-        .get_thread(&name)?
-        .ok_or_else(|| anyhow!("Thread not found: {}", name))?;
+        .get_thread(&ThreadName::new(&name))?
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&name, "switch thread")))?;
+
+    if !force {
+        ensure_worktree_clean(repo, "switch threads")?;
+    }
 
     // Auto-capture-on-switch (jj-style): before flipping HEAD,
     // capture any uncommitted edits in the *source* thread so the
@@ -1807,36 +2442,39 @@ pub(crate) fn cmd_thread_switch(
     //     worktree, `repo.root()` IS the execution path, and that's
     //     exactly when we MOST want to capture (the user has been
     //     editing here). Found during dogfood.
-    let auto_capture_outcome = match repo.head_ref()? {
-        Head::Attached {
-            thread: source_thread,
-        } if source_thread != name => {
-            let manager = ThreadManager::new(repo.heddle_dir());
-            let source_record = manager.find_by_thread(&source_thread)?;
-            let source_mode = source_record.as_ref().map(|t| t.mode.clone());
-            let source_path = source_record
-                .map(|t| t.execution_path)
-                .filter(|p| !p.as_os_str().is_empty());
-            let mode_safe_to_capture = matches!(
-                source_mode,
-                Some(ThreadMode::Materialized) | Some(ThreadMode::Solid)
-            );
-            match (mode_safe_to_capture, source_path) {
-                (true, Some(path)) if path.exists() => {
-                    let outcome = repo
+    let auto_capture_outcome =
+        if force {
+            None
+        } else {
+            match repo.head_ref()? {
+                Head::Attached {
+                    thread: source_thread,
+                } if source_thread != name => {
+                    let manager = ThreadManager::new(repo.heddle_dir());
+                    let source_record = manager.find_by_thread(&source_thread)?;
+                    let source_mode = source_record.as_ref().map(|t| t.mode.clone());
+                    let source_path = source_record
+                        .map(|t| t.execution_path)
+                        .filter(|p| !p.as_os_str().is_empty());
+                    let mode_safe_to_capture = matches!(
+                        source_mode,
+                        Some(ThreadMode::Materialized) | Some(ThreadMode::Solid)
+                    );
+                    match (mode_safe_to_capture, source_path) {
+                        (true, Some(path)) if path.exists() => {
+                            let outcome = repo
                         .capture_thread_from_disk(&source_thread, &path)
                         .with_context(|| {
-                            format!(
-                                "auto-capture of '{source_thread}' before switch to '{name}'"
-                            )
+                            format!("auto-capture of '{source_thread}' before switch to '{name}'")
                         })?;
-                    Some((source_thread, outcome))
+                            Some((source_thread, outcome))
+                        }
+                        _ => None,
+                    }
                 }
                 _ => None,
             }
-        }
-        _ => None,
-    };
+        };
 
     // "Invisible thread directories" rule: switching to a thread that has
     // its *own* dedicated worktree (the one `heddle start --workspace
@@ -1890,7 +2528,7 @@ pub(crate) fn cmd_thread_switch(
         let head_target_repo = open_main_repo_from_worktree_if_needed(repo)?;
         let head_repo = head_target_repo.as_ref().unwrap_or(repo);
         head_repo.refs().write_head(&Head::Attached {
-            thread: name.clone(),
+            thread: ThreadName::new(&name),
         })?;
     } else if open_main_repo_from_worktree_if_needed(repo)?.is_some() {
         // Switching to a target thread that has *no* dedicated
@@ -1907,10 +2545,9 @@ pub(crate) fn cmd_thread_switch(
         // `heddle start --workspace materialized <target>` to give the
         // target its own worktree, or cd's to the main repo root
         // first.
-        anyhow::bail!(
-            "thread '{name}' has no dedicated worktree, and switching to it from inside another thread's worktree would overwrite this directory's files. \
-             Run `heddle start --workspace materialized {name}` to give it a dedicated worktree, or cd to the main repo root and try again."
-        );
+        return Err(anyhow!(thread_switch_would_overwrite_worktree_advice(
+            &name
+        )));
     } else {
         // Legacy shared-worktree path: materialize the target tree at
         // CWD and reattach HEAD to the thread. Intentional raw `goto`:
@@ -1918,8 +2555,22 @@ pub(crate) fn cmd_thread_switch(
         // attached thread, which is the wrong behavior here.
         repo.goto(&state)?;
         repo.refs().write_head(&Head::Attached {
-            thread: name.clone(),
+            thread: ThreadName::new(&name),
         })?;
+        if repo.capability() == repo::RepositoryCapability::GitOverlay
+            && repo.root().join(".git").exists()
+        {
+            let mut bridge = crate::bridge::GitBridge::new(repo);
+            match bridge.write_through_thread_checkout(&name)? {
+                crate::bridge::WriteThroughOutcome::Wrote(_) => {}
+                crate::bridge::WriteThroughOutcome::Skipped(reason) => {
+                    return Err(anyhow!(thread_switch_git_checkout_skipped_advice(
+                        &name,
+                        reason.to_string()
+                    )));
+                }
+            }
+        }
     }
 
     let summary = find_thread_summary(repo, &name)?;
@@ -1932,9 +2583,10 @@ pub(crate) fn cmd_thread_switch(
             .as_ref()
             .and_then(|t| t.execution_path.clone())
             .ok_or_else(|| {
-                anyhow!(
-                    "thread '{name}' has no on-disk worktree; `--print-cd-path` only works for materialized threads"
-                )
+                anyhow!(RecoveryAdvice::thread_checkout_unavailable(
+                    &name,
+                    "--print-cd-path",
+                ))
             })?;
         println!("{path}");
         return Ok(());
@@ -1956,23 +2608,63 @@ pub(crate) fn cmd_thread_switch(
 
     render_thread_op(
         cli,
-        ThreadOpOutput {
+        thread_op_output(
+            "thread_switch",
+            "thread switch",
             name,
             message,
-            path: summary.as_ref().and_then(|thread| thread.path.clone()),
-            execution_path: summary
+            summary.as_ref().and_then(|thread| thread.path.clone()),
+            summary
                 .as_ref()
                 .and_then(|thread| thread.execution_path.clone()),
-            thread: summary,
-        },
+            Some(build_repository_verification_state(repo)),
+            summary,
+        ),
+    )
+}
+
+fn thread_switch_would_overwrite_worktree_advice(thread: &str) -> RecoveryAdvice {
+    let primary_command = format!("heddle start --workspace materialized {thread}");
+    RecoveryAdvice::safety_refusal(
+        "thread_switch_would_overwrite_worktree",
+        format!("thread '{thread}' has no dedicated worktree"),
+        format!(
+            "Run `{primary_command}` to give it a dedicated worktree, or cd to the main repo root and retry `heddle thread switch {thread}`."
+        ),
+        "the current directory is another thread's dedicated worktree",
+        "switching here would overwrite this directory's files with the target thread tree",
+        "the source thread was auto-captured when needed; no checkout files were overwritten",
+        primary_command.clone(),
+        vec![primary_command, format!("heddle thread switch {thread}")],
+    )
+}
+
+fn thread_switch_git_checkout_skipped_advice(thread: &str, reason: String) -> RecoveryAdvice {
+    let primary_command = canonical_bridge_reconcile_ref_preview_command(Some("heddle"), thread);
+    RecoveryAdvice::safety_refusal(
+        "thread_switch_git_checkout_skipped",
+        format!("switched Heddle to '{thread}', but could not update Git checkout: {reason}"),
+        format!("Inspect the Git/Heddle checkout mapping with `{primary_command}`."),
+        format!(
+            "Git checkout write-through was skipped after Heddle switched to '{thread}': {reason}"
+        ),
+        "Git and Heddle may now point at different checkout states until reconciliation runs",
+        format!("Heddle HEAD was switched to '{thread}'; Git checkout was left unchanged"),
+        primary_command.clone(),
+        vec![primary_command],
     )
 }
 
 pub fn cmd_thread_show(cli: &Cli, repo: &Repository, name: Option<String>) -> Result<()> {
-    let name = super::thread_cmd::resolve_thread_name_or_current(repo, name)?;
+    let name = super::thread_cmd::resolve_thread_name_or_current(
+        repo,
+        name,
+        "thread show",
+        "heddle thread show <THREAD>",
+    )?;
 
-    let summary =
-        find_thread_summary(repo, &name)?.ok_or_else(|| anyhow!("Thread not found: {}", name))?;
+    let summary = find_thread_summary(repo, &name)?
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&name, "show thread")))?;
 
     show_thread_summary(cli, repo, &summary)
 }
@@ -1982,16 +2674,95 @@ pub(crate) fn show_thread_summary(
     repo: &Repository,
     summary: &ThreadSummary,
 ) -> Result<()> {
-    if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(summary)?);
+    let mut trust = build_repository_verification_state(repo);
+    let mut summary = summary.clone();
+    if !trust.verified {
+        summary.thread_health = trust.status.clone();
+        summary.recommended_action = trust.recommended_action.clone();
+        summary.recommended_action_argv = trust.recommended_action_argv.clone();
+        summary.recommended_action_template = trust.recommended_action_template.clone();
     } else {
-        println!(
-            "Repository mode: {} ({})",
-            repo.capability_label(),
-            repo.storage_model_label()
+        let action = primary_next_action_with_verification(
+            None,
+            None,
+            None,
+            Some(&summary.recommended_action),
+            &trust,
         );
+        let action = contextual_thread_action(
+            repo,
+            &summary.name,
+            summary.target_thread.as_deref(),
+            &action,
+        );
+        if !action.is_empty() {
+            summary.recommended_action = action;
+            summary.recommended_action_argv = action_argv(&summary.recommended_action);
+            summary.recommended_action_template =
+                recommended_action_template(&summary.recommended_action);
+        }
+    }
+    if !trust.recommended_action.is_empty() {
+        let contextual = contextual_thread_action(
+            repo,
+            &summary.name,
+            summary.target_thread.as_deref(),
+            &trust.recommended_action,
+        );
+        if contextual != trust.recommended_action {
+            override_trust_recommended_action(&mut trust, contextual);
+        }
+    }
+    if trust.verified
+        && !summary.recommended_action.is_empty()
+        && trust.recommended_action != summary.recommended_action
+        && thread_recovery_action_is_primary(
+            Some(&summary.thread_health),
+            &summary.recommended_action,
+        )
+    {
+        override_trust_recommended_action(&mut trust, summary.recommended_action.clone());
+    }
+    let presentation = crate::cli::render::repository_presentation(
+        repo,
+        summary.target_thread.as_deref(),
+        summary.parent_thread.as_deref(),
+    );
+    if should_output_json(cli, Some(repo.config())) {
+        println!(
+            "{}",
+            serde_json::to_string(&ThreadShowOutput {
+                output_kind: "thread_show",
+                repository_label: presentation.label,
+                repository_context: presentation.context,
+                next_action: summary.recommended_action.clone(),
+                next_action_argv: summary.recommended_action_argv.clone(),
+                next_action_template: recommended_action_template(&summary.recommended_action),
+                recommended_action_template: recommended_action_template(
+                    &summary.recommended_action
+                ),
+                summary,
+                recovery_commands: trust.recovery_commands.clone(),
+                recovery_command_argv: command_argvs(&trust.recovery_commands),
+                trust,
+            })?
+        );
+    } else {
+        println!("Repository: {}", presentation.label);
+        render_repository_context_lines(presentation.context.as_ref());
         if repo.hosted_enabled() {
             println!("Hosted: enabled");
+        }
+        let trust_only_blocks_on_this_ready_thread = trust.workflow_status == "ready"
+            && trust.recommended_action == summary.recommended_action;
+        let mut next_step_printed = false;
+        if !trust.verified
+            && !trust_only_blocks_on_this_ready_thread
+            && !trust.recommended_action.is_empty()
+        {
+            println!("Verification: {}", style::warn(&trust.summary));
+            print_next_step(&trust.recommended_action);
+            next_step_printed = true;
         }
         if let Some(operation) = &summary.operation {
             println!(
@@ -2000,21 +2771,38 @@ pub(crate) fn show_thread_summary(
             );
         }
         if let Some(remote_tracking) = &summary.remote_tracking {
-            println!("Remote drift: {}", remote_tracking.message);
+            if remote_tracking.behind == 0 && remote_tracking.ahead > 0 {
+                println!("Remote sync: {}", remote_tracking.message);
+            } else {
+                println!("Remote drift: {}", remote_tracking.message);
+            }
         }
         println!();
-        println!("Thread: {}", summary.name);
+        if summary.is_current {
+            println!("Thread: {} {}", summary.name, style::dim("(current)"));
+        } else {
+            println!("Thread: {}", summary.name);
+        }
         println!("Status: {}", summary.coordination_status);
-        if let Some(base) = &summary.base_state {
+        if cli.verbose > 0
+            && let Some(base) = &summary.base_state
+        {
             println!("Base: {}", base);
         }
-        if let Some(base_root) = &summary.base_root {
-            println!("Base root: {}", base_root);
+        if cli.verbose > 0
+            && let Some(base_root) = &summary.base_root
+            && !base_root.is_empty()
+        {
+            println!("Base tree: {}", base_root);
         }
-        if let Some(current) = &summary.current_state {
+        if cli.verbose > 0
+            && let Some(current) = &summary.current_state
+        {
             println!("Current: {}", current);
         }
-        if let Some(git_branch_tip) = &summary.git_branch_tip {
+        if cli.verbose > 0
+            && let Some(git_branch_tip) = &summary.git_branch_tip
+        {
             println!("Git tip: {}", git_branch_tip);
             println!("History: {}", git_history_label(summary.history_imported));
         }
@@ -2023,67 +2811,98 @@ pub(crate) fn show_thread_summary(
         } else if let Some(path) = &summary.execution_path {
             println!("Execution root: {}", path);
         }
-        println!("Workspace: {}", summary.visibility);
-        if let Some(shared) = &summary.shared_target_dir {
+        if let Some(mode) = &summary.thread_mode {
+            let checkout = if summary.is_isolated {
+                thread_workspace_label(mode)
+            } else {
+                "no dedicated checkout"
+            };
+            println!("Checkout: {}", checkout);
+        } else {
+            println!("Checkout: {}", summary.visibility);
+        }
+        if cli.verbose > 0
+            && let Some(shared) = &summary.shared_target_dir
+        {
             println!("Shared cargo target: {}", shared);
         }
-        if let Some(state) = &summary.thread_state {
+        if let Some(state) = &summary.thread_state
+            && (cli.verbose > 0 || matches!(state, ThreadState::Merged | ThreadState::Abandoned))
+        {
             println!("Lifecycle: {}", state);
         }
         if let Some(freshness) = &summary.freshness
             && *freshness != ThreadFreshness::Unknown
+            && !matches!(
+                summary.thread_state,
+                Some(ThreadState::Merged | ThreadState::Abandoned)
+            )
         {
             println!("Sync: {}", freshness);
         }
         if let Some(target) = &summary.target_thread {
             println!("Target thread: {}", target);
         }
-        if let Some(parent) = &summary.parent_thread {
+        if cli.verbose > 0
+            && let Some(parent) = &summary.parent_thread
+        {
             println!("Parent thread: {}", parent);
         }
-        if !summary.child_threads.is_empty() {
+        if cli.verbose > 0 && !summary.child_threads.is_empty() {
             println!("Child threads: {}", summary.child_threads.join(", "));
         }
-        if !summary.sibling_threads.is_empty() {
+        if cli.verbose > 0 && !summary.sibling_threads.is_empty() {
             println!("Sibling threads: {}", summary.sibling_threads.join(", "));
         }
-        if summary.stack_depth > 0 {
+        if cli.verbose > 0 && summary.stack_depth > 0 {
             println!("Stack depth: {}", summary.stack_depth);
         }
         if summary.stale_from_parent {
             println!("Parent drift: parent moved since this thread last refreshed");
         }
-        if let Some(actor) = &summary.actor
-            && let Some(text) =
-                crate::cli::render::actor_display(actor.provider.as_deref(), actor.model.as_deref())
+        if cli.verbose > 0 {
+            if let Some(actor) = &summary.actor
+                && let Some(text) = crate::cli::render::actor_display(
+                    actor.provider.as_deref(),
+                    actor.model.as_deref(),
+                )
+            {
+                println!("Actor: {text}");
+            }
+            if let Some(session_id) = &summary.session_id {
+                println!("Session: {}", session_id);
+            }
+            if let Some(session) = &summary.heddle_session_id {
+                println!("Heddle session: {}", session);
+            }
+            if let Some(harness) = &summary.harness {
+                println!("Harness: {}", harness);
+            }
+            if let Some(thinking_level) = &summary.thinking_level {
+                println!("Thinking: {}", thinking_level);
+            }
+            if let Some(last_progress_at) = &summary.last_progress_at {
+                println!("Last progress: {}", last_progress_at);
+            }
+        }
+        if cli.verbose > 0
+            && let Some(last_activity_at) = &summary.last_activity_at
         {
-            println!("Actor: {text}");
-        }
-        if let Some(session_id) = &summary.session_id {
-            println!("Session: {}", session_id);
-        }
-        if let Some(session) = &summary.heddle_session_id {
-            println!("Heddle session: {}", session);
-        }
-        if let Some(harness) = &summary.harness {
-            println!("Harness: {}", harness);
-        }
-        if let Some(thinking_level) = &summary.thinking_level {
-            println!("Thinking: {}", thinking_level);
-        }
-        if let Some(last_progress_at) = &summary.last_progress_at {
-            println!("Last progress: {}", last_progress_at);
-        }
-        if let Some(last_activity_at) = &summary.last_activity_at {
             println!("Last activity: {}", last_activity_at);
         }
-        if let Some(report_flush_state) = &summary.report_flush_state {
+        if cli.verbose > 0
+            && let Some(report_flush_state) = &summary.report_flush_state
+        {
             println!("Report flush: {}", report_flush_state);
         }
-        if let Some(attach_reason) = &summary.attach_reason {
+        if cli.verbose > 0
+            && let Some(attach_reason) = &summary.attach_reason
+        {
             println!("Attach: {}", attach_reason);
         }
-        if let Some(usage_summary) = &summary.usage_summary {
+        if cli.verbose > 0
+            && let Some(usage_summary) = &summary.usage_summary
+        {
             let mut parts = Vec::new();
             if let Some(input) = usage_summary.input_tokens {
                 parts.push(format!("input {}", input));
@@ -2107,10 +2926,14 @@ pub(crate) fn show_thread_summary(
         if let Some(task) = &summary.task {
             println!("Task: {}", task);
         }
-        let captures = collect_thread_captures(repo, &summary.name, 5).unwrap_or_default();
+        let captures = if cli.verbose > 0 {
+            collect_thread_captures(repo, &summary.name, 5).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if !captures.is_empty() {
             println!();
-            println!("{}", style::section("Last 5 captures"));
+            println!("{}", style::section("Recent saved states"));
             for capture in captures {
                 println!(
                     "  {} {}",
@@ -2142,8 +2965,8 @@ pub(crate) fn show_thread_summary(
         if !summary.blockers.is_empty() {
             println!("Blocked by: {}", summary.blockers.join(" | "));
         }
-        if !summary.recommended_action.is_empty() {
-            println!("Next step: {}", summary.recommended_action);
+        if !summary.recommended_action.is_empty() && !next_step_printed {
+            print_next_step(&summary.recommended_action);
         }
     }
 
@@ -2154,26 +2977,37 @@ pub(crate) fn cmd_thread_delete(cli: &Cli, repo: &Repository, name: String) -> R
     if let Head::Attached { thread } = repo.head_ref()?
         && thread == name
     {
-        return Err(anyhow!(
-            "Cannot delete current thread. Switch to another thread first."
-        ));
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "branch_delete_current",
+            format!("Refusing to delete current thread '{name}'"),
+            "Inspect available threads with `heddle thread list`, switch to another thread, then retry.",
+            format!("HEAD is attached to '{name}'"),
+            "deleting the attached thread would strand the current checkout without its branch ref",
+            "no refs were moved or deleted",
+            "heddle thread list",
+            vec!["heddle thread list".to_string()],
+        )));
     }
 
+    let thread_name = ThreadName::new(&name);
     let state = repo
         .refs()
-        .delete_thread(&name)?
-        .ok_or_else(|| anyhow!("Thread not found: {}", name))?;
+        .delete_thread(&thread_name)?
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&name, "delete thread")))?;
 
     repo.oplog()
-        .record_thread_delete(&name, &state, Some(&repo.op_scope()))?;
+        .record_thread_delete(&thread_name, &state, Some(&repo.op_scope()))?;
 
-    let output = ThreadOpOutput {
-        name: name.clone(),
-        message: format!("Deleted thread '{}'", name),
-        path: None,
-        execution_path: None,
-        thread: None,
-    };
+    let output = thread_op_output(
+        "thread_drop",
+        "thread drop",
+        name.clone(),
+        format!("Deleted thread '{}'", name),
+        None,
+        None,
+        Some(build_repository_verification_state(repo)),
+        None,
+    );
 
     render_thread_op(cli, output)
 }
@@ -2184,19 +3018,21 @@ pub(crate) fn cmd_thread_rename(
     old: String,
     new: String,
 ) -> Result<()> {
+    let old_tn = ThreadName::new(&old);
+    let new_tn = ThreadName::new(&new);
     let state = repo
         .refs()
-        .get_thread(&old)?
-        .ok_or_else(|| anyhow!("Thread not found: {}", old))?;
+        .get_thread(&old_tn)?
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&old, "rename thread")))?;
 
     let mut updates = vec![
         RefUpdate::Thread {
-            name: new.clone(),
+            name: new_tn.clone(),
             expected: RefExpectation::Missing,
             new: Some(state),
         },
         RefUpdate::Thread {
-            name: old.clone(),
+            name: old_tn.clone(),
             expected: RefExpectation::Value(state),
             new: None,
         },
@@ -2207,25 +3043,28 @@ pub(crate) fn cmd_thread_rename(
     {
         updates.push(RefUpdate::Head {
             expected: RefExpectation::Value(Head::Attached {
-                thread: old.clone(),
+                thread: old_tn.clone(),
             }),
             new: Head::Attached {
-                thread: new.clone(),
+                thread: new_tn.clone(),
             },
         });
     }
 
     repo.refs().update_refs(&updates)?;
     repo.oplog()
-        .record_thread_rename(&old, &new, &state, Some(&repo.op_scope()))?;
+        .record_thread_rename(&old_tn, &new_tn, &state, Some(&repo.op_scope()))?;
 
-    let output = ThreadOpOutput {
-        name: new.clone(),
-        message: format!("Renamed thread '{}' to '{}'", old, new),
-        path: None,
-        execution_path: None,
-        thread: find_thread_summary(repo, &new)?,
-    };
+    let output = thread_op_output(
+        "thread_rename",
+        "thread rename",
+        new.clone(),
+        format!("Renamed thread '{}' to '{}'", old, new),
+        None,
+        None,
+        Some(build_repository_verification_state(repo)),
+        find_thread_summary(repo, &new)?,
+    );
 
     render_thread_op(cli, output)
 }
@@ -2243,16 +3082,75 @@ fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
                 // obvious; shell wrappers can prefer `heddle start <name>
                 // --print-cd-path` to capture the path directly.
                 println!("Run this to switch shells:");
-                println!("    cd {}", style::accent(&crate::cli::render::shell_quote(path)));
-            } else if let Some(path) = &thread.execution_path {
+                println!(
+                    "    cd {}",
+                    style::accent(&crate::cli::render::shell_quote(path))
+                );
+            } else if let Some(path) = non_empty_string(thread.execution_path.as_deref()) {
                 println!("Execution root: {}", style::dim(path));
             }
             if !thread.recommended_action.is_empty() {
-                println!("Next step: {}", style::bold(&thread.recommended_action));
+                print_next_step(&thread.recommended_action);
             }
         }
     }
     Ok(())
+}
+
+fn non_empty_string(value: Option<&str>) -> Option<&str> {
+    value.and_then(|value| {
+        if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn thread_op_output(
+    output_kind: &'static str,
+    action: &'static str,
+    name: String,
+    message: String,
+    path: Option<String>,
+    execution_path: Option<String>,
+    trust: Option<RepositoryVerificationState>,
+    thread: Option<ThreadSummary>,
+) -> ThreadOpOutput {
+    let recommended_action = thread
+        .as_ref()
+        .and_then(|thread| non_empty_action(&thread.recommended_action))
+        .or_else(|| {
+            trust
+                .as_ref()
+                .and_then(|trust| non_empty_action(&trust.recommended_action))
+        });
+    let recommended_action_argv = recommended_action.as_deref().and_then(action_argv);
+    let recommended_action_template = recommended_action
+        .as_deref()
+        .and_then(recommended_action_template);
+    ThreadOpOutput {
+        output_kind,
+        status: "completed",
+        action,
+        name,
+        message,
+        next_action: recommended_action.clone(),
+        next_action_argv: recommended_action_argv.clone(),
+        next_action_template: recommended_action_template.clone(),
+        recommended_action,
+        recommended_action_argv,
+        recommended_action_template,
+        thread,
+        path,
+        execution_path,
+        trust,
+    }
+}
+
+fn non_empty_action(action: &str) -> Option<String> {
+    (!action.trim().is_empty()).then(|| action.to_string())
 }
 
 fn default_thread_path(repo: &Repository, name: &str) -> PathBuf {
@@ -2267,6 +3165,78 @@ fn default_thread_path(repo: &Repository, name: &str) -> PathBuf {
         .map(|path| path.to_path_buf())
         .unwrap_or_else(|| workspace_root.to_path_buf());
     parent.join(format!("{repo_name}-{}", sanitize_name(name)))
+}
+
+fn ensure_explicit_start_path_outside_repo(
+    repo: &Repository,
+    name: &str,
+    path: &Path,
+) -> Result<()> {
+    if repo.capability() != repo::RepositoryCapability::GitOverlay {
+        return Ok(());
+    }
+    let requested = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let requested_for_check = normalize_path_for_containment(&requested)?;
+    let repo_root = normalize_path_for_containment(repo.root())?;
+    if requested_for_check == repo_root || requested_for_check.starts_with(&repo_root) {
+        let suggested = default_thread_path(repo, name);
+        let suggested_command = format!("heddle start {name} --path {}", suggested.display());
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "thread_start_path_inside_repo",
+            format!(
+                "Refusing to start thread '{name}' inside the current repository at '{}'",
+                requested_for_check.display()
+            ),
+            format!(
+                "Choose a sibling checkout outside the repository, for example `{suggested_command}`."
+            ),
+            format!(
+                "requested checkout path '{}' is inside repository '{}'",
+                requested_for_check.display(),
+                repo_root.display()
+            ),
+            "starting an isolated checkout inside the source worktree would make Heddle report the nested checkout as unsaved work",
+            "no thread refs, checkout directories, mounts, or worktree files were changed",
+            suggested_command.clone(),
+            vec![suggested_command],
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_path_for_containment(path: &Path) -> Result<PathBuf> {
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| anyhow!("path '{}' has no usable ancestor", path.display()))?;
+    }
+
+    let mut normalized = ancestor.canonicalize()?;
+    let remainder = path.strip_prefix(ancestor).with_context(|| {
+        format!(
+            "path '{}' could not be normalized relative to '{}'",
+            path.display(),
+            ancestor.display()
+        )
+    })?;
+
+    for component in remainder.components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {}
+        }
+    }
+
+    Ok(normalized)
 }
 
 fn default_lightweight_thread_path(repo: &Repository, name: &str) -> PathBuf {
@@ -2348,4 +3318,31 @@ pub(crate) fn find_active_thread_entry(
         .into_iter()
         .filter(|entry| entry.thread == thread && entry.status == AgentStatus::Active)
         .max_by_key(|entry| entry.started_at))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_execution_paths_are_suppressed() {
+        assert_eq!(display_path_string(&PathBuf::new()), None);
+        assert_eq!(non_empty_string(Some("")), None);
+        assert_eq!(non_empty_string(Some("   ")), None);
+    }
+
+    #[test]
+    fn git_checkout_skipped_after_thread_switch_uses_reconcile_advice() {
+        let advice =
+            thread_switch_git_checkout_skipped_advice("feature/git", "dirty Git index".to_string());
+
+        assert_eq!(advice.kind, "thread_switch_git_checkout_skipped");
+        assert!(advice.error.contains("switched Heddle to 'feature/git'"));
+        assert!(advice.unsafe_condition.contains("dirty Git index"));
+        assert_eq!(
+            advice.primary_command,
+            "heddle bridge git reconcile --prefer heddle --ref feature/git --preview"
+        );
+        assert!(advice.preserved.contains("Git checkout was left unchanged"));
+    }
 }

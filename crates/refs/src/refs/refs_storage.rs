@@ -5,12 +5,16 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process, thread,
+    process,
+    thread::{self},
     time::{Duration, Instant},
 };
 
 use chrono::Utc;
-use objects::error::{HeddleError, Result};
+use objects::{
+    error::{HeddleError, Result},
+    object::ThreadName,
+};
 
 use super::{RefManager, name::validate_ref_name};
 use crate::fs_atomic::write_file_atomic;
@@ -74,7 +78,7 @@ impl RefManager {
     pub(crate) fn ref_summary_index_path(&self) -> PathBuf {
         self.refs_dir().join("ref-summary-index")
     }
-    pub(super) fn thread_path(&self, name: &str) -> Result<PathBuf> {
+    pub(super) fn thread_path(&self, name: &ThreadName) -> Result<PathBuf> {
         validate_ref_name(name).map_err(|error| HeddleError::InvalidRefName(error.name))?;
         if name.contains('/') {
             let flat = self.flat_thread_path(name)?;
@@ -202,7 +206,7 @@ impl RefManager {
         file.sync_all()?;
         Ok(temp_path)
     }
-    pub(super) fn list_refs_recursive(&self, dir: &Path, prefix: &str) -> Result<Vec<String>> {
+    pub(super) fn list_refs_recursive(&self, dir: &Path, prefix: &str) -> Result<Vec<ThreadName>> {
         let mut refs = Vec::new();
 
         if !dir.exists() {
@@ -217,11 +221,11 @@ impl RefManager {
                 None => continue,
             };
 
-            let full_name = if prefix.is_empty() {
-                name.to_string()
+            let full_name = ThreadName::from(if prefix.is_empty() {
+                name.into()
             } else {
                 format!("{}/{}", prefix, name)
-            };
+            });
 
             if path.is_dir() {
                 refs.extend(self.list_refs_recursive(&path, &full_name)?);

@@ -28,7 +28,7 @@ use super::{
     MergeOutcome,
     lines::{build_alignment, split_lines},
     markers::{ConflictMarkers, emit_conflict, emit_lines},
-    whitespace::{prefer_clean, trailing_ws_equal},
+    whitespace::compare_trailing_ws,
 };
 
 pub(super) fn run(
@@ -152,12 +152,12 @@ fn emit_hunk(
     their_slice: &[&[u8]],
     markers: ConflictMarkers<'_>,
 ) {
-    if slice_eq(our_slice, base_slice) {
+    if our_slice == base_slice {
         emit_lines(out, their_slice);
-    } else if slice_eq(their_slice, base_slice) {
+    } else if their_slice == base_slice || our_slice == their_slice {
         emit_lines(out, our_slice);
-    } else if slice_eq(our_slice, their_slice) || trailing_ws_equal(our_slice, their_slice) {
-        emit_lines(out, prefer_clean(our_slice, their_slice));
+    } else if let Some(clean) = compare_trailing_ws(our_slice, their_slice) {
+        emit_lines(out, clean);
     } else if let Some(composed) = compose_disjoint(base_slice, our_slice, their_slice) {
         // One side inserted at an anchor and the other edited adjacent base
         // lines — patches compose, no overlap. Without this branch we'd
@@ -177,10 +177,6 @@ fn emit_hunk(
         emit_conflict(out, our_slice, their_slice, markers);
         *conflicts += 1;
     }
-}
-
-fn slice_eq(a: &[&[u8]], b: &[&[u8]]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
 }
 
 /// Classification of what a side does to a single base line.
@@ -204,11 +200,7 @@ enum LineAction<'a> {
 /// check: any base line modified by both sides — or any same-anchor
 /// insertion with different content — bails out so the conflict marker
 /// path remains correct.
-fn compose_disjoint(
-    base: &[&[u8]],
-    ours: &[&[u8]],
-    theirs: &[&[u8]],
-) -> Option<Vec<u8>> {
+fn compose_disjoint(base: &[&[u8]], ours: &[&[u8]], theirs: &[&[u8]]) -> Option<Vec<u8>> {
     let (our_actions, our_inserts) = classify_against_base(base, ours);
     let (their_actions, their_inserts) = classify_against_base(base, theirs);
 
@@ -234,7 +226,11 @@ fn compose_disjoint(
         }
     }
     // Trailing-gap insertions (past end of base).
-    compose_gap(&mut out, &our_inserts[base.len()], &their_inserts[base.len()])?;
+    compose_gap(
+        &mut out,
+        &our_inserts[base.len()],
+        &their_inserts[base.len()],
+    )?;
     Some(out)
 }
 

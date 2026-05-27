@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use objects::object::ThreadName;
 
 /// Convenience: read the current state's short change-id by opening the repo
 /// directly. Used by undo tests that assert HEAD has moved to a specific state.
@@ -48,7 +49,7 @@ fn test_spaces_in_filename() {
     std::fs::write(temp.path().join("file with spaces.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Spaces in name"], temp.path());
     assert!(temp.path().join("file with spaces.txt").exists());
-    let result = heddle(&["status", "--json"], Some(temp.path())).unwrap();
+    let result = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let status: Value = serde_json::from_str(&result).expect("Status should be valid JSON");
     let changes = status.get("changes").expect("Should have changes field");
     let modified = changes.get("modified").and_then(|m| m.as_array()).unwrap();
@@ -69,27 +70,32 @@ fn test_unicode_filename() {
     assert!(temp.path().join("emoji_😀.txt").exists());
 }
 
-/// Regression: `heddle undo` on a real-world worktree (with `target/`,
-/// `node_modules/`, `.git/`, etc.) must not abort with `os error 66` after
-/// destroying tracked files. The planner asks `remove_dir` to drop the parent
-/// of an ignored child; that fails with ENOTEMPTY. Pre-fix this left the
+/// Regression: `heddle undo` on a worktree with explicitly ignored build or
+/// dependency output must not abort with `os error 66` after destroying tracked
+/// files. The planner asks `remove_dir` to drop the parent of an ignored child;
+/// that fails with ENOTEMPTY. Pre-fix this left the
 /// worktree gutted with HEAD stuck at the old state. Post-fix the directory
 /// is left in place and undo completes transactionally.
 #[test]
 fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-    heddle_must_succeed(&["capture", "-m", "empty"], temp.path());
+    std::fs::write(
+        temp.path().join(".heddleignore"),
+        "target/\nnode_modules/\n",
+    )
+    .unwrap();
+    heddle_must_succeed(&["capture", "-m", "ignore colocated git"], temp.path());
 
     std::fs::write(temp.path().join("main.rs"), "fn main() {}").unwrap();
     std::fs::create_dir_all(temp.path().join("web")).unwrap();
     std::fs::write(temp.path().join("web/index.html"), "<html/>").unwrap();
     heddle_must_succeed(&["capture", "-m", "tracked"], temp.path());
 
-    // Drop ignored siblings into tracked directories — these would otherwise
-    // be present from `bun install`, `cargo build`, `git init`, etc. Heddle's
-    // default ignore list (`target`, `node_modules`, `.git`) skips them, so
-    // they are invisible to status — but they still occupy the filesystem.
+    // Drop explicitly ignored siblings into tracked directories — these would
+    // otherwise be present from `bun install`, `cargo build`, `git init`, etc.
+    // They are invisible to status because this test named them in
+    // `.heddleignore`, but they still occupy the filesystem.
     std::fs::create_dir_all(temp.path().join("web/node_modules/lodash")).unwrap();
     std::fs::write(
         temp.path().join("web/node_modules/lodash/index.js"),
@@ -105,15 +111,14 @@ fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
     assert!(!temp.path().join("main.rs").exists());
     assert!(!temp.path().join("web/index.html").exists());
     // Ignored siblings preserved across the apply.
-    assert!(
-        temp.path()
-            .join("web/node_modules/lodash/index.js")
-            .exists()
-    );
+    assert!(temp
+        .path()
+        .join("web/node_modules/lodash/index.js")
+        .exists());
     assert!(temp.path().join("target/foo.bin").exists());
 
     // HEAD advanced and disk matches state — no divergence.
-    let status_json = heddle_must_succeed(&["status", "--json"], temp.path());
+    let status_json = heddle_must_succeed(&["status", "--output", "json"], temp.path());
     let status: Value = serde_json::from_str(&status_json).unwrap();
     let changes = status.get("changes").unwrap();
     assert!(changes["modified"].as_array().unwrap().is_empty());
@@ -135,8 +140,11 @@ fn test_undo_refuses_when_untracked_file_present() {
     let untracked = temp.path().join("my-notes.md");
     std::fs::write(&untracked, "user-written content").unwrap();
 
-    let err = heddle(&["undo", "-n", "1"], Some(temp.path()))
-        .expect_err("undo must refuse on dirty worktree");
+    let err = heddle(
+        &["undo", "-n", "1", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("undo must refuse on dirty worktree");
     assert!(
         err.contains("untracked"),
         "error should mention untracked: {err}"
@@ -160,8 +168,11 @@ fn test_undo_refuses_when_tracked_file_modified() {
 
     std::fs::write(temp.path().join("a.txt"), "uncommitted edit").unwrap();
 
-    let err = heddle(&["undo", "-n", "1"], Some(temp.path()))
-        .expect_err("undo must refuse with modified file");
+    let err = heddle(
+        &["undo", "-n", "1", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("undo must refuse with modified file");
     assert!(
         err.contains("modified"),
         "error should mention modified: {err}"
@@ -210,8 +221,11 @@ fn test_cherry_pick_refuses_when_untracked_file_present() {
     let untracked = temp.path().join("user-notes.md");
     std::fs::write(&untracked, "user-written content").unwrap();
 
-    let err = heddle(&["cherry-pick", &feature_commit], Some(temp.path()))
-        .expect_err("cherry-pick must refuse on dirty worktree");
+    let err = heddle(
+        &["cherry-pick", &feature_commit, "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("cherry-pick must refuse on dirty worktree");
     assert!(
         err.contains("untracked"),
         "error should mention untracked: {err}"
@@ -249,8 +263,11 @@ fn test_cherry_pick_refuses_when_tracked_file_modified() {
     // Modify a tracked file without snapshotting.
     std::fs::write(temp.path().join("base.txt"), "uncommitted edit").unwrap();
 
-    let err = heddle(&["cherry-pick", &feature_commit], Some(temp.path()))
-        .expect_err("cherry-pick must refuse with modified file");
+    let err = heddle(
+        &["cherry-pick", &feature_commit, "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("cherry-pick must refuse with modified file");
     assert!(
         err.contains("modified"),
         "error should mention modified: {err}"
@@ -322,8 +339,11 @@ fn test_rebase_refuses_when_untracked_file_present() {
     let untracked = temp.path().join("user-notes.md");
     std::fs::write(&untracked, "user-written content").unwrap();
 
-    let err = heddle(&["rebase", "feature"], Some(temp.path()))
-        .expect_err("rebase must refuse on dirty worktree");
+    let err = heddle(
+        &["rebase", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("rebase must refuse on dirty worktree");
     assert!(
         err.contains("untracked"),
         "error should mention untracked: {err}"
@@ -350,8 +370,11 @@ fn test_rebase_refuses_when_tracked_file_modified() {
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
     std::fs::write(temp.path().join("base.txt"), "uncommitted edit").unwrap();
 
-    let err = heddle(&["rebase", "feature"], Some(temp.path()))
-        .expect_err("rebase must refuse with modified file");
+    let err = heddle(
+        &["rebase", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect_err("rebase must refuse with modified file");
     assert!(
         err.contains("modified"),
         "error should mention modified: {err}"
@@ -388,18 +411,21 @@ fn test_rebase_force_proceeds_and_destroys_edit() {
 
 /// Regression: a Repository-level test that `clear_worktree` and the
 /// incremental remove path both tolerate ENOTEMPTY when the directory holds
-/// heddle-ignored content. This is the unit-level companion to the CLI test
+/// local-only content. This is the unit-level companion to the CLI test
 /// above.
 #[test]
 fn test_undo_with_dotgit_directory_present() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join(".heddleignore"), ".git/\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "empty"], temp.path());
 
     std::fs::write(temp.path().join("file.txt"), "v1").unwrap();
     heddle_must_succeed(&["capture", "-m", "v1"], temp.path());
 
-    // Simulate a co-located git repo: `.git` is heddle-ignored by default.
+    // Simulate a co-located git repo. `.git` is preserved only because this
+    // test explicitly names it in `.heddleignore`; Heddle's only built-in
+    // ignore is `.heddle` itself.
     std::fs::create_dir_all(temp.path().join(".git/objects/01")).unwrap();
     std::fs::write(temp.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::write(temp.path().join(".git/objects/01/abc"), "fake git object").unwrap();
@@ -518,7 +544,7 @@ fn test_undo_ff_merge_restores_head_and_thread_ref() {
     // Feature thread never moved during FF merge, so its tip is unchanged.
     let feature_tip = repo
         .refs()
-        .get_thread("feature")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
         .expect("feature thread still exists")
         .short();
@@ -533,7 +559,7 @@ fn test_undo_ff_merge_restores_head_and_thread_ref() {
     // inverse the thread context it needs.
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -636,7 +662,7 @@ fn test_redo_ff_merge_restores_head_and_thread_ref() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -646,7 +672,7 @@ fn test_redo_ff_merge_restores_head_and_thread_ref() {
     );
     let feature_tip = repo
         .refs()
-        .get_thread("feature")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
         .expect("feature thread still exists")
         .short();
@@ -711,7 +737,7 @@ fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -721,7 +747,7 @@ fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
     );
     let feature_tip = repo
         .refs()
-        .get_thread("feature")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
         .expect("feature thread still exists")
         .short();
@@ -774,7 +800,7 @@ fn test_redo_ff_merge_succeeds_when_source_deleted() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -835,14 +861,11 @@ fn test_redo_ff_merge_refuses_when_post_target_state_missing() {
     );
 }
 
-/// Non-fast-forward merge undo: both threads have divergent work since the
-/// common ancestor. The merge synthesizes a new merge state with two parents.
-/// Undo must restore main to its pre-merge tip; feature's tip never moved.
-/// Unlike the FF path, this case exercises the `Snapshot` inverse (the merge
-/// records a new state with `thread = Some("main")`), so the thread ref *is*
-/// reset alongside HEAD.
+/// Divergent target/source histories are stale until refreshed. The old
+/// direct non-fast-forward merge path used to synthesize a merge state here;
+/// the stricter verification model refuses before writing an undoable op.
 #[test]
-fn test_undo_non_ff_merge_restores_both_threads() {
+fn test_stale_non_ff_merge_refuses_without_moving_threads() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -862,47 +885,41 @@ fn test_undo_non_ff_merge_restores_both_threads() {
     heddle_must_succeed(&["capture", "-m", "main work"], temp.path());
     let main_tip_before = head_short(temp.path());
 
-    heddle_must_succeed(&["merge", "feature"], temp.path());
-    let merge_state = head_short(temp.path());
-    assert_ne!(
-        merge_state, main_tip_before,
-        "non-FF merge must produce a fresh merge state"
+    let err = heddle(&["merge", "feature"], Some(temp.path()))
+        .expect_err("stale divergent merge must refuse before mutation");
+    assert!(
+        err.contains("Thread 'feature' is stale") && err.contains("heddle thread refresh feature"),
+        "stale merge should explain the refresh path: {err}"
     );
-    assert_ne!(
-        merge_state, feature_tip_before,
-        "non-FF merge must not collapse to feature's tip"
-    );
-
-    heddle_must_succeed(&["undo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         main_tip_before,
-        "undo of non-FF merge must restore HEAD to main's pre-merge tip"
+        "stale merge refusal must leave HEAD at main's pre-merge tip"
     );
 
     let repo = Repository::open(temp.path()).unwrap();
 
-    // The `main` thread ref must be reset too (not just HEAD): the `Snapshot`
-    // inverse for a merge carries the thread name so the ref rewinds with it.
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
     assert_eq!(
         main_tip, main_tip_before,
-        "non-FF undo must reset the `main` thread ref to its pre-merge tip"
+        "stale merge refusal must leave the `main` thread ref unchanged"
     );
 
-    // Feature is untouched throughout — its tip stays put.
     let feature_tip = repo
         .refs()
-        .get_thread("feature")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
         .expect("feature thread still exists")
         .short();
-    assert_eq!(feature_tip, feature_tip_before);
+    assert_eq!(
+        feature_tip, feature_tip_before,
+        "stale merge refusal must leave the source thread unchanged"
+    );
 }
 
 /// `--dry-run` is the discoverable spelling of `--preview` documented in
@@ -1636,7 +1653,10 @@ fn test_undo_thread_create_removes_record_when_no_worktree() {
 
     // The ref is gone — that part already worked pre-fix.
     assert!(
-        repo.refs().get_thread("feature").unwrap().is_none(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .is_none(),
         "undo of `thread create` must delete the thread ref"
     );
 
@@ -1681,7 +1701,10 @@ fn test_undo_thread_create_refuses_with_materialized_worktree() {
     {
         let repo = Repository::open(temp.path()).unwrap();
         assert!(
-            repo.refs().get_thread("feature").unwrap().is_some(),
+            repo.refs()
+                .get_thread(&ThreadName::new("feature"))
+                .unwrap()
+                .is_some(),
             "feature thread ref must exist after `start --path`"
         );
     }
@@ -1705,7 +1728,10 @@ fn test_undo_thread_create_refuses_with_materialized_worktree() {
     // Refusal must be pre-flight: nothing was mutated.
     let repo = Repository::open(temp.path()).unwrap();
     assert!(
-        repo.refs().get_thread("feature").unwrap().is_some(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .is_some(),
         "thread ref must survive a refused undo (pre-flight refusal — \
          consistent with the redaction/dirty-worktree gates)"
     );
@@ -1737,11 +1763,17 @@ fn test_undo_thread_rename_round_trips_refs_and_record() {
     {
         let repo = Repository::open(temp.path()).unwrap();
         assert!(
-            repo.refs().get_thread("feature-v2").unwrap().is_some(),
+            repo.refs()
+                .get_thread(&ThreadName::new("feature-v2"))
+                .unwrap()
+                .is_some(),
             "rename forward path must create `feature-v2`"
         );
         assert!(
-            repo.refs().get_thread("feature").unwrap().is_none(),
+            repo.refs()
+                .get_thread(&ThreadName::new("feature"))
+                .unwrap()
+                .is_none(),
             "rename forward path must remove `feature`"
         );
     }
@@ -1752,11 +1784,17 @@ fn test_undo_thread_rename_round_trips_refs_and_record() {
 
     // Refs: rename rolled back.
     assert!(
-        repo.refs().get_thread("feature").unwrap().is_some(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .is_some(),
         "undo of rename must restore the old name's ref"
     );
     assert!(
-        repo.refs().get_thread("feature-v2").unwrap().is_none(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature-v2"))
+            .unwrap()
+            .is_none(),
         "undo of rename must delete the new name's ref"
     );
 
@@ -1812,7 +1850,10 @@ fn test_redo_thread_create_restores_manager_record() {
 
     // The ref is back — that part already worked pre-fix.
     assert!(
-        repo.refs().get_thread("feature").unwrap().is_some(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feature"))
+            .unwrap()
+            .is_some(),
         "redo of `thread create` must restore the thread ref"
     );
 
@@ -1927,7 +1968,7 @@ fn test_undo_rebase_ancestor_ff_restores_thread_ref() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -1992,7 +2033,7 @@ fn test_undo_rebase_replay_restores_thread_ref() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2055,7 +2096,7 @@ fn test_undo_pull_local_restores_thread_ref() {
     let repo = Repository::open(target.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2096,37 +2137,44 @@ fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
     std::fs::write(temp.path().join("conflict.txt"), "main edit\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "main edit"], temp.path());
-    let main_tip_before = head_short(temp.path());
-
-    // Conflicted 3-way merge — leaves HEAD at `main_tip_before` with
-    // conflict markers on disk and a live merge_state.
-    let _ = heddle(&["merge", "feature"], Some(temp.path()));
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    let feature_tip_before = head_short(temp.path());
+    let refresh = heddle(
+        &["thread", "refresh", "feature", "--output", "json"],
+        Some(temp.path()),
+    );
+    assert!(
+        refresh
+            .as_ref()
+            .is_err_and(|err| err.contains("thread_refresh_conflicted")),
+        "refresh should create a durable conflict state: {refresh:?}"
+    );
 
     heddle_must_succeed(&["resolve", "--abort"], temp.path());
     assert_eq!(
         head_short(temp.path()),
-        main_tip_before,
-        "abort must leave HEAD at main's pre-merge tip"
+        feature_tip_before,
+        "abort must leave HEAD at feature's pre-refresh tip"
     );
 
-    // Undo the abort — `FastForwardV2 { pre = post = main_tip_before }`
+    // Undo the abort — `FastForwardV2 { pre = post = feature_tip_before }`
     // so the observable state is unchanged.
     heddle_must_succeed(&["undo"], temp.path());
     let repo = Repository::open(temp.path()).unwrap();
-    let main_tip = repo
+    let feature_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("feature"))
         .unwrap()
-        .expect("main thread still exists")
+        .expect("feature thread still exists")
         .short();
     assert_eq!(
-        main_tip, main_tip_before,
-        "undo of merge abort must leave main thread ref at the pre-merge tip"
+        feature_tip, feature_tip_before,
+        "undo of refresh abort must leave feature thread ref at the pre-refresh tip"
     );
     match repo.head_ref().unwrap() {
-        refs::Head::Attached { thread } => assert_eq!(thread, "main"),
+        refs::Head::Attached { thread } => assert_eq!(thread, "feature"),
         refs::Head::Detached { state } => panic!(
-            "HEAD must stay attached to main; got detached at {}",
+            "HEAD must stay attached to feature; got detached at {}",
             state.short()
         ),
     }
@@ -2207,7 +2255,7 @@ fn test_undo_ship_manual_resolution_restores_thread_ref() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2267,7 +2315,7 @@ fn test_redo_rebase_pins_recorded_tip_when_source_advances() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2380,7 +2428,7 @@ fn test_undo_rebase_replay_multi_commit_rewinds_whole_transaction() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2443,7 +2491,7 @@ fn test_redo_rebase_replay_multi_commit_restores_post_rebase_tip() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2486,7 +2534,7 @@ fn test_undo_rebase_refuses_when_worktree_dirty() {
     // sync with HEAD. The rebase batch must NOT be undone while this
     // edit could be silently destroyed by the rewind.
     std::fs::write(temp.path().join("a.txt"), "uncommitted change").unwrap();
-    let err = heddle(&["undo"], Some(temp.path()))
+    let err = heddle(&["undo", "--output", "json"], Some(temp.path()))
         .expect_err("undo of rebase must refuse on dirty worktree");
     assert!(
         err.contains("modified") || err.contains("dirty") || err.contains("untracked"),
@@ -2541,10 +2589,7 @@ fn test_undo_rebase_refuses_when_pre_rebase_blob_purged() {
     // Need a state id for `redact apply <state> --path …`. After the
     // rebase, the current state contains config/secrets.toml at the
     // same blob hash as the pre-rebase tree.
-    let log_json = heddle_must_succeed(
-        &["--output", "json", "log", "--limit", "1"],
-        temp.path(),
-    );
+    let log_json = heddle_must_succeed(&["--output", "json", "log", "--limit", "1"], temp.path());
     let log: Value = serde_json::from_str(&log_json).unwrap();
     let current_state = log["states"][0]["change_id"].as_str().unwrap().to_string();
 
@@ -2575,8 +2620,7 @@ fn test_undo_rebase_refuses_when_pre_rebase_blob_purged() {
     let err = heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
         .expect_err("undo of rebase must refuse when a pre-rebase blob has been purged");
     assert!(
-        err.to_lowercase().contains("purge")
-            || err.to_lowercase().contains("purged"),
+        err.to_lowercase().contains("purge") || err.to_lowercase().contains("purged"),
         "refusal must name the purge concern: {err}"
     );
 }
@@ -2617,8 +2661,7 @@ fn test_undo_rebase_continue_preserves_pre_conflict_advances() {
     heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
     let main_tip_before = head_short(temp.path());
 
-    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path()))
-        .unwrap_or_else(|out| out);
+    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
     assert!(
         rebase_output.contains("Conflict applying")
             || rebase_output.contains("\"status\": \"conflict\""),
@@ -2659,7 +2702,7 @@ fn test_undo_rebase_continue_preserves_pre_conflict_advances() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2702,8 +2745,7 @@ fn test_redo_rebase_continue_restores_manual_resolution_tip() {
     heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
     let main_tip_before = head_short(temp.path());
 
-    let rebase_output =
-        heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
+    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
     assert!(
         rebase_output.contains("Conflict applying")
             || rebase_output.contains("\"status\": \"conflict\""),
@@ -2743,7 +2785,7 @@ fn test_redo_rebase_continue_restores_manual_resolution_tip() {
     let repo = Repository::open(temp.path()).unwrap();
     let main_tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread still exists")
         .short();
@@ -2783,8 +2825,7 @@ fn test_rebase_abort_tolerates_corrupted_pending_advance_line() {
     heddle_must_succeed(&["capture", "-m", "main conflict"], temp.path());
     let main_tip_before = head_short(temp.path());
 
-    let rebase_output =
-        heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
+    let rebase_output = heddle(&["rebase", "feature"], Some(temp.path())).unwrap_or_else(|out| out);
     assert!(
         rebase_output.contains("Conflict applying")
             || rebase_output.contains("\"status\": \"conflict\""),
@@ -2887,10 +2928,7 @@ fn test_undo_list_shows_multi_commit_rebase_as_single_batch() {
     // Every op in the batch must be a fast-forward — no foreign ops
     // should have been folded into the rebase batch.
     for op in ops {
-        let desc = op
-            .get("description")
-            .and_then(|d| d.as_str())
-            .unwrap_or("");
+        let desc = op.get("description").and_then(|d| d.as_str()).unwrap_or("");
         assert!(
             desc.starts_with("fast-forward") || desc.starts_with("transaction commit"),
             "rebase batch entry must be FF or txn-commit marker, got: {desc}"
@@ -2976,7 +3014,10 @@ fn test_rebase_fast_forwarded_json_lists_target_and_creates_batch() {
             .as_str()
             .is_some_and(|d| d.starts_with("transaction commit"))
     });
-    assert!(has_tc, "single-FF rebase batch must carry TransactionCommit marker");
+    assert!(
+        has_tc,
+        "single-FF rebase batch must carry TransactionCommit marker"
+    );
 }
 
 /// JSON output for the multi-commit replay entry path. Must emit
@@ -3045,8 +3086,7 @@ fn test_rebase_abort_json_clears_state_without_oplog_batch() {
         &["--output", "json", "undo", "--list", "--depth", "20"],
         temp.path(),
     );
-    let count_before = serde_json::from_str::<Value>(&batches_before_abort).unwrap()
-        ["batches"]
+    let count_before = serde_json::from_str::<Value>(&batches_before_abort).unwrap()["batches"]
         .as_array()
         .unwrap()
         .len();
@@ -3091,9 +3131,15 @@ fn test_rebase_abort_and_continue_without_state_error() {
 
     let abort_err = heddle(&["rebase", "--abort"], Some(temp.path()))
         .expect_err("abort with no rebase must error");
-    assert!(abort_err.contains("No rebase in progress"), "got: {abort_err}");
+    assert!(
+        abort_err.contains("No rebase in progress"),
+        "got: {abort_err}"
+    );
 
     let cont_err = heddle(&["rebase", "--continue"], Some(temp.path()))
         .expect_err("continue with no rebase must error");
-    assert!(cont_err.contains("No rebase in progress"), "got: {cont_err}");
+    assert!(
+        cont_err.contains("No rebase in progress"),
+        "got: {cont_err}"
+    );
 }

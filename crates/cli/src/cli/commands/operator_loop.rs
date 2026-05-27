@@ -3,14 +3,19 @@ use anyhow::Result;
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationStatus};
 
 use super::{
+    action_line::print_next_step,
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    next_action::{NextActionInput, effective_next_action},
     operator_core::{
-        OperatorCommandOutput, abort_operator, open_operator_repo_from_path, recommend_next_action,
-        run_git_control,
+        OperatorCommandOutput, abort_operator, exit_if_blocked_operator_status,
+        open_operator_repo_from_path, recommend_next_action,
     },
+    remote::resolve_default_remote_name,
     workflow::cmd_sync,
+    worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    bridge::{GitBridge, git_import::import_selected_refs},
+    bridge::GitBridge,
     cli::{Cli, cli_args::SyncArgs, should_output_json, style},
 };
 
@@ -19,7 +24,10 @@ pub async fn cmd_continue(cli: &Cli) -> Result<()> {
     let cwd = cli.repo.as_ref().unwrap_or(&current_dir);
     let repo = open_operator_repo_from_path(cwd)?;
     let output = super::operator_core::continue_operator(&repo)?;
-    emit(cli, output)
+    let status = output.status.clone();
+    emit(cli, output)?;
+    exit_if_blocked_operator_status(&status);
+    Ok(())
 }
 
 pub fn cmd_abort(cli: &Cli) -> Result<()> {
@@ -50,22 +58,45 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
     }
 
     if let Some(remote) = repo.git_remote_tracking_status()? {
-        if remote.behind > 0 {
-            run_git_control(&repo, &["pull", "--rebase"])?;
+        let remote_decision = super::git_overlay_health::remote_drift_decision(&repo, &remote);
+        if remote_decision.status == "remote_diverged" {
+            let recommended_action = remote_decision
+                .primary_action
+                .clone()
+                .unwrap_or_else(|| "heddle verify".to_string());
+            return emit(
+                cli,
+                OperatorCommandOutput {
+                    status: "blocked".to_string(),
+                    action: "sync".to_string(),
+                    message: remote.message,
+                    blockers: vec![
+                        "Git branch and upstream both contain commits the other side lacks"
+                            .to_string(),
+                    ],
+                    warnings: Vec::new(),
+                    next_action: Some(recommended_action.clone()),
+                    recommended_action: Some(recommended_action),
+                },
+            );
+        }
+        if remote_decision.status == "remote_behind" {
+            ensure_worktree_clean(&repo, "sync")?;
+            let remote_name = resolve_default_remote_name(&repo, None)?;
             let mut bridge = GitBridge::new(&repo);
-            import_selected_refs(
-                &mut bridge,
-                Some(repo.root()),
-                std::slice::from_ref(&remote.branch),
-            )?;
+            let outcome = bridge.pull(&remote_name)?;
+            let verification = build_repository_verification_state(&repo);
+            if !verification.verified {
+                return emit(cli, sync_blocked_by_trust(verification));
+            }
             return emit(
                 cli,
                 OperatorCommandOutput {
                     status: "synced".to_string(),
                     action: "sync".to_string(),
                     message: format!(
-                        "Synced branch '{}' with upstream '{}'",
-                        remote.branch, remote.upstream
+                        "Synced branch '{}' with remote '{}' ({} commit(s) seen, {} state(s) imported)",
+                        remote.branch, remote_name, outcome.commits_seen, outcome.states_created,
                     ),
                     blockers: Vec::new(),
                     warnings: Vec::new(),
@@ -74,7 +105,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                 },
             );
         }
-        if remote.ahead > 0 {
+        if remote_decision.status == "remote_ahead" {
             return emit(
                 cli,
                 OperatorCommandOutput {
@@ -91,6 +122,17 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
     }
 
     cmd_sync(cli, args).await
+}
+
+fn sync_blocked_by_trust(trust: RepositoryVerificationState) -> OperatorCommandOutput {
+    OperatorCommandOutput::blocked_by_repository_verification(
+        "sync",
+        format!(
+            "Sync changed the checkout, but repository verification is still blocked: {}",
+            trust.summary
+        ),
+        &trust,
+    )
 }
 
 fn emit(cli: &Cli, output: OperatorCommandOutput) -> Result<()> {
@@ -111,7 +153,7 @@ fn emit(cli: &Cli, output: OperatorCommandOutput) -> Result<()> {
             }
         }
         if let Some(next) = output.recommended_action.or(output.next_action) {
-            println!("Next step: {}", style::bold(&next));
+            print_next_step(&next);
         }
     }
     Ok(())
@@ -124,4 +166,23 @@ pub(crate) fn primary_next_action(
     fallback: Option<&str>,
 ) -> String {
     recommend_next_action(operation, remote_tracking, import_hint, fallback)
+}
+
+pub(crate) fn primary_next_action_with_verification(
+    operation: Option<&RepositoryOperationStatus>,
+    remote_tracking: Option<&GitRemoteTrackingStatus>,
+    import_hint: Option<&GitOverlayImportHint>,
+    fallback: Option<&str>,
+    trust: &RepositoryVerificationState,
+) -> String {
+    let fallback = non_empty_action(fallback)
+        .or_else(|| non_empty_action(Some(trust.recommended_action.as_str())));
+    effective_next_action(
+        NextActionInput::default(operation, remote_tracking, import_hint, fallback)
+            .with_verification(trust),
+    )
+}
+
+fn non_empty_action(action: Option<&str>) -> Option<&str> {
+    action.filter(|action| !action.trim().is_empty())
 }

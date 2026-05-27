@@ -247,10 +247,7 @@ fn projfs_mount_unmounts_cleanly_on_session_drop() {
     let (session, mountpoint) = mount_fixture(repo);
     let target = mountpoint.path().join("hello.txt");
 
-    assert!(
-        target.exists(),
-        "fixture file must be visible before drop",
-    );
+    assert!(target.exists(), "fixture file must be visible before drop",);
 
     let mp: PathBuf = mountpoint.path().to_path_buf();
     drop(session);
@@ -349,7 +346,9 @@ fn projfs_mount_hides_instance_id_sidecar_from_listing() {
     names.sort();
 
     assert!(
-        !names.iter().any(|n| n.contains("heddle-projfs-id") || n.contains("heddle_projfs_id")),
+        !names
+            .iter()
+            .any(|n| n.contains("heddle-projfs-id") || n.contains("heddle_projfs_id")),
         "instance-ID sidecar must not appear in mounted listing: {names:?}",
     );
     assert!(

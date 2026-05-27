@@ -236,7 +236,7 @@ worst-case-of-packed; the production reftable design is much better.
    the user will never notice. We'd be solving a problem nobody has yet.
 2. **Format migration burden.** Existing `.heddle` repos have
    `refs/packed-refs` text files. Either we add migrate-on-read +
-   write-new-format, or we ship a `heddle refs migrate` command, or we
+   write-new-format, or we ship a `refs migrate` command, or we
    read-both / write-old until 0.4. None of those are *hard*, but they
    add surface area and test cases.
 3. **Format-stability commitment.** Once we ship a binary format on

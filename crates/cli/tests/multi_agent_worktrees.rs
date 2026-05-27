@@ -7,7 +7,11 @@
 //! 2. **`heddle worktree add`** — create a filesystem-isolated agent checkout.
 //! 3. **Actor registry** — `heddle actor spawn / list / done`.
 
-use std::{fs, process::Command, str};
+use std::{
+    fs,
+    process::{Command, Output},
+    str,
+};
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -53,12 +57,7 @@ fn translate_legacy_args(args: &[&str]) -> Vec<String> {
 }
 
 fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
-    cmd.args(translate_legacy_args(args));
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
-    }
-    let output = cmd.output().map_err(|e| e.to_string())?;
+    let output = heddle_output(args, cwd)?;
     let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();
     let stderr = str::from_utf8(&output.stderr).unwrap_or("").to_string();
     if output.status.success() {
@@ -71,6 +70,45 @@ fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String
             stderr
         ))
     }
+}
+
+fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output, String> {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
+    cmd.args(translate_legacy_args(args));
+    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    cmd.output().map_err(|e| e.to_string())
+}
+
+fn heddle_argv_json<I, S>(args: I) -> Value
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    serde_json::json!(
+        std::iter::once(env!("CARGO_BIN_EXE_heddle").to_string())
+            .chain(args.into_iter().map(|arg| arg.as_ref().to_string()))
+            .collect::<Vec<_>>()
+    )
+}
+
+fn heddle_output_with_env(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    envs: &[(&str, &str)],
+) -> Result<Output, String> {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
+    cmd.args(translate_legacy_args(args));
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    cmd.output().map_err(|e| e.to_string())
 }
 
 /// RAII wrapper around a per-test repo `TempDir` that also tears down
@@ -136,7 +174,51 @@ fn setup_repo(filename: &str, content: &str) -> RepoFixture {
 }
 
 fn head_track(path: &std::path::Path) -> String {
-    let out = heddle(&["--json", "status"], Some(path)).unwrap();
+    let out = heddle(&["--output", "json", "status"], Some(path)).unwrap();
     let v: Value = serde_json::from_str(&out).unwrap();
     v["thread"].as_str().unwrap_or("").to_string()
+}
+
+/// Mutation `--output json` replies no longer embed `verification`
+/// (the verification-claim gate still consults it in-memory, but it
+/// is omitted from the wire). This helper grafts the proof back onto
+/// the returned value for test ergonomics by invoking
+/// `heddle verify --output json` after the original call.
+pub(crate) fn inject_post_verification_at(
+    cwd: &std::path::Path,
+    mut value: Value,
+) -> Value {
+    let obj = match value.as_object_mut() {
+        Some(obj) => obj,
+        None => return value,
+    };
+    if obj.contains_key("verification") {
+        return value;
+    }
+    let verify_out = match heddle_output(&["--output", "json", "verify"], Some(cwd)) {
+        Ok(out) => out,
+        Err(_) => return value,
+    };
+    let stream = if !verify_out.status.success() {
+        verify_out.stderr
+    } else {
+        verify_out.stdout
+    };
+    let text = std::str::from_utf8(&stream).unwrap_or("");
+    let parsed: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return value,
+    };
+    let verification = if parsed.get("kind") == Some(&Value::String("verify_failed".to_string())) {
+        parsed.get("verification").cloned().unwrap_or(Value::Null)
+    } else {
+        let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
+        obj_map.remove("output_kind");
+        obj_map.remove("repository_label");
+        obj_map.remove("repository_context");
+        obj_map.remove("clean");
+        Value::Object(obj_map)
+    };
+    obj.insert("verification".to_string(), verification);
+    value
 }

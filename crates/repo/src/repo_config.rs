@@ -255,13 +255,7 @@ impl Default for WorktreeConfig {
 }
 
 fn default_ignore() -> Vec<String> {
-    vec![
-        ".heddle".to_string(),
-        ".heddleignore".to_string(),
-        ".git".to_string(),
-        "target".to_string(),
-        "node_modules".to_string(),
-    ]
+    vec![".heddle".to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,16 +279,23 @@ impl Default for DefaultsConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
-    #[default]
-    Auto,
     Json,
+    // `auto` is the historical name for the default; accept it as an
+    // alias so user configs from before the TTY-detection rip survive
+    // an upgrade without a hard error. New writes use `text`.
+    #[serde(alias = "auto")]
+    #[default]
     Text,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OutputConfig {
+    // Optional so callers can distinguish "repo explicitly set
+    // `output.format`" from "repo left it at the default" — needed
+    // to layer repo config on top of user config without the
+    // repo's default overwriting a user-configured value.
     #[serde(default)]
-    pub format: OutputFormat,
+    pub format: Option<OutputFormat>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -424,18 +425,9 @@ mod tests {
     fn test_default_config_values() {
         let config = RepoConfig::default();
 
-        assert_eq!(
-            config.worktree.ignore,
-            vec![
-                ".heddle".to_string(),
-                ".heddleignore".to_string(),
-                ".git".to_string(),
-                "target".to_string(),
-                "node_modules".to_string(),
-            ]
-        );
+        assert_eq!(config.worktree.ignore, vec![".heddle".to_string()]);
         assert_eq!(config.worktree.fsmonitor.mode, crate::FsMonitorMode::Off);
-        assert_eq!(config.output.format, OutputFormat::Auto);
+        assert_eq!(config.output.format, None);
         assert!(config.policies.default_policy.is_none());
     }
 
@@ -448,7 +440,7 @@ version = 1
         let config: RepoConfig = toml::from_str(toml).expect("config should deserialize");
 
         assert_eq!(config.repository.version, 1);
-        assert_eq!(config.output.format, OutputFormat::Auto);
+        assert_eq!(config.output.format, None);
         assert!(config.policies.default_policy.is_none());
         assert!(config.agent.provider.is_none());
         assert!(config.agent.model.is_none());

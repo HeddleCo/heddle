@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{sync::mpsc, time::Duration};
 
-use objects::{error::HeddleError, object::ChangeId};
+use objects::{
+    error::HeddleError,
+    object::{ChangeId, MarkerName, ThreadName},
+};
 use tempfile::TempDir;
 
 use super::*;
@@ -22,7 +25,7 @@ fn test_head_default() {
     assert_eq!(
         head,
         Head::Attached {
-            thread: "main".to_string()
+            thread: ThreadName::new("main")
         }
     );
 }
@@ -30,7 +33,7 @@ fn test_head_default() {
 fn test_head_roundtrip_attached() {
     let (_temp, refs) = create_ref_manager();
     let head = Head::Attached {
-        thread: "feature/auth".to_string(),
+        thread: ThreadName::new("feature/auth"),
     };
     refs.write_head(&head).unwrap();
     let read = refs.read_head().unwrap();
@@ -49,24 +52,27 @@ fn test_head_roundtrip_detached() {
 fn test_track_operations() {
     let (_temp, refs) = create_ref_manager();
     let id = ChangeId::generate();
-    refs.set_thread("main", &id).unwrap();
-    let got = refs.get_thread("main").unwrap();
+    refs.set_thread(&ThreadName::new("main"), &id).unwrap();
+    let got = refs.get_thread(&ThreadName::new("main")).unwrap();
     assert_eq!(got, Some(id));
     let threads = refs.list_threads().unwrap();
-    assert_eq!(threads, vec!["main"]);
-    let deleted = refs.delete_thread("main").unwrap();
+    assert_eq!(threads, vec![ThreadName::new("main")]);
+    let deleted = refs.delete_thread(&ThreadName::new("main")).unwrap();
     assert_eq!(deleted, Some(id));
-    assert_eq!(refs.get_thread("main").unwrap(), None);
+    assert_eq!(refs.get_thread(&ThreadName::new("main")).unwrap(), None);
 }
 #[test]
 fn test_nested_threads() {
     let (_temp, refs) = create_ref_manager();
     let id = ChangeId::generate();
-    refs.set_thread("agent/claude/refactor", &id).unwrap();
-    let got = refs.get_thread("agent/claude/refactor").unwrap();
+    refs.set_thread(&ThreadName::new("agent/claude/refactor"), &id)
+        .unwrap();
+    let got = refs
+        .get_thread(&ThreadName::new("agent/claude/refactor"))
+        .unwrap();
     assert_eq!(got, Some(id));
     let threads = refs.list_threads().unwrap();
-    assert_eq!(threads, vec!["agent/claude/refactor"]);
+    assert_eq!(threads, vec![ThreadName::new("agent/claude/refactor")]);
 }
 
 #[test]
@@ -75,16 +81,19 @@ fn test_parent_and_child_threads_can_coexist() {
     let parent = ChangeId::generate();
     let child = ChangeId::generate();
 
-    refs.set_thread("feature/orchestrator", &parent).unwrap();
-    refs.set_thread("feature/orchestrator/parser", &child)
+    refs.set_thread(&ThreadName::new("feature/orchestrator"), &parent)
+        .unwrap();
+    refs.set_thread(&ThreadName::new("feature/orchestrator/parser"), &child)
         .unwrap();
 
     assert_eq!(
-        refs.get_thread("feature/orchestrator").unwrap(),
+        refs.get_thread(&ThreadName::new("feature/orchestrator"))
+            .unwrap(),
         Some(parent)
     );
     assert_eq!(
-        refs.get_thread("feature/orchestrator/parser").unwrap(),
+        refs.get_thread(&ThreadName::new("feature/orchestrator/parser"))
+            .unwrap(),
         Some(child)
     );
 
@@ -92,8 +101,8 @@ fn test_parent_and_child_threads_can_coexist() {
     assert_eq!(
         threads,
         vec![
-            "feature/orchestrator".to_string(),
-            "feature/orchestrator/parser".to_string()
+            ThreadName::new("feature/orchestrator"),
+            ThreadName::new("feature/orchestrator/parser")
         ]
     );
 }
@@ -101,27 +110,27 @@ fn test_parent_and_child_threads_can_coexist() {
 fn test_marker_operations() {
     let (_temp, refs) = create_ref_manager();
     let id = ChangeId::generate();
-    refs.create_marker("v1.0.0", &id).unwrap();
-    let got = refs.get_marker("v1.0.0").unwrap();
+    refs.create_marker(&MarkerName::new("v1.0.0"), &id).unwrap();
+    let got = refs.get_marker(&MarkerName::new("v1.0.0")).unwrap();
     assert_eq!(got, Some(id));
     let markers = refs.list_markers().unwrap();
-    assert_eq!(markers, vec!["v1.0.0"]);
+    assert_eq!(markers, vec![MarkerName::new("v1.0.0")]);
 }
 #[test]
 fn test_marker_no_overwrite() {
     let (_temp, refs) = create_ref_manager();
     let id = ChangeId::generate();
-    refs.create_marker("v1.0.0", &id).unwrap();
-    let result = refs.create_marker("v1.0.0", &id);
+    refs.create_marker(&MarkerName::new("v1.0.0"), &id).unwrap();
+    let result = refs.create_marker(&MarkerName::new("v1.0.0"), &id);
     assert!(result.is_err());
 }
 #[test]
 fn test_resolve() {
     let (_temp, refs) = create_ref_manager();
     let id = ChangeId::generate();
-    refs.set_thread("main", &id).unwrap();
+    refs.set_thread(&ThreadName::new("main"), &id).unwrap();
     refs.write_head(&Head::Attached {
-        thread: "main".to_string(),
+        thread: ThreadName::new("main"),
     })
     .unwrap();
     let resolved = refs.resolve("main").unwrap();
@@ -136,36 +145,42 @@ fn test_track_cas_conflict() {
     let (_temp, refs) = create_ref_manager();
     let id1 = ChangeId::generate();
     let id2 = ChangeId::generate();
-    refs.set_thread("main", &id1).unwrap();
-    let result = refs.set_thread_cas("main", RefExpectation::Value(id2), &id2);
+    refs.set_thread(&ThreadName::new("main"), &id1).unwrap();
+    let result = refs.set_thread_cas(&ThreadName::new("main"), RefExpectation::Value(id2), &id2);
     assert!(matches!(result, Err(HeddleError::Conflict(_))));
-    assert_eq!(refs.get_thread("main").unwrap(), Some(id1));
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("main")).unwrap(),
+        Some(id1)
+    );
 }
 #[test]
 fn test_update_refs_transaction_success() {
     let (_temp, refs) = create_ref_manager();
     let id1 = ChangeId::generate();
     let id2 = ChangeId::generate();
-    refs.set_thread("main", &id1).unwrap();
+    refs.set_thread(&ThreadName::new("main"), &id1).unwrap();
     refs.write_head(&Head::Attached {
-        thread: "main".to_string(),
+        thread: ThreadName::new("main"),
     })
     .unwrap();
     let updates = vec![
         RefUpdate::Thread {
-            name: "main".to_string(),
+            name: ThreadName::new("main"),
             expected: RefExpectation::Value(id1),
             new: Some(id2),
         },
         RefUpdate::Head {
             expected: RefExpectation::Value(Head::Attached {
-                thread: "main".to_string(),
+                thread: ThreadName::new("main"),
             }),
             new: Head::Detached { state: id2 },
         },
     ];
     refs.update_refs(&updates).unwrap();
-    assert_eq!(refs.get_thread("main").unwrap(), Some(id2));
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("main")).unwrap(),
+        Some(id2)
+    );
     assert_eq!(refs.read_head().unwrap(), Head::Detached { state: id2 });
 }
 #[test]
@@ -173,31 +188,34 @@ fn test_update_refs_transaction_conflict() {
     let (_temp, refs) = create_ref_manager();
     let id1 = ChangeId::generate();
     let id2 = ChangeId::generate();
-    refs.set_thread("main", &id1).unwrap();
+    refs.set_thread(&ThreadName::new("main"), &id1).unwrap();
     refs.write_head(&Head::Attached {
-        thread: "main".to_string(),
+        thread: ThreadName::new("main"),
     })
     .unwrap();
     let updates = vec![
         RefUpdate::Thread {
-            name: "main".to_string(),
+            name: ThreadName::new("main"),
             expected: RefExpectation::Value(id2),
             new: Some(id2),
         },
         RefUpdate::Head {
             expected: RefExpectation::Value(Head::Attached {
-                thread: "main".to_string(),
+                thread: ThreadName::new("main"),
             }),
             new: Head::Detached { state: id2 },
         },
     ];
     let result = refs.update_refs(&updates);
     assert!(matches!(result, Err(HeddleError::Conflict(_))));
-    assert_eq!(refs.get_thread("main").unwrap(), Some(id1));
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("main")).unwrap(),
+        Some(id1)
+    );
     assert_eq!(
         refs.read_head().unwrap(),
         Head::Attached {
-            thread: "main".to_string()
+            thread: ThreadName::new("main")
         }
     );
 }
@@ -205,28 +223,28 @@ fn test_update_refs_transaction_conflict() {
 fn test_invalid_track_name_path_traversal() {
     let (_temp, refs) = create_ref_manager();
     let id = ChangeId::generate();
-    let result = refs.set_thread("../etc/passwd", &id);
+    let result = refs.set_thread(&ThreadName::new("../etc/passwd"), &id);
     assert!(matches!(result, Err(HeddleError::InvalidRefName(_))));
 }
 #[test]
 fn test_invalid_track_name_absolute_path() {
     let (_temp, refs) = create_ref_manager();
     let id = ChangeId::generate();
-    let result = refs.set_thread("/etc/passwd", &id);
+    let result = refs.set_thread(&ThreadName::new("/etc/passwd"), &id);
     assert!(matches!(result, Err(HeddleError::InvalidRefName(_))));
 }
 #[test]
 fn test_invalid_track_name_with_backslash() {
     let (_temp, refs) = create_ref_manager();
     let id = ChangeId::generate();
-    let result = refs.set_thread("\\windows\\system32", &id);
+    let result = refs.set_thread(&ThreadName::new("\\windows\\system32"), &id);
     assert!(matches!(result, Err(HeddleError::InvalidRefName(_))));
 }
 #[test]
 fn test_invalid_marker_name_path_traversal() {
     let (_temp, refs) = create_ref_manager();
     let id = ChangeId::generate();
-    let result = refs.create_marker("../../../root", &id);
+    let result = refs.create_marker(&MarkerName::new("../../../root"), &id);
     assert!(matches!(result, Err(HeddleError::InvalidRefName(_))));
 }
 #[test]
@@ -238,7 +256,7 @@ fn test_set_remote_thread_waits_for_refs_lock() {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let refs = RefManager::new(root);
-        let result = refs.set_remote_thread("origin", "main", &change_id);
+        let result = refs.set_remote_thread("origin", &ThreadName::new("main"), &change_id);
         tx.send(result).unwrap();
     });
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
@@ -250,14 +268,14 @@ fn test_set_remote_thread_waits_for_refs_lock() {
 fn test_delete_remote_thread_waits_for_refs_lock() {
     let (_temp, refs) = create_ref_manager();
     let change_id = ChangeId::generate();
-    refs.set_remote_thread("origin", "main", &change_id)
+    refs.set_remote_thread("origin", &ThreadName::new("main"), &change_id)
         .unwrap();
     let lock = refs.lock_refs().unwrap();
     let root = refs.root.clone();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let refs = RefManager::new(root);
-        let result = refs.delete_remote_thread("origin", "main");
+        let result = refs.delete_remote_thread("origin", &ThreadName::new("main"));
         tx.send(result).unwrap();
     });
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
@@ -275,12 +293,14 @@ fn test_ref_summary_index_rebuild_reports_repo_ref_shape() {
     let remote_main = ChangeId::generate();
     let remote_feature = ChangeId::generate();
 
-    refs.set_thread("main", &main).unwrap();
-    refs.set_thread("feature/api", &feature).unwrap();
-    refs.create_marker("v1.0.0", &marker).unwrap();
-    refs.set_remote_thread("origin", "main", &remote_main)
+    refs.set_thread(&ThreadName::new("main"), &main).unwrap();
+    refs.set_thread(&ThreadName::new("feature/api"), &feature)
         .unwrap();
-    refs.set_remote_thread("origin", "feature/api", &remote_feature)
+    refs.create_marker(&MarkerName::new("v1.0.0"), &marker)
+        .unwrap();
+    refs.set_remote_thread("origin", &ThreadName::new("main"), &remote_main)
+        .unwrap();
+    refs.set_remote_thread("origin", &ThreadName::new("feature/api"), &remote_feature)
         .unwrap();
 
     let before = refs.inspect_ref_summary_index().unwrap();
@@ -310,13 +330,16 @@ fn test_ref_summary_index_rebuild_reports_repo_ref_shape() {
 
     assert_eq!(
         refs.list_threads().unwrap(),
-        vec!["feature/api".to_string(), "main".to_string()]
+        vec![ThreadName::new("feature/api"), ThreadName::new("main")]
     );
-    assert_eq!(refs.list_markers().unwrap(), vec!["v1.0.0".to_string()]);
+    assert_eq!(
+        refs.list_markers().unwrap(),
+        vec![MarkerName::new("v1.0.0")]
+    );
     assert_eq!(refs.list_remotes().unwrap(), vec!["origin".to_string()]);
     assert_eq!(
         refs.list_remote_threads("origin").unwrap(),
-        vec!["feature/api".to_string(), "main".to_string()]
+        vec![ThreadName::new("feature/api"), ThreadName::new("main")]
     );
 }
 
@@ -327,9 +350,11 @@ fn test_ref_summary_index_falls_back_when_sidecar_is_corrupt() {
     let marker = ChangeId::generate();
     let remote = ChangeId::generate();
 
-    refs.set_thread("main", &main).unwrap();
-    refs.create_marker("stable", &marker).unwrap();
-    refs.set_remote_thread("origin", "main", &remote).unwrap();
+    refs.set_thread(&ThreadName::new("main"), &main).unwrap();
+    refs.create_marker(&MarkerName::new("stable"), &marker)
+        .unwrap();
+    refs.set_remote_thread("origin", &ThreadName::new("main"), &remote)
+        .unwrap();
     refs.rebuild_ref_summary_index().unwrap();
 
     std::fs::write(refs.ref_summary_index_path(), "not a valid summary\n").unwrap();
@@ -339,11 +364,14 @@ fn test_ref_summary_index_falls_back_when_sidecar_is_corrupt() {
     assert!(!inspection.valid);
     assert!(inspection.error.is_some());
 
-    assert_eq!(refs.list_threads().unwrap(), vec!["main".to_string()]);
-    assert_eq!(refs.list_markers().unwrap(), vec!["stable".to_string()]);
+    assert_eq!(refs.list_threads().unwrap(), vec![ThreadName::new("main")]);
+    assert_eq!(
+        refs.list_markers().unwrap(),
+        vec![MarkerName::new("stable")]
+    );
     assert_eq!(refs.list_remotes().unwrap(), vec!["origin".to_string()]);
     assert_eq!(
         refs.list_remote_threads("origin").unwrap(),
-        vec!["main".to_string()]
+        vec![ThreadName::new("main")]
     );
 }

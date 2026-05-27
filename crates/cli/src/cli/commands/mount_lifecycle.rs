@@ -59,10 +59,10 @@ mod linux {
         sync::Mutex,
     };
 
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{Context, Result, anyhow};
     use mount::{
-        worker::{default_worker_binary, Supervisor},
         ContentAddressedMount, NfsSession, NfsShell,
+        worker::{Supervisor, default_worker_binary},
     };
     use repo::Repository;
     use tracing::warn;
@@ -209,10 +209,10 @@ mod macos {
         sync::Mutex,
     };
 
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{Context, Result, anyhow};
     use mount::{
-        fskit::readiness::{self, Readiness},
         ContentAddressedMount, NfsSession, NfsShell,
+        fskit::readiness::{self, Readiness},
     };
     use repo::Repository;
     use tracing::{info, warn};
@@ -399,7 +399,7 @@ mod windows {
         sync::Mutex,
     };
 
-    use anyhow::{anyhow, Context, Result};
+    use anyhow::{Context, Result, anyhow};
     use mount::{ContentAddressedMount, NfsSession, NfsShell, ProjFsSession, ProjFsShell};
     use repo::Repository;
     use tracing::warn;
@@ -495,16 +495,15 @@ mod windows {
                     );
                     let reopened = Repository::open(&root)
                         .map_err(|e| anyhow!("reopen repo for NFS fallback: {e}"))?;
-                    let mount = ContentAddressedMount::new(reopened, thread_id).map_err(|e| {
-                        anyhow!("open mount for {thread_id} (NFS fallback): {e}")
-                    })?;
-                    BackingSession::Nfs(
-                        NfsShell::new(mount).mount_background(mountpoint).map_err(|e| {
+                    let mount = ContentAddressedMount::new(reopened, thread_id)
+                        .map_err(|e| anyhow!("open mount for {thread_id} (NFS fallback): {e}"))?;
+                    BackingSession::Nfs(NfsShell::new(mount).mount_background(mountpoint).map_err(
+                        |e| {
                             anyhow!(
                                 "ProjFS mount failed ({native_err}); NFS fallback also failed: {e}"
                             )
-                        })?,
-                    )
+                        },
+                    )?)
                 }
             }
         } else {
@@ -554,13 +553,11 @@ mod windows {
 pub(crate) use linux::MountHandle;
 #[cfg(all(target_os = "linux", feature = "mount"))]
 pub(crate) use linux::{spawn_mount_for_thread, unmount_thread_if_mounted};
-
 #[cfg(all(target_os = "macos", feature = "mount"))]
 #[allow(unused_imports)] // Re-exported for downstream callers / tests.
 pub(crate) use macos::MountHandle;
 #[cfg(all(target_os = "macos", feature = "mount"))]
 pub(crate) use macos::{spawn_mount_for_thread, unmount_thread_if_mounted};
-
 #[cfg(all(target_os = "windows", feature = "mount"))]
 #[allow(unused_imports)] // Re-exported for downstream callers / tests.
 pub(crate) use windows::MountHandle;

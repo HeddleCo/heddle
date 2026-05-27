@@ -34,17 +34,15 @@ use std::{
     hint::black_box,
     io::{Read, Seek, SeekFrom},
     path::PathBuf,
+    sync::Arc,
+    time::Duration,
 };
 
-use std::sync::Arc;
-
-use std::time::Duration;
-
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mount::{
     BlobCachePool, ContentAddressedMount, MountOptions, NodeId, PlatformShell, PromotionPolicy,
 };
-use objects::store::compression::{compress, decompress, CompressionConfig};
+use objects::store::compression::{CompressionConfig, compress, decompress};
 use repo::Repository;
 use tempfile::TempDir;
 

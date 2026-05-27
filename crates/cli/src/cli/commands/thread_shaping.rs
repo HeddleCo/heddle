@@ -4,20 +4,26 @@
 use std::{fs, path::Path};
 
 use anyhow::{Result, anyhow};
-use objects::{fs_ops::remove_path_recursively, object::ChangeId};
-use repo::Repository;
+use objects::{fs_ops::remove_path_recursively, object::{ChangeId, ThreadName}};
+use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
+    advice::RecoveryAdvice,
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::merge_thread_into_current,
     operator_core::OperatorCommandOutput,
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
-    thread_cmd::{load_thread, refresh_thread, refresh_thread_freshness},
+    thread_cmd::{load_thread, refresh_thread, refresh_thread_freshness, thread_not_found_advice},
+    thread_landing::{
+        merge_preview_command, ship_command_for_thread, ship_command_with_push_target,
+    },
 };
 use crate::{
-    cli::{Cli, should_output_json, style, worktree_status_options},
+    cli::{Cli, render::shell_quote, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
 
@@ -56,14 +62,22 @@ pub fn cmd_capture_split(
 ) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     let current = super::thread_cmd::current_thread(&repo)?.ok_or_else(|| {
-        anyhow!("No current thread; `heddle capture --split` requires an active thread checkout")
+        anyhow!(RecoveryAdvice::no_current_thread(
+            "capture --split",
+            None,
+            "heddle thread switch <name>",
+        ))
     })?;
     let target = load_thread(&repo, &into)?;
     let moved_paths = collect_worktree_split_paths(&repo, &prefixes)?;
     if moved_paths.is_empty() {
-        return Err(anyhow!(
-            "No dirty paths matched the requested split prefixes"
-        ));
+        return Err(anyhow!(no_paths_matched_advice(
+            "capture split",
+            "No dirty paths matched the requested split prefixes",
+            "the worktree has no dirty paths under the requested prefixes",
+            "capture --split would not move any work into the target thread",
+            "heddle status",
+        )));
     }
 
     let target_repo = Repository::open(&target.execution_path)?;
@@ -124,7 +138,13 @@ pub fn cmd_thread_move(
     let moved_paths =
         collect_state_move_paths(&source_repo, &source_base, &source_current, &prefixes)?;
     if moved_paths.is_empty() {
-        return Err(anyhow!("No captured paths matched the requested prefixes"));
+        return Err(anyhow!(no_paths_matched_advice(
+            "thread move",
+            "No captured paths matched the requested prefixes",
+            "the source thread has no captured paths under the requested prefixes",
+            "thread move would not move any captured files into the target thread",
+            "heddle thread show",
+        )));
     }
 
     apply_selected_state_paths(&source_repo, &source_current, &target_repo, &moved_paths)?;
@@ -188,7 +208,7 @@ pub fn cmd_thread_absorb(
     let child = load_thread(&repo, &thread)?;
     let parent_id = into
         .or(child.parent_thread.clone())
-        .ok_or_else(|| anyhow!("Thread '{}' has no recorded parent; pass --into", child.id))?;
+        .ok_or_else(|| anyhow!(RecoveryAdvice::thread_absorb_parent_required(&child.id)))?;
     let parent = load_thread(&repo, &parent_id)?;
     let parent_repo = Repository::open(&parent.execution_path)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
@@ -243,50 +263,92 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         thread.execution_path.clone()
     };
     let source_repo = Repository::open(&source_root)?;
+    let rebase_state_path = source_repo.heddle_dir().join("REBASE_STATE");
 
-    if thread.freshness == repo::ThreadFreshness::Stale
-        && refresh_thread(&repo, &thread_id, cli).is_ok()
-    {
-        let manager = super::thread_cmd::thread_manager(&repo);
-        let mut refreshed_thread = manager
-            .load(&thread_id)?
-            .ok_or_else(|| anyhow!("Thread '{}' not found after refresh", thread_id))?;
-        let resolved_state = repo
-            .refs()
-            .get_thread(&refreshed_thread.thread)?
-            .map(|id| id.short());
-        refreshed_thread.integration_policy_result.status = Some("manual_resolved".to_string());
-        refreshed_thread.integration_policy_result.reason =
-            Some("manual integration resolution captured".to_string());
-        refreshed_thread
-            .integration_policy_result
-            .manual_resolution_state = resolved_state;
-        manager.save(&refreshed_thread)?;
-        return emit_thread_resolve(
-            cli,
-            &ThreadResolveOutput {
-                operator: OperatorCommandOutput {
-                    status: "synced".to_string(),
-                    action: "resolve".to_string(),
-                    message: "Thread refreshed cleanly".to_string(),
-                    blockers: Vec::new(),
-                    warnings: Vec::new(),
-                    next_action: Some(format!("heddle ship --thread {}", thread.id)),
-                    recommended_action: Some(format!("heddle ship --thread {}", thread.id)),
-                },
-                thread: thread_id,
-            },
-        );
+    if thread.freshness == repo::ThreadFreshness::Stale {
+        match refresh_thread(&repo, &thread_id, cli) {
+            Ok(_) => {
+                let manager = super::thread_cmd::thread_manager(&repo);
+                let mut refreshed_thread = manager.load(&thread_id)?.ok_or_else(|| {
+                    anyhow!(thread_not_found_advice(&thread_id, "resolve thread"))
+                })?;
+                let resolved_state = repo
+                    .refs()
+                    .get_thread(&ThreadName::new(&refreshed_thread.thread))?
+                    .map(|id| id.short());
+                refreshed_thread.integration_policy_result.status =
+                    Some("manual_resolved".to_string());
+                refreshed_thread.integration_policy_result.reason =
+                    Some("manual integration resolution captured".to_string());
+                refreshed_thread
+                    .integration_policy_result
+                    .manual_resolution_state = resolved_state;
+                manager.save(&refreshed_thread)?;
+                let operator = if rebase_state_path.exists() {
+                    thread_resolve_rebase_followup_operator(
+                        &source_repo,
+                        &rebase_state_path,
+                        &thread.id,
+                    )?
+                } else {
+                    let trust = build_repository_verification_state(&repo);
+                    thread_resolve_refresh_operator(&thread.id, &trust)
+                };
+                return emit_thread_resolve(
+                    cli,
+                    &ThreadResolveOutput {
+                        operator,
+                        thread: thread_id,
+                    },
+                );
+            }
+            Err(err) => {
+                if rebase_state_path.exists() {
+                    let operator = thread_resolve_rebase_followup_operator(
+                        &source_repo,
+                        &rebase_state_path,
+                        &thread.id,
+                    )?;
+                    return emit_thread_resolve(
+                        cli,
+                        &ThreadResolveOutput {
+                            operator,
+                            thread: thread_id,
+                        },
+                    );
+                }
+                if let Some(operator) =
+                    thread_resolve_conflict_recovery_operator(&source_repo, &thread.id)?
+                {
+                    return emit_thread_resolve(
+                        cli,
+                        &ThreadResolveOutput {
+                            operator,
+                            thread: thread_id,
+                        },
+                    );
+                }
+                return Err(err);
+            }
+        }
     }
 
     let summary = super::thread::find_thread_summary(&repo, &thread.id)?
-        .ok_or_else(|| anyhow!("Thread '{}' not found", thread.id))?;
-    let rebase_state_path = source_repo.heddle_dir().join("REBASE_STATE");
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&thread.id, "resolve thread")))?;
     let mut blockers = if rebase_state_path.exists() {
         Vec::new()
     } else {
         summary.blockers.clone()
     };
+    let mut warnings = Vec::new();
+    if !blockers.is_empty()
+        && blockers
+            .iter()
+            .all(|blocker| is_manual_review_blocker(blocker))
+    {
+        warnings = blockers.clone();
+        blockers.clear();
+    }
     let mut recommended_action = summary.recommended_action.clone();
     if blockers.is_empty() && rebase_state_path.exists() {
         let rebase_state = super::rebase::load_persisted_rebase_state(&rebase_state_path)?;
@@ -319,7 +381,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 thread.id,
                 preview.conflicts.join(", ")
             ));
-            recommended_action = format!("heddle merge {}", thread.id);
+            recommended_action = merge_preview_command(&thread.id);
         }
     }
     if blockers.is_empty() {
@@ -328,14 +390,14 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         thread.integration_policy_result.reason =
             Some("manual integration resolution captured".to_string());
         thread.integration_policy_result.manual_resolution_state =
-            repo.refs().get_thread(&thread.thread)?.map(|id| id.short());
+            repo.refs().get_thread(&ThreadName::new(&thread.thread))?.map(|id| id.short());
         manager.save(&thread)?;
     }
     let recommended_action = if blockers.is_empty() {
         if rebase_state_path.exists() {
             recommended_action
         } else {
-            format!("heddle ship --thread {}", summary.name)
+            ship_command_for_thread(&repo, &summary.name)
         }
     } else {
         recommended_action
@@ -343,11 +405,12 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
     let import_hint = repo.git_overlay_import_hint()?;
-    let recommended_action = primary_next_action(
+    let recommended_action = thread_resolve_next_action(
+        &blockers,
         operation.as_ref(),
         remote_tracking.as_ref(),
         import_hint.as_ref(),
-        Some(&recommended_action),
+        &recommended_action,
     );
     emit_thread_resolve(
         cli,
@@ -359,14 +422,164 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                     "blocked".to_string()
                 },
                 action: "resolve".to_string(),
-                message: "Thread requires a manual follow-up".to_string(),
+                message: if blockers.is_empty() {
+                    if warnings.is_empty() {
+                        "Thread manual resolution recorded".to_string()
+                    } else {
+                        "Thread manual review recorded".to_string()
+                    }
+                } else {
+                    "Thread requires a manual follow-up".to_string()
+                },
                 blockers: blockers.clone(),
-                warnings: Vec::new(),
-                next_action: Some(recommended_action.clone()),
-                recommended_action: Some(recommended_action),
+                warnings,
+                next_action: recommended_action.clone(),
+                recommended_action,
             },
             thread: summary.name.clone(),
         },
+    )
+}
+
+fn is_manual_review_blocker(blocker: &str) -> bool {
+    blocker.starts_with("Heavy-impact change:")
+}
+
+fn thread_resolve_next_action(
+    blockers: &[String],
+    operation: Option<&RepositoryOperationStatus>,
+    remote_tracking: Option<&GitRemoteTrackingStatus>,
+    import_hint: Option<&GitOverlayImportHint>,
+    local_action: &str,
+) -> Option<String> {
+    let action = if blockers.is_empty() {
+        primary_next_action(operation, remote_tracking, import_hint, Some(local_action))
+    } else if let Some(operation) = operation {
+        operation.next_action.clone()
+    } else {
+        local_action.to_string()
+    };
+    (!action.trim().is_empty()).then_some(action)
+}
+
+fn thread_resolve_rebase_followup_operator(
+    source_repo: &Repository,
+    rebase_state_path: &Path,
+    thread_id: &str,
+) -> Result<OperatorCommandOutput> {
+    let rebase_state = super::rebase::load_persisted_rebase_state(rebase_state_path)?;
+    let current_state = source_repo
+        .current_state()?
+        .ok_or_else(|| anyhow!("Thread '{}' has no current state", thread_id))?;
+    let next_action = "heddle continue".to_string();
+    let mut blockers = Vec::new();
+    if rebase_state
+        .pre_conflict_head.is_none_or(|head| head == current_state.change_id)
+    {
+        blockers.push(
+            "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),
+        );
+    }
+
+    Ok(OperatorCommandOutput {
+        status: if blockers.is_empty() {
+            "completed".to_string()
+        } else {
+            "blocked".to_string()
+        },
+        action: "resolve".to_string(),
+        message: if blockers.is_empty() {
+            "Thread manual resolution recorded; continue the rebase".to_string()
+        } else {
+            "Thread still requires a manual rebase resolution".to_string()
+        },
+        blockers,
+        warnings: Vec::new(),
+        next_action: Some(next_action.clone()),
+        recommended_action: Some(next_action),
+    })
+}
+
+fn thread_resolve_conflict_recovery_operator(
+    source_repo: &Repository,
+    thread_id: &str,
+) -> Result<Option<OperatorCommandOutput>> {
+    if !source_repo.merge_state_manager().is_merge_in_progress() {
+        return Ok(None);
+    }
+    let unresolved = source_repo.merge_state_manager().unresolved()?;
+    let repo_arg = shell_quote(&source_repo.root().display().to_string());
+    let conflict_list_command = format!("heddle --repo {repo_arg} conflict list");
+    let recommended_action = unresolved
+        .first()
+        .map(|path| format!("heddle --repo {repo_arg} resolve {}", shell_quote(path)))
+        .unwrap_or_else(|| format!("heddle --repo {repo_arg} continue"));
+    let blockers = if unresolved.is_empty() {
+        Vec::new()
+    } else {
+        unresolved
+            .iter()
+            .map(|path| format!("Resolve conflict marker path: {path}"))
+            .collect()
+    };
+    Ok(Some(OperatorCommandOutput {
+        status: "blocked".to_string(),
+        action: "resolve".to_string(),
+        message: format!(
+            "Thread '{thread_id}' has conflict markers in its checkout; resolve them there, then continue"
+        ),
+        blockers,
+        warnings: Vec::new(),
+        next_action: Some(conflict_list_command),
+        recommended_action: Some(recommended_action),
+    }))
+}
+
+fn thread_resolve_refresh_operator(
+    thread_id: &str,
+    trust: &RepositoryVerificationState,
+) -> OperatorCommandOutput {
+    let ship_command = ship_command_with_push_target(thread_id, trust.default_remote.is_some());
+    if trust.verified {
+        return OperatorCommandOutput {
+            status: "synced".to_string(),
+            action: "resolve".to_string(),
+            message: "Thread refreshed cleanly".to_string(),
+            blockers: Vec::new(),
+            warnings: Vec::new(),
+            next_action: Some(ship_command.clone()),
+            recommended_action: Some(ship_command),
+        };
+    }
+
+    OperatorCommandOutput::blocked_by_repository_verification(
+        "resolve",
+        format!(
+            "Thread refreshed cleanly, but repository verification is blocked: {}",
+            trust.summary
+        ),
+        trust,
+    )
+}
+
+fn no_paths_matched_advice(
+    action: &'static str,
+    error: &'static str,
+    unsafe_condition: &'static str,
+    would_change: &'static str,
+    primary_command: &'static str,
+) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "no_paths_matched",
+        error,
+        format!(
+            "Inspect available paths with `{primary_command}`, then retry `{action}` with a matching prefix."
+        ),
+        unsafe_condition,
+        would_change,
+        "repository state was left unchanged",
+        primary_command,
+        vec![primary_command.to_string()],
     )
 }
 
@@ -551,14 +764,215 @@ fn emit_thread_resolve(cli: &Cli, output: &ThreadResolveOutput) -> Result<()> {
                 println!("  - {}", style::warn(blocker));
             }
         }
+        if !output.operator.warnings.is_empty() {
+            println!("{}", style::warn("Reviewed:"));
+            for warning in &output.operator.warnings {
+                println!("  - {}", style::warn(warning));
+            }
+        }
         if let Some(next) = output
             .operator
             .recommended_action
             .as_ref()
             .or(output.operator.next_action.as_ref())
         {
-            println!("Next: {}", style::bold(next));
+            print_next(next);
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::commands::git_overlay_health::VerificationCheck;
+
+    fn trust_state(verified: bool) -> RepositoryVerificationState {
+        let check = VerificationCheck {
+            name: "Mapping".to_string(),
+            status: if verified { "clean" } else { "needs_import" }.to_string(),
+            clean: verified,
+            summary: if verified {
+                "Git/Heddle mapping is clean"
+            } else {
+                "active Git branch has not been imported"
+            }
+            .to_string(),
+            recommended_action: (!verified).then(|| "heddle adopt --ref main".to_string()),
+            recommended_action_argv: (!verified).then(|| {
+                vec![
+                    "heddle".to_string(),
+                    "adopt".to_string(),
+                    "--ref".to_string(),
+                    "main".to_string(),
+                ]
+            }),
+            recommended_action_template: None,
+            recovery_commands: if verified {
+                Vec::new()
+            } else {
+                vec!["heddle adopt --ref main".to_string()]
+            },
+            recovery_command_argv: if verified {
+                Vec::new()
+            } else {
+                vec![vec![
+                    "heddle".to_string(),
+                    "adopt".to_string(),
+                    "--ref".to_string(),
+                    "main".to_string(),
+                ]]
+            },
+            recovery_action_templates: Vec::new(),
+            details: std::collections::BTreeMap::new(),
+        };
+        let machine_contract_coverage =
+            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+        RepositoryVerificationState {
+            verified,
+            status: if verified { "clean" } else { "needs_import" }.to_string(),
+            repository_mode: "git-overlay".to_string(),
+            heddle_initialized: true,
+            git_branch: Some("main".to_string()),
+            heddle_thread: Some("main".to_string()),
+            worktree_dirty: false,
+            worktree_state: "clean".to_string(),
+            import_state: check.status.clone(),
+            mapping_state: check.status.clone(),
+            remote_drift: "clean".to_string(),
+            active_operation: None,
+            default_remote: None,
+            clone_verification: "not_applicable".to_string(),
+            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+                &machine_contract_coverage,
+            )
+            .to_string(),
+            machine_contract_coverage,
+            summary: check.summary.clone(),
+            workflow_status: "clean".to_string(),
+            workflow_summary: "no workflow attention needed".to_string(),
+            recommended_action: check.recommended_action.clone().unwrap_or_default(),
+            recommended_action_argv: check.recommended_action_argv.clone(),
+            recommended_action_template: check.recommended_action_template.clone(),
+            recovery_commands: check.recovery_commands.clone(),
+            recovery_command_argv: check.recovery_command_argv.clone(),
+            recovery_action_templates: check.recovery_action_templates.clone(),
+            checks: vec![check],
+        }
+    }
+
+    #[test]
+    fn thread_resolve_reports_synced_only_when_repository_verification_is_clean() {
+        let clean = thread_resolve_refresh_operator("feature/clean", &trust_state(true));
+        assert_eq!(clean.status, "synced");
+        assert_eq!(
+            clean.recommended_action.as_deref(),
+            Some("heddle ship --thread feature/clean --no-push")
+        );
+
+        let blocked = thread_resolve_refresh_operator("feature/blocked", &trust_state(false));
+        assert_eq!(blocked.status, "blocked");
+        assert!(
+            blocked
+                .message
+                .contains("repository verification is blocked"),
+            "blocked message should name verification, got: {}",
+            blocked.message
+        );
+        assert_eq!(
+            blocked.recommended_action.as_deref(),
+            Some("heddle adopt --ref main")
+        );
+        assert!(
+            blocked
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("active Git branch has not been imported")),
+            "verification blocker should be surfaced: {:?}",
+            blocked.blockers
+        );
+    }
+
+    #[test]
+    fn thread_resolve_blockers_keep_local_recovery_ahead_of_remote_push() {
+        let blockers = vec!["Thread still has merge conflicts".to_string()];
+        let remote = GitRemoteTrackingStatus {
+            branch: "main".to_string(),
+            upstream: "origin/main".to_string(),
+            ahead: 1,
+            behind: 0,
+            local_oid: None,
+            upstream_oid: None,
+            upstream_is_undone_checkpoint: false,
+            message: "branch is ahead".to_string(),
+            next_action: "heddle push".to_string(),
+        };
+
+        let action = thread_resolve_next_action(
+            &blockers,
+            None,
+            Some(&remote),
+            None,
+            "heddle merge feature/conflict --preview",
+        );
+
+        assert_eq!(
+            action.as_deref(),
+            Some("heddle merge feature/conflict --preview")
+        );
+    }
+
+    #[test]
+    fn thread_resolve_clean_state_can_surface_remote_push() {
+        let remote = GitRemoteTrackingStatus {
+            branch: "main".to_string(),
+            upstream: "origin/main".to_string(),
+            ahead: 1,
+            behind: 0,
+            local_oid: None,
+            upstream_oid: None,
+            upstream_is_undone_checkpoint: false,
+            message: "branch is ahead".to_string(),
+            next_action: "heddle push".to_string(),
+        };
+
+        let action =
+            thread_resolve_next_action(&[], None, Some(&remote), None, "heddle ship --thread x");
+
+        assert_eq!(action.as_deref(), Some("heddle push"));
+    }
+
+    #[test]
+    fn empty_path_movement_refusals_use_typed_advice() {
+        let split = no_paths_matched_advice(
+            "capture split",
+            "No dirty paths matched the requested split prefixes",
+            "the worktree has no dirty paths under the requested prefixes",
+            "capture --split would not move any work into the target thread",
+            "heddle status",
+        );
+        assert_eq!(split.kind, "no_paths_matched");
+        assert_eq!(split.primary_command, "heddle status");
+        assert!(
+            split
+                .to_string()
+                .contains("Preserved: repository state was left unchanged"),
+            "display should keep the uniform advice surface: {split}"
+        );
+
+        let move_paths = no_paths_matched_advice(
+            "thread move",
+            "No captured paths matched the requested prefixes",
+            "the source thread has no captured paths under the requested prefixes",
+            "thread move would not move any captured files into the target thread",
+            "heddle thread show",
+        );
+        assert_eq!(move_paths.kind, "no_paths_matched");
+        assert_eq!(move_paths.primary_command, "heddle thread show");
+        assert!(
+            move_paths.primary_hint().contains("heddle thread show"),
+            "hint should name the inspection command: {}",
+            move_paths.primary_hint()
+        );
+    }
 }

@@ -36,12 +36,12 @@ pub use head::{Head, HeadParseError};
 pub use name::{RefNameError, validate_ref_name};
 pub use operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
 pub use packed_model::PackedRefsModel;
-pub use reftable_model::{ReftableError, ReftableModel};
 #[cfg(feature = "postgres")]
 pub use pg_refs::PgRefBackend;
 pub use ref_backend::RefBackend;
 pub use ref_summary_index::RefSummaryIndexInspection;
 pub use refs_manager::RefManager;
+pub use reftable_model::{ReftableError, ReftableModel};
 pub use resolve::resolve_refspec;
 pub use text::{ChangeIdTextError, format_change_id_text, parse_change_id_text};
 pub use types::{RefExpectation, RefUpdate};

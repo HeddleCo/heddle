@@ -144,15 +144,13 @@ impl ReftableModel {
 
         // Thread index — we need offsets, so build the block first into a
         // scratch buffer while recording each record's start offset.
-        let (thread_offsets, thread_block_bytes) =
-            encode_block(&self.threads, thread_block_start);
+        let (thread_offsets, thread_block_bytes) = encode_block(&self.threads, thread_block_start);
         for off in &thread_offsets {
             out.extend_from_slice(&off.to_le_bytes());
         }
         out.extend_from_slice(&thread_block_bytes);
 
-        let (marker_offsets, marker_block_bytes) =
-            encode_block(&self.markers, marker_block_start);
+        let (marker_offsets, marker_block_bytes) = encode_block(&self.markers, marker_block_start);
         for off in &marker_offsets {
             out.extend_from_slice(&off.to_le_bytes());
         }
@@ -168,12 +166,10 @@ impl ReftableModel {
         let (thread_count, marker_count) = parse_header(bytes)?;
         let thread_index_start = HEADER_LEN;
         let thread_block_start = thread_index_start + thread_count * 4;
-        let (threads, thread_block_end) =
-            decode_block(bytes, thread_block_start, thread_count)?;
+        let (threads, thread_block_end) = decode_block(bytes, thread_block_start, thread_count)?;
         let marker_index_start = thread_block_end;
         let marker_block_start = marker_index_start + marker_count * 4;
-        let (markers, marker_block_end) =
-            decode_block(bytes, marker_block_start, marker_count)?;
+        let (markers, marker_block_end) = decode_block(bytes, marker_block_start, marker_count)?;
 
         let footer_start = marker_block_end;
         if bytes.len() < footer_start + FOOTER_LEN {
@@ -204,7 +200,13 @@ impl ReftableModel {
         let (thread_count, marker_count) = parse_header(bytes)?;
         let thread_index_start = HEADER_LEN;
         let thread_block_start = thread_index_start + thread_count * 4;
-        let thread_block_end = thread_block_start + block_byte_len_from_index(bytes, thread_index_start, thread_count, thread_block_start)?;
+        let thread_block_end = thread_block_start
+            + block_byte_len_from_index(
+                bytes,
+                thread_index_start,
+                thread_count,
+                thread_block_start,
+            )?;
         let marker_index_start = thread_block_end;
         binary_search_block(bytes, marker_index_start, marker_count, name)
     }

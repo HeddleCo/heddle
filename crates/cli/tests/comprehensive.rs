@@ -67,6 +67,11 @@ fn heddle(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    // Heddle refuses captures without an accountable principal. Pin
+    // the identity here so the suite is deterministic regardless of
+    // the runner's git global config or shell env.
+    cmd.env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev");
 
     let output = cmd.output().map_err(|e| e.to_string())?;
     let stdout = str::from_utf8(&output.stdout).unwrap_or("").to_string();
@@ -85,7 +90,7 @@ fn heddle(args: &[&str], cwd: Option<&Path>) -> Result<String, String> {
 }
 
 fn status_json(path: &Path) -> Value {
-    let output = heddle(&["status", "--json"], Some(path)).unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(path)).unwrap();
     serde_json::from_str(&output).expect("status should return JSON")
 }
 
@@ -109,7 +114,17 @@ fn create_merge_conflict(temp: &TempDir) {
     fs::write(temp.path().join("file.txt"), "main content").unwrap();
     heddle(&["capture", "-m", "Main commit"], Some(temp.path())).unwrap();
 
-    heddle(&["merge", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    let refresh = heddle(
+        &["--output", "json", "thread", "refresh", "feature"],
+        Some(temp.path()),
+    );
+    assert!(
+        refresh
+            .as_ref()
+            .is_err_and(|err| err.contains("thread_refresh_conflicted")),
+        "refresh should create a durable conflict state: {refresh:?}"
+    );
 }
 
 fn assert_exists(path: impl AsRef<Path>, msg: &str) {

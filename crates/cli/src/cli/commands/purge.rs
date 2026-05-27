@@ -11,6 +11,7 @@ use objects::object::ChangeId;
 use repo::Repository;
 use serde::Serialize;
 
+use super::advice::RecoveryAdvice;
 use crate::{
     cli::{Cli, PurgeApplyArgs, PurgeCommands, PurgeListArgs, should_output_json},
     config::UserConfig,
@@ -55,12 +56,24 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
         .with_context(|| "resolve current principal")?;
 
     if !args.force {
-        return Err(anyhow!(
-            "purge is irreversible — re-run with `--force` to remove the bytes for blob {} ({}) in state {}",
-            blob.short(),
-            args.path,
+        let force_command = format!(
+            "heddle purge apply {} --path {} --force",
             state.short(),
-        ));
+            args.path
+        );
+        return Err(anyhow!(RecoveryAdvice::destructive_requires_force(
+            "purge",
+            format!(
+                "purge is irreversible for blob {} ({}) in state {}",
+                blob.short(),
+                args.path,
+                state.short()
+            ),
+            "purge removes local blob bytes referenced by an existing redaction",
+            "heddle redact list",
+            force_command,
+            "nothing was removed; the redaction record and blob bytes were left untouched",
+        )));
     }
 
     let outcome = repo.purge_blob(&blob, &principal)?;
@@ -115,7 +128,7 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
 
 fn cmd_purge_list(cli: &Cli, repo: &Repository, _args: PurgeListArgs) -> Result<()> {
     // List every redaction in the repo that's been purged. The
-    // companion view in the oplog (`heddle log --json` filtered to
+    // companion view in the oplog (`heddle log --output json` filtered to
     // `OpRecord::Purge`) covers the audit trail; this surface is the
     // "which blobs are purged right now" view.
     let listing = repo.list_all_redactions()?;

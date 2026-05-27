@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::fs;
 
-use objects::object::ChangeId;
+use objects::object::{ChangeId, ThreadName};
 use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
@@ -28,7 +28,7 @@ fn test_init_creates_structure() {
     assert!(temp_dir.path().join(".heddle/objects/trees").exists());
     assert!(temp_dir.path().join(".heddle/objects/states").exists());
     let root_state = repo.head().unwrap().expect("init should seed main state");
-    assert_eq!(repo.refs().get_thread("main").unwrap(), Some(root_state));
+    assert_eq!(repo.refs().get_thread(&ThreadName::new("main")).unwrap(), Some(root_state));
     let state = repo.store().get_state(&root_state).unwrap().unwrap();
     assert!(state.parents.is_empty());
     let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
@@ -481,6 +481,30 @@ fn test_compare_worktree_cached_marks_clean_symlink_index_entry_fresh() {
 
 #[test]
 #[cfg(unix)]
+fn test_compare_worktree_cached_marks_retargeted_symlink_modified() {
+    let (temp_dir, repo) = create_test_repo();
+
+    fs::write(temp_dir.path().join("old.txt"), "old content").unwrap();
+    fs::write(temp_dir.path().join("new.txt"), "new content").unwrap();
+    std::os::unix::fs::symlink("old.txt", temp_dir.path().join("link")).unwrap();
+
+    let state = repo.snapshot(Some("initial".to_string()), None).unwrap();
+    let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+
+    fs::remove_file(temp_dir.path().join("link")).unwrap();
+    std::os::unix::fs::symlink("new.txt", temp_dir.path().join("link")).unwrap();
+
+    let status = repo.compare_worktree_cached(&tree).unwrap();
+    assert_eq!(status.modified, vec![std::path::PathBuf::from("link")]);
+    assert!(
+        status.added.is_empty(),
+        "retargeting a tracked symlink must not classify it as added"
+    );
+    assert!(status.deleted.is_empty());
+}
+
+#[test]
+#[cfg(unix)]
 fn test_materialize_tree_creates_symlinks() {
     let (temp_dir, repo) = create_test_repo();
 
@@ -926,10 +950,10 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
     // Repo::init_default attaches HEAD to "main"; explicitly rewind the
     // thread ref to state1 so a fast-forward to state2 is meaningful.
     let state1 = repo.head().unwrap().expect("base state should exist");
-    repo.refs().set_thread("main", &state1).unwrap();
+    repo.refs().set_thread(&ThreadName::new("main"), &state1).unwrap();
     repo.refs()
         .write_head(&Head::Attached {
-            thread: "main".to_string(),
+            thread: ThreadName::new("main"),
         })
         .unwrap();
 
@@ -937,7 +961,7 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
 
     // Thread ref must advance to the target.
     assert_eq!(
-        repo.refs().get_thread("main").unwrap(),
+        repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
         Some(state2.change_id),
         "main ref must advance to fast-forward target"
     );
@@ -1002,14 +1026,10 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
 #[test]
 fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     let temp_dir = TempDir::new().unwrap();
-    // Fake a minimal git-overlay layout: just `.git/HEAD` pointing at a
-    // branch ref. `has_git_metadata` flips capability to GitOverlay; the
-    // open-time sync reads this file via `detect_git_head_fast`.
-    let git_dir = temp_dir.path().join(".git");
-    fs::create_dir_all(&git_dir).unwrap();
-    fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    gix::init(temp_dir.path()).expect("init real git repository");
 
     let repo = Repository::init_default(temp_dir.path()).unwrap();
+    assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
     fs::write(temp_dir.path().join("a.txt"), "version 1").unwrap();
     let state1 = repo.snapshot(Some("v1".to_string()), None).unwrap();
@@ -1316,9 +1336,7 @@ mod blob_hydrator_callback {
     fn require_blob_uses_factory_registered_hydrator_after_reopen() {
         use std::path::Path;
 
-        use crate::lazy_hydrator::{
-            HydratorSection, LazyHydratorConfig, register_factory,
-        };
+        use crate::lazy_hydrator::{HydratorSection, LazyHydratorConfig, register_factory};
 
         // Test-isolated kind name — does not collide with the production
         // "git-overlay" / "hosted" kinds that other tests / CLI startup
@@ -1356,9 +1374,7 @@ mod blob_hydrator_callback {
         register_factory(
             KIND,
             Arc::new(
-                move |_root: &Path,
-                      _section: &HydratorSection|
-                      -> Result<Arc<dyn BlobHydrator>> {
+                move |_root: &Path, _section: &HydratorSection| -> Result<Arc<dyn BlobHydrator>> {
                     let bytes = payload_for_factory.clone();
                     let calls = Arc::new(AtomicUsize::new(0));
                     let calls_for_hydrator = Arc::clone(&calls);
@@ -1393,9 +1409,7 @@ mod blob_hydrator_callback {
         register_factory(
             KIND,
             Arc::new(
-                move |_root: &Path,
-                      _section: &HydratorSection|
-                      -> Result<Arc<dyn BlobHydrator>> {
+                move |_root: &Path, _section: &HydratorSection| -> Result<Arc<dyn BlobHydrator>> {
                     let bytes = payload2_for_factory.clone();
                     Ok(Arc::new(InlineHydrator {
                         bytes,
@@ -1480,7 +1494,10 @@ mod require_tree_callback {
             .expect_err("require_tree must error when the tree is absent from the store");
         match err {
             HeddleError::MissingObject { object_type, id } => {
-                assert_eq!(object_type, "tree", "object_type must distinguish tree from blob");
+                assert_eq!(
+                    object_type, "tree",
+                    "object_type must distinguish tree from blob"
+                );
                 assert_eq!(
                     id,
                     hash.to_hex(),

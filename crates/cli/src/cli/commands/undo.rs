@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Undo and redo commands.
 
-use std::collections::HashSet;
-
 use anyhow::{Result, anyhow};
-use objects::object::{ChangeId, ContentHash, Tree};
+use objects::object::{ChangeId, ContentHash};
 use oplog::{OpBatch, OpRecord};
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
 
 use super::{
-    undo_apply::{apply_redo_batch, apply_undo_batch},
+    action_line::print_next,
+    advice::RecoveryAdvice,
+    command_catalog::{ActionFields, ActionTemplate},
+    git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    undo_apply::{
+        apply_redo_batch, apply_undo_batch, preflight_redo_batches, preflight_undo_batches,
+    },
     worktree_safety::ensure_worktree_clean,
 };
-use crate::cli::{Cli, should_output_json};
+use crate::cli::{Cli, should_output_json, style};
 
 #[derive(Serialize)]
 struct OpListOutput {
+    output_kind: &'static str,
     batches: Vec<OpBatchOutput>,
 }
 
@@ -39,9 +44,21 @@ struct OpListEntry {
 
 #[derive(Serialize)]
 struct UndoRedoOutput {
+    output_kind: &'static str,
+    status: &'static str,
     action: String,
     message: String,
     batches: Vec<OpBatchOutput>,
+    next_action: Option<String>,
+    next_action_argv: Option<Vec<String>>,
+    next_action_template: Option<ActionTemplate>,
+    recommended_action: Option<String>,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<ActionTemplate>,
+    #[serde(skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "verification")]
+    trust: Option<RepositoryVerificationState>,
 }
 
 pub fn cmd_undo(
@@ -55,24 +72,27 @@ pub fn cmd_undo(
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
 
     if list && preview {
-        return Err(anyhow!("Use either --list or --preview, not both"));
+        return Err(anyhow!(undo_mode_conflict_advice()));
     }
 
     if list {
         let scope = repo.op_scope();
         let batches = repo.oplog().recent_batches_scoped(depth, Some(&scope))?;
         let output = OpListOutput {
+            output_kind: "undo_list",
             batches: batches.iter().map(build_batch_output).collect(),
         };
 
         if should_output_json(cli, Some(repo.config())) {
             println!("{}", serde_json::to_string(&output)?);
         } else {
-            println!("Recent operation batches (showing up to {}):", depth);
+            println!("Recent undo history (showing up to {}):", depth);
             if output.batches.is_empty() {
-                println!("  No operations");
-            } else {
+                println!("  No saved changes to undo");
+            } else if cli.verbose > 0 {
                 print_batches(&output.batches);
+            } else {
+                print_human_history(&output.batches);
             }
         }
 
@@ -83,37 +103,21 @@ pub fn cmd_undo(
     let batches = repo.oplog().undo_batches_scoped(steps, Some(&scope))?;
 
     if batches.is_empty() {
-        return Err(anyhow!("Nothing to undo"));
+        return Err(anyhow!(empty_history_advice("undo", "undo")));
     }
 
-    // Run the redaction safety pre-flight before the `--preview`
-    // short-circuit so preview output is honest about refusals. A
-    // `Redact` without `--allow-redact-undo`, or any batch that crosses
-    // a `Purge`, must surface the same error here that the real undo
-    // would surface — otherwise `--preview` advertises "Would undo …"
-    // for a chain the real command would reject. The other pre-flights
-    // (`ensure_worktree_clean`, `ensure_undo_states_reachable`) stay
-    // post-preview: dirty worktree and gc-pruned states are conditions
-    // operators expect `--preview` to ignore.
+    // Run safety pre-flights before the `--preview` short-circuit so
+    // preview output is honest about refusals. Preview must not
+    // advertise "Would undo …" for a chain the real command would
+    // reject.
     ensure_redaction_undo_safe(&repo, &batches, allow_redact_undo)?;
-    // Cross-thread safety: refuse to undo a `ThreadCreate` whose
-    // ThreadManager record still has a materialized worktree on disk.
-    // The inverse only deletes the ref, so silently proceeding would
-    // leave the worktree directory orphaned with a broken `.heddle/HEAD`
-    // and a phantom ThreadManager record. Pre-preview for the same
-    // honesty reason as the redaction gate.
     ensure_thread_worktree_undo_safe(&repo, &batches)?;
-    // heddle#198: a rebase batch's inverse restores the thread tip to
-    // its pre-rebase state. If any blob reachable from that tree has
-    // been purged since (Redact + Purge), the rewind would land the
-    // worktree on a tip whose next `materialize` fails with a
-    // missing-blob error. Refuse pre-mutation with a message naming
-    // the affected blob — same fail-loud discipline as the Redact
-    // path's purge gate in `ensure_redaction_undo_safe`.
-    ensure_rebase_undo_safe(&repo, &batches)?;
+    preflight_undo_execution(&repo, &batches)?;
 
     if preview {
         let output = UndoRedoOutput {
+            output_kind: "undo",
+            status: "preview",
             action: "undo".to_string(),
             message: format!(
                 "Would undo {} batch{}",
@@ -121,25 +125,31 @@ pub fn cmd_undo(
                 if batches.len() == 1 { "" } else { "es" }
             ),
             batches: batches.iter().map(build_batch_output).collect(),
+            next_action: None,
+            next_action_argv: None,
+            next_action_template: None,
+            recommended_action: None,
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            trust: None,
         };
 
         if should_output_json(cli, Some(repo.config())) {
             println!("{}", serde_json::to_string(&output)?);
         } else {
-            println!("{}", output.message);
-            print_batches(&output.batches);
+            println!(
+                "{}",
+                human_undo_redo_message("undo", output.batches.len(), true)
+            );
+            if cli.verbose > 0 {
+                print_batches(&output.batches);
+            } else {
+                print_human_history(&output.batches);
+            }
         }
 
         return Ok(());
     }
-
-    ensure_worktree_clean(&repo, "undo")?;
-    // Refuse before mutating anything when a state the batch needs to
-    // restore is missing from the object store — typically because `gc
-    // --prune` or a truncated oplog has reached past the live window.
-    // Letting `apply_undo_batch` discover this mid-apply would leave the
-    // repo half-undone (worktree partially rewritten, batch not marked).
-    ensure_undo_states_reachable(&repo, &batches)?;
 
     let mut updated_batches = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -147,7 +157,12 @@ pub fn cmd_undo(
         updated_batches.push(repo.oplog().mark_batch_undone(&batch)?);
     }
 
+    let post_undo_repo = Repository::open(repo.root())?;
+    let post_undo_trust = build_repository_verification_state(&post_undo_repo);
+    let recommended_action = ActionFields::from_action(&post_undo_trust.recommended_action);
     let output = UndoRedoOutput {
+        output_kind: "undo",
+        status: "completed",
         action: "undo".to_string(),
         message: format!(
             "Undone {} batch{}",
@@ -155,14 +170,31 @@ pub fn cmd_undo(
             if updated_batches.len() == 1 { "" } else { "es" }
         ),
         batches: updated_batches.iter().map(build_batch_output).collect(),
+        next_action: recommended_action.action.clone(),
+        next_action_argv: recommended_action.argv.clone(),
+        next_action_template: recommended_action.template.clone(),
+        recommended_action: recommended_action.action,
+        recommended_action_argv: recommended_action.argv,
+        recommended_action_template: recommended_action.template,
+        trust: Some(post_undo_trust),
     };
 
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("{}", output.message);
-        print_batches(&output.batches);
-        print_head(&repo)?;
+        println!(
+            "{}",
+            human_undo_redo_message("undo", output.batches.len(), false)
+        );
+        if cli.verbose > 0 {
+            print_batches(&output.batches);
+        } else {
+            print_human_history(&output.batches);
+        }
+        print_head(&post_undo_repo)?;
+        if let Some(trust) = &output.trust {
+            print_post_undo_trust(trust);
+        }
     }
 
     Ok(())
@@ -175,7 +207,7 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     let batches = repo.oplog().redo_batches_scoped(steps, Some(&scope))?;
 
     if batches.is_empty() {
-        return Err(anyhow!("Nothing to redo"));
+        return Err(anyhow!(empty_history_advice("redo", "redo")));
     }
 
     // Same preview-honesty rule as `cmd_undo`: run pre-flight refusals
@@ -187,6 +219,8 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
 
     if preview {
         let output = UndoRedoOutput {
+            output_kind: "redo",
+            status: "preview",
             action: "redo".to_string(),
             message: format!(
                 "Would redo {} batch{}",
@@ -194,19 +228,34 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
                 if batches.len() == 1 { "" } else { "es" }
             ),
             batches: batches.iter().map(build_batch_output).collect(),
+            next_action: None,
+            next_action_argv: None,
+            next_action_template: None,
+            recommended_action: None,
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            trust: None,
         };
 
         if should_output_json(cli, Some(repo.config())) {
             println!("{}", serde_json::to_string(&output)?);
         } else {
-            println!("{}", output.message);
-            print_batches(&output.batches);
+            println!(
+                "{}",
+                human_undo_redo_message("redo", output.batches.len(), true)
+            );
+            if cli.verbose > 0 {
+                print_batches(&output.batches);
+            } else {
+                print_human_history(&output.batches);
+            }
         }
 
         return Ok(());
     }
 
     ensure_worktree_clean(&repo, "redo")?;
+    preflight_redo_batches(&repo, &batches)?;
 
     let mut updated_batches = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -214,7 +263,11 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         updated_batches.push(repo.oplog().mark_batch_redone(&batch)?);
     }
 
+    let post_redo_trust = build_repository_verification_state(&repo);
+    let recommended_action = ActionFields::from_action(&post_redo_trust.recommended_action);
     let output = UndoRedoOutput {
+        output_kind: "redo",
+        status: "completed",
         action: "redo".to_string(),
         message: format!(
             "Redone {} batch{}",
@@ -222,17 +275,65 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
             if updated_batches.len() == 1 { "" } else { "es" }
         ),
         batches: updated_batches.iter().map(build_batch_output).collect(),
+        next_action: recommended_action.action.clone(),
+        next_action_argv: recommended_action.argv.clone(),
+        next_action_template: recommended_action.template.clone(),
+        recommended_action: recommended_action.action,
+        recommended_action_argv: recommended_action.argv,
+        recommended_action_template: recommended_action.template,
+        trust: Some(post_redo_trust),
     };
 
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        println!("{}", output.message);
-        print_batches(&output.batches);
+        println!(
+            "{}",
+            human_undo_redo_message("redo", output.batches.len(), false)
+        );
+        if cli.verbose > 0 {
+            print_batches(&output.batches);
+        } else {
+            print_human_history(&output.batches);
+        }
         print_head(&repo)?;
     }
 
     Ok(())
+}
+
+fn undo_mode_conflict_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "undo_mode_conflict",
+        "Use either --list or --preview, not both",
+        "Run `heddle undo --list` to inspect history, or `heddle undo --preview` to preview the next undo.",
+        "--list and --preview are mutually exclusive undo modes",
+        "combining them would make the command output ambiguous between history listing and undo preview",
+        "repository state was left unchanged",
+        "heddle undo --list",
+        vec![
+            "heddle undo --list".to_string(),
+            "heddle undo --preview".to_string(),
+        ],
+    )
+}
+
+fn empty_history_advice(action: &str, noun: &str) -> RecoveryAdvice {
+    let kind = if action == "undo" {
+        "nothing_to_undo"
+    } else {
+        "nothing_to_redo"
+    };
+    RecoveryAdvice::safety_refusal(
+        kind,
+        format!("Nothing to {action}"),
+        "Inspect recent undo history with `heddle undo --list`.",
+        format!("there are no {noun} entries in the current checkout lane"),
+        format!("{action} would need to move Heddle and Git state, but no eligible batch exists"),
+        "repository state was left unchanged",
+        "heddle undo --list",
+        vec!["heddle undo --list".to_string()],
+    )
 }
 
 fn build_batch_output(batch: &OpBatch) -> OpBatchOutput {
@@ -273,6 +374,51 @@ fn format_timestamp(timestamp: chrono::DateTime<chrono::Utc>) -> String {
     timestamp.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+fn human_undo_redo_message(action: &str, count: usize, preview: bool) -> String {
+    let noun = if count == 1 {
+        "saved change"
+    } else {
+        "saved changes"
+    };
+    let verb = match (action, preview) {
+        ("undo", true) => "Would undo",
+        ("undo", false) => "Undid",
+        ("redo", true) => "Would redo",
+        ("redo", false) => "Redid",
+        _ if preview => "Would apply",
+        _ => "Applied",
+    };
+    format!("{verb} {count} {noun}")
+}
+
+fn print_human_history(batches: &[OpBatchOutput]) {
+    for batch in batches {
+        let status = if batch.undone {
+            " undone"
+        } else if batch.partial {
+            " partial"
+        } else {
+            ""
+        };
+        println!("  {}{}", style::dim(&batch.timestamp), style::dim(status));
+        for entry in &batch.operations {
+            let entry_status = if entry.undone { " (undone)" } else { "" };
+            println!(
+                "    - {}{}",
+                human_operation_description(&entry.description),
+                style::dim(entry_status)
+            );
+        }
+    }
+}
+
+fn human_operation_description(description: &str) -> String {
+    if description.starts_with("git checkpoint ") {
+        return "Git commit written".to_string();
+    }
+    description.to_string()
+}
+
 fn print_batches(batches: &[OpBatchOutput]) {
     for batch in batches {
         let status = if batch.undone {
@@ -307,6 +453,66 @@ fn print_head(repo: &Repository) -> Result<()> {
     Ok(())
 }
 
+fn print_post_undo_trust(trust: &RepositoryVerificationState) {
+    println!("Verification: {}", human_post_undo_trust_status(trust));
+    if !trust.recommended_action.trim().is_empty() {
+        print_next(&trust.recommended_action);
+    }
+}
+
+fn human_post_undo_trust_status(trust: &RepositoryVerificationState) -> String {
+    if matches!(trust.status.as_str(), "dirty_worktree" | "uncaptured") {
+        "changes to save".to_string()
+    } else {
+        trust.status.clone()
+    }
+}
+
+fn preflight_undo_execution(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
+    ensure_no_active_operation(repo, "undo")?;
+    ensure_worktree_clean(repo, "undo")?;
+    // Refuse before mutating anything when a state the batch needs to
+    // restore is missing from the object store — typically because `gc
+    // --prune` or a truncated oplog has reached past the live window.
+    // Letting `apply_undo_batch` discover this mid-apply would leave the
+    // repo half-undone (worktree partially rewritten, batch not marked).
+    ensure_undo_states_reachable(repo, batches)?;
+    preflight_undo_batches(repo, batches)
+}
+
+fn ensure_no_active_operation(repo: &Repository, action: &str) -> Result<()> {
+    let Some(operation) = repo.operation_status()? else {
+        return Ok(());
+    };
+    let primary_command = operation.next_action.clone();
+    let mut recovery_commands = vec![primary_command.clone()];
+    if !recovery_commands
+        .iter()
+        .any(|command| command == "heddle abort")
+    {
+        recovery_commands.push("heddle abort".to_string());
+    }
+    if !recovery_commands
+        .iter()
+        .any(|command| command == "heddle verify")
+    {
+        recovery_commands.push("heddle verify".to_string());
+    }
+    Err(anyhow!(RecoveryAdvice::safety_refusal(
+        "operation_in_progress",
+        format!("Refusing to {action}: {}", operation.message),
+        format!("Finish or abort the active operation with `{primary_command}` before retrying."),
+        format!(
+            "{} {} is {}",
+            operation.scope, operation.kind, operation.state
+        ),
+        format!("{action} would move repository state while an operation still owns the checkout"),
+        "no undo mutation was applied",
+        primary_command,
+        recovery_commands,
+    )))
+}
+
 /// Walk every batch we're about to undo and verify that each state the
 /// inverse would restore is still present in the object store. If any state
 /// is missing we refuse before touching the worktree or marking batches
@@ -336,12 +542,19 @@ fn ensure_undo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
         .iter()
         .map(|(op_id, id)| format!("op {} -> {}", op_id, id.short()))
         .collect();
-    Err(anyhow!(
-        "Refusing to undo: prior state(s) needed to restore have been garbage-collected or are otherwise missing from the object store ({}). \
-         A destructive boundary (likely `heddle gc --prune`) has been crossed past the live oplog window — \
-         undo cannot rewind here. Restore the missing states from a backup, or run `heddle undo --list` and pick an entry past the boundary.",
-        shorts.join(", "),
-    ))
+    Err(anyhow!(RecoveryAdvice::safety_refusal(
+        "undo_state_missing",
+        format!(
+            "Refusing to undo: prior state(s) needed to restore have been garbage-collected or are otherwise missing from the object store ({})",
+            shorts.join(", ")
+        ),
+        "Restore the missing states from a backup, or run `heddle undo --list` and pick an entry past the boundary.",
+        "a destructive boundary (likely `heddle gc --prune`) has been crossed past the live oplog window",
+        "undo cannot rewind here without the prior states",
+        "no undo mutation was applied",
+        "heddle undo --list",
+        vec!["heddle undo --list".to_string()],
+    )))
 }
 
 /// Identify the state IDs that an inverse for `op` would need to load.
@@ -398,12 +611,19 @@ fn ensure_redo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
         .iter()
         .map(|(op_id, id)| format!("op {} -> {}", op_id, id.short()))
         .collect();
-    Err(anyhow!(
-        "Refusing to redo: post-state(s) needed to replay have been garbage-collected or are otherwise missing from the object store ({}). \
-         A destructive boundary (likely `heddle gc --prune`) has been crossed past the live oplog window — \
-         redo cannot replay here. Restore the missing states from a backup, or re-run the original operation manually.",
-        shorts.join(", "),
-    ))
+    Err(anyhow!(RecoveryAdvice::safety_refusal(
+        "redo_state_missing",
+        format!(
+            "Refusing to redo: post-state(s) needed to replay have been garbage-collected or are otherwise missing from the object store ({})",
+            shorts.join(", ")
+        ),
+        "Restore the missing states from a backup, or re-run the original operation manually.",
+        "a destructive boundary (likely `heddle gc --prune`) has been crossed past the live oplog window",
+        "redo cannot replay here without the post-states",
+        "no redo mutation was applied",
+        "heddle log",
+        vec!["heddle log".to_string()],
+    )))
 }
 
 fn states_required_for_redo(op: &OpRecord) -> Vec<ChangeId> {
@@ -479,13 +699,19 @@ fn ensure_redaction_undo_safe(
                 format!("op {} (redaction {})", op_id, redaction_id.short())
             })
             .collect();
-        return Err(anyhow!(
-            "Refusing to undo: `heddle purge` is irreversible by design — the blob bytes have been \
-             physically removed from local storage and cannot be reconstructed. Affected op(s): {}. \
-             Restore the bytes from a backup if you need them, or run `heddle undo --list` and \
-             target an earlier op past the purge.",
-            shorts.join(", "),
-        ));
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "irreversible_purge_undo",
+            format!(
+                "Refusing to undo: `heddle purge` is irreversible by design — the blob bytes have been physically removed from local storage and cannot be reconstructed. Affected op(s): {}",
+                shorts.join(", ")
+            ),
+            "Restore the bytes from a backup if you need them, or run `heddle undo --list` and target an earlier op past the purge.",
+            "the undo chain contains purge operation(s) whose blob bytes are gone from local storage",
+            "undoing purge would claim to restore bytes Heddle no longer has",
+            "no undo mutation was applied",
+            "heddle undo --list",
+            vec!["heddle undo --list".to_string()],
+        )));
     }
 
     if redact_ops.is_empty() {
@@ -508,13 +734,22 @@ fn ensure_redaction_undo_safe(
             .iter()
             .map(|r| format!("op {} (blob {} at {})", r.op_id, r.blob.short(), r.path))
             .collect();
-        return Err(anyhow!(
-            "Refusing to undo: at least one redaction in this chain has had its bytes purged ({}). \
-             The redaction record is now the only audit trail that those bytes were destroyed; \
-             removing it would lie about local storage and a subsequent materialize would fail \
-             with a missing-blob error rather than restore content. Purge is irreversible.",
-            shorts.join(", "),
-        ));
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "redaction_bytes_purged",
+            format!(
+                "Refusing to undo: at least one redaction in this chain has had its bytes purged ({}). Purge is irreversible.",
+                shorts.join(", ")
+            ),
+            "Inspect redactions with `heddle redact list`; restore the bytes from backup before attempting a different recovery.",
+            "the redaction record is now the only audit trail that those bytes were destroyed",
+            "removing it would lie about local storage and a subsequent materialize would fail with a missing-blob error rather than restore content",
+            "no undo mutation was applied",
+            "heddle redact list",
+            vec![
+                "heddle redact list".to_string(),
+                "heddle undo --list".to_string()
+            ],
+        )));
     }
 
     if !allow_redact_undo {
@@ -522,12 +757,19 @@ fn ensure_redaction_undo_safe(
             .iter()
             .map(|r| format!("op {} (blob {} at {})", r.op_id, r.blob.short(), r.path))
             .collect();
-        return Err(anyhow!(
-            "Refusing to undo a `heddle redact apply`: the inverse removes the redaction record \
-             so subsequent materializes restore the original bytes, which would re-expose \
-             previously-hidden content. Pass `--allow-redact-undo` to confirm. Affected op(s): {}.",
-            shorts.join(", "),
-        ));
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "redaction_undo_requires_confirmation",
+            format!(
+                "Refusing to undo a `heddle redact apply`: the inverse removes the redaction record so subsequent materializes restore the original bytes, which would re-expose previously-hidden content. Affected op(s): {}",
+                shorts.join(", ")
+            ),
+            "Pass `--allow-redact-undo` to confirm.",
+            "undo would re-expose previously-hidden content",
+            "the redaction record would be removed and future materialization would restore the original bytes",
+            "no undo mutation was applied",
+            "heddle undo --allow-redact-undo",
+            vec!["heddle undo --allow-redact-undo".to_string()],
+        )));
     }
 
     Ok(())
@@ -557,149 +799,22 @@ fn ensure_redaction_redo_supported(batches: &[OpBatch]) -> Result<()> {
         .iter()
         .map(|(op_id, kind)| format!("op {} ({})", op_id, kind))
         .collect();
-    Err(anyhow!(
-        "Refusing to redo: `Redact` and `Purge` ops do not have a re-apply path — the oplog \
-         entry doesn't preserve the full Redaction record (reason, redactor, signature) needed \
-         to recreate it, and Purge is irreversible by design. Re-run `heddle redact apply` \
-         (or `heddle purge apply`) to re-establish the operation. Affected op(s): {}.",
-        shorts.join(", "),
-    ))
-}
-
-/// heddle#198 — Rebase-undo safety against a purge that crossed the
-/// rebase batch. The rebase inverse rewinds the attached thread to
-/// the earliest recorded `pre_target_id`. Materializing that tip
-/// requires every blob in its tree; if `Redact apply` + `Purge` have
-/// run on any of those blobs since the rebase, the bytes are gone
-/// and the rewind would surface a raw `missing blob` from inside
-/// `goto`. Refuse pre-mutation with a single message naming the
-/// blob and the rebase batch — mirrors the "Refused regardless of
-/// the flag when the underlying bytes have since been purged" rule
-/// the Redact inverse already enforces (docs/undo.md "Safety
-/// contracts").
-///
-/// Identification: a rebase batch is the one written by
-/// `rebase_ops::flush_rebase_batch` — its `TransactionCommit`
-/// envelope marker carries an id with prefix `"rebase-"`. Both the
-/// replay path and the FF arms (is_ancestor / empty-commits) flush
-/// through the same helper so the marker is uniform.
-fn ensure_rebase_undo_safe(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
-    let mut blocking: Vec<(u64, ChangeId, ContentHash)> = Vec::new();
-
-    for batch in batches {
-        if !is_rebase_batch(batch) {
-            continue;
-        }
-        // The earliest FF in the batch carries the pre-rebase tip
-        // (batch_index is monotonic; the replay loop appends in
-        // order). Materializing that tip needs every blob in its
-        // tree — that's the surface a purge can invalidate.
-        let Some(pre_target) = earliest_rebase_pre_target_id(batch) else {
-            continue;
-        };
-        let Some(tree) = load_tree_for_state(repo, &pre_target)? else {
-            // Pre-tip state already missing — `ensure_undo_states_reachable`
-            // surfaces that with the destructive-boundary message;
-            // don't double-report here.
-            continue;
-        };
-        let mut blobs: HashSet<ContentHash> = HashSet::new();
-        collect_tree_blobs(repo, &tree, &mut blobs)?;
-        for blob in &blobs {
-            let redactions = repo.get_redactions_for_blob(blob)?;
-            if redactions.redactions.iter().any(|r| r.is_purged()) {
-                blocking.push((batch.id, pre_target, *blob));
-                break; // one purged blob per batch is sufficient to refuse
-            }
-        }
-    }
-
-    if blocking.is_empty() {
-        return Ok(());
-    }
-
-    let shorts: Vec<String> = blocking
-        .iter()
-        .map(|(batch_id, pre_target, blob)| {
-            format!(
-                "rebase batch {} (pre-rebase tip {}, purged blob {})",
-                batch_id,
-                pre_target.short(),
-                blob.short()
-            )
-        })
-        .collect();
-    Err(anyhow!(
-        "Refusing to undo: at least one rebase in this chain rewinds to a tip whose tree \
-         references blobs that have since been purged ({}). The rewind would land the worktree \
-         on a state whose next `materialize` would fail with a missing-blob error rather than \
-         restore content. Purge is irreversible — restore the bytes from a backup or run \
-         `heddle undo --list` and target an op past the rebase.",
-        shorts.join(", "),
-    ))
-}
-
-/// A rebase batch is identified by its `TransactionCommit` marker
-/// (id prefix `"rebase-"`) — see `rebase_ops::flush_rebase_batch`.
-/// Pre-198 oplog entries did not flush a marker; they age out as the
-/// undo window slides forward. The check tolerates batches without
-/// the marker (treats them as non-rebase, no rebase-specific
-/// refusal applies).
-fn is_rebase_batch(batch: &OpBatch) -> bool {
-    batch.entries.iter().any(|entry| {
-        matches!(
-            &entry.operation,
-            OpRecord::TransactionCommit { transaction_id, .. }
-                if transaction_id.starts_with("rebase-")
-        )
-    })
-}
-
-fn earliest_rebase_pre_target_id(batch: &OpBatch) -> Option<ChangeId> {
-    // Entries are sorted by `batch_index` (see
-    // `PackedOpLog::collect_batches_scoped`), so the first advance arm
-    // we encounter carries the pre-rebase tip. Detached-mode rebases
-    // (heddle#198 r2 / Codex PR #218 P2) flush `OpRecord::Goto` rather
-    // than `FastForward*` — `ff_advance_deferred` falls back to it when
-    // there's no thread ref to FF — and their `prev_head` is the same
-    // pre-rebase tip a `pre_target_id` would name. Skip `Goto` entries
-    // without a `prev_head` (legacy or operator-issued goto with no
-    // recoverable previous state) and keep scanning.
-    batch.entries.iter().find_map(|entry| match &entry.operation {
-        OpRecord::FastForwardV2 { pre_target_id, .. } => Some(*pre_target_id),
-        OpRecord::FastForward { pre_target_id, .. } => Some(*pre_target_id),
-        OpRecord::Goto {
-            prev_head: Some(prev),
-            ..
-        } => Some(*prev),
-        _ => None,
-    })
-}
-
-fn load_tree_for_state(repo: &Repository, state: &ChangeId) -> Result<Option<Tree>> {
-    let Some(state_obj) = repo.store().get_state(state)? else {
-        return Ok(None);
-    };
-    Ok(repo.store().get_tree(&state_obj.tree)?)
-}
-
-fn collect_tree_blobs(
-    repo: &Repository,
-    tree: &Tree,
-    out: &mut HashSet<ContentHash>,
-) -> Result<()> {
-    for entry in tree.iter() {
-        if entry.is_blob() {
-            out.insert(entry.hash);
-            continue;
-        }
-        if entry.is_tree()
-            && let Some(subtree) = repo.store().get_tree(&entry.hash)?
-        {
-            collect_tree_blobs(repo, &subtree, out)?;
-        }
-    }
-    Ok(())
+    Err(anyhow!(RecoveryAdvice::safety_refusal(
+        "redaction_redo_unsupported",
+        format!(
+            "Refusing to redo: `Redact` and `Purge` ops do not have a re-apply path. Affected op(s): {}",
+            shorts.join(", ")
+        ),
+        "Re-run `heddle redact apply` (or `heddle purge apply`) to re-establish the operation.",
+        "the oplog entry doesn't preserve the full Redaction record (reason, redactor, signature) needed to recreate it, and Purge is irreversible by design",
+        "redo would invent redaction metadata or claim to recreate purged bytes",
+        "no redo mutation was applied",
+        "heddle redact apply",
+        vec![
+            "heddle redact apply".to_string(),
+            "heddle purge apply".to_string(),
+        ],
+    )))
 }
 
 /// Cross-thread undo safety: refuse to undo any `ThreadCreate` whose
@@ -728,8 +843,7 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
             // post-heddle#23-r2 creates record as V2. Both have the
             // same worktree-orphan hazard on undo.
             let name = match &entry.operation {
-                OpRecord::ThreadCreate { name, .. }
-                | OpRecord::ThreadCreateV2 { name, .. } => name,
+                OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => name,
                 _ => continue,
             };
             let Some(record) = manager.find_by_thread(name)? else {
@@ -759,170 +873,23 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
             )
         })
         .collect();
-    Err(anyhow!(
-        "Refusing to undo: at least one `thread create` in this chain has an attached \
-         materialized worktree that would be orphaned by the inverse ({}). The undo only \
-         removes the thread ref; the worktree directory and its `.heddle/HEAD` would be left \
-         pointing at a thread that no longer exists. Tear the worktree down first with \
-         `heddle thread drop <name> --delete-thread`, then re-run `heddle undo`.",
-        shorts.join(", "),
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use chrono::Utc;
-    use objects::object::Principal;
-    use oplog::OpEntry;
-
-    use super::*;
-
-    fn op_entry(id: u64, operation: OpRecord, batch_index: u32) -> OpEntry {
-        OpEntry {
-            id,
-            timestamp: Utc::now(),
-            operation,
-            undone: false,
-            batch_id: 1,
-            batch_index,
-            scope: None,
-            actor: Principal::new("Test", "test@example.com"),
-            operation_id: None,
-        }
-    }
-
-    fn rebase_txn_commit_entry(index: u32) -> OpEntry {
-        op_entry(
-            100 + u64::from(index),
-            OpRecord::TransactionCommit {
-                transaction_id: "rebase-1234567890".to_string(),
-                op_count: 1,
-            },
-            index,
-        )
-    }
-
-    /// heddle#198 r2 (Codex PR #218 P2): detached-mode rebase batches
-    /// carry `OpRecord::Goto` (no thread ref to FF), and the purge
-    /// safety scan must lift the pre-rebase tip from `prev_head` for
-    /// these entries. Pre-fix, the helper matched only `FastForward*`
-    /// arms and returned `None` for detached batches; the gate then
-    /// silently skipped them.
-    #[test]
-    fn earliest_rebase_pre_target_id_extracts_prev_head_from_goto() {
-        let pre = ChangeId::generate();
-        let post = ChangeId::generate();
-        let batch = OpBatch {
-            id: 1,
-            entries: vec![
-                op_entry(
-                    1,
-                    OpRecord::Goto {
-                        target: post,
-                        prev_head: Some(pre),
-                    },
-                    0,
-                ),
-                rebase_txn_commit_entry(1),
-            ],
-        };
-        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre));
-    }
-
-    /// The same helper must keep the existing `FastForwardV2` arm — a
-    /// regression here would silently break the attached-mode purge
-    /// scan that's already covered by the integration tests.
-    #[test]
-    fn earliest_rebase_pre_target_id_extracts_pre_target_from_fast_forward_v2() {
-        let pre = ChangeId::generate();
-        let post = ChangeId::generate();
-        let batch = OpBatch {
-            id: 2,
-            entries: vec![
-                op_entry(
-                    1,
-                    OpRecord::FastForwardV2 {
-                        source_thread: "<rebase>".to_string(),
-                        target_thread: "main".to_string(),
-                        pre_target_id: pre,
-                        post_target_id: post,
-                    },
-                    0,
-                ),
-                rebase_txn_commit_entry(1),
-            ],
-        };
-        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre));
-    }
-
-    /// When the first replayed-commit advance is a Goto and the second
-    /// is an FF, the earliest pre-target must come from the Goto. The
-    /// `batch_index` ordering (set by `PackedOpLog::collect_batches_scoped`)
-    /// is preserved by `entries`, so `find_map` walks oldest-first.
-    #[test]
-    fn earliest_rebase_pre_target_id_prefers_first_entry_when_mixed() {
-        let pre_goto = ChangeId::generate();
-        let mid = ChangeId::generate();
-        let post = ChangeId::generate();
-        let batch = OpBatch {
-            id: 3,
-            entries: vec![
-                op_entry(
-                    1,
-                    OpRecord::Goto {
-                        target: mid,
-                        prev_head: Some(pre_goto),
-                    },
-                    0,
-                ),
-                op_entry(
-                    2,
-                    OpRecord::FastForwardV2 {
-                        source_thread: "<rebase>".to_string(),
-                        target_thread: "main".to_string(),
-                        pre_target_id: mid,
-                        post_target_id: post,
-                    },
-                    1,
-                ),
-                rebase_txn_commit_entry(2),
-            ],
-        };
-        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre_goto));
-    }
-
-    /// A `Goto` without `prev_head` (legacy or operator-issued goto)
-    /// has nothing to rewind to and must skip past it rather than
-    /// surface a placeholder. The helper continues scanning for a
-    /// subsequent FF/Goto that does carry a pre-target.
-    #[test]
-    fn earliest_rebase_pre_target_id_skips_goto_without_prev_head() {
-        let pre = ChangeId::generate();
-        let post = ChangeId::generate();
-        let batch = OpBatch {
-            id: 4,
-            entries: vec![
-                op_entry(
-                    1,
-                    OpRecord::Goto {
-                        target: post,
-                        prev_head: None,
-                    },
-                    0,
-                ),
-                op_entry(
-                    2,
-                    OpRecord::FastForwardV2 {
-                        source_thread: "<rebase>".to_string(),
-                        target_thread: "main".to_string(),
-                        pre_target_id: pre,
-                        post_target_id: post,
-                    },
-                    1,
-                ),
-                rebase_txn_commit_entry(2),
-            ],
-        };
-        assert_eq!(earliest_rebase_pre_target_id(&batch), Some(pre));
-    }
+    let first_drop_command = blocking
+        .first()
+        .map(|(_, name, _)| format!("heddle thread drop {name} --delete-thread"))
+        .unwrap_or_else(|| "heddle undo --list".to_string());
+    Err(anyhow!(RecoveryAdvice::safety_refusal(
+        "thread_worktree_undo_unsafe",
+        format!(
+            "Refusing to undo: at least one `thread create` in this chain has an attached materialized worktree that would be orphaned by the inverse ({}).",
+            shorts.join(", ")
+        ),
+        format!(
+            "Tear the first worktree down with `{first_drop_command}`, then re-run `heddle undo`."
+        ),
+        "undo chain includes thread create operation(s) whose materialized worktrees still exist",
+        "undo would remove thread refs while leaving worktree directories and `.heddle/HEAD` pointing at missing threads",
+        "no undo mutation was applied",
+        first_drop_command.clone(),
+        vec![first_drop_command, "heddle undo --list".to_string()],
+    )))
 }

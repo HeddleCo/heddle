@@ -8,7 +8,7 @@
 //! - `list` enumerates every redaction in the repo.
 //! - `show` dumps a single redaction by its content-addressed id.
 //!
-//! Respects `--json` via `should_output_json`.
+//! Respects `--output json` via `should_output_json`.
 //!
 //! `--all-states` propagates the redaction across every state reachable
 //! from a thread tip or marker. The walk fans out by blob hash (not
@@ -24,9 +24,10 @@ use objects::{
     object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature},
     worktree::should_ignore,
 };
-use repo::Repository;
+use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
+use super::advice::RecoveryAdvice;
 use crate::{
     cli::{
         Cli, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, RedactTrustAddArgs,
@@ -158,13 +159,8 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
                     extra.signature = Some(sign_redaction(signer.as_ref(), &extra)?);
                 }
                 let extra_id = repo.put_redaction(extra)?;
-                repo.oplog().record_redact(
-                    &extra_id,
-                    &blob,
-                    &other_state,
-                    &path,
-                    Some(&scope),
-                )?;
+                repo.oplog()
+                    .record_redact(&extra_id, &blob, &other_state, &path, Some(&scope))?;
                 extra_oplog_entries += 1;
             }
         }
@@ -191,16 +187,11 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
     emit_apply(cli, &output)
 }
 
-/// Suggestion to add a redacted path to `.heddleignore` so it doesn't
+/// Suggestion to add a redacted path to an ignore file so it doesn't
 /// get re-captured on the next `heddle capture`. Returned as `None`
 /// when the path is already covered by heddle's *effective* ignore
 /// set — i.e. `Repository::ignore_patterns()`, which is what the
-/// capture/walker actually consults: `.heddleignore` + the
-/// `worktree.ignore` patterns in `.heddle/config.toml`.
-///
-/// Crucially we do NOT treat `.gitignore` coverage as suppression:
-/// `heddle capture` never reads `.gitignore`, so a path covered only
-/// there can still be re-captured. The hint must surface in that case.
+/// capture/walker actually consults.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct IgnoreHint {
     /// Path to the ignore file we'd append to, relative to the repo
@@ -221,12 +212,9 @@ pub(crate) struct IgnoreHint {
     pub message: String,
 }
 
-/// If `path` is not yet covered by heddle's effective ignore set,
-/// return a hint pointing at `.heddleignore`. Suppression mirrors the
-/// exact patterns `heddle capture` consults
-/// (`Repository::ignore_patterns()` = `.heddleignore` + repo config
-/// `worktree.ignore`), so the hint never gives a false sense of
-/// safety just because `.gitignore` happens to mention the path.
+/// If `path` is not yet covered by Heddle's effective ignore set,
+/// return a hint pointing at the preferred ignore file for this repo:
+/// `.gitignore` in Git-overlay mode, `.heddleignore` in native mode.
 pub(crate) fn ignore_hint_for_path(repo: &Repository, path: &str) -> Result<Option<IgnoreHint>> {
     let patterns = repo
         .ignore_patterns()
@@ -235,20 +223,23 @@ pub(crate) fn ignore_hint_for_path(repo: &Repository, path: &str) -> Result<Opti
         return Ok(None);
     }
 
-    let heddleignore = repo.root().join(".heddleignore");
-    let exists = heddleignore.is_file();
+    let ignore_file = match repo.capability() {
+        RepositoryCapability::GitOverlay => ".gitignore",
+        RepositoryCapability::NativeHeddle => ".heddleignore",
+    };
+    let exists = repo.root().join(ignore_file).is_file();
     let message = if exists {
         format!(
-            "hint: add `{path}` to .heddleignore so the next `heddle capture` doesn't re-import the leaked bytes"
+            "hint: add `{path}` to {ignore_file} so the next `heddle capture` doesn't re-import the leaked bytes"
         )
     } else {
         format!(
-            "hint: create .heddleignore with `{path}` so the next `heddle capture` doesn't re-import the leaked bytes"
+            "hint: create {ignore_file} with `{path}` so the next `heddle capture` doesn't re-import the leaked bytes"
         )
     };
 
     Ok(Some(IgnoreHint {
-        ignore_file: ".heddleignore".to_string(),
+        ignore_file: ignore_file.to_string(),
         already_exists: exists,
         suggested_pattern: path.to_string(),
         message,
@@ -495,7 +486,12 @@ pub(crate) fn blob_at_path(repo: &Repository, state: &ChangeId, path: &str) -> R
         .ok_or_else(|| anyhow!("state '{}' has no tree", state.short()))?;
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     if parts.is_empty() {
-        return Err(anyhow!("empty path"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "redact_path_empty",
+            "redact path must not be empty",
+            "Pass a repository-relative path with `--path <path>`.",
+            "heddle redact apply <state> --path <path>",
+        )));
     }
     let hash = walk_path_to_blob(repo, &tree, &parts)?
         .ok_or_else(|| anyhow!("path '{}' not in state {}", path, state.short()))?;
@@ -635,9 +631,12 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
         }
         (None, Some(algorithm), Some(public_key)) => (algorithm, public_key),
         (None, _, _) => {
-            return Err(anyhow!(
-                "supply either `--from-pem <PATH>` or both `--algorithm` and `--public-key`"
-            ));
+            return Err(anyhow!(RecoveryAdvice::invalid_usage(
+                "redact_trust_key_source_required",
+                "supply either `--from-pem <PATH>` or both `--algorithm` and `--public-key`",
+                "Use `heddle redact trust add --from-pem <PATH>` or pass both raw key fields.",
+                "heddle redact trust add --from-pem <PATH>",
+            )));
         }
     };
 
@@ -679,9 +678,16 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
                 .unwrap_or(false)
     });
     if already_trusted {
-        return Err(anyhow!(
-            "key {algorithm}:{public_key} is already in the trust list"
-        ));
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "redact_trust_key_duplicate",
+            format!("key {algorithm}:{public_key} is already in the trust list"),
+            "Inspect trusted redaction keys with `heddle redact trust list`.",
+            format!("the trust list already contains key {algorithm}:{public_key}"),
+            "adding it again would create duplicate trust metadata without changing trust",
+            "repo config, trust entries, objects, refs, and worktree files were left unchanged",
+            "heddle redact trust list",
+            vec!["heddle redact trust list".to_string()],
+        )));
     }
 
     let mut entry = toml::value::Table::new();
@@ -768,15 +774,21 @@ fn cmd_redact_trust_remove(
         .as_table_mut()
         .ok_or_else(|| anyhow!("repo config root must be a TOML table"))?;
     let Some(redact) = root.get_mut("redact").and_then(|v| v.as_table_mut()) else {
-        return Err(anyhow!("no [redact] section in config; nothing to remove"));
+        return Err(anyhow!(redact_trust_nothing_to_remove_advice(
+            "redact_trust_config_missing",
+            "no [redact] section in config; nothing to remove",
+            &args.public_key,
+        )));
     };
     let Some(trusted_keys) = redact
         .get_mut("trusted_keys")
         .and_then(|v| v.as_array_mut())
     else {
-        return Err(anyhow!(
-            "no `trusted_keys` array in [redact]; nothing to remove"
-        ));
+        return Err(anyhow!(redact_trust_nothing_to_remove_advice(
+            "redact_trust_keys_missing",
+            "no `trusted_keys` array in [redact]; nothing to remove",
+            &args.public_key,
+        )));
     };
 
     let before = trusted_keys.len();
@@ -789,10 +801,14 @@ fn cmd_redact_trust_remove(
     });
     let removed = before - trusted_keys.len();
     if removed == 0 {
-        return Err(anyhow!(
-            "no trusted key matched `{}` — nothing removed",
-            args.public_key
-        ));
+        return Err(anyhow!(redact_trust_nothing_to_remove_advice(
+            "redact_trust_key_not_found",
+            format!(
+                "no trusted key matched `{}`; nothing removed",
+                args.public_key
+            ),
+            &args.public_key,
+        )));
     }
 
     let serialized = toml::to_string(&value).with_context(|| "serialize patched repo config")?;
@@ -808,6 +824,23 @@ fn cmd_redact_trust_remove(
         );
     }
     Ok(())
+}
+
+fn redact_trust_nothing_to_remove_advice(
+    kind: &'static str,
+    error: impl Into<String>,
+    public_key: &str,
+) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        kind,
+        error,
+        "Inspect trusted redaction keys with `heddle redact trust list`.",
+        format!("the trust list does not contain key `{public_key}`"),
+        "removing a missing key would imply a trust change that did not occur",
+        "repo config, trust entries, objects, refs, and worktree files were left unchanged",
+        "heddle redact trust list",
+        vec!["heddle redact trust list".to_string()],
+    )
 }
 
 /// Short-form display for a hex-encoded public key. Same length as

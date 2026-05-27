@@ -64,7 +64,32 @@ jobs:
       - name: Tests
         run: cargo test --locked --workspace
 
-      # 3a. Unit tests for `scripts/fuse-bench-compare.py`. The perf gate
+      # 3a. World-class CLI release gates. These duplicate a narrow slice
+      #     of the full test run on purpose: the job log names the hard
+      #     gates from docs/CLI_WORLD_CLASS_RUBRIC.md directly, so schema
+      #     drift, docs drift, hidden runtime git dependencies, no-git
+      #     overlay workflows, public help reachability, auto output,
+      #     TTY output, exit-code, corrupt-repo recovery, and
+      #     destructive-safety regressions are easy to diagnose.
+      - name: CLI world-class release gates
+        run: |
+          cargo test --locked -p heddle-cli --test git_process_lint -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration git_replacement_matrix -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration public_command_paths_have_all_required_help_entrypoints -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration default_auto_output_is_json_when_stdout_is_piped_and_text_when_forced -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration narrow_no_color_text_outputs_cover_everyday_read_surfaces -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration tty_auto_mode_renders_text_and_explicit_json_stays_json -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration global_exit_codes_and_failure_streams_are_predictable -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration start_merge_undo_json_workflow_keeps_machine_streams_clean -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration thread_cleanup -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration test_cli_capture_blocks_large_git_overlay_deletion_without_force -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration doctor_schemas_has_no_drift_or_unmatched_registered_verbs -- --nocapture
+          cargo test --locked -p heddle-cli --test cli_integration doctor_docs -- --nocapture
+          target/debug/heddle --repo "$PWD" doctor schemas --output json
+          target/debug/heddle --repo "$PWD" doctor docs --all --output json
+
+      # 3b. Unit tests for `scripts/fuse-bench-compare.py`. The perf gate
       #     is only as honest as the compare script; these tests pin the
       #     "missing or corrupt estimates fail closed" contract (Codex r1
       #     P1 on heddle#89). Plain `unittest`, no third-party deps.

@@ -13,6 +13,7 @@
 //! then call `emit(&cli, repo.config(), &output)` from the handler.
 
 use anyhow::Result;
+use repo::{Repository, Thread, ThreadManager};
 use serde::Serialize;
 
 use crate::cli::{cli_args::Cli, should_output_json};
@@ -47,6 +48,104 @@ pub fn actor_display(provider: Option<&str>, model: Option<&str>) -> Option<Stri
     }
 }
 
+/// Human-facing repository mode label. JSON keeps the exact
+/// `repository_capability` / `storage_model` values; text output uses
+/// product language instead of storage implementation names.
+pub fn repository_mode_label(capability: &str, storage_model: &str) -> String {
+    if capability == "git-overlay" || storage_model == "git+heddle-sidecar" {
+        "Git + Heddle".to_string()
+    } else if capability == "plain-git" || storage_model == "git-only" {
+        "Git repo (setup needed)".to_string()
+    } else if capability == "native"
+        || capability == "native-heddle"
+        || storage_model == "heddle-native"
+    {
+        "Heddle native".to_string()
+    } else {
+        capability.to_string()
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RepositoryContextInfo {
+    pub kind: String,
+    pub parent_repository: Option<String>,
+    pub target_thread: Option<String>,
+    pub parent_thread: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RepositoryPresentation {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<RepositoryContextInfo>,
+}
+
+/// Presentation-only repository identity. This deliberately leaves
+/// `Repository::capability_label()` untouched: an isolated checkout that
+/// shares a Git-overlay object store is still technically opened through
+/// the native Heddle storage path, but user-facing status should say what
+/// the checkout is managed by.
+pub fn repository_presentation(
+    repo: &Repository,
+    target_thread: Option<&str>,
+    parent_thread: Option<&str>,
+) -> RepositoryPresentation {
+    if let Some(parent_root) = managed_git_overlay_parent_root(repo) {
+        let thread = current_child_thread(repo);
+        let target_thread = target_thread.map(ToString::to_string).or_else(|| {
+            thread
+                .as_ref()
+                .and_then(|thread| thread.target_thread.clone())
+        });
+        let parent_thread = parent_thread.map(ToString::to_string).or_else(|| {
+            thread
+                .as_ref()
+                .and_then(|thread| thread.parent_thread.clone())
+        });
+        return RepositoryPresentation {
+            label: "Git + Heddle isolated checkout".to_string(),
+            context: Some(RepositoryContextInfo {
+                kind: "git-overlay-isolated-checkout".to_string(),
+                parent_repository: Some(parent_root.display().to_string()),
+                target_thread,
+                parent_thread,
+            }),
+        };
+    }
+
+    RepositoryPresentation {
+        label: repository_mode_label(repo.capability_label(), repo.storage_model_label()),
+        context: None,
+    }
+}
+
+fn managed_git_overlay_parent_root(repo: &Repository) -> Option<std::path::PathBuf> {
+    let parent_root = repo.heddle_dir().parent()?;
+    if paths_equal(parent_root, repo.root()) {
+        return None;
+    }
+    parent_root
+        .join(".git")
+        .exists()
+        .then(|| parent_root.to_path_buf())
+}
+
+fn current_child_thread(repo: &Repository) -> Option<Thread> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    if let Ok(Some(thread)) = manager.find_by_execution_root(repo.root()) {
+        return Some(thread);
+    }
+    let lane = repo.current_lane().ok().flatten()?;
+    manager.find_by_thread(&lane).ok().flatten()
+}
+
+fn paths_equal(left: &std::path::Path, right: &std::path::Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
 /// Format a truncated one-line preview of an ordered string list for
 /// inclusion in a status / advice / blocker message. Used by every
 /// verb that would otherwise dump a 50+ item csv onto a single line:
@@ -66,6 +165,14 @@ pub fn preview_list(items: &[String], total: usize) -> String {
         String::new()
     };
     format!("{}{suffix}", visible.join(", "))
+}
+
+pub fn git_only_branch_summary(branches: &[String], total: usize) -> String {
+    let noun = if total == 1 { "branch" } else { "branches" };
+    format!(
+        "Optional Git-only {noun} available: {}",
+        preview_list(branches, total)
+    )
 }
 
 /// POSIX-shell-quote a path for inclusion in a copy-pasteable command.
@@ -101,7 +208,7 @@ pub struct RenderOpts {
 }
 
 /// Contract every CLI output type implements. The `Serialize` super-trait
-/// is what powers `--json`; `render_text` is the human view. The same
+/// is what powers `--output json`; `render_text` is the human view. The same
 /// underlying value powers both — there is no separate "text-mode" code
 /// path that could drift from JSON.
 pub trait RenderOutput: Serialize {
@@ -114,15 +221,11 @@ pub trait RenderOutput: Serialize {
 /// existing structure-first verbs. Handlers should construct a typed
 /// output value and call this; never `println!` directly.
 pub fn emit<T: RenderOutput>(cli: &Cli, cfg: Option<&repo::RepoConfig>, out: &T) -> Result<()> {
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
     if should_output_json(cli, cfg) {
-        serde_json::to_writer(&mut handle, out)?;
-        // Trailing newline so terminal renderers don't visually run into
-        // the next prompt. JSON consumers strip whitespace anyway.
-        use std::io::Write;
-        let _ = handle.write_all(b"\n");
+        write_json_stdout(out)?;
     } else {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
         out.render_text(&mut handle, RenderOpts::default())?;
     }
     Ok(())
@@ -136,16 +239,38 @@ pub fn emit_with_opts<T: RenderOutput>(
     out: &T,
     opts: RenderOpts,
 ) -> Result<()> {
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
     if should_output_json(cli, cfg) {
-        serde_json::to_writer(&mut handle, out)?;
-        use std::io::Write;
-        let _ = handle.write_all(b"\n");
+        write_json_stdout(out)?;
     } else {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
         out.render_text(&mut handle, opts)?;
     }
     Ok(())
+}
+
+/// Write a single JSON value plus trailing newline to stdout.
+///
+/// Treats a closed downstream pipe as a successful early stop. CLI tools
+/// should be composable with `head`, `true`, and other short readers; a
+/// consumer choosing to close stdout is not a Heddle failure.
+pub fn write_json_stdout<T: Serialize>(out: &T) -> Result<()> {
+    let mut text = serde_json::to_string(out)?;
+    text.push('\n');
+    write_stdout(&text)
+}
+
+/// Write text to stdout, treating `BrokenPipe` as a normal shell outcome.
+pub fn write_stdout(text: &str) -> Result<()> {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    match handle.write_all(text.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 #[cfg(test)]

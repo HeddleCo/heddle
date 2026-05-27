@@ -17,5 +17,5 @@ pub use git_core::{
     GitBridge, GitBridgeError, GitResult, SyncMapping, WriteThroughOutcome, WriteThroughSkipReason,
 };
 
-#[cfg(test)]
+#[cfg(all(test, feature = "git-overlay"))]
 mod git_bridge_tests;

@@ -206,11 +206,7 @@ pub(crate) fn write_cargo_config(checkout: &Path, target_dir: &Path) -> Result<b
 /// with `ERROR_SHARING_VIOLATION`. Taking the writer by value makes
 /// ownership obvious at the call site and forces the close to happen
 /// before `remove_file`.
-fn write_body_or_cleanup<W: Write>(
-    mut writer: W,
-    body: &[u8],
-    cleanup_path: &Path,
-) -> Result<W> {
+fn write_body_or_cleanup<W: Write>(mut writer: W, body: &[u8], cleanup_path: &Path) -> Result<W> {
     match writer.write_all(body) {
         Ok(()) => Ok(writer),
         Err(err) => {
@@ -233,10 +229,8 @@ fn count_active_materialized_threads(repo: &Repository) -> usize {
     threads
         .into_iter()
         .filter(|thread| {
-            matches!(
-                thread.mode,
-                ThreadMode::Solid | ThreadMode::Materialized
-            ) && thread.state == repo::ThreadState::Active
+            matches!(thread.mode, ThreadMode::Solid | ThreadMode::Materialized)
+                && thread.state == repo::ThreadState::Active
         })
         .count()
 }

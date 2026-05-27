@@ -3,10 +3,10 @@
 
 use objects::{
     error::{HeddleError, Result},
-    object::ChangeId,
+    object::{ChangeId, ThreadName},
 };
 
-use super::{Head, RefManager, parse_change_id_text};
+use super::{parse_change_id_text, Head, RefManager};
 
 pub(super) struct HeadState {
     pub head: Head,
@@ -24,7 +24,7 @@ impl RefManager {
         if !path.exists() {
             return Ok(HeadState {
                 head: Head::Attached {
-                    thread: "main".to_string(),
+                    thread: ThreadName::new("main"),
                 },
                 exists: false,
                 raw: None,

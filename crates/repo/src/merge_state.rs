@@ -15,11 +15,14 @@ pub struct MergeState {
     pub base: Option<ChangeId>,
     pub conflicts: Vec<String>,
     pub resolved: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<PathBuf>,
 }
 
 pub struct MergeStateManager {
     merge_state_path: PathBuf,
     lock: RepoLock,
+    worktree_root: Option<PathBuf>,
 }
 
 impl MergeStateManager {
@@ -28,6 +31,19 @@ impl MergeStateManager {
         Self {
             merge_state_path: heddle_dir.join("MERGE_STATE"),
             lock: RepoLock::at(heddle_dir.join("locks/merge_state.lock")),
+            worktree_root: None,
+        }
+    }
+
+    pub fn new_for_worktree(
+        heddle_dir: impl AsRef<std::path::Path>,
+        worktree_root: impl Into<PathBuf>,
+    ) -> Self {
+        let heddle_dir = heddle_dir.as_ref();
+        Self {
+            merge_state_path: heddle_dir.join("MERGE_STATE"),
+            lock: RepoLock::at(heddle_dir.join("locks/merge_state.lock")),
+            worktree_root: Some(worktree_root.into()),
         }
     }
 
@@ -45,6 +61,7 @@ impl MergeStateManager {
             base,
             conflicts,
             resolved: Vec::new(),
+            worktree_root: self.worktree_root.clone(),
         };
         self.write_state(&state)?;
         Ok(())
@@ -52,13 +69,13 @@ impl MergeStateManager {
 
     pub fn load(&self) -> Result<Option<MergeState>> {
         let _lock = self.read_lock()?;
-        self.load_unlocked()
+        self.load_unlocked_for_worktree()
     }
 
     pub fn resolve(&self, path: &str) -> Result<()> {
         let _lock = self.write_lock()?;
         let mut state = self
-            .load_unlocked()?
+            .load_unlocked_for_worktree()?
             .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
 
         if state.conflicts.iter().any(|conflict| conflict == path)
@@ -74,7 +91,7 @@ impl MergeStateManager {
     pub fn resolve_all(&self) -> Result<Vec<String>> {
         let _lock = self.write_lock()?;
         let mut state = self
-            .load_unlocked()?
+            .load_unlocked_for_worktree()?
             .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
 
         let newly_resolved: Vec<String> = state
@@ -93,7 +110,7 @@ impl MergeStateManager {
     pub fn unresolved(&self) -> Result<Vec<String>> {
         let _lock = self.read_lock()?;
         let state = self
-            .load_unlocked()?
+            .load_unlocked_for_worktree()?
             .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
 
         Ok(state
@@ -107,7 +124,7 @@ impl MergeStateManager {
     pub fn abort(&self) -> Result<MergeState> {
         let _lock = self.write_lock()?;
         let state = self
-            .load_unlocked()?
+            .load_unlocked_for_worktree()?
             .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
 
         if !self.merge_state_path.exists() {
@@ -121,7 +138,7 @@ impl MergeStateManager {
     pub fn finish(&self) -> Result<MergeState> {
         let _lock = self.write_lock()?;
         let state = self
-            .load_unlocked()?
+            .load_unlocked_for_worktree()?
             .ok_or_else(|| crate::HeddleError::NotFound("No merge in progress".to_string()))?;
 
         let unresolved: Vec<_> = state
@@ -146,7 +163,7 @@ impl MergeStateManager {
     }
 
     pub fn is_merge_in_progress(&self) -> bool {
-        self.read_lock().is_ok() && self.merge_state_path.exists()
+        self.load().is_ok_and(|state| state.is_some())
     }
 
     /// Re-point `ours` at a new state without ending the merge. Used by
@@ -174,6 +191,24 @@ impl MergeStateManager {
         Ok(Some(state))
     }
 
+    fn load_unlocked_for_worktree(&self) -> Result<Option<MergeState>> {
+        let Some(state) = self.load_unlocked()? else {
+            return Ok(None);
+        };
+        if self.state_belongs_to_worktree(&state) {
+            Ok(Some(state))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn state_belongs_to_worktree(&self, state: &MergeState) -> bool {
+        match (&self.worktree_root, &state.worktree_root) {
+            (_, None) | (None, _) => true,
+            (Some(current), Some(recorded)) => current == recorded,
+        }
+    }
+
     fn write_state(&self, state: &MergeState) -> Result<()> {
         let content = serde_json::to_vec(state)?;
         write_file_atomic(&self.merge_state_path, &content)?;
@@ -195,7 +230,7 @@ impl MergeStateManager {
 
 impl Repository {
     pub fn merge_state_manager(&self) -> MergeStateManager {
-        MergeStateManager::new(self.heddle_dir())
+        MergeStateManager::new_for_worktree(self.heddle_dir(), self.root().to_path_buf())
     }
 }
 

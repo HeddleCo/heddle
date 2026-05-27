@@ -729,33 +729,41 @@ fn pull_planner_exclude_fingerprint(ids: &[ChangeId]) -> String {
 }
 
 fn load_ref_snapshots(repo: &Repository, threads: bool) -> Result<Vec<RefSnapshotMirror>> {
-    let names = if threads {
-        repo.refs().list_threads()?
-    } else {
-        repo.refs().list_markers()?
-    };
-    let mut snapshots = Vec::with_capacity(names.len());
-    for name in names {
-        let state = if threads {
-            repo.refs().get_thread(&name)?
-        } else {
-            repo.refs().get_marker(&name)?
+    let mut snapshots = if threads {
+        let names = repo.refs().list_threads()?;
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let state = repo.refs().get_thread(&name)?
+                .ok_or_else(|| {
+                    HeddleError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("thread '{}' disappeared while rebuilding pull planner manifest", name),
+                    ))
+                })?;
+            out.push(RefSnapshotMirror {
+                name: name.to_string(),
+                state_id: state.to_string_full(),
+            });
         }
-        .ok_or_else(|| {
-            HeddleError::Io(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "{} '{}' disappeared while rebuilding pull planner manifest",
-                    if threads { "thread" } else { "marker" },
-                    name
-                ),
-            ))
-        })?;
-        snapshots.push(RefSnapshotMirror {
-            name,
-            state_id: state.to_string_full(),
-        });
-    }
+        out
+    } else {
+        let names = repo.refs().list_markers()?;
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let state = repo.refs().get_marker(&name)?
+                .ok_or_else(|| {
+                    HeddleError::Io(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("marker '{}' disappeared while rebuilding pull planner manifest", name),
+                    ))
+                })?;
+            out.push(RefSnapshotMirror {
+                name: name.to_string(),
+                state_id: state.to_string_full(),
+            });
+        }
+        out
+    };
     snapshots.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(snapshots)
 }
@@ -764,10 +772,10 @@ fn head_snapshot(head: &Head, threads: &[RefSnapshotMirror]) -> HeadSnapshotMirr
     match head {
         Head::Attached { thread } => HeadSnapshotMirror {
             kind: "attached".to_string(),
-            value: thread.clone(),
+            value: thread.to_string(),
             head_state: threads
                 .iter()
-                .find(|snapshot| snapshot.name == *thread)
+                .find(|snapshot| *thread == snapshot.name)
                 .map(|snapshot| snapshot.state_id.clone()),
         },
         Head::Detached { state } => HeadSnapshotMirror {

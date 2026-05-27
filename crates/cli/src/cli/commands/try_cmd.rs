@@ -36,18 +36,22 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
 
 use super::{
+    action_line::print_next,
+    advice::RecoveryAdvice,
+    command_catalog::{ActionFields, ActionTemplate},
+    git_overlay_health::{action_templates, command_argvs},
     merge::merge_thread_into_current,
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{create_snapshot, SnapshotAgentOverrides},
     thread::start_thread,
-    thread_cmd::{DropOutcome, drop_thread_silent},
+    thread_cmd::{drop_thread_silent, DropOutcome},
 };
 use crate::{
-    cli::{Cli, ThreadStartArgs, TryArgs, WorkspaceModeArg, should_output_json, style},
+    cli::{should_output_json, style, Cli, ThreadStartArgs, TryArgs, WorkspaceModeArg},
     config::UserConfig,
 };
 
@@ -72,7 +76,7 @@ struct TryOutput {
     /// When cleanup of the ephemeral thread fails (lock contention,
     /// filesystem error, etc.) on a path where we tried to drop it,
     /// this carries the error message so automation can detect the
-    /// orphan instead of trusting `thread_dropped` alone. `None` when
+    /// orphan instead of relying on `thread_dropped` alone. `None` when
     /// no cleanup was attempted, or when cleanup succeeded.
     #[serde(skip_serializing_if = "Option::is_none")]
     cleanup_error: Option<String>,
@@ -95,16 +99,37 @@ struct TryOutput {
     merge_state: Option<String>,
 
     /// Hint surfaced to the user when `--auto-merge` is *not* set:
-    /// the exact `heddle merge <name>` they should run. Always
+    /// the exact merge preview command they should run. Always
     /// printed in non-JSON mode; included for JSON consumers so the
     /// agent doesn't have to reconstruct the verb.
     #[serde(skip_serializing_if = "Option::is_none")]
     next_action: Option<String>,
+    next_action_argv: Option<Vec<String>>,
+    next_action_template: Option<ActionTemplate>,
+
+    /// Same primary command as `next_action`, under the cross-command
+    /// verification/action field name agents already inspect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recommended_action: Option<String>,
+    recommended_action_argv: Option<Vec<String>>,
+    recommended_action_template: Option<ActionTemplate>,
+
+    /// Secondary safe commands. For a successful non-auto-merge try,
+    /// the primary action lands the thread and this command discards
+    /// it. Keeping them separate makes every emitted action parseable.
+    recovery_commands: Vec<String>,
+    recovery_command_argv: Vec<Vec<String>>,
+    recovery_action_templates: Vec<ActionTemplate>,
 }
 
 pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     if args.command.is_empty() {
-        return Err(anyhow!("Usage: heddle try -- <cmd...>"));
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "try_command_required",
+            "Usage: heddle try -- <cmd...>",
+            "Pass a command after `--` so Heddle can run it inside an ephemeral thread.",
+            "heddle try -- <cmd...>",
+        )));
     }
 
     let repo_root_arg = cli
@@ -134,14 +159,12 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     // Only the user-supplied `--name` path needs the check —
     // auto-generated names embed a uuid and won't collide.
     if args.name.is_some() && thread_name_in_use(&repo, &thread_name)? {
-        return Err(anyhow!(
-            "thread '{thread_name}' already exists; pick a different --name or omit it for an auto-generated name"
-        ));
+        return Err(anyhow!(try_thread_name_collision_advice(&thread_name)));
     }
 
     // Use start_thread directly so the ephemeral thread is registered
-    // exactly the same way `heddle start` does. We force the heavy
-    // workspace mode by default — virtualized mounts are awkward to
+    // exactly the same way `heddle start` does. `auto` resolves to a
+    // materialized checkout here: virtualized mounts are awkward to
     // execute commands inside, and a real checkout is what the cmd
     // expects.
     let workspace = match args.workspace {
@@ -188,7 +211,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
             // This is not a "the user's code is broken" failure — it's
             // an operator error. Drop the thread and surface a real
             // error so the caller can fix the invocation.
-            let _ = drop_thread_silent(&repo, &thread_name, true);
+            let _ = drop_thread_silent(&repo, &thread_name, true, true);
             return Err(anyhow!(
                 "Failed to execute `{}`: {}",
                 display_cmd(&args.command),
@@ -207,7 +230,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         // we report the cleanup failure honestly in the JSON shape
         // and as a stderr warning, so automation isn't fooled into
         // thinking the orphan ephemeral thread was cleaned up.
-        let drop_result = drop_thread_silent(&repo, &thread_name, true);
+        let drop_result = drop_thread_silent(&repo, &thread_name, true, true);
         let (thread_dropped, cleanup_error) =
             interpret_drop_result(&thread_name, drop_result, "try cleanup");
 
@@ -220,6 +243,11 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
             format!("thread '{thread_name}' dropped")
         } else {
             format!("thread '{thread_name}' NOT dropped (cleanup failed)")
+        };
+        let recovery_commands = if thread_dropped {
+            Vec::new()
+        } else {
+            vec![format!("heddle thread drop {thread_name}")]
         };
         let output = TryOutput {
             status: "failed",
@@ -240,6 +268,14 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
             captured_state: None,
             merge_state: None,
             next_action: None,
+            next_action_argv: None,
+            next_action_template: None,
+            recommended_action: None,
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            recovery_command_argv: command_argvs(&recovery_commands),
+            recovery_action_templates: action_templates(&recovery_commands),
+            recovery_commands,
         };
         emit(cli, &repo, &output)?;
         // Exit with the cmd's exit code — this is the contract: try
@@ -311,7 +347,7 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         // never fire as non-clean given `preview=false`, but being
         // explicit keeps the failure mode obvious.
         if !args.keep_on_success && merge_output.conflicts.is_empty() {
-            let drop_result = drop_thread_silent(&repo, &thread_name, true);
+            let drop_result = drop_thread_silent(&repo, &thread_name, true, true);
             let (dropped, err) =
                 interpret_drop_result(&thread_name, drop_result, "auto-merge cleanup");
             thread_dropped = dropped;
@@ -326,13 +362,20 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     }
 
     let next_action = if !args.auto_merge {
-        Some(format!(
-            "heddle merge {} (or `heddle thread drop {}` to discard)",
-            thread_name, thread_name
-        ))
+        Some(super::thread_landing::merge_preview_command(&thread_name))
     } else {
         None
     };
+    let recommended_action = next_action.clone();
+    let recommended_action_fields =
+        ActionFields::from_optional_action_ref(recommended_action.as_deref());
+    let recovery_commands = if !args.auto_merge || !thread_dropped {
+        vec![format!("heddle thread drop {thread_name}")]
+    } else {
+        Vec::new()
+    };
+    let recovery_command_argv = command_argvs(&recovery_commands);
+    let recovery_action_templates = action_templates(&recovery_commands);
 
     let message = if args.auto_merge {
         match (&captured_state, &merge_state) {
@@ -355,11 +398,11 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     } else {
         match &captured_state {
             Some(state) => format!(
-                "`{}` succeeded; thread '{}' ready (state {}). Run `heddle merge {}` to land.",
+                "`{}` succeeded; thread '{}' ready (state {}). Preview with `{}` before landing.",
                 display_cmd(&args.command),
                 thread_name,
                 state,
-                thread_name
+                super::thread_landing::merge_preview_command(&thread_name)
             ),
             None => format!(
                 "`{}` succeeded; thread '{}' ready (no capture).",
@@ -381,6 +424,14 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         captured_state,
         merge_state,
         next_action,
+        next_action_argv: recommended_action_fields.argv.clone(),
+        next_action_template: recommended_action_fields.template.clone(),
+        recommended_action,
+        recommended_action_argv: recommended_action_fields.argv,
+        recommended_action_template: recommended_action_fields.template,
+        recovery_commands,
+        recovery_command_argv,
+        recovery_action_templates,
     };
     emit(cli, &repo, &output)
 }
@@ -403,7 +454,11 @@ pub(crate) fn thread_name_in_use(repo: &Repository, name: &str) -> Result<bool> 
     if manager.find_by_thread(name)?.is_some() || manager.load(name)?.is_some() {
         return Ok(true);
     }
-    if repo.refs().get_thread(name)?.is_some() {
+    if repo
+        .refs()
+        .get_thread(&objects::object::ThreadName::new(name))?
+        .is_some()
+    {
         return Ok(true);
     }
     Ok(false)
@@ -431,6 +486,22 @@ fn verify_parent_unchanged(repo: &Repository, before: Option<&str>) -> Result<()
 /// can run with `--output json` for a structured shape.
 fn display_cmd(cmd: &[String]) -> String {
     cmd.join(" ")
+}
+
+fn try_thread_name_collision_advice(thread_name: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "try_thread_name_collision",
+        format!("thread '{thread_name}' already exists"),
+        "Pick a different `--name`, or omit it so Heddle can generate a collision-resistant name.",
+        format!("`heddle try --name {thread_name}` would target an existing thread"),
+        "reusing that thread name could attach to and later clean up an existing user thread",
+        "no try thread was spawned and the existing thread was left unchanged",
+        "heddle try --name <different-name> -- <cmd...>",
+        vec![
+            "heddle try --name <different-name> -- <cmd...>".to_string(),
+            "heddle try -- <cmd...>".to_string(),
+        ],
+    )
 }
 
 /// Build the default thread name from the cmd. `try-<8-hex>` of a
@@ -465,7 +536,10 @@ fn emit(cli: &Cli, repo: &Repository, output: &TryOutput) -> Result<()> {
         };
         println!("{}", painted);
         if let Some(next) = &output.next_action {
-            println!("Next: {}", style::bold(next));
+            print_next(next);
+        }
+        if let Some(discard) = output.recovery_commands.first() {
+            println!("Discard: {}", style::bold(discard));
         }
     }
     Ok(())
@@ -497,7 +571,7 @@ fn interpret_drop_result(
 
 #[cfg(test)]
 mod tests {
-    use objects::object::ChangeId;
+    use objects::object::{ChangeId, ThreadName};
 
     use super::*;
 
@@ -520,7 +594,9 @@ mod tests {
         // missed. `thread_name_in_use` must catch it.
         let (_temp, repo) = init_repo();
         let id = ChangeId::generate();
-        repo.refs().set_thread("ref-only-thread", &id).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("ref-only-thread"), &id)
+            .unwrap();
 
         // ThreadManager has no record (we didn't go through start_thread).
         let manager = ThreadManager::new(repo.heddle_dir());
@@ -540,7 +616,9 @@ mod tests {
         // the guard short-circuits with the precise message.
         let (_temp, repo) = init_repo();
         let id = ChangeId::generate();
-        repo.refs().set_thread("legacy-ref-thread", &id).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("legacy-ref-thread"), &id)
+            .unwrap();
 
         let make_args = || TryArgs {
             name: Some("legacy-ref-thread".into()),
@@ -551,7 +629,6 @@ mod tests {
         };
         let cli = Cli {
             command: crate::cli::Commands::Try(make_args()),
-            json: false,
             output: None,
             no_color: true,
             repo: Some(repo.root().to_path_buf()),
@@ -560,6 +637,11 @@ mod tests {
             op_id: None,
         };
         let err = cmd_try(&cli, make_args()).expect_err("must refuse ref-only collision");
+        let advice = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
+            .expect("try collision refusal should carry typed recovery advice");
+        assert_eq!(advice.kind, "try_thread_name_collision");
         let msg = err.to_string();
         assert!(
             msg.contains("legacy-ref-thread") && msg.contains("already exists"),
@@ -609,6 +691,14 @@ mod tests {
             captured_state: None,
             merge_state: None,
             next_action: None,
+            next_action_argv: None,
+            next_action_template: None,
+            recommended_action: None,
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            recovery_commands: Vec::new(),
+            recovery_command_argv: Vec::new(),
+            recovery_action_templates: Vec::new(),
         };
         let json = serde_json::to_string(&ok_output).unwrap();
         assert!(
@@ -629,6 +719,14 @@ mod tests {
             captured_state: None,
             merge_state: None,
             next_action: None,
+            next_action_argv: None,
+            next_action_template: None,
+            recommended_action: None,
+            recommended_action_argv: None,
+            recommended_action_template: None,
+            recovery_commands: Vec::new(),
+            recovery_command_argv: Vec::new(),
+            recovery_action_templates: Vec::new(),
         };
         let json = serde_json::to_string(&err_output).unwrap();
         assert!(

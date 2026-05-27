@@ -6,7 +6,7 @@ use std::{
 
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ContentHash},
+    object::{ChangeId, ContentHash, ThreadName},
 };
 use proto::ProtocolError;
 use repo::{BlobHydrator, Repository};
@@ -142,7 +142,7 @@ impl BlobHydrator for LazyHostedHydrator {
         // `pull --lazy` advanced the local thread between clone and now,
         // the cached state would point at the OLD tip and we'd leave any
         // post-pull missing blobs unresolved — that was the round-2 P1.
-        let target_state = match repo.refs().get_thread(&self.local_thread) {
+        let target_state = match repo.refs().get_thread(&ThreadName::from(self.local_thread.as_str())) {
             Ok(Some(id)) => id,
             Ok(None) => {
                 return Err(HeddleError::Config(format!(
@@ -379,8 +379,7 @@ impl HydrationBridge {
 /// [`LazyHostedHydrator`] adapter that defers the actual gRPC connect (and
 /// worker-thread spawn) until the first `require_blob` call needs it.
 pub fn register_hosted_factory() {
-    use std::path::Path as StdPath;
-    use std::sync::Arc as StdArc;
+    use std::{path::Path as StdPath, sync::Arc as StdArc};
 
     use repo::lazy_hydrator::{
         BlobHydratorFactory, HydratorSection, KIND_HOSTED, register_factory,
@@ -428,16 +427,15 @@ mod tests {
     };
 
     use cli_shared::ClientConfig;
-    use objects::object::{Blob, ChangeId};
-    use repo::Repository;
-    use tempfile::TempDir;
-    use tonic::transport::Endpoint;
-
     use grpc::heddle::v1::{
         auth_service_client::AuthServiceClient, content_service_client::ContentServiceClient,
         hosted_user_service_client::HostedUserServiceClient,
         repo_sync_service_client::RepoSyncServiceClient,
     };
+    use objects::object::{Blob, ChangeId, ThreadName};
+    use repo::Repository;
+    use tempfile::TempDir;
+    use tonic::transport::Endpoint;
 
     use super::{
         super::{HostedGrpcClient, helpers::HostedTransportPolicy},
@@ -547,7 +545,7 @@ mod tests {
             .expect("multi-thread runtime");
         runtime.block_on(async {
             let (_temp, repo) = temp_repo();
-            let target = repo.refs().get_thread("main").unwrap().unwrap();
+            let target = repo.refs().get_thread(&ThreadName::from("main")).unwrap().unwrap();
             // Seed a known thread tip the hydrator can resolve via
             // `local_thread`.
             let _ = target;
@@ -623,7 +621,7 @@ mod tests {
         hydrator.bridge.set(bridge).map_err(|_| ()).expect("set");
 
         let (_temp, repo) = temp_repo();
-        let first_tip = repo.refs().get_thread("main").unwrap().unwrap();
+        let first_tip = repo.refs().get_thread(&ThreadName::from("main")).unwrap().unwrap();
 
         // First hydrate — bridge sees the original tip.
         let blake3 = Blob::new(b"a".to_vec()).hash();
@@ -632,7 +630,7 @@ mod tests {
         // Advance the local "main" thread to a fresh, distinct ChangeId.
         let advanced = ChangeId::generate();
         assert_ne!(advanced, first_tip, "fresh ChangeId must differ");
-        repo.refs().set_thread("main", &advanced).expect("advance");
+        repo.refs().set_thread(&ThreadName::from("main"), &advanced).expect("advance");
 
         // Second hydrate — bridge MUST see the advanced tip, not the
         // first one (round-2 cached-state bug regression guard).

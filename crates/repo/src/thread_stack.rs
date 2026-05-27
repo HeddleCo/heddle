@@ -20,6 +20,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use objects::object::ThreadName;
+
 use crate::{Repository, Result, thread_model::ThreadRecord, thread_storage::ThreadManager};
 
 /// One node in a stack tree. `name` matches [`ThreadRecord::thread`];
@@ -388,7 +390,7 @@ impl Repository {
         let refs = self.refs();
         let mut tips: HashMap<String, String> = HashMap::new();
         for record in &records {
-            if let Some(id) = refs.get_thread(&record.thread)? {
+            if let Some(id) = refs.get_thread(&ThreadName::from(record.thread.as_str()))? {
                 tips.insert(record.thread.clone(), id.to_string());
             }
         }

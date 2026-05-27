@@ -11,7 +11,7 @@ use base64::Engine as _;
 use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{DiffKind, Session, Tree},
+    object::{DiffKind, Session, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary},
 };
 use proto::{
@@ -44,6 +44,83 @@ use crate::{
         UserHarnessRootThreadPolicy, UserHarnessSubagentThreadPolicy, UserThreadWorkspaceMode,
     },
 };
+
+pub(crate) fn probe_current_process_harness(
+    repo: &Repository,
+    current_provider: Option<String>,
+    current_model: Option<String>,
+    current_policy: Option<String>,
+) -> Result<HarnessProbeResult> {
+    probe_harness_actor(&HarnessProbeInput {
+        argv: detected_harness_argv().or_else(|| Some(std::env::args().collect())),
+        env_hints: harness_env_hints(),
+        explicit_harness: None,
+        explicit_provider: None,
+        explicit_model: None,
+        explicit_thinking_level: None,
+        explicit_policy: None,
+        probe_metadata: BTreeMap::new(),
+        current_provider,
+        current_model,
+        current_policy,
+        repo_root: repo.root().display().to_string(),
+    })
+}
+
+fn harness_env_hints() -> BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(key, value)| {
+            !value.trim().is_empty()
+                && (key.starts_with("HEDDLE_AGENT_")
+                    || key.starts_with("CODEX_")
+                    || key.starts_with("CLAUDE")
+                    || key.starts_with("ANTHROPIC_")
+                    || key.starts_with("OPENAI_")
+                    || key.starts_with("OPENCODE_")
+                    || key.starts_with("AIDER_")
+                    || matches!(
+                        key.as_str(),
+                        "MODEL" | "REASONING_EFFORT" | "THINKING_LEVEL"
+                    ))
+        })
+        .collect()
+}
+
+fn detected_harness_argv() -> Option<Vec<String>> {
+    detected_harness_argv_impl()
+}
+
+#[cfg(target_os = "linux")]
+fn detected_harness_argv_impl() -> Option<Vec<String>> {
+    let mut pid = std::process::id();
+    for _ in 0..8 {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let ppid = stat.split_whitespace().nth(3)?.parse::<u32>().ok()?;
+        if ppid == 0 || ppid == pid {
+            return None;
+        }
+        pid = ppid;
+        let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        let argv = raw
+            .split(|byte| *byte == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).to_string())
+            .collect::<Vec<_>>();
+        let program = argv.first().map(|arg| arg.to_ascii_lowercase())?;
+        if ["codex", "claude", "opencode", "aider"]
+            .iter()
+            .any(|needle| program.contains(needle))
+        {
+            return Some(argv);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detected_harness_argv_impl() -> Option<Vec<String>> {
+    None
+}
 
 pub fn cmd_harness_bridge(cli: &Cli) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
@@ -845,7 +922,7 @@ impl HarnessBridgeRuntime {
         }
 
         let current_attached = match self.repo.head_ref()? {
-            Head::Attached { thread } => Some(thread),
+            Head::Attached { thread } => Some(thread.to_string()),
             Head::Detached { .. } => None,
         };
 
@@ -912,16 +989,17 @@ impl HarnessBridgeRuntime {
         let base_state = self
             .resolve_harness_thread_base_state(target_thread, parent_thread)?
             .ok_or_else(|| anyhow!("No current state to start a thread from"))?;
-        if self.repo.refs().get_thread(name)?.is_none() {
+        let tn = ThreadName::new(name);
+        if self.repo.refs().get_thread(&tn)?.is_none() {
             self.repo
                 .refs()
-                .set_thread_cas(name, refs::RefExpectation::Missing, &base_state)?;
+                .set_thread_cas(&tn, refs::RefExpectation::Missing, &base_state)?;
             // Harness writes the ThreadManager record later in this
             // function (after materializing); no record exists to
             // snapshot at recording time. `None` matches the pattern
             // used by `cmd_start` / agent reservation. heddle#23 r2.
             self.repo.oplog().record_thread_create(
-                name,
+                &tn,
                 &base_state,
                 None,
                 Some(&self.repo.op_scope()),
@@ -1259,7 +1337,7 @@ impl HarnessBridgeRuntime {
                 .ok_or_else(|| anyhow!("registry entry disappeared during update"));
         }
 
-        if probe.native_actor_key.is_some() {
+        if client_instance_id.is_none() && probe.native_actor_key.is_some() {
             let (entry, _) = registry.find_or_create_active_entry(
                 |entry| {
                     claude_actor_compatible(entry, probe, self.repo.root())
@@ -1699,7 +1777,9 @@ fn resolve_actor_attachment(
     }
     precedence.push("explicit-heddle-session:miss".to_string());
 
-    if let Some(native_actor_key) = probe.native_actor_key.as_deref() {
+    if client_instance_id.is_none()
+        && let Some(native_actor_key) = probe.native_actor_key.as_deref()
+    {
         if let Some(entry) = registry.find_active_by_native_actor_key(native_actor_key)?
             && claude_actor_compatible(&entry, probe, repo.root())
             && let Some(bound_session_id) = entry.heddle_session_id.clone()
@@ -1762,7 +1842,7 @@ fn resolve_actor_attachment(
         precedence.push("client-instance-id:miss".to_string());
     }
 
-    if probe.native_actor_key.is_some() {
+    if client_instance_id.is_none() && probe.native_actor_key.is_some() {
         precedence.push("native-instance-key:skipped-strong-native-key".to_string());
         return Ok(ResolvedAttachment {
             target: AttachTarget::CreateNew {
@@ -2008,7 +2088,7 @@ fn resolve_named_thread_base_state(
         return Ok(Some(state_id));
     }
 
-    Ok(repo.refs().get_thread(thread_name)?)
+    Ok(repo.refs().get_thread(&ThreadName::new(thread_name))?)
 }
 
 fn resolve_parent_thread_for_subagent(
@@ -2050,7 +2130,7 @@ fn native_key_slug(value: &str) -> String {
 
 fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
     if ThreadManager::new(repo.heddle_dir()).load(base)?.is_none()
-        && repo.refs().get_thread(base)?.is_none()
+        && repo.refs().get_thread(&ThreadName::new(base))?.is_none()
     {
         return Ok(base.to_string());
     }
@@ -2059,7 +2139,7 @@ fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
         if ThreadManager::new(repo.heddle_dir())
             .load(&candidate)?
             .is_none()
-            && repo.refs().get_thread(&candidate)?.is_none()
+            && repo.refs().get_thread(&ThreadName::new(&candidate))?.is_none()
         {
             return Ok(candidate);
         }
@@ -3346,7 +3426,13 @@ mod tests {
         drop(repo);
 
         let fresh_repo = Repository::open(temp.path()).unwrap();
-        let user_config = UserConfig::default();
+        let user_config = UserConfig {
+            principal: Some(crate::config::UserPrincipalConfig {
+                name: "Ada Lovelace".to_string(),
+                email: "ada@example.com".to_string(),
+            }),
+            ..UserConfig::default()
+        };
         let mut runtime = HarnessBridgeRuntime::new(fresh_repo, user_config);
         let payload = serde_json::json!({
             "session_id": "claude-sess-123",

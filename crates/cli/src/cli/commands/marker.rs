@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Marker commands.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
+use objects::object::MarkerName;
 use repo::Repository;
 use serde::Serialize;
 
-use super::snapshot::ensure_current_state;
+use super::{advice::RecoveryAdvice, snapshot::ensure_current_state};
 use crate::{
-    cli::{Cli, MarkerCommands, should_output_json},
+    cli::{should_output_json, Cli, MarkerCommands},
     config::UserConfig,
 };
 
@@ -51,12 +52,8 @@ pub fn cmd_marker(cli: &Cli, command: MarkerCommands) -> Result<()> {
             // Clap enforces required_unless_present + conflicts_with, so
             // these branches are unreachable in practice. Guard defensively
             // in case the constraint is ever relaxed.
-            (Some(_), Some(_)) => Err(anyhow!(
-                "marker delete: cannot combine <NAME> with --prefix"
-            )),
-            (None, None) => Err(anyhow!(
-                "marker delete: provide either <NAME> or --prefix <PFX>"
-            )),
+            (Some(_), Some(_)) => Err(anyhow!(marker_delete_selector_conflict_advice())),
+            (None, None) => Err(anyhow!(marker_delete_selector_required_advice())),
         },
         MarkerCommands::Show { name } => cmd_marker_show(cli, &repo, name),
     }
@@ -81,7 +78,7 @@ fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Resu
         .filter_map(|name| {
             let state = repo.refs().get_marker(name).ok()??;
             Some(MarkerEntry {
-                name: name.clone(),
+                name: name.to_string(),
                 change_id: state.short(),
             })
         })
@@ -113,8 +110,9 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
         )),
     )?;
 
-    repo.refs().create_marker(&name, &current)?;
-    repo.oplog().record_marker_create(&name, &current)?;
+    let mn = MarkerName::new(&name);
+    repo.refs().create_marker(&mn, &current)?;
+    repo.oplog().record_marker_create(&mn, &current)?;
 
     let output = MarkerOpOutput {
         name: name.clone(),
@@ -132,12 +130,13 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
 }
 
 fn cmd_marker_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
+    let mn = MarkerName::new(&name);
     let state = repo
         .refs()
-        .delete_marker(&name)?
+        .delete_marker(&mn)?
         .ok_or_else(|| anyhow!("Marker not found: {}", name))?;
 
-    repo.oplog().record_marker_delete(&name, &state)?;
+    repo.oplog().record_marker_delete(&mn, &state)?;
 
     let output = MarkerOpOutput {
         name: name.clone(),
@@ -156,13 +155,11 @@ fn cmd_marker_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
 
 fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Result<()> {
     if prefix.is_empty() {
-        return Err(anyhow!(
-            "marker delete --prefix: prefix must be non-empty (refusing to delete every marker)"
-        ));
+        return Err(anyhow!(marker_delete_empty_prefix_advice()));
     }
 
     let all = repo.refs().list_markers()?;
-    let matches: Vec<String> = all
+    let matches: Vec<MarkerName> = all
         .into_iter()
         .filter(|name| name.starts_with(&prefix))
         .collect();
@@ -173,7 +170,7 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
         if let Some(state) = repo.refs().delete_marker(name)? {
             repo.oplog().record_marker_delete(name, &state)?;
             deleted.push(MarkerEntry {
-                name: name.clone(),
+                name: name.to_string(),
                 change_id: state.short(),
             });
         }
@@ -204,10 +201,60 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
     Ok(())
 }
 
+fn marker_delete_empty_prefix_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "marker_delete_empty_prefix",
+        "Refusing to delete markers: --prefix must be non-empty",
+        "Inspect markers with `heddle marker list`, then rerun with a non-empty `--prefix`.",
+        "an empty marker prefix matches every marker",
+        "`heddle marker delete --prefix \"\"` would delete every marker ref",
+        "no marker refs were deleted",
+        "heddle marker list",
+        vec![
+            "heddle marker list".to_string(),
+            "heddle marker delete --prefix <prefix>".to_string(),
+        ],
+    )
+}
+
+fn marker_delete_selector_conflict_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "marker_delete_selector_conflict",
+        "marker delete cannot combine <NAME> with --prefix",
+        "Choose exactly one selector: delete one marker with `heddle marker delete <NAME>`, or delete a named group with `heddle marker delete --prefix <prefix>`.",
+        "both an exact marker name and a prefix selector were supplied",
+        "deleting with two selector modes would make the target marker set ambiguous",
+        "no marker refs, repository objects, metadata, or worktree files were changed",
+        "heddle marker list",
+        vec![
+            "heddle marker list".to_string(),
+            "heddle marker delete <NAME>".to_string(),
+            "heddle marker delete --prefix <prefix>".to_string(),
+        ],
+    )
+}
+
+fn marker_delete_selector_required_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "marker_delete_selector_required",
+        "marker delete requires <NAME> or --prefix <prefix>",
+        "Inspect markers with `heddle marker list`, then delete one marker with `heddle marker delete <NAME>` or a named group with `heddle marker delete --prefix <prefix>`.",
+        "no marker name or prefix selector was supplied",
+        "deleting without a selector would have to guess which marker refs should be removed",
+        "no marker refs, repository objects, metadata, or worktree files were changed",
+        "heddle marker list",
+        vec![
+            "heddle marker list".to_string(),
+            "heddle marker delete <NAME>".to_string(),
+            "heddle marker delete --prefix <prefix>".to_string(),
+        ],
+    )
+}
+
 fn cmd_marker_show(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     let state_id = repo
         .refs()
-        .get_marker(&name)?
+        .get_marker(&MarkerName::new(&name))?
         .ok_or_else(|| anyhow!("Marker not found: {}", name))?;
 
     let state = repo
@@ -233,4 +280,28 @@ fn cmd_marker_show(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marker_delete_selector_advices_are_typed() {
+        let conflict = marker_delete_selector_conflict_advice();
+        assert_eq!(conflict.kind, "marker_delete_selector_conflict");
+        assert_eq!(conflict.primary_command, "heddle marker list");
+        assert!(conflict.primary_hint().contains("exactly one selector"));
+        assert!(conflict.unsafe_condition.contains("exact marker name"));
+        assert!(conflict.would_change.contains("ambiguous"));
+        assert!(conflict.preserved.contains("no marker refs"));
+
+        let required = marker_delete_selector_required_advice();
+        assert_eq!(required.kind, "marker_delete_selector_required");
+        assert_eq!(required.primary_command, "heddle marker list");
+        assert!(required.primary_hint().contains("heddle marker list"));
+        assert!(required.unsafe_condition.contains("no marker name"));
+        assert!(required.would_change.contains("guess"));
+        assert!(required.preserved.contains("no marker refs"));
+    }
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use objects::object::ThreadName;
 
 #[test]
 fn test_cli_bridge_git_init() {
@@ -47,7 +48,11 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
     assert!(pull.is_ok(), "Bridge pull failed: {:?}", pull.err());
 
     let target_repo = Repository::open(target.path()).unwrap();
-    assert!(target_repo.refs().get_thread("main").unwrap().is_some());
+    assert!(target_repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -77,7 +82,11 @@ fn test_cli_bridge_git_import_from_external_repo() {
     assert!(result.is_ok(), "Bridge import failed: {:?}", result.err());
 
     let repo = Repository::open(heddle_repo_dir.path()).unwrap();
-    assert!(repo.refs().get_thread("main").unwrap().is_some());
+    assert!(repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -123,7 +132,13 @@ fn test_cli_push_mirror_dual_push_to_weft_and_git_remote() {
     // would never execute and codecov/patch would miss it.
     let stdout = heddle(
         &[
-            "--output", "text", "push", &weft_path, "--thread", "main", &mirror_arg,
+            "--output",
+            "text",
+            "push",
+            &weft_path,
+            "--thread",
+            "main",
+            &mirror_arg,
         ],
         Some(source.path()),
     )
@@ -178,7 +193,13 @@ fn test_cli_push_mirror_failure_does_not_abort_primary_push() {
     // failure on stdout).
     let result = heddle(
         &[
-            "--output", "text", "push", &weft_path, "--thread", "main", &mirror_arg,
+            "--output",
+            "text",
+            "push",
+            &weft_path,
+            "--thread",
+            "main",
+            &mirror_arg,
         ],
         Some(source.path()),
     );
@@ -300,7 +321,7 @@ fn test_cli_push_mirror_json_success_emits_mirrored_true() {
     let weft_path = weft_target.path().to_string_lossy().to_string();
     let git_path = git_remote.path().to_string_lossy().to_string();
     let mirror_arg = format!("--mirror={}", git_path);
-    let stdout = heddle(
+    let output = heddle_output(
         &[
             "--output",
             "json",
@@ -312,17 +333,22 @@ fn test_cli_push_mirror_json_success_emits_mirrored_true() {
         ],
         Some(source.path()),
     )
-    .expect("push --output json --mirror=<remote> must succeed");
-
+    .expect("push --output json --mirror=<remote> must invoke");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
     assert!(
-        stdout.contains("\"mirrored\":true"),
-        "JSON success line missing: {}",
-        stdout
+        output.status.success(),
+        "primary push must succeed: stderr={stderr}"
+    );
+
+    // Mirror diagnostics land on stderr to keep `heddle push --output json`
+    // a single JSON object on stdout (PR #251 contract).
+    assert!(
+        stderr.contains("\"mirrored\":true"),
+        "JSON mirror success line missing on stderr: {stderr}"
     );
     assert!(
-        stdout.contains(&git_path),
-        "JSON output must echo the mirror remote: {}",
-        stdout
+        stderr.contains(&git_path),
+        "stderr should echo the mirror remote: {stderr}"
     );
 }
 
@@ -342,14 +368,12 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
     // Plain `git init` → RepositoryCapability::GitOverlay,
     // hosted_enabled() == false. This is the drop-in case the
     // early-return in cmd_push handles.
-    assert!(
-        Command::new("git")
-            .arg("init")
-            .current_dir(source.path())
-            .status()
-            .unwrap()
-            .success()
-    );
+    assert!(Command::new("git")
+        .arg("init")
+        .current_dir(source.path())
+        .status()
+        .unwrap()
+        .success());
     for (k, v) in [
         ("user.name", "Heddle Test"),
         ("user.email", "heddle@example.com"),
@@ -390,11 +414,8 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
     let primary_path = primary_remote.path().to_string_lossy().to_string();
     let mirror_path = mirror_remote.path().to_string_lossy().to_string();
     let mirror_arg = format!("--mirror={}", mirror_path);
-    heddle(
-        &["push", &primary_path, &mirror_arg],
-        Some(source.path()),
-    )
-    .expect("push --mirror in GitOverlay repo should succeed");
+    heddle(&["push", &primary_path, &mirror_arg], Some(source.path()))
+        .expect("push --mirror in GitOverlay repo should succeed");
 
     assert!(
         primary_repo.find_reference("refs/heads/main").is_ok(),
@@ -430,7 +451,7 @@ fn test_cli_push_mirror_json_uses_rfc8259_escaping_for_unicode() {
     let weft_path = weft_target.path().to_string_lossy().to_string();
     let mirror_path = mirror_dir.to_string_lossy().to_string();
     let mirror_arg = format!("--mirror={}", mirror_path);
-    let stdout = heddle(
+    let output = heddle_output(
         &[
             "--output",
             "json",
@@ -442,12 +463,19 @@ fn test_cli_push_mirror_json_uses_rfc8259_escaping_for_unicode() {
         ],
         Some(source.path()),
     )
-    .expect("push --output json --mirror=<U+2028> must succeed");
+    .expect("push --output json --mirror=<U+2028> must invoke");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
+    assert!(
+        output.status.success(),
+        "primary push must succeed: stderr={stderr}"
+    );
 
-    let mirror_line = stdout
+    // Mirror outcome JSON now lives on stderr (PR #251 contract — stdout
+    // stays a single JSON object).
+    let mirror_line = stderr
         .lines()
         .find(|line| line.contains("\"mirrored\""))
-        .unwrap_or_else(|| panic!("mirror outcome JSON line missing in stdout: {}", stdout));
+        .unwrap_or_else(|| panic!("mirror outcome JSON line missing on stderr: {stderr}"));
 
     // The Debug-format bug emits `"\u{2028}"` (literal braces), which
     // is not valid JSON — `serde_json::from_str` rejects it.
@@ -488,7 +516,7 @@ fn test_cli_push_mirror_json_failure_emits_mirrored_false_with_error() {
         .to_string_lossy()
         .to_string();
     let mirror_arg = format!("--mirror={}", bogus);
-    let stdout = heddle(
+    let output = heddle_output(
         &[
             "--output",
             "json",
@@ -500,16 +528,20 @@ fn test_cli_push_mirror_json_failure_emits_mirrored_false_with_error() {
         ],
         Some(source.path()),
     )
-    .expect("primary push must succeed even when mirror push fails");
-
+    .expect("primary push must invoke even when mirror push fails");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap_or("");
     assert!(
-        stdout.contains("\"mirrored\":false"),
-        "JSON failure line missing: {}",
-        stdout
+        output.status.success(),
+        "primary push must succeed even when mirror push fails: stderr={stderr}"
+    );
+
+    // Mirror failure JSON lives on stderr (PR #251 contract).
+    assert!(
+        stderr.contains("\"mirrored\":false"),
+        "JSON mirror-failure line missing on stderr: {stderr}"
     );
     assert!(
-        stdout.contains("\"error\""),
-        "JSON failure must include error field: {}",
-        stdout
+        stderr.contains("\"error\""),
+        "JSON mirror failure must include error field: {stderr}"
     );
 }

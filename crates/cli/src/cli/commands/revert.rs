@@ -8,8 +8,12 @@ use objects::object::{Attribution, FileChangeSet, Tree};
 use repo::{DiffKind, Repository};
 use serde::Serialize;
 
-use super::history_target::resolve_state_id;
-use crate::cli::{Cli, should_output_json, worktree_status_options};
+use super::{
+    advice::RecoveryAdvice,
+    history_target::{require_resolved_state, resolve_state_id},
+    worktree_safety::ensure_worktree_clean,
+};
+use crate::cli::{Cli, should_output_json};
 
 #[derive(Serialize)]
 struct RevertOutput {
@@ -29,16 +33,10 @@ pub fn cmd_revert(
 
     let target_id = resolve_state_id(&repo, &state_spec)?;
 
-    let target_state = repo
-        .store()
-        .get_state(&target_id)?
-        .ok_or_else(|| anyhow!("State not found: {}", state_spec))?;
+    let target_state = require_resolved_state(&repo, &target_id)?;
 
     let parent_tree = if let Some(parent_id) = target_state.first_parent() {
-        let parent_state = repo
-            .store()
-            .get_state(parent_id)?
-            .ok_or_else(|| anyhow!("Parent state not found"))?;
+        let parent_state = require_resolved_state(&repo, parent_id)?;
         repo.require_tree(&parent_state.tree)?
     } else {
         Tree::new()
@@ -60,25 +58,10 @@ pub fn cmd_revert(
     let changes = repo.diff_trees(&parent_hash, &target_state.tree)?;
 
     if changes.is_empty() {
-        return Err(anyhow!("No changes to revert in state {}", state_spec));
+        return Err(anyhow!(no_changes_to_revert_advice(&target_id.short())));
     }
 
-    let current_state = repo.current_state()?;
-    let current_tree = match current_state.as_ref() {
-        Some(s) => repo.require_tree(&s.tree)?,
-        None => Tree::new(),
-    };
-
-    let status = repo.compare_worktree_cached_with_options(
-        &current_tree,
-        &worktree_status_options(Some(repo.config())),
-    )?;
-    if !status.is_clean() {
-        return Err(anyhow!(
-            "Cannot revert: you have uncommitted changes.\n\
-             Commit or stash your changes first."
-        ));
-    }
+    ensure_worktree_clean(&repo, "revert")?;
 
     let mut files_affected: Vec<String> = Vec::new();
 
@@ -131,6 +114,22 @@ pub fn cmd_revert(
     }
 
     Ok(())
+}
+
+fn no_changes_to_revert_advice(state: &str) -> RecoveryAdvice {
+    let inspect_command = format!("heddle show {state}");
+    RecoveryAdvice::safety_refusal(
+        "no_changes_to_revert",
+        format!("No changes to revert in state {state}"),
+        format!(
+            "Inspect the state with `{inspect_command}` and choose a state with a non-empty diff."
+        ),
+        "the selected state has an empty diff relative to its parent",
+        "revert would not update any files or create a meaningful inverse state",
+        "repository state was left unchanged",
+        inspect_command.clone(),
+        vec![inspect_command, "heddle log".to_string()],
+    )
 }
 
 fn apply_inverse_changes(

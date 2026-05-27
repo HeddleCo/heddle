@@ -20,10 +20,10 @@
 //!   `Unauthorized` mid-stream the publisher exits cleanly and logs a
 //!   pointer at re-running `heddle auth login` — no in-band refresh.
 
-
 use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
+use cli_shared::UserConfig;
 use futures::{SinkExt, StreamExt};
 use objects::store::{AgentEntry, AgentRegistry};
 use repo::{HostedConfig, Repository};
@@ -42,10 +42,9 @@ use tokio_tungstenite::{
     },
 };
 use tracing::{debug, info, warn};
+use weft_client_shim::CliContext;
 
 use crate::credentials;
-use cli_shared::UserConfig;
-use weft_client_shim::CliContext;
 
 /// Local mirror of `weft_server::presence::hub::PresenceEvent`.
 ///

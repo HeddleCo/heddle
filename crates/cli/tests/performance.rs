@@ -10,7 +10,7 @@ use std::{
 
 use objects::{
     object::{Blob, ChangeId, ContentHash},
-    store::{pack::ObjectType as PackObjectType, CompressionConfig, PackBuilder, PackObjectId},
+    store::{CompressionConfig, PackBuilder, PackObjectId, pack::ObjectType as PackObjectType},
 };
 use proto::{ObjectData, ObjectId, ObjectType};
 use repo::Repository;

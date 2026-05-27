@@ -3,7 +3,7 @@
 
 use tempfile::TempDir;
 
-use super::{pack_index::PackIndex, ObjectType, PackBuilder, PackObjectId, PackReader};
+use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
 use crate::{
     delta::MAX_DELTA_OUTPUT_SIZE,
     object::{ChangeId, ContentHash},
@@ -300,7 +300,7 @@ fn test_pack_reader_missing_object_returns_none() {
 /// with the expected diagnostic phrase.
 #[test]
 fn stale_index_swapped_offsets_surfaces_as_invalid_object() {
-    use crate::store::{pack::pack_index::PackIndex, StoreError};
+    use crate::store::{StoreError, pack::pack_index::PackIndex};
 
     let blob_a = b"alpha-payload alpha-payload alpha-payload alpha".to_vec();
     let blob_b = b"bravo-payload bravo-payload bravo-payload bravo".to_vec();

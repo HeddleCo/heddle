@@ -16,6 +16,7 @@
 use std::{fs, path::Path};
 
 use objects::object::ContentHash;
+use objects::object::ThreadName;
 use repo::Repository;
 use tempfile::TempDir;
 
@@ -46,7 +47,7 @@ fn current_state_tree_hex(repo_root: &Path) -> String {
     let repo = Repository::open(repo_root).unwrap();
     let tip = repo
         .refs()
-        .get_thread("main")
+        .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("main thread must have a tip after capture");
     let state = repo
@@ -150,7 +151,11 @@ fn test_revert_missing_parent_tree_fails_loud_not_silent_empty() {
     // intermediate-state insertions.
     let parent_tree_hex = {
         let repo = Repository::open(temp.path()).unwrap();
-        let tip = repo.refs().get_thread("main").unwrap().unwrap();
+        let tip = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .unwrap();
         let second_state = repo.store().get_state(&tip).unwrap().unwrap();
         let parent_id = second_state
             .first_parent()
@@ -273,7 +278,11 @@ fn test_goto_missing_current_tree_fails_loud_not_silent_dirty() {
     // target (heddle has no `main~1` rev-parse syntax).
     let (current_tree_hex, first_state_id) = {
         let repo = Repository::open(temp.path()).unwrap();
-        let tip = repo.refs().get_thread("main").unwrap().unwrap();
+        let tip = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .unwrap();
         let second_state = repo.store().get_state(&tip).unwrap().unwrap();
         let parent_id = second_state
             .first_parent()

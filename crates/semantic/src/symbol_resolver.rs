@@ -499,24 +499,33 @@ pub fn resolve_all_symbols(
 /// `start` and `end` are 1-indexed, inclusive. Returns the bytes
 /// for those lines (including newlines).
 pub fn extract_line_range(source: &[u8], start: u32, end: u32) -> Vec<u8> {
-    let mut result = Vec::new();
-    let mut current_line: u32 = 1;
-    let mut i = 0;
+    let mut line: u32 = 1;
+    let mut byte_start = 0;
 
-    while i < source.len() {
-        if current_line >= start && current_line <= end {
-            result.push(source[i]);
+    for (i, &b) in source.iter().enumerate() {
+        if line == start {
+            byte_start = i;
+            break;
         }
-        if source[i] == b'\n' {
-            current_line += 1;
-            if current_line > end {
-                break;
-            }
+        if b == b'\n' {
+            line += 1;
         }
-        i += 1;
     }
 
-    result
+    if line < start {
+        return Vec::new();
+    }
+
+    for (i, &b) in source[byte_start..].iter().enumerate() {
+        if b == b'\n' {
+            line += 1;
+            if line > end {
+                return source[byte_start..byte_start + i + 1].to_vec();
+            }
+        }
+    }
+
+    source[byte_start..].to_vec()
 }
 
 #[cfg(test)]

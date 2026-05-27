@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use objects::{
     error::{HeddleError, Result},
     fs_ops::remove_path_recursively,
-    object::ChangeId,
+    object::{ChangeId, MarkerName, ThreadName},
 };
 
 use super::{
-    Head, RefExpectation, RefUpdate, backend::CoreRefBackend, format_change_id_text,
-    packed_refs::PackedRefs, ref_backend::RefBackend, resolve_refspec,
+    backend::CoreRefBackend, format_change_id_text, packed_refs::PackedRefs,
+    ref_backend::RefBackend, resolve_refspec, Head, RefExpectation, RefUpdate,
 };
 use crate::fs_atomic::sync_directory;
 
@@ -108,7 +108,7 @@ impl RefManager {
         }])
     }
 
-    pub fn get_thread(&self, name: &str) -> Result<Option<ChangeId>> {
+    pub fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
         let path = self.thread_path(name)?;
         if let Some(id) = self.read_change_id_at(&path, "thread", name)? {
             return Ok(Some(id));
@@ -116,28 +116,28 @@ impl RefManager {
         Ok(PackedRefs::load(&self.packed_refs_path())?.get_thread(name))
     }
 
-    pub fn set_thread(&self, name: &str, state: &ChangeId) -> Result<()> {
+    pub fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<()> {
         self.set_thread_cas(name, RefExpectation::Any, state)
     }
 
     pub fn set_thread_cas(
         &self,
-        name: &str,
+        name: &ThreadName,
         expected: RefExpectation<ChangeId>,
         state: &ChangeId,
     ) -> Result<()> {
         self.update_refs(&[RefUpdate::Thread {
-            name: name.to_string(),
+            name: name.clone(),
             expected,
             new: Some(*state),
         }])
     }
 
-    pub fn delete_thread(&self, name: &str) -> Result<Option<ChangeId>> {
+    pub fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
         let state = self.get_thread(name)?;
         if state.is_some() {
             self.update_refs(&[RefUpdate::Thread {
-                name: name.to_string(),
+                name: name.clone(),
                 expected: RefExpectation::Any,
                 new: None,
             }])?;
@@ -145,22 +145,26 @@ impl RefManager {
         Ok(state)
     }
 
-    pub fn delete_thread_cas(&self, name: &str, expected: RefExpectation<ChangeId>) -> Result<()> {
+    pub fn delete_thread_cas(
+        &self,
+        name: &ThreadName,
+        expected: RefExpectation<ChangeId>,
+    ) -> Result<()> {
         self.update_refs(&[RefUpdate::Thread {
-            name: name.to_string(),
+            name: name.clone(),
             expected,
             new: None,
         }])
     }
 
-    pub fn list_threads(&self) -> Result<Vec<String>> {
+    pub fn list_threads(&self) -> Result<Vec<ThreadName>> {
         if let Some(summary) = self.try_read_ref_summary_index() {
             return Ok(summary.thread_names());
         }
         self.list_threads_from_storage()
     }
 
-    pub fn get_marker(&self, name: &str) -> Result<Option<ChangeId>> {
+    pub fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
         let path = self.marker_path(name)?;
         if let Some(id) = self.read_change_id_at(&path, "marker", name)? {
             return Ok(Some(id));
@@ -168,24 +172,24 @@ impl RefManager {
         Ok(PackedRefs::load(&self.packed_refs_path())?.get_marker(name))
     }
 
-    pub fn create_marker(&self, name: &str, state: &ChangeId) -> Result<()> {
+    pub fn create_marker(&self, name: &MarkerName, state: &ChangeId) -> Result<()> {
         self.set_marker_cas(name, RefExpectation::Missing, state)
     }
 
     pub fn set_marker_cas(
         &self,
-        name: &str,
+        name: &MarkerName,
         expected: RefExpectation<ChangeId>,
         state: &ChangeId,
     ) -> Result<()> {
         self.update_refs(&[RefUpdate::Marker {
-            name: name.to_string(),
+            name: name.clone(),
             expected,
             new: Some(*state),
         }])
     }
 
-    pub fn delete_marker(&self, name: &str) -> Result<Option<ChangeId>> {
+    pub fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
         let state = self.get_marker(name)?;
         if state.is_some() {
             self.delete_marker_cas(name, RefExpectation::Any)?;
@@ -193,27 +197,36 @@ impl RefManager {
         Ok(state)
     }
 
-    pub fn delete_marker_cas(&self, name: &str, expected: RefExpectation<ChangeId>) -> Result<()> {
+    pub fn delete_marker_cas(
+        &self,
+        name: &MarkerName,
+        expected: RefExpectation<ChangeId>,
+    ) -> Result<()> {
         self.update_refs(&[RefUpdate::Marker {
-            name: name.to_string(),
+            name: name.clone(),
             expected,
             new: None,
         }])
     }
 
-    pub fn list_markers(&self) -> Result<Vec<String>> {
+    pub fn list_markers(&self) -> Result<Vec<MarkerName>> {
         if let Some(summary) = self.try_read_ref_summary_index() {
             return Ok(summary.marker_names());
         }
         self.list_markers_from_storage()
     }
 
-    pub fn get_remote_thread(&self, remote: &str, thread: &str) -> Result<Option<ChangeId>> {
+    pub fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
         let path = self.remote_thread_path(remote, thread)?;
         self.read_change_id_at(&path, "remote thread", &format!("{}/{}", remote, thread))
     }
 
-    pub fn set_remote_thread(&self, remote: &str, thread: &str, state: &ChangeId) -> Result<()> {
+    pub fn set_remote_thread(
+        &self,
+        remote: &str,
+        thread: &ThreadName,
+        state: &ChangeId,
+    ) -> Result<()> {
         let _lock = self.lock_refs()?;
         let path = self.remote_thread_path(remote, thread)?;
         let content = format_change_id_text(state);
@@ -231,7 +244,11 @@ impl RefManager {
         Ok(())
     }
 
-    pub fn delete_remote_thread(&self, remote: &str, thread: &str) -> Result<Option<ChangeId>> {
+    pub fn delete_remote_thread(
+        &self,
+        remote: &str,
+        thread: &ThreadName,
+    ) -> Result<Option<ChangeId>> {
         let _lock = self.lock_refs()?;
         let state = self.get_remote_thread(remote, thread)?;
         if state.is_some() {
@@ -255,7 +272,7 @@ impl RefManager {
         self.list_remotes_from_storage()
     }
 
-    pub fn list_remote_threads(&self, remote: &str) -> Result<Vec<String>> {
+    pub fn list_remote_threads(&self, remote: &str) -> Result<Vec<ThreadName>> {
         if let Some(summary) = self.try_read_ref_summary_index() {
             return Ok(summary.remote_thread_names(remote));
         }
@@ -274,8 +291,8 @@ impl RefManager {
         resolve_refspec(
             refspec,
             || self.read_head(),
-            |name| self.get_thread(name),
-            |name| self.get_marker(name),
+            |name| self.get_thread(&ThreadName::new(name)),
+            |name| self.get_marker(&MarkerName::new(name)),
         )
     }
 
@@ -337,50 +354,58 @@ impl CoreRefBackend for RefManager {
     fn write_head_cas(&self, expected: RefExpectation<Head>, head: &Head) -> Result<()> {
         RefManager::write_head_cas(self, expected, head)
     }
-    fn get_thread(&self, name: &str) -> Result<Option<ChangeId>> {
+    fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
         RefManager::get_thread(self, name)
     }
-    fn set_thread(&self, name: &str, state: &ChangeId) -> Result<()> {
+    fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<()> {
         RefManager::set_thread(self, name, state)
     }
     fn set_thread_cas(
         &self,
-        name: &str,
+        name: &ThreadName,
         expected: RefExpectation<ChangeId>,
         state: &ChangeId,
     ) -> Result<()> {
         RefManager::set_thread_cas(self, name, expected, state)
     }
-    fn delete_thread(&self, name: &str) -> Result<Option<ChangeId>> {
+    fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
         RefManager::delete_thread(self, name)
     }
-    fn delete_thread_cas(&self, name: &str, expected: RefExpectation<ChangeId>) -> Result<()> {
+    fn delete_thread_cas(
+        &self,
+        name: &ThreadName,
+        expected: RefExpectation<ChangeId>,
+    ) -> Result<()> {
         RefManager::delete_thread_cas(self, name, expected)
     }
-    fn list_threads(&self) -> Result<Vec<String>> {
+    fn list_threads(&self) -> Result<Vec<ThreadName>> {
         RefManager::list_threads(self)
     }
-    fn get_marker(&self, name: &str) -> Result<Option<ChangeId>> {
+    fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
         RefManager::get_marker(self, name)
     }
-    fn create_marker(&self, name: &str, state: &ChangeId) -> Result<()> {
+    fn create_marker(&self, name: &MarkerName, state: &ChangeId) -> Result<()> {
         RefManager::create_marker(self, name, state)
     }
     fn set_marker_cas(
         &self,
-        name: &str,
+        name: &MarkerName,
         expected: RefExpectation<ChangeId>,
         state: &ChangeId,
     ) -> Result<()> {
         RefManager::set_marker_cas(self, name, expected, state)
     }
-    fn delete_marker(&self, name: &str) -> Result<Option<ChangeId>> {
+    fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
         RefManager::delete_marker(self, name)
     }
-    fn delete_marker_cas(&self, name: &str, expected: RefExpectation<ChangeId>) -> Result<()> {
+    fn delete_marker_cas(
+        &self,
+        name: &MarkerName,
+        expected: RefExpectation<ChangeId>,
+    ) -> Result<()> {
         RefManager::delete_marker_cas(self, name, expected)
     }
-    fn list_markers(&self) -> Result<Vec<String>> {
+    fn list_markers(&self) -> Result<Vec<MarkerName>> {
         RefManager::list_markers(self)
     }
     fn update_refs(&self, updates: &[RefUpdate]) -> Result<()> {
@@ -392,19 +417,19 @@ impl CoreRefBackend for RefManager {
 }
 
 impl RefBackend for RefManager {
-    fn get_remote_thread(&self, remote: &str, thread: &str) -> Result<Option<ChangeId>> {
+    fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
         RefManager::get_remote_thread(self, remote, thread)
     }
-    fn set_remote_thread(&self, remote: &str, thread: &str, state: &ChangeId) -> Result<()> {
+    fn set_remote_thread(&self, remote: &str, thread: &ThreadName, state: &ChangeId) -> Result<()> {
         RefManager::set_remote_thread(self, remote, thread, state)
     }
-    fn delete_remote_thread(&self, remote: &str, thread: &str) -> Result<Option<ChangeId>> {
+    fn delete_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
         RefManager::delete_remote_thread(self, remote, thread)
     }
     fn list_remotes(&self) -> Result<Vec<String>> {
         RefManager::list_remotes(self)
     }
-    fn list_remote_threads(&self, remote: &str) -> Result<Vec<String>> {
+    fn list_remote_threads(&self, remote: &str) -> Result<Vec<ThreadName>> {
         RefManager::list_remote_threads(self, remote)
     }
     fn inspect_ref_summary_index(&self) -> Result<super::RefSummaryIndexInspection> {

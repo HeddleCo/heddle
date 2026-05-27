@@ -2,9 +2,14 @@
 //! Sync threads/markers functionality for Git bridge.
 
 use gix::refs::transaction::PreviousValue;
+use objects::object::{MarkerName, ThreadName};
+use refs::RefExpectation;
 
 use crate::bridge::{
-    git_core::{GitBridge, GitBridgeError, GitResult, git_err, set_reference},
+    git_core::{
+        GitBridge, GitBridgeError, GitResult, ensure_commit_update_fast_forward, git_err,
+        set_reference,
+    },
     git_import::thread_can_adopt_change,
 };
 
@@ -59,27 +64,19 @@ pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
         let name = branch.name().shorten().to_string();
         let target = branch.peel_to_id().map_err(git_err)?.detach();
         if let Some(change_id) = bridge.mapping.get_heddle(target) {
-            if let Some(existing) = bridge.heddle_repo.refs().get_thread(&name)?
+            let tn = ThreadName::new(&name);
+            if let Some(existing) = bridge.heddle_repo.refs().get_thread(&tn)?
                 && !thread_can_adopt_change(bridge.heddle_repo, &existing, &change_id)?
             {
-                return Err(GitBridgeError::Conflict(format!(
-                    "thread {name} at {existing} differs from branch {name} at \
-                     {change_id}. The Heddle thread and the Git branch have \
-                     diverged — neither is an ancestor of the other. Heddle \
-                     will not auto-reconcile: pick which side wins. If the \
-                     Git branch should replace the Heddle thread wholesale, \
-                     drop the thread with `heddle thread drop {name} \
-                     --delete-thread` and rerun (this discards thread-only \
-                     states). If the Heddle thread should replace the Git \
-                     branch, delete the Git branch with `git branch -D \
-                     {name}` and rerun (this discards branch-only commits). \
-                     To merge or rebase the two histories instead, do the \
-                     merge in Git first, then re-run sync on the merged \
-                     branch.",
-                )));
+                return Err(GitBridgeError::GitHeddleThreadDiverged {
+                    thread: name.clone(),
+                    branch: name,
+                    thread_change: existing,
+                    branch_change: change_id,
+                });
             }
 
-            bridge.heddle_repo.refs().set_thread(&name, &change_id)?;
+            bridge.heddle_repo.refs().set_thread(&tn, &change_id)?;
             stats += 1;
         }
     }
@@ -103,18 +100,19 @@ pub fn sync_tags(bridge: &mut GitBridge) -> GitResult<usize> {
         let oid = tag.peel_to_id().map_err(git_err)?.detach();
 
         if let Some(change_id) = bridge.mapping.get_heddle(oid) {
-            match bridge.heddle_repo.refs().get_marker(&name) {
-                Ok(Some(existing)) if existing != change_id => {
-                    return Err(GitBridgeError::Conflict(format!(
-                        "marker {} at {} differs from tag {} at {}",
-                        name, existing, name, change_id
-                    )));
-                }
+            let mn = MarkerName::new(&name);
+            match bridge.heddle_repo.refs().get_marker(&mn) {
+                Ok(Some(existing)) if existing != change_id => bridge
+                    .heddle_repo
+                    .refs()
+                    .set_marker_cas(&mn, RefExpectation::Any, &change_id)?,
                 Ok(_) => {}
                 Err(err) => return Err(err.into()),
             }
 
-            bridge.heddle_repo.refs().create_marker(&name, &change_id)?;
+            if bridge.heddle_repo.refs().get_marker(&mn)?.is_none() {
+                bridge.heddle_repo.refs().create_marker(&mn, &change_id)?;
+            }
             stats += 1;
         }
     }
@@ -133,11 +131,12 @@ pub fn sync_track_to_branch(
     if let Ok(mut branch) = repo.find_reference(&branch_ref) {
         let existing = branch.peel_to_id().map_err(git_err)?.detach();
         if existing != git_oid {
+            ensure_commit_update_fast_forward(repo, &branch_ref, existing, git_oid)?;
             set_reference(
                 repo,
                 &branch_ref,
                 git_oid,
-                PreviousValue::Any,
+                PreviousValue::ExistingMustMatch(gix::refs::Target::Object(existing)),
                 "heddle: sync thread",
             )?;
         }

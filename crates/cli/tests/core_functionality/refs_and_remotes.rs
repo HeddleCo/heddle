@@ -85,8 +85,12 @@ fn test_thread_current_after_switch() {
 fn test_thread_current_json_output() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-    let result = heddle(&["--output", "json", "thread", "current"], Some(temp.path())).unwrap();
-    let value: Value = serde_json::from_str(&result).expect("thread current --json output");
+    let result = heddle(
+        &["--output", "json", "thread", "current"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let value: Value = serde_json::from_str(&result).expect("thread current --output json output");
     assert_eq!(value["thread"], "main");
 }
 
@@ -171,7 +175,11 @@ fn test_thread_and_marker_listing_survives_ref_summary_maintenance() {
     assert!(markers.contains("stable"));
 
     let maintenance: serde_json::Value = serde_json::from_str(
-        &heddle(&["--json", "maintenance", "inspect"], Some(temp.path())).unwrap(),
+        &heddle(
+            &["--output", "json", "maintenance", "inspect"],
+            Some(temp.path()),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert_eq!(

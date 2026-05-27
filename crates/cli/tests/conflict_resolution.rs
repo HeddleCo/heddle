@@ -5,7 +5,7 @@
 //! the lifecycle a stack-aware rebase produces — start → resolve →
 //! finish / abort / carry_forward.
 
-use objects::object::ChangeId;
+use objects::object::{ChangeId, ThreadName};
 use repo::{MergeState, MergeStateManager, Repository};
 use tempfile::TempDir;
 
@@ -21,7 +21,7 @@ fn test_detect_divergent_history() {
 
     // Fork: create feature branch
     repo.refs()
-        .set_thread("feature", &base_state.change_id)
+        .set_thread(&ThreadName::new("feature"), &base_state.change_id)
         .unwrap();
 
     // Make divergent changes on feature
@@ -135,18 +135,16 @@ fn test_non_conflicting_changes() {
 
     // These changes don't conflict - different files
     // A merge would succeed
-    assert!(
-        repo.store()
-            .get_state(&branch1.change_id)
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        repo.store()
-            .get_state(&branch2.change_id)
-            .unwrap()
-            .is_some()
-    );
+    assert!(repo
+        .store()
+        .get_state(&branch1.change_id)
+        .unwrap()
+        .is_some());
+    assert!(repo
+        .store()
+        .get_state(&branch2.change_id)
+        .unwrap()
+        .is_some());
 }
 
 /// Test fast-forward merge detection.
@@ -424,7 +422,11 @@ fn merge_state_carry_forward_repoints_ours_without_ending_merge() {
     assert_eq!(after.ours, new_ours, "ours repointed");
     assert_eq!(after.theirs, theirs, "theirs preserved");
     assert_eq!(after.base, Some(base), "base preserved");
-    assert_eq!(after.resolved, vec!["a.txt".to_string()], "resolved preserved");
+    assert_eq!(
+        after.resolved,
+        vec!["a.txt".to_string()],
+        "resolved preserved"
+    );
     assert!(manager.is_merge_in_progress(), "merge stays alive");
     assert_eq!(manager.unresolved().unwrap(), vec!["b.txt".to_string()]);
 }

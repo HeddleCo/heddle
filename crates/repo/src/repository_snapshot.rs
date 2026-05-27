@@ -77,7 +77,7 @@ impl Repository {
             }
             let theirs = merge_state.theirs;
             let base = merge_state.base;
-            let intent = intent.or(Some(format!("Merge {}", theirs.short())));
+            let intent = intent.or_else(|| Some(format!("Merge {}", theirs.short())));
             let state = self.snapshot_merge_with_attribution(
                 &theirs,
                 intent,
@@ -126,15 +126,18 @@ impl Repository {
         // malformed manifest collapses to the plain `build_tree_profiled`
         // path. The slow path is always correct; the fast path is the
         // optimisation.
-        let head_for_manifest = self.refs.read_head().ok();
+        let head_for_manifest = self.head_ref().ok();
         let manifest_context: Option<(String, crate::thread_manifest::ThreadManifest)> =
             match head_for_manifest.as_ref() {
                 Some(Head::Attached { thread }) => {
                     match crate::thread_manifest::read_manifest(self.heddle_dir(), thread) {
                         Ok(Some(m)) => {
-                            let self_root_canonical = super::repository_thread_materialize::canonical_worktree_path(&self.root);
+                            let self_root_canonical =
+                                super::repository_thread_materialize::canonical_worktree_path(
+                                    &self.root,
+                                );
                             if m.worktree_path == self_root_canonical {
-                                Some((thread.clone(), m))
+                                Some((thread.to_string(), m))
                             } else {
                                 None
                             }
@@ -149,8 +152,9 @@ impl Repository {
         let snapshot = (|| -> Result<SnapshotExecution> {
             debug!("Building tree from worktree");
             let (tree, tree_profile) = match manifest_context.as_ref() {
-                Some((_, manifest)) => self
-                    .build_tree_profiled_with_stat_cache(&self.root, manifest)?,
+                Some((_, manifest)) => {
+                    self.build_tree_profiled_with_stat_cache(&self.root, manifest)?
+                }
                 None => self.build_tree_profiled(&self.root)?,
             };
             debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
@@ -227,7 +231,7 @@ impl Repository {
             // `agent_capture_atomicity_under_sigkill`.
             objects::fault_inject::maybe_panic_at("snapshot_after_state_before_ref");
 
-            let head = self.refs.read_head()?;
+            let head = self.head_ref()?;
             let thread = match &head {
                 Head::Attached { thread } => Some(thread.clone()),
                 Head::Detached { .. } => None,
@@ -312,6 +316,133 @@ impl Repository {
         snapshot
     }
 
+    /// Create a snapshot from a caller-supplied tree instead of walking
+    /// the worktree. Used by Git-overlay staged-index commits, where
+    /// the desired snapshot is the Git index boundary and the worktree
+    /// may intentionally still contain unstaged files.
+    #[instrument(skip(self, tree, attribution), fields(intent = ?intent, confidence))]
+    pub fn snapshot_tree_with_attribution_profiled(
+        &self,
+        tree: Tree,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+    ) -> Result<SnapshotExecution> {
+        let _lock = self
+            .locker()
+            .write()
+            .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+
+        if let Some(merge_state) = self.merge_state_manager().load()? {
+            let unresolved: Vec<_> = merge_state
+                .conflicts
+                .iter()
+                .filter(|path| !merge_state.resolved.contains(*path))
+                .collect();
+            if !unresolved.is_empty() {
+                return Err(HeddleError::Conflict(format!(
+                    "Unresolved conflicts: {}",
+                    unresolved
+                        .into_iter()
+                        .map(|path| path.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
+
+        self.store.begin_snapshot_write_batch()?;
+        let snapshot = (|| -> Result<SnapshotExecution> {
+            let root_tree_write_start = std::time::Instant::now();
+            let tree_hash = self.store.put_tree(&tree)?;
+            let root_tree_write_ms = root_tree_write_start.elapsed().as_millis();
+
+            let prev_head = self.head()?;
+            let parents = match prev_head {
+                Some(id) => vec![id],
+                None => vec![],
+            };
+
+            let mut state = State::new_snapshot(tree_hash, parents, attribution);
+
+            if let Some(intent) = intent {
+                state = state.with_intent(intent);
+            }
+
+            if let Some(confidence) = confidence {
+                state = state.with_confidence(confidence);
+            }
+
+            if let Some(parent_id) = prev_head
+                && let Some(parent_state) = self.store.get_state(&parent_id)?
+                && let Some(inherited) = Repository::inherit_parent_context(&parent_state)
+            {
+                state = state.with_context(inherited);
+            }
+
+            #[cfg(feature = "tree-sitter-symbols")]
+            {
+                let prior_state = match prev_head {
+                    Some(id) => self.store.get_state(&id).ok().flatten(),
+                    None => None,
+                };
+                match self.compute_and_persist_signals(prior_state.as_ref(), &state) {
+                    Ok(Some(hash)) => {
+                        state = state.with_risk_signals(hash);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
+                    }
+                }
+            }
+
+            let state_ref_oplog_start = std::time::Instant::now();
+            self.store.put_state(&state)?;
+            self.store.flush_snapshot_write_batch()?;
+
+            objects::fault_inject::maybe_panic_at("snapshot_after_state_before_ref");
+
+            let head = self.head_ref()?;
+            let thread = match &head {
+                Head::Attached { thread } => Some(thread.clone()),
+                Head::Detached { .. } => None,
+            };
+
+            match head {
+                Head::Attached { thread } => {
+                    self.refs.set_thread(&thread, &state.change_id)?;
+                }
+                Head::Detached { .. } => {
+                    self.refs.write_head(&Head::Detached {
+                        state: state.change_id,
+                    })?;
+                }
+            }
+
+            self.oplog.record_snapshot(
+                &state.change_id,
+                prev_head.as_ref(),
+                thread.as_deref(),
+                Some(&self.op_scope()),
+            )?;
+
+            Ok(SnapshotExecution {
+                state,
+                tree,
+                profile: SnapshotProfile {
+                    tree_write_ms: root_tree_write_ms,
+                    state_ref_oplog_ms: state_ref_oplog_start.elapsed().as_millis(),
+                    ..SnapshotProfile::default()
+                },
+            })
+        })();
+        if snapshot.is_err() {
+            self.store.abort_snapshot_write_batch();
+        }
+        snapshot
+    }
+
     /// Create a merge state with two parents.
     pub fn snapshot_merge_with_attribution(
         &self,
@@ -369,7 +500,7 @@ impl Repository {
 
         self.store.put_state(&state)?;
 
-        let head = self.refs.read_head()?;
+        let head = self.head_ref()?;
         let thread = match &head {
             Head::Attached { thread } => Some(thread.clone()),
             Head::Detached { .. } => None,

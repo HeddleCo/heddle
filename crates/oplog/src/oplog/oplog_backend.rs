@@ -6,7 +6,7 @@
 
 use objects::{
     error::Result,
-    object::{ChangeId, ContentHash},
+    object::{ChangeId, ContentHash, MarkerName, ThreadName},
 };
 
 use super::oplog_types::{OpBatch, OpEntry, OpRecord};
@@ -14,7 +14,9 @@ use super::oplog_types::{OpBatch, OpEntry, OpRecord};
 /// Backend-agnostic interface for the operation log.
 pub trait OpLogBackend: Send + Sync {
     /// Append a batch of operations atomically. Returns the assigned IDs.
-    fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>>;
+    fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
+        self.record_batch_scoped(operations, None)
+    }
     fn record_batch_scoped(
         &self,
         operations: Vec<OpRecord>,
@@ -59,15 +61,33 @@ pub trait OpLogBackend: Send + Sync {
 
     fn last(&self) -> Result<Option<OpEntry>>;
     fn recent(&self, count: usize) -> Result<Vec<OpEntry>>;
-    fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>>;
+    fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.recent_batches_scoped(count, None)
+    }
     fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>>;
 
-    fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>>;
+    fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.undo_batches_scoped(count, None)
+    }
     fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>>;
-    fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>>;
+    fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.redo_batches_scoped(count, None)
+    }
     fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>>;
     fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch>;
     fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch>;
+
+    /// Coalesce two existing batches into one logical undo/redo unit.
+    ///
+    /// Implementations should preserve entry IDs and chronological entry
+    /// order, rewriting only batch metadata. Backends that cannot rewrite
+    /// local batch metadata may keep the default fail-closed behavior.
+    fn coalesce_batches(&self, primary_batch_id: u64, secondary_batch_id: u64) -> Result<OpBatch> {
+        let _ = (primary_batch_id, secondary_batch_id);
+        Err(objects::error::HeddleError::Config(
+            "oplog backend does not support batch coalescing".to_string(),
+        ))
+    }
 
     fn record_snapshot(
         &self,
@@ -117,7 +137,7 @@ pub trait OpLogBackend: Send + Sync {
     /// legacy oplog entries written before heddle#23 r2.
     fn record_thread_create(
         &self,
-        name: &str,
+        name: &ThreadName,
         state: &ChangeId,
         manager_snapshot: Option<Vec<u8>>,
         scope: Option<&str>,
@@ -135,7 +155,7 @@ pub trait OpLogBackend: Send + Sync {
 
     fn record_thread_delete(
         &self,
-        name: &str,
+        name: &ThreadName,
         state: &ChangeId,
         scope: Option<&str>,
     ) -> Result<u64> {
@@ -149,20 +169,10 @@ pub trait OpLogBackend: Send + Sync {
         Ok(ids[0])
     }
 
-    /// Record a thread rename as a batch.
-    ///
-    /// Emits the new-name arm as `ThreadCreateV2 { manager_snapshot: None }`
-    /// — `cmd_thread_rename`'s forward path does not re-key the
-    /// ThreadManager record under the new name (a pre-existing
-    /// forward-path bug filed as a follow-up in
-    /// docs/design/cross-thread-undo.md), so there is no record to
-    /// snapshot. The undo gate (`ensure_thread_worktree_undo_safe`)
-    /// matches both V1 and V2 ThreadCreate arms, so the rename undo
-    /// still refuses on a materialized worktree under either name.
     fn record_thread_rename(
         &self,
-        old_name: &str,
-        new_name: &str,
+        old_name: &ThreadName,
+        new_name: &ThreadName,
         state: &ChangeId,
         scope: Option<&str>,
     ) -> Result<Vec<u64>> {
@@ -198,7 +208,7 @@ pub trait OpLogBackend: Send + Sync {
         Ok(ids[0])
     }
 
-    fn record_marker_create(&self, name: &str, state: &ChangeId) -> Result<u64> {
+    fn record_marker_create(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
         let ids = self.record_batch(vec![OpRecord::MarkerCreate {
             name: name.to_string(),
             state: *state,
@@ -206,7 +216,7 @@ pub trait OpLogBackend: Send + Sync {
         Ok(ids[0])
     }
 
-    fn record_marker_delete(&self, name: &str, state: &ChangeId) -> Result<u64> {
+    fn record_marker_delete(&self, name: &MarkerName, state: &ChangeId) -> Result<u64> {
         let ids = self.record_batch(vec![OpRecord::MarkerDelete {
             name: name.to_string(),
             state: *state,
@@ -277,8 +287,8 @@ pub trait OpLogBackend: Send + Sync {
     /// retained as read-back-only.
     fn record_fast_forward(
         &self,
-        source_thread: &str,
-        target_thread: &str,
+        source_thread: &ThreadName,
+        target_thread: &ThreadName,
         pre_target_id: &ChangeId,
         post_target_id: &ChangeId,
         scope: Option<&str>,

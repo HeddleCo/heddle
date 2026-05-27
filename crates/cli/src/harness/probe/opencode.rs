@@ -42,12 +42,23 @@ impl HarnessActorProbe for OpenCodeProbe {
             Some(origin) => format!("opencode:client:{client_name}@{origin}"),
             None => format!("opencode:client:{client_name}"),
         });
-        let provider = metadata.get("provider").cloned();
+        let provider = metadata
+            .get("provider")
+            .cloned()
+            .or_else(|| input.explicit_provider.clone())
+            .or_else(|| input.env_hints.get("HEDDLE_AGENT_PROVIDER").cloned())
+            .or_else(|| input.env_hints.get("OPENCODE_PROVIDER").cloned())
+            .or_else(|| input.current_provider.clone());
         let model = metadata
             .get("model")
             .cloned()
             .or_else(|| metadata.get("agent_model").cloned())
-            .or_else(|| argv_value(argv, "--model"));
+            .or_else(|| argv_value(argv, "--model"))
+            .or_else(|| input.explicit_model.clone())
+            .or_else(|| input.env_hints.get("HEDDLE_AGENT_MODEL").cloned())
+            .or_else(|| input.env_hints.get("OPENCODE_MODEL").cloned())
+            .or_else(|| input.env_hints.get("MODEL").cloned())
+            .or_else(|| input.current_model.clone());
         let probe_source = if metadata.get("hook_event").is_some() {
             ProbeSource::HookPayload
         } else if session_id.is_some() {

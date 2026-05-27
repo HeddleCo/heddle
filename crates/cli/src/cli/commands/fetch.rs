@@ -6,7 +6,8 @@ use std::collections::HashSet;
 
 #[cfg(feature = "client")]
 use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+use objects::object::{MarkerName, ThreadName};
 #[cfg(feature = "client")]
 use objects::object::ChangeId;
 #[cfg(feature = "client")]
@@ -14,6 +15,10 @@ use proto::AuthToken;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
+use super::{
+    advice::RecoveryAdvice, git_overlay_health::build_repository_verification_state,
+    remote::resolved_default_remote_name,
+};
 #[cfg(feature = "client")]
 use crate::client::HostedGrpcClient;
 use crate::{
@@ -26,9 +31,18 @@ use crate::{
 
 #[derive(Serialize)]
 struct FetchOutput {
+    output_kind: &'static str,
     remote: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ref_scope: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags_included: Option<bool>,
     refs_fetched: usize,
     objects_fetched: usize,
+    #[allow(dead_code)]
+    #[serde(skip_serializing)]
+    #[serde(rename = "verification")]
+    trust: super::git_overlay_health::RepositoryVerificationState,
 }
 
 pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<()> {
@@ -42,7 +56,14 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                 configured
             }
         } else {
-            vec![remote.clone().unwrap_or_else(|| "origin".to_string())]
+            let selected = if let Some(remote) = remote.as_ref() {
+                remote.clone()
+            } else if let Some(default) = resolved_default_remote_name(&repo)? {
+                default
+            } else {
+                return Err(RecoveryAdvice::remote_name_required_for_fetch().into());
+            };
+            vec![selected]
         };
 
         for remote_name in &remotes {
@@ -54,18 +75,25 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
             println!(
                 "{}",
                 serde_json::to_string(&FetchOutput {
+                    output_kind: "fetch",
                     remote: if all {
                         "all".to_string()
                     } else {
-                        remote.unwrap_or_else(|| "origin".to_string())
+                        remotes
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "origin".to_string())
                     },
+                    ref_scope: Some("branches_and_heddle_notes"),
+                    tags_included: Some(false),
                     refs_fetched: remotes.len(),
                     objects_fetched: 0,
+                    trust: build_repository_verification_state(&repo),
                 })?
             );
         } else {
             println!(
-                "{} fetched Git-overlay refs from {}",
+                "{} fetched branches + refs/notes/heddle from {} (tags skipped)",
                 style::ok_marker(),
                 if all {
                     style::bold("all remotes")
@@ -79,31 +107,30 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
     let remotes = if all {
         repo.refs().list_remotes()?
+    } else if let Some(remote) = remote.as_ref() {
+        vec![remote.clone()]
+    } else if let Some(default) = resolved_default_remote_name(&repo)? {
+        vec![default]
     } else {
-        vec![
-            remote
-                .as_ref()
-                .ok_or_else(|| anyhow!("remote name required (or use --all)"))?
-                .clone(),
-        ]
+        return Err(RecoveryAdvice::remote_name_required_for_fetch().into());
     };
 
     let mut total_refs = 0;
     let mut total_objects = 0;
     let user_config = UserConfig::load_default().unwrap_or_default();
 
-    for remote_name in remotes {
+    for remote_name in &remotes {
         let token = user_config.remote_token();
         #[cfg(feature = "client")]
-        let (target, server_key) =
-            resolve_remote_with_key(&repo, Some(&remote_name)).map_err(anyhow::Error::msg)?;
+        let (target, server_key) = resolve_remote_with_key(&repo, Some(remote_name.as_str()))
+            .map_err(anyhow::Error::msg)?;
         #[cfg(not(feature = "client"))]
-        let (target, _server_key) =
-            resolve_remote_with_key(&repo, Some(&remote_name)).map_err(anyhow::Error::msg)?;
+        let (target, _server_key) = resolve_remote_with_key(&repo, Some(remote_name.as_str()))
+            .map_err(anyhow::Error::msg)?;
 
         match target {
             RemoteTarget::Local(path) => {
-                let (refs, objects) = fetch_local(&repo, &path, &remote_name, cli).await?;
+                let (refs, objects) = fetch_local(&repo, &path, remote_name, cli).await?;
                 total_refs += refs;
                 total_objects += objects;
             }
@@ -118,7 +145,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                             user_config: &user_config,
                             token,
                             server_key,
-                            remote_name: &remote_name,
+                            remote_name,
                             cli,
                         },
                     )
@@ -135,9 +162,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                 #[cfg(not(feature = "client"))]
                 {
                     let _ = (addr, repo_path, token);
-                    anyhow::bail!(
-                        "network fetch support is not available in this build; enable the `client` feature"
-                    );
+                    anyhow::bail!(RecoveryAdvice::network_feature_unavailable("fetch"));
                 }
             }
         }
@@ -147,13 +172,20 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
         println!(
             "{}",
             serde_json::to_string(&FetchOutput {
+                output_kind: "fetch",
                 remote: if all {
                     "all".to_string()
                 } else {
-                    remote.as_ref().unwrap().clone()
+                    remotes
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "origin".to_string())
                 },
+                ref_scope: None,
+                tags_included: None,
                 refs_fetched: total_refs,
                 objects_fetched: total_objects,
+                trust: build_repository_verification_state(&repo),
             })?
         );
     } else {
@@ -174,12 +206,7 @@ async fn fetch_local(
     remote_name: &str,
     cli: &Cli,
 ) -> Result<(usize, usize)> {
-    if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{{\"status\":\"connected\",\"remote\":\"{}\",\"type\":\"local\"}}",
-            remote_name
-        );
-    } else {
+    if !should_output_json(cli, Some(repo.config())) {
         println!(
             "{} fetching from {} {}",
             style::working_marker(),
@@ -202,7 +229,7 @@ async fn fetch_local(
         let count = source.fetch_state(repo, &change_id)?;
         objects_fetched += count;
         repo.refs()
-            .set_remote_thread(remote_name, &track_name, &change_id)?;
+            .set_remote_thread(remote_name, &ThreadName::new(&track_name), &change_id)?;
         refs_fetched += 1;
     }
 
@@ -211,8 +238,9 @@ async fn fetch_local(
         let count = source.fetch_state(repo, &change_id)?;
         objects_fetched += count;
         // Create local marker if it doesn't exist
-        if repo.refs().get_marker(&marker_name)?.is_none() {
-            repo.refs().create_marker(&marker_name, &change_id)?;
+        let mn = MarkerName::new(&marker_name);
+        if repo.refs().get_marker(&mn)?.is_none() {
+            repo.refs().create_marker(&mn, &change_id)?;
         }
     }
 
@@ -246,12 +274,7 @@ async fn fetch_network(
     let mut client = HostedGrpcClient::connect(options.addr, &config).await?;
     client.auto_rotate_if_needed().await;
 
-    if should_output_json(options.cli, Some(repo.config())) {
-        println!(
-            "{{\"status\":\"connected\",\"remote\":\"{}\"}}",
-            options.remote_name
-        );
-    } else {
+    if !should_output_json(options.cli, Some(repo.config())) {
         println!(
             "{} connected to {} {}",
             style::ok_marker(),
@@ -293,12 +316,13 @@ async fn fetch_network(
     let refs_fetched = refs_to_update.len();
     for (track_name, change_id) in refs_to_update {
         repo.refs()
-            .set_remote_thread(options.remote_name, &track_name, &change_id)?;
+            .set_remote_thread(options.remote_name, &ThreadName::new(&track_name), &change_id)?;
     }
 
     for (marker_name, change_id) in markers_to_create {
-        if repo.refs().get_marker(&marker_name)?.is_none() {
-            repo.refs().create_marker(&marker_name, &change_id)?;
+        let mn = MarkerName::new(&marker_name);
+        if repo.refs().get_marker(&mn)?.is_none() {
+            repo.refs().create_marker(&mn, &change_id)?;
         }
     }
     Ok((refs_fetched, objects_fetched))
@@ -315,7 +339,7 @@ async fn fetch_remote_state(
     client
         .fetch_state(repo, repo_path, remote_name, state_id)
         .await
-        .map_err(|e| anyhow!(e.to_string()))
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
 #[cfg(feature = "client")]

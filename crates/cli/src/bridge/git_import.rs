@@ -4,7 +4,8 @@
 use std::{collections::HashSet, path::Path};
 
 use chrono::{TimeZone, Utc};
-use objects::object::{Agent, Attribution, ChangeId, Principal, State, Status};
+use objects::object::{Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName};
+use refs::{Head, RefExpectation};
 use repo::Repository as HeddleRepository;
 use tracing::warn;
 
@@ -266,6 +267,15 @@ fn import_with_ref_filter(
     } else {
         bridge.open_git_repo()?
     };
+    if repo.git_dir().join("shallow").is_file() {
+        return Err(GitBridgeError::ShallowClone {
+            repository: repo
+                .workdir()
+                .unwrap_or_else(|| repo.git_dir())
+                .to_path_buf(),
+            retry_command: shallow_import_retry_command(wanted_refs),
+        });
+    }
 
     let mut stats = ImportStats::default();
     let mut plans: Vec<RefPlan> = Vec::new();
@@ -482,6 +492,19 @@ fn import_with_ref_filter(
                 &successful_updates,
                 "heddle: import refs from source",
             )?;
+            let note_updates = collect_note_ref_updates(&repo)?;
+            if !note_updates.is_empty() {
+                copy_reachable_objects(
+                    &repo,
+                    &mirror_repo,
+                    note_updates.iter().map(|update| update.target),
+                )?;
+                apply_ref_updates(
+                    &mirror_repo,
+                    &note_updates,
+                    "heddle: import Heddle notes from source",
+                )?;
+            }
         }
     }
 
@@ -527,36 +550,40 @@ fn import_with_ref_filter(
             continue;
         }
         if let Some(change_id) = bridge.mapping.get_heddle(plan.peeled_commit_oid) {
-            if let Some(existing) = bridge.heddle_repo.refs().get_thread(name.as_str())?
-                && !thread_can_adopt_change(bridge.heddle_repo, &existing, &change_id)?
+            let existing = bridge.heddle_repo.refs().get_thread(&ThreadName::new(name.as_str()))?;
+            if let Some(existing_change) = existing
+                && !thread_can_adopt_change(bridge.heddle_repo, &existing_change, &change_id)?
             {
-                return Err(GitBridgeError::Conflict(format!(
-                    "thread {name} at {existing} differs from branch {name} at \
-                     {change_id}. The Heddle thread and the Git branch have \
-                     diverged — neither is an ancestor of the other. Heddle \
-                     will not auto-reconcile: pick which side wins. If the \
-                     Git branch should replace the Heddle thread wholesale, \
-                     drop the thread with `heddle thread drop {name} \
-                     --delete-thread` and rerun the import (this discards \
-                     thread-only states). If the Heddle thread should \
-                     replace the Git branch, delete the Git branch with \
-                     `git branch -D {name}` and rerun (this discards \
-                     branch-only commits). To merge or rebase the two \
-                     histories instead, do the merge in Git first, then \
-                     re-run the import on the merged branch.",
-                )));
+                return Err(GitBridgeError::GitHeddleThreadDiverged {
+                    thread: name.to_string(),
+                    branch: name.to_string(),
+                    thread_change: existing_change,
+                    branch_change: change_id,
+                });
             }
 
-            bridge
-                .heddle_repo
-                .refs()
-                .set_thread(name.as_str(), &change_id)
-                .map_err(|e| {
-                    GitBridgeError::InvalidMapping(format!(
-                        "set_thread failed for '{}': {}",
-                        name, e
-                    ))
-                })?;
+            if should_materialize_imported_current_thread(bridge.heddle_repo, name, existing)? {
+                bridge
+                    .heddle_repo
+                    .fast_forward_attached_without_record(&change_id)
+                    .map_err(|e| {
+                        GitBridgeError::InvalidMapping(format!(
+                            "materialize imported branch '{}' failed: {}",
+                            name, e
+                        ))
+                    })?;
+            } else {
+                bridge
+                    .heddle_repo
+                    .refs()
+                    .set_thread(&ThreadName::new(name.as_str()), &change_id)
+                    .map_err(|e| {
+                        GitBridgeError::InvalidMapping(format!(
+                            "set_thread failed for '{}': {}",
+                            name, e
+                        ))
+                    })?;
+            }
             stats.branches_synced += 1;
         }
     }
@@ -579,26 +606,105 @@ fn import_with_ref_filter(
             Err(_) => continue,
         };
         if let Some(change_id) = bridge.mapping.get_heddle(oid) {
-            if let Ok(Some(existing)) = bridge.heddle_repo.refs().get_marker(&name)
-                && existing != change_id
-            {
-                return Err(GitBridgeError::Conflict(format!(
-                    "marker {} at {} differs from tag {} at {}",
-                    name, existing, name, change_id
-                )));
-            }
-
-            if let Err(e) = bridge.heddle_repo.refs().create_marker(&name, &change_id) {
-                warn!(
-                    "Failed to create marker '{}' during git import: {}",
-                    name, e
-                );
-            }
+            sync_marker_from_git_tag(bridge, &name, &change_id)?;
             stats.tags_synced += 1;
         }
     }
 
     Ok(stats)
+}
+
+fn shallow_import_retry_command(wanted_refs: Option<&HashSet<String>>) -> String {
+    match wanted_refs.and_then(|refs| refs.iter().next()) {
+        Some(_) => "heddle bridge git import --path <full-git-repo> --ref <ref>".to_string(),
+        None => "heddle bridge git import --path <full-git-repo>".to_string(),
+    }
+}
+
+fn sync_marker_from_git_tag(
+    bridge: &GitBridge<'_>,
+    name: &str,
+    change_id: &ChangeId,
+) -> GitResult<()> {
+    let mn = MarkerName::new(name);
+    match bridge.heddle_repo.refs().get_marker(&mn) {
+        Ok(Some(existing)) if existing == *change_id => Ok(()),
+        Ok(Some(_)) => bridge
+            .heddle_repo
+            .refs()
+            .set_marker_cas(&mn, RefExpectation::Any, change_id)
+            .map_err(|error| {
+                GitBridgeError::InvalidMapping(format!(
+                    "failed to update marker '{}' during git import: {}",
+                    name, error
+                ))
+            }),
+        Ok(None) => bridge
+            .heddle_repo
+            .refs()
+            .create_marker(&mn, change_id)
+            .map_err(|error| {
+                GitBridgeError::InvalidMapping(format!(
+                    "failed to create marker '{}' during git import: {}",
+                    name, error
+                ))
+            }),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn collect_note_ref_updates(repo: &gix::Repository) -> GitResult<Vec<RefUpdate>> {
+    let mut updates = Vec::new();
+    for reference in repo
+        .references()
+        .map_err(git_err)?
+        .prefixed("refs/notes/")
+        .map_err(git_err)?
+    {
+        let reference = reference.map_err(git_err)?;
+        let Some(target) = reference.try_id() else {
+            continue;
+        };
+        let full = reference.name().as_bstr().to_string();
+        let short = full
+            .strip_prefix("refs/notes/")
+            .unwrap_or(&full)
+            .to_string();
+        updates.push(RefUpdate {
+            name: short,
+            target: target.detach(),
+            namespace: RefNamespace::Note,
+        });
+    }
+    Ok(updates)
+}
+
+fn should_materialize_imported_current_thread(
+    heddle_repo: &HeddleRepository,
+    name: &str,
+    existing: Option<ChangeId>,
+) -> GitResult<bool> {
+    if heddle_repo.capability() != repo::RepositoryCapability::NativeHeddle {
+        return Ok(false);
+    }
+    if !matches!(
+        heddle_repo.refs().read_head()?,
+        Head::Attached { ref thread } if thread == name
+    ) {
+        return Ok(false);
+    }
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    let Some(state) = heddle_repo.store().get_state(&existing)? else {
+        return Ok(false);
+    };
+    let Some(tree) = heddle_repo.store().get_tree(&state.tree)? else {
+        return Ok(false);
+    };
+    heddle_repo
+        .worktree_is_clean_cached(&tree)
+        .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))
 }
 
 pub(crate) fn thread_can_adopt_change(

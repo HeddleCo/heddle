@@ -99,8 +99,8 @@ fn run_bench(worker_bin: &Path) {
     let mountpoint = TempDir::new().expect("mountpoint tempdir");
 
     // Bring the supervisor up.
-    let sup = Supervisor::spawn(worker_bin, crate_root, "main", mountpoint.path())
-        .expect("spawn worker");
+    let sup =
+        Supervisor::spawn(worker_bin, crate_root, "main", mountpoint.path()).expect("spawn worker");
 
     // Warm-up — first roundtrip pays page-fault tax we don't want
     // in the measured sample.

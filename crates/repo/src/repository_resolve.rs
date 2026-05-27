@@ -16,6 +16,15 @@ impl Repository {
             return Ok(Some(id));
         }
 
+        if self.capability() == super::RepositoryCapability::GitOverlay {
+            if let Some(id) = self.git_overlay_mapped_change_for_branch(spec)? {
+                return Ok(Some(id));
+            }
+            if let Some(id) = self.git_overlay_mapped_change_for_tag(spec)? {
+                return Ok(Some(id));
+            }
+        }
+
         resolve_short_change_id(self, spec)
     }
 
@@ -124,7 +133,7 @@ fn resolve_short_change_id(repo: &Repository, spec: &str) -> Result<Option<Chang
 mod tests {
     use std::fs;
 
-    use objects::object::ChangeId;
+    use objects::object::{ChangeId, MarkerName};
     use tempfile::TempDir;
 
     use crate::{HeddleError, Repository};
@@ -185,7 +194,9 @@ mod tests {
     #[test]
     fn resolve_state_accepts_marker_name() {
         let (_t, repo, s1, _) = repo_with_two_states();
-        repo.refs().create_marker("milestone-1", &s1).unwrap();
+        repo.refs()
+            .create_marker(&MarkerName::new("milestone-1"), &s1)
+            .unwrap();
         let resolved = repo.resolve_state("milestone-1").unwrap();
         assert_eq!(resolved, Some(s1));
     }

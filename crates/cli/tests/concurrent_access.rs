@@ -8,7 +8,7 @@ use std::{
 };
 
 use objects::{
-    object::Blob,
+    object::{Blob, MarkerName, ThreadName},
     store::{FsStore, ObjectStore},
 };
 use repo::Repository;
@@ -143,7 +143,7 @@ fn test_concurrent_track_operations() {
             barrier.wait();
 
             // Create thread
-            let track_name = format!("feature/{}", i);
+            let track_name = ThreadName::new(format!("feature/{}", i));
             repo.refs().set_thread(&track_name, &base_id).unwrap();
 
             // Verify
@@ -397,7 +397,7 @@ fn test_concurrent_marker_operations() {
         let handle = thread::spawn(move || {
             barrier.wait();
 
-            let marker_name = format!("v1.0.{}", i);
+            let marker_name = MarkerName::new(format!("v1.0.{}", i));
             let _ = repo.refs().create_marker(&marker_name, &state_id);
         });
         handles.push(handle);

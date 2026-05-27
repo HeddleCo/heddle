@@ -625,8 +625,10 @@ fn prepare_sources(args: &Args) -> Result<Sources> {
 /// edit to the workload flips it. Skip noisy dirs that shouldn't be
 /// part of the input (`target/`, `.git/`, etc.).
 fn workload_manifest(root: &Path) -> Result<String> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
 
     let mut entries: Vec<(String, u64, i128)> = Vec::new();
     for entry in walkdir::WalkDir::new(root)

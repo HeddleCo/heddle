@@ -23,9 +23,11 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use weft_client_shim::{CliContext, WeftExtensions};
 
-use crate::cli::AuthCommands;
-use crate::cli::cli_args::SupportCommands;
-use crate::cli::commands::{cmd_auth, cmd_presence_publish, cmd_support};
+use crate::cli::{
+    AuthCommands,
+    cli_args::SupportCommands,
+    commands::{cmd_auth, cmd_presence_publish, cmd_support},
+};
 
 pub struct EnabledWeftExtensions;
 

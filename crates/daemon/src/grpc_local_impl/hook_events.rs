@@ -38,12 +38,11 @@ use std::{
     time::Duration,
 };
 
+use grpc::heddle::v1::HookEvent as ProtoHookEvent;
 use objects::object::OperationId;
 use prost_types::Timestamp;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
-
-use grpc::heddle::v1::HookEvent as ProtoHookEvent;
 
 /// Channel capacity for the in-process broadcast. Each subscriber gets
 /// its own queue; if a subscriber lags more than this many events

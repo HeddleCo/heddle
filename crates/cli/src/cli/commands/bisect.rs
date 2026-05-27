@@ -6,7 +6,7 @@ use std::{fs, path::PathBuf};
 use anyhow::{Result, anyhow};
 use repo::Repository;
 
-use super::snapshot::ensure_current_state;
+use super::{advice::RecoveryAdvice, snapshot::ensure_current_state};
 use crate::{
     cli::{Cli, cli_args::BisectCommands, should_output_json},
     config::UserConfig,
@@ -63,9 +63,7 @@ pub fn cmd_bisect(cli: &Cli, command: BisectCommands) -> Result<()> {
         }
         BisectCommands::Good { commit } => {
             if !is_bisect_active(&repo) {
-                return Err(anyhow!(
-                    "No bisect in progress. Run 'heddle bisect start' first."
-                ));
+                return Err(anyhow!(no_bisect_in_progress_advice("mark bisect good")));
             }
 
             let resolved = resolve_commit(&repo, commit.as_deref())?;
@@ -80,9 +78,7 @@ pub fn cmd_bisect(cli: &Cli, command: BisectCommands) -> Result<()> {
         }
         BisectCommands::Bad { commit } => {
             if !is_bisect_active(&repo) {
-                return Err(anyhow!(
-                    "No bisect in progress. Run 'heddle bisect start' first."
-                ));
+                return Err(anyhow!(no_bisect_in_progress_advice("mark bisect bad")));
             }
 
             let resolved = resolve_commit(&repo, commit.as_deref())?;
@@ -107,4 +103,21 @@ pub fn cmd_bisect(cli: &Cli, command: BisectCommands) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn no_bisect_in_progress_advice(action: &'static str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "no_bisect_in_progress",
+        "No bisect in progress",
+        "Start one with `heddle bisect start`, then mark states with `heddle bisect good <state>` or `heddle bisect bad <state>`.",
+        "the repository has no persisted Heddle bisect state",
+        format!("{action} would need to update an active bisect search"),
+        "repository state was left unchanged",
+        "heddle bisect start",
+        vec![
+            "heddle bisect start".to_string(),
+            "heddle bisect good <state>".to_string(),
+            "heddle bisect bad <state>".to_string(),
+        ],
+    )
 }

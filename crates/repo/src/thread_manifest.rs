@@ -320,12 +320,10 @@ pub fn remove_thread_manifest_dir(heddle_dir: &Path, thread: &str) -> io::Result
     // Walk upward stopping at the first non-empty parent (another
     // thread might still live there) or at `threads/` itself
     // (we don't reap the root, that's heddle-managed).
-    if removed
-        && let Some(mut parent) = dir.parent()
-    {
+    if removed && let Some(mut parent) = dir.parent() {
         while parent != threads_root {
             match fs::read_dir(parent).map(|mut it| it.next().is_some()) {
-                Ok(true) => break,                  // sibling thread present
+                Ok(true) => break, // sibling thread present
                 Ok(false) => match fs::remove_dir(parent) {
                     Ok(()) => {}
                     // Race: another process refilled the dir

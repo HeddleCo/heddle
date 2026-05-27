@@ -12,12 +12,12 @@
 //!   4. The working-tree invariant: parent's worktree is byte-identical
 //!      after both the success and failure paths.
 
-use std::fs;
+use std::{fs, str};
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{heddle, heddle_output};
+use super::{assert_json_recovery_advice_fields, heddle, heddle_argv_json, heddle_output};
 
 /// Bootstrap a minimal repo with a single capture so the parent has
 /// a HEAD. Tests then run `heddle try` against this seeded state and
@@ -31,7 +31,7 @@ fn setup_repo() -> TempDir {
 }
 
 /// Resolve the parent thread's HEAD as a full change-id string. We
-/// read it via `heddle log --json` rather than poking at refs/ on
+/// read it via `heddle log --output json` rather than poking at refs/ on
 /// disk so we exercise the same observation path an agent would.
 fn parent_head(repo: &std::path::Path) -> String {
     let raw = heddle(&["--output", "json", "log", "--limit", "1"], Some(repo)).unwrap();
@@ -87,6 +87,42 @@ fn try_succeeds_creates_thread_and_preserves_parent_head() {
     assert!(
         thread_name.starts_with("try-"),
         "thread name should be auto-generated (got {thread_name})"
+    );
+    assert_eq!(
+        value["next_action"],
+        format!("heddle merge {thread_name} --preview"),
+        "try should emit one parseable primary action, not a combined choice: {raw}"
+    );
+    assert_eq!(
+        value["recommended_action"], value["next_action"],
+        "try should expose the cross-command action field for agents: {raw}"
+    );
+    assert_eq!(
+        value["recommended_action_argv"],
+        heddle_argv_json(["merge", thread_name, "--preview"]),
+        "try should provide argv for the primary action: {raw}"
+    );
+    assert_eq!(
+        value["next_action_argv"],
+        heddle_argv_json(["merge", thread_name, "--preview"]),
+        "try should provide argv for the next action too: {raw}"
+    );
+    assert!(value["recommended_action_template"].is_null());
+    assert!(value["next_action_template"].is_null());
+    assert_eq!(
+        value["recovery_commands"],
+        serde_json::json!([format!("heddle thread drop {thread_name}")]),
+        "try should expose discard as recovery, not inline prose: {raw}"
+    );
+    assert_eq!(
+        value["recovery_command_argv"],
+        serde_json::json!([heddle_argv_json(["thread", "drop", thread_name])]),
+        "try should provide argv for discard recovery: {raw}"
+    );
+    assert_eq!(
+        value["recovery_action_templates"],
+        serde_json::json!([]),
+        "try should expose recovery templates even when every recovery is concrete argv: {raw}"
     );
 
     // Parent's HEAD must not have advanced.
@@ -218,6 +254,14 @@ fn try_auto_merge_advances_parent_head_on_success() {
     let value: Value = serde_json::from_str(&raw).expect("output should be JSON");
 
     assert_eq!(value["status"], "completed", "raw output: {raw}");
+    assert!(
+        value["next_action"].is_null(),
+        "auto-merge success should not recommend a second landing step: {raw}"
+    );
+    assert!(
+        value["recommended_action"].is_null(),
+        "auto-merge success should not recommend a second landing step: {raw}"
+    );
     assert_eq!(value["exit_code"], 0);
     assert!(
         value["captured_state"].is_string(),
@@ -326,7 +370,7 @@ fn try_rejects_existing_thread_name() {
     )
     .expect("thread create should succeed");
 
-    let err = heddle(
+    let output = heddle_output(
         &[
             "--output",
             "json",
@@ -338,11 +382,26 @@ fn try_rejects_existing_thread_name() {
         ],
         Some(temp.path()),
     )
-    .expect_err("try with --name pointing at an existing thread must refuse");
+    .expect("invoke try collision");
     assert!(
-        err.contains("already exists"),
-        "error should explain the collision; got: {err}"
+        !output.status.success(),
+        "try with --name pointing at an existing thread must refuse"
     );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode try collision should keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = str::from_utf8(&output.stderr).expect("stderr should be utf8");
+    let envelope: Value = serde_json::from_str(stderr).expect("stderr should be JSON");
+    assert_eq!(envelope["kind"], "try_thread_name_collision");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("already exists")),
+        "error should explain the collision; got: {envelope}"
+    );
+    assert_json_recovery_advice_fields(&envelope, stderr);
 
     // The existing thread must NOT have been dropped/abandoned.
     let list_raw = heddle(

@@ -1,59 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Every state-changing dispatch arm in [`crates/cli/src/main.rs`] must
-//! call [`cli::operation_id::resolve_operation_id`].
+//! Op-id validation must be driven once from the command contract before
+//! dispatch reaches individual command arms.
 //!
-//! The dedup contract is wire-only without it: an agent passing
-//! `--op-id` to a verb whose arm forgets to plumb the call would silently
-//! lose idempotency. CI fails this test when a new verb is introduced
-//! without explicit classification.
+//! The dedup contract is wire-only without it: an agent passing `--op-id`
+//! needs replay/reservation before dispatch and a final format check in
+//! the child process before any command body starts work. CI fails this
+//! test if validation drifts back into per-arm calls.
 //!
-//! The check is intentionally text-based (no `syn` dep): every match arm
-//! `Commands::<Variant>(...) => { ... }` is parsed by a small balanced-
-//! brace scanner and the body is grep-asserted for the canonical helper
-//! name. Read-only verbs are an explicit allowlist below; everything else
-//! is treated as state-changing. Adding a verb to either list is a
-//! deliberate decision — and one a reviewer can spot at a glance.
+//! The check is intentionally text-based (no `syn` dep): the dispatch
+//! match is parsed by a small balanced-brace scanner and grep-asserted
+//! for the canonical helper name.
 
-use std::{collections::BTreeSet, path::PathBuf};
+use std::path::PathBuf;
 
-/// Variants whose arms are read-only — no oplog mutation under any
-/// subcommand. Adding a verb here is a permission to skip op-id wiring;
-/// removing one immediately requires a `resolve_operation_id` call.
-const READ_ONLY_VARIANTS: &[&str] = &[
-    "Status",
-    "Watch",
-    "Diagnose",
-    // Codex git-overlay foundation added these read-only surfaces.
-    "Doctor",
-    "GitOverlay",
-    "Version",
-    "Log",
-    "Show",
-    "Inspect",
-    "Diff",
-    "Compare",
-    "Blame",
-    "Completion",
-    "Help",
-    "Index",
-    "Monitor",
-    "Query",
-    "Presence",
-    "HarnessBridge",
-    "Semantic",
-    // Engineering retrospective: walks recent oplog batches and prints
-    // a summary. Pure read — never writes a new OpRecord.
-    "Retro",
-    // Schema registry: prints the JSON schemas embedded in the CLI
-    // and the registry index. No oplog mutation.
-    "Schemas",
-    // Shell integration: prints a `cd`-hook snippet to stdout. No
-    // oplog mutation — installs nothing, edits no files.
-    "Shell",
-];
+use cli::{
+    cli::commands::{
+        build_command_catalog, command_persists_op_id, command_uses_bootstrap_op_id_store,
+        observe_only_root_commands,
+    },
+    operation_id::supports_local_op_id,
+};
 
 #[test]
-fn every_state_changing_arm_resolves_op_id() {
+fn op_id_validation_is_centralized_before_dispatch() {
     let main_rs = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("main.rs");
@@ -67,37 +36,156 @@ fn every_state_changing_arm_resolves_op_id() {
         main_rs.display()
     );
 
-    let read_only: BTreeSet<&str> = READ_ONLY_VARIANTS.iter().copied().collect();
+    let resolver_call = "resolve_operation_id(&cli)?";
+    let resolver_count = source.matches(resolver_call).count();
+    assert_eq!(
+        resolver_count, 1,
+        "`{resolver_call}` must be called exactly once from the command-contract gate before dispatch"
+    );
 
-    let mut missing = Vec::new();
-    let mut classified = BTreeSet::new();
+    let idempotency_gate = source
+        .find("match run_local_idempotency_if_requested")
+        .expect("main.rs must run the local op-id idempotency gate");
+    let centralized_resolver = source
+        .find(resolver_call)
+        .expect("main.rs must centrally validate op-id before dispatch");
+    let dispatch = source
+        .find("let result = match &cli.command")
+        .expect("main.rs must contain command dispatch");
+    assert!(
+        idempotency_gate < centralized_resolver && centralized_resolver < dispatch,
+        "`{resolver_call}` must run after replay/reservation and before command dispatch"
+    );
+
+    let mut offenders = Vec::new();
     for arm in &arms {
-        classified.insert(arm.variant.as_str());
-        if read_only.contains(arm.variant.as_str()) {
-            continue;
+        if arm.body.contains("resolve_operation_id(") {
+            offenders.push(arm.variant.clone());
         }
-        if !arm.body.contains("resolve_operation_id(") {
-            missing.push(arm.variant.clone());
+    }
+    assert!(
+        offenders.is_empty(),
+        "op-id validation must stay centralized; remove arm-level resolver calls from: {offenders:?}"
+    );
+}
+
+#[test]
+fn command_contract_table_drives_op_id_and_read_only_classification() {
+    let catalog = build_command_catalog();
+    let root_entries = catalog
+        .commands
+        .iter()
+        .filter(|entry| entry.path.len() == 1)
+        .collect::<Vec<_>>();
+    assert!(
+        !root_entries.is_empty(),
+        "command catalog returned no root entries"
+    );
+
+    for entry in root_entries {
+        let root = entry.path[0].as_str();
+        assert_eq!(
+            entry.supports_op_id,
+            supports_local_op_id(root),
+            "op-id runtime support for `{root}` must come from the command contract table"
+        );
+        assert_eq!(
+            entry.persists_op_id,
+            command_persists_op_id(root),
+            "op-id persistence for `{root}` must come from the command contract table"
+        );
+        assert_eq!(
+            entry.op_id_store_scope == "bootstrap",
+            command_uses_bootstrap_op_id_store(root),
+            "op-id store scope for `{root}` must come from the command contract table"
+        );
+        if entry.persists_op_id {
+            assert!(
+                entry.supports_op_id,
+                "`{root}` cannot persist op-id state unless it supports op-id replay"
+            );
+        }
+        if observe_only_root_commands().contains(&root) {
+            assert!(
+                entry.observe_only,
+                "`{root}` is read-only in op-id coverage but not observe_only in command catalog"
+            );
+            assert!(
+                !entry.mutates,
+                "`{root}` is read-only in op-id coverage but mutates in command catalog"
+            );
         }
     }
 
-    assert!(
-        missing.is_empty(),
-        "the following Commands variants are state-changing but their arm in main.rs \
-         doesn't call `resolve_operation_id(&cli)?`: {missing:?}.\n\
-         Either wire the call (add `resolve_operation_id(&cli)?;` at the top of the \
-         arm body) or, if the verb is genuinely read-only, add it to \
-         READ_ONLY_VARIANTS in this test."
-    );
-
-    // Catch dangling allowlist entries — if a verb is renamed or removed
-    // from main.rs and we forget to drop it from READ_ONLY_VARIANTS, the
-    // allowlist silently loses meaning.
-    for ro in READ_ONLY_VARIANTS {
+    for read_only in [
+        "thread list",
+        "thread show",
+        "workspace",
+        "workspace show",
+        "bridge git status",
+        "hook list",
+        "remote list",
+        "context get",
+        "review show",
+        "agent list",
+    ] {
+        let entry = catalog
+            .commands
+            .iter()
+            .find(|entry| entry.display == read_only)
+            .unwrap_or_else(|| panic!("missing command catalog entry for `{read_only}`"));
         assert!(
-            classified.contains(*ro),
-            "READ_ONLY_VARIANTS lists `{ro}` but no Commands::{ro} arm was found in \
-             main.rs — drop the entry or update the variant name."
+            entry.observe_only,
+            "`{read_only}` must be observe-only in the command contract table"
+        );
+        assert!(
+            !entry.supports_op_id,
+            "`{read_only}` must not reserve local op-id slots"
+        );
+        assert_eq!(
+            entry.op_id_store_scope, "none",
+            "`{read_only}` must not use an op-id store"
+        );
+        assert!(
+            !supports_local_op_id(read_only),
+            "runtime op-id support for `{read_only}` must come from the exact command contract"
+        );
+    }
+
+    for mutating in [
+        "init",
+        "adopt",
+        "clone",
+        "thread switch",
+        "thread drop",
+        "bridge git init",
+        "bridge git export",
+        "bridge git import",
+        "context set",
+        "review sign",
+        "agent capture",
+    ] {
+        let entry = catalog
+            .commands
+            .iter()
+            .find(|entry| entry.display == mutating)
+            .unwrap_or_else(|| panic!("missing command catalog entry for `{mutating}`"));
+        assert!(
+            entry.mutates,
+            "`{mutating}` must be mutating in the command contract table"
+        );
+        assert!(
+            supports_local_op_id(mutating),
+            "runtime op-id support for `{mutating}` must come from the exact command contract"
+        );
+        let expected_scope = if entry.may_initialize {
+            "bootstrap"
+        } else {
+            "repository"
+        };
+        assert_eq!(
+            entry.op_id_store_scope, expected_scope,
+            "`{mutating}` op-id store scope must come from the exact command contract"
         );
     }
 }
@@ -144,6 +232,10 @@ fn extract_command_arms(source: &str) -> Vec<Arm> {
         let start = cursor + rel;
         cursor = start + needle.len();
 
+        if cfg_attr_before_arm_is_disabled(source, start) {
+            continue;
+        }
+
         // Word-boundary check: skip when preceded by an identifier char
         // (e.g. `ContextCommands::`, `ActorCommands::`, `SessionCommands::`).
         if start > 0 {
@@ -187,6 +279,28 @@ fn extract_command_arms(source: &str) -> Vec<Arm> {
         });
     }
     arms
+}
+
+fn cfg_attr_before_arm_is_disabled(source: &str, arm_start: usize) -> bool {
+    for line in source[..arm_start].lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !trimmed.starts_with("#[") {
+            return false;
+        }
+        if trimmed.contains("cfg(feature = \"client\")") && !cfg!(feature = "client") {
+            return true;
+        }
+        if trimmed.contains("cfg(feature = \"git-overlay\")") && !cfg!(feature = "git-overlay") {
+            return true;
+        }
+        if trimmed.contains("cfg(feature = \"semantic\")") && !cfg!(feature = "semantic") {
+            return true;
+        }
+    }
+    false
 }
 
 fn read_variant_name(s: &str) -> String {

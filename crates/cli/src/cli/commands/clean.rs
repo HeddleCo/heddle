@@ -8,6 +8,7 @@ use objects::fs_ops::remove_path_recursively;
 use repo::Repository;
 use serde::Serialize;
 
+use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, should_output_json, worktree_status_options};
 
 #[derive(Serialize)]
@@ -20,10 +21,14 @@ pub fn cmd_clean(cli: &Cli, force: bool, dry_run: bool) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
 
     if !force && !dry_run {
-        return Err(anyhow!(
-            "Refusing to clean without --force.\n\
-             Use --dry-run to see what would be removed, or --force to actually remove files."
-        ));
+        return Err(anyhow!(RecoveryAdvice::destructive_requires_force(
+            "clean",
+            "untracked paths may contain work Heddle has not captured",
+            "`clean --force` removes untracked files and directories from the worktree",
+            "heddle clean --dry-run",
+            "heddle clean --force",
+            "nothing was removed",
+        )));
     }
 
     let current_state = repo.current_state()?;

@@ -38,6 +38,8 @@ pub struct SemanticChangeEntry {
     pub old_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub importance: Option<String>,
 }
 
 impl From<SemanticChange> for SemanticChangeEntry {
@@ -56,6 +58,7 @@ impl From<SemanticChangeEntryFields> for SemanticChangeEntry {
             to_path: fields.to_path,
             old_name: fields.old_name,
             new_name: fields.new_name,
+            importance: fields.importance,
         }
     }
 }

@@ -21,6 +21,7 @@
 use std::fs;
 
 use chrono::{Duration, Utc};
+use objects::object::ThreadName;
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadIntegrationPolicy,
     ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,
@@ -28,7 +29,7 @@ use repo::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::heddle;
+use super::{heddle, heddle_output};
 
 /// Bootstrap a minimal repo with one snapshot. Tests that need a
 /// thread on top either use the CLI (`thread create`) for explicit
@@ -98,12 +99,14 @@ fn seed_thread(
     // to round-trip, but `cmd_thread_list` reads from the record
     // store directly. Add the ref to keep us honest about what the
     // CLI sees.
-    repo.refs().set_thread(name, &head).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new(name), &head)
+        .unwrap();
     manager.save(&thread).unwrap();
 }
 
 fn list_thread_names(repo_path: &std::path::Path, args: &[&str]) -> Vec<String> {
-    let mut argv = vec!["--json", "thread", "list"];
+    let mut argv = vec!["--output", "json", "thread", "list"];
     argv.extend_from_slice(args);
     let out = heddle(&argv, Some(repo_path)).expect("thread list should succeed");
     let value: Value = serde_json::from_str(&out).expect("thread list output should be JSON");
@@ -183,6 +186,38 @@ fn thread_cleanup_without_mode_flag_refuses() {
     );
 }
 
+#[test]
+fn thread_cleanup_without_mode_flag_uses_typed_advice_json() {
+    let temp = setup_repo();
+    let output = heddle_output(
+        &["--output", "json", "thread", "cleanup"],
+        Some(temp.path()),
+    )
+    .expect("invoke cleanup without mode");
+    assert!(!output.status.success(), "cleanup without mode should fail");
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode cleanup refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("cleanup mode refusal should emit JSON envelope");
+    assert_eq!(envelope["kind"], "thread_cleanup_mode_required");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("requires at least one mode flag")),
+        "cleanup mode refusal should include typed recovery detail: {stderr}"
+    );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("--dry-run")),
+        "cleanup mode hint should recommend a dry run: {stderr}"
+    );
+}
+
 /// `--merged --dry-run` lists merged threads without actually
 /// removing their records from the store.
 #[test]
@@ -204,7 +239,14 @@ fn thread_cleanup_merged_dry_run_reports_without_dropping() {
     );
 
     let out = heddle(
-        &["--json", "thread", "cleanup", "--merged", "--dry-run"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "cleanup",
+            "--merged",
+            "--dry-run",
+        ],
         Some(temp.path()),
     )
     .expect("dry-run cleanup should succeed");
@@ -231,8 +273,9 @@ fn thread_cleanup_merged_dry_run_reports_without_dropping() {
 }
 
 /// `--merged` (no dry-run) actually drops the matching threads.
-/// "Drop" mirrors `cmd_thread_drop`: the record is marked
-/// `Abandoned` and any execution path is removed.
+/// Cleanup marks the record `Abandoned`, removes any execution path,
+/// and prunes the live thread ref so cleaned work disappears from
+/// everyday thread/push surfaces.
 #[test]
 fn thread_cleanup_merged_drops_matching_threads() {
     let temp = setup_repo();
@@ -252,7 +295,7 @@ fn thread_cleanup_merged_drops_matching_threads() {
     );
 
     let out = heddle(
-        &["--json", "thread", "cleanup", "--merged"],
+        &["--output", "json", "thread", "cleanup", "--merged"],
         Some(temp.path()),
     )
     .expect("cleanup --merged should succeed");
@@ -271,6 +314,15 @@ fn thread_cleanup_merged_drops_matching_threads() {
         matches!(dropped.state, ThreadState::Abandoned),
         "merged thread should be marked Abandoned after cleanup; got {:?}",
         dropped.state
+    );
+    assert!(
+        repo.refs().get_thread(&ThreadName::new("feat/done")).unwrap().is_none(),
+        "merged cleanup should remove the live thread ref so default surfaces stop treating it as active"
+    );
+    let default_view = list_thread_names(temp.path(), &[]);
+    assert!(
+        !default_view.iter().any(|name| name == "feat/done"),
+        "cleaned merged thread should disappear from the default thread list; got {default_view:?}"
     );
     let still_active = manager.load("feat/active").unwrap().expect("loads");
     assert!(
@@ -300,7 +352,8 @@ fn thread_cleanup_auto_filters_by_age() {
 
     let out = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "thread",
             "cleanup",
             "--auto",
@@ -348,7 +401,14 @@ fn thread_cleanup_dry_run_reports_zero_reclaimed_bytes() {
     );
 
     let out = heddle(
-        &["--json", "thread", "cleanup", "--merged", "--dry-run"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "cleanup",
+            "--merged",
+            "--dry-run",
+        ],
         Some(temp.path()),
     )
     .expect("dry-run cleanup should succeed");
@@ -389,7 +449,8 @@ fn thread_cleanup_skips_active_thread() {
 
     let out = heddle(
         &[
-            "--json",
+            "--output",
+            "json",
             "thread",
             "cleanup",
             "--auto",
@@ -447,6 +508,49 @@ fn thread_cleanup_auto_requires_older_than() {
     assert!(
         err.contains("--older-than"),
         "refusal must point at --older-than; got: {err}"
+    );
+}
+
+#[test]
+fn thread_cleanup_invalid_duration_uses_typed_advice_json() {
+    let temp = setup_repo();
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "thread",
+            "cleanup",
+            "--auto",
+            "--older-than",
+            "1x",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke cleanup with invalid duration");
+    assert!(
+        !output.status.success(),
+        "cleanup with invalid duration should fail"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode invalid duration refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("invalid duration should emit JSON envelope");
+    assert_eq!(envelope["kind"], "thread_cleanup_invalid_duration");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("unknown duration unit")),
+        "invalid duration refusal should include typed recovery detail: {stderr}"
+    );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("7d")),
+        "invalid duration hint should recommend a valid duration: {stderr}"
     );
 }
 
@@ -514,11 +618,13 @@ fn thread_cleanup_handles_id_diverging_from_name() {
         auto: false,
         shared_target_dir: None,
     };
-    repo.refs().set_thread(&synthetic.thread, &head).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new(&synthetic.thread), &head)
+        .unwrap();
     manager.save(&synthetic).unwrap();
 
     let out = heddle(
-        &["--json", "thread", "cleanup", "--merged"],
+        &["--output", "json", "thread", "cleanup", "--merged"],
         Some(temp.path()),
     )
     .expect("cleanup --merged must succeed even when id != thread (the mount-key invariant)");

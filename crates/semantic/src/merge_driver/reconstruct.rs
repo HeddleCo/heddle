@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
+use merge::{text_hunk_merge_with_markers, ConflictMarkers, MergeOutcome};
 
 use super::items::{FileSegments, Item, ItemKey};
 
@@ -107,12 +107,7 @@ pub(crate) fn reconstruct_merged_file(
         resolved.insert((*key).clone(), resolution);
     }
 
-    let item_emit_order = compute_item_emit_order(
-        &base_mks,
-        &ours_mks,
-        &theirs_mks,
-        &all_keys,
-    );
+    let item_emit_order = compute_item_emit_order(&base_mks, &ours_mks, &theirs_mks, &all_keys);
 
     // For each side, record each item's index so we can look up the
     // inter-item segment that preceded it in source.
@@ -155,18 +150,12 @@ pub(crate) fn reconstruct_merged_file(
     for (emit_idx, key) in item_emit_order.iter().enumerate() {
         let mut segs: [Option<&str>; N_SIDES] = [None, None, None];
         for s in 0..N_SIDES {
-            let r = side_range_for_emit(
-                &side_idx_maps[s],
-                key,
-                &item_emit_order,
-                emit_idx,
-            );
+            let r = side_range_for_emit(&side_idx_maps[s], key, &item_emit_order, emit_idx);
             if emitted[s].insert(r) {
                 segs[s] = Some(inter_slice(side_sources[s], &side_ranges[s], r));
             }
         }
-        let (seg_bytes, seg_conflicts) =
-            merge_segment(segs[0], segs[1], segs[2], markers);
+        let (seg_bytes, seg_conflicts) = merge_segment(segs[0], segs[1], segs[2], markers);
         output.extend_from_slice(&seg_bytes);
         total_conflicts += seg_conflicts;
 
@@ -185,8 +174,7 @@ pub(crate) fn reconstruct_merged_file(
             post[s] = Some(inter_slice(side_sources[s], &side_ranges[s], last));
         }
     }
-    let (post_bytes, post_conflicts) =
-        merge_segment(post[0], post[1], post[2], markers);
+    let (post_bytes, post_conflicts) = merge_segment(post[0], post[1], post[2], markers);
     // Only emit the postamble if it adds bytes — otherwise we risk
     // duplicating the trailing newline already in the last item's bytes.
     if !post_bytes.is_empty() {
@@ -309,9 +297,7 @@ fn materialize_segment(outcome: MergeOutcome, fallback: &str) -> (Vec<u8>, usize
         } => (merged_bytes_with_markers, conflict_count),
         // Binary / DeleteVsModify shouldn't fire on a text subset, but
         // carry through with base bytes rather than nothing.
-        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => {
-            (fallback.as_bytes().to_vec(), 0)
-        }
+        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => (fallback.as_bytes().to_vec(), 0),
     }
 }
 
@@ -333,9 +319,13 @@ struct SideSources<'a> {
 
 impl<'a> SideSources<'a> {
     fn new(base: &'a str, ours: &'a str, theirs: &'a str) -> Self {
-        let eol_policy =
-            EolPolicy::detect(&[base.as_bytes(), ours.as_bytes(), theirs.as_bytes()]);
-        SideSources { base, ours, theirs, eol_policy }
+        let eol_policy = EolPolicy::detect(&[base.as_bytes(), ours.as_bytes(), theirs.as_bytes()]);
+        SideSources {
+            base,
+            ours,
+            theirs,
+            eol_policy,
+        }
     }
 }
 
@@ -375,7 +365,12 @@ impl EolPolicy {
                 first_lf = l;
             }
         }
-        EolPolicy { crlf, lf, first_crlf, first_lf }
+        EolPolicy {
+            crlf,
+            lf,
+            first_crlf,
+            first_lf,
+        }
     }
 
     fn eol(self) -> &'static [u8] {
@@ -489,20 +484,12 @@ fn compute_item_emit_order(
     all_keys: &BTreeSet<&MatchKey>,
 ) -> Vec<MatchKey> {
     let mut order: Vec<MatchKey> = base_mks.to_vec();
-    let mut placed: BTreeSet<MatchKey> = order.iter().cloned().collect();
 
-    let mut splice_added = |side_mks: &[MatchKey]| {
+    for side_mks in [ours_mks, theirs_mks] {
         for (idx, key) in side_mks.iter().enumerate() {
-            if placed.contains(key) {
+            if order.contains(key) {
                 continue;
             }
-            // Anchor is the nearest match-key to the left in this
-            // side's source order that's already placed in `order`.
-            // That includes both base keys AND earlier-spliced
-            // additions from this side — so a run of N adjacent new
-            // items splices as a contiguous block preserving source
-            // order, rather than each one jumping ahead of its
-            // predecessor at the same base anchor.
             let mut insert_at = 0usize;
             for i in (0..idx).rev() {
                 if let Some(pos) = order.iter().position(|k| *k == side_mks[i]) {
@@ -511,19 +498,10 @@ fn compute_item_emit_order(
                 }
             }
             order.insert(insert_at, key.clone());
-            placed.insert(key.clone());
         }
-    };
+    }
 
-    splice_added(ours_mks);
-    splice_added(theirs_mks);
-
-    // Filter to keys that appear in the resolved set (some may have been
-    // removed from all sides — those are absent from `all_keys`).
-    order
-        .into_iter()
-        .filter(|k| all_keys.contains(k))
-        .collect()
+    order.into_iter().filter(|k| all_keys.contains(k)).collect()
 }
 
 /// Append `eol` to `out` unless `out` already ends with a `\n` (which

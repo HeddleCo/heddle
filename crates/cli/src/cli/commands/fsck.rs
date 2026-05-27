@@ -5,9 +5,12 @@ use anyhow::{Result, anyhow};
 use repo::Repository;
 use serde::Serialize;
 
-use super::fsck_checks::{
-    FsckError, check_blobs, check_merge_state, check_refs, check_states, check_trees, make_error,
-    repair_issues,
+use super::{
+    advice::RecoveryAdvice,
+    fsck_checks::{
+        FsckError, check_blobs, check_merge_state, check_refs, check_states, check_trees,
+        make_error, repair_issues,
+    },
 };
 use crate::{
     bridge::{GitBridge, git_notes},
@@ -43,7 +46,8 @@ pub fn cmd_fsck(cli: &Cli, full: bool, thorough: bool, repair: bool, bridge: boo
         check_bridge(&repo, &mut errors, &mut warnings, &mut objects_checked)?;
     }
 
-    let valid = errors.is_empty();
+    let error_count = errors.len();
+    let valid = error_count == 0;
 
     if repair && !valid {
         repair_issues(&repo, &errors)?;
@@ -99,10 +103,28 @@ pub fn cmd_fsck(cli: &Cli, full: bool, thorough: bool, repair: bool, bridge: boo
     }
 
     if !valid {
-        return Err(anyhow!("Repository has integrity errors"));
+        return Err(anyhow!(fsck_integrity_error_advice(error_count, repair)));
     }
 
     Ok(())
+}
+
+fn fsck_integrity_error_advice(error_count: usize, repaired: bool) -> RecoveryAdvice {
+    let preserved = if repaired {
+        "repair mode ran for known-safe issues; remaining repository state was left for inspection"
+    } else {
+        "no repository objects, refs, or worktree files were changed"
+    };
+    RecoveryAdvice::safety_refusal(
+        "repository_integrity_error",
+        "Repository has integrity errors",
+        "Inspect repository integrity with `heddle fsck --full`, then restore or repair the reported object/ref.",
+        format!("{error_count} integrity error(s) remain after fsck"),
+        "treating this repository as verified could hide missing or corrupt objects/refs",
+        preserved,
+        "heddle fsck --full",
+        vec!["heddle fsck --full".to_string()],
+    )
 }
 
 fn check_bridge(

@@ -9,6 +9,7 @@ use super::{
     merge_algo::{ConflictLabels, MergeResult, three_way_merge_with_labels},
     merge_relation::{MergeRelation, MergeRelationKind},
 };
+use crate::cli::commands::RecoveryAdvice;
 
 pub(crate) struct MergePlan {
     relation: MergeRelation,
@@ -94,7 +95,12 @@ impl MergePlan {
 
         let merge_base_id = graph
             .find_merge_base(current_change_id, target_change_id)?
-            .ok_or_else(|| anyhow!("No common ancestor found"))?;
+            .ok_or_else(|| {
+                anyhow!(RecoveryAdvice::merge_no_common_ancestor(
+                    &current_change_id.short(),
+                    &target_change_id.short(),
+                ))
+            })?;
         let base_tree = load_tree(repo, &merge_base_id)?;
         let current_tree = load_tree(repo, current_change_id)?;
         let target_tree = load_tree(repo, target_change_id)?;
@@ -130,12 +136,19 @@ fn load_tree(repo: &Repository, change_id: &ChangeId) -> Result<objects::object:
     // produced a clean merge against an empty side, silently erasing
     // every tracked file. Surface the corruption instead.
     repo.store().get_tree(&state.tree)?.ok_or_else(|| {
-        anyhow!(
-            "state {} references tree {} but the object store has no such tree; \
-             aborting merge to avoid silently merging against an empty tree. \
-             Run `heddle fsck --full` to inspect store integrity.",
-            change_id.short(),
-            state.tree
-        )
+        anyhow!(RecoveryAdvice::merge_integrity_refusal(
+            format!(
+                "State {} references missing tree {}",
+                change_id.short(),
+                state.tree
+            ),
+            format!(
+                "state {} references tree {} but the object store has no such tree",
+                change_id.short(),
+                state.tree
+            ),
+            "merging against a missing tree would silently treat that side as empty and could erase tracked files",
+            "merge stopped before writing refs, metadata, or worktree files",
+        ))
     })
 }

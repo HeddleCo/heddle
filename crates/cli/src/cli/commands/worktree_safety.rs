@@ -10,10 +10,14 @@
 //! This module provides a single guard that callers invoke before mutating the
 //! worktree. It mirrors `git checkout`'s default of protecting the working copy
 //! and produces a precise error message that points the user at
-//! `heddle capture -m "..."` to capture work first.
+//! `heddle commit -m "..."`, `heddle capture -m "..."`, or
+//! `heddle stash push -m "..."` to preserve work first.
 
 use anyhow::{Result, anyhow};
 use repo::{Repository, WorktreeStatusDetailed};
+
+use super::advice::RecoveryAdvice;
+use crate::cli::worktree_status_options;
 
 /// Refuse to perform a destructive worktree apply when uncommitted changes
 /// exist.
@@ -34,37 +38,45 @@ pub(crate) fn ensure_worktree_clean(repo: &Repository, action: &str) -> Result<(
     let Some(tree) = repo.get_tree_for_state(&head)? else {
         return Ok(());
     };
-    let detailed: WorktreeStatusDetailed = repo.compare_worktree_cached_detailed(&tree)?;
+    let detailed: WorktreeStatusDetailed = repo.compare_worktree_cached_detailed_with_options(
+        &tree,
+        &worktree_status_options(Some(repo.config())),
+    )?;
     if detailed.is_clean() {
         return Ok(());
     }
 
-    let mut reasons = Vec::new();
-    if !detailed.modified.is_empty() {
-        reasons.push(format!("{} modified file(s)", detailed.modified.len()));
-    }
-    if !detailed.deleted.is_empty() {
-        reasons.push(format!("{} deleted file(s)", detailed.deleted.len()));
-    }
-    let untracked_count = detailed.untracked.flattened_path_count();
-    if untracked_count > 0 {
-        reasons.push(format!("{} untracked file(s)", untracked_count));
-    }
-
-    Err(anyhow!(
-        "Refusing to {action}: worktree has uncommitted changes ({}). \
-         {Action} would destroy them — no prior snapshot exists to restore from. \
-         Capture them with `heddle capture -m \"...\"` (or remove them) and retry.",
-        reasons.join(", "),
-        action = action,
-        Action = capitalize(action),
-    ))
+    Err(anyhow!(dirty_worktree_advice(
+        action,
+        &detailed,
+        "repository state and worktree files were left unchanged; no snapshot has been written for these paths",
+    )))
 }
 
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
+pub(crate) fn dirty_worktree_advice(
+    action: &str,
+    detailed: &WorktreeStatusDetailed,
+    already_preserved: impl Into<String>,
+) -> RecoveryAdvice {
+    RecoveryAdvice::dirty_worktree(action, dirty_paths(detailed), already_preserved)
+}
+
+fn dirty_paths(detailed: &WorktreeStatusDetailed) -> Vec<String> {
+    let untracked = detailed.untracked.flatten_paths();
+    detailed
+        .modified
+        .iter()
+        .map(|path| format!("modified: {}", path.display()))
+        .chain(
+            detailed
+                .deleted
+                .iter()
+                .map(|path| format!("deleted: {}", path.display())),
+        )
+        .chain(
+            untracked
+                .iter()
+                .map(|path| format!("untracked: {}", path.display())),
+        )
+        .collect()
 }

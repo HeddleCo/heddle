@@ -27,13 +27,14 @@
 //! [`RefEmitStats::skipped_unmapped`] and can decide whether that's
 //! acceptable.
 
+use objects::object::{MarkerName, ThreadName};
 use refs::refs::{RefBackend, RefExpectation};
 use tracing::warn;
 
 use crate::{
-    IngestError,
     git_walk::{RefHead, RefNamespace},
     sha_map::ShaMap,
+    IngestError,
 };
 
 /// Rolling tally returned by [`RefEmitter::emit`].
@@ -84,8 +85,9 @@ impl<'a> RefEmitter<'a> {
                     // slash separation prevents collisions between a
                     // local `main` and `origin/main`; refs stores
                     // slashed names as nested paths under `refs/threads/`.
+                    let thread_name = ThreadName::from(head.short_name.as_str());
                     self.refs
-                        .set_thread(&head.short_name, &cid)
+                        .set_thread(&thread_name, &cid)
                         .map_err(IngestError::from)?;
                     stats.threads_written += 1;
                 }
@@ -95,13 +97,14 @@ impl<'a> RefEmitter<'a> {
                     // importer has to use `set_marker_cas(Any, …)`.
                     // We still short-circuit when the marker already
                     // points at the same cid — saves a lock cycle.
+                    let marker_name = MarkerName::from(head.short_name.as_str());
                     let existing = self
                         .refs
-                        .get_marker(&head.short_name)
+                        .get_marker(&marker_name)
                         .map_err(IngestError::from)?;
                     if existing != Some(cid) {
                         self.refs
-                            .set_marker_cas(&head.short_name, RefExpectation::Any, &cid)
+                            .set_marker_cas(&marker_name, RefExpectation::Any, &cid)
                             .map_err(IngestError::from)?;
                     }
                     stats.markers_written += 1;
@@ -158,7 +161,7 @@ mod tests {
         assert_eq!(stats.threads_written, 1);
         assert_eq!(stats.markers_written, 1);
         assert_eq!(stats.skipped_unmapped, 0);
-        assert_eq!(mgr.get_thread("main").unwrap(), Some(cid));
+        assert_eq!(mgr.get_thread(&ThreadName::new("main")).unwrap(), Some(cid));
         // Markers are listed under list_markers.
         let markers = mgr.list_markers().unwrap();
         assert!(
@@ -182,7 +185,10 @@ mod tests {
         )];
         RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
 
-        assert_eq!(mgr.get_thread("feature/ingest").unwrap(), Some(cid));
+        assert_eq!(
+            mgr.get_thread(&ThreadName::new("feature/ingest")).unwrap(),
+            Some(cid)
+        );
     }
 
     #[test]
@@ -196,7 +202,7 @@ mod tests {
         let stats = RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
         assert_eq!(stats.threads_written, 0);
         assert_eq!(stats.skipped_unmapped, 1);
-        assert_eq!(mgr.get_thread("orphan").unwrap(), None);
+        assert_eq!(mgr.get_thread(&ThreadName::new("orphan")).unwrap(), None);
     }
 
     #[test]
@@ -220,8 +226,14 @@ mod tests {
         let stats = RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
 
         assert_eq!(stats.threads_written, 2);
-        assert_eq!(mgr.get_thread("main").unwrap(), Some(local_cid));
-        assert_eq!(mgr.get_thread("origin/main").unwrap(), Some(remote_cid));
+        assert_eq!(
+            mgr.get_thread(&ThreadName::new("main")).unwrap(),
+            Some(local_cid)
+        );
+        assert_eq!(
+            mgr.get_thread(&ThreadName::new("origin/main")).unwrap(),
+            Some(remote_cid)
+        );
     }
 
     #[test]
@@ -237,6 +249,6 @@ mod tests {
         let second = RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
 
         assert_eq!(first, second);
-        assert_eq!(mgr.get_thread("main").unwrap(), Some(cid));
+        assert_eq!(mgr.get_thread(&ThreadName::new("main")).unwrap(), Some(cid));
     }
 }

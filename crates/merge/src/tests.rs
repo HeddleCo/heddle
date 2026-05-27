@@ -420,7 +420,10 @@ fn trailing_space_only_difference_still_auto_resolves_with_same_endings() {
     let theirs = b"X\nY-edit\n";
     match text_hunk_merge(base, ours, theirs) {
         MergeOutcome::Clean(out) => {
-            assert_eq!(out, b"X\nY-edit\n", "prefer_clean must pick no-trailing-space");
+            assert_eq!(
+                out, b"X\nY-edit\n",
+                "prefer_clean must pick no-trailing-space"
+            );
         }
         other => panic!("expected Clean (prefer_clean), got {other:?}"),
     }
@@ -439,9 +442,8 @@ fn bench_no_conflict_disjoint_hunks_large_file() {
     let base: String = (1..=1000).map(|i| format!("line {i}\n")).collect();
     let mut ours = String::new();
     for i in 1..=1000 {
-        let in_our_hunk = (100..=104).contains(&i)
-            || (400..=404).contains(&i)
-            || (700..=704).contains(&i);
+        let in_our_hunk =
+            (100..=104).contains(&i) || (400..=404).contains(&i) || (700..=704).contains(&i);
         ours.push_str(&if in_our_hunk {
             format!("OUR-{i}\n")
         } else {
@@ -450,9 +452,8 @@ fn bench_no_conflict_disjoint_hunks_large_file() {
     }
     let mut theirs = String::new();
     for i in 1..=1000 {
-        let in_their_hunk = (200..=204).contains(&i)
-            || (500..=504).contains(&i)
-            || (800..=804).contains(&i);
+        let in_their_hunk =
+            (200..=204).contains(&i) || (500..=504).contains(&i) || (800..=804).contains(&i);
         theirs.push_str(&if in_their_hunk {
             format!("THEIR-{i}\n")
         } else {

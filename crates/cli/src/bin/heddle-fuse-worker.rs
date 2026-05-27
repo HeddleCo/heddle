@@ -30,7 +30,7 @@
 use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
-use mount::worker::{run_worker, WorkerArgs};
+use mount::worker::{WorkerArgs, run_worker};
 
 #[cfg(target_os = "linux")]
 fn main() -> ExitCode {

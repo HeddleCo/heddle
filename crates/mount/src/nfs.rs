@@ -153,9 +153,9 @@ impl NfsShell {
         // a UNIX-domain socket (nfsserve supports it), which
         // limits the surface to filesystem permissions — the
         // sentinel we want at this layer. Tracked separately.
-        let listener = runtime.block_on(NFSTcpListener::bind("127.0.0.1:0", fs)).map_err(
-            |e| MountError::Store(objects::error::HeddleError::Io(e)),
-        )?;
+        let listener = runtime
+            .block_on(NFSTcpListener::bind("127.0.0.1:0", fs))
+            .map_err(|e| MountError::Store(objects::error::HeddleError::Io(e)))?;
         let port = listener.get_listen_port();
         debug!(port, "heddle nfs server listening");
 
@@ -203,9 +203,8 @@ pub struct NfsSession {
 
 impl NfsSession {
     pub fn unmount(mut self) -> Result<()> {
-        invoke_unmount(&self.mountpoint).map_err(|e| {
-            MountError::Store(objects::error::HeddleError::Io(e))
-        })?;
+        invoke_unmount(&self.mountpoint)
+            .map_err(|e| MountError::Store(objects::error::HeddleError::Io(e)))?;
         self.unmounted = true;
         // Shut the server down. `Runtime::shutdown_background`
         // releases the worker threads without blocking; the
@@ -251,9 +250,8 @@ fn invoke_mount(mountpoint: &Path, port: u16) -> std::io::Result<()> {
     // lock manager (we don't run rpc.lockd), forbids reserved-port
     // binding (we don't run as root inside the server process),
     // and pins NFSv3 + TCP.
-    let opts = format!(
-        "vers=3,tcp,port={port},mountport={port},nolocks,soft,intr,actimeo=0,resvport=off"
-    );
+    let opts =
+        format!("vers=3,tcp,port={port},mountport={port},nolocks,soft,intr,actimeo=0,resvport=off");
     let status = Command::new("mount")
         .arg("-t")
         .arg("nfs")
@@ -329,10 +327,7 @@ fn invoke_unmount(mountpoint: &Path) -> std::io::Result<()> {
     let mp_str = mountpoint
         .to_str()
         .ok_or_else(|| std::io::Error::other("non-UTF8 mountpoint"))?;
-    let status = Command::new("umount.exe")
-        .arg("-f")
-        .arg(mp_str)
-        .status()?;
+    let status = Command::new("umount.exe").arg("-f").arg(mp_str).status()?;
     if !status.success() {
         return Err(std::io::Error::other(format!(
             "umount.exe returned {status}"
@@ -370,8 +365,14 @@ impl NFSFileSystem for HeddleNFS {
         NodeId::ROOT.0
     }
 
-    async fn lookup(&self, dirid: fileid3, filename: &filename3) -> std::result::Result<fileid3, nfsstat3> {
-        let name = OsStr::new(std::str::from_utf8(filename.as_ref()).map_err(|_| nfsstat3::NFS3ERR_INVAL)?);
+    async fn lookup(
+        &self,
+        dirid: fileid3,
+        filename: &filename3,
+    ) -> std::result::Result<fileid3, nfsstat3> {
+        let name = OsStr::new(
+            std::str::from_utf8(filename.as_ref()).map_err(|_| nfsstat3::NFS3ERR_INVAL)?,
+        );
         match self.inner.lookup(NodeId(dirid), name) {
             Ok(Some(entry)) => Ok(entry.node.0),
             Ok(None) => Err(nfsstat3::NFS3ERR_NOENT),
@@ -384,7 +385,14 @@ impl NFSFileSystem for HeddleNFS {
             .inner
             .attrs(NodeId(id))
             .map_err(|e| mount_err_to_nfs(&e))?;
-        Ok(fattr_from(id, attrs.kind, attrs.size, attrs.unix_mode, attrs.nlink, attrs.mtime))
+        Ok(fattr_from(
+            id,
+            attrs.kind,
+            attrs.size,
+            attrs.unix_mode,
+            attrs.nlink,
+            attrs.mtime,
+        ))
     }
 
     async fn setattr(&self, id: fileid3, setattr: sattr3) -> std::result::Result<fattr3, nfsstat3> {

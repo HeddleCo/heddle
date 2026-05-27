@@ -14,7 +14,11 @@ use super::{
     read_annotation_content, resolve_scope_at_target, resolve_state, resolve_target, target_label,
 };
 use crate::{
-    cli::{Cli, commands::snapshot::resolve_attribution, should_output_json},
+    cli::{
+        Cli,
+        commands::{RecoveryAdvice, snapshot::resolve_attribution},
+        should_output_json,
+    },
     config::UserConfig,
 };
 
@@ -114,11 +118,11 @@ pub async fn cmd_context_edit(
     let context_root = head_state
         .context
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No context annotations in this repository"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (target, mut blob, index) = repo
         .find_annotation(context_root, &annotation_id)?
-        .ok_or_else(|| anyhow::anyhow!("Annotation not found: {annotation_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
 
     let annotation = blob
         .annotations
@@ -195,11 +199,11 @@ pub async fn cmd_context_supersede(
     let context_root = head_state
         .context
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No context annotations in this repository"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (original_target, mut original_blob, index) = repo
         .find_annotation(context_root, &annotation_id)?
-        .ok_or_else(|| anyhow::anyhow!("Annotation not found: {annotation_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
     let original_annotation = original_blob.annotations[index].clone();
     let original_revision = original_annotation.current_revision().cloned().unwrap();
 
@@ -286,10 +290,20 @@ pub async fn cmd_context_rm(
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
     let Some(context_root) = &head_state.context else {
-        anyhow::bail!("No context annotations to remove");
+        return Err(anyhow::anyhow!(RecoveryAdvice::invalid_usage(
+            "context_remove_empty",
+            "No context annotations to remove",
+            "Inspect context with `heddle context list`, then remove an existing annotation scope.",
+            "heddle context list",
+        )));
     };
     if !all && scope.is_none() {
-        anyhow::bail!("Specify --scope to remove specific annotations, or --all to remove all");
+        return Err(anyhow::anyhow!(RecoveryAdvice::invalid_usage(
+            "context_remove_scope_required",
+            "Specify --scope to remove specific annotations, or --all to remove all",
+            "Pass `--scope <scope>` to remove one scope, or `--all` to remove all annotations at the target.",
+            "heddle context rm --path <path> --scope file",
+        )));
     }
     let scope_filter = if all {
         None

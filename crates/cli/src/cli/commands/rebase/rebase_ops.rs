@@ -10,7 +10,7 @@ use refs::Head;
 use repo::Repository;
 
 use super::{
-    super::ff_record::ff_advance_deferred,
+    super::{advice::RecoveryAdvice, ff_record::ff_advance_deferred},
     rebase_state::{load_rebase_state, save_rebase_state},
 };
 use crate::cli::{Cli, should_output_json};
@@ -57,7 +57,12 @@ fn replay_commits_internal(
         state.onto
     } else {
         repo.current_state()?
-            .ok_or_else(|| anyhow!("No current state"))?
+            .ok_or_else(|| {
+                anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+                    "<current>",
+                    "current state",
+                ))
+            })?
             .change_id
     };
 
@@ -66,7 +71,12 @@ fn replay_commits_internal(
         let commit_state = repo
             .store()
             .get_state(&commit_id)?
-            .ok_or_else(|| anyhow!("Commit {} not found", commit_id))?;
+            .ok_or_else(|| {
+                anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+                    &commit_id.to_string(),
+                    "commit",
+                ))
+            })?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -207,7 +217,12 @@ fn resume_manual_resolution_if_present(
 
     let current_state = repo
         .current_state()?
-        .ok_or_else(|| anyhow!("No current state"))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+                "<current>",
+                "current state",
+            ))
+        })?;
 
     if current_state.change_id == pre_conflict_head || current_state.change_id == pending_commit {
         if let Some(cli) = cli
@@ -240,7 +255,7 @@ fn resume_manual_resolution_if_present(
     let resolution_advance = match repo.head_ref()? {
         Head::Attached { thread } => OpRecord::FastForwardV2 {
             source_thread: REBASE_REPLAY_SOURCE.to_string(),
-            target_thread: thread,
+            target_thread: thread.to_string(),
             pre_target_id: pre_conflict_head,
             post_target_id: current_state.change_id,
         },
@@ -298,12 +313,22 @@ fn apply_commit(
     let current_tree = repo
         .store()
         .get_tree(&current_tree_hash)?
-        .ok_or_else(|| anyhow!("Current tree not found"))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+                &current_tree_hash.to_string(),
+                "current tree",
+            ))
+        })?;
 
     let commit_tree = repo
         .store()
         .get_tree(&commit_tree_hash)?
-        .ok_or_else(|| anyhow!("Commit tree not found"))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+                &commit_tree_hash.to_string(),
+                "commit tree",
+            ))
+        })?;
 
     let parent_tree_hash = if let Some(parent_id) = commit_state.parents.first() {
         get_tree_for_state(repo, parent_id)?
@@ -314,7 +339,12 @@ fn apply_commit(
     let parent_tree = repo
         .store()
         .get_tree(&parent_tree_hash)?
-        .ok_or_else(|| anyhow!("Parent tree not found"))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+                &parent_tree_hash.to_string(),
+                "parent tree",
+            ))
+        })?;
 
     let changes = compute_tree_diff(&parent_tree, &commit_tree);
 
@@ -539,7 +569,12 @@ fn get_tree_for_state(repo: &Repository, state_id: &ChangeId) -> Result<ContentH
     let state = repo
         .store()
         .get_state(state_id)?
-        .ok_or_else(|| anyhow!("State {} not found", state_id))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+                &state_id.to_string(),
+                "state",
+            ))
+        })?;
     Ok(state.tree)
 }
 

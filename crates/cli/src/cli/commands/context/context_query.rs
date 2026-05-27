@@ -18,7 +18,7 @@ use super::{
     AnnotationHistoryOutput, AnnotationOutput, ContextGetOutput, RevisionOutput,
     filter_annotations, print_context_get, resolve_state, resolve_state_id, target_label,
 };
-use crate::cli::{Cli, should_output_json};
+use crate::cli::{Cli, commands::RecoveryAdvice, should_output_json};
 
 #[derive(Serialize)]
 struct SuggestionOutput {
@@ -148,11 +148,11 @@ pub async fn cmd_context_history(
     let context_root = state_obj
         .context
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No context annotations in this repository"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let (target, blob, index) = repo
         .find_annotation(context_root, &annotation_id)?
-        .ok_or_else(|| anyhow::anyhow!("Annotation not found: {annotation_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
     let annotation = &blob.annotations[index];
     let (target_kind, target_label) = target_label(&target);
     let output = AnnotationHistoryOutput {
@@ -214,13 +214,20 @@ pub async fn cmd_context_check(
     let context_root = state_obj
         .context
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No context annotations in this repository"))?;
+        .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
 
     let target_filter = match (path, state) {
         (Some(path), None) => Some(ContextTarget::file(path)?),
         (None, Some(state)) => Some(ContextTarget::state(resolve_state_id(&repo, &state)?)),
         (None, None) => None,
-        (Some(_), Some(_)) => anyhow::bail!("--path and --state are mutually exclusive"),
+        (Some(_), Some(_)) => {
+            return Err(anyhow::anyhow!(RecoveryAdvice::invalid_usage(
+                "context_target_conflict",
+                "--path and --state are mutually exclusive",
+                "Pass exactly one target: either `--path <path>` or `--state <state>`.",
+                "heddle context list --path <path>",
+            )));
+        }
     };
 
     let entries = repo.list_context_entries(context_root, None)?;

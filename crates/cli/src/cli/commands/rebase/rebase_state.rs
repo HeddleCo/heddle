@@ -3,10 +3,12 @@
 
 use std::{fs, io::Write};
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use objects::object::ChangeId;
 use oplog::OpRecord;
 use repo::Repository;
+
+use super::super::advice::RecoveryAdvice;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RebaseState {
@@ -112,8 +114,12 @@ pub(crate) fn save_rebase_state(path: &std::path::Path, state: &RebaseState) -> 
     // these get re-emitted into the oplog in the same order at the
     // end of the rebase.
     for advance in &state.pending_advances {
-        let bytes = rmp_serde::to_vec(advance)
-            .map_err(|e| anyhow!("encode pending_advance: {}", e))?;
+        let bytes = rmp_serde::to_vec(advance).map_err(|e| {
+            anyhow!(RecoveryAdvice::rebase_state_corrupted(
+                "encode pending_advance",
+                e,
+            ))
+        })?;
         content.push_str(&format!("pending_advance={}\n", hex::encode(&bytes)));
     }
 
@@ -149,10 +155,7 @@ pub(crate) fn load_rebase_state_for_abort(path: &std::path::Path) -> Result<Reba
     load_rebase_state_internal(path, /* for_abort= */ true)
 }
 
-fn load_rebase_state_internal(
-    path: &std::path::Path,
-    for_abort: bool,
-) -> Result<RebaseState> {
+fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result<RebaseState> {
     let content = fs::read_to_string(path)?;
 
     let mut onto = None;
@@ -191,20 +194,28 @@ fn load_rebase_state_internal(
             // history is discarded. The continue path keeps the
             // hard-fail so a silently-truncated batch never lands in
             // the oplog.
-            match hex::decode(value).map_err(|e| anyhow!("decode pending_advance: {}", e)) {
+            match hex::decode(value).map_err(|e| {
+                anyhow!(RecoveryAdvice::rebase_state_corrupted(
+                    "decode pending_advance",
+                    e,
+                ))
+            }) {
                 Err(_) if for_abort => continue,
                 Err(e) => return Err(e),
-                Ok(bytes) => match rmp_serde::from_slice::<OpRecord>(&bytes)
-                    .map_err(|e| anyhow!("decode pending_advance OpRecord: {}", e))
-                {
+                Ok(bytes) => match rmp_serde::from_slice::<OpRecord>(&bytes).map_err(|e| {
+                    anyhow!(RecoveryAdvice::rebase_state_corrupted(
+                        "decode pending_advance OpRecord",
+                        e,
+                    ))
+                }) {
                     Err(_) if for_abort => continue,
                     Err(e) => return Err(e),
                     Ok(advance) => match advance {
                         // heddle#198 r4 (Codex PR #218 P2): only the
-                        // variants `ff_advance_deferred` emits (FFV2,
-                        // Goto) plus the legacy V1 FastForward read-back
-                        // path can legitimately appear in a rebase
-                        // batch. Anything else — MarkerCreate, ThreadX,
+                        // FF-advance variants (FFV2, Goto) plus the
+                        // legacy V1 FastForward read-back path can
+                        // legitimately appear in a rebase batch.
+                        // Anything else — MarkerCreate, ThreadX,
                         // Snapshot — would land in the committed batch
                         // verbatim and pollute undo/redo with records
                         // the rebase never produced. Strict loader
@@ -218,10 +229,13 @@ fn load_rebase_state_internal(
                             continue;
                         }
                         other => {
-                            return Err(anyhow!(
-                                "Unexpected pending_advance variant {} in rebase state — only FastForward/FastForwardV2/Goto are accepted",
-                                other.description(),
-                            ));
+                            return Err(anyhow!(RecoveryAdvice::rebase_state_corrupted(
+                                "Unexpected pending_advance variant in rebase state",
+                                format!(
+                                    "{} — only FastForward/FastForwardV2/Goto are accepted",
+                                    other.description()
+                                ),
+                            )));
                         }
                     },
                 },
@@ -229,9 +243,18 @@ fn load_rebase_state_internal(
         }
     }
 
-    let onto = onto.ok_or_else(|| anyhow!("Missing 'onto' in rebase state"))?;
-    let original_head =
-        original_head.ok_or_else(|| anyhow!("Missing 'original_head' in rebase state"))?;
+    let onto = onto.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_state_corrupted(
+            "Missing 'onto' in rebase state",
+            "",
+        ))
+    })?;
+    let original_head = original_head.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_state_corrupted(
+            "Missing 'original_head' in rebase state",
+            "",
+        ))
+    })?;
     // heddle#198 r3 (Codex PR #218 P1): on the abort path a missing
     // `transaction_id=` collapses to an empty string — the abort
     // rewind never reaches `flush_rebase_batch` so the id's
@@ -247,11 +270,19 @@ fn load_rebase_state_internal(
     // never reaches the dedup helper.
     let transaction_id = match (transaction_id, for_abort) {
         (Some(id), false) if id.trim().is_empty() => {
-            return Err(anyhow!("Blank 'transaction_id' in rebase state"));
+            return Err(anyhow!(RecoveryAdvice::rebase_state_corrupted(
+                "Blank 'transaction_id' in rebase state",
+                "",
+            )));
         }
         (Some(id), _) => id,
         (None, true) => String::new(),
-        (None, false) => return Err(anyhow!("Missing 'transaction_id' in rebase state")),
+        (None, false) => {
+            return Err(anyhow!(RecoveryAdvice::rebase_state_corrupted(
+                "Missing 'transaction_id' in rebase state",
+                "",
+            )));
+        }
     };
 
     // heddle#198 r4 (Codex PR #218 P1): the persisted invariant is
@@ -263,11 +294,14 @@ fn load_rebase_state_internal(
     // an incomplete batch. Abort tolerates because it discards the
     // buffered FF history when rewinding to `original_head`.
     if !for_abort && pending_advances.len() != current_index {
-        return Err(anyhow!(
-            "Inconsistent rebase state: pending_advance lines ({}) do not match current_index ({})",
-            pending_advances.len(),
-            current_index,
-        ));
+        return Err(anyhow!(RecoveryAdvice::rebase_state_corrupted(
+            "Inconsistent rebase state",
+            format!(
+                "pending_advance lines ({}) do not match current_index ({})",
+                pending_advances.len(),
+                current_index,
+            ),
+        )));
     }
 
     Ok(RebaseState {
@@ -340,7 +374,10 @@ mod tests {
         assert_eq!(loaded.original_head, original.original_head);
         assert_eq!(loaded.current_index, original.current_index);
         assert_eq!(loaded.commits_to_replay, original.commits_to_replay);
-        assert_eq!(loaded.pending_manual_resolution, original.pending_manual_resolution);
+        assert_eq!(
+            loaded.pending_manual_resolution,
+            original.pending_manual_resolution
+        );
         assert_eq!(loaded.pre_conflict_head, original.pre_conflict_head);
         assert_eq!(loaded.pending_advances.len(), 3);
         for (got, want) in loaded.pending_advances.iter().zip(advances.iter()) {
@@ -606,9 +643,9 @@ mod tests {
     /// decodes can inject non-rebase operations (e.g. `MarkerCreate`,
     /// `ThreadDelete`) into the rebase's undo/redo history — undo would
     /// replay records the rebase never produced. The strict loader
-    /// must whitelist only the variants `ff_advance_deferred` emits
-    /// (`FastForwardV2` / `Goto`) plus the legacy V1 `FastForward` read-
-    /// back path, and reject anything else.
+    /// must whitelist only the FF-advance variants (`FastForwardV2`
+    /// / `Goto`) plus the legacy V1 `FastForward` read-back path,
+    /// and reject anything else.
     #[test]
     fn load_strict_rejects_non_advance_pending_record() {
         let tmp = TempDir::new().unwrap();

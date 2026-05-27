@@ -13,7 +13,12 @@ use objects::object::{Agent, ChangeId, State};
 use repo::{ChangedPathFilters, HistoryQuery, Repository, format_confidence, is_synthetic_root};
 use serde::Serialize;
 
-use super::{history_target::resolve_state_id, snapshot::ensure_current_state};
+use super::{
+    action_line::{format_next_step_dim, print_next_step},
+    git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
+    history_target::resolve_state_id,
+    snapshot::ensure_current_state,
+};
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
@@ -40,12 +45,14 @@ pub struct LogCommandOptions {
 
 #[derive(Serialize)]
 struct LogOutput {
+    output_kind: &'static str,
+    status: &'static str,
     repository_capability: String,
     storage_model: String,
     states: Vec<StateEntry>,
     /// Carried for the human-readable renderer only. Not part of the
     /// JSON contract: import-hint information is exposed via
-    /// `heddle bridge git status --json` instead.
+    /// `heddle bridge git status --output json` instead.
     #[serde(skip)]
     git_overlay_import_hint: Option<LogGitOverlayImportHintOutput>,
 }
@@ -82,6 +89,8 @@ struct StateEntry {
 
 #[derive(Serialize)]
 struct ReflogOutput {
+    output_kind: &'static str,
+    status: &'static str,
     repository_capability: String,
     storage_model: String,
     entries: Vec<ReflogEntry>,
@@ -102,7 +111,7 @@ impl From<&State> for StateEntry {
     fn from(state: &State) -> Self {
         Self {
             change_id: state.change_id.short(),
-            content_hash: state.tree.short(),
+            content_hash: state.compute_hash().short(),
             intent: state.intent.clone(),
             principal: state.attribution.principal.to_string(),
             principal_name: state.attribution.principal.name.clone(),
@@ -117,7 +126,18 @@ impl From<&State> for StateEntry {
 }
 
 pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let cwd = std::env::current_dir()?;
+    let start = cli.repo.as_ref().unwrap_or(&cwd);
+    if !options.reflog
+        && options.state.is_none()
+        && options.since.is_none()
+        && options.paths.is_empty()
+        && let Some(probe) = build_plain_git_verification_probe(start)?
+    {
+        return render_plain_git_log(cli, &probe, options.oneline);
+    }
+
+    let repo = Repository::open(start)?;
 
     if options.reflog {
         return cmd_log_reflog(cli, &repo, options.limit, options.oneline);
@@ -169,6 +189,8 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
     // real snapshot and report a "Heddle <init@heddle>" or (in older
     // repos) "Unknown" principal that the user never authored.
     let output = LogOutput {
+        output_kind: "log",
+        status: "completed",
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
         git_overlay_import_hint: repo.git_overlay_import_hint()?.map(|hint| {
@@ -204,9 +226,9 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
         if options.oneline {
-            let _ = write_oneline(&mut handle, &output);
+            let _ = write_oneline(&mut handle, &output, cli.verbose > 0);
         } else {
-            let _ = write_full(&mut handle, &output);
+            let _ = write_full(&mut handle, &output, cli.verbose > 0);
         }
     }
 
@@ -217,13 +239,52 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
         Some(repo.config()),
         crate::cli::tips::Tip::QueryFromLog,
         as_json,
+        cli.quiet,
     );
 
     Ok(())
 }
 
+fn render_plain_git_log(cli: &Cli, probe: &PlainGitVerificationProbe, oneline: bool) -> Result<()> {
+    if should_output_json(cli, None) {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "output_kind": "log",
+                "status": "blocked",
+                "repository_capability": "plain-git",
+                "storage_model": "git",
+                "states": [],
+                "verification": &probe.trust,
+                "recommended_action": &probe.trust.recommended_action,
+                "recovery_commands": &probe.trust.recovery_commands,
+            }))?
+        );
+    } else if oneline {
+        println!("plain-git Heddle not initialized; next: heddle init");
+    } else {
+        println!("Git repo, Heddle not initialized");
+        if let Some(branch) = &probe.git_branch {
+            println!("Git branch: {}", style::bold(branch));
+        }
+        println!("History: unavailable until this Git repo is initialized and imported");
+        print_next_step("heddle init");
+        if let Some(branch) = &probe.git_branch {
+            println!(
+                "Then: {}",
+                style::bold(&super::git_overlay_health::canonical_adopt_ref_command(
+                    branch
+                ))
+            );
+        }
+    }
+    Ok(())
+}
+
 fn cmd_log_reflog(cli: &Cli, repo: &Repository, limit: usize, oneline: bool) -> Result<()> {
     let output = ReflogOutput {
+        output_kind: "log_reflog",
+        status: "completed",
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
         entries: collect_reflog_entries(repo.root(), limit)?,
@@ -385,16 +446,20 @@ fn write_reflog_oneline<W: std::io::Write>(
 fn write_reflog_full<W: std::io::Write>(out: &mut W, output: &ReflogOutput) -> std::io::Result<()> {
     writeln!(
         out,
-        "Repository mode: {} ({})",
-        output.repository_capability, output.storage_model
+        "Repository: {}",
+        crate::cli::render::repository_mode_label(
+            &output.repository_capability,
+            &output.storage_model
+        )
     )?;
     writeln!(out, "Reflog: {} entrie(s)", output.entries.len())?;
     if output.entries.is_empty() {
-        writeln!(
-            out,
-            "Next step: {}",
-            style::dim("make a checkpoint, fetch, pull, push, or run `heddle bridge git import`")
-        )?;
+        if let Some(line) = format_next_step_dim(
+            "make a checkpoint, fetch, pull, push, or run `heddle adopt`",
+            0,
+        ) {
+            writeln!(out, "{line}")?;
+        }
         return Ok(());
     }
 
@@ -435,42 +500,68 @@ fn short_oid(oid: &str) -> &str {
     oid.get(..12).unwrap_or(oid)
 }
 
-fn write_oneline<W: std::io::Write>(out: &mut W, output: &LogOutput) -> std::io::Result<()> {
+fn write_oneline<W: std::io::Write>(
+    out: &mut W,
+    output: &LogOutput,
+    verbose: bool,
+) -> std::io::Result<()> {
     for entry in &output.states {
         let intent = entry.intent.as_deref().unwrap_or("(no intent)");
-        let checkpoint = if entry.git_checkpoint.is_some() {
+        let checkpoint = if verbose && entry.git_checkpoint.is_some() {
             " [git]"
         } else {
             ""
         };
-        // Three columns of decreasing emphasis: id (dim, structural),
-        // hash (dim, structural), intent (bold, the part you read).
-        writeln!(
-            out,
-            "{} {} {}{}",
-            style::change_id(&entry.change_id),
-            style::dim(&entry.content_hash),
-            style::bold(intent),
-            checkpoint,
-        )?;
+        if verbose {
+            // Three columns of decreasing emphasis: id (dim,
+            // structural), hash (dim, structural), intent (bold, the
+            // part you read). Default text hides the content hash
+            // because the stable change id is the user-facing anchor.
+            writeln!(
+                out,
+                "{} {} {}{}",
+                style::change_id(&entry.change_id),
+                style::dim(&entry.content_hash),
+                style::bold(intent),
+                checkpoint,
+            )?;
+        } else {
+            writeln!(
+                out,
+                "{} {}",
+                style::change_id(&entry.change_id),
+                style::bold(intent),
+            )?;
+        }
     }
     Ok(())
 }
 
-fn write_full<W: std::io::Write>(out: &mut W, output: &LogOutput) -> std::io::Result<()> {
+fn write_full<W: std::io::Write>(
+    out: &mut W,
+    output: &LogOutput,
+    verbose: bool,
+) -> std::io::Result<()> {
     writeln!(
         out,
-        "Repository mode: {} ({})",
-        output.repository_capability, output.storage_model
+        "Repository: {}",
+        crate::cli::render::repository_mode_label(
+            &output.repository_capability,
+            &output.storage_model
+        )
     )?;
     if let Some(hint) = &output.git_overlay_import_hint {
         writeln!(
             out,
-            "Git import: {} other branch(es) still live only in Git ({})",
-            hint.missing_branch_count,
-            crate::cli::render::preview_list(&hint.missing_branches, hint.missing_branch_count,)
+            "{}",
+            crate::cli::render::git_only_branch_summary(
+                &hint.missing_branches,
+                hint.missing_branch_count,
+            )
         )?;
-        writeln!(out, "Next step: {}", style::dim(&hint.recommended_command))?;
+        if let Some(line) = format_next_step_dim(&hint.recommended_command, 0) {
+            writeln!(out, "{line}")?;
+        }
     }
     writeln!(out)?;
     for (i, entry) in output.states.iter().enumerate() {
@@ -478,29 +569,40 @@ fn write_full<W: std::io::Write>(out: &mut W, output: &LogOutput) -> std::io::Re
             writeln!(out)?;
         }
 
-        // Header: change-id and tree hash dim, timestamp dim.
-        // Nothing carries semantic color here — these are
-        // structurally important but not the focus.
-        writeln!(
-            out,
-            "{} ({}) {}",
-            style::change_id(&entry.change_id),
-            style::dim(&entry.content_hash),
-            style::dim(&entry.created_at),
-        )?;
+        if verbose {
+            // Header: change-id and tree hash dim, timestamp dim.
+            // Nothing carries semantic color here — these are
+            // structurally important but not the focus.
+            writeln!(
+                out,
+                "{} ({}) {}",
+                style::change_id(&entry.change_id),
+                style::dim(&entry.content_hash),
+                style::dim(&entry.created_at),
+            )?;
+        } else {
+            writeln!(
+                out,
+                "{} {}",
+                style::change_id(&entry.change_id),
+                style::dim(&entry.created_at),
+            )?;
+        }
 
         if let Some(intent) = &entry.intent {
             // Intent is the editorial line — bold, no color.
             writeln!(out, "  {}", style::bold(intent))?;
         }
 
-        writeln!(
-            out,
-            "  Principal: {}",
-            style::principal(&entry.principal_name, &entry.principal_email)
-        )?;
+        if verbose {
+            writeln!(
+                out,
+                "  Principal: {}",
+                style::principal(&entry.principal_name, &entry.principal_email)
+            )?;
+        }
 
-        if let Some(agent) = &entry.agent {
+        if verbose && let Some(agent) = &entry.agent {
             writeln!(out, "  Agent: {}", style::dim(agent))?;
         }
 
@@ -521,7 +623,7 @@ fn write_full<W: std::io::Write>(out: &mut W, output: &LogOutput) -> std::io::Re
         // durability: local only" fallback used to repeat on every entry and
         // told the user nothing they couldn't infer from the absence of a
         // Git-checkpoint line.
-        if let Some(git_checkpoint) = &entry.git_checkpoint {
+        if verbose && let Some(git_checkpoint) = &entry.git_checkpoint {
             writeln!(
                 out,
                 "  Git checkpoint: {}",
@@ -565,6 +667,8 @@ mod tests {
     fn render_sites_no_ansi_when_disabled() {
         style::force_for_test(false);
         let output = LogOutput {
+            output_kind: "log",
+            status: "completed",
             repository_capability: "git-overlay".to_string(),
             storage_model: "git+heddle-sidecar".to_string(),
             git_overlay_import_hint: None,
@@ -572,18 +676,23 @@ mod tests {
         };
 
         let mut buf = Vec::new();
-        write_oneline(&mut buf, &output).unwrap();
+        write_oneline(&mut buf, &output, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains('\x1b'), "oneline leaked ANSI: {s:?}");
         assert!(s.contains("hd-abc123"));
         assert!(s.contains("Capture audit pipeline"));
 
         let mut buf = Vec::new();
-        write_full(&mut buf, &output).unwrap();
+        write_full(&mut buf, &output, false).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(!s.contains('\x1b'), "full leaked ANSI: {s:?}");
-        assert!(s.contains("Ada <ada@example.com>"));
+        assert!(!s.contains("Ada <ada@example.com>"));
         assert!(s.contains("Confidence: 0.95"));
+
+        let mut buf = Vec::new();
+        write_full(&mut buf, &output, true).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("Ada <ada@example.com>"));
     }
 
     /// With color enabled, the same renderer must emit escapes —
@@ -595,13 +704,15 @@ mod tests {
     fn render_sites_emit_ansi_when_enabled() {
         style::force_for_test(true);
         let output = LogOutput {
+            output_kind: "log",
+            status: "completed",
             repository_capability: "git-overlay".to_string(),
             storage_model: "git+heddle-sidecar".to_string(),
             git_overlay_import_hint: None,
             states: vec![sample_entry()],
         };
         let mut buf = Vec::new();
-        write_oneline(&mut buf, &output).unwrap();
+        write_oneline(&mut buf, &output, true).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains('\x1b'), "expected ANSI in oneline: {s:?}");
     }

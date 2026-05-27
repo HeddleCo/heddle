@@ -73,7 +73,7 @@ fn test_cli_marker_list_filter_prefix_match() {
     heddle(&["marker", "create", "keepme"], Some(temp.path())).unwrap();
 
     let json = heddle(
-        &["--json", "marker", "list", "--filter", "failed-"],
+        &["--output", "json", "marker", "list", "--filter", "failed-"],
         Some(temp.path()),
     )
     .unwrap();
@@ -95,7 +95,7 @@ fn test_cli_marker_list_filter_prefix_match() {
     }
 
     // Unfiltered listing should still return all three.
-    let json_all = heddle(&["--json", "marker", "list"], Some(temp.path())).unwrap();
+    let json_all = heddle(&["--output", "json", "marker", "list"], Some(temp.path())).unwrap();
     let parsed_all: Value = serde_json::from_str(&json_all).unwrap();
     assert_eq!(parsed_all["markers"].as_array().unwrap().len(), 3);
 }
@@ -113,7 +113,7 @@ fn test_cli_marker_list_filter_no_match_is_empty_array() {
     heddle(&["marker", "create", "alpha"], Some(temp.path())).unwrap();
 
     let json = heddle(
-        &["--json", "marker", "list", "--filter", "nope-"],
+        &["--output", "json", "marker", "list", "--filter", "nope-"],
         Some(temp.path()),
     )
     .unwrap();
@@ -249,8 +249,30 @@ fn test_cli_marker_delete_prefix_empty_rejected() {
     heddle(&["capture", "-m", "Marked"], Some(temp.path())).unwrap();
     heddle(&["marker", "create", "important"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["marker", "delete", "--prefix", ""], Some(temp.path()));
-    assert!(result.is_err(), "Empty --prefix should be rejected");
+    let output = heddle_output(
+        &["--output", "json", "marker", "delete", "--prefix", ""],
+        Some(temp.path()),
+    )
+    .expect("marker delete should run");
+    assert!(
+        !output.status.success(),
+        "Empty --prefix should be rejected"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "JSON-mode marker refusal must keep stdout quiet: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr)
+        .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "marker_delete_empty_prefix");
+    assert!(
+        envelope["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("Refusing to delete markers")),
+        "empty prefix refusal should use full typed advice: {stderr}"
+    );
 
     // Sanity-check: marker still exists.
     let listing = heddle(&["marker", "list"], Some(temp.path())).unwrap();
@@ -338,18 +360,20 @@ fn test_cli_help_shows_thread_surface() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    // `thread` was promoted onto the everyday surface (heddle#154)
-    // because new users reach for it before reading the advanced
-    // page. `ready` remains advanced. The thread-surface
-    // terminology guarantee is still load-bearing: neither tier
-    // should resurrect the legacy `worktree`/`lane` verbs.
+    // The default help curates executable daily verbs. Thread/workspace
+    // remain native power nouns discoverable through advanced help and
+    // topic pages without resurrecting legacy `worktree`/`lane` verbs.
     let everyday = heddle(&["help"], Some(temp.path())).unwrap();
-    assert!(everyday.contains("\n  thread"));
+    assert!(everyday.contains("\n  ready"));
+    assert!(!everyday.contains("\n  thread"));
+    assert!(!everyday.contains("\n  workspace"));
     assert!(!everyday.contains("\n  worktree"));
     assert!(!everyday.contains("\n  lane"));
 
     let advanced = heddle(&["help", "advanced"], Some(temp.path())).unwrap();
-    assert!(advanced.contains("ready"));
+    assert!(advanced.contains("\n  thread"));
+    assert!(advanced.contains("\n  workspace"));
+    assert!(advanced.contains("review"));
     assert!(!advanced.contains("\n  worktree"));
     assert!(!advanced.contains("\n  lane"));
 }
@@ -373,11 +397,14 @@ fn test_cli_help_verb_falls_through_to_clap() {
         "`heddle help init` should render clap's per-verb help: {help_init}"
     );
 
-    // Truly unknown name still prints the missing-topic fallback.
+    // Truly unknown names still print the missing-topic fallback, but now
+    // distinguish command paths from topic pages and point back to curated help.
     let help_garbage = heddle(&["help", "definitely-not-a-thing"], Some(temp.path())).unwrap();
     assert!(
-        help_garbage.contains("no topic 'definitely-not-a-thing'"),
-        "unknown name should print the missing-topic message: {help_garbage}"
+        help_garbage.contains("no topic or command 'definitely-not-a-thing'")
+            && help_garbage.contains("heddle help advanced")
+            && help_garbage.contains("heddle help"),
+        "unknown name should print the missing-topic recovery message: {help_garbage}"
     );
 }
 

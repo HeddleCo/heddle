@@ -381,7 +381,9 @@ impl ThreadView {
         runtime: ThreadRuntimeOverlay,
         is_current: bool,
     ) -> Self {
-        let is_isolated = runtime.path.is_some() || runtime.execution_path.is_some();
+        let is_isolated = path_present(runtime.path.as_ref())
+            || path_present(runtime.execution_path.as_ref())
+            || path_present(runtime.materialized_path.as_ref());
         Self {
             record,
             runtime,
@@ -389,6 +391,10 @@ impl ThreadView {
             is_isolated,
         }
     }
+}
+
+fn path_present(path: Option<&PathBuf>) -> bool {
+    path.is_some_and(|path| !path.as_os_str().is_empty())
 }
 
 fn default_freshness() -> ThreadFreshness {

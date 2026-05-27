@@ -6,7 +6,7 @@ Bench harness: [`crates/devtools/src/fuse_dispatch_bench.rs`](../../crates/devto
 ## TL;DR
 
 **Do not migrate the HeddleCo orchestrator from `git worktree` dispatch
-to `heddle thread --workspace virtualized` dispatch on Linux at this
+to `heddle start <name> --workspace virtualized` dispatch on Linux at this
 time.** The Linux FUSE adapter today (`crates/mount/src/fuse.rs`)
 implements read-path FUSE ops (`open`/`lookup`/`getattr`/`read`/
 `readdir`) plus `write` to existing files, but does **not** implement
@@ -17,7 +17,7 @@ create a new file fails with `Function not implemented (os error 38)`
 — including `cargo`, which must create `Cargo.lock` and every artifact
 under `target/` before it can do anything useful.
 
-`heddle thread --workspace solid` works on Linux today and is on par
+`heddle start <name> --workspace solid` works on Linux today and is on par
 with `git worktree` for the create/build matrix; once the FUSE write
 side gains `create`/`mkdir`, the same harness will produce the
 virtualized-mode numbers we need.
@@ -27,7 +27,7 @@ virtualized-mode numbers we need.
 ```
 Ubuntu 24.04.4 LTS | kernel 6.8.0-71-generic | 8 threads | 15.6 GiB RAM | rootfs=ext2/ext3
 cargo 1.95.0 (f2d3ce0bd 2026-03-21)
-heddle 0.2.4 (release, --features mount)
+binary: heddle 0.2.4 (release, --features mount)
 ```
 
 Notes:
@@ -57,7 +57,7 @@ The harness:
    tempdir).
 2. For each requested mode: creates N parallel workdirs via
    `git worktree add` / `heddle start --workspace solid` /
-   `heddle start --workspace virtualized --daemon`. For virtualized
+   `heddle start --workspace virtualized`. For virtualized
    the `--path` argument is ignored by the CLI; the actual mount path
    is read from the JSON output (`thread.path` /
    `<parent>/.<repo-name>-heddle-mounts/<thread>`).
@@ -187,7 +187,7 @@ actually land.
    migration now would just shift the orchestrator onto a broken
    substrate on the platform where most agents run.
 2. If we want a halfway step before FUSE writes land: switch
-   orchestrator dispatch to `heddle thread --workspace solid
+   orchestrator dispatch to `heddle start <name> --workspace solid
    --shared-target` on Linux. The bench shows solid mode is within
    noise of git for create / check / build, and the orchestrator
    would get the heddle-side benefits (semantic merge, native undo,
