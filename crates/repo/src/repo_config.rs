@@ -428,7 +428,18 @@ impl RepoConfig {
         let mut file = std::fs::File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        Ok(toml::from_str(&contents)?)
+        // Wrap parse failures in `HeddleError::ConfigParse` so the CLI
+        // error envelope can render the actual config file in the
+        // recovery hint (Codex R3 cid 3313132711 on #271). The implicit
+        // `From<toml::de::Error>` would lose the path; we attach it
+        // here where we still know which file produced the failure.
+        toml::from_str::<Self>(&contents).map_err(|err| {
+            let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            objects::error::HeddleError::ConfigParse {
+                path: resolved,
+                message: err.to_string(),
+            }
+        })
     }
 
     /// Save configuration to a file.

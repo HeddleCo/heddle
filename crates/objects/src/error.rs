@@ -22,6 +22,11 @@ pub enum HeddleError {
     Serialization(String),
     #[error("configuration error: {0}")]
     Config(String),
+    #[error("configuration parse error at {path}: {message}")]
+    ConfigParse {
+        path: std::path::PathBuf,
+        message: String,
+    },
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("compression error: {0}")]

@@ -161,6 +161,36 @@ fn repo_config_with_output_format_auto_errors_with_typed_envelope() {
         "JSON envelope error message should name field and value: {envelope}"
     );
     assert_json_recovery_advice_fields(&envelope, "repo config output.format=auto");
+
+    // Codex R3 (cid 3313132711): the recovery hint must cite the actual
+    // file that produced the parse failure — not a hard-coded
+    // `.heddle/config.toml`. Resolve the repo config path to its
+    // absolute form (mirrors the `canonicalize()` in `RepoConfig::load`)
+    // and assert it appears verbatim in the hint.
+    let expected_path = config_path
+        .canonicalize()
+        .expect("repo config path canonicalizes");
+    let expected_path = expected_path.display().to_string();
+    let hint = envelope["hint"]
+        .as_str()
+        .expect("envelope.hint should be a string");
+    assert!(
+        hint.contains(&expected_path),
+        "hint should cite the actual repo config path {expected_path}: hint={hint}"
+    );
+    assert!(
+        hint.contains("output.format"),
+        "hint should name the field: {hint}"
+    );
+    assert!(
+        hint.contains("'text'") && hint.contains("'json'"),
+        "hint should list the valid values: {hint}"
+    );
+    let stderr_text_after = String::from_utf8_lossy(&text_out.stderr);
+    assert!(
+        stderr_text_after.contains(&expected_path),
+        "text envelope should also surface the path so the user knows which file to edit: stderr={stderr_text_after}"
+    );
 }
 
 #[test]
@@ -206,6 +236,32 @@ fn user_config_with_output_format_auto_via_heddle_config_env_errors_with_typed_e
         "JSON envelope error message should name field and value: {envelope}"
     );
     assert_json_recovery_advice_fields(&envelope, "user config HEDDLE_CONFIG output.format=auto");
+
+    // Codex R3 (cid 3313132711): when the bad value lives in the user
+    // config reached via `HEDDLE_CONFIG`, the hint must cite that exact
+    // file — not a hard-coded `.heddle/config.toml` the user does not
+    // even have. Use the canonical form so the rendered hint is
+    // copy/paste-safe across symlinks.
+    let expected_path = bad_user_config
+        .canonicalize()
+        .expect("HEDDLE_CONFIG path canonicalizes");
+    let expected_path = expected_path.display().to_string();
+    let hint = envelope["hint"]
+        .as_str()
+        .expect("envelope.hint should be a string");
+    assert!(
+        hint.contains(&expected_path),
+        "hint should cite the HEDDLE_CONFIG path {expected_path}: hint={hint}"
+    );
+    assert!(
+        !hint.contains(".heddle/config.toml"),
+        "hint must not point at the repo config when the bad value is in the user config: hint={hint}"
+    );
+    let stderr_text_after = String::from_utf8_lossy(&text_out.stderr);
+    assert!(
+        stderr_text_after.contains(&expected_path),
+        "text envelope should also surface the HEDDLE_CONFIG path so the user knows which file to edit: stderr={stderr_text_after}"
+    );
 }
 
 #[test]
@@ -232,6 +288,39 @@ fn user_config_with_output_format_auto_via_home_path_errors_with_typed_envelope(
     );
     let stderr = String::from_utf8_lossy(&text_out.stderr);
     assert_typed_output_format_envelope(&stderr, "HOME-based user config");
+
+    // Codex R3 (cid 3313132711): the recovery hint must cite the actual
+    // discovered file — `$HOME/.config/heddle/config.toml` in this case
+    // — so the user does not have to guess which of `HEDDLE_CONFIG`,
+    // `XDG_CONFIG_HOME`-derived, HOME-derived, or repo config holds the
+    // bad value. Mirrors `UserConfig::load`'s `canonicalize()`.
+    let expected_path = config_path
+        .canonicalize()
+        .expect("HOME-based user config path canonicalizes");
+    let expected_path = expected_path.display().to_string();
+    assert!(
+        stderr.contains(&expected_path),
+        "text envelope should cite the HOME-based config path {expected_path}: stderr={stderr}"
+    );
+
+    let json_out = run_with_home_user_config(fake_home, None, &["--output", "json", "status"]);
+    assert!(
+        !json_out.status.success(),
+        "status --output json with HOME user output.format='auto' must fail too: stderr={}",
+        String::from_utf8_lossy(&json_out.stderr)
+    );
+    let envelope = parse_envelope(&json_out.stderr);
+    let hint = envelope["hint"]
+        .as_str()
+        .expect("envelope.hint should be a string");
+    assert!(
+        hint.contains(&expected_path),
+        "JSON envelope hint should cite the HOME-based config path {expected_path}: hint={hint}"
+    );
+    assert!(
+        !hint.contains(".heddle/config.toml"),
+        "hint must not point at the repo config when the bad value is in the HOME user config: hint={hint}"
+    );
 }
 
 fn run_with_bad_user_config(

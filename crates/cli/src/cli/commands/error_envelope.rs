@@ -415,20 +415,30 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             // `crates/repo/src/repo_config.rs`). The error string carries
             // the field-and-value contract; we match on it here so the
             // user gets a typed `Next:` envelope instead of a generic
-            // runtime fallback.
-            if let HeddleError::Config(message) = heddle_err
+            // runtime fallback. The path comes from `ConfigParse` so the
+            // hint cites the *actual* file (`HEDDLE_CONFIG`, the resolved
+            // `$HOME/.config/heddle/config.toml`, or the repo's
+            // `.heddle/config.toml`) — not a hard-coded path that may
+            // not be the one that produced the failure (Codex R3 on #271).
+            if let HeddleError::ConfigParse { path, message } = heddle_err
                 && message.contains("invalid output.format")
             {
+                let path_display = path.display().to_string();
                 return ErrorClassification {
                     kind: "invalid_repo_config_output_format".to_string(),
-                    human_error: Some(extract_invalid_output_format_message(message)),
-                    hint: "Edit `.heddle/config.toml` and set `output.format` to `text` or `json`."
-                        .to_string(),
-                    unsafe_condition:
-                        "repository configuration declares an unknown output.format value"
-                            .to_string(),
+                    human_error: Some(format!(
+                        "{} (in {})",
+                        extract_invalid_output_format_message(message),
+                        path_display
+                    )),
+                    hint: format!(
+                        "Edit {path_display} and set output.format to 'text' or 'json'."
+                    ),
+                    unsafe_condition: format!(
+                        "configuration at {path_display} declares an unknown output.format value"
+                    ),
                     would_change:
-                        "the requested command did not run because Heddle could not load the repository config"
+                        "the requested command did not run because Heddle could not load the configuration"
                             .to_string(),
                     preserved:
                         "no repository objects, refs, metadata, or worktree files were changed"
