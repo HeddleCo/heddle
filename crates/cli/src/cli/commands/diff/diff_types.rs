@@ -126,7 +126,7 @@ impl DiffStats {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct FileChange {
     pub path: String,
     pub kind: String,
@@ -142,6 +142,37 @@ pub struct FileChange {
     /// summary remains accurate without us retaining the hunks.
     #[serde(skip)]
     pub line_counts: Option<LineCounts>,
+    /// Trailing-newline state and total line counts per side. The
+    /// patch renderer uses these to emit the unified-diff
+    /// `\ No newline at end of file` marker; `diff_blobs` strips
+    /// line terminators before the renderer ever sees them, so the
+    /// state must be plumbed alongside the hunk vector. Defaults
+    /// (`true` / `0`) mean "no marker needed", which is what
+    /// status-only fast paths fall back to.
+    #[serde(skip)]
+    pub eol: FileEolState,
+}
+
+/// Trailing-newline state for both sides of a file change, plus the
+/// total line count per side. The patch renderer reads these to decide
+/// whether to emit `\ No newline at end of file` and where.
+#[derive(Clone, Copy, Debug)]
+pub struct FileEolState {
+    pub old_has_final_newline: bool,
+    pub new_has_final_newline: bool,
+    pub old_line_count: usize,
+    pub new_line_count: usize,
+}
+
+impl Default for FileEolState {
+    fn default() -> Self {
+        Self {
+            old_has_final_newline: true,
+            new_has_final_newline: true,
+            old_line_count: 0,
+            new_line_count: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

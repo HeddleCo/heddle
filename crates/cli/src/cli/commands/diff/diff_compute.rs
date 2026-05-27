@@ -28,8 +28,8 @@ use super::{
         render_diff_patch,
     },
     diff_types::{
-        ContextSnippet, DiffOutput, DiffStats, FileChange, FileContextEntry, LineDiff,
-        SemanticChangeEntry, change_line_counts,
+        ContextSnippet, DiffOutput, DiffStats, FileChange, FileContextEntry, FileEolState,
+        LineDiff, SemanticChangeEntry, change_line_counts,
     },
 };
 #[cfg(feature = "semantic")]
@@ -219,10 +219,7 @@ pub fn cmd_diff(
             .map(|change| FileChange {
                 path: change.path.clone(),
                 kind: change.kind.to_string(),
-                old_path: None,
-                binary: false,
-                lines: None,
-                line_counts: None,
+                ..Default::default()
             })
             .collect()
     } else {
@@ -241,16 +238,19 @@ pub fn cmd_diff(
                 // Pre-Phase-D bug: case 2 fell through to `lines = None`,
                 // and `print_diff` rendered the catch-all
                 // "Binary file or unable to diff" — even on plain text.
-                let lines_result = if let Some(ref tree) = to_tree {
+                let diff_result = if let Some(ref tree) = to_tree {
                     get_state_diff(&repo, from_tree.as_ref(), tree, &change.path, &change.kind)
                 } else {
                     get_worktree_diff(&repo, from_tree.as_ref(), &change.path, &change.kind)
                 };
-                let binary = lines_result
+                let binary = diff_result
                     .as_ref()
                     .err()
                     .is_some_and(is_binary_diff_error);
-                let raw_lines = lines_result.ok();
+                let (raw_lines, eol) = match diff_result {
+                    Ok((lines, eol)) => (Some(lines), eol),
+                    Err(_) => (None, FileEolState::default()),
+                };
                 // `--stat` only needs the per-file tally; the unified
                 // hunks would be allocated only for `strip_line_hunks`
                 // to throw them away. Count once and drop the vector
@@ -266,10 +266,11 @@ pub fn cmd_diff(
                 FileChange {
                     path: change.path.clone(),
                     kind: change.kind.to_string(),
-                    old_path: None,
                     binary,
                     lines,
                     line_counts,
+                    eol,
+                    ..Default::default()
                 }
             })
             .collect()
@@ -387,26 +388,17 @@ fn render_worktree_status_diff(
         .map(|path| FileChange {
             path: path.display().to_string(),
             kind: "modified".to_string(),
-            old_path: None,
-            binary: false,
-            lines: None,
-            line_counts: None,
+            ..Default::default()
         })
         .chain(status.added.iter().map(|path| FileChange {
             path: path.display().to_string(),
             kind: "added".to_string(),
-            old_path: None,
-            binary: false,
-            lines: None,
-            line_counts: None,
+            ..Default::default()
         }))
         .chain(status.deleted.iter().map(|path| FileChange {
             path: path.display().to_string(),
             kind: "deleted".to_string(),
-            old_path: None,
-            binary: false,
-            lines: None,
-            line_counts: None,
+            ..Default::default()
         }))
         .collect::<Vec<_>>();
     let changes = if detect_renames {
@@ -498,25 +490,28 @@ pub fn compute_state_diff(
     let file_changes: Vec<FileChange> = changes
         .iter()
         .map(|change| {
-            let lines_result = get_state_diff(
+            let diff_result = get_state_diff(
                 repo,
                 from_tree.as_ref(),
                 &to_tree,
                 &change.path,
                 &change.kind,
             );
-            let binary = lines_result
+            let binary = diff_result
                 .as_ref()
                 .err()
                 .is_some_and(is_binary_diff_error);
-            let lines = lines_result.ok().map(|lines| unified_hunks(lines, unified));
+            let (lines, eol) = match diff_result {
+                Ok((lines, eol)) => (Some(unified_hunks(lines, unified)), eol),
+                Err(_) => (None, FileEolState::default()),
+            };
             FileChange {
                 path: change.path.clone(),
                 kind: change.kind.to_string(),
-                old_path: None,
                 binary,
                 lines,
-                line_counts: None,
+                eol,
+                ..Default::default()
             }
         })
         .collect();
@@ -599,25 +594,28 @@ pub fn compute_tree_diff(
     let file_changes: Vec<FileChange> = changes
         .iter()
         .map(|change| {
-            let lines_result = get_state_diff(
+            let diff_result = get_state_diff(
                 repo,
                 from_tree.as_ref(),
                 to_tree,
                 &change.path,
                 &change.kind,
             );
-            let binary = lines_result
+            let binary = diff_result
                 .as_ref()
                 .err()
                 .is_some_and(is_binary_diff_error);
-            let lines = lines_result.ok().map(|lines| unified_hunks(lines, unified));
+            let (lines, eol) = match diff_result {
+                Ok((lines, eol)) => (Some(unified_hunks(lines, unified)), eol),
+                Err(_) => (None, FileEolState::default()),
+            };
             FileChange {
                 path: change.path.clone(),
                 kind: change.kind.to_string(),
-                old_path: None,
                 binary,
                 lines,
-                line_counts: None,
+                eol,
+                ..Default::default()
             }
         })
         .collect();
@@ -874,22 +872,24 @@ fn get_worktree_diff(
     from_tree: Option<&Tree>,
     path: &str,
     kind: &DiffKind,
-) -> Result<Vec<LineDiff>> {
+) -> Result<(Vec<LineDiff>, FileEolState)> {
     let worktree_path = repo.root().join(path);
 
     match kind {
         DiffKind::Added => {
             let new_blob = read_worktree_blob_for_diff(&worktree_path)?;
-            Ok(number_lines(blob_lines(&new_blob, "+")?))
+            let eol = eol_for_added(&new_blob);
+            Ok((number_lines(blob_lines(&new_blob, "+")?), eol))
         }
         DiffKind::Deleted => {
             if let Some(tree) = from_tree
                 && let Some(entry) = tree.get(path)
             {
                 let blob = repo.require_blob(&entry.hash)?;
-                return Ok(number_lines(blob_lines(&blob, "-")?));
+                let eol = eol_for_deleted(&blob);
+                return Ok((number_lines(blob_lines(&blob, "-")?), eol));
             }
-            Ok(vec![])
+            Ok((vec![], FileEolState::default()))
         }
         DiffKind::Modified => {
             let new_blob = read_worktree_blob_for_diff(&worktree_path)?;
@@ -899,17 +899,19 @@ fn get_worktree_diff(
             {
                 ensure_text_diffable(&old_blob)?;
                 ensure_text_diffable(&new_blob)?;
+                let eol = eol_for_modified(&old_blob, &new_blob);
                 let diff = diff_blobs(&old_blob, &new_blob);
                 let lines = diff
                     .iter()
                     .map(|l| LineDiff::new(l.prefix(), l.content()))
                     .collect();
-                return Ok(number_lines(lines));
+                return Ok((number_lines(lines), eol));
             }
 
-            Ok(number_lines(blob_lines(&new_blob, "+")?))
+            let eol = eol_for_added(&new_blob);
+            Ok((number_lines(blob_lines(&new_blob, "+")?), eol))
         }
-        DiffKind::Unchanged => Ok(Vec::new()),
+        DiffKind::Unchanged => Ok((Vec::new(), FileEolState::default())),
     }
 }
 
@@ -1017,21 +1019,23 @@ fn detect_clear_renames(
         if change.kind == "added"
             && let Some(old_path) = rename_by_new.get(change.path.as_str())
         {
-            let lines = if include_lines {
+            let (lines, eol) = if include_lines {
                 match rename_lines(repo, from_tree, to_tree, old_path, &change.path, unified) {
-                    Ok(lines) => lines,
+                    Ok(Some((lines, eol))) => (Some(lines), eol),
+                    Ok(None) => (None, FileEolState::default()),
                     Err(error) if is_binary_diff_error(&error) => {
                         change.binary = true;
-                        None
+                        (None, FileEolState::default())
                     }
                     Err(error) => return Err(error),
                 }
             } else {
-                None
+                (None, FileEolState::default())
             };
             change.kind = "renamed".to_string();
             change.old_path = Some((*old_path).to_string());
             change.lines = lines;
+            change.eol = eol;
             // The original `added` carried a stat-path tally that
             // counted the file as a pure insertion; after we collapse
             // the (added, deleted) pair into one rename, those line
@@ -1052,7 +1056,7 @@ fn rename_lines(
     old_path: &str,
     new_path: &str,
     unified: usize,
-) -> Result<Option<Vec<LineDiff>>> {
+) -> Result<Option<(Vec<LineDiff>, FileEolState)>> {
     let Some(old_blob) = blob_from_tree(repo, from_tree, old_path)? else {
         return Ok(None);
     };
@@ -1061,12 +1065,13 @@ fn rename_lines(
     };
     ensure_text_diffable(&old_blob)?;
     ensure_text_diffable(&new_blob)?;
+    let eol = eol_for_modified(&old_blob, &new_blob);
     let diff = diff_blobs(&old_blob, &new_blob);
     let lines = diff
         .iter()
         .map(|line| LineDiff::new(line.prefix(), line.content()))
         .collect();
-    Ok(Some(unified_hunks(number_lines(lines), unified)))
+    Ok(Some((unified_hunks(number_lines(lines), unified), eol)))
 }
 
 fn blob_from_tree(repo: &Repository, tree: Option<&Tree>, path: &str) -> Result<Option<Blob>> {
@@ -1148,44 +1153,99 @@ fn get_state_diff(
     to_tree: &Tree,
     path: &str,
     kind: &DiffKind,
-) -> Result<Vec<LineDiff>> {
+) -> Result<(Vec<LineDiff>, FileEolState)> {
     match kind {
         DiffKind::Added => {
             let Some(new_blob) = find_blob_in_tree(repo, to_tree, path)? else {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), FileEolState::default()));
             };
-            Ok(number_lines(blob_lines(&new_blob, "+")?))
+            let eol = eol_for_added(&new_blob);
+            Ok((number_lines(blob_lines(&new_blob, "+")?), eol))
         }
         DiffKind::Deleted => {
             let Some(tree) = from_tree else {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), FileEolState::default()));
             };
             let Some(old_blob) = find_blob_in_tree(repo, tree, path)? else {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), FileEolState::default()));
             };
-            Ok(number_lines(blob_lines(&old_blob, "-")?))
+            let eol = eol_for_deleted(&old_blob);
+            Ok((number_lines(blob_lines(&old_blob, "-")?), eol))
         }
         DiffKind::Modified => {
             let Some(new_blob) = find_blob_in_tree(repo, to_tree, path)? else {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), FileEolState::default()));
             };
             if let Some(tree) = from_tree
                 && let Some(old_blob) = find_blob_in_tree(repo, tree, path)?
             {
                 ensure_text_diffable(&old_blob)?;
                 ensure_text_diffable(&new_blob)?;
+                let eol = eol_for_modified(&old_blob, &new_blob);
                 let diff = diff_blobs(&old_blob, &new_blob);
                 let lines = diff
                     .iter()
                     .map(|l| LineDiff::new(l.prefix(), l.content()))
                     .collect();
-                return Ok(number_lines(lines));
+                return Ok((number_lines(lines), eol));
             }
             // No corresponding blob in `from_tree` — render as all-new.
-            Ok(number_lines(blob_lines(&new_blob, "+")?))
+            let eol = eol_for_added(&new_blob);
+            Ok((number_lines(blob_lines(&new_blob, "+")?), eol))
         }
-        DiffKind::Unchanged => Ok(Vec::new()),
+        DiffKind::Unchanged => Ok((Vec::new(), FileEolState::default())),
     }
+}
+
+/// Trailing-newline state for a one-sided change (added or deleted).
+/// The absent side is reported as "has newline" so the patch renderer
+/// never tries to emit a marker for content that doesn't exist.
+fn eol_for_added(new_blob: &Blob) -> FileEolState {
+    let (new_eol, new_count) = blob_eol_meta(new_blob);
+    FileEolState {
+        old_has_final_newline: true,
+        new_has_final_newline: new_eol,
+        old_line_count: 0,
+        new_line_count: new_count,
+    }
+}
+
+fn eol_for_deleted(old_blob: &Blob) -> FileEolState {
+    let (old_eol, old_count) = blob_eol_meta(old_blob);
+    FileEolState {
+        old_has_final_newline: old_eol,
+        new_has_final_newline: true,
+        old_line_count: old_count,
+        new_line_count: 0,
+    }
+}
+
+fn eol_for_modified(old_blob: &Blob, new_blob: &Blob) -> FileEolState {
+    let (old_eol, old_count) = blob_eol_meta(old_blob);
+    let (new_eol, new_count) = blob_eol_meta(new_blob);
+    FileEolState {
+        old_has_final_newline: old_eol,
+        new_has_final_newline: new_eol,
+        old_line_count: old_count,
+        new_line_count: new_count,
+    }
+}
+
+/// `diff_blobs` strips line terminators before the renderer sees the
+/// hunks, so the per-side trailing-newline state has to come from the
+/// raw blob bytes. Empty blobs are treated as "no marker needed":
+/// there's nothing to lack a newline.
+fn blob_eol_meta(blob: &Blob) -> (bool, usize) {
+    let content = blob.content();
+    if content.is_empty() {
+        return (true, 0);
+    }
+    let has_eol = content.ends_with(b"\n");
+    let line_count = blob
+        .content_str()
+        .map(|text| text.lines().count())
+        .unwrap_or(0);
+    (has_eol, line_count)
 }
 
 fn blob_lines(blob: &Blob, prefix: &str) -> Result<Vec<LineDiff>> {
@@ -1284,10 +1344,8 @@ mod tests {
         FileChange {
             path: "notes.txt".to_string(),
             kind: kind.to_string(),
-            old_path: None,
-            binary: false,
-            lines: None,
             line_counts: Some(counts),
+            ..Default::default()
         }
     }
 

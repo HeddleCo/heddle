@@ -3236,3 +3236,100 @@ fn test_cli_diff_patch_output_applies_with_patch_command() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// When the original blob lacks a trailing newline, `--patch` must
+/// emit the standard `\ No newline at end of file` marker on the OLD
+/// side. Without it, `diff_blobs` strips terminators and the renderer
+/// would synthesise a `\n` onto the `-` line that no longer matches
+/// the real source — `git apply --check` rejects the resulting patch.
+#[test]
+fn test_cli_diff_patch_preserves_missing_old_final_newline() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    // No trailing newline — common for generated configs and
+    // single-line scripts.
+    std::fs::write(temp.path().join("noeol.txt"), b"hello").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("noeol.txt"), "hello\nmore\n").unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    assert!(
+        patch.contains("\\ No newline at end of file"),
+        "OLD side lacked a trailing newline; patch must carry the marker:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("noeol.txt"), b"hello").unwrap();
+    git_commit_all(apply_dir.path(), "seed no-eol content");
+
+    let mut child = Command::new("git")
+        .args(["apply", "--check"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("git apply should finish");
+    assert!(
+        out.status.success(),
+        "git apply --check must accept a no-eol-side patch;\npatch=\n{patch}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The mirror case: the NEW blob lacks a trailing newline. The marker
+/// must land on the NEW side so the patch describes a file that ends
+/// without `\n` once applied.
+#[test]
+fn test_cli_diff_patch_preserves_missing_new_final_newline() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("noeol.txt"), "hello\nmore\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    // Strip the trailing newline AND the last line — common when
+    // turning a multi-line script into a one-liner.
+    std::fs::write(temp.path().join("noeol.txt"), b"hello").unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    assert!(
+        patch.contains("\\ No newline at end of file"),
+        "NEW side lacks a trailing newline; patch must carry the marker:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("noeol.txt"), "hello\nmore\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed with-eol content");
+
+    let mut child = Command::new("git")
+        .args(["apply", "--check"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("git apply should finish");
+    assert!(
+        out.status.success(),
+        "git apply --check must accept a no-eol-mirror patch;\npatch=\n{patch}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+

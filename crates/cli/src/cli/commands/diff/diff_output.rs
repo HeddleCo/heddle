@@ -7,7 +7,9 @@ use std::{
     process::{Command, Stdio},
 };
 
-use super::diff_types::{DiffOutput, LineDiff, SemanticChangeEntry, should_render_modified_pair};
+use super::diff_types::{
+    DiffOutput, FileChange, LineDiff, SemanticChangeEntry, should_render_modified_pair,
+};
 use crate::cli::style;
 
 const PAGER_LINE_THRESHOLD: usize = 200;
@@ -82,13 +84,106 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         let old_path = change.old_path.as_deref().unwrap_or(&change.path);
         buf.push_str(&format!("--- a/{old_path}\n"));
         buf.push_str(&format!("+++ b/{}\n", change.path));
-        for line in lines {
-            buf.push_str(&line.prefix);
-            buf.push_str(&line.content);
-            buf.push('\n');
-        }
+        render_patch_hunks(change, lines, &mut buf);
     }
     buf
+}
+
+const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
+
+/// Walk the rendered hunks once and emit each line, splicing in the
+/// `\ No newline at end of file` marker after the line that holds the
+/// file's tail on a side whose source bytes lacked a trailing `\n`.
+///
+/// The diff backend strips line terminators, so per-line equality
+/// collapses `hello` and `hello\n` into the same `LineDiff`. To match
+/// `git diff`'s output (which `git apply --check` accepts), a context
+/// line that sits on the no-newline side's tail has to be split into
+/// a `-` + `+` pair, with the marker attached to the side that lacks
+/// the terminator. The 4-case matrix is in `render_patch_hunks`'s
+/// context-line branch.
+fn render_patch_hunks(change: &FileChange, lines: &[LineDiff], buf: &mut String) {
+    let old_no_eol = !change.eol.old_has_final_newline;
+    let new_no_eol = !change.eol.new_has_final_newline;
+    let old_tail_idx = if old_no_eol && change.eol.old_line_count > 0 {
+        find_side_tail_idx(lines, Side::Old, change.eol.old_line_count)
+    } else {
+        None
+    };
+    let new_tail_idx = if new_no_eol && change.eol.new_line_count > 0 {
+        find_side_tail_idx(lines, Side::New, change.eol.new_line_count)
+    } else {
+        None
+    };
+
+    for (idx, line) in lines.iter().enumerate() {
+        let is_old_tail = Some(idx) == old_tail_idx;
+        let is_new_tail = Some(idx) == new_tail_idx;
+        let needs_old_marker = is_old_tail && old_no_eol;
+        let needs_new_marker = is_new_tail && new_no_eol;
+
+        if line.prefix == " " && (needs_old_marker || needs_new_marker) {
+            if is_old_tail && is_new_tail && needs_old_marker && needs_new_marker {
+                // Both sides' tail lands on this context line and both
+                // lack a trailing newline — emit the line once, then
+                // a single marker that applies to both sides.
+                emit_line(buf, line);
+                buf.push_str(NO_NEWLINE_MARKER);
+            } else {
+                // Mixed state: at least one side needs the marker and
+                // the other shouldn't be tagged. Split the context
+                // line into a `-content` / `+content` pair so each
+                // side's marker (or its absence) is unambiguous.
+                buf.push('-');
+                buf.push_str(&line.content);
+                buf.push('\n');
+                if needs_old_marker {
+                    buf.push_str(NO_NEWLINE_MARKER);
+                }
+                buf.push('+');
+                buf.push_str(&line.content);
+                buf.push('\n');
+                if needs_new_marker {
+                    buf.push_str(NO_NEWLINE_MARKER);
+                }
+            }
+            continue;
+        }
+
+        emit_line(buf, line);
+        if needs_old_marker && line.prefix == "-" {
+            buf.push_str(NO_NEWLINE_MARKER);
+        }
+        if needs_new_marker && line.prefix == "+" {
+            buf.push_str(NO_NEWLINE_MARKER);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Side {
+    Old,
+    New,
+}
+
+fn find_side_tail_idx(lines: &[LineDiff], side: Side, target: usize) -> Option<usize> {
+    lines.iter().enumerate().rev().find_map(|(idx, line)| {
+        let (on_side, line_number) = match side {
+            Side::Old => (line.prefix == "-" || line.prefix == " ", line.old_line),
+            Side::New => (line.prefix == "+" || line.prefix == " ", line.new_line),
+        };
+        if on_side && line_number == Some(target) {
+            Some(idx)
+        } else {
+            None
+        }
+    })
+}
+
+fn emit_line(buf: &mut String, line: &LineDiff) {
+    buf.push_str(&line.prefix);
+    buf.push_str(&line.content);
+    buf.push('\n');
 }
 
 pub(crate) fn print_diff_patch(output: &DiffOutput) {
