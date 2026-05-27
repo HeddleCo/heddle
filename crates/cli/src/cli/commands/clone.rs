@@ -70,8 +70,6 @@ struct CloneOutput {
     objects: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<String>,
-    #[allow(dead_code)]
-    #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     #[serde(skip_serializing_if = "Option::is_none")]
     trust: Option<RepositoryVerificationState>,
