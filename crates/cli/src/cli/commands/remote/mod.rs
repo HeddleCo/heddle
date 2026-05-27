@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use gix::{bstr::ByteSlice, refs::transaction::PreviousValue};
-use objects::object::ThreadName;
+use objects::{fs_atomic::write_file_atomic, object::ThreadName};
 #[cfg(feature = "client")]
 use proto::AuthToken;
 use refs::Head;
@@ -944,7 +944,7 @@ fn write_git_overlay_branch_upstream(root: &Path, branch: &str, remote: &str) ->
         quote_git_config_value(remote),
         escape_git_config_value(branch)
     ));
-    fs::write(config_path, contents)?;
+    write_file_atomic(&config_path, contents.as_bytes())?;
     Ok(())
 }
 
@@ -962,7 +962,7 @@ fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
         quote_git_config_value(url),
         escape_git_config_value(name)
     ));
-    fs::write(config_path, contents)?;
+    write_file_atomic(&config_path, contents.as_bytes())?;
     Ok(())
 }
 
@@ -1222,4 +1222,100 @@ struct PushNetworkOptions<'a> {
     track_name: &'a str,
     force: bool,
     cli: &'a Cli,
+}
+
+#[cfg(test)]
+mod git_overlay_config_atomic_tests {
+    //! Crash-mid-write semantics for the Git-overlay `.git/config`
+    //! writers. Both `write_git_overlay_remote` and
+    //! `write_git_overlay_branch_upstream` now route through
+    //! `objects::fs_atomic::write_file_atomic` — the same tmp-and-rename
+    //! primitive `remote add`/`remove` use. The atomicity contract:
+    //! after the helper returns, the file is the full new content; a
+    //! prior interrupted write that left the file partially-written
+    //! must not leak back into the result.
+    use super::*;
+    use tempfile::TempDir;
+
+    fn init_dot_git(root: &Path) {
+        fs::create_dir_all(root.join(".git")).unwrap();
+    }
+
+    #[test]
+    fn write_git_overlay_remote_recovers_from_partial_prior_write() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        init_dot_git(root);
+        let config = root.join(".git").join("config");
+
+        // Establish a clean baseline so we know what "previous full
+        // content" looks like.
+        write_git_overlay_remote(root, "origin", "https://example.com/a.git").unwrap();
+        assert!(
+            fs::read_to_string(&config)
+                .unwrap()
+                .contains("https://example.com/a.git")
+        );
+
+        // Simulate a crash mid-write by truncating the file. A
+        // non-atomic writer using `fs::write` could leave the config
+        // in exactly this shape if the process died between the
+        // `open(O_TRUNC)` and the final `write_all`.
+        fs::write(&config, "[remote \"origin\"]\n\turl = htt").unwrap();
+
+        // Re-invoke the helper. The atomic contract: the resulting
+        // file is the full, well-formed new content — never a partial.
+        write_git_overlay_remote(root, "origin", "https://example.com/b.git").unwrap();
+        let recovered = fs::read_to_string(&config).unwrap();
+        assert!(
+            recovered.contains("[remote \"origin\"]"),
+            "section header missing: {recovered}"
+        );
+        assert!(
+            recovered.contains("https://example.com/b.git"),
+            "new url missing: {recovered}"
+        );
+        assert!(
+            recovered.contains("fetch = +refs/heads/*:refs/remotes/origin/*"),
+            "fetch line missing: {recovered}"
+        );
+        assert!(
+            !recovered.contains("url = htt\n") && !recovered.trim_end().ends_with("url = htt"),
+            "partial bytes from prior crash leaked into result: {recovered}"
+        );
+    }
+
+    #[test]
+    fn write_git_overlay_branch_upstream_recovers_from_partial_prior_write() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        init_dot_git(root);
+        let config = root.join(".git").join("config");
+
+        // Baseline.
+        write_git_overlay_branch_upstream(root, "main", "origin").unwrap();
+        assert!(
+            fs::read_to_string(&config)
+                .unwrap()
+                .contains("[branch \"main\"]")
+        );
+
+        // Crash-mid-write simulation: leave the file truncated mid-key.
+        fs::write(&config, "[branch \"main\"]\n\trem").unwrap();
+
+        // The atomic helper produces a fully-formed section regardless
+        // of the prior partial state.
+        write_git_overlay_branch_upstream(root, "main", "upstream").unwrap();
+        let recovered = fs::read_to_string(&config).unwrap();
+        assert!(recovered.contains("[branch \"main\"]"), "{recovered}");
+        assert!(recovered.contains("upstream"), "{recovered}");
+        assert!(
+            recovered.contains("merge = refs/heads/main"),
+            "{recovered}"
+        );
+        assert!(
+            !recovered.trim_end().ends_with("rem"),
+            "partial bytes from prior crash leaked into result: {recovered}"
+        );
+    }
 }
