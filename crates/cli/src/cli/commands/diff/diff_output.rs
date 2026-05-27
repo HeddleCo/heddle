@@ -72,19 +72,71 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 /// because the hunk-header `LineDiff` already encodes the second `@`
 /// (prefix=`@`, content=`@ -a,b +c,d @@`), so concatenation yields the
 /// canonical `@@ -a,b +c,d @@` shape.
+///
+/// Two cases require git's extended header block to round-trip:
+///
+/// * **Added files** get `diff --git ... / new file mode 100644 /
+///   --- /dev/null`. Without it, `git apply` (and `patch -p1`) demand
+///   that `b/<path>` already exist on the target side, which defeats
+///   the whole point of an add hunk.
+/// * **Renames** get `diff --git a/old b/new / similarity index N% /
+///   rename from old / rename to new`. Pure renames (no edits) emit
+///   the extended headers and stop; rename-with-edit appends the
+///   usual `--- a/old / +++ b/new` + hunk body.
 pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
     let mut buf = String::new();
     for change in &output.changes {
-        let Some(lines) = &change.lines else {
-            continue;
-        };
-        if lines.is_empty() {
+        let lines_ref = change.lines.as_deref();
+        let has_hunk_body = lines_ref
+            .is_some_and(|lines| lines.iter().any(|line| line.prefix != " "));
+        let old_path = change.old_path.as_deref().unwrap_or(&change.path);
+        let is_rename = change.old_path.as_deref().is_some_and(|old| old != change.path);
+        let is_added = change.kind == "added";
+
+        // Renames must emit headers even when there's no hunk body
+        // (pure rename = identical content). Other kinds need at least
+        // one `+`/`-` line; without one, `--- /+++/@@` would be a
+        // header with no body, which `patch(1)` reads as malformed.
+        if !is_rename && !has_hunk_body {
             continue;
         }
-        let old_path = change.old_path.as_deref().unwrap_or(&change.path);
-        buf.push_str(&format!("--- a/{old_path}\n"));
+
+        if is_rename {
+            buf.push_str(&format!("diff --git a/{old_path} b/{}\n", change.path));
+            let pct = (change
+                .similarity_score
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0)
+                * 100.0)
+                .round() as u32;
+            buf.push_str(&format!("similarity index {pct}%\n"));
+            buf.push_str(&format!("rename from {old_path}\n"));
+            buf.push_str(&format!("rename to {}\n", change.path));
+            // Pure rename — extended headers alone suffice; emitting
+            // `--- a/old / +++ b/new` without hunks would tell git to
+            // apply an empty patch and warn about a stray header.
+            if !has_hunk_body {
+                continue;
+            }
+        } else if is_added {
+            // `new file mode 100644` is the git-canonical default for a
+            // regular text blob. The probe doesn't carry the real mode
+            // yet; matching git's default for a new regular file keeps
+            // the round-trip clean. If/when executable-bit detection
+            // lands, thread it through here.
+            buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
+            buf.push_str("new file mode 100644\n");
+        }
+
+        if is_added {
+            buf.push_str("--- /dev/null\n");
+        } else {
+            buf.push_str(&format!("--- a/{old_path}\n"));
+        }
         buf.push_str(&format!("+++ b/{}\n", change.path));
-        render_patch_hunks(change, lines, &mut buf);
+        if let Some(lines) = lines_ref {
+            render_patch_hunks(change, lines, &mut buf);
+        }
     }
     buf
 }

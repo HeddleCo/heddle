@@ -132,6 +132,13 @@ pub struct FileChange {
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
+    /// Rename-detector score (0.0–1.0) for `kind == "renamed"` entries.
+    /// The patch renderer emits this as `similarity index N%` in the
+    /// extended diff header; without it `git apply` rejects rename
+    /// patches because there's no signal that `b/new` shouldn't already
+    /// exist on the target side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity_score: Option<f64>,
     #[serde(skip)]
     pub binary: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

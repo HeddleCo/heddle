@@ -3555,6 +3555,139 @@ fn test_cli_diff_json_heddle_patch_field_present_without_flag() {
     );
 }
 
+/// A pure rename (no content change) must round-trip through
+/// `git apply --check` via the extended-header form. Without
+/// `diff --git` + `similarity index` + `rename from`/`to`, `git apply`
+/// treats `+++ b/<new>` as a path that must already exist on the
+/// target side and rejects the patch as malformed.
+#[test]
+fn test_cli_diff_patch_pure_rename_round_trips() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let body = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    std::fs::write(temp.path().join("from.txt"), body).unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    // Pure rename: same bytes, new path.
+    std::fs::remove_file(temp.path().join("from.txt")).unwrap();
+    std::fs::write(temp.path().join("to.txt"), body).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    assert!(
+        patch.contains("diff --git a/from.txt b/to.txt"),
+        "rename must emit `diff --git` extended header:\n{patch}"
+    );
+    assert!(
+        patch.contains("similarity index 100%"),
+        "pure rename must report 100% similarity:\n{patch}"
+    );
+    assert!(
+        patch.contains("rename from from.txt") && patch.contains("rename to to.txt"),
+        "rename must emit `rename from`/`rename to` headers:\n{patch}"
+    );
+    // Pure rename has no hunk body — `--- /+++/@@` would tell git to
+    // apply an empty patch and warn.
+    assert!(
+        !patch.contains("--- a/from.txt") && !patch.contains("+++ b/to.txt"),
+        "pure rename must not emit `--- /+++` lines:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("from.txt"), body).unwrap();
+    git_commit_all(apply_dir.path(), "seed rename source");
+
+    let mut child = Command::new("git")
+        .args(["apply", "--check"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("git apply should finish");
+    assert!(
+        out.status.success(),
+        "git apply --check must accept a pure-rename patch;\npatch=\n{patch}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A rename combined with an edit must emit BOTH the extended rename
+/// headers AND a hunk body. Without the headers `git apply` looks for
+/// `b/<new>` on the target side and fails; without the body the edits
+/// don't land.
+#[test]
+fn test_cli_diff_patch_rename_with_edit_round_trips() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let original = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    std::fs::write(temp.path().join("source.txt"), original).unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    // Rename + tweak one line — still >75% LCS overlap so the rename
+    // detector pairs them.
+    std::fs::remove_file(temp.path().join("source.txt")).unwrap();
+    let edited = "alpha\nBETA\ngamma\ndelta\nepsilon\n";
+    std::fs::write(temp.path().join("target.txt"), edited).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+
+    assert!(
+        patch.contains("diff --git a/source.txt b/target.txt"),
+        "rename+edit must emit `diff --git` extended header:\n{patch}"
+    );
+    assert!(
+        patch.contains("rename from source.txt") && patch.contains("rename to target.txt"),
+        "rename+edit must emit `rename from`/`rename to` headers:\n{patch}"
+    );
+    // Similarity must be below 100% (one line changed) but well above
+    // the detector's 75% floor.
+    assert!(
+        patch.contains("similarity index ") && !patch.contains("similarity index 100%"),
+        "rename+edit must report a non-100% similarity:\n{patch}"
+    );
+    assert!(
+        patch.contains("--- a/source.txt") && patch.contains("+++ b/target.txt"),
+        "rename+edit must still emit the `--- /+++` line-diff headers:\n{patch}"
+    );
+    assert!(
+        patch.contains("-beta") && patch.contains("+BETA"),
+        "rename+edit body must include the actual edit:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("source.txt"), original).unwrap();
+    git_commit_all(apply_dir.path(), "seed rename+edit source");
+
+    let mut child = Command::new("git")
+        .args(["apply", "--check"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("git apply should finish");
+    assert!(
+        out.status.success(),
+        "git apply --check must accept a rename+edit patch;\npatch=\n{patch}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// `--name-only` must NOT trigger patch rendering — the printer only
 /// reads `change.path`. Asserting "no headers, no `@@`, file paths
 /// only" pins the disjointness from `--patch` so a future refactor

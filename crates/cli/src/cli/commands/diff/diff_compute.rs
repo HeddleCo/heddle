@@ -1306,10 +1306,10 @@ fn detect_clear_renames(
 
     let mut used_old = BTreeSet::new();
     let mut used_new = BTreeSet::new();
-    let mut renames = Vec::new();
-    for (_, old_path, new_path) in candidates {
+    let mut renames: Vec<(String, String, f64)> = Vec::new();
+    for (score, old_path, new_path) in candidates {
         if used_old.insert(old_path.clone()) && used_new.insert(new_path.clone()) {
-            renames.push((old_path, new_path));
+            renames.push((old_path, new_path, score));
         }
     }
     if renames.is_empty() {
@@ -1318,11 +1318,11 @@ fn detect_clear_renames(
 
     let rename_by_new = renames
         .iter()
-        .map(|(old_path, new_path)| (new_path.as_str(), old_path.as_str()))
+        .map(|(old_path, new_path, score)| (new_path.as_str(), (old_path.as_str(), *score)))
         .collect::<std::collections::BTreeMap<_, _>>();
     let removed_old = renames
         .iter()
-        .map(|(old_path, _)| old_path.as_str())
+        .map(|(old_path, _, _)| old_path.as_str())
         .collect::<BTreeSet<_>>();
 
     let mut output = Vec::with_capacity(changes.len() - renames.len());
@@ -1331,7 +1331,7 @@ fn detect_clear_renames(
             continue;
         }
         if change.kind == "added"
-            && let Some(old_path) = rename_by_new.get(change.path.as_str())
+            && let Some((old_path, score)) = rename_by_new.get(change.path.as_str()).copied()
         {
             let (lines, eol) = if include_lines {
                 match rename_lines(repo, from_tree, to_tree, old_path, &change.path, unified) {
@@ -1347,7 +1347,8 @@ fn detect_clear_renames(
                 (None, FileEolState::default())
             };
             change.kind = "renamed".to_string();
-            change.old_path = Some((*old_path).to_string());
+            change.old_path = Some(old_path.to_string());
+            change.similarity_score = Some(score);
             change.lines = lines;
             change.eol = eol;
             // The original `added` carried a stat-path tally that
