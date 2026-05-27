@@ -30,7 +30,9 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use cli::cli::commands::build_command_catalog;
+use cli::cli::commands::{
+    CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, build_command_catalog,
+};
 
 use super::{heddle, heddle_output};
 
@@ -362,6 +364,105 @@ fn kind_field_exceptions_use_kind_intentionally() {
             "`{display}` is documented as a `kind`-rather-than-output_kind exception but the catalog declares no `kind` discriminator. Update the catalog or drop the exception."
         );
     }
+}
+
+#[test]
+fn clone_catalog_entry_advertises_both_clone_and_clone_connection() {
+    // Hosted `heddle clone --output json` emits TWO JSON records on
+    // one invocation: a preliminary connection envelope
+    // (`output_kind: "clone_connection"`) followed by the final clone
+    // payload (`output_kind: "clone"`). Agents that consume
+    // `commands` / `json_discriminators` only see legitimate
+    // routes for the final record unless the catalog advertises both
+    // discriminators (heddle#272 Codex r3 finding, PR #281).
+    //
+    // This test pins both discriminators against the constants used
+    // by the runtime emission sites in `crates/cli/src/cli/commands/clone.rs`,
+    // so a future rename of either value updates the catalog and the
+    // runtime in lockstep — divergence fails CI.
+    let catalog = build_command_catalog();
+    let clone = catalog
+        .commands
+        .iter()
+        .find(|c| c.display == "clone")
+        .expect("clone should be cataloged");
+
+    let output_kind_values: Vec<&str> = clone
+        .json_discriminators
+        .iter()
+        .filter(|d| d.field == "output_kind")
+        .map(|d| d.value.as_str())
+        .collect();
+
+    assert!(
+        output_kind_values.contains(&CLONE_OUTPUT_KIND),
+        "clone catalog entry must advertise `output_kind = {CLONE_OUTPUT_KIND}` \
+         (the final clone payload); actually advertises {output_kind_values:?}"
+    );
+    assert!(
+        output_kind_values.contains(&CLONE_CONNECTION_OUTPUT_KIND),
+        "clone catalog entry must advertise `output_kind = {CLONE_CONNECTION_OUTPUT_KIND}` \
+         alongside `{CLONE_OUTPUT_KIND}` so agents can route the hosted \
+         preliminary connection envelope; actually advertises {output_kind_values:?}"
+    );
+
+    // The preliminary envelope is not backed by a documented schema
+    // verb (it's a small inline object); the metadata invariant test
+    // requires `no_schema_reason` to be set in that case. Pin the
+    // shape here so a future refactor of the catalog helper doesn't
+    // silently drop the documentation.
+    let envelope = clone
+        .json_discriminators
+        .iter()
+        .find(|d| d.value == CLONE_CONNECTION_OUTPUT_KIND)
+        .expect("clone_connection discriminator must be present");
+    assert!(
+        envelope.schema_verb.is_none(),
+        "clone_connection envelope has no schema verb (it is not a Serialize struct); \
+         got schema_verb={:?}",
+        envelope.schema_verb
+    );
+    assert!(
+        envelope
+            .no_schema_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty()),
+        "clone_connection envelope must document why it has no schema verb"
+    );
+}
+
+#[test]
+#[ignore = "requires a live hosted gRPC fixture; runtime equality is enforced \
+            statically via CLONE_CONNECTION_OUTPUT_KIND (see \
+            clone_catalog_entry_advertises_both_clone_and_clone_connection). \
+            When a hosted-clone fixture lands, drop the #[ignore] and parse \
+            both stdout records here."]
+fn hosted_clone_emits_both_discriminator_values() {
+    // Placeholder for the live-network assertion: spawn `heddle
+    // clone --output json <hosted-remote> <path>` against a fixture
+    // server, then assert the first stdout line carries
+    // `output_kind: "clone_connection"` and the final line carries
+    // `output_kind: "clone"`. Both values must match the catalog.
+    //
+    // Until the fixture exists, the constants used by clone.rs at
+    // the actual emit sites (CLONE_OUTPUT_KIND and
+    // CLONE_CONNECTION_OUTPUT_KIND) are pinned to the catalog by the
+    // sibling test, so a rename can't silently desync runtime from
+    // catalog.
+    let catalog = build_command_catalog();
+    let clone = catalog
+        .commands
+        .iter()
+        .find(|c| c.display == "clone")
+        .expect("clone should be cataloged");
+    let advertised: Vec<&str> = clone
+        .json_discriminators
+        .iter()
+        .filter(|d| d.field == "output_kind")
+        .map(|d| d.value.as_str())
+        .collect();
+    assert!(advertised.contains(&CLONE_OUTPUT_KIND));
+    assert!(advertised.contains(&CLONE_CONNECTION_OUTPUT_KIND));
 }
 
 #[test]

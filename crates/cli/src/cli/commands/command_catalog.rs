@@ -916,6 +916,25 @@ const fn json_discriminator(
     }
 }
 
+/// Helper for advertising a JSON discriminator value that is *not*
+/// backed by a documented schema verb — used for preliminary /
+/// transport-envelope records emitted alongside the primary payload
+/// (e.g. `clone_connection` ahead of the final `clone` object on
+/// hosted clones). The `reason` is required by the metadata invariant
+/// test so the catalog can't carry orphan discriminators.
+const fn json_discriminator_no_schema(
+    reason: &'static str,
+    field: &'static str,
+    value: &'static str,
+) -> CommandJsonDiscriminatorSpec {
+    CommandJsonDiscriminatorSpec {
+        schema_verb: None,
+        field,
+        value,
+        no_schema_reason: Some(reason),
+    }
+}
+
 const fn front_door(contract: CommandContract, help_rank: u16) -> CommandContract {
     CommandContract {
         help_visibility: "everyday",
@@ -1383,7 +1402,25 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     },
                     &["clone"],
                 ),
-                &[json_discriminator(Some("clone"), "output_kind", "clone")],
+                &[
+                    json_discriminator(Some("clone"), "output_kind", "clone"),
+                    // `clone --output json` on a hosted/network remote
+                    // emits a preliminary connection envelope before the
+                    // final clone payload. Both records carry
+                    // `output_kind` so agents that route on the
+                    // discriminator (per heddle#272) can classify each
+                    // line without falling back to text parsing. The
+                    // envelope has no separate schema verb — it's a
+                    // small inline object, not a Serialize struct in
+                    // `schemas`. Source-of-truth value:
+                    // `cli::cli::commands::CLONE_CONNECTION_OUTPUT_KIND`.
+                    json_discriminator_no_schema(
+                        "preliminary connection envelope emitted by hosted clones \
+                         before the final clone payload (no separate schema)",
+                        "output_kind",
+                        "clone_connection",
+                    ),
+                ],
             ),
             220,
         ),
@@ -5105,6 +5142,12 @@ mod tests {
         // revert, purge, redact, stash, clean, discuss, context, review,
         // cherry-pick, bisect). Any further sweep MUST extend this list
         // and document the addition.
+        //
+        // `clone` appears twice because hosted `clone --output json`
+        // emits two JSON records per invocation (a preliminary
+        // `clone_connection` envelope followed by the final `clone`
+        // payload); both discriminator values are advertised so agents
+        // can route on either record. See heddle#272 (PR #281 r3).
         let displays = raw_json_discriminator_specs()
             .iter()
             .map(|(path, _)| path.join(" "))
@@ -5124,6 +5167,7 @@ mod tests {
                 "checkpoint",
                 "cherry-pick",
                 "clean",
+                "clone",
                 "clone",
                 "commit",
                 "commands",
@@ -5181,14 +5225,21 @@ mod tests {
     #[test]
     fn json_discriminator_metadata_is_internally_consistent() {
         let raw_discriminators = raw_json_discriminator_specs();
-        let raw_paths = raw_discriminators
+        // A single command path MAY advertise more than one
+        // discriminator (e.g. `clone` carries both `clone` and
+        // `clone_connection` because hosted `clone --output json`
+        // emits a preliminary connection envelope before the final
+        // payload — see heddle#272). But each (path, value) pair must
+        // still be unique, otherwise two entries would advertise the
+        // same wire-format token and agents couldn't tell them apart.
+        let path_value_pairs = raw_discriminators
             .iter()
-            .map(|(path, _)| path.to_vec())
+            .map(|(path, d)| (path.to_vec(), d.value))
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            raw_paths.len(),
+            path_value_pairs.len(),
             raw_discriminators.len(),
-            "JSON discriminator table contains duplicate command paths"
+            "JSON discriminator table contains duplicate (path, value) pairs"
         );
 
         let mut schema_verbs = BTreeSet::new();

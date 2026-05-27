@@ -121,7 +121,10 @@ pub use bridge::cmd_bridge_git;
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clean::cmd_clean;
-pub use clone::{GitOverlayBlobHydrator, cmd_clone, register_git_overlay_factory};
+pub use clone::{
+    CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, GitOverlayBlobHydrator, cmd_clone,
+    register_git_overlay_factory,
+};
 pub use collapse::cmd_collapse;
 pub use command_catalog::{
     CommandCatalogOutput, build_command_catalog, cmd_commands, command_canonical_command,
