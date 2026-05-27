@@ -64,6 +64,41 @@ pub(crate) fn print_stat(output: &DiffOutput) {
     );
 }
 
+/// Render the diff as standard unified-diff text — no gutter, no
+/// inline-edit `~` lines, no ANSI styling. Output is suitable for
+/// `patch(1)` and `git apply` round-trip. Each line is `prefix + content`
+/// because the hunk-header `LineDiff` already encodes the second `@`
+/// (prefix=`@`, content=`@ -a,b +c,d @@`), so concatenation yields the
+/// canonical `@@ -a,b +c,d @@` shape.
+pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
+    let mut buf = String::new();
+    for change in &output.changes {
+        let Some(lines) = &change.lines else {
+            continue;
+        };
+        if lines.is_empty() {
+            continue;
+        }
+        let old_path = change.old_path.as_deref().unwrap_or(&change.path);
+        buf.push_str(&format!("--- a/{old_path}\n"));
+        buf.push_str(&format!("+++ b/{}\n", change.path));
+        for line in lines {
+            buf.push_str(&line.prefix);
+            buf.push_str(&line.content);
+            buf.push('\n');
+        }
+    }
+    buf
+}
+
+pub(crate) fn print_diff_patch(output: &DiffOutput) {
+    let rendered = output
+        .patch
+        .clone()
+        .unwrap_or_else(|| render_diff_patch(output));
+    print!("{rendered}");
+}
+
 pub(crate) fn print_diff(output: &DiffOutput) {
     let mut rendered = String::new();
     for change in &output.changes {

@@ -440,6 +440,10 @@ pub struct DiffArgs {
     /// Show concise applicable context alongside diff output.
     #[arg(long)]
     pub context: bool,
+
+    /// Output patch in standard unified-diff format suitable for `patch(1)` / `git apply`.
+    #[arg(short = 'p', long = "patch")]
+    pub patch: bool,
 }
 
 /// Arguments for the `revert` command.

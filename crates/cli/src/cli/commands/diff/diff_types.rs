@@ -23,6 +23,11 @@ pub struct DiffOutput {
     pub context: Option<Vec<FileContextEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broader_guidance: Option<Vec<ContextSnippet>>,
+    /// Rendered unified-diff text, suitable for `patch(1)` / `git apply`.
+    /// Populated whenever line-level hunks exist regardless of the
+    /// `--patch` flag, so JSON consumers always see a parseable diff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
 }
 
 impl DiffOutput {
@@ -66,6 +71,7 @@ impl DiffOutput {
             semantic_changes,
             context,
             broader_guidance,
+            patch: None,
         }
     }
 }

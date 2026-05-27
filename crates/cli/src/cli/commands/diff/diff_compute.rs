@@ -23,7 +23,10 @@ use super::{
         },
         history_target::{require_resolved_state, resolve_state_id},
     },
-    diff_output::{print_context, print_diff, print_semantic_changes, print_stat},
+    diff_output::{
+        print_context, print_diff, print_diff_patch, print_semantic_changes, print_stat,
+        render_diff_patch,
+    },
     diff_types::{
         ContextSnippet, DiffOutput, DiffStats, FileChange, FileContextEntry, LineDiff,
         SemanticChangeEntry, change_line_counts,
@@ -55,6 +58,7 @@ pub fn cmd_diff(
     name_only: bool,
     unified: usize,
     show_context: bool,
+    patch: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
@@ -69,7 +73,7 @@ pub fn cmd_diff(
         if probe.changes.is_clean() {
             return Err(anyhow!(plain_git_setup_advice(&probe, "diff", None)));
         }
-        return render_plain_git_head_diff(cli, &probe, stat, name_only);
+        return render_plain_git_head_diff(cli, &probe, stat, name_only, patch);
     }
 
     let repo = Repository::open(start)?;
@@ -78,7 +82,7 @@ pub fn cmd_diff(
         && from_is_head_or_default
         && let Some(status) = trust_visible_worktree_status(&repo, &trust)?
     {
-        return render_worktree_status_diff(cli, &status, stat, name_only, true);
+        return render_worktree_status_diff(cli, &status, stat, name_only, true, patch);
     }
     let git_overlay_head_worktree_diff = repo.current_state()?.is_none()
         && to.is_none()
@@ -305,7 +309,7 @@ pub fn cmd_diff(
     } else {
         file_changes
     };
-    let output = DiffOutput::with_stats(
+    let mut output = DiffOutput::with_stats(
         from_id.map(|id| id.short()),
         to.clone(),
         file_changes,
@@ -320,6 +324,7 @@ pub fn cmd_diff(
             .transpose()?,
         stats,
     );
+    populate_patch_text(&mut output);
 
     if should_output_json(cli, Some(repo.config())) {
         println!("{}", serde_json::to_string(&output)?);
@@ -329,6 +334,8 @@ pub fn cmd_diff(
         }
     } else if stat {
         print_stat(&output);
+    } else if patch {
+        print_diff_patch(&output);
     } else {
         if show_context {
             print_context(&output);
@@ -342,13 +349,28 @@ pub fn cmd_diff(
     Ok(())
 }
 
+/// Render and stash the standard unified-diff text on the output payload
+/// when there is any line-level data to render. JSON consumers always
+/// need a patch-compatible field; the rest of the print path consults
+/// the same renderer.
+fn populate_patch_text(output: &mut DiffOutput) {
+    if !output.changes.iter().any(|change| change.lines.is_some()) {
+        return;
+    }
+    let text = render_diff_patch(output);
+    if !text.is_empty() {
+        output.patch = Some(text);
+    }
+}
+
 fn render_plain_git_head_diff(
     cli: &Cli,
     probe: &PlainGitVerificationProbe,
     stat: bool,
     name_only: bool,
+    patch: bool,
 ) -> Result<()> {
-    render_worktree_status_diff(cli, &probe.changes, stat, name_only, false)
+    render_worktree_status_diff(cli, &probe.changes, stat, name_only, false, patch)
 }
 
 fn render_worktree_status_diff(
@@ -357,6 +379,7 @@ fn render_worktree_status_diff(
     stat: bool,
     name_only: bool,
     detect_renames: bool,
+    patch: bool,
 ) -> Result<()> {
     let changes = status
         .modified
@@ -391,7 +414,8 @@ fn render_worktree_status_diff(
     } else {
         changes
     };
-    let output = DiffOutput::new(Some("HEAD".to_string()), None, changes, None, None, None);
+    let mut output = DiffOutput::new(Some("HEAD".to_string()), None, changes, None, None, None);
+    populate_patch_text(&mut output);
 
     if should_output_json(cli, None) {
         println!("{}", serde_json::to_string(&output)?);
@@ -401,6 +425,8 @@ fn render_worktree_status_diff(
         }
     } else if stat {
         print_stat(&output);
+    } else if patch {
+        print_diff_patch(&output);
     } else {
         print_diff(&output);
     }
