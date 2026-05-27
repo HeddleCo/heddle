@@ -71,7 +71,19 @@ struct TurnView {
 
 #[derive(Serialize)]
 struct DiscussionListOutput {
+    output_kind: &'static str,
     discussions: Vec<DiscussionOutput>,
+}
+
+/// Envelope used by per-discussion verbs (`open`/`append`/`resolve`/`show`).
+/// The verb's `output_kind` rides on top of the discussion payload; the
+/// inner fields stay flat for wire compat with PR #251's discussion
+/// schema.
+#[derive(Serialize)]
+struct DiscussionEnvelope<'a> {
+    output_kind: &'static str,
+    #[serde(flatten)]
+    discussion: &'a DiscussionOutput,
 }
 
 fn open_service() -> Result<LocalDiscussionService> {
@@ -100,7 +112,7 @@ async fn run_open(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussOpenArg
         .open_discussion(tonic::Request::new(req))
         .await
         .map_err(status_to_anyhow)?;
-    emit_discussion(cli, &to_view(&resp.into_inner()))
+    emit_discussion(cli, "discuss_open", &to_view(&resp.into_inner()))
 }
 
 async fn run_append(
@@ -118,7 +130,7 @@ async fn run_append(
         .append_turn(tonic::Request::new(req))
         .await
         .map_err(status_to_anyhow)?;
-    emit_discussion(cli, &to_view(&resp.into_inner()))
+    emit_discussion(cli, "discuss_append", &to_view(&resp.into_inner()))
 }
 
 async fn run_resolve(
@@ -174,7 +186,7 @@ async fn run_resolve(
         .resolve_discussion(tonic::Request::new(req))
         .await
         .map_err(status_to_anyhow)?;
-    emit_discussion(cli, &to_view(&resp.into_inner()))
+    emit_discussion(cli, "discuss_resolve", &to_view(&resp.into_inner()))
 }
 
 async fn run_list(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussListArgs) -> Result<()> {
@@ -206,6 +218,7 @@ async fn run_list(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussListArg
         resp.into_inner().discussions
     };
     let output = DiscussionListOutput {
+        output_kind: "discuss_list",
         discussions: discussions.iter().map(to_view).collect(),
     };
     if should_output_json(cli, None) {
@@ -242,14 +255,18 @@ async fn run_show(cli: &Cli, svc: &LocalDiscussionService, args: &DiscussShowArg
         .get_discussion(tonic::Request::new(req))
         .await
         .map_err(status_to_anyhow)?;
-    emit_discussion(cli, &to_view(&resp.into_inner()))
+    emit_discussion(cli, "discuss_show", &to_view(&resp.into_inner()))
 }
 
-fn emit_discussion(cli: &Cli, view: &DiscussionOutput) -> Result<()> {
+fn emit_discussion(cli: &Cli, output_kind: &'static str, view: &DiscussionOutput) -> Result<()> {
     if should_output_json(cli, None) {
+        let envelope = DiscussionEnvelope {
+            output_kind,
+            discussion: view,
+        };
         println!(
             "{}",
-            serde_json::to_string(view).context("serialize discussion")?
+            serde_json::to_string(&envelope).context("serialize discussion")?
         );
     } else {
         println!("discussion {}", view.id);

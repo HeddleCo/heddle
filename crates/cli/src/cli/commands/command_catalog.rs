@@ -1119,19 +1119,47 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["bisect"], GROUP),
     entry(
         &["bisect", "start"],
-        opaque_schemas(WORKTREE_MUTATION, &["bisect start"]),
+        json_discriminators(
+            opaque_schemas(WORKTREE_MUTATION, &["bisect start"]),
+            &[json_discriminator(
+                Some("bisect start"),
+                "output_kind",
+                "bisect_start",
+            )],
+        ),
     ),
     entry(
         &["bisect", "good"],
-        opaque_schemas(WORKTREE_MUTATION, &["bisect good"]),
+        json_discriminators(
+            opaque_schemas(WORKTREE_MUTATION, &["bisect good"]),
+            &[json_discriminator(
+                Some("bisect good"),
+                "output_kind",
+                "bisect_good",
+            )],
+        ),
     ),
     entry(
         &["bisect", "bad"],
-        opaque_schemas(WORKTREE_MUTATION, &["bisect bad"]),
+        json_discriminators(
+            opaque_schemas(WORKTREE_MUTATION, &["bisect bad"]),
+            &[json_discriminator(
+                Some("bisect bad"),
+                "output_kind",
+                "bisect_bad",
+            )],
+        ),
     ),
     entry(
         &["bisect", "reset"],
-        opaque_schemas(WORKTREE_MUTATION, &["bisect reset"]),
+        json_discriminators(
+            opaque_schemas(WORKTREE_MUTATION, &["bisect reset"]),
+            &[json_discriminator(
+                Some("bisect reset"),
+                "output_kind",
+                "bisect_reset",
+            )],
+        ),
     ),
     entry(&["blame"], documented_schemas(READ_JSON, &["blame"])),
     entry(
@@ -1324,25 +1352,38 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["cherry-pick"],
-        opaque_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
+        json_discriminators(
+            opaque_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
+            &[json_discriminator(
+                Some("cherry-pick"),
+                "output_kind",
+                "cherry_pick",
+            )],
+        ),
     ),
     entry(
         &["clean"],
-        documented_schemas(DESTRUCTIVE_WORKTREE_ONLY_MUTATION, &["clean"]),
+        json_discriminators(
+            documented_schemas(DESTRUCTIVE_WORKTREE_ONLY_MUTATION, &["clean"]),
+            &[json_discriminator(Some("clean"), "output_kind", "clean")],
+        ),
     ),
     entry(
         &["clone"],
         front_door(
-            documented_schemas(
-                CommandContract {
-                    may_initialize: true,
-                    may_write_worktree: true,
-                    may_move_ref: true,
-                    writes_worktree: true,
-                    network_io: true,
-                    ..MUTATING
-                },
-                &["clone"],
+            json_discriminators(
+                documented_schemas(
+                    CommandContract {
+                        may_initialize: true,
+                        may_write_worktree: true,
+                        may_move_ref: true,
+                        writes_worktree: true,
+                        network_io: true,
+                        ..MUTATING
+                    },
+                    &["clone"],
+                ),
+                &[json_discriminator(Some("clone"), "output_kind", "clone")],
             ),
             220,
         ),
@@ -1407,43 +1448,113 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["context"], GROUP),
     entry(
         &["context", "set"],
-        opaque_schemas(MUTATING, &["context set"]),
+        json_discriminators(
+            opaque_schemas(MUTATING, &["context set"]),
+            &[json_discriminator(
+                Some("context set"),
+                "output_kind",
+                "context_set",
+            )],
+        ),
     ),
     entry(
         &["context", "get"],
-        opaque_schemas(READ_JSON, &["context get"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["context get"]),
+            &[json_discriminator(
+                Some("context get"),
+                "output_kind",
+                "context_get",
+            )],
+        ),
     ),
     entry(
         &["context", "list"],
-        opaque_schemas(READ_JSON, &["context list"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["context list"]),
+            &[json_discriminator(
+                Some("context list"),
+                "output_kind",
+                "context_list",
+            )],
+        ),
     ),
     entry(
         &["context", "history"],
-        opaque_schemas(READ_JSON, &["context history"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["context history"]),
+            &[json_discriminator(
+                Some("context history"),
+                "output_kind",
+                "context_history",
+            )],
+        ),
     ),
     entry(
         &["context", "edit"],
-        opaque_schemas(MUTATING, &["context edit"]),
+        json_discriminators(
+            opaque_schemas(MUTATING, &["context edit"]),
+            &[json_discriminator(
+                Some("context edit"),
+                "output_kind",
+                "context_edit",
+            )],
+        ),
     ),
     entry(
         &["context", "supersede"],
-        opaque_schemas(MUTATING, &["context supersede"]),
+        json_discriminators(
+            opaque_schemas(MUTATING, &["context supersede"]),
+            &[json_discriminator(
+                Some("context supersede"),
+                "output_kind",
+                "context_supersede",
+            )],
+        ),
     ),
     entry(
         &["context", "rm"],
-        opaque_schemas(MUTATING, &["context rm"]),
+        json_discriminators(
+            opaque_schemas(MUTATING, &["context rm"]),
+            &[json_discriminator(
+                Some("context rm"),
+                "output_kind",
+                "context_rm",
+            )],
+        ),
     ),
     entry(
         &["context", "check"],
-        opaque_schemas(READ_JSON, &["context check"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["context check"]),
+            &[json_discriminator(
+                Some("context check"),
+                "output_kind",
+                "context_check",
+            )],
+        ),
     ),
     entry(
         &["context", "suggest"],
-        opaque_schemas(READ_JSON, &["context suggest"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["context suggest"]),
+            &[json_discriminator(
+                Some("context suggest"),
+                "output_kind",
+                "context_suggest",
+            )],
+        ),
     ),
     entry(
         &["context", "audit"],
-        opaque_schemas(READ_JSON, &["context audit"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["context audit"]),
+            &[json_discriminator(
+                Some("context audit"),
+                "output_kind",
+                "context_audit",
+            )],
+        ),
     ),
     entry(&["daemon"], surface(GROUP, "admin")),
     entry(
@@ -1476,23 +1587,58 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["discuss"], GROUP),
     entry(
         &["discuss", "open"],
-        documented_schemas(MUTATING, &["discuss open"]),
+        json_discriminators(
+            documented_schemas(MUTATING, &["discuss open"]),
+            &[json_discriminator(
+                Some("discuss open"),
+                "output_kind",
+                "discuss_open",
+            )],
+        ),
     ),
     entry(
         &["discuss", "append"],
-        documented_schemas(MUTATING, &["discuss append"]),
+        json_discriminators(
+            documented_schemas(MUTATING, &["discuss append"]),
+            &[json_discriminator(
+                Some("discuss append"),
+                "output_kind",
+                "discuss_append",
+            )],
+        ),
     ),
     entry(
         &["discuss", "resolve"],
-        documented_schemas(MUTATING, &["discuss resolve"]),
+        json_discriminators(
+            documented_schemas(MUTATING, &["discuss resolve"]),
+            &[json_discriminator(
+                Some("discuss resolve"),
+                "output_kind",
+                "discuss_resolve",
+            )],
+        ),
     ),
     entry(
         &["discuss", "list"],
-        documented_schemas(READ_JSON, &["discuss list"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["discuss list"]),
+            &[json_discriminator(
+                Some("discuss list"),
+                "output_kind",
+                "discuss_list",
+            )],
+        ),
     ),
     entry(
         &["discuss", "show"],
-        documented_schemas(READ_JSON, &["discuss show"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["discuss show"]),
+            &[json_discriminator(
+                Some("discuss show"),
+                "output_kind",
+                "discuss_show",
+            )],
+        ),
     ),
     entry(
         &["doctor"],
@@ -1536,14 +1682,26 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "Use pull for the normal remote update workflow; inspect verification output before materializing changes.",
         ),
     ),
-    entry(&["fork"], opaque_schemas(MUTATING, &["fork"])),
+    entry(
+        &["fork"],
+        json_discriminators(
+            opaque_schemas(MUTATING, &["fork"]),
+            &[json_discriminator(Some("fork"), "output_kind", "fork")],
+        ),
+    ),
     entry(&["fsck"], documented_schemas(MUTATING, &["fsck"])),
     entry(&["gc"], hidden(opaque_schemas(GC_MUTATION, &["gc"]))),
     entry(
         &["git-overlay"],
         documented_schemas(READ_JSON, &["git-overlay"]),
     ),
-    entry(&["goto"], documented_schemas(WORKTREE_MUTATION, &["goto"])),
+    entry(
+        &["goto"],
+        json_discriminators(
+            documented_schemas(WORKTREE_MUTATION, &["goto"]),
+            &[json_discriminator(Some("goto"), "output_kind", "goto")],
+        ),
+    ),
     entry(
         &["harness-bridge"],
         hidden(opaque_schemas(READ_JSONL, &["harness-bridge"])),
@@ -1579,7 +1737,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["init"],
         exits(
-            front_door(documented_schemas(INIT, &["init"]), 200),
+            front_door(
+                json_discriminators(
+                    documented_schemas(INIT, &["init"]),
+                    &[json_discriminator(Some("init"), "output_kind", "init")],
+                ),
+                200,
+            ),
             &[
                 (0, "ok"),
                 (73, "cannot create state directory"),
@@ -1685,14 +1849,34 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["stack"], opaque_schemas(READ_JSON, &["stack"])),
+    entry(
+        &["stack"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["stack"]),
+            &[json_discriminator(Some("stack"), "output_kind", "stack")],
+        ),
+    ),
     entry(
         &["stack", "ready"],
-        opaque_schemas(READ_JSON, &["stack ready"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["stack ready"]),
+            &[json_discriminator(
+                Some("stack ready"),
+                "output_kind",
+                "stack_ready",
+            )],
+        ),
     ),
     entry(
         &["stack", "snapshot"],
-        opaque_schemas(READ_JSON, &["stack snapshot"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["stack snapshot"]),
+            &[json_discriminator(
+                Some("stack snapshot"),
+                "output_kind",
+                "stack_snapshot",
+            )],
+        ),
     ),
     entry(
         &["monitor"],
@@ -1725,17 +1909,31 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["purge"], GROUP),
     entry(
         &["purge", "apply"],
-        opaque_schemas(
-            CommandContract {
-                destructive_requires_force: true,
-                ..DESTRUCTIVE_DATA_MUTATION
-            },
-            &["purge apply"],
+        json_discriminators(
+            opaque_schemas(
+                CommandContract {
+                    destructive_requires_force: true,
+                    ..DESTRUCTIVE_DATA_MUTATION
+                },
+                &["purge apply"],
+            ),
+            &[json_discriminator(
+                Some("purge apply"),
+                "output_kind",
+                "purge_apply",
+            )],
         ),
     ),
     entry(
         &["purge", "list"],
-        opaque_schemas(READ_JSON, &["purge list"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["purge list"]),
+            &[json_discriminator(
+                Some("purge list"),
+                "output_kind",
+                "purge_list",
+            )],
+        ),
     ),
     entry(
         &["push"],
@@ -1778,28 +1976,70 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["redact"], GROUP),
     entry(
         &["redact", "apply"],
-        opaque_schemas(DATA_MUTATION, &["redact apply"]),
+        json_discriminators(
+            opaque_schemas(DATA_MUTATION, &["redact apply"]),
+            &[json_discriminator(
+                Some("redact apply"),
+                "output_kind",
+                "redact_apply",
+            )],
+        ),
     ),
     entry(
         &["redact", "list"],
-        opaque_schemas(READ_JSON, &["redact list"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["redact list"]),
+            &[json_discriminator(
+                Some("redact list"),
+                "output_kind",
+                "redact_list",
+            )],
+        ),
     ),
     entry(
         &["redact", "show"],
-        opaque_schemas(READ_JSON, &["redact show"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["redact show"]),
+            &[json_discriminator(
+                Some("redact show"),
+                "output_kind",
+                "redact_show",
+            )],
+        ),
     ),
     entry(&["redact", "trust"], GROUP),
     entry(
         &["redact", "trust", "add"],
-        opaque_schemas(DATA_MUTATION, &["redact trust add"]),
+        json_discriminators(
+            opaque_schemas(DATA_MUTATION, &["redact trust add"]),
+            &[json_discriminator(
+                Some("redact trust add"),
+                "output_kind",
+                "redact_trust_add",
+            )],
+        ),
     ),
     entry(
         &["redact", "trust", "list"],
-        opaque_schemas(READ_JSON, &["redact trust list"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["redact trust list"]),
+            &[json_discriminator(
+                Some("redact trust list"),
+                "output_kind",
+                "redact_trust_list",
+            )],
+        ),
     ),
     entry(
         &["redact", "trust", "remove"],
-        opaque_schemas(DATA_MUTATION, &["redact trust remove"]),
+        json_discriminators(
+            opaque_schemas(DATA_MUTATION, &["redact trust remove"]),
+            &[json_discriminator(
+                Some("redact trust remove"),
+                "output_kind",
+                "redact_trust_remove",
+            )],
+        ),
     ),
     entry(
         &["redo"],
@@ -1836,24 +2076,55 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["retro"], documented_schemas(READ_JSON, &["retro"])),
     entry(
         &["revert"],
-        documented_schemas(WORKTREE_MUTATION, &["revert"]),
+        json_discriminators(
+            documented_schemas(WORKTREE_MUTATION, &["revert"]),
+            &[json_discriminator(Some("revert"), "output_kind", "revert")],
+        ),
     ),
     entry(&["review"], GROUP),
     entry(
         &["review", "show"],
-        documented_schemas(READ_JSON, &["review show"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["review show"]),
+            &[json_discriminator(
+                Some("review show"),
+                "output_kind",
+                "review_show",
+            )],
+        ),
     ),
     entry(
         &["review", "sign"],
-        documented_schemas(MUTATING, &["review sign"]),
+        json_discriminators(
+            documented_schemas(MUTATING, &["review sign"]),
+            &[json_discriminator(
+                Some("review sign"),
+                "output_kind",
+                "review_sign",
+            )],
+        ),
     ),
     entry(
         &["review", "next"],
-        documented_schemas(READ_JSON, &["review next"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["review next"]),
+            &[json_discriminator(
+                Some("review next"),
+                "output_kind",
+                "review_next",
+            )],
+        ),
     ),
     entry(
         &["review", "health"],
-        documented_schemas(READ_JSON, &["review health"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["review health"]),
+            &[json_discriminator(
+                Some("review health"),
+                "output_kind",
+                "review_health",
+            )],
+        ),
     ),
     entry(&["run"], surface(EXTERNAL_WORKTREE_COMMAND, "automation")),
     entry(
@@ -1953,7 +2224,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["stash", "list"],
         git_adapter_action(
-            documented_schemas(READ_JSON, &["stash list"]),
+            json_discriminators(
+                documented_schemas(READ_JSON, &["stash list"]),
+                &[json_discriminator(
+                    Some("stash list"),
+                    "output_kind",
+                    "stash_list",
+                )],
+            ),
             "thread captures",
             "conceptual_home",
             "Use thread captures to inspect durable Heddle save points.",
@@ -2003,7 +2281,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["stash", "show"],
-        git_adapter_alias(documented_schemas(READ_JSON, &["stash show"]), "show"),
+        git_adapter_alias(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["stash show"]),
+                &[json_discriminator(
+                    Some("stash show"),
+                    "output_kind",
+                    "stash_show",
+                )],
+            ),
+            "show",
+        ),
     ),
     entry(
         &["status"],
@@ -2149,7 +2437,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["verify"],
         exits(
-            front_door(documented_schemas(READ_JSON, &["verify"]), 110),
+            front_door(
+                json_discriminators(
+                    documented_schemas(READ_JSON, &["verify"]),
+                    &[json_discriminator(Some("verify"), "output_kind", "verify")],
+                ),
+                110,
+            ),
             &[
                 (0, "verified clean"),
                 (65, "verification reports blocked state"),
@@ -4806,6 +5100,11 @@ mod tests {
 
     #[test]
     fn json_discriminator_table_starts_with_bounded_command_slice() {
+        // Wire-format-stable list. PR #251 instrumented the initial set;
+        // heddle#272 swept the named-by-persona verbs (stack, goto, fork,
+        // revert, purge, redact, stash, clean, discuss, context, review,
+        // cherry-pick, bisect). Any further sweep MUST extend this list
+        // and document the addition.
         let displays = raw_json_discriminator_specs()
             .iter()
             .map(|(path, _)| path.join(" "))
@@ -4813,22 +5112,66 @@ mod tests {
         assert_eq!(
             displays,
             vec![
+                "bisect start",
+                "bisect good",
+                "bisect bad",
+                "bisect reset",
                 "bridge git status",
                 "bridge git import",
                 "bridge git sync",
                 "bridge git reconcile",
                 "capture",
                 "checkpoint",
+                "cherry-pick",
+                "clean",
+                "clone",
                 "commit",
                 "commands",
+                "context set",
+                "context get",
+                "context list",
+                "context history",
+                "context edit",
+                "context supersede",
+                "context rm",
+                "context check",
+                "context suggest",
+                "context audit",
                 "diff",
+                "discuss open",
+                "discuss append",
+                "discuss resolve",
+                "discuss list",
+                "discuss show",
                 "doctor docs",
                 "doctor schemas",
+                "fork",
+                "goto",
+                "init",
+                "stack",
+                "stack ready",
+                "stack snapshot",
+                "purge apply",
+                "purge list",
+                "redact apply",
+                "redact list",
+                "redact show",
+                "redact trust add",
+                "redact trust list",
+                "redact trust remove",
                 "redo",
+                "revert",
+                "review show",
+                "review sign",
+                "review next",
+                "review health",
                 "schemas",
+                "stash list",
+                "stash show",
                 "status",
                 "thread list",
                 "thread show",
+                "verify",
                 "undo",
                 "workspace show",
             ]

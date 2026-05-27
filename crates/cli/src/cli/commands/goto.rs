@@ -20,6 +20,7 @@ use crate::{
 
 #[derive(Serialize)]
 struct GotoOutput {
+    output_kind: &'static str,
     target: String,
     intent: Option<String>,
     message: String,
@@ -71,6 +72,7 @@ pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
     }
 
     let output = GotoOutput {
+        output_kind: "goto",
         target: target_id.short(),
         intent: target_state.intent.clone(),
         message: format!("Now at: {}", target_id.short()),

@@ -13,6 +13,7 @@ use crate::cli::{Cli, should_output_json, worktree_status_options};
 
 #[derive(Serialize)]
 struct CleanOutput {
+    output_kind: &'static str,
     removed: Vec<String>,
     dry_run: bool,
 }
@@ -112,6 +113,7 @@ fn output_result(cli: &Cli, repo: &Repository, removed: &[String], dry_run: bool
         println!(
             "{}",
             serde_json::to_string(&CleanOutput {
+                output_kind: "clean",
                 removed: removed.to_vec(),
                 dry_run
             })?

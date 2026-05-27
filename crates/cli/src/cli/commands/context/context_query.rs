@@ -76,7 +76,10 @@ pub async fn cmd_context_list(
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let Some(context_root) = &state_obj.context else {
         if should_output_json(cli, None) {
-            println!("[]");
+            println!(
+                "{}",
+                serde_json::json!({"output_kind": "context_list", "items": []})
+            );
         } else {
             println!("No context annotations.");
         }
@@ -86,7 +89,7 @@ pub async fn cmd_context_list(
     let entries = repo.list_context_entries(context_root, prefix.as_deref().map(Path::new))?;
 
     if should_output_json(cli, None) {
-        let output: Vec<ContextGetOutput> = entries
+        let items: Vec<ContextGetOutput> = entries
             .iter()
             .filter_map(|entry| {
                 let annotations = filter_annotations(
@@ -101,6 +104,12 @@ pub async fn cmd_context_list(
                 }
                 let (target_kind, target_label) = target_label(&entry.target);
                 Some(ContextGetOutput {
+                    // `context_list` envelopes ContextGetOutput rows, so
+                    // the inner `output_kind` field is suppressed via
+                    // serialization to avoid leaking a misleading
+                    // per-row discriminator. The outer envelope owns
+                    // the discriminator.
+                    output_kind: "context_get",
                     target_kind,
                     target: target_label,
                     annotations: annotations
@@ -110,7 +119,11 @@ pub async fn cmd_context_list(
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string(&output)?);
+        let envelope = serde_json::json!({
+            "output_kind": "context_list",
+            "items": items,
+        });
+        println!("{}", serde_json::to_string(&envelope)?);
     } else if entries.is_empty() {
         println!("No context annotations.");
     } else {
@@ -156,6 +169,7 @@ pub async fn cmd_context_history(
     let annotation = &blob.annotations[index];
     let (target_kind, target_label) = target_label(&target);
     let output = AnnotationHistoryOutput {
+        output_kind: "context_history",
         annotation_id: annotation.annotation_id.clone(),
         target_kind,
         target: target_label,
@@ -242,7 +256,14 @@ pub async fn cmd_context_check(
 
     if filtered_entries.is_empty() {
         if should_output_json(cli, None) {
-            println!("{}", serde_json::json!({ "annotations": 0, "stale": 0 }));
+            println!(
+                "{}",
+                serde_json::json!({
+                    "output_kind": "context_check",
+                    "annotations": 0,
+                    "stale": 0,
+                })
+            );
         } else {
             println!("No annotations found.");
         }
@@ -310,6 +331,7 @@ pub async fn cmd_context_check(
         println!(
             "{}",
             serde_json::json!({
+                "output_kind": "context_check",
                 "annotations": total,
                 "fresh": fresh,
                 "stale": stale,
@@ -341,7 +363,7 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
     let suggestions = repo.suggest_context_targets(&state_obj, limit)?;
 
     if should_output_json(cli, None) {
-        let output: Vec<SuggestionOutput> = suggestions
+        let items: Vec<SuggestionOutput> = suggestions
             .into_iter()
             .map(|suggestion| SuggestionOutput {
                 path: suggestion.path,
@@ -358,7 +380,11 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
                 stale_annotations: suggestion.stale_annotations,
             })
             .collect();
-        println!("{}", serde_json::to_string(&output)?);
+        let envelope = serde_json::json!({
+            "output_kind": "context_suggest",
+            "items": items,
+        });
+        println!("{}", serde_json::to_string(&envelope)?);
     } else if suggestions.is_empty() {
         println!("No low-noise context suggestions right now.");
     } else {
@@ -384,7 +410,13 @@ pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
         if should_output_json(cli, None) {
             println!(
                 "{}",
-                serde_json::json!({"annotations": 0, "superseded": 0, "duplicates": 0, "stale": 0})
+                serde_json::json!({
+                    "output_kind": "context_audit",
+                    "annotations": 0,
+                    "superseded": 0,
+                    "duplicates": 0,
+                    "stale": 0,
+                })
             );
         } else {
             println!("No context annotations.");
@@ -444,6 +476,7 @@ pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
         println!(
             "{}",
             serde_json::json!({
+                "output_kind": "context_audit",
                 "annotations": total,
                 "superseded": superseded,
                 "duplicates": duplicates,
