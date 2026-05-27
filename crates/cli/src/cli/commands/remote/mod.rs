@@ -772,7 +772,9 @@ fn refresh_git_tracking_after_overlay_push(
         return Ok(None);
     };
     let head = head.detach();
-    let tracking_remote = resolve_git_tracking_remote_name(repo, remote_name)?;
+    let Some(tracking_remote) = resolve_git_tracking_remote_name(repo, remote_name)? else {
+        return Ok(None);
+    };
 
     let upstream = git
         .find_reference(format!("refs/heads/{branch}").as_str())
@@ -834,44 +836,55 @@ struct GitTrackingRemoteResolution {
 fn resolve_git_tracking_remote_name(
     repo: &Repository,
     requested: &str,
-) -> Result<GitTrackingRemoteResolution> {
+) -> Result<Option<GitTrackingRemoteResolution>> {
     if let Some(name) = git_remote_name_for_url(repo.root(), requested)? {
-        return Ok(GitTrackingRemoteResolution {
+        return Ok(Some(GitTrackingRemoteResolution {
             name,
             configured_remote: None,
-        });
+        }));
     }
     if !looks_like_remote_location(requested)
         && git_remote_ref_name_is_valid(repo.root(), requested)?
     {
-        return Ok(GitTrackingRemoteResolution {
+        return Ok(Some(GitTrackingRemoteResolution {
             name: requested.to_string(),
             configured_remote: None,
-        });
+        }));
     }
 
     let remotes = git_remote_names(repo.root())?;
     if remotes.is_empty() && !requested.trim().is_empty() {
         write_git_overlay_remote(repo.root(), "origin", requested)
             .context("failed to configure Git remote for tracking")?;
-        return Ok(GitTrackingRemoteResolution {
+        return Ok(Some(GitTrackingRemoteResolution {
             name: "origin".to_string(),
             configured_remote: Some(GitOverlayConfiguredRemote {
                 name: "origin".to_string(),
                 url: requested.to_string(),
             }),
-        });
+        }));
     }
-    if remotes.len() == 1 {
-        return Ok(GitTrackingRemoteResolution {
+    // Only fall back to a sole configured remote when the requested
+    // argument is not itself a remote-location shape. If the user
+    // pushed to an explicit URL/path that did not match any
+    // configured remote (otherwise `git_remote_name_for_url` would
+    // have caught it above), silently retargeting the unrelated
+    // sole remote (e.g. `origin`) would corrupt its tracking refs.
+    if remotes.len() == 1 && !looks_like_remote_location(requested) {
+        return Ok(Some(GitTrackingRemoteResolution {
             name: remotes[0].clone(),
             configured_remote: None,
-        });
+        }));
     }
-    Ok(GitTrackingRemoteResolution {
+    if looks_like_remote_location(requested) {
+        // Explicit URL/path that does not match any configured
+        // remote — skip the tracking refresh rather than guessing.
+        return Ok(None);
+    }
+    Ok(Some(GitTrackingRemoteResolution {
         name: requested.to_string(),
         configured_remote: None,
-    })
+    }))
 }
 
 fn git_remote_name_for_url(root: &Path, requested: &str) -> Result<Option<String>> {
