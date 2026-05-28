@@ -8,8 +8,6 @@ use std::{
 use objects::object::ChangeId;
 use tempfile::TempDir;
 
-use super::oplog_backend::OpLogBackend;
-
 use super::{OpLog, OpRecord};
 
 fn create_oplog() -> (TempDir, OpLog) {

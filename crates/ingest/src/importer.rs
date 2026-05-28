@@ -24,7 +24,7 @@ use objects::{
         CompressionConfig, ObjectStore,
     },
 };
-use oplog::oplog::OpLogBackend;
+use oplog::oplog::{OpLog, OpLogBackend};
 use refs::refs::RefBackend;
 use tracing::info;
 
@@ -65,12 +65,18 @@ pub struct ImportStats {
 }
 
 /// Orchestrates one import pass.
-pub struct Importer<'a> {
+///
+/// Generic over the ref and oplog backends. The object store stays
+/// `&dyn ObjectStore` (it has no `async` methods — see heddle#259). `O`
+/// defaults to `OpLog` so [`Importer::new`] (which starts without an oplog
+/// backend) has a concrete type; [`Importer::with_oplog`] rebinds `O` to
+/// whatever backend the caller attaches.
+pub struct Importer<'a, R: RefBackend, O: OpLogBackend = OpLog> {
     git: &'a GitSource,
     store: &'a dyn ObjectStore,
-    refs: &'a dyn RefBackend,
+    refs: &'a R,
     map: &'a mut ShaMap,
-    oplog: Option<&'a dyn OpLogBackend>,
+    oplog: Option<&'a O>,
     /// Where the streaming pack builder writes its in-flight pack
     /// file and 512 index-bucket files. Both are removed on a clean
     /// finalize. Defaults to `std::env::temp_dir()/heddle-ingest-<pid>`
@@ -81,11 +87,11 @@ pub struct Importer<'a> {
     pack_staging_dir: Option<PathBuf>,
 }
 
-impl<'a> Importer<'a> {
+impl<'a, R: RefBackend> Importer<'a, R, OpLog> {
     pub fn new(
         git: &'a GitSource,
         store: &'a dyn ObjectStore,
-        refs: &'a dyn RefBackend,
+        refs: &'a R,
         map: &'a mut ShaMap,
     ) -> Self {
         Self {
@@ -97,14 +103,24 @@ impl<'a> Importer<'a> {
             pack_staging_dir: None,
         }
     }
+}
 
+impl<'a, R: RefBackend, O: OpLogBackend> Importer<'a, R, O> {
     /// Attach an oplog backend so the importer also translates reflog
     /// entries into `OpRecord`s. Without one the import still produces a
     /// valid Heddle repo — you just don't get `heddle undo` reach past the
     /// import boundary.
-    pub fn with_oplog(mut self, oplog: &'a dyn OpLogBackend) -> Self {
-        self.oplog = Some(oplog);
-        self
+    ///
+    /// Rebinds the oplog type parameter to the attached backend's type.
+    pub fn with_oplog<O2: OpLogBackend>(self, oplog: &'a O2) -> Importer<'a, R, O2> {
+        Importer {
+            git: self.git,
+            store: self.store,
+            refs: self.refs,
+            map: self.map,
+            oplog: Some(oplog),
+            pack_staging_dir: self.pack_staging_dir,
+        }
     }
 
     /// Override the directory used to stage the in-progress pack file
@@ -122,7 +138,10 @@ impl<'a> Importer<'a> {
     /// Run the full import. Safe to re-invoke on the same `ShaMap` — the
     /// translators short-circuit on cache hits, so a second pass is
     /// effectively a no-op modulo any new commits since last time.
-    pub fn run(&mut self) -> crate::Result<ImportStats> {
+    ///
+    /// `async` because ref emission awaits the backend's `async` marker
+    /// read; for the local `RefManager` the future is immediately ready.
+    pub async fn run(&mut self) -> crate::Result<ImportStats> {
         let (heads, refs_seen) = self.git.collect_refs_detailed()?;
         info!(
             local_branches = refs_seen.local_branches,
@@ -253,7 +272,7 @@ impl<'a> Importer<'a> {
             }
         };
 
-        let ref_stats = RefEmitter::new(self.refs, self.map).emit(&heads)?;
+        let ref_stats = RefEmitter::new(self.refs, self.map).emit(&heads).await?;
         info!(
             threads = ref_stats.threads_written,
             markers = ref_stats.markers_written,
@@ -503,10 +522,17 @@ pub fn import_git_into(
     // same filesystem (atomic move, no copy).
     let staging_dir = repo.heddle_dir().join("ingest").join("staging");
 
-    let stats = Importer::new(&git, repo.store(), repo.refs(), &mut map)
-        .with_oplog(repo.oplog())
-        .with_pack_staging_dir(staging_dir)
-        .run()?;
+    // `run` is `async`, but the local `RefManager`/`OpLog` futures are
+    // immediately ready. `pollster::block_on` drives them to completion
+    // without a Tokio runtime, so this is safe even when `import_git_into`
+    // is invoked from inside the CLI's Tokio runtime. The importer is
+    // scoped so its `&mut map` borrow ends before `map` is returned.
+    let stats = {
+        let mut importer = Importer::new(&git, repo.store(), repo.refs(), &mut map)
+            .with_oplog(repo.oplog())
+            .with_pack_staging_dir(staging_dir);
+        pollster::block_on(importer.run())?
+    };
     Ok((stats, map))
 }
 
@@ -569,7 +595,7 @@ mod tests {
         refs.init().unwrap();
         let mut map = ShaMap::new();
 
-        let stats = Importer::new(&git, &store, &refs, &mut map).run().unwrap();
+        let stats = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
 
         // Two commits on main + one more on feature/x = 2 unique commits
         // (main is a prefix of feature/x), or 1+1 depending on graph.
@@ -603,9 +629,9 @@ mod tests {
         refs.init().unwrap();
         let mut map = ShaMap::new();
 
-        let first = Importer::new(&git, &store, &refs, &mut map).run().unwrap();
+        let first = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
         let states_after_first = store.list_states().unwrap().len();
-        let second = Importer::new(&git, &store, &refs, &mut map).run().unwrap();
+        let second = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
         let states_after_second = store.list_states().unwrap().len();
 
         assert_eq!(first.commits_imported, second.commits_imported);
@@ -642,7 +668,7 @@ mod tests {
         refs.init().unwrap();
         let mut map = ShaMap::new();
 
-        let stats = Importer::new(&git, &store, &refs, &mut map).run().unwrap();
+        let stats = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
         assert!(
             stats.reflog_only_commits >= 1,
             "expected reflog to rescue the dropped tip, stats={stats:?}"
@@ -670,10 +696,12 @@ mod tests {
         oplog.init().unwrap();
         let mut map = ShaMap::new();
 
-        let stats = Importer::new(&git, &store, &refs, &mut map)
-            .with_oplog(&oplog)
-            .run()
-            .unwrap();
+        let stats = pollster::block_on(
+            Importer::new(&git, &store, &refs, &mut map)
+                .with_oplog(&oplog)
+                .run(),
+        )
+        .unwrap();
 
         assert_eq!(stats.oplog.skipped_unmapped, 0, "stats={stats:?}");
         assert!(
@@ -717,7 +745,7 @@ mod tests {
         refs.init().unwrap();
         let mut map = ShaMap::new();
 
-        let stats = Importer::new(&git, &store, &refs, &mut map).run().unwrap();
+        let stats = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
         assert_eq!(stats.oplog, OplogEmitStats::default());
     }
 

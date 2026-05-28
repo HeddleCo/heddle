@@ -10,13 +10,13 @@ use std::{
 
 use objects::{
     error::{HeddleError, Result},
-    object::ChangeId,
+    object::{ChangeId, MarkerName, ThreadName},
 };
 use runtime_bridge::RuntimeBridge;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use super::{CoreRefBackend, Head, RefBackend, RefExpectation, RefUpdate, resolve_refspec};
+use super::{CoreRefBackend, Head, RefBackend, RefExpectation, RefUpdate};
 
 fn sqlx_err(e: sqlx::Error) -> HeddleError {
     HeddleError::Io(std::io::Error::other(e.to_string()))
@@ -24,11 +24,13 @@ fn sqlx_err(e: sqlx::Error) -> HeddleError {
 
 /// Postgres-backed reference storage for the stateless server.
 ///
-/// Synchronous `CoreRefBackend` / `RefBackend` methods drive their `sqlx`
-/// futures through a shared [`RuntimeBridge`] so the backend is safe to
-/// call from any caller flavor — including a current-thread Tokio
-/// runtime and non-Tokio threads. See [`PgRefBackend::bridge`] for the
-/// lazy-init pattern.
+/// The `async` trait reads (`get_thread`, `get_marker`, `create_marker`,
+/// `resolve`) `.await` `sqlx` directly — no runtime bridge. The remaining
+/// synchronous `CoreRefBackend` / `RefBackend` methods still drive their
+/// `sqlx` futures through a shared [`RuntimeBridge`] so they're safe to
+/// call from any caller flavor — including a current-thread Tokio runtime
+/// and non-Tokio threads. See [`PgRefBackend::bridge`] for the lazy-init
+/// pattern.
 #[derive(Clone)]
 pub struct PgRefBackend {
     pool: Arc<PgPool>,
@@ -146,20 +148,22 @@ impl CoreRefBackend for PgRefBackend {
 
             match maybe_row {
                 None => Ok(Head::Attached {
-                    thread: "main".to_string(),
+                    thread: ThreadName::from("main"),
                 }),
                 Some(r) => {
                     let thread: Option<String> = r.try_get("thread").map_err(sqlx_err)?;
                     let change_id: Option<Vec<u8>> = r.try_get("change_id").map_err(sqlx_err)?;
                     if let Some(t) = thread {
-                        Ok(Head::Attached { thread: t })
+                        Ok(Head::Attached {
+                            thread: ThreadName::from(t),
+                        })
                     } else if let Some(b) = change_id {
                         Ok(Head::Detached {
                             state: Self::bytes_to_id(b)?,
                         })
                     } else {
                         Ok(Head::Attached {
-                            thread: "main".to_string(),
+                            thread: ThreadName::from("main"),
                         })
                     }
                 }
@@ -171,7 +175,7 @@ impl CoreRefBackend for PgRefBackend {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let (thread, change_id): (Option<String>, Option<Vec<u8>>) = match head {
-            Head::Attached { thread } => (Some(thread.clone()), None),
+            Head::Attached { thread } => (Some(thread.to_string()), None),
             Head::Detached { state } => (None, Some(Self::id_to_bytes(state))),
         };
         self.block(async move {
@@ -212,13 +216,10 @@ impl CoreRefBackend for PgRefBackend {
         self.write_head(head)
     }
 
-    fn get_thread(&self, name: &str) -> Result<Option<ChangeId>> {
-        let pool = Arc::clone(&self.pool);
-        let repo_id = self.repo_id;
-        let name = name.to_string();
-        self.block(async move { Self::get_ref_async(&pool, repo_id, &name, true).await })
+    async fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
+        Self::get_ref_async(self.pool.as_ref(), self.repo_id, name.as_str(), true).await
     }
-    fn set_thread(&self, name: &str, state: &ChangeId) -> Result<()> {
+    fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
@@ -227,7 +228,7 @@ impl CoreRefBackend for PgRefBackend {
     }
     fn set_thread_cas(
         &self,
-        name: &str,
+        name: &ThreadName,
         expected: RefExpectation<ChangeId>,
         state: &ChangeId,
     ) -> Result<()> {
@@ -237,47 +238,54 @@ impl CoreRefBackend for PgRefBackend {
         let new_bytes = Self::id_to_bytes(state);
         self.block(async move { match expected { RefExpectation::Any => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET change_id = EXCLUDED.change_id, updated_at = NOW()").bind(repo_id).bind(&name).bind(&new_bytes).execute(pool.as_ref()).await.map_err(sqlx_err)?; } RefExpectation::Missing => { let n = sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT DO NOTHING").bind(repo_id).bind(&name).bind(&new_bytes).execute(pool.as_ref()).await.map_err(sqlx_err)?.rows_affected(); if n == 0 { return Err(HeddleError::Conflict(format!("thread '{}' already exists", name))); } } RefExpectation::Value(old) => { let old_bytes = Self::id_to_bytes(&old); let n = sqlx::query("UPDATE refs SET change_id = $4, updated_at = NOW() WHERE repo_id = $1 AND name = $2 AND is_thread = true AND change_id = $3").bind(repo_id).bind(&name).bind(old_bytes).bind(&new_bytes).execute(pool.as_ref()).await.map_err(sqlx_err)?.rows_affected(); if n == 0 { return Err(HeddleError::Conflict(format!("thread '{}' CAS conflict", name))); } } } Ok(()) })
     }
-    fn delete_thread(&self, name: &str) -> Result<Option<ChangeId>> {
+    fn delete_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
         self.block(async move { let row = sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = true RETURNING change_id").bind(repo_id).bind(&name).fetch_optional(pool.as_ref()).await.map_err(sqlx_err)?; row.map(|r| { let bytes: Vec<u8> = r.try_get("change_id").map_err(sqlx_err)?; Self::bytes_to_id(bytes) }).transpose() })
     }
-    fn delete_thread_cas(&self, name: &str, expected: RefExpectation<ChangeId>) -> Result<()> {
+    fn delete_thread_cas(&self, name: &ThreadName, expected: RefExpectation<ChangeId>) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
         self.block(async move { let n = match expected { RefExpectation::Any | RefExpectation::Missing => sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = true").bind(repo_id).bind(&name).execute(pool.as_ref()).await.map_err(sqlx_err)?.rows_affected(), RefExpectation::Value(old) => { let old_bytes = Self::id_to_bytes(&old); sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = true AND change_id = $3").bind(repo_id).bind(&name).bind(old_bytes).execute(pool.as_ref()).await.map_err(sqlx_err)?.rows_affected() } }; if n == 0 { Err(HeddleError::Conflict(format!("thread '{}' delete CAS conflict", name))) } else { Ok(()) } })
     }
-    fn list_threads(&self) -> Result<Vec<String>> {
+    fn list_threads(&self) -> Result<Vec<ThreadName>> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         self.block(async move {
-            sqlx::query_scalar::<_, String>(
+            let names = sqlx::query_scalar::<_, String>(
                 "SELECT name FROM refs WHERE repo_id = $1 AND is_thread = true ORDER BY name",
             )
             .bind(repo_id)
             .fetch_all(pool.as_ref())
             .await
-            .map_err(sqlx_err)
+            .map_err(sqlx_err)?;
+            Ok(names.into_iter().map(ThreadName::from).collect())
         })
     }
-    fn get_marker(&self, name: &str) -> Result<Option<ChangeId>> {
-        let pool = Arc::clone(&self.pool);
-        let repo_id = self.repo_id;
-        let name = name.to_string();
-        self.block(async move { Self::get_ref_async(&pool, repo_id, &name, false).await })
+    async fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
+        Self::get_ref_async(self.pool.as_ref(), self.repo_id, name.as_str(), false).await
     }
-    fn create_marker(&self, name: &str, state: &ChangeId) -> Result<()> {
-        let pool = Arc::clone(&self.pool);
-        let repo_id = self.repo_id;
-        let name = name.to_string();
+    async fn create_marker(&self, name: &MarkerName, state: &ChangeId) -> Result<()> {
         let bytes = Self::id_to_bytes(state);
-        self.block(async move { let n = sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, false, $3, NOW()) ON CONFLICT DO NOTHING").bind(repo_id).bind(&name).bind(bytes).execute(pool.as_ref()).await.map_err(sqlx_err)?.rows_affected(); if n == 0 { Err(HeddleError::Conflict(format!("marker '{}' already exists", name))) } else { Ok(()) } })
+        let n = sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, false, $3, NOW()) ON CONFLICT DO NOTHING")
+            .bind(self.repo_id)
+            .bind(name.as_str())
+            .bind(bytes)
+            .execute(self.pool.as_ref())
+            .await
+            .map_err(sqlx_err)?
+            .rows_affected();
+        if n == 0 {
+            Err(HeddleError::Conflict(format!("marker '{name}' already exists")))
+        } else {
+            Ok(())
+        }
     }
     fn set_marker_cas(
         &self,
-        name: &str,
+        name: &MarkerName,
         expected: RefExpectation<ChangeId>,
         state: &ChangeId,
     ) -> Result<()> {
@@ -287,59 +295,75 @@ impl CoreRefBackend for PgRefBackend {
         let new_bytes = Self::id_to_bytes(state);
         self.block(async move { match expected { RefExpectation::Any => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, false, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET change_id = EXCLUDED.change_id, updated_at = NOW()").bind(repo_id).bind(&name).bind(&new_bytes).execute(pool.as_ref()).await.map_err(sqlx_err)?; } RefExpectation::Missing => { let n = sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, false, $3, NOW()) ON CONFLICT DO NOTHING").bind(repo_id).bind(&name).bind(&new_bytes).execute(pool.as_ref()).await.map_err(sqlx_err)?.rows_affected(); if n == 0 { return Err(HeddleError::Conflict(format!("marker '{}' already exists", name))); } } RefExpectation::Value(old) => { let old_bytes = Self::id_to_bytes(&old); let n = sqlx::query("UPDATE refs SET change_id = $4, updated_at = NOW() WHERE repo_id = $1 AND name = $2 AND is_thread = false AND change_id = $3").bind(repo_id).bind(&name).bind(old_bytes).bind(&new_bytes).execute(pool.as_ref()).await.map_err(sqlx_err)?.rows_affected(); if n == 0 { return Err(HeddleError::Conflict(format!("marker '{}' CAS conflict", name))); } } } Ok(()) })
     }
-    fn delete_marker(&self, name: &str) -> Result<Option<ChangeId>> {
+    fn delete_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
         self.block(async move { let row = sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = false RETURNING change_id").bind(repo_id).bind(&name).fetch_optional(pool.as_ref()).await.map_err(sqlx_err)?; row.map(|r| { let bytes: Vec<u8> = r.try_get("change_id").map_err(sqlx_err)?; Self::bytes_to_id(bytes) }).transpose() })
     }
-    fn delete_marker_cas(&self, name: &str, expected: RefExpectation<ChangeId>) -> Result<()> {
+    fn delete_marker_cas(&self, name: &MarkerName, expected: RefExpectation<ChangeId>) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
         self.block(async move { let n = match expected { RefExpectation::Any | RefExpectation::Missing => sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = false").bind(repo_id).bind(&name).execute(pool.as_ref()).await.map_err(sqlx_err)?.rows_affected(), RefExpectation::Value(old) => { let old_bytes = Self::id_to_bytes(&old); sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = false AND change_id = $3").bind(repo_id).bind(&name).bind(old_bytes).execute(pool.as_ref()).await.map_err(sqlx_err)?.rows_affected() } }; if n == 0 { Err(HeddleError::Conflict(format!("marker '{}' delete CAS conflict", name))) } else { Ok(()) } })
     }
-    fn list_markers(&self) -> Result<Vec<String>> {
+    fn list_markers(&self) -> Result<Vec<MarkerName>> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         self.block(async move {
-            sqlx::query_scalar::<_, String>(
+            let names = sqlx::query_scalar::<_, String>(
                 "SELECT name FROM refs WHERE repo_id = $1 AND is_thread = false ORDER BY name",
             )
             .bind(repo_id)
             .fetch_all(pool.as_ref())
             .await
-            .map_err(sqlx_err)
+            .map_err(sqlx_err)?;
+            Ok(names.into_iter().map(MarkerName::from).collect())
         })
     }
     fn update_refs(&self, updates: &[RefUpdate]) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let updates = updates.to_vec();
-        self.block(async move { let mut tx = pool.begin().await.map_err(sqlx_err)?; for update in &updates { match update { RefUpdate::Thread { name, expected, new } => match (expected, new) { (_, None) => { sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = true").bind(repo_id).bind(name).execute(&mut *tx).await.map_err(sqlx_err)?; } (RefExpectation::Missing, Some(state)) => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT DO NOTHING").bind(repo_id).bind(name).bind(Self::id_to_bytes(state)).execute(&mut *tx).await.map_err(sqlx_err)?; } (RefExpectation::Value(old), Some(new_state)) => { sqlx::query("UPDATE refs SET change_id = $4, updated_at = NOW() WHERE repo_id = $1 AND name = $2 AND is_thread = true AND change_id = $3").bind(repo_id).bind(name).bind(Self::id_to_bytes(old)).bind(Self::id_to_bytes(new_state)).execute(&mut *tx).await.map_err(sqlx_err)?; } (_, Some(state)) => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET change_id = EXCLUDED.change_id, updated_at = NOW()").bind(repo_id).bind(name).bind(Self::id_to_bytes(state)).execute(&mut *tx).await.map_err(sqlx_err)?; } }, RefUpdate::Marker { name, expected: _, new } => match new { None => { sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = false").bind(repo_id).bind(name).execute(&mut *tx).await.map_err(sqlx_err)?; } Some(state) => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, false, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET change_id = EXCLUDED.change_id, updated_at = NOW()").bind(repo_id).bind(name).bind(Self::id_to_bytes(state)).execute(&mut *tx).await.map_err(sqlx_err)?; } }, RefUpdate::Head { new, .. } => { let (thread, change_id): (Option<String>, Option<Vec<u8>>) = match new { Head::Attached { thread } => (Some(thread.clone()), None), Head::Detached { state } => (None, Some(Self::id_to_bytes(state))), }; sqlx::query("INSERT INTO heads (repo_id, thread, change_id) VALUES ($1, $2, $3) ON CONFLICT (repo_id) DO UPDATE SET thread = EXCLUDED.thread, change_id = EXCLUDED.change_id").bind(repo_id).bind(thread).bind(change_id).execute(&mut *tx).await.map_err(sqlx_err)?; } } } tx.commit().await.map_err(sqlx_err)?; Ok(()) })
+        self.block(async move { let mut tx = pool.begin().await.map_err(sqlx_err)?; for update in &updates { match update { RefUpdate::Thread { name, expected, new } => match (expected, new) { (_, None) => { sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = true").bind(repo_id).bind(name.as_str()).execute(&mut *tx).await.map_err(sqlx_err)?; } (RefExpectation::Missing, Some(state)) => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT DO NOTHING").bind(repo_id).bind(name.as_str()).bind(Self::id_to_bytes(state)).execute(&mut *tx).await.map_err(sqlx_err)?; } (RefExpectation::Value(old), Some(new_state)) => { sqlx::query("UPDATE refs SET change_id = $4, updated_at = NOW() WHERE repo_id = $1 AND name = $2 AND is_thread = true AND change_id = $3").bind(repo_id).bind(name.as_str()).bind(Self::id_to_bytes(old)).bind(Self::id_to_bytes(new_state)).execute(&mut *tx).await.map_err(sqlx_err)?; } (_, Some(state)) => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, true, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET change_id = EXCLUDED.change_id, updated_at = NOW()").bind(repo_id).bind(name.as_str()).bind(Self::id_to_bytes(state)).execute(&mut *tx).await.map_err(sqlx_err)?; } }, RefUpdate::Marker { name, expected: _, new } => match new { None => { sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = false").bind(repo_id).bind(name.as_str()).execute(&mut *tx).await.map_err(sqlx_err)?; } Some(state) => { sqlx::query("INSERT INTO refs (repo_id, name, is_thread, change_id, updated_at) VALUES ($1, $2, false, $3, NOW()) ON CONFLICT (repo_id, name) DO UPDATE SET change_id = EXCLUDED.change_id, updated_at = NOW()").bind(repo_id).bind(name.as_str()).bind(Self::id_to_bytes(state)).execute(&mut *tx).await.map_err(sqlx_err)?; } }, RefUpdate::Head { new, .. } => { let (thread, change_id): (Option<String>, Option<Vec<u8>>) = match new { Head::Attached { thread } => (Some(thread.to_string()), None), Head::Detached { state } => (None, Some(Self::id_to_bytes(state))), }; sqlx::query("INSERT INTO heads (repo_id, thread, change_id) VALUES ($1, $2, $3) ON CONFLICT (repo_id) DO UPDATE SET thread = EXCLUDED.thread, change_id = EXCLUDED.change_id").bind(repo_id).bind(thread).bind(change_id).execute(&mut *tx).await.map_err(sqlx_err)?; } } } tx.commit().await.map_err(sqlx_err)?; Ok(()) })
     }
-    fn resolve(&self, refspec: &str) -> Result<Option<ChangeId>> {
-        resolve_refspec(
-            refspec,
-            || self.read_head(),
-            |name| self.get_thread(name),
-            |name| self.get_marker(name),
-        )
+    async fn resolve(&self, refspec: &str) -> Result<Option<ChangeId>> {
+        if refspec == "@" || refspec == "HEAD" {
+            return match self.read_head()? {
+                Head::Attached { thread } => self.get_thread(&thread).await,
+                Head::Detached { state } => Ok(Some(state)),
+            };
+        }
+        if let Some(id) = self.get_thread(&ThreadName::new(refspec)).await? {
+            return Ok(Some(id));
+        }
+        if let Some(id) = self.get_marker(&MarkerName::new(refspec)).await? {
+            return Ok(Some(id));
+        }
+        if let Ok(id) = ChangeId::parse(refspec) {
+            return Ok(Some(id));
+        }
+        Ok(None)
     }
 }
 
 impl RefBackend for PgRefBackend {
-    fn get_remote_thread(&self, _remote: &str, _track: &str) -> Result<Option<ChangeId>> {
+    fn get_remote_thread(&self, _remote: &str, _thread: &ThreadName) -> Result<Option<ChangeId>> {
         Err(HeddleError::Conflict(
             "remote threading refs are not supported on the server backend".into(),
         ))
     }
-    fn set_remote_thread(&self, _remote: &str, _track: &str, _state: &ChangeId) -> Result<()> {
+    fn set_remote_thread(
+        &self,
+        _remote: &str,
+        _thread: &ThreadName,
+        _state: &ChangeId,
+    ) -> Result<()> {
         Err(HeddleError::Conflict(
             "remote threading refs are not supported on the server backend".into(),
         ))
     }
-    fn delete_remote_thread(&self, _remote: &str, _track: &str) -> Result<Option<ChangeId>> {
+    fn delete_remote_thread(&self, _remote: &str, _thread: &ThreadName) -> Result<Option<ChangeId>> {
         Err(HeddleError::Conflict(
             "remote threading refs are not supported on the server backend".into(),
         ))
@@ -347,7 +371,7 @@ impl RefBackend for PgRefBackend {
     fn list_remotes(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
-    fn list_remote_threads(&self, _remote: &str) -> Result<Vec<String>> {
+    fn list_remote_threads(&self, _remote: &str) -> Result<Vec<ThreadName>> {
         Ok(Vec::new())
     }
 }
