@@ -17,7 +17,7 @@ use crate::bridge::{
     },
     git_notes,
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
-    git_util::ExportStats,
+    git_util::{ExportStats, ExportedRef},
 };
 
 const SUBMODULE_PREFIX: &str = "heddle-submodule:";
@@ -207,6 +207,10 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         // original commit bytes are already present (and whose SHAs we
         // want to preserve verbatim, which means NOT recreating them).
         if bridge.mapping.has_heddle(&state_id) {
+            // Already mapped to an existing commit — it still lands in
+            // the destination, so it counts toward the total even though
+            // nothing is minted here.
+            stats.commits_total += 1;
             continue;
         }
         let message_override = bridge
@@ -223,6 +227,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         )?;
         bridge.mapping.insert(state_id, git_oid);
         stats.states_exported += 1;
+        stats.commits_total += 1;
 
         // Attach a heddle note to the freshly-created commit so the
         // change_id survives a fresh `git clone` of the destination
@@ -268,6 +273,10 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         {
             sync_track_to_branch(&repo, &track_name, git_oid)?;
             stats.threads_synced += 1;
+            stats.branches.push(ExportedRef {
+                name: track_name.clone(),
+                tip: git_oid,
+            });
         }
     }
 
@@ -279,6 +288,10 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             {
                 sync_marker_to_tag(&repo, &marker_name, git_oid)?;
                 stats.markers_synced += 1;
+                stats.tags.push(ExportedRef {
+                    name: marker_name.to_string(),
+                    tip: git_oid,
+                });
             }
         }
     }

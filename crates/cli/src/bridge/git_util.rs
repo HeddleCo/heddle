@@ -136,11 +136,42 @@ impl<'a> GitBridge<'a> {
 }
 
 /// Statistics for export operation.
+///
+/// `commits_total` counts every heddle state that lands in the
+/// destination as a git commit — both freshly-minted commits and states
+/// already mapped to an existing commit (the common git-overlay case,
+/// where `heddle commit` wrote the checkpoint inline). `states_exported`
+/// counts only the freshly-minted subset. They diverge whenever the
+/// destination is already populated: an overlay re-export reports
+/// `commits_total = N` and `states_exported = 0` — the signal that
+/// surfaces "already in sync" instead of a misleading bare
+/// "exported 0 states" (heddle#289, mirroring the import-side
+/// `commits_imported`/`states_created` split from heddle#147).
 #[derive(Debug, Default)]
 pub struct ExportStats {
+    /// Freshly-minted git commits (heddle-native states with no
+    /// preserved git_oid). Stays at 0 when every state was already
+    /// mapped to an existing commit.
     pub states_exported: usize,
+    /// Every state that maps to a commit present in the destination,
+    /// including ones whose commit already existed. Mirrors
+    /// [`ImportStats::commits_imported`].
+    pub commits_total: usize,
     pub threads_synced: usize,
     pub markers_synced: usize,
+    /// Branches written to the destination, paired with their tip
+    /// commit so the summary can show tip short-SHAs.
+    pub branches: Vec<ExportedRef>,
+    /// Tags written to the destination, paired with their tip commit.
+    pub tags: Vec<ExportedRef>,
+}
+
+/// A ref written to the export destination, paired with the commit it
+/// points at (so the export summary can render tip short-SHAs).
+#[derive(Debug, Clone)]
+pub struct ExportedRef {
+    pub name: String,
+    pub tip: gix::hash::ObjectId,
 }
 
 /// Statistics for import operation.
