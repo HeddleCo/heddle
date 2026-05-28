@@ -2287,7 +2287,28 @@ pub struct ReviewNextSchema {
     pub change_id: Option<String>,
     pub headline: Option<String>,
     pub existing_signatures: Option<u32>,
-    pub next: Option<ReviewNextStateSchema>,
+    pub next: RequiredNullableNextState,
+}
+
+/// `next` is ALWAYS present in the runtime envelope — either the pending
+/// review state or an explicit JSON `null`. Modeling it as
+/// `Option<ReviewNextStateSchema>` directly would let schemars drop the
+/// field from the schema's `required` set, advertising a shape the command
+/// never emits. This wrapper keeps the value nullable (its schema delegates
+/// to `Option`'s nullable form) while reporting `_schemars_private_is_option
+/// == false`, so the derive marks `next` required (heddle#272 Codex r7).
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct RequiredNullableNextState(pub Option<ReviewNextStateSchema>);
+
+impl JsonSchema for RequiredNullableNextState {
+    fn schema_name() -> String {
+        "RequiredNullableNextState".to_owned()
+    }
+
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        <Option<ReviewNextStateSchema> as JsonSchema>::json_schema(generator)
+    }
 }
 
 /// The pending review state echoed under `review next`'s `next` field.

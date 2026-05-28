@@ -2985,10 +2985,11 @@ outside clean verification coverage.
 
 `heddle bisect start|good|bad|reset --output json` emit (each carries
 `output_kind` set to the snake-cased subcommand, e.g. `bisect_start`,
-`bisect_good`):
+`bisect_good`). The `start` payload is just the discriminator and status;
+`good`/`bad` also carry a `commit` field for the marked state:
 
 ```json
-{"output_kind": "bisect_start", "status": "started", "current": "hd-sqr398dvx9ay", "remaining": 5, "good": "hd-good123", "bad": "hd-bad456"}
+{"output_kind": "bisect_start", "status": "started"}
 ```
 
 `heddle blame --output json` emits:
@@ -3003,10 +3004,12 @@ outside clean verification coverage.
 {"ingested": true, "commits_imported": 2, "states_created": 2, "reason": "mirror update", "remote": "origin"}
 ```
 
-`heddle cherry-pick --output json` emits:
+`heddle cherry-pick --output json` emits the committed shape by default;
+with `--no-commit` the `new_commit` field is replaced by `"no_commit":
+true` and `status` is `"applied"`:
 
 ```json
-{"output_kind": "cherry_pick", "cherry_picked": true, "source_change_id": "hd-source123", "change_id": "hd-result456", "conflicts": []}
+{"output_kind": "cherry_pick", "status": "committed", "commit": "hd-source123", "new_commit": "hd-result456"}
 ```
 
 `heddle collapse --output json` emits:
@@ -3059,10 +3062,11 @@ outside clean verification coverage.
 {"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
 ```
 
-`heddle fork --output json` emits:
+`heddle fork --output json` emits (`thread` is `null` unless `--name`
+names a new thread for the fork):
 
 ```json
-{"output_kind": "fork", "thread": "review/fix-parser", "from": "main", "base_change_id": "hd-sqr398dvx9ay", "message": "forked review/fix-parser from main"}
+{"output_kind": "fork", "change_id": "hd-result456", "content_hash": "b9c34842", "thread": "review/fix-parser", "from_state": "hd-sqr398dvx9ay", "message": "Created fork hd-result456 from hd-sqr398dvx9ay"}
 ```
 
 `heddle fsck --output json` emits:
@@ -3096,10 +3100,12 @@ outside clean verification coverage.
 ```
 
 `heddle purge apply|list --output json` emit (each carries `output_kind`
-set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`):
+set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`).
+`ignore_hint` is present only when the purged path is not yet covered by a
+`.heddleignore` / `.gitignore` glob:
 
 ```json
-{"output_kind": "purge_apply", "purged": true, "redaction_id": "redact-123", "bytes_removed": 2048, "redactions": [{"redaction_id": "redact-123", "purged": true}]}
+{"output_kind": "purge_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "redactions_marked": 1, "blob_bytes_removed": false, "blob_remains_in_pack": false, "purger": "A. Engineer <a@example.com>", "message": "purged blob sha256:abc123 at secrets.env in hd-sqr398dvx9ay (1 redaction(s) marked)", "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
 
 `heddle query --output json` emits:
@@ -3116,18 +3122,23 @@ set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`):
 
 `heddle redact apply|list|show --output json` emit (each carries
 `output_kind` set to the snake-cased subcommand, e.g. `redact_apply`,
-`redact_list`):
+`redact_list`). `signature_algorithm` is present only when the redaction
+is signed (`--sign-with`); `ignore_hint` only when the path is not yet
+covered by a `.heddleignore` / `.gitignore` glob:
 
 ```json
-{"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "purged": false}
+{"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "redactor": "A. Engineer <a@example.com>", "redacted_at": "2026-01-01T00:00:00Z", "all_states": false, "states_redacted": 1, "signed": false, "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
 
 `heddle redact trust add|list|remove --output json` emit (each carries
 `output_kind` set to the snake-cased subcommand, e.g. `redact_trust_add`,
-`redact_trust_list`):
+`redact_trust_list`). The `add` payload flattens the added entry alongside
+`output_kind` (`label` present only when `--label` is supplied); `list`
+returns a `trusted_keys` array plus `count`; `remove` returns a `removed`
+count:
 
 ```json
-{"output_kind": "redact_trust_add", "trusted_keys": [{"algorithm": "ed25519", "label": "security", "public_key": "abc123"}], "added": true, "removed": false}
+{"output_kind": "redact_trust_add", "algorithm": "ed25519", "public_key": "abc123def456", "label": "security"}
 ```
 
 `heddle resolve --output json` emits:

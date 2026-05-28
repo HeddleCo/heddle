@@ -31,7 +31,7 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use cli::cli::commands::{
-    CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, build_command_catalog,
+    CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, build_command_catalog, schema_for_verb,
 };
 
 use super::{heddle, heddle_output};
@@ -699,18 +699,236 @@ fn doc_sample_top_level_keys(doc: &str, output_kind_value: &str) -> Option<BTree
     None
 }
 
+/// The heddle#272 named-by-persona sweep group (mirrors the second block of
+/// [`SWEPT`]). The doc-sample-vs-runtime invariant is EXHAUSTIVE over every
+/// one of these verbs that carries a documented `output_kind` sample — there
+/// is no hand-picked subset. Verbs whose specific `output_kind` is not
+/// individually documented (they ride a grouped sample under a representative
+/// sibling, e.g. `purge list` under `purge_apply`) are skipped automatically
+/// because no sample with their discriminator exists.
+const SWEPT_272: &[&str] = &[
+    "stack",
+    "stack ready",
+    "stack snapshot",
+    "goto",
+    "fork",
+    "revert",
+    "purge apply",
+    "purge list",
+    "redact apply",
+    "redact list",
+    "redact show",
+    "redact trust add",
+    "redact trust list",
+    "redact trust remove",
+    "stash list",
+    "stash show",
+    "clean",
+    "discuss open",
+    "discuss append",
+    "discuss resolve",
+    "discuss list",
+    "discuss show",
+    "context set",
+    "context get",
+    "context list",
+    "context history",
+    "context edit",
+    "context supersede",
+    "context rm",
+    "context check",
+    "context suggest",
+    "context audit",
+    "review show",
+    "review sign",
+    "review next",
+    "review health",
+    "cherry-pick",
+    "bisect start",
+    "bisect good",
+    "bisect bad",
+    "bisect reset",
+];
+
+fn sv(args: &[&str]) -> Vec<String> {
+    args.iter().map(|s| s.to_string()).collect()
+}
+
+/// `change_id` of the current HEAD state in `dir` (first `log` record).
+fn head_change_id(dir: &std::path::Path) -> String {
+    let stdout = heddle(&["--output", "json", "log"], Some(dir)).expect("heddle log");
+    let first = stdout.lines().next().unwrap_or("");
+    let parsed: Value = serde_json::from_str(first).expect("log stdout is JSON");
+    parsed["states"][0]["change_id"]
+        .as_str()
+        .expect("log states[0].change_id")
+        .to_string()
+}
+
+/// Build a fixture repo carrying exactly the state `output_kind`'s verb needs,
+/// plus the argv (after `--output json`) that drives it. `None` means the verb
+/// has no synthetic-fixture invocation here — the caller then requires the
+/// verb's registered schema to pin every documented key instead.
+///
+/// Returning a value here is the structural anti-subset guarantee: a #272 verb
+/// with a documented sample and a *generic* schema (one that pins none of the
+/// real fields, as the inline `serde_json::json!` verbs do) MUST appear in this
+/// match or the invariant test fails demanding it.
+fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
+    let case = match output_kind {
+        "bisect_start" => (init_fixture(), sv(&["bisect", "start"])),
+        "clean" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("untracked.txt"), "junk").unwrap();
+            (t, sv(&["clean", "--dry-run"]))
+        }
+        "fork" => (init_fixture(), sv(&["fork"])),
+        "goto" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            (t, sv(&["goto", "main"]))
+        }
+        "revert" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit base");
+            std::fs::write(t.path().join("a.txt"), "base\nmore").unwrap();
+            heddle(&["commit", "-m", "second"], Some(t.path())).expect("commit second");
+            (t, sv(&["revert", "HEAD"]))
+        }
+        "stack" => (init_fixture(), sv(&["stack"])),
+        "stack_ready" => (init_fixture(), sv(&["stack", "ready"])),
+        "stack_snapshot" => {
+            let t = init_fixture();
+            heddle(&["start", "feature-x", "--workspace", "solid"], Some(t.path()))
+                .expect("start feature-x");
+            (t, sv(&["stack", "snapshot", "--thread", "feature-x"]))
+        }
+        "stash_list" => (init_fixture(), sv(&["stash", "list"])),
+        "stash_show" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            std::fs::write(t.path().join("a.txt"), "base\nwip").unwrap();
+            heddle(&["stash", "push", "-m", "wip"], Some(t.path())).expect("stash push");
+            (t, sv(&["stash", "show"]))
+        }
+        "cherry_pick" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("f.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit base");
+            heddle(&["fork", "--name", "feature"], Some(t.path())).expect("fork feature");
+            heddle(&["goto", "feature"], Some(t.path())).expect("goto feature");
+            std::fs::write(t.path().join("g.txt"), "feat").unwrap();
+            heddle(&["commit", "-m", "feature work"], Some(t.path())).expect("commit feature");
+            let src = head_change_id(t.path());
+            heddle(&["goto", "main"], Some(t.path())).expect("goto main");
+            (t, vec!["cherry-pick".to_string(), src])
+        }
+        "redact_apply" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("secrets.env"), "TOKEN=abc").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            (
+                t,
+                sv(&["redact", "apply", "HEAD", "--path", "secrets.env", "--reason", "credential"]),
+            )
+        }
+        "purge_apply" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("secrets.env"), "TOKEN=abc").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(
+                &["redact", "apply", "HEAD", "--path", "secrets.env", "--reason", "credential"],
+                Some(t.path()),
+            )
+            .expect("redact apply");
+            (
+                t,
+                sv(&["purge", "apply", "HEAD", "--path", "secrets.env", "--force"]),
+            )
+        }
+        "redact_trust_add" => (
+            init_fixture(),
+            sv(&[
+                "redact", "trust", "add", "--public-key", "abc123def456", "--algorithm", "ed25519",
+                "--label", "security",
+            ]),
+        ),
+        "discuss_open" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "fn verify(){}").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            (t, sv(&["discuss", "open", "a.txt", "verify", "check edge case"]))
+        }
+        "discuss_list" => (init_fixture(), sv(&["discuss", "list"])),
+        "context_set" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "code").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            (
+                t,
+                sv(&["context", "set", "--path", "a.txt", "--scope", "file", "-m", "owner note"]),
+            )
+        }
+        "context_list" => (init_fixture(), sv(&["context", "list"])),
+        "review_show" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "fn verify(){}").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            let cid = head_change_id(t.path());
+            (t, vec!["review".to_string(), "show".to_string(), cid])
+        }
+        "review_next" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(&["fork"], Some(t.path())).expect("fork");
+            (t, sv(&["review", "next"]))
+        }
+        "review_health" => (init_fixture(), sv(&["review", "health"])),
+        _ => return None,
+    };
+    Some(case)
+}
+
+/// Top-level property names declared by the registered schema for `verb`, or
+/// an empty set when the verb has no schema or only a generic envelope.
+fn schema_property_names(verb: &str) -> BTreeSet<String> {
+    let Some(schema) = schema_for_verb(verb) else {
+        return BTreeSet::new();
+    };
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|props| props.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 #[test]
-fn swept_doc_samples_match_runtime_keys() {
-    // heddle#272 r6 (Codex P2 x2): `doctor schemas` only checks that a
-    // documented sample's keys are a SUBSET of the schema's properties —
-    // it never checks the sample against the actual `--output json`
-    // payload. So a sample can describe a stale shape (the old
-    // key/value-style context payload; the `thread`/`snapshot` stack
-    // wrapper) and pass. This test closes that gap: for verbs we can
-    // invoke in a fixture, the documented sample's top-level keys must be
-    // a subset of the real runtime keys, and `output_kind` must be
-    // present in both. Doc drift now turns CI red until the sample is
-    // corrected.
+fn doc_samples_match_runtime_for_every_swept_272_verb() {
+    // heddle#272 r7 (Codex P2 x7): the r6 doc-sample-vs-runtime check ran a
+    // hand-picked list of three verbs, so seven more stale samples
+    // (cherry-pick, purge apply, bisect start, fork, redact apply, redact
+    // trust add, review next) sailed through and Codex had to find them by
+    // hand. This invariant closes the loophole: it is EXHAUSTIVE over the
+    // entire #272 sweep group. Every #272 verb that carries a documented
+    // `output_kind` sample must either
+    //
+    //   (a) be invoked here against a fixture, with the documented sample's
+    //       top-level key set asserted EXACTLY equal to the live payload's,
+    //       or
+    //   (b) have a registered schema that pins every documented key
+    //       (doc-keys ⊆ schema-properties), so `doctor schemas` guards it.
+    //
+    // (b) is required because a few verbs can't be exercised with a synthetic
+    // fixture (`review sign` cryptographically validates its `--signature`).
+    // Crucially, the inline `serde_json::json!` verbs resolve to a GENERIC
+    // operation-record schema (`additionalProperties: true`) that pins NONE
+    // of their real fields, so (b) fails for them and they are forced down
+    // path (a). A new generic-schema verb added to the doc without a runtime
+    // case here fails this test rather than deferring to an r8.
     let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -719,74 +937,85 @@ fn swept_doc_samples_match_runtime_keys() {
     let doc = std::fs::read_to_string(&doc_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", doc_path.display()));
 
-    let fixture = init_fixture();
-    // Build a stack so `stack snapshot` has a member to scope to (an
-    // empty repo's `main` is not part of any stack).
-    heddle(
-        &["start", "feature-x", "--workspace", "solid"],
-        Some(fixture.path()),
-    )
-    .expect("heddle start feature-x");
-    std::fs::write(fixture.path().join("annotated.txt"), "content")
-        .expect("write annotated fixture file");
-
-    // (output_kind value, runtime argv) — each invocation must succeed in
-    // the fixture and the documented sample must mirror its key set.
-    let cases: &[(&str, &[&str])] = &[
-        (
-            "stack_snapshot",
-            &["--output", "json", "stack", "snapshot", "--thread", "feature-x"],
-        ),
-        (
-            "context_set",
-            &[
-                "--output",
-                "json",
-                "context",
-                "set",
-                "--path",
-                "annotated.txt",
-                "--scope",
-                "file",
-                "-m",
-                "owner note",
-            ],
-        ),
-        ("context_list", &["--output", "json", "context", "list"]),
-    ];
-
     let mut failures = Vec::new();
-    for (output_kind, argv) in cases {
-        let runtime_keys = runtime_top_level_keys(argv, fixture.path());
-        let Some(doc_keys) = doc_sample_top_level_keys(&doc, output_kind) else {
-            failures.push(format!(
-                "{output_kind}: no documented `{output_kind}` sample found in docs/json-schemas.md"
-            ));
+    let mut covered_by_runtime = 0usize;
+    let mut covered_by_schema = 0usize;
+
+    for &verb in SWEPT_272 {
+        let output_kind = expected_output_kind(verb);
+        let Some(doc_keys) = doc_sample_top_level_keys(&doc, &output_kind) else {
+            // This verb's discriminator is not individually documented
+            // (grouped under a representative sibling) — nothing to check.
             continue;
         };
+
         if !doc_keys.contains("output_kind") {
             failures.push(format!(
-                "{output_kind}: documented sample is missing the `output_kind` key"
+                "{output_kind} ({verb}): documented sample is missing the `output_kind` key"
             ));
+            continue;
         }
-        if !runtime_keys.contains("output_kind") {
-            failures.push(format!(
-                "{output_kind}: runtime payload is missing the `output_kind` key (keys: {runtime_keys:?})"
-            ));
+
+        if let Some((fixture, argv)) = runtime_doc_case(&output_kind) {
+            let argv_refs: Vec<&str> = std::iter::once("--output")
+                .chain(std::iter::once("json"))
+                .chain(argv.iter().map(String::as_str))
+                .collect();
+            let runtime_keys = runtime_top_level_keys(&argv_refs, fixture.path());
+            if !runtime_keys.contains("output_kind") {
+                failures.push(format!(
+                    "{output_kind} ({verb}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
+                ));
+            }
+            if doc_keys != runtime_keys {
+                let doc_only: Vec<&String> = doc_keys.difference(&runtime_keys).collect();
+                let runtime_only: Vec<&String> = runtime_keys.difference(&doc_keys).collect();
+                failures.push(format!(
+                    "{output_kind} ({verb}): documented sample does not match the live \
+                     `--output json` payload.\n      in doc only:     {doc_only:?}\n      \
+                     in runtime only: {runtime_only:?}\n      doc keys:     {doc_keys:?}\n      \
+                     runtime keys: {runtime_keys:?}"
+                ));
+            }
+            covered_by_runtime += 1;
+            continue;
         }
-        let extra: Vec<&String> = doc_keys.difference(&runtime_keys).collect();
-        if !extra.is_empty() {
+
+        // No runtime case: the registered schema MUST pin every documented
+        // key, otherwise the sample is unguarded and could drift freely.
+        let schema_props = schema_property_names(verb);
+        let unpinned: Vec<&String> = doc_keys
+            .iter()
+            .filter(|k| k.as_str() != "output_kind")
+            .filter(|k| !schema_props.contains(*k))
+            .collect();
+        if unpinned.is_empty() {
+            covered_by_schema += 1;
+        } else {
             failures.push(format!(
-                "{output_kind}: documented sample has keys absent from the real `--output json` \
-                 payload: {extra:?}\n      doc keys:     {doc_keys:?}\n      runtime keys: {runtime_keys:?}"
+                "{output_kind} ({verb}): no runtime case AND its registered schema does not pin \
+                 documented keys {unpinned:?} (schema is generic). Add a `runtime_doc_case` arm \
+                 so the sample is checked against the live payload."
             ));
         }
     }
 
     assert!(
         failures.is_empty(),
-        "Documented samples drifted from the real runtime payloads:\n  - {}",
+        "Documented #272 samples drifted from runtime / are unguarded:\n  - {}",
         failures.join("\n  - ")
+    );
+
+    // Sanity floor: the seven Codex r7 findings are all runtime-checked, and
+    // at least one verb leans on the schema path (`review sign`). If these
+    // collapse to zero the harness silently stopped covering anything.
+    assert!(
+        covered_by_runtime >= 18,
+        "expected the #272 sweep to runtime-check most documented verbs; only {covered_by_runtime} ran"
+    );
+    assert!(
+        covered_by_schema >= 1,
+        "expected at least one schema-guarded #272 verb (review sign); got {covered_by_schema}"
     );
 }
 
