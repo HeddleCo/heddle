@@ -6,7 +6,8 @@ use std::{collections::BTreeSet, path::Path};
 use anyhow::{Result, anyhow};
 use objects::{
     object::{
-        AnnotationStatus, Blob, ChangeId, ContextTarget, DiffKind, FileChangeSet, State, Tree,
+        AnnotationStatus, Blob, ChangeId, ContextTarget, DiffKind, EntryType, FileChangeSet,
+        FileMode, State, Tree, TreeEntry,
     },
     worktree::diff_blobs,
 };
@@ -269,16 +270,28 @@ pub fn cmd_diff(
                     let counts = change_line_counts(raw_lines.as_deref());
                     (None, Some(counts))
                 } else {
-                    (raw_lines.map(|lines| unified_hunks(lines, unified)), None)
+                    (
+                        raw_lines.map(|lines| unified_hunks(lines, unified, &eol)),
+                        None,
+                    )
                 };
 
+                let kind = change.kind.to_string();
+                let mode = change_file_mode(
+                    &repo,
+                    from_tree.as_ref(),
+                    to_tree.as_ref(),
+                    &change.path,
+                    &kind,
+                );
                 FileChange {
                     path: change.path.clone(),
-                    kind: change.kind.to_string(),
+                    kind,
                     binary,
                     lines,
                     line_counts,
                     eol,
+                    mode,
                     ..Default::default()
                 }
             })
@@ -387,7 +400,11 @@ fn render_plain_git_head_diff(
     // and feed them through the same `diff_blobs` + renderer pipeline
     // the heddle paths use — that way the `\ No newline at end of
     // file` handling stays in one place.
-    if patch && !stat && !name_only {
+    //
+    // JSON output carries a `.patch` field whenever a repo is available,
+    // regardless of the `--patch` flag, so we inflate hunks for JSON too.
+    let json = should_output_json(cli, None);
+    if (patch || json) && !stat && !name_only {
         let changes = plain_git_file_changes_with_hunks(probe, unified)?;
         return render_status_changes(cli, changes, stat, name_only, patch);
     }
@@ -496,11 +513,14 @@ fn plain_git_file_change(
     diff_kind: DiffKind,
     unified: usize,
 ) -> Result<FileChange> {
-    let old_blob = match (head_tree, &diff_kind) {
+    let (old_blob, old_mode) = match (head_tree, &diff_kind) {
         (Some(tree), DiffKind::Modified | DiffKind::Deleted) => {
-            plain_git_lookup_blob(git_repo, tree, path)?
+            match plain_git_lookup_blob_and_mode(git_repo, tree, path)? {
+                Some((blob, mode)) => (Some(blob), Some(mode)),
+                None => (None, None),
+            }
         }
-        _ => None,
+        _ => (None, None),
     };
     let new_blob = match diff_kind {
         DiffKind::Added | DiffKind::Modified => {
@@ -509,6 +529,14 @@ fn plain_git_file_change(
             // only so the rendered patch at least names the path.
             read_worktree_blob_for_diff(&root.join(path)).ok()
         }
+        _ => None,
+    };
+    // Added files take their mode from the live worktree; deleted files
+    // from the HEAD tree entry resolved above. (A pure mode change on a
+    // modify isn't surfaced as a header here.)
+    let mode = match diff_kind {
+        DiffKind::Added => worktree_file_mode(&root.join(path)),
+        DiffKind::Deleted => old_mode,
         _ => None,
     };
     let (lines, eol, binary) = compute_plain_git_hunks(
@@ -523,23 +551,32 @@ fn plain_git_file_change(
         binary,
         lines,
         eol,
+        mode,
         ..Default::default()
     })
 }
 
-fn plain_git_lookup_blob(
+fn plain_git_lookup_blob_and_mode(
     git_repo: &gix::Repository,
     tree: &mut gix::Tree<'_>,
     path: &std::path::Path,
-) -> Result<Option<Blob>> {
+) -> Result<Option<(Blob, FileMode)>> {
     let Some(entry) = tree.peel_to_entry_by_path(path)? else {
         return Ok(None);
     };
-    if !entry.mode().is_blob() {
+    let entry_mode = entry.mode();
+    if !entry_mode.is_blob_or_symlink() {
         return Ok(None);
     }
+    let mode = if entry_mode.is_link() {
+        FileMode::Symlink
+    } else if entry_mode.is_executable() {
+        FileMode::Executable
+    } else {
+        FileMode::Normal
+    };
     let object = git_repo.find_object(entry.object_id())?;
-    Ok(Some(Blob::new(object.data.clone())))
+    Ok(Some((Blob::new(object.data.clone()), mode)))
 }
 
 fn compute_plain_git_hunks(
@@ -594,7 +631,7 @@ fn compute_plain_git_hunks(
         }
     };
     match attempt() {
-        Ok((lines, eol)) => (Some(unified_hunks(lines, unified)), eol, false),
+        Ok((lines, eol)) => (Some(unified_hunks(lines, unified, &eol)), eol, false),
         Err(error) if is_binary_diff_error(&error) => {
             (None, FileEolState::default(), true)
         }
@@ -613,14 +650,14 @@ fn render_worktree_status_diff(
     unified: usize,
     repo: Option<&Repository>,
 ) -> Result<()> {
-    // `--patch` is the only printer that actually needs the hunk
-    // vector. The other printers — `--stat`, `--name-only`, the
-    // default pretty printer — read only kind/path off the status
-    // entries, so we keep the cheap status-only construction for
-    // them. JSON consumers always get a `patch` field when hunks
-    // are available, which is why we also inflate when we know a
-    // heddle Repository is around.
-    let want_hunks = patch
+    // `--patch` and JSON output are the two consumers that actually
+    // need the hunk vector: `--patch` prints it, and JSON always carries
+    // a `.patch` field when a repo is available (regardless of the CLI
+    // flag). The other printers — `--stat`, `--name-only`, the default
+    // pretty printer — read only kind/path off the status entries, so we
+    // keep the cheap status-only construction for them.
+    let json = should_output_json(cli, None);
+    let want_hunks = (patch || json)
         && !stat
         && !name_only
         && repo.is_some();
@@ -714,21 +751,24 @@ fn make_status_file_change(
     unified: usize,
 ) -> FileChange {
     let path_str = path.display().to_string();
-    let (lines, eol, binary) = if want_hunks && let Some(repo) = repo {
+    let (lines, eol, binary, mode) = if want_hunks && let Some(repo) = repo {
+        // Worktree status diffs have no `to_tree`; the add mode comes
+        // from the live worktree, the delete mode from `from_tree`.
+        let mode = change_file_mode(repo, from_tree, None, &path_str, kind);
         match get_worktree_diff(repo, from_tree, &path_str, &diff_kind) {
-            Ok((raw, eol)) => (Some(unified_hunks(raw, unified)), eol, false),
+            Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false, mode),
             Err(error) if is_binary_diff_error(&error) => {
-                (None, FileEolState::default(), true)
+                (None, FileEolState::default(), true, mode)
             }
             // Worktree read errors on a status-listed file mean the
             // file vanished between the status scan and the diff
             // attempt. Fall back to status-only; the renderer prints
             // the file header without a body, matching git's
             // behaviour for transient races.
-            Err(_) => (None, FileEolState::default(), false),
+            Err(_) => (None, FileEolState::default(), false, mode),
         }
     } else {
-        (None, FileEolState::default(), false)
+        (None, FileEolState::default(), false, None)
     };
     FileChange {
         path: path_str,
@@ -736,6 +776,7 @@ fn make_status_file_change(
         binary,
         lines,
         eol,
+        mode,
         ..Default::default()
     }
 }
@@ -827,7 +868,7 @@ pub fn compute_state_diff(
                 .err()
                 .is_some_and(is_binary_diff_error);
             let (lines, eol) = match diff_result {
-                Ok((lines, eol)) => (Some(unified_hunks(lines, unified)), eol),
+                Ok((lines, eol)) => (Some(unified_hunks(lines, unified, &eol)), eol),
                 Err(_) => (None, FileEolState::default()),
             };
             FileChange {
@@ -931,7 +972,7 @@ pub fn compute_tree_diff(
                 .err()
                 .is_some_and(is_binary_diff_error);
             let (lines, eol) = match diff_result {
-                Ok((lines, eol)) => (Some(unified_hunks(lines, unified)), eol),
+                Ok((lines, eol)) => (Some(unified_hunks(lines, unified, &eol)), eol),
                 Err(_) => (None, FileEolState::default()),
             };
             FileChange {
@@ -980,9 +1021,22 @@ fn strip_line_hunks(changes: Vec<FileChange>) -> Vec<FileChange> {
         .collect()
 }
 
-fn unified_hunks(lines: Vec<LineDiff>, context: usize) -> Vec<LineDiff> {
-    if lines.is_empty() || !lines.iter().any(|line| line.prefix != " ") {
+fn unified_hunks(lines: Vec<LineDiff>, context: usize, eol: &FileEolState) -> Vec<LineDiff> {
+    if lines.is_empty() {
         return lines;
+    }
+    if !lines.iter().any(|line| line.prefix != " ") {
+        // No `+`/`-` lines. The only way an all-context diff is still a
+        // real change is a trailing-newline-only edit (`hello\n` <->
+        // `hello`): `diff_blobs` strips terminators, so the changed tail
+        // line collapses to shared context. Synthesize a single tail
+        // hunk so the renderer can split it and attach the
+        // `\ No newline at end of file` marker. Otherwise it's a genuine
+        // no-op — return the lines untouched (no hunk header).
+        if eol.old_has_final_newline == eol.new_has_final_newline {
+            return lines;
+        }
+        return eol_only_tail_hunk(lines, context);
     }
 
     let mut ranges = Vec::<(usize, usize)>::new();
@@ -1029,6 +1083,27 @@ fn unified_hunks(lines: Vec<LineDiff>, context: usize) -> Vec<LineDiff> {
         });
         output.extend(trim_trailing_added_decorations(&lines[start..end]));
     }
+    output
+}
+
+/// Build a single hunk anchored on the file's last line for a
+/// trailing-newline-only change. The body is `context` lines plus the
+/// tail (all shared context); the renderer (`render_patch_hunks`) splits
+/// the tail into a `-`/`+` pair and attaches the no-newline marker to
+/// the side that lacks the terminator. Mirrors `git diff`'s hunk for an
+/// EOL-only edit (e.g. `@@ -2,4 +2,4 @@` for a 5-line file at context 3).
+fn eol_only_tail_hunk(lines: Vec<LineDiff>, context: usize) -> Vec<LineDiff> {
+    let end = lines.len();
+    let start = end.saturating_sub(context + 1);
+    let (old_start, old_len, new_start, new_len) = hunk_span(&lines, start, end);
+    let mut output = Vec::with_capacity(end - start + 1);
+    output.push(LineDiff {
+        prefix: "@".to_string(),
+        content: format!("@ -{},{} +{},{} @@", old_start, old_len, new_start, new_len),
+        old_line: None,
+        new_line: None,
+    });
+    output.extend_from_slice(&lines[start..end]);
     output
 }
 
@@ -1207,10 +1282,12 @@ fn get_worktree_diff(
             Ok((number_lines(blob_lines(&new_blob, "+")?), eol))
         }
         DiffKind::Deleted => {
+            // `find_blob_in_tree` walks the path component by component;
+            // a root-only `tree.get(path)` misses nested deletions like
+            // `src/nested/file.txt` and would drop the deletion hunk.
             if let Some(tree) = from_tree
-                && let Some(entry) = tree.get(path)
+                && let Some(blob) = find_blob_in_tree(repo, tree, path)?
             {
-                let blob = repo.require_blob(&entry.hash)?;
                 let eol = eol_for_deleted(&blob);
                 return Ok((number_lines(blob_lines(&blob, "-")?), eol));
             }
@@ -1397,7 +1474,7 @@ fn rename_lines(
         .iter()
         .map(|line| LineDiff::new(line.prefix(), line.content()))
         .collect();
-    Ok(Some((unified_hunks(number_lines(lines), unified), eol)))
+    Ok(Some((unified_hunks(number_lines(lines), unified, &eol), eol)))
 }
 
 fn blob_from_tree(repo: &Repository, tree: Option<&Tree>, path: &str) -> Result<Option<Blob>> {
@@ -1631,11 +1708,29 @@ fn number_lines(lines: Vec<LineDiff>) -> Vec<LineDiff> {
 }
 
 fn find_blob_in_tree(repo: &Repository, tree: &Tree, path: &str) -> Result<Option<Blob>> {
-    let parts: Vec<&str> = path.split('/').collect();
-    find_blob_recursive(repo, tree, &parts)
+    match find_entry_in_tree(repo, tree, path)? {
+        Some(entry) => Ok(Some(repo.require_blob(&entry.hash)?)),
+        None => Ok(None),
+    }
 }
 
-fn find_blob_recursive(repo: &Repository, tree: &Tree, parts: &[&str]) -> Result<Option<Blob>> {
+/// Resolve a path to its `TreeEntry`, descending through subtrees.
+///
+/// `Tree::get` binary-searches a single tree's direct children only, so
+/// a nested path like `src/nested/file.txt` must be walked component by
+/// component — a root-level `tree.get("src/nested/file.txt")` always
+/// misses. Returns the entry for a blob or symlink leaf; `None` for a
+/// missing path or a directory leaf.
+fn find_entry_in_tree(repo: &Repository, tree: &Tree, path: &str) -> Result<Option<TreeEntry>> {
+    let parts: Vec<&str> = path.split('/').collect();
+    find_entry_recursive(repo, tree, &parts)
+}
+
+fn find_entry_recursive(
+    repo: &Repository,
+    tree: &Tree,
+    parts: &[&str],
+) -> Result<Option<TreeEntry>> {
     if parts.is_empty() {
         return Ok(None);
     }
@@ -1647,23 +1742,68 @@ fn find_blob_recursive(repo: &Repository, tree: &Tree, parts: &[&str]) -> Result
     };
 
     if parts.len() == 1 {
-        if entry.is_blob() || entry.entry_type == objects::object::EntryType::Symlink {
-            return Ok(Some(repo.require_blob(&entry.hash)?));
+        if entry.is_blob() || entry.entry_type == EntryType::Symlink {
+            return Ok(Some(entry.clone()));
         }
     } else if entry.is_tree()
         && let Some(subtree) = repo.store().get_tree(&entry.hash)?
     {
-        return find_blob_recursive(repo, &subtree, &parts[1..]);
+        return find_entry_recursive(repo, &subtree, &parts[1..]);
     }
 
     Ok(None)
+}
+
+/// Resolve a worktree path's git file mode for patch headers. A symlink
+/// reports `120000`; a regular file with any executable bit set reports
+/// `100755`; everything else `100644`. Read failures fall back to `None`
+/// (the renderer then emits the regular-file default).
+fn worktree_file_mode(path: &Path) -> Option<FileMode> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() {
+        return Some(FileMode::Symlink);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 != 0 {
+            return Some(FileMode::Executable);
+        }
+    }
+    Some(FileMode::Normal)
+}
+
+/// Pick the git file mode the patch renderer stamps on an add/delete.
+/// Added files take the content-side mode (the `to_tree` entry for a
+/// state-to-state diff, otherwise the live worktree); deleted files take
+/// the old `from_tree` entry's mode. Other kinds carry no mode header.
+fn change_file_mode(
+    repo: &Repository,
+    from_tree: Option<&Tree>,
+    to_tree: Option<&Tree>,
+    path: &str,
+    kind: &str,
+) -> Option<FileMode> {
+    match kind {
+        "added" => match to_tree {
+            Some(tree) => find_entry_in_tree(repo, tree, path)
+                .ok()
+                .flatten()
+                .map(|entry| entry.mode),
+            None => worktree_file_mode(&repo.root().join(path)),
+        },
+        "deleted" => from_tree
+            .and_then(|tree| find_entry_in_tree(repo, tree, path).ok().flatten())
+            .map(|entry| entry.mode),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::unified_hunks;
     use crate::cli::commands::diff::diff_types::{
-        DiffStats, FileChange, LineCounts, LineDiff, change_line_counts,
+        DiffStats, FileChange, FileEolState, LineCounts, LineDiff, change_line_counts,
     };
 
     fn stat_change(kind: &str, counts: LineCounts) -> FileChange {
@@ -1747,7 +1887,7 @@ mod tests {
             LineDiff::with_lines(" ", "fn existing() {}", Some(2), Some(4)),
         ];
 
-        let hunk = unified_hunks(lines, 3);
+        let hunk = unified_hunks(lines, 3, &FileEolState::default());
 
         assert!(
             hunk.iter()

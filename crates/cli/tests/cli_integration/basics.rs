@@ -63,6 +63,36 @@ fn heddle_adopt(path: &std::path::Path) {
     heddle(&["adopt"], Some(path)).unwrap();
 }
 
+/// Pipe a patch into `git <args>` (e.g. `["apply", "--check"]`) run in
+/// `dir` and return the captured output. Shared by the round-trip tests
+/// that prove `heddle diff --patch` produces a body real git accepts.
+fn run_git_apply(dir: &std::path::Path, patch: &str, args: &[&str]) -> Output {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    child.wait_with_output().expect("git apply should finish")
+}
+
+fn git_apply(dir: &std::path::Path, patch: &str) {
+    let out = run_git_apply(dir, patch, &["apply"]);
+    assert!(
+        out.status.success(),
+        "git apply must accept the patch;\npatch=\n{patch}\nstderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn json_stdout(output: &Output, context: &str) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
         panic!(
@@ -3831,5 +3861,411 @@ fn test_cli_diff_name_only_does_not_emit_patch_body() {
     assert!(
         listing.contains("a.txt") && listing.contains("b.txt"),
         "name-only output must still list each changed path:\n{listing}"
+    );
+}
+
+/// Adding an empty tracked file must still produce a patch: git emits
+/// the `new file mode` extended header with no hunk body and `git apply`
+/// creates the file from that alone. The old `has_hunk_body` blanket
+/// skip dropped the change entirely (empty blob -> empty hunk vector ->
+/// no header), so applying the diff never created the file.
+#[test]
+fn test_cli_diff_patch_empty_file_add_round_trips() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("empty.txt"), "").unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+    assert!(
+        patch.contains("diff --git a/empty.txt b/empty.txt"),
+        "empty add must carry the `diff --git` header:\n{patch}"
+    );
+    assert!(
+        patch.contains("new file mode 100644"),
+        "empty add must carry the `new file mode` header:\n{patch}"
+    );
+    assert!(
+        !patch.contains("@@"),
+        "empty add is header-only — no hunk body (matches git):\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("seed.txt"), "seed\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed");
+    git_apply(apply_dir.path(), &patch);
+    assert!(
+        apply_dir.path().join("empty.txt").exists(),
+        "applying the empty-add patch must create the file:\n{patch}"
+    );
+}
+
+/// Deleting an empty tracked file mirrors the empty-add case: the
+/// `deleted file mode` header alone is a valid patch and `git apply`
+/// unlinks the path from it.
+#[test]
+fn test_cli_diff_patch_empty_file_delete_round_trips() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("willdie.txt"), "").unwrap();
+    std::fs::write(temp.path().join("keep.txt"), "keep\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::remove_file(temp.path().join("willdie.txt")).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+    assert!(
+        patch.contains("diff --git a/willdie.txt b/willdie.txt"),
+        "empty delete must carry the `diff --git` header:\n{patch}"
+    );
+    assert!(
+        patch.contains("deleted file mode 100644"),
+        "empty delete must carry the `deleted file mode` header:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("willdie.txt"), "").unwrap();
+    std::fs::write(apply_dir.path().join("keep.txt"), "keep\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed");
+    git_apply(apply_dir.path(), &patch);
+    assert!(
+        !apply_dir.path().join("willdie.txt").exists(),
+        "applying the empty-delete patch must unlink the file:\n{patch}"
+    );
+    assert!(
+        apply_dir.path().join("keep.txt").exists(),
+        "the empty-delete patch must leave other files alone:\n{patch}"
+    );
+}
+
+/// An added executable must carry `new file mode 100755` so `git apply`
+/// restores the exec bit. Hard-coding `100644` silently dropped the
+/// executable mode on round-trip.
+#[cfg(unix)]
+#[test]
+fn test_cli_diff_patch_added_executable_preserves_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    let script = temp.path().join("run.sh");
+    std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+    let mut perms = std::fs::metadata(&script).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+    assert!(
+        patch.contains("new file mode 100755"),
+        "executable add must carry `new file mode 100755`:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("seed.txt"), "seed\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed");
+    git_apply(apply_dir.path(), &patch);
+    let applied = apply_dir.path().join("run.sh");
+    let mode = std::fs::metadata(&applied).unwrap().permissions().mode();
+    assert!(
+        mode & 0o111 != 0,
+        "applied run.sh must be executable; mode={mode:o}"
+    );
+}
+
+/// An added symlink must carry `new file mode 120000` and a hunk body
+/// that is the link target (git stores a symlink as a blob containing
+/// its target). `git apply` then recreates the symlink, not a regular
+/// file holding the target text.
+#[cfg(unix)]
+#[test]
+fn test_cli_diff_patch_added_symlink_preserves_mode_and_target() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::os::unix::fs::symlink("target/path", temp.path().join("linky")).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+    assert!(
+        patch.contains("new file mode 120000"),
+        "symlink add must carry `new file mode 120000`:\n{patch}"
+    );
+    assert!(
+        patch.contains("+target/path"),
+        "symlink add body must be the link target:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("seed.txt"), "seed\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed");
+    git_apply(apply_dir.path(), &patch);
+    let applied = apply_dir.path().join("linky");
+    let meta = std::fs::symlink_metadata(&applied).unwrap();
+    assert!(
+        meta.file_type().is_symlink(),
+        "applying the symlink-add patch must recreate a symlink"
+    );
+    assert_eq!(
+        std::fs::read_link(&applied).unwrap().to_string_lossy(),
+        "target/path",
+        "the recreated symlink must point at the original target"
+    );
+}
+
+/// A deleted file nested below a directory must resolve its old blob
+/// through the recursive tree lookup. The old root-only `tree.get(path)`
+/// missed `src/nested/file.txt`, so the deletion hunk was dropped and
+/// `git apply` could not unlink the nested path.
+#[test]
+fn test_cli_diff_patch_nested_deleted_file_round_trips() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::create_dir_all(temp.path().join("src/nested")).unwrap();
+    std::fs::write(temp.path().join("src/nested/file.txt"), "alpha\nbeta\n").unwrap();
+    std::fs::write(temp.path().join("keep.txt"), "keep\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::remove_file(temp.path().join("src/nested/file.txt")).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+    assert!(
+        patch.contains("deleted file mode 100644"),
+        "nested delete must carry the `deleted file mode` header:\n{patch}"
+    );
+    assert!(
+        patch.contains("--- a/src/nested/file.txt") && patch.contains("+++ /dev/null"),
+        "nested delete must source the new side from `/dev/null`:\n{patch}"
+    );
+    assert!(
+        patch.contains("-alpha") && patch.contains("-beta"),
+        "nested delete body must include every removed line:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::create_dir_all(apply_dir.path().join("src/nested")).unwrap();
+    std::fs::write(apply_dir.path().join("src/nested/file.txt"), "alpha\nbeta\n").unwrap();
+    std::fs::write(apply_dir.path().join("keep.txt"), "keep\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed");
+    git_apply(apply_dir.path(), &patch);
+    assert!(
+        !apply_dir.path().join("src/nested/file.txt").exists(),
+        "applying the nested-delete patch must unlink the nested file:\n{patch}"
+    );
+}
+
+/// Dropping only the trailing newline (`hello\n` -> `hello`) is a real
+/// change even though every line is shared context after the diff
+/// backend strips terminators. The renderer must synthesize a tail hunk
+/// and attach `\ No newline at end of file` so the edit round-trips.
+#[test]
+fn test_cli_diff_patch_newline_only_removal_round_trips() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("nl.txt"), "hello\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("nl.txt"), "hello").unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+    assert!(
+        patch.contains("@@"),
+        "newline-only removal must emit a hunk:\n{patch}"
+    );
+    assert!(
+        patch.contains("\\ No newline at end of file"),
+        "newline-only removal must carry the no-newline marker:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("nl.txt"), "hello\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed");
+    git_apply(apply_dir.path(), &patch);
+    assert_eq!(
+        std::fs::read(apply_dir.path().join("nl.txt")).unwrap(),
+        b"hello",
+        "applying the patch must drop the trailing newline"
+    );
+}
+
+/// Mirror of the removal: adding a trailing newline (`hello` ->
+/// `hello\n`) must also synthesize a tail hunk, with the marker on the
+/// old side.
+#[test]
+fn test_cli_diff_patch_newline_only_addition_round_trips() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("nl.txt"), "hello").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("nl.txt"), "hello\n").unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+    assert!(
+        patch.contains("@@") && patch.contains("\\ No newline at end of file"),
+        "newline-only addition must emit a hunk with the no-newline marker:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::fs::write(apply_dir.path().join("nl.txt"), "hello").unwrap();
+    git_commit_all(apply_dir.path(), "seed");
+    git_apply(apply_dir.path(), &patch);
+    assert_eq!(
+        std::fs::read(apply_dir.path().join("nl.txt")).unwrap(),
+        b"hello\n",
+        "applying the patch must add the trailing newline"
+    );
+}
+
+/// `heddle --output json diff` (no `--patch`) on a dirty plain-Git
+/// checkout must still populate the top-level `patch` field. The fast
+/// path used to gate hunk inflation on the CLI `--patch` flag alone, so
+/// JSON consumers got no parseable patch unless they also passed
+/// `--patch`.
+#[test]
+fn test_cli_diff_json_plain_git_patch_field_present_without_flag() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("file.txt"), "a\nb\nc\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    std::fs::write(temp.path().join("file.txt"), "a\nB\nc\n").unwrap();
+
+    let output = heddle_output(&["--output", "json", "diff"], Some(temp.path()))
+        .expect("heddle diff should run");
+    assert!(
+        output.status.success(),
+        "heddle diff should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = json_stdout(&output, "plain-git json no flag");
+    let patch_field = value
+        .get("patch")
+        .and_then(Value::as_str)
+        .expect("JSON output must include `patch` field even without --patch");
+    assert!(
+        patch_field.contains("--- a/file.txt")
+            && patch_field.contains("-b")
+            && patch_field.contains("+B"),
+        "patch field must carry the unified-diff body: {patch_field}"
+    );
+}
+
+/// The trust-visible Heddle fast path (a git-adopted repo whose branch
+/// advanced outside Heddle) must populate the JSON `patch` field too,
+/// without `--patch`. Same contract as the plain-Git path.
+#[test]
+fn test_cli_diff_json_trust_visible_patch_field_present_without_flag() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("file.txt"), "a\nb\nc\n").unwrap();
+    git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
+    // Advance the git branch outside Heddle so the verification state is
+    // `git_branch_advanced`, which routes `diff` through the
+    // trust-visible worktree-status fast path.
+    std::fs::write(temp.path().join("file.txt"), "a\nb\nc\nd\n").unwrap();
+    git(&["add", "file.txt"], temp.path());
+    git(&["commit", "-m", "manual git commit"], temp.path());
+    // An uncommitted worktree edit on top, so the diff has a body.
+    std::fs::write(temp.path().join("file.txt"), "a\nB\nc\nd\n").unwrap();
+
+    let output = heddle_output(&["--output", "json", "diff"], Some(temp.path()))
+        .expect("heddle diff should run");
+    assert!(
+        output.status.success(),
+        "heddle diff should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = json_stdout(&output, "trust-visible json no flag");
+    let patch_field = value
+        .get("patch")
+        .and_then(Value::as_str)
+        .expect("trust-visible JSON output must include `patch` field even without --patch");
+    assert!(
+        patch_field.contains("--- a/file.txt") && patch_field.contains("+++ b/file.txt"),
+        "patch field must carry the standard headers: {patch_field}"
+    );
+}
+
+/// A state-to-state added file (`heddle diff <from> <to>`) must carry
+/// the real `new file mode` from the destination tree entry — exercises
+/// the `to_tree` branch of the mode resolver, distinct from the
+/// worktree-add path.
+#[test]
+fn test_cli_diff_patch_state_to_state_add_carries_mode() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "v1"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("fresh.txt"), "fresh\n").unwrap();
+    heddle(&["capture", "-m", "v2"], Some(temp.path())).unwrap();
+
+    let patch = heddle(&["diff", "HEAD~1", "HEAD", "--patch"], Some(temp.path())).unwrap();
+    assert!(
+        patch.contains("diff --git a/fresh.txt b/fresh.txt")
+            && patch.contains("new file mode 100644"),
+        "state-to-state add must carry the `new file mode` header:\n{patch}"
+    );
+    assert!(
+        patch.contains("+fresh"),
+        "state-to-state add body must include the new content:\n{patch}"
+    );
+}
+
+/// Deleting a committed executable and symlink on the plain-Git fast
+/// path must carry their real modes (`100755` / `120000`), read from the
+/// gix HEAD tree entry, and round-trip through `git apply`.
+#[cfg(unix)]
+#[test]
+fn test_cli_diff_patch_plain_git_delete_executable_and_symlink_modes() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::os::unix::fs::symlink("the/target", temp.path().join("oldlink")).unwrap();
+    let script = temp.path().join("old.sh");
+    std::fs::write(&script, "#!/bin/sh\necho x\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    std::fs::write(temp.path().join("keep.txt"), "keep\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    std::fs::remove_file(temp.path().join("oldlink")).unwrap();
+    std::fs::remove_file(&script).unwrap();
+
+    let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
+    assert!(
+        patch.contains("deleted file mode 100755"),
+        "deleted executable must carry mode 100755:\n{patch}"
+    );
+    assert!(
+        patch.contains("deleted file mode 120000"),
+        "deleted symlink must carry mode 120000:\n{patch}"
+    );
+
+    let apply_dir = TempDir::new().unwrap();
+    init_git_repo(apply_dir.path());
+    std::os::unix::fs::symlink("the/target", apply_dir.path().join("oldlink")).unwrap();
+    let apply_script = apply_dir.path().join("old.sh");
+    std::fs::write(&apply_script, "#!/bin/sh\necho x\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&apply_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&apply_script, perms).unwrap();
+    }
+    std::fs::write(apply_dir.path().join("keep.txt"), "keep\n").unwrap();
+    git_commit_all(apply_dir.path(), "seed");
+    git_apply(apply_dir.path(), &patch);
+    assert!(
+        !apply_dir.path().join("oldlink").exists()
+            && !apply_dir.path().join("old.sh").exists(),
+        "applying the delete patch must unlink both special files:\n{patch}"
     );
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Types used by diff command output.
 
-use objects::object::SemanticChange;
+use objects::object::{FileMode, SemanticChange};
 use serde::Serialize;
 
 use crate::cli::commands::semantic_change_output::{
@@ -139,6 +139,14 @@ pub struct FileChange {
     /// exist on the target side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity_score: Option<f64>,
+    /// Git file mode of the content side, used by the patch renderer to
+    /// emit `new file mode <mode>` (adds) / `deleted file mode <mode>`
+    /// (deletes). `None` falls back to `100644` (a regular file). For an
+    /// executable the renderer emits `100755`; for a symlink `120000`
+    /// (and the hunk body is the link target, matching git's blob
+    /// representation of a symlink).
+    #[serde(skip)]
+    pub mode: Option<FileMode>,
     #[serde(skip)]
     pub binary: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

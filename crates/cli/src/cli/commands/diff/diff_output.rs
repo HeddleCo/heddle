@@ -7,6 +7,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+use objects::object::FileMode;
+
 use super::diff_types::{
     DiffOutput, FileChange, LineDiff, SemanticChangeEntry, should_render_modified_pair,
 };
@@ -73,13 +75,15 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 /// (prefix=`@`, content=`@ -a,b +c,d @@`), so concatenation yields the
 /// canonical `@@ -a,b +c,d @@` shape.
 ///
-/// Two cases require git's extended header block to round-trip:
+/// Three cases require git's extended header block to round-trip:
 ///
-/// * **Added files** get `diff --git ... / new file mode 100644 /
+/// * **Added files** get `diff --git ... / new file mode <mode> /
 ///   --- /dev/null`. Without it, `git apply` (and `patch -p1`) demand
 ///   that `b/<path>` already exist on the target side, which defeats
-///   the whole point of an add hunk.
-/// * **Deleted files** get `diff --git ... / deleted file mode 100644 /
+///   the whole point of an add hunk. `<mode>` reflects the real file
+///   type (`100755` for an executable, `120000` for a symlink) so the
+///   round-trip preserves it.
+/// * **Deleted files** get `diff --git ... / deleted file mode <mode> /
 ///   +++ /dev/null`. `git apply --check` tolerates the bare `+++ b/<path>`
 ///   shape, but actually applying it leaves an empty file behind instead
 ///   of removing the path — the `+++ /dev/null` + deleted-mode header is
@@ -88,6 +92,13 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 ///   rename from old / rename to new`. Pure renames (no edits) emit
 ///   the extended headers and stop; rename-with-edit appends the
 ///   usual `--- a/old / +++ b/new` + hunk body.
+///
+/// An empty-file add/delete is still a real patch: git emits the
+/// extended header with no hunk body (and `git apply` creates/unlinks
+/// the path from that alone), so we emit the header-only form rather
+/// than skipping the change. A modify with no hunk body is only skipped
+/// when it is a genuine no-op — a trailing-newline-only change carries a
+/// synthesized tail hunk (see `unified_hunks`) and is rendered.
 pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
     let mut buf = String::new();
     for change in &output.changes {
@@ -98,12 +109,30 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         let is_rename = change.old_path.as_deref().is_some_and(|old| old != change.path);
         let is_added = change.kind == "added";
         let is_deleted = change.kind == "deleted";
+        // `lines: None` is the binary / unreadable case — there is no
+        // text body to render, so it never produces a patch regardless
+        // of kind. `lines: Some(_)` (even empty) means we have a
+        // readable text side.
+        let has_text = change.lines.is_some();
 
-        // Renames must emit headers even when there's no hunk body
-        // (pure rename = identical content). Other kinds need at least
-        // one `+`/`-` line; without one, `--- /+++/@@` would be a
-        // header with no body, which `patch(1)` reads as malformed.
-        if !is_rename && !has_hunk_body {
+        // Decide whether this change emits anything at all:
+        // * renames always do (the extended headers carry the move even
+        //   for identical content);
+        // * add/delete do whenever there's a readable text side — the
+        //   empty-file case renders header-only;
+        // * a modify renders only when it has a real hunk body. A modify
+        //   with no body and matching EOL is a no-op; the
+        //   trailing-newline-only case is handled upstream in
+        //   `unified_hunks`, which synthesizes a tail hunk so this
+        //   branch sees `has_hunk_body == true`.
+        let should_render = if is_rename {
+            true
+        } else if is_added || is_deleted {
+            has_text
+        } else {
+            has_hunk_body
+        };
+        if !should_render {
             continue;
         }
 
@@ -125,21 +154,20 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
                 continue;
             }
         } else if is_added {
-            // `new file mode 100644` is the git-canonical default for a
-            // regular text blob. The probe doesn't carry the real mode
-            // yet; matching git's default for a new regular file keeps
-            // the round-trip clean. If/when executable-bit detection
-            // lands, thread it through here.
             buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
-            buf.push_str("new file mode 100644\n");
+            buf.push_str(&format!("new file mode {}\n", mode_str(change.mode)));
         } else if is_deleted {
-            // Mirror of the add case: `deleted file mode 100644` is the
-            // git-canonical default for a regular text blob. Paired with
-            // `+++ /dev/null` below, it tells git to unlink the path
-            // rather than truncate it to empty. Real-mode detection, if
-            // it lands, threads through here too.
             buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
-            buf.push_str("deleted file mode 100644\n");
+            buf.push_str(&format!("deleted file mode {}\n", mode_str(change.mode)));
+        }
+
+        // An empty-file add/delete (text side present but zero lines)
+        // has no hunk body. git stops after the `new/deleted file mode`
+        // header in that case and `git apply` still creates/unlinks the
+        // path — emitting `--- /+++/@@` with no `@@` body would be a
+        // malformed hunk, so we stop here too.
+        if (is_added || is_deleted) && !has_hunk_body {
+            continue;
         }
 
         if is_added {
@@ -157,6 +185,16 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         }
     }
     buf
+}
+
+/// Map a tracked file mode to the git unified-diff mode string. `None`
+/// (mode not resolved) and the regular-file case both render `100644`.
+fn mode_str(mode: Option<FileMode>) -> &'static str {
+    match mode {
+        Some(FileMode::Executable) => "100755",
+        Some(FileMode::Symlink) => "120000",
+        Some(FileMode::Normal) | None => "100644",
+    }
 }
 
 const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
