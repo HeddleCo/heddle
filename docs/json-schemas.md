@@ -108,6 +108,7 @@ metadata only; it does not import Git history or write Git-tracked files.
 
 ```json
 {
+  "output_kind": "init",
   "status": "initialized",
   "action": "init",
   "path": "/repo/.heddle",
@@ -155,6 +156,7 @@ in-progress operation.
 
 ```json
 {
+  "output_kind": "status",
   "repository_capability": "git-overlay",
   "repository_label": "Git + Heddle",
   "storage_model": "git+heddle-sidecar",
@@ -323,7 +325,7 @@ blocked verification state on stdout.
 
 ```json
 {
-  "output_kind": "verification",
+  "output_kind": "verify",
   "clean": true,
   "repository_label": "Git + Heddle",
   "verified": true,
@@ -370,7 +372,7 @@ blocked verification state on stdout.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `output_kind` | string | required | Always `verification`; lets agents identify the proof payload without a wrapper object. |
+| `output_kind` | string | required | Always `verify`; lets agents identify the proof payload without a wrapper object. |
 | `repository_label` | string | required | Human-facing repository identity; managed Git-overlay child checkouts use `"Git + Heddle isolated checkout"`. |
 | `repository_context` | object | optional | Present for managed child checkouts; includes `kind`, `parent_repository`, and any recorded `target_thread` / `parent_thread`. |
 | `verified` | bool | required | `true` only when all verification checks are clean or not applicable. |
@@ -421,7 +423,6 @@ standard recovery fields plus nested verification proof:
     }
   ],
   "verification": {
-    "output_kind": "verification",
     "clean": false,
     "verified": false,
     "status": "dirty_worktree",
@@ -447,6 +448,7 @@ surface; the native first-run loop should prefer `commit`.
 
 ```json
 {
+  "output_kind": "capture",
   "status": "captured",
   "action": "capture",
   "change_id": "hd-capture123",
@@ -468,6 +470,7 @@ surface; the native first-run loop should prefer `commit`.
 
 ```json
 {
+  "output_kind": "checkpoint",
   "status": "checkpointed",
   "action": "checkpoint",
   "change_id": "hd-capture123",
@@ -483,6 +486,7 @@ surface; the native first-run loop should prefer `commit`.
 
 ```json
 {
+  "output_kind": "commit",
   "status": "committed",
   "action": "commit",
   "change_id": "hd-capture123",
@@ -602,6 +606,7 @@ state and worktree/default comparison target.
 
 ```json
 {
+  "output_kind": "diff",
   "from_state": "hd-base123",
   "to_state": "hd-head456",
   "changes": []
@@ -1615,6 +1620,7 @@ carries `git_overlay_import_hint`.
 
 ```json
 {
+  "output_kind": "bridge_git_status",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
   "mirror_path": "/repo/.heddle/git",
@@ -1811,6 +1817,7 @@ State detail view, pretty-printed.
 
 ```json
 {
+  "output_kind": "thread_list",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
   "hosted_enabled": false,
@@ -1901,6 +1908,7 @@ Control-tower view across every active thread.
 
 ```json
 {
+  "output_kind": "workspace_summary",
   "repository": "/work/project",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
@@ -2168,6 +2176,7 @@ Hosted-review payload for a single state.
 
 ```json
 {
+  "output_kind": "review_show",
   "change_id": "hd-def456",
   "headline": "Tighten parser recovery",
   "agent_narrative": null,
@@ -2183,21 +2192,25 @@ Hosted-review payload for a single state.
 `heddle review sign --output json` emits:
 
 ```json
-{"signature_id": "...", "change_id": "..."}
+{"output_kind": "review_sign", "signature_id": "...", "change_id": "..."}
 ```
 
-`heddle review next --output json` emits either a `NextStateView`
-(`{change_id, headline, existing_signatures}`) or the literal `null`
-when there are no pending reviews in the scan window.
+`heddle review next --output json` emits a stable envelope keyed by
+`output_kind: "review_next"`. When the scan window holds a pending
+review, the pending state's view is flattened alongside `output_kind`
+(`change_id`, `headline`, `existing_signatures`) and the same view is
+echoed under `next`. When the scan window holds no pending review, the
+payload carries only `output_kind` and `next: null` — never a
+top-level `null`.
 
 ```json
-{"change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": []}
+{"output_kind": "review_next", "change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
 ```
 
 `heddle review health --output json` emits:
 
 ```json
-{"entries": [{"module_id": "...", "fire_rate": 0.42, "warn": false}], "window_states": 12}
+{"output_kind": "review_health", "entries": [{"module_id": "...", "fire_rate": 0.42, "warn": false}], "window_states": 12}
 ```
 
 ---
@@ -2322,8 +2335,8 @@ key naming:
 |------|-------|
 | `init` | `{"initialized": true, "path": "..."}` |
 | `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
-| `import` | `{"commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N}` |
-| `sync` | `{"states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
+| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N}` |
+| `sync` | `{"output_kind": "bridge_git_sync", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
 | `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
 | `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
 
@@ -2342,13 +2355,13 @@ key naming:
 `heddle bridge git import --output json` emits:
 
 ```json
-{"commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "partial_mirror_refs": 0, "already_in_sync": false}
+{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "partial_mirror_refs": 0, "already_in_sync": false}
 ```
 
 `heddle bridge git sync --output json` emits:
 
 ```json
-{"states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
+{"output_kind": "bridge_git_sync", "states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
 ```
 
 `heddle bridge git push --output json` emits:
@@ -2372,8 +2385,9 @@ List every runtime schema verb and the subset enforced by
 
 ```json
 {
-  "schema_verbs": ["status", "verification", "try"],
-  "documented_schema_verbs": ["status", "verification", "try"]
+  "output_kind": "schemas",
+  "schema_verbs": ["status", "verify", "try"],
+  "documented_schema_verbs": ["status", "verify", "try"]
 }
 ```
 
@@ -2708,6 +2722,7 @@ Move the active checkout to a resolved state.
 
 ```json
 {
+  "output_kind": "goto",
   "target": "hd-sqr398dvx9ay",
   "intent": "capture parser fix",
   "message": "Now at: hd-sqr398dvx9ay"
@@ -2722,6 +2737,7 @@ List or remove untracked worktree paths.
 
 ```json
 {
+  "output_kind": "clean",
   "removed": ["tmp/output.txt"],
   "dry_run": true
 }
@@ -2831,6 +2847,7 @@ Preview or apply a ref reconciliation between Git and Heddle.
 
 ```json
 {
+  "output_kind": "bridge_git_reconcile",
   "status": "preview",
   "prefer": null,
   "ref_name": "main",
@@ -2850,19 +2867,19 @@ Preview or apply a ref reconciliation between Git and Heddle.
 `heddle stack` emits:
 
 ```json
-{"thread": "main", "stack": null, "stacks": []}
+{"output_kind": "stack", "thread": "main", "stack": null, "stacks": []}
 ```
 
 `heddle stack ready` emits:
 
 ```json
-{"thread": "main", "next_action": {"kind": "unknown"}}
+{"output_kind": "stack_ready", "thread": "main", "next_action": {"kind": "unknown"}}
 ```
 
-`heddle stack snapshot` emits:
+`heddle stack snapshot` emits a `RepositorySnapshot` flattened beneath the discriminator, so the root carries `output_kind` alongside `version`, `captured_at`, `stacks`, and `threads` — there is no `thread`/`snapshot` wrapper:
 
 ```json
-{"thread": "main", "snapshot": null}
+{"output_kind": "stack_snapshot", "version": 1, "captured_at": "2026-05-28T15:43:36Z", "stacks": [{"root": {"name": "feature-x", "children": []}}], "threads": [{"thread": "feature-x", "parent_thread": null, "base_state": "hd-sqr398dvx9ay", "current_state": "hd-sqr398dvx9ay", "state": "active", "freshness": "current"}]}
 ```
 
 ---
@@ -2886,6 +2903,7 @@ List saved stash entries.
 
 ```json
 {
+  "output_kind": "stash_list",
   "stashes": [
     {
       "index": 0,
@@ -2904,6 +2922,7 @@ Show the top stash as path buckets.
 
 ```json
 {
+  "output_kind": "stash_show",
   "modified": ["src/parser.rs"],
   "added": ["tests/parser.rs"],
   "deleted": []
@@ -2919,6 +2938,7 @@ Apply the inverse of a state. With `--no-commit`, `change_id` is
 
 ```json
 {
+  "output_kind": "revert",
   "change_id": null,
   "reverted_state": "hd-sqr398dvx9ay",
   "files_affected": ["M src/parser.rs"],
@@ -2973,10 +2993,13 @@ Every verified everyday/agent runtime schema is a concrete machine-contract
 mirror. Advanced/internal/admin opaque entries are counted separately
 outside clean verification coverage.
 
-`heddle bisect start|good|bad|reset --output json` emit:
+`heddle bisect start|good|bad|reset --output json` emit (each carries
+`output_kind` set to the snake-cased subcommand, e.g. `bisect_start`,
+`bisect_good`). The `start` payload is just the discriminator and status;
+`good`/`bad` also carry a `commit` field for the marked state:
 
 ```json
-{"status": "started", "current": "hd-sqr398dvx9ay", "remaining": 5, "good": "hd-good123", "bad": "hd-bad456"}
+{"output_kind": "bisect_start", "status": "started"}
 ```
 
 `heddle blame --output json` emits:
@@ -2991,10 +3014,12 @@ outside clean verification coverage.
 {"ingested": true, "commits_imported": 2, "states_created": 2, "reason": "mirror update", "remote": "origin"}
 ```
 
-`heddle cherry-pick --output json` emits:
+`heddle cherry-pick --output json` emits the committed shape by default;
+with `--no-commit` the `new_commit` field is replaced by `"no_commit":
+true` and `status` is `"applied"`:
 
 ```json
-{"cherry_picked": true, "source_change_id": "hd-source123", "change_id": "hd-result456", "conflicts": []}
+{"output_kind": "cherry_pick", "status": "committed", "commit": "hd-source123", "new_commit": "hd-result456"}
 ```
 
 `heddle collapse --output json` emits:
@@ -3015,10 +3040,16 @@ outside clean verification coverage.
 {"conflicts": [{"id": "conflict-1", "kind": "content", "path": "src/lib.rs", "candidate_resolutions": []}]}
 ```
 
-`heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit:
+`heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
 
 ```json
-{"path": "src/lib.rs", "key": "owner", "value": "platform", "entries": [{"path": "src/lib.rs", "key": "owner", "value": "platform"}], "suggestions": [], "issues": []}
+{"output_kind": "context_set", "target": "src/lib.rs", "annotations": 1, "state": "hd-k6a0wfrbgcg7"}
+```
+
+`heddle context list --output json` wraps its rows in an `items` envelope; the rows themselves carry no per-row discriminator (the envelope owns it). Each row is `{"target_kind": ..., "target": ..., "annotations": [...]}` — it emits:
+
+```json
+{"output_kind": "context_list", "items": [{"target_kind": "file", "target": "src/lib.rs", "annotations": [{"annotation_id": "hd-hy06md66hab4qb5ctkwphyc22r", "attribution": "A. Engineer <a@example.com>", "content": "returns false on timing mismatch", "created_at": 1767225600, "kind": "rationale", "revision_count": 1, "scope": "file", "status": "active", "supersedes_annotation_id": null, "supersedes_rewrite_pct": null, "tags": []}]}]}
 ```
 
 `heddle daemon serve|status|stop --output json` emit:
@@ -3027,22 +3058,25 @@ outside clean verification coverage.
 {"running": true, "pid": 4242, "endpoint": "/work/project/.heddle/daemon.sock", "mounts": 1, "stopped": false}
 ```
 
-`heddle discuss open|append|resolve|show --output json` emit:
+`heddle discuss open|append|resolve|show --output json` emit (each carries
+`output_kind` set to the snake-cased subcommand, e.g. `discuss_open`,
+`discuss_append`):
 
 ```json
-{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
+{"output_kind": "discuss_open", "id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
 ```
 
 `heddle discuss list --output json` emits:
 
 ```json
-{"discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
+{"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
 ```
 
-`heddle fork --output json` emits:
+`heddle fork --output json` emits (`thread` is `null` unless `--name`
+names a new thread for the fork):
 
 ```json
-{"thread": "review/fix-parser", "from": "main", "base_change_id": "hd-sqr398dvx9ay", "message": "forked review/fix-parser from main"}
+{"output_kind": "fork", "change_id": "hd-result456", "content_hash": "b9c34842", "thread": "review/fix-parser", "from_state": "hd-sqr398dvx9ay", "message": "Created fork hd-result456 from hd-sqr398dvx9ay"}
 ```
 
 `heddle fsck --output json` emits:
@@ -3075,10 +3109,13 @@ outside clean verification coverage.
 {"ok": true, "tasks": [{"name": "gc", "status": "skipped"}], "objects_removed": 0, "index_updated": true, "monitoring": false}
 ```
 
-`heddle purge apply|list --output json` emit:
+`heddle purge apply|list --output json` emit (each carries `output_kind`
+set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`).
+`ignore_hint` is present only when the purged path is not yet covered by a
+`.heddleignore` / `.gitignore` glob:
 
 ```json
-{"purged": true, "redaction_id": "redact-123", "bytes_removed": 2048, "redactions": [{"redaction_id": "redact-123", "purged": true}]}
+{"output_kind": "purge_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "redactions_marked": 1, "blob_bytes_removed": false, "blob_remains_in_pack": false, "purger": "A. Engineer <a@example.com>", "message": "purged blob sha256:abc123 at secrets.env in hd-sqr398dvx9ay (1 redaction(s) marked)", "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
 
 `heddle query --output json` emits:
@@ -3093,16 +3130,25 @@ outside clean verification coverage.
 {"rebased": true, "old_base": "hd-old123", "new_base": "hd-new456", "change_id": "hd-result789", "conflicts": []}
 ```
 
-`heddle redact apply|list|show --output json` emit:
+`heddle redact apply|list|show --output json` emit (each carries
+`output_kind` set to the snake-cased subcommand, e.g. `redact_apply`,
+`redact_list`). `signature_algorithm` is present only when the redaction
+is signed (`--sign-with`); `ignore_hint` only when the path is not yet
+covered by a `.heddleignore` / `.gitignore` glob:
 
 ```json
-{"redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "purged": false}
+{"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "redactor": "A. Engineer <a@example.com>", "redacted_at": "2026-01-01T00:00:00Z", "all_states": false, "states_redacted": 1, "signed": false, "ignore_hint": {"ignore_file": ".heddleignore", "already_exists": false, "suggested_pattern": "secrets.env", "message": "hint: create .heddleignore with `secrets.env` so the next `heddle capture` doesn't re-import the leaked bytes"}}
 ```
 
-`heddle redact trust add|list|remove --output json` emit:
+`heddle redact trust add|list|remove --output json` emit (each carries
+`output_kind` set to the snake-cased subcommand, e.g. `redact_trust_add`,
+`redact_trust_list`). The `add` payload flattens the added entry alongside
+`output_kind` (`label` present only when `--label` is supplied); `list`
+returns a `trusted_keys` array plus `count`; `remove` returns a `removed`
+count:
 
 ```json
-{"trusted_keys": [{"algorithm": "ed25519", "label": "security", "public_key": "abc123"}], "added": true, "removed": false}
+{"output_kind": "redact_trust_add", "algorithm": "ed25519", "public_key": "abc123def456", "label": "security"}
 ```
 
 `heddle resolve --output json` emits:

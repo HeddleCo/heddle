@@ -21,6 +21,7 @@ use crate::{
 
 #[derive(Serialize)]
 struct InitOutput {
+    output_kind: &'static str,
     status: String,
     action: String,
     path: PathBuf,
@@ -124,6 +125,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         (!trust.recommended_action.is_empty()).then(|| trust.recommended_action.clone());
     let principal_status = init_principal_status(&repo, &user_config)?;
     let output = InitOutput {
+        output_kind: "init",
         status: "initialized".to_string(),
         action: "init".to_string(),
         path: repo.heddle_dir().to_path_buf(),

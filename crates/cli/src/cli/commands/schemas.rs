@@ -116,7 +116,7 @@ schema_registry! {
     (&["review health"], ReviewHealthSchema),
     (&["inspect"], InspectSchema),
     (&["retro"], RetroSchema),
-    (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionSchema),
+    (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionEnvelopeSchema),
     (&["discuss list"], DiscussionListSchema),
     (&["query"], QuerySchema),
     (&["transaction commit"], TransactionCommitSchema),
@@ -755,6 +755,20 @@ pub struct DiscussionSchema {
     pub resolved_annotation_id: Option<String>,
 }
 
+/// Per-discussion verbs (`open`/`append`/`resolve`/`show`) emit the
+/// discussion payload flattened beneath an `output_kind` discriminator,
+/// mirroring `DiscussionEnvelope` in `discuss.rs`. `discuss list` reuses
+/// the bare [`DiscussionSchema`] for its inner items — those carry no
+/// per-item discriminator (the list envelope owns it), so the
+/// discriminator lives on this wrapper rather than on the shared inner
+/// struct.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiscussionEnvelopeSchema {
+    pub output_kind: String,
+    #[serde(flatten)]
+    pub discussion: DiscussionSchema,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionResolutionSchema {
     pub kind: String,
@@ -773,6 +787,7 @@ pub struct DiscussionTurnSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionListSchema {
+    pub output_kind: String,
     pub discussions: Vec<DiscussionSchema>,
 }
 
@@ -807,6 +822,7 @@ pub struct OperationRecordSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct InitSchema {
+    pub output_kind: String,
     pub status: String,
     pub action: String,
     pub path: String,
@@ -949,6 +965,7 @@ pub struct UndoSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CleanSchema {
+    pub output_kind: String,
     pub removed: Vec<String>,
     pub dry_run: bool,
 }
@@ -982,6 +999,7 @@ pub struct DiffStatsSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GotoSchema {
+    pub output_kind: String,
     pub target: String,
     pub intent: Option<String>,
     pub message: String,
@@ -2241,6 +2259,7 @@ pub struct WorkspaceGroupSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewShowSchema {
+    pub output_kind: String,
     pub change_id: String,
     pub headline: String,
     pub agent_narrative: Option<String>,
@@ -2254,22 +2273,59 @@ pub struct ReviewShowSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewSignSchema {
+    pub output_kind: String,
     pub signature_id: String,
     pub change_id: String,
 }
 
-/// `heddle review next --output json` emits either a populated object or the
-/// literal `null`. We model the populated shape; the `null` case is
-/// allowed by the doc and isn't covered here.
+/// `heddle review next --output json` emits a stable envelope keyed by
+/// `output_kind: "review_next"`. When the scan window holds a pending
+/// review, the pending state's view is flattened alongside `output_kind`
+/// (`change_id`, `headline`, `existing_signatures`) and the same view is
+/// echoed under `next`. When no pending review is found, only
+/// `output_kind` and `next: null` are emitted — there is no top-level
+/// `null`. Mirrors the envelope built in `review::run_next`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewNextSchema {
+    pub output_kind: String,
+    pub change_id: Option<String>,
+    pub headline: Option<String>,
+    pub existing_signatures: Option<u32>,
+    pub next: RequiredNullableNextState,
+}
+
+/// `next` is ALWAYS present in the runtime envelope — either the pending
+/// review state or an explicit JSON `null`. Modeling it as
+/// `Option<ReviewNextStateSchema>` directly would let schemars drop the
+/// field from the schema's `required` set, advertising a shape the command
+/// never emits. This wrapper keeps the value nullable (its schema delegates
+/// to `Option`'s nullable form) while reporting `_schemars_private_is_option
+/// == false`, so the derive marks `next` required (heddle#272 Codex r7).
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct RequiredNullableNextState(pub Option<ReviewNextStateSchema>);
+
+impl JsonSchema for RequiredNullableNextState {
+    fn schema_name() -> String {
+        "RequiredNullableNextState".to_owned()
+    }
+
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        <Option<ReviewNextStateSchema> as JsonSchema>::json_schema(generator)
+    }
+}
+
+/// The pending review state echoed under `review next`'s `next` field.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReviewNextStateSchema {
     pub change_id: String,
     pub headline: String,
-    pub existing_signatures: Vec<Value>,
+    pub existing_signatures: u32,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewHealthSchema {
+    pub output_kind: String,
     pub entries: Vec<ReviewHealthEntrySchema>,
     pub window_states: usize,
 }
@@ -2559,6 +2615,7 @@ pub struct StashMutationSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct StashListSchema {
+    pub output_kind: String,
     pub stashes: Vec<StashListEntrySchema>,
 }
 
@@ -2571,6 +2628,7 @@ pub struct StashListEntrySchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct StashShowSchema {
+    pub output_kind: String,
     pub modified: Vec<String>,
     pub added: Vec<String>,
     pub deleted: Vec<String>,
@@ -2578,6 +2636,7 @@ pub struct StashShowSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RevertSchema {
+    pub output_kind: String,
     pub change_id: Option<String>,
     pub reverted_state: String,
     pub files_affected: Vec<String>,
@@ -2794,6 +2853,61 @@ mod tests {
                 "documented schema verb '{verb}' is not advertised as a runtime schema"
             );
         }
+    }
+
+    /// Every documented (non-opaque) verb whose catalog advertises an
+    /// `output_kind` discriminator must declare the `output_kind`
+    /// property on its *registered schema struct*, not merely rely on the
+    /// runtime injection in [`schema_for_verb`].
+    ///
+    /// heddle#272 r6 (Codex P2): `schema_for_verb` injects the
+    /// discriminator from the catalog after deriving the struct schema,
+    /// so `heddle schemas <verb>` already surfaces `output_kind`. That
+    /// injection masks the fact that the Rust mirror struct (e.g.
+    /// `CleanSchema`, `GotoSchema`) never declares the field. The mirror
+    /// is the source of truth a reader greps; it must be honest about the
+    /// discriminator the runtime always emits. This check reads the
+    /// *pre-injection* struct schema so a missing field fails CI rather
+    /// than being papered over by the catalog.
+    #[test]
+    fn documented_swept_schema_structs_declare_output_kind() {
+        let mut missing = Vec::new();
+        for verb in documented_schema_verbs() {
+            // Opaque verbs expose a generic object schema; their
+            // discriminator is genuinely catalog-only (there is no
+            // Serialize mirror struct to declare it on).
+            if opaque_schema_verbs().contains(verb) {
+                continue;
+            }
+            let Some(discriminator) =
+                command_catalog::command_json_discriminator_for_schema_verb(verb)
+            else {
+                continue;
+            };
+            if discriminator.field != "output_kind" {
+                continue;
+            }
+            let bare = schema_for_registered_verb(verb)
+                .unwrap_or_else(|| panic!("documented verb `{verb}` has no registered schema"));
+            let declares = bare
+                .get("properties")
+                .and_then(|properties| properties.get("output_kind"))
+                .is_some();
+            if !declares {
+                missing.push(format!(
+                    "{verb}: catalog advertises output_kind=`{}` but the schema struct declares no `output_kind` property",
+                    discriminator.value
+                ));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "Documented swept schema structs missing the `output_kind` property. Add \
+             `pub output_kind: String` to each mirror struct so it matches the runtime \
+             emission (the catalog injection masks this at the `heddle schemas` layer, \
+             but the struct must be honest):\n  - {}",
+            missing.join("\n  - ")
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ use crate::cli::{Cli, should_output_json};
 
 #[derive(Serialize)]
 struct RevertOutput {
+    output_kind: &'static str,
     change_id: Option<String>,
     reverted_state: String,
     files_affected: Vec<String>,
@@ -72,6 +73,7 @@ pub fn cmd_revert(
             println!(
                 "{}",
                 serde_json::to_string(&RevertOutput {
+                    output_kind: "revert",
                     change_id: None,
                     reverted_state: target_id.short(),
                     files_affected,
@@ -96,6 +98,7 @@ pub fn cmd_revert(
         println!(
             "{}",
             serde_json::to_string(&RevertOutput {
+                output_kind: "revert",
                 change_id: Some(new_state.change_id.short()),
                 reverted_state: target_id.short(),
                 files_affected,

@@ -83,6 +83,7 @@ pub async fn cmd_context_set(
         println!(
             "{}",
             serde_json::json!({
+                "output_kind": "context_set",
                 "target": label,
                 "annotations": blob.annotations.len(),
                 "state": new_state.change_id.short(),
@@ -168,6 +169,7 @@ pub async fn cmd_context_edit(
         println!(
             "{}",
             serde_json::json!({
+                "output_kind": "context_edit",
                 "annotation_id": annotation_id,
                 "state": new_state.change_id.short(),
                 "revision_count": revision_count,
@@ -261,6 +263,7 @@ pub async fn cmd_context_supersede(
         println!(
             "{}",
             serde_json::json!({
+                "output_kind": "context_supersede",
                 "annotation_id": annotation_id,
                 "replacement_target": label,
                 "rewrite_pct": rewrite_pct,
@@ -326,6 +329,7 @@ pub async fn cmd_context_rm(
         println!(
             "{}",
             serde_json::json!({
+                "output_kind": "context_rm",
                 "target": label,
                 "removed": true,
                 "state": new_state.change_id.short(),
