@@ -1244,6 +1244,19 @@ pub struct PullArgs {
 
 /// Arguments for the `clone` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Behavior:
+  Default thread: with --thread omitted, the clone checks out the remote's advertised default branch (its Git HEAD). If the remote advertises none, it falls back to a thread named `main`, then to the alphabetically first imported thread. It never prompts.
+  Depth: --depth 0 (the default) clones full history. --depth N keeps roughly N generations of ancestry — a shallow clone — and marks states beyond that boundary as grafted, so `heddle log` stops at the shallow edge.
+  Depth bounds history, not file content: every state the clone keeps is fully materialized. A shallow clone is smaller because it holds fewer states, not because their blobs are absent.
+
+  See `heddle help threads` for the thread model.
+
+Examples:
+  heddle clone ./repo ./clone                # full clone; lands on the remote's default thread
+  heddle clone ./repo ./clone --thread main  # check out a named thread after cloning
+  heddle clone ./repo ./clone --depth 1      # shallow clone: keep the tip, graft older ancestry
+")]
 pub struct CloneArgs {
     /// Remote repository path.
     pub remote: String,
