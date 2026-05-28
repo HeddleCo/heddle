@@ -2254,14 +2254,28 @@ pub struct ReviewSignSchema {
     pub change_id: String,
 }
 
-/// `heddle review next --output json` emits either a populated object or the
-/// literal `null`. We model the populated shape; the `null` case is
-/// allowed by the doc and isn't covered here.
+/// `heddle review next --output json` emits a stable envelope keyed by
+/// `output_kind: "review_next"`. When the scan window holds a pending
+/// review, the pending state's view is flattened alongside `output_kind`
+/// (`change_id`, `headline`, `existing_signatures`) and the same view is
+/// echoed under `next`. When no pending review is found, only
+/// `output_kind` and `next: null` are emitted — there is no top-level
+/// `null`. Mirrors the envelope built in `review::run_next`.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewNextSchema {
+    pub output_kind: String,
+    pub change_id: Option<String>,
+    pub headline: Option<String>,
+    pub existing_signatures: Option<u32>,
+    pub next: Option<ReviewNextStateSchema>,
+}
+
+/// The pending review state echoed under `review next`'s `next` field.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReviewNextStateSchema {
     pub change_id: String,
     pub headline: String,
-    pub existing_signatures: Vec<Value>,
+    pub existing_signatures: u32,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

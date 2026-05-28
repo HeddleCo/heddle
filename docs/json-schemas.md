@@ -2186,12 +2186,16 @@ Hosted-review payload for a single state.
 {"signature_id": "...", "change_id": "..."}
 ```
 
-`heddle review next --output json` emits either a `NextStateView`
-(`{change_id, headline, existing_signatures}`) or the literal `null`
-when there are no pending reviews in the scan window.
+`heddle review next --output json` emits a stable envelope keyed by
+`output_kind: "review_next"`. When the scan window holds a pending
+review, the pending state's view is flattened alongside `output_kind`
+(`change_id`, `headline`, `existing_signatures`) and the same view is
+echoed under `next`. When the scan window holds no pending review, the
+payload carries only `output_kind` and `next: null` — never a
+top-level `null`.
 
 ```json
-{"change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": []}
+{"output_kind": "review_next", "change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0, "next": {"change_id": "hd-def456", "headline": "Tighten parser recovery", "existing_signatures": 0}}
 ```
 
 `heddle review health --output json` emits:
