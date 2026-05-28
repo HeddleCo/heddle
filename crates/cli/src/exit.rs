@@ -164,6 +164,63 @@ mod tests {
     }
 
     #[test]
+    fn no_default_remote_string_sentinel_is_config() {
+        // `heddle pull` against a repo with no default remote surfaces the
+        // raw `RemoteError::NotFound` display via `anyhow::Error::msg`, so it
+        // is only matchable as a string. The persona-flagged divergence
+        // (HeddleCo/heddle#252) was this returning the `IoErr` catch-all.
+        let err = anyhow::anyhow!("remote not found: (no default remote configured)");
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn remote_not_configured_advice_is_config() {
+        // `heddle push`/`heddle pull` with no default remote raise the typed
+        // `remote_not_configured` advice — a missing-precondition (Config),
+        // not the `IoErr` catch-all.
+        let err = anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::remote_not_configured(
+            "push"
+        ));
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn nothing_to_commit_advice_is_data_err() {
+        // `heddle commit` with nothing staged is semantic rejection of
+        // well-formed input (DataErr), not an IO failure.
+        let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
+            "nothing_to_commit",
+            "nothing to commit",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+            "heddle status",
+            vec!["heddle status".to_string()],
+        );
+        let err = anyhow::anyhow!(advice);
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn reconcile_direction_required_advice_is_data_err() {
+        // `heddle bridge git reconcile` without a `--prefer` side requires
+        // manual resolution — the reconcile contract's documented DataErr.
+        let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
+            "reconcile_direction_required",
+            "Refusing to reconcile 'main': choose a local side before applying",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+            "heddle status",
+            vec!["heddle status".to_string()],
+        );
+        let err = anyhow::anyhow!(advice);
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
     fn missing_repo_string_sentinel_is_config() {
         let err = anyhow::anyhow!("repository not found at /tmp/whatever");
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);

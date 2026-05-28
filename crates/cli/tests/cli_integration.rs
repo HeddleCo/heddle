@@ -31,6 +31,8 @@ mod context_recovery_advice;
 mod current_context_advice;
 #[path = "cli_integration/doctor_docs.rs"]
 mod doctor_docs;
+#[path = "cli_integration/exit_codes.rs"]
+mod exit_codes;
 #[path = "cli_integration/fault_injection.rs"]
 mod fault_injection;
 #[path = "cli_integration/git_overlay_interop_matrix.rs"]
