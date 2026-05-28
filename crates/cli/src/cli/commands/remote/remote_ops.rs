@@ -200,6 +200,9 @@ pub async fn cmd_pull(
     lazy: bool,
 ) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
+        return Err(anyhow::anyhow!(RecoveryAdvice::remote_not_configured("pull")));
+    }
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         ensure_worktree_clean(&repo, "pull")?;
         let remote_name = resolve_default_remote_name(&repo, remote.as_deref())?;

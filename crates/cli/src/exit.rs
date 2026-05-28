@@ -56,6 +56,22 @@ impl HeddleExitCode {
     /// get a code more informative than the bare `1` shell convention.
     pub fn from_error(err: &anyhow::Error) -> Self {
         for cause in err.chain() {
+            // Typed refusals carry a stable `kind` discriminator — route the
+            // ones whose documented code differs from the `IoErr` catch-all.
+            // Keyed on `kind` (not the user-visible message) so rewording the
+            // error text can't silently regress the contract.
+            if let Some(advice) = cause.downcast_ref::<crate::cli::commands::RecoveryAdvice>() {
+                match advice.kind {
+                    // No default remote configured (push/pull): a missing
+                    // precondition, not an IO failure.
+                    "remote_not_configured" => return Self::Config,
+                    // Nothing staged / no changes to capture, and a reconcile
+                    // that needs a `--prefer` side: well-formed input the
+                    // command semantically rejects.
+                    "nothing_to_commit" | "reconcile_direction_required" => return Self::DataErr,
+                    _ => {}
+                }
+            }
             if let Some(io) = cause.downcast_ref::<std::io::Error>() {
                 return match io.kind() {
                     IoErrorKind::PermissionDenied => Self::NoPerm,
@@ -94,6 +110,7 @@ impl HeddleExitCode {
         let msg = format!("{err:#}");
         if msg.contains("no upstream configured")
             || msg.contains("no remote configured")
+            || msg.contains("no default remote configured")
             || msg.contains("workspace config invalid")
             || msg.contains("repository not found")
         {
