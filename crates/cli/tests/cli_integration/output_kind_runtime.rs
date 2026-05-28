@@ -515,10 +515,24 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
         !items.is_empty(),
         "populated context list must surface items: {populated}"
     );
-    // Per-row `output_kind` rides as `context_get` (the envelope
-    // discriminator owns the outer one). Locking the inner value
-    // catches accidental row-discriminator changes.
-    assert_eq!(items[0]["output_kind"].as_str(), Some("context_get"));
+    // List rows MUST NOT repeat a per-row `output_kind`: the
+    // `context_list` envelope owns the discriminator. A row that carried
+    // its own `output_kind: "context_get"` would make consumers that
+    // route recursively on the discriminator misclassify the list row as
+    // a standalone `context get` payload (heddle#272 Codex r5 finding).
+    assert!(
+        items[0].get("output_kind").is_none(),
+        "context list rows must not carry a nested output_kind: {populated}"
+    );
+    // The row still carries its substantive fields.
+    assert!(
+        items[0].get("target").and_then(|v| v.as_str()).is_some(),
+        "context list row must keep its `target`: {populated}"
+    );
+    assert!(
+        items[0].get("annotations").and_then(|v| v.as_array()).is_some(),
+        "context list row must keep its `annotations` array: {populated}"
+    );
 }
 
 #[test]

@@ -15,8 +15,8 @@ use repo::{
 use serde::Serialize;
 
 use super::{
-    AnnotationHistoryOutput, AnnotationOutput, ContextGetOutput, RevisionOutput,
-    filter_annotations, print_context_get, resolve_state, resolve_state_id, target_label,
+    AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput, filter_annotations,
+    print_context_get, resolve_state, resolve_state_id, target_label,
 };
 use crate::cli::{Cli, commands::RecoveryAdvice, should_output_json};
 
@@ -89,7 +89,7 @@ pub async fn cmd_context_list(
     let entries = repo.list_context_entries(context_root, prefix.as_deref().map(Path::new))?;
 
     if should_output_json(cli, None) {
-        let items: Vec<ContextGetOutput> = entries
+        let items: Vec<ContextListRow> = entries
             .iter()
             .filter_map(|entry| {
                 let annotations = filter_annotations(
@@ -103,13 +103,7 @@ pub async fn cmd_context_list(
                     return None;
                 }
                 let (target_kind, target_label) = target_label(&entry.target);
-                Some(ContextGetOutput {
-                    // `context_list` envelopes ContextGetOutput rows, so
-                    // the inner `output_kind` field is suppressed via
-                    // serialization to avoid leaking a misleading
-                    // per-row discriminator. The outer envelope owns
-                    // the discriminator.
-                    output_kind: "context_get",
+                Some(ContextListRow {
                     target_kind,
                     target: target_label,
                     annotations: annotations

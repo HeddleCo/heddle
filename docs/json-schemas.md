@@ -2168,6 +2168,7 @@ Hosted-review payload for a single state.
 
 ```json
 {
+  "output_kind": "review_show",
   "change_id": "hd-def456",
   "headline": "Tighten parser recovery",
   "agent_narrative": null,
@@ -2183,7 +2184,7 @@ Hosted-review payload for a single state.
 `heddle review sign --output json` emits:
 
 ```json
-{"signature_id": "...", "change_id": "..."}
+{"output_kind": "review_sign", "signature_id": "...", "change_id": "..."}
 ```
 
 `heddle review next --output json` emits a stable envelope keyed by
@@ -2201,7 +2202,7 @@ top-level `null`.
 `heddle review health --output json` emits:
 
 ```json
-{"entries": [{"module_id": "...", "fire_rate": 0.42, "warn": false}], "window_states": 12}
+{"output_kind": "review_health", "entries": [{"module_id": "...", "fire_rate": 0.42, "warn": false}], "window_states": 12}
 ```
 
 ---
@@ -2712,6 +2713,7 @@ Move the active checkout to a resolved state.
 
 ```json
 {
+  "output_kind": "goto",
   "target": "hd-sqr398dvx9ay",
   "intent": "capture parser fix",
   "message": "Now at: hd-sqr398dvx9ay"
@@ -2726,6 +2728,7 @@ List or remove untracked worktree paths.
 
 ```json
 {
+  "output_kind": "clean",
   "removed": ["tmp/output.txt"],
   "dry_run": true
 }
@@ -2854,19 +2857,19 @@ Preview or apply a ref reconciliation between Git and Heddle.
 `heddle stack` emits:
 
 ```json
-{"thread": "main", "stack": null, "stacks": []}
+{"output_kind": "stack", "thread": "main", "stack": null, "stacks": []}
 ```
 
 `heddle stack ready` emits:
 
 ```json
-{"thread": "main", "next_action": {"kind": "unknown"}}
+{"output_kind": "stack_ready", "thread": "main", "next_action": {"kind": "unknown"}}
 ```
 
 `heddle stack snapshot` emits:
 
 ```json
-{"thread": "main", "snapshot": null}
+{"output_kind": "stack_snapshot", "thread": "main", "snapshot": null}
 ```
 
 ---
@@ -2890,6 +2893,7 @@ List saved stash entries.
 
 ```json
 {
+  "output_kind": "stash_list",
   "stashes": [
     {
       "index": 0,
@@ -2908,6 +2912,7 @@ Show the top stash as path buckets.
 
 ```json
 {
+  "output_kind": "stash_show",
   "modified": ["src/parser.rs"],
   "added": ["tests/parser.rs"],
   "deleted": []
@@ -2923,6 +2928,7 @@ Apply the inverse of a state. With `--no-commit`, `change_id` is
 
 ```json
 {
+  "output_kind": "revert",
   "change_id": null,
   "reverted_state": "hd-sqr398dvx9ay",
   "files_affected": ["M src/parser.rs"],
@@ -2977,10 +2983,12 @@ Every verified everyday/agent runtime schema is a concrete machine-contract
 mirror. Advanced/internal/admin opaque entries are counted separately
 outside clean verification coverage.
 
-`heddle bisect start|good|bad|reset --output json` emit:
+`heddle bisect start|good|bad|reset --output json` emit (each carries
+`output_kind` set to the snake-cased subcommand, e.g. `bisect_start`,
+`bisect_good`):
 
 ```json
-{"status": "started", "current": "hd-sqr398dvx9ay", "remaining": 5, "good": "hd-good123", "bad": "hd-bad456"}
+{"output_kind": "bisect_start", "status": "started", "current": "hd-sqr398dvx9ay", "remaining": 5, "good": "hd-good123", "bad": "hd-bad456"}
 ```
 
 `heddle blame --output json` emits:
@@ -2998,7 +3006,7 @@ outside clean verification coverage.
 `heddle cherry-pick --output json` emits:
 
 ```json
-{"cherry_picked": true, "source_change_id": "hd-source123", "change_id": "hd-result456", "conflicts": []}
+{"output_kind": "cherry_pick", "cherry_picked": true, "source_change_id": "hd-source123", "change_id": "hd-result456", "conflicts": []}
 ```
 
 `heddle collapse --output json` emits:
@@ -3019,10 +3027,12 @@ outside clean verification coverage.
 {"conflicts": [{"id": "conflict-1", "kind": "content", "path": "src/lib.rs", "candidate_resolutions": []}]}
 ```
 
-`heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit:
+`heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`):
+
+`context list` wraps its rows in an `{"output_kind": "context_list", "items": [...]}` envelope; the rows themselves carry no per-row discriminator (the envelope owns it).
 
 ```json
-{"path": "src/lib.rs", "key": "owner", "value": "platform", "entries": [{"path": "src/lib.rs", "key": "owner", "value": "platform"}], "suggestions": [], "issues": []}
+{"output_kind": "context_set", "path": "src/lib.rs", "key": "owner", "value": "platform", "entries": [{"path": "src/lib.rs", "key": "owner", "value": "platform"}], "suggestions": [], "issues": []}
 ```
 
 `heddle daemon serve|status|stop --output json` emit:
@@ -3031,22 +3041,24 @@ outside clean verification coverage.
 {"running": true, "pid": 4242, "endpoint": "/work/project/.heddle/daemon.sock", "mounts": 1, "stopped": false}
 ```
 
-`heddle discuss open|append|resolve|show --output json` emit:
+`heddle discuss open|append|resolve|show --output json` emit (each carries
+`output_kind` set to the snake-cased subcommand, e.g. `discuss_open`,
+`discuss_append`):
 
 ```json
-{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
+{"output_kind": "discuss_open", "id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}
 ```
 
 `heddle discuss list --output json` emits:
 
 ```json
-{"discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
+{"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
 ```
 
 `heddle fork --output json` emits:
 
 ```json
-{"thread": "review/fix-parser", "from": "main", "base_change_id": "hd-sqr398dvx9ay", "message": "forked review/fix-parser from main"}
+{"output_kind": "fork", "thread": "review/fix-parser", "from": "main", "base_change_id": "hd-sqr398dvx9ay", "message": "forked review/fix-parser from main"}
 ```
 
 `heddle fsck --output json` emits:
@@ -3079,10 +3091,11 @@ outside clean verification coverage.
 {"ok": true, "tasks": [{"name": "gc", "status": "skipped"}], "objects_removed": 0, "index_updated": true, "monitoring": false}
 ```
 
-`heddle purge apply|list --output json` emit:
+`heddle purge apply|list --output json` emit (each carries `output_kind`
+set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`):
 
 ```json
-{"purged": true, "redaction_id": "redact-123", "bytes_removed": 2048, "redactions": [{"redaction_id": "redact-123", "purged": true}]}
+{"output_kind": "purge_apply", "purged": true, "redaction_id": "redact-123", "bytes_removed": 2048, "redactions": [{"redaction_id": "redact-123", "purged": true}]}
 ```
 
 `heddle query --output json` emits:
@@ -3097,16 +3110,20 @@ outside clean verification coverage.
 {"rebased": true, "old_base": "hd-old123", "new_base": "hd-new456", "change_id": "hd-result789", "conflicts": []}
 ```
 
-`heddle redact apply|list|show --output json` emit:
+`heddle redact apply|list|show --output json` emit (each carries
+`output_kind` set to the snake-cased subcommand, e.g. `redact_apply`,
+`redact_list`):
 
 ```json
-{"redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "purged": false}
+{"output_kind": "redact_apply", "redaction_id": "redact-123", "blob": "sha256:abc123", "state": "hd-sqr398dvx9ay", "path": "secrets.env", "reason": "credential", "purged": false}
 ```
 
-`heddle redact trust add|list|remove --output json` emit:
+`heddle redact trust add|list|remove --output json` emit (each carries
+`output_kind` set to the snake-cased subcommand, e.g. `redact_trust_add`,
+`redact_trust_list`):
 
 ```json
-{"trusted_keys": [{"algorithm": "ed25519", "label": "security", "public_key": "abc123"}], "added": true, "removed": false}
+{"output_kind": "redact_trust_add", "trusted_keys": [{"algorithm": "ed25519", "label": "security", "public_key": "abc123"}], "added": true, "removed": false}
 ```
 
 `heddle resolve --output json` emits:

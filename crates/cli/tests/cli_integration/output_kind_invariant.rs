@@ -493,6 +493,68 @@ fn unswept_verbs_have_no_output_kind_declaration() {
     );
 }
 
+#[test]
+fn swept_verb_doc_samples_show_output_kind() {
+    // heddle#272 r5 (Codex P1): the `docs/json-schemas.md` sample for
+    // each #272-swept verb must show the `output_kind` field so the
+    // documented machine contract matches the runtime emission. The
+    // `doctor schemas` gate only checks that a sample's keys are a
+    // subset of the schema's properties (it does not enforce
+    // required-field presence), so it would NOT catch a sample that
+    // silently drops `output_kind`; this test does.
+    //
+    // Verbs documented with one representative sample for a pipe-listed
+    // group (e.g. `bisect start|good|bad|reset`) show the first
+    // variant's value; the per-variant value is mechanically
+    // `display.replace(['-', ' '], "_")`.
+    let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .join("docs/json-schemas.md");
+    let doc = std::fs::read_to_string(&doc_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", doc_path.display()));
+
+    const REQUIRED: &[&str] = &[
+        "goto",
+        "clean",
+        "revert",
+        "fork",
+        "cherry_pick",
+        "stack",
+        "stack_ready",
+        "stack_snapshot",
+        "stash_list",
+        "stash_show",
+        "review_show",
+        "review_sign",
+        "review_next",
+        "review_health",
+        "bisect_start",
+        "purge_apply",
+        "redact_apply",
+        "redact_trust_add",
+        "discuss_open",
+        "discuss_list",
+        "context_set",
+        "context_list",
+    ];
+
+    let missing: Vec<&str> = REQUIRED
+        .iter()
+        .copied()
+        .filter(|value| !doc.contains(&format!("\"output_kind\": \"{value}\"")))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "docs/json-schemas.md is missing `output_kind` in the sample(s) for \
+         these heddle#272-swept verbs: {missing:?}. Add `\"output_kind\": \
+         \"<value>\"` to each sample so the documented contract matches the \
+         runtime discriminator."
+    );
+}
+
 // ---------------------------------------------------------------------
 // Runtime contract: invoke a representative subset of swept verbs and
 // confirm the emitted JSON carries `output_kind` matching the catalog

@@ -79,6 +79,18 @@ pub(crate) struct ContextGetOutput {
     pub(crate) annotations: Vec<AnnotationOutput>,
 }
 
+/// A single `context list` row. Identical to [`ContextGetOutput`] minus
+/// the per-row `output_kind`: the `context_list` envelope owns the
+/// discriminator, so list rows must not repeat it (consumers that route
+/// recursively on `output_kind` would otherwise misclassify a list row
+/// as a standalone `context get` payload).
+#[derive(Serialize)]
+pub(crate) struct ContextListRow {
+    pub(crate) target_kind: String,
+    pub(crate) target: String,
+    pub(crate) annotations: Vec<AnnotationOutput>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct AnnotationHistoryOutput {
     pub(crate) output_kind: &'static str,
