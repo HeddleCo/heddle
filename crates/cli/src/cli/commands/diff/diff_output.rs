@@ -98,7 +98,9 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 /// the path from that alone), so we emit the header-only form rather
 /// than skipping the change. A modify with no hunk body is only skipped
 /// when it is a genuine no-op — a trailing-newline-only change carries a
-/// synthesized tail hunk (see `unified_hunks`) and is rendered.
+/// synthesized tail hunk (see `unified_hunks`) and is rendered, and a
+/// mode-only modify (chmod) emits a header-only `diff --git` +
+/// `old mode`/`new mode` block so the permission change round-trips.
 pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
     let mut buf = String::new();
     for change in &output.changes {
@@ -109,6 +111,13 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         let is_rename = change.old_path.as_deref().is_some_and(|old| old != change.path);
         let is_added = change.kind == "added";
         let is_deleted = change.kind == "deleted";
+        let is_modified = !is_rename && !is_added && !is_deleted;
+        // A mode-only modify (chmod / exec-bit flip / type swap) has no
+        // hunk body but is still a real change: git records it as
+        // `old mode`/`new mode` extended headers and `git apply`
+        // reproduces the permission change from those alone.
+        let mode_changed = is_modified
+            && matches!((change.old_mode, change.mode), (Some(old), Some(new)) if old != new);
         // `lines: None` is the binary / unreadable case — there is no
         // text body to render, so it never produces a patch regardless
         // of kind. `lines: Some(_)` (even empty) means we have a
@@ -130,7 +139,7 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         } else if is_added || is_deleted {
             has_text
         } else {
-            has_hunk_body
+            has_hunk_body || mode_changed
         };
         if !should_render {
             continue;
@@ -159,6 +168,15 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         } else if is_deleted {
             buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
             buf.push_str(&format!("deleted file mode {}\n", mode_str(change.mode)));
+        } else if mode_changed {
+            // A modify whose mode changed (with or without a content
+            // hunk). Emit the `diff --git` + `old mode`/`new mode`
+            // header pair; a plain content modify still skips the
+            // `diff --git` line (git apply accepts the bare `---`/`+++`
+            // form, and the existing renderer never emitted it).
+            buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
+            buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
+            buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
         }
 
         // An empty-file add/delete (text side present but zero lines)
@@ -167,6 +185,13 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         // path — emitting `--- /+++/@@` with no `@@` body would be a
         // malformed hunk, so we stop here too.
         if (is_added || is_deleted) && !has_hunk_body {
+            continue;
+        }
+        // A mode-only modify carries no content hunk: the `old mode`/
+        // `new mode` header pair is the entire patch, so stop before the
+        // `--- /+++` line-diff headers (which would be a malformed
+        // empty hunk).
+        if is_modified && !has_hunk_body {
             continue;
         }
 
@@ -994,6 +1019,8 @@ fn semantic_path(change: &SemanticChangeEntry) -> String {
 
 #[cfg(test)]
 mod tests {
+    use objects::object::FileMode;
+
     use super::{
         SIGNATURE_CHANGE_SEPARATOR, aligned_added_tokens, group_semantic_changes, paint_line,
         paint_signature_change_item_lines, render_diff_patch,
@@ -1020,6 +1047,84 @@ mod tests {
 
     fn diff_output_with(changes: Vec<FileChange>) -> DiffOutput {
         DiffOutput::new(None, None, changes, None, None, None)
+    }
+
+    /// A mode-only modify (exec-bit flip, no content change) must render
+    /// as a header-only `diff --git` + `old mode`/`new mode` block with
+    /// no `@@` hunk. Regressing this drops the chmod from the patch so
+    /// `git apply` can't reproduce the permission change (cid 3318629228).
+    #[test]
+    fn render_diff_patch_emits_mode_only_header_for_chmod() {
+        let change = FileChange {
+            path: "run.sh".to_string(),
+            kind: "modified".to_string(),
+            lines: Some(Vec::new()),
+            old_mode: Some(FileMode::Normal),
+            mode: Some(FileMode::Executable),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.contains("diff --git a/run.sh b/run.sh"),
+            "chmod-only must emit the `diff --git` header:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("old mode 100644") && rendered.contains("new mode 100755"),
+            "chmod-only must emit `old mode`/`new mode`:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("@@") && !rendered.contains("--- a/"),
+            "chmod-only is header-only — no hunk body:\n{rendered}"
+        );
+    }
+
+    /// A modify that changes BOTH content and mode emits the mode-header
+    /// pair AND the usual `--- /+++` line-diff body.
+    #[test]
+    fn render_diff_patch_emits_mode_headers_with_content_hunk() {
+        let change = FileChange {
+            path: "run.sh".to_string(),
+            kind: "modified".to_string(),
+            lines: Some(vec![
+                LineDiff::with_lines("@", "@ -1,1 +1,1 @@", None, None),
+                LineDiff::with_lines("-", "echo old", Some(1), None),
+                LineDiff::with_lines("+", "echo new", None, Some(1)),
+            ]),
+            old_mode: Some(FileMode::Normal),
+            mode: Some(FileMode::Executable),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.contains("old mode 100644") && rendered.contains("new mode 100755"),
+            "content+mode change must still emit the mode headers:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("--- a/run.sh")
+                && rendered.contains("+++ b/run.sh")
+                && rendered.contains("+echo new"),
+            "content+mode change must still emit the line-diff body:\n{rendered}"
+        );
+    }
+
+    /// An unchanged mode on a modify with no hunk body is a genuine
+    /// no-op and must emit nothing — guards against the mode branch
+    /// firing when `old_mode == mode`.
+    #[test]
+    fn render_diff_patch_skips_modify_with_same_mode_and_no_body() {
+        let change = FileChange {
+            path: "run.sh".to_string(),
+            kind: "modified".to_string(),
+            lines: Some(Vec::new()),
+            old_mode: Some(FileMode::Normal),
+            mode: Some(FileMode::Normal),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.is_empty(),
+            "no-op modify (same mode, no body) must emit nothing:\n{rendered}"
+        );
     }
 
     /// `lines: None` is the binary / unreadable case. The patch

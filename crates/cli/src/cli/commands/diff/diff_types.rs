@@ -144,9 +144,16 @@ pub struct FileChange {
     /// (deletes). `None` falls back to `100644` (a regular file). For an
     /// executable the renderer emits `100755`; for a symlink `120000`
     /// (and the hunk body is the link target, matching git's blob
-    /// representation of a symlink).
+    /// representation of a symlink). For a `modified` change it is the
+    /// new (post-change) mode, paired with `old_mode`.
     #[serde(skip)]
     pub mode: Option<FileMode>,
+    /// Old (pre-change) git file mode for a `modified` change. When it
+    /// differs from `mode` the renderer emits `old mode`/`new mode`
+    /// extended headers so a chmod (e.g. exec-bit flip) round-trips
+    /// through `git apply` even when the file's content is unchanged.
+    #[serde(skip)]
+    pub old_mode: Option<FileMode>,
     #[serde(skip)]
     pub binary: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

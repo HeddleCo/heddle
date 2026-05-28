@@ -29,6 +29,8 @@ mod cli_premium_output;
 mod context_recovery_advice;
 #[path = "cli_integration/current_context_advice.rs"]
 mod current_context_advice;
+#[path = "cli_integration/diff_patch_conformance.rs"]
+mod diff_patch_conformance;
 #[path = "cli_integration/doctor_docs.rs"]
 mod doctor_docs;
 #[path = "cli_integration/fault_injection.rs"]

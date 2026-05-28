@@ -277,7 +277,7 @@ pub fn cmd_diff(
                 };
 
                 let kind = change.kind.to_string();
-                let mode = change_file_mode(
+                let (old_mode, mode) = change_file_modes(
                     &repo,
                     from_tree.as_ref(),
                     to_tree.as_ref(),
@@ -292,6 +292,7 @@ pub fn cmd_diff(
                     line_counts,
                     eol,
                     mode,
+                    old_mode,
                     ..Default::default()
                 }
             })
@@ -372,14 +373,18 @@ pub fn cmd_diff(
     Ok(())
 }
 
-/// Render and stash the standard unified-diff text on the output payload
-/// when there is any line-level data to render. JSON consumers always
-/// need a patch-compatible field; the rest of the print path consults
-/// the same renderer.
+/// Render and stash the standard unified-diff text on the output payload.
+/// JSON consumers always need a patch-compatible field; the rest of the
+/// print path consults the same renderer.
+///
+/// We always run `render_diff_patch` rather than gating on `lines`,
+/// because some changes are valid header-only patches with no line body:
+/// a pure rename (`rename from`/`rename to`), a mode-only modify
+/// (`old mode`/`new mode`), and an empty-file add/delete. `render_diff_patch`
+/// already decides per-change what is renderable and returns an empty
+/// string when nothing is — so the emptiness check below is the only
+/// gate we need.
 fn populate_patch_text(output: &mut DiffOutput) {
-    if !output.changes.iter().any(|change| change.lines.is_some()) {
-        return;
-    }
     let text = render_diff_patch(output);
     if !text.is_empty() {
         output.patch = Some(text);
@@ -532,12 +537,14 @@ fn plain_git_file_change(
         _ => None,
     };
     // Added files take their mode from the live worktree; deleted files
-    // from the HEAD tree entry resolved above. (A pure mode change on a
-    // modify isn't surfaced as a header here.)
-    let mode = match diff_kind {
-        DiffKind::Added => worktree_file_mode(&root.join(path)),
-        DiffKind::Deleted => old_mode,
-        _ => None,
+    // from the HEAD tree entry resolved above. A modify carries both: the
+    // HEAD-tree old mode and the live-worktree new mode, so a chmod
+    // (exec-bit flip) surfaces as `old mode`/`new mode`.
+    let (old_mode_field, mode) = match diff_kind {
+        DiffKind::Added => (None, worktree_file_mode(&root.join(path))),
+        DiffKind::Deleted => (None, old_mode),
+        DiffKind::Modified => (old_mode, worktree_file_mode(&root.join(path))),
+        DiffKind::Unchanged => (None, None),
     };
     let (lines, eol, binary) = compute_plain_git_hunks(
         old_blob.as_ref(),
@@ -552,6 +559,7 @@ fn plain_git_file_change(
         lines,
         eol,
         mode,
+        old_mode: old_mode_field,
         ..Default::default()
     })
 }
@@ -669,7 +677,11 @@ fn render_worktree_status_diff(
 
     let changes = file_changes_from_status(status, want_hunks, repo, from_tree.as_ref(), unified);
     let changes = if detect_renames {
-        detect_clear_renames_for_worktree_status(cli, changes)?
+        // `want_hunks` (a `--patch`/JSON render) needs the rename pair's
+        // edit hunk preserved; pass it through as `include_lines` and
+        // the real `unified` context so a rename-with-edits doesn't
+        // collapse to a pure rename that drops the content edit.
+        detect_clear_renames_for_worktree_status(cli, changes, want_hunks, unified)?
     } else {
         changes
     };
@@ -751,24 +763,24 @@ fn make_status_file_change(
     unified: usize,
 ) -> FileChange {
     let path_str = path.display().to_string();
-    let (lines, eol, binary, mode) = if want_hunks && let Some(repo) = repo {
-        // Worktree status diffs have no `to_tree`; the add mode comes
-        // from the live worktree, the delete mode from `from_tree`.
-        let mode = change_file_mode(repo, from_tree, None, &path_str, kind);
+    let (lines, eol, binary, mode, old_mode) = if want_hunks && let Some(repo) = repo {
+        // Worktree status diffs have no `to_tree`; the new-side mode comes
+        // from the live worktree, the old-side mode from `from_tree`.
+        let (old_mode, mode) = change_file_modes(repo, from_tree, None, &path_str, kind);
         match get_worktree_diff(repo, from_tree, &path_str, &diff_kind) {
-            Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false, mode),
+            Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false, mode, old_mode),
             Err(error) if is_binary_diff_error(&error) => {
-                (None, FileEolState::default(), true, mode)
+                (None, FileEolState::default(), true, mode, old_mode)
             }
             // Worktree read errors on a status-listed file mean the
             // file vanished between the status scan and the diff
             // attempt. Fall back to status-only; the renderer prints
             // the file header without a body, matching git's
             // behaviour for transient races.
-            Err(_) => (None, FileEolState::default(), false, mode),
+            Err(_) => (None, FileEolState::default(), false, mode, old_mode),
         }
     } else {
-        (None, FileEolState::default(), false, None)
+        (None, FileEolState::default(), false, None, None)
     };
     FileChange {
         path: path_str,
@@ -777,6 +789,7 @@ fn make_status_file_change(
         lines,
         eol,
         mode,
+        old_mode,
         ..Default::default()
     }
 }
@@ -1329,6 +1342,8 @@ fn read_worktree_blob_for_diff(path: &std::path::Path) -> Result<Blob> {
 fn detect_clear_renames_for_worktree_status(
     cli: &Cli,
     changes: Vec<FileChange>,
+    include_lines: bool,
+    unified: usize,
 ) -> Result<Vec<FileChange>> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
@@ -1343,7 +1358,7 @@ fn detect_clear_renames_for_worktree_status(
     } else {
         None
     };
-    detect_clear_renames(&repo, from_tree.as_ref(), None, changes, false, 3)
+    detect_clear_renames(&repo, from_tree.as_ref(), None, changes, include_lines, unified)
 }
 
 fn detect_clear_renames(
@@ -1773,29 +1788,42 @@ fn worktree_file_mode(path: &Path) -> Option<FileMode> {
     Some(FileMode::Normal)
 }
 
-/// Pick the git file mode the patch renderer stamps on an add/delete.
-/// Added files take the content-side mode (the `to_tree` entry for a
-/// state-to-state diff, otherwise the live worktree); deleted files take
-/// the old `from_tree` entry's mode. Other kinds carry no mode header.
-fn change_file_mode(
+/// Resolve the `(old_mode, mode)` pair the patch renderer stamps on a
+/// change. `mode` is the field the renderer reads for `new file mode`
+/// (adds) / `deleted file mode` (deletes); `old_mode` pairs with it on a
+/// `modified` change so a chmod surfaces as `old mode`/`new mode`.
+///
+/// * **added** — `(None, new-side mode)`: the `to_tree` entry for a
+///   state-to-state diff, otherwise the live worktree.
+/// * **deleted** — `(None, old-side mode)`: the `from_tree` entry's mode
+///   carried in `mode` for the `deleted file mode` header.
+/// * **modified** — `(old-side mode, new-side mode)`: `from_tree` entry
+///   vs. the `to_tree` entry (state diff) or live worktree.
+/// * anything else — `(None, None)`.
+fn change_file_modes(
     repo: &Repository,
     from_tree: Option<&Tree>,
     to_tree: Option<&Tree>,
     path: &str,
     kind: &str,
-) -> Option<FileMode> {
-    match kind {
-        "added" => match to_tree {
-            Some(tree) => find_entry_in_tree(repo, tree, path)
-                .ok()
-                .flatten()
-                .map(|entry| entry.mode),
-            None => worktree_file_mode(&repo.root().join(path)),
-        },
-        "deleted" => from_tree
+) -> (Option<FileMode>, Option<FileMode>) {
+    let old_side = || {
+        from_tree
             .and_then(|tree| find_entry_in_tree(repo, tree, path).ok().flatten())
+            .map(|entry| entry.mode)
+    };
+    let new_side = || match to_tree {
+        Some(tree) => find_entry_in_tree(repo, tree, path)
+            .ok()
+            .flatten()
             .map(|entry| entry.mode),
-        _ => None,
+        None => worktree_file_mode(&repo.root().join(path)),
+    };
+    match kind {
+        "added" => (None, new_side()),
+        "deleted" => (None, old_side()),
+        "modified" => (old_side(), new_side()),
+        _ => (None, None),
     }
 }
 
