@@ -257,19 +257,34 @@ pub trait BlobHydrator: Send + Sync {
 }
 
 /// A Heddle repository.
-pub struct Repository {
+///
+/// Generic over its reference and operation-log backends. The CLI uses the
+/// defaults — `Repository<RefManager, OpLog>` (the on-disk local
+/// backends) — so the bare name `Repository` resolves to the local flavor
+/// everywhere. The hosted server instantiates
+/// `Repository<PgRefBackend, PgOpLogBackend>` via [`Repository::from_parts`].
+///
+/// The object store stays `Box<dyn ObjectStore>` because [`Repository::open`]
+/// selects `FsStore` vs `S3Store` at *runtime* from config — a choice that
+/// can't be a compile-time type parameter without re-introducing dynamic
+/// dispatch via an enum. See heddle#259 for the Phase-2 follow-up.
+pub struct Repository<R = RefManager, O = OpLog>
+where
+    R: RefBackend,
+    O: OpLogBackend,
+{
     root: PathBuf,
     heddle_dir: PathBuf,
     capability: RepositoryCapability,
     store: Box<dyn ObjectStore>,
-    refs: Box<dyn RefBackend>,
-    oplog: Box<dyn OpLogBackend>,
+    refs: R,
+    oplog: O,
     config: RepoConfig,
     shallow: RwLock<ShallowInfo>,
     blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
 }
 
-impl RepositoryLockExt for Repository {
+impl<R: RefBackend, O: OpLogBackend> RepositoryLockExt for Repository<R, O> {
     fn locker(&self) -> RepoLock {
         let lock_root = self.heddle_dir.parent().expect(
             "heddle_dir has no parent component; cannot determine lock root. This indicates a misconfigured repository.",
@@ -278,7 +293,7 @@ impl RepositoryLockExt for Repository {
     }
 }
 
-impl Repository {
+impl<R: RefBackend, O: OpLogBackend> Repository<R, O> {
     /// Expert-only constructor for callers that already own the repository's
     /// component backends and invariant state.
     ///
@@ -291,8 +306,8 @@ impl Repository {
         root: PathBuf,
         heddle_dir: PathBuf,
         store: Box<dyn ObjectStore>,
-        refs: Box<dyn RefBackend>,
-        oplog: Box<dyn OpLogBackend>,
+        refs: R,
+        oplog: O,
         config: RepoConfig,
         shallow: ShallowInfo,
     ) -> Self {
@@ -310,6 +325,23 @@ impl Repository {
         }
     }
 
+    /// The object store backing this repository.
+    pub fn store(&self) -> &dyn ObjectStore {
+        self.store.as_ref()
+    }
+
+    /// The reference backend (threads, markers, HEAD).
+    pub fn refs(&self) -> &R {
+        &self.refs
+    }
+
+    /// The operation-log backend.
+    pub fn oplog(&self) -> &O {
+        &self.oplog
+    }
+}
+
+impl Repository {
     fn open_raw(
         root: PathBuf,
         heddle_dir: PathBuf,
@@ -328,8 +360,8 @@ impl Repository {
             root,
             heddle_dir,
             store,
-            Box::new(refs),
-            Box::new(oplog),
+            refs,
+            oplog,
             config,
             shallow,
         );
@@ -465,8 +497,8 @@ impl Repository {
             heddle_dir: heddle_dir.clone(),
             capability,
             store: Box::new(store),
-            refs: Box::new(refs),
-            oplog: Box::new(oplog),
+            refs,
+            oplog,
             config,
             shallow: RwLock::new(ShallowInfo::load(&heddle_dir)?),
             blob_hydrator: RwLock::new(None),
@@ -1566,10 +1598,6 @@ impl Repository {
         Ok(record)
     }
 
-    pub fn store(&self) -> &dyn ObjectStore {
-        self.store.as_ref()
-    }
-
     pub fn init_worktree(
         path: impl AsRef<Path>,
         shared_galeed_dir: impl AsRef<Path>,
@@ -1588,14 +1616,6 @@ impl Repository {
         )?;
         fs::create_dir_all(heddle_dir.join("state"))?;
         Ok(())
-    }
-
-    pub fn refs(&self) -> &dyn RefBackend {
-        &*self.refs
-    }
-
-    pub fn oplog(&self) -> &dyn OpLogBackend {
-        self.oplog.as_ref()
     }
 
     pub fn op_scope(&self) -> String {

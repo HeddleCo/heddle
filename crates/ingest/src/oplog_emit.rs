@@ -73,16 +73,19 @@ pub struct OplogEmitStats {
 
 /// Emits oplog records from a list of reflog entries.
 ///
-/// Takes `&dyn OpLogBackend` so the same emitter drives the local
-/// `OpLog` on disk and the server's Postgres-backed backend.
-pub struct OplogEmitter<'a> {
-    oplog: &'a dyn OpLogBackend,
+/// Generic over the [`OpLogBackend`] so the same emitter drives the local
+/// `OpLog` on disk and the server's Postgres-backed backend. Only the
+/// synchronous `record_*` methods are used here, so `emit` stays sync even
+/// though the trait now has `async` read methods — the type parameter is
+/// required because the trait is no longer `&dyn`-dispatchable.
+pub struct OplogEmitter<'a, O: OpLogBackend> {
+    oplog: &'a O,
     map: &'a ShaMap,
     scope: Option<String>,
 }
 
-impl<'a> OplogEmitter<'a> {
-    pub fn new(oplog: &'a dyn OpLogBackend, map: &'a ShaMap) -> Self {
+impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
+    pub fn new(oplog: &'a O, map: &'a ShaMap) -> Self {
         Self {
             oplog,
             map,
