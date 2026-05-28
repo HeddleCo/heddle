@@ -39,8 +39,8 @@ fn clone_help_pins_behavior_stanza() {
         "clone help should explain that --depth 0 is full history: {help}"
     );
     assert!(
-        help.contains("hydrated on demand") && help.contains("depth boundary"),
-        "clone help should explain that history past the depth boundary is hydrated on demand: {help}"
+        help.contains("depth boundary") && help.contains("re-clone at a greater --depth"),
+        "clone help should explain that history past the depth boundary is absent and recovered by re-cloning at a greater depth: {help}"
     );
     // Depth on Git-overlay clones: nonzero is rejected, --depth 0 is accepted
     // (= the full-clone default, since cmd_clone normalizes 0 to None before

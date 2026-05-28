@@ -1247,7 +1247,7 @@ pub struct PullArgs {
 #[command(after_help = "\
 Behavior:
   Default thread (no --thread): cloning a Git repository lands on the remote's advertised default branch (its Git HEAD); if the remote advertises none, it falls back to a thread named `main`, then to the alphabetically first imported thread. Cloning a Heddle remote (local path or hosted) lands on `main`. It never prompts.
-  Depth (Heddle remotes only): --depth 0 (the default) clones full history. --depth N materializes the tip plus N generations of ancestry; history older than that is not fetched up front but is hydrated on demand the first time you reach it, so `heddle log` initially stops at the depth boundary. Git-overlay clones reject a nonzero --depth; --depth 0 is accepted and clones full history (the default).
+  Depth (Heddle remotes only): --depth 0 (the default) clones full history. --depth N fetches only the tip plus N generations of ancestry, so `heddle log` stops at the depth boundary; history older than that is not present locally — re-clone at a greater --depth (or --depth 0) to obtain it. Git-overlay clones reject a nonzero --depth; --depth 0 is accepted and clones full history (the default).
   Depth bounds history, not file content: every state the clone keeps is fully materialized. A shallow clone is smaller because it holds fewer states, not because their blobs are absent.
 
   See `heddle help threads` for the thread model and `heddle help advanced` for power surfaces.
