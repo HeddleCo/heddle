@@ -524,31 +524,39 @@ fn plain_git_file_changes_with_hunks(
 
     let mut changes = Vec::with_capacity(probe.changes.change_count());
     for path in &probe.changes.modified {
-        changes.push(plain_git_file_change(
+        push_plain_git_modified(
             &git_repo,
-            head_tree.as_mut(),
+            &mut head_tree,
             &probe.root,
             path,
-            "modified",
-            DiffKind::Modified,
             unified,
-        )?);
+            &mut changes,
+        )?;
     }
     for path in &probe.changes.added {
-        let (kind, diff_kind) = if deleted_set.contains(path.as_path()) {
-            ("modified", DiffKind::Modified)
+        if deleted_set.contains(path.as_path()) {
+            // Coalesced HEAD→worktree modify (see above): route through the
+            // type-change classifier so a coalesced regular↔symlink swap
+            // splits into delete+add rather than emitting a cross-type chmod.
+            push_plain_git_modified(
+                &git_repo,
+                &mut head_tree,
+                &probe.root,
+                path,
+                unified,
+                &mut changes,
+            )?;
         } else {
-            ("added", DiffKind::Added)
-        };
-        changes.push(plain_git_file_change(
-            &git_repo,
-            head_tree.as_mut(),
-            &probe.root,
-            path,
-            kind,
-            diff_kind,
-            unified,
-        )?);
+            changes.push(plain_git_file_change(
+                &git_repo,
+                head_tree.as_mut(),
+                &probe.root,
+                path,
+                "added",
+                DiffKind::Added,
+                unified,
+            )?);
+        }
     }
     for path in &probe.changes.deleted {
         // Already emitted as a coalesced modify in the added loop.
@@ -647,6 +655,86 @@ fn plain_git_lookup_blob_and_mode(
     Ok(Some((Blob::new(object.data.clone()), mode)))
 }
 
+/// Classify the HEAD-tree side of a plain-Git path. A tracked entry is a
+/// blob or symlink — git records no directory entries — so this returns
+/// `Regular` or `Symlink`; an absent entry (unborn HEAD, or a path not in
+/// HEAD) is `Absent`, which `is_type_change` treats as no type change so
+/// the modify renders as content.
+fn plain_git_old_side_kind(
+    head_tree: Option<&mut gix::Tree<'_>>,
+    path: &std::path::Path,
+) -> Result<SideKind> {
+    let Some(tree) = head_tree else {
+        return Ok(SideKind::Absent);
+    };
+    let Some(entry) = tree.peel_to_entry_by_path(path)? else {
+        return Ok(SideKind::Absent);
+    };
+    Ok(if entry.mode().is_link() {
+        SideKind::Symlink
+    } else {
+        SideKind::Regular
+    })
+}
+
+/// Emit the plain-Git `FileChange`(s) for one `modified` (or coalesced-
+/// modify) path, splitting a *type change* into the delete+add pair git
+/// records rather than a cross-type chmod `git apply` rejects.
+///
+/// This is the plain-Git mirror of the heddle path's
+/// `worktree_modified_type_change` + `expand_type_changes`: it reuses the
+/// same `worktree_side_kind` / `is_type_change` decision so both backends
+/// classify identical input identically (a regular↔symlink swap splits, a
+/// file→dir change downgrades to a deletion whose new leaves arrive as
+/// their own `added` entries from status). A tracked old side is always a
+/// single blob/symlink, so there is never an old subtree to expand here.
+fn push_plain_git_modified(
+    git_repo: &gix::Repository,
+    head_tree: &mut Option<gix::Tree<'_>>,
+    root: &Path,
+    path: &std::path::Path,
+    unified: usize,
+    out: &mut Vec<FileChange>,
+) -> Result<()> {
+    let new_kind = worktree_side_kind(&root.join(path));
+    let old_kind = plain_git_old_side_kind(head_tree.as_mut(), path)?;
+    if is_type_change(old_kind, new_kind) {
+        out.push(plain_git_file_change(
+            git_repo,
+            head_tree.as_mut(),
+            root,
+            path,
+            "deleted",
+            DiffKind::Deleted,
+            unified,
+        )?);
+        // A new-side directory's leaves arrive as separate `added` status
+        // entries; only a non-directory new side adds here.
+        if new_kind != SideKind::Dir {
+            out.push(plain_git_file_change(
+                git_repo,
+                head_tree.as_mut(),
+                root,
+                path,
+                "added",
+                DiffKind::Added,
+                unified,
+            )?);
+        }
+    } else {
+        out.push(plain_git_file_change(
+            git_repo,
+            head_tree.as_mut(),
+            root,
+            path,
+            "modified",
+            DiffKind::Modified,
+            unified,
+        )?);
+    }
+    Ok(())
+}
+
 fn compute_plain_git_hunks(
     old: Option<&Blob>,
     new: Option<&Blob>,
@@ -672,17 +760,7 @@ fn compute_plain_git_hunks(
                 Ok((number_lines(blob_lines(old, "-")?), eol))
             }
             DiffKind::Modified => match (old, new) {
-                (Some(old), Some(new)) => {
-                    ensure_text_diffable(old)?;
-                    ensure_text_diffable(new)?;
-                    let eol = eol_for_modified(old, new);
-                    let diff = diff_blobs(old, new);
-                    let lines = diff
-                        .iter()
-                        .map(|l| LineDiff::new(l.prefix(), l.content()))
-                        .collect();
-                    Ok((number_lines(lines), eol))
-                }
+                (Some(old), Some(new)) => modified_blob_hunks(old, new),
                 (None, Some(new)) => {
                     ensure_text_diffable(new)?;
                     let eol = eol_for_added(new);
@@ -1687,24 +1765,7 @@ fn get_worktree_diff(
             if let Some(tree) = from_tree
                 && let Some(old_blob) = find_blob_in_tree(repo, tree, path)?
             {
-                // Content-identical modify — a pure mode change (chmod /
-                // exec-bit flip), including on a binary file. Return an
-                // empty text body so the renderer takes the mode-only
-                // chmod path (`old mode`/`new mode`) instead of the
-                // binary branch: there's no content delta to refuse, and
-                // git round-trips the permission change on its own.
-                if old_blob.content() == new_blob.content() {
-                    return Ok((Vec::new(), FileEolState::default()));
-                }
-                ensure_text_diffable(&old_blob)?;
-                ensure_text_diffable(&new_blob)?;
-                let eol = eol_for_modified(&old_blob, &new_blob);
-                let diff = diff_blobs(&old_blob, &new_blob);
-                let lines = diff
-                    .iter()
-                    .map(|l| LineDiff::new(l.prefix(), l.content()))
-                    .collect();
-                return Ok((number_lines(lines), eol));
+                return modified_blob_hunks(&old_blob, &new_blob);
             }
 
             let eol = eol_for_added(&new_blob);
@@ -1722,12 +1783,21 @@ fn get_worktree_diff(
 /// fails reading the directory, the change collapses to `lines: None`, and
 /// the renderer drops it — leaving `git apply` unable to create `foo/bar`
 /// over the still-present `foo`. Returns the effective `(kind, DiffKind)`.
+///
+/// Classification goes through `worktree_side_kind` (`symlink_metadata`, no
+/// link following), so only a *real* directory triggers the downgrade. A
+/// regular file replaced by a symlink *pointing at* a directory reports
+/// `Symlink`, stays a `modified` entry, and is split into delete+add by
+/// `expand_type_changes` — `Path::is_dir()` would have followed the link,
+/// misread it as a directory, and dropped the `120000` add (cid 3320033195).
 fn worktree_modified_type_change(
     repo_root: &Path,
     path: &str,
     diff_kind: DiffKind,
 ) -> Option<(&'static str, DiffKind)> {
-    if matches!(diff_kind, DiffKind::Modified) && repo_root.join(path).is_dir() {
+    if matches!(diff_kind, DiffKind::Modified)
+        && worktree_side_kind(&repo_root.join(path)) == SideKind::Dir
+    {
         Some(("deleted", DiffKind::Deleted))
     } else {
         None
@@ -2022,22 +2092,7 @@ fn get_state_diff(
             if let Some(tree) = from_tree
                 && let Some(old_blob) = find_blob_in_tree(repo, tree, path)?
             {
-                // Content-identical modify — a pure mode change (chmod /
-                // exec-bit flip), including on a binary file. Return an
-                // empty text body so the renderer takes the mode-only
-                // chmod path instead of the binary branch.
-                if old_blob.content() == new_blob.content() {
-                    return Ok((Vec::new(), FileEolState::default()));
-                }
-                ensure_text_diffable(&old_blob)?;
-                ensure_text_diffable(&new_blob)?;
-                let eol = eol_for_modified(&old_blob, &new_blob);
-                let diff = diff_blobs(&old_blob, &new_blob);
-                let lines = diff
-                    .iter()
-                    .map(|l| LineDiff::new(l.prefix(), l.content()))
-                    .collect();
-                return Ok((number_lines(lines), eol));
+                return modified_blob_hunks(&old_blob, &new_blob);
             }
             // No corresponding blob in `from_tree` — render as all-new.
             let eol = eol_for_added(&new_blob);
@@ -2104,6 +2159,34 @@ fn blob_lines(blob: &Blob, prefix: &str) -> Result<Vec<LineDiff>> {
         .lines()
         .map(|line| LineDiff::new(prefix, line))
         .collect())
+}
+
+/// Compute the `(lines, eol)` for a `modified` pair of blobs, applying the
+/// identical-content short-circuit shared by every diff-rendering path.
+///
+/// When the two blobs carry identical bytes the change is a pure mode flip
+/// (chmod / exec-bit), even on a binary file: returning an empty body routes
+/// the renderer through the `old mode`/`new mode` header instead of the
+/// binary-refusal branch, so a binary chmod-only round-trips through `git
+/// apply` rather than emitting a placeholder binary patch git rejects.
+///
+/// Both heddle-backed paths (`get_worktree_diff`, `get_state_diff`) and the
+/// plain-Git fast path (`compute_plain_git_hunks`) call this, so the
+/// short-circuit + text-diff decision lives in exactly one place — a binary
+/// chmod-only behaves identically regardless of backend (cid 3320033191).
+fn modified_blob_hunks(old: &Blob, new: &Blob) -> Result<(Vec<LineDiff>, FileEolState)> {
+    if old.content() == new.content() {
+        return Ok((Vec::new(), FileEolState::default()));
+    }
+    ensure_text_diffable(old)?;
+    ensure_text_diffable(new)?;
+    let eol = eol_for_modified(old, new);
+    let diff = diff_blobs(old, new);
+    let lines = diff
+        .iter()
+        .map(|l| LineDiff::new(l.prefix(), l.content()))
+        .collect();
+    Ok((number_lines(lines), eol))
 }
 
 fn ensure_text_diffable(blob: &Blob) -> Result<()> {

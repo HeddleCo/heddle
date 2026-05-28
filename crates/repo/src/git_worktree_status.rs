@@ -66,7 +66,18 @@ pub fn git_worktree_entry_state(
     let absolute = root.join(path);
     let metadata = match fs::symlink_metadata(&absolute) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        // `NotFound`: the path is simply gone. `NotADirectory`: an ancestor
+        // is no longer a directory (e.g. tracked `data/item.txt` after `data`
+        // became a regular file — a dir→file type change). In both cases the
+        // indexed path cannot exist in the worktree, which is exactly what
+        // `git status` reports as a deletion; the new file arrives as its own
+        // untracked `added` entry.
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
             return Ok(GitWorktreeEntryState::Deleted);
         }
         Err(error) => return Err(error.into()),
@@ -162,6 +173,22 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let oid = write_blob_hash(b"anything");
         let state = git_worktree_entry_state(temp.path(), "nope.txt", oid, GIT_MODE_REGULAR)
+            .expect("call");
+        assert_eq!(state, GitWorktreeEntryState::Deleted);
+    }
+
+    /// A tracked path whose ancestor became a regular file (a dir→file type
+    /// change: `data/item.txt` after `data` is replaced by a file) raises
+    /// `ENOTDIR`, not `NotFound`. The indexed path still cannot exist, so it
+    /// must report `Deleted` rather than propagating an io error.
+    #[test]
+    fn ancestor_turned_into_file_is_deleted() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // `data` is a regular file; `data/item.txt` therefore has a non-dir
+        // ancestor and cannot be statted.
+        fs::write(temp.path().join("data"), b"now a file").unwrap();
+        let oid = write_blob_hash(b"x\ny\n");
+        let state = git_worktree_entry_state(temp.path(), "data/item.txt", oid, GIT_MODE_REGULAR)
             .expect("call");
         assert_eq!(state, GitWorktreeEntryState::Deleted);
     }

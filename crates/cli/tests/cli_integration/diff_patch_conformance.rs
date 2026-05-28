@@ -937,6 +937,33 @@ fn symlink_to_regular_type_change_round_trips() {
     );
 }
 
+/// cid 3320033195 — a tracked regular file replaced by a symlink whose
+/// *target is a real directory*. `Path::is_dir()` follows the link and
+/// would misclassify the change as a plain deletion, dropping the `120000`
+/// add and losing the new path on apply. Symlink-aware metadata
+/// (`worktree_side_kind`) keeps it a regular→symlink type change → the
+/// modify splits into delete(100644) + add(120000). The symlink target
+/// `realdir` exists as a real directory in the worktree, so this trips the
+/// `is_dir()`-follows-the-link defect specifically.
+#[cfg(unix)]
+#[test]
+fn regular_to_symlink_pointing_at_dir_type_change_round_trips() {
+    native_cell(
+        &[
+            normal("node", "real contents\n"),
+            normal("realdir/keep.txt", "keep\n"),
+        ],
+        |dir| {
+            std::fs::remove_file(dir.join("node")).unwrap();
+            write_entry(dir, &symlink("node", "realdir"));
+        },
+        &[
+            Expect::Present(symlink("node", "realdir")),
+            Expect::Present(normal("realdir/keep.txt", "keep\n")),
+        ],
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Matrix — state-to-state type changes (cid 3319484717). The committed-tree
 // surface (`heddle diff HEAD~1 HEAD`) took the `to_tree`-present branch, which
@@ -1188,6 +1215,157 @@ fn plain_git_chmod_round_trips() {
         true,
         |dir| set_mode(&dir.join("run.sh"), 0o755),
         &[Expect::Present(exec("run.sh", body))],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Plain-Git both-path coverage (cid 3320033191 / 3320033195). The plain-Git
+// fast path is a separate diff-rendering backend from the heddle-backed paths;
+// for four rounds, bugs were fixed in one backend and missed in the other.
+// These cells run the binary-chmod / type-change / symlink classes — the ones
+// the heddle paths already cover via `native_cell` / `state_cell` — through the
+// plain-Git backend too, so a sibling-path miss fails CI here, not in review.
+// ---------------------------------------------------------------------------
+
+/// cid 3320033191 — a pure chmod on a *binary* file in a plain-Git repo. The
+/// old/new blob bytes are identical, so it must render as a mode-only header
+/// (`old mode`/`new mode`), NOT a `Binary files … differ` placeholder that
+/// `git apply` refuses. The identical-content short-circuit (now shared by
+/// every backend via `modified_blob_hunks`) routes it through the chmod path.
+#[cfg(unix)]
+#[test]
+fn plain_git_binary_pure_chmod_round_trips() {
+    let bytes: &[u8] = &[0u8, 1, 2, 0, 255, 0, 42];
+    plain_git_cell(
+        &[binary("data.bin", bytes)],
+        true,
+        |dir| set_mode(&dir.join("data.bin"), 0o755),
+        &[Expect::Present(binary_exec("data.bin", bytes))],
+    );
+}
+
+/// The binary-chmod patch is header-only on the plain-Git path too: no
+/// `Binary files … differ` marker, no `@@` body — just the `old mode`/`new
+/// mode` pair. Pins the exact shape so a regression that re-introduces the
+/// binary branch for a pure chmod trips here.
+#[cfg(unix)]
+#[test]
+fn plain_git_binary_pure_chmod_emits_mode_only_patch() {
+    let h = TempDir::new().unwrap();
+    git_init(h.path());
+    write_entry(h.path(), &binary("data.bin", &[0u8, 1, 2, 0, 255]));
+    git(h.path(), &["add", "-A"]);
+    git(h.path(), &["commit", "-q", "-m", "seed"]);
+    set_mode(&h.path().join("data.bin"), 0o755);
+
+    let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
+    assert!(
+        patch.contains("old mode 100644") && patch.contains("new mode 100755"),
+        "plain-Git binary chmod must carry `old mode`/`new mode`:\n{patch}"
+    );
+    assert!(
+        !patch.contains("Binary files") && !patch.contains("@@"),
+        "pure binary chmod is header-only — no binary marker, no hunk:\n{patch}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_git_regular_to_symlink_type_change_round_trips() {
+    // regular → symlink in a plain-Git repo must split into delete(100644)
+    // + add(120000), matching the heddle path's `expand_type_changes`.
+    plain_git_cell(
+        &[normal("node", "real contents\n"), normal("keep.txt", "keep\n")],
+        false,
+        |dir| {
+            std::fs::remove_file(dir.join("node")).unwrap();
+            write_entry(dir, &symlink("node", "some/target/path"));
+        },
+        &[
+            Expect::Present(symlink("node", "some/target/path")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_git_symlink_to_regular_type_change_round_trips() {
+    plain_git_cell(
+        &[symlink("node", "some/target/path"), normal("keep.txt", "keep\n")],
+        false,
+        |dir| {
+            std::fs::remove_file(dir.join("node")).unwrap();
+            write_entry(dir, &normal("node", "now real contents\n"));
+        },
+        &[
+            Expect::Present(normal("node", "now real contents\n")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+/// cid 3320033195 on the plain-Git backend: the symlink target is a real
+/// directory. `worktree_side_kind` (used by the plain-Git classifier too)
+/// reports `Symlink`, never the `Dir` it points at, so the regular→symlink
+/// swap still splits into delete+add.
+#[cfg(unix)]
+#[test]
+fn plain_git_regular_to_symlink_pointing_at_dir_type_change_round_trips() {
+    plain_git_cell(
+        &[
+            normal("node", "real contents\n"),
+            normal("realdir/keep.txt", "keep\n"),
+        ],
+        false,
+        |dir| {
+            std::fs::remove_file(dir.join("node")).unwrap();
+            write_entry(dir, &symlink("node", "realdir"));
+        },
+        &[
+            Expect::Present(symlink("node", "realdir")),
+            Expect::Present(normal("realdir/keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[test]
+fn plain_git_file_to_dir_type_change_round_trips() {
+    // file → dir on the plain-Git path: the modify downgrades to a deletion
+    // of the blocking file; the dir's leaf arrives as a separate untracked
+    // `added` entry. Without the downgrade the modify renders a chmod+empty
+    // body git apply leaves as a file, blocking the nested add.
+    plain_git_cell(
+        &[normal("conf", "old config\n"), normal("keep.txt", "keep\n")],
+        false,
+        |dir| {
+            std::fs::remove_file(dir.join("conf")).unwrap();
+            write_entry(dir, &normal("conf/nested.txt", "nested\nvalue\n"));
+        },
+        &[
+            Expect::Present(normal("conf/nested.txt", "nested\nvalue\n")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[test]
+fn plain_git_dir_to_file_type_change_round_trips() {
+    // dir → file: the leaf is deleted (worktree path gone) and the new file
+    // is added (untracked). Neither lands in the modified set, so this guards
+    // that the plain-Git add/delete ordering still round-trips.
+    plain_git_cell(
+        &[normal("data/item.txt", "x\ny\n"), normal("keep.txt", "keep\n")],
+        false,
+        |dir| {
+            std::fs::remove_file(dir.join("data/item.txt")).unwrap();
+            std::fs::remove_dir(dir.join("data")).unwrap();
+            write_entry(dir, &normal("data", "now a file\n"));
+        },
+        &[
+            Expect::Present(normal("data", "now a file\n")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
     );
 }
 
@@ -1650,6 +1828,90 @@ proptest! {
         prop_assert!(
             !patch.trim().is_empty(),
             "type change must produce a patch; file_to_link={file_to_link}"
+        );
+        let json_patch = json_patch_field(h.path());
+        prop_assert_eq!(json_patch.as_deref(), Some(patch.as_str()));
+
+        // Oracle: seed `pre`, apply, assert the post type + content materializes.
+        let g = TempDir::new().unwrap();
+        git_init(g.path());
+        write_entry(g.path(), &pre);
+        write_entry(g.path(), &normal("anchor.txt", "anchor\n"));
+        git(g.path(), &["add", "-A"]);
+        git(g.path(), &["commit", "-q", "-m", "seed"]);
+
+        let check = pipe_git(g.path(), &["apply", "--check"], &patch);
+        prop_assert!(
+            check.status.success(),
+            "git apply --check failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let applied = pipe_git(g.path(), &["apply"], &patch);
+        prop_assert!(
+            applied.status.success(),
+            "git apply failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+
+        let meta = std::fs::symlink_metadata(g.path().join("node")).unwrap();
+        if file_to_link {
+            prop_assert!(
+                meta.file_type().is_symlink(),
+                "node should be a symlink after apply"
+            );
+            let link = std::fs::read_link(g.path().join("node")).unwrap();
+            let link = link.to_string_lossy();
+            prop_assert_eq!(link.as_bytes(), target.as_bytes());
+        } else {
+            prop_assert!(
+                !meta.file_type().is_symlink(),
+                "node should be a regular file after apply"
+            );
+            prop_assert_eq!(
+                std::fs::read(g.path().join("node")).unwrap(),
+                body.as_bytes().to_vec()
+            );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
+
+    /// The plain-Git backend (no `heddle init`) must split a regular↔symlink
+    /// swap into delete+add exactly like the heddle backend does, never the
+    /// cross-type `old mode`/`new mode` flip git apply rejects. This is the
+    /// random both-path guard for the plain-Git type-change routing
+    /// (`push_plain_git_modified`): the heddle surface gets this coverage from
+    /// `symlink_type_change_round_trips`, so the plain-Git surface gets the
+    /// mirror here rather than waiting for an r11 Codex review (cid 3320033195).
+    #[cfg(unix)]
+    #[test]
+    fn plain_git_symlink_type_change_round_trips(
+        file_to_link in any::<bool>(),
+        body in "[a-z]{1,12}\n",
+        target in "[a-z][a-z/]{0,18}[a-z]",
+    ) {
+        let (pre, post): (Entry, Entry) = if file_to_link {
+            (normal("node", &body), symlink("node", &target))
+        } else {
+            (symlink("node", &target), normal("node", &body))
+        };
+
+        let h = TempDir::new().unwrap();
+        git_init(h.path());
+        write_entry(h.path(), &pre);
+        write_entry(h.path(), &normal("anchor.txt", "anchor\n"));
+        git(h.path(), &["add", "-A"]);
+        git(h.path(), &["commit", "-q", "-m", "seed"]);
+
+        std::fs::remove_file(h.path().join("node")).unwrap();
+        write_entry(h.path(), &post);
+
+        let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
+        prop_assert!(
+            !patch.trim().is_empty(),
+            "plain-Git type change must produce a patch; file_to_link={file_to_link}"
         );
         let json_patch = json_patch_field(h.path());
         prop_assert_eq!(json_patch.as_deref(), Some(patch.as_str()));
