@@ -3440,11 +3440,14 @@ fn test_cli_diff_patch_plain_git_added_file_emits_hunk() {
 }
 
 /// Plain-Git `--patch` for a DELETED file (present in HEAD, missing
-/// from the worktree) must emit a `--- a/...`-style delete hunk with
-/// every old line marked `-`. Mirror of the ADDED case above; the
-/// status-only fallback used to drop the body here too.
+/// from the worktree) must emit the git-canonical deletion block:
+/// `deleted file mode` + `--- a/<path>` + `+++ /dev/null` + an
+/// all-`-` hunk. `git apply --check` tolerates a bare `+++ b/<path>`
+/// shape, but actually applying it would truncate the file to empty
+/// instead of removing it — so we apply for real and assert the path
+/// is gone, not left behind as a zero-byte file.
 #[test]
-fn test_cli_diff_patch_plain_git_deleted_file_emits_hunk() {
+fn test_cli_diff_patch_plain_git_deleted_file_round_trips() {
     let temp = TempDir::new().unwrap();
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("doomed.txt"), "gamma\ndelta\n").unwrap();
@@ -3456,8 +3459,20 @@ fn test_cli_diff_patch_plain_git_deleted_file_emits_hunk() {
     let patch = heddle(&["diff", "--patch"], Some(temp.path())).unwrap();
 
     assert!(
+        patch.contains("deleted file mode 100644"),
+        "DELETED file must carry the `deleted file mode` header:\n{patch}"
+    );
+    assert!(
         patch.contains("--- a/doomed.txt"),
         "DELETED file must produce a `--- a/<path>` header:\n{patch}"
+    );
+    assert!(
+        patch.contains("+++ /dev/null"),
+        "DELETED file must source the new side from `/dev/null`:\n{patch}"
+    );
+    assert!(
+        !patch.contains("+++ b/doomed.txt"),
+        "DELETED file must NOT emit `+++ b/<path>` (that truncates, not removes):\n{patch}"
     );
     assert!(
         patch.contains("-gamma") && patch.contains("-delta"),
@@ -3470,7 +3485,7 @@ fn test_cli_diff_patch_plain_git_deleted_file_emits_hunk() {
     std::fs::write(apply_dir.path().join("kept.txt"), "anchor\n").unwrap();
     git_commit_all(apply_dir.path(), "seed apply");
 
-    let mut child = Command::new("git")
+    let mut check = Command::new("git")
         .args(["apply", "--check"])
         .current_dir(apply_dir.path())
         .stdin(Stdio::piped())
@@ -3478,17 +3493,48 @@ fn test_cli_diff_patch_plain_git_deleted_file_emits_hunk() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("git apply should spawn");
-    child
+    check
         .stdin
         .as_mut()
         .unwrap()
         .write_all(patch.as_bytes())
         .unwrap();
-    let out = child.wait_with_output().expect("git apply should finish");
+    let check_out = check.wait_with_output().expect("git apply should finish");
     assert!(
-        out.status.success(),
+        check_out.status.success(),
         "git apply --check must accept a plain-Git delete patch;\npatch=\n{patch}\nstderr={}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    // Apply for real and confirm the path is unlinked rather than
+    // truncated to a zero-byte file — the actual bug behind cid 3315303999.
+    let mut apply = Command::new("git")
+        .args(["apply"])
+        .current_dir(apply_dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git apply should spawn");
+    apply
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let apply_out = apply.wait_with_output().expect("git apply should finish");
+    assert!(
+        apply_out.status.success(),
+        "git apply must apply a plain-Git delete patch;\npatch=\n{patch}\nstderr={}",
+        String::from_utf8_lossy(&apply_out.stderr)
+    );
+    assert!(
+        !apply_dir.path().join("doomed.txt").exists(),
+        "applying the delete patch must REMOVE doomed.txt, not leave it behind:\n{patch}"
+    );
+    assert!(
+        apply_dir.path().join("kept.txt").exists(),
+        "applying the delete patch must leave untouched files in place:\n{patch}"
     );
 }
 

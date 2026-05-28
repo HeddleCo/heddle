@@ -79,6 +79,11 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 ///   --- /dev/null`. Without it, `git apply` (and `patch -p1`) demand
 ///   that `b/<path>` already exist on the target side, which defeats
 ///   the whole point of an add hunk.
+/// * **Deleted files** get `diff --git ... / deleted file mode 100644 /
+///   +++ /dev/null`. `git apply --check` tolerates the bare `+++ b/<path>`
+///   shape, but actually applying it leaves an empty file behind instead
+///   of removing the path — the `+++ /dev/null` + deleted-mode header is
+///   what tells git to unlink it.
 /// * **Renames** get `diff --git a/old b/new / similarity index N% /
 ///   rename from old / rename to new`. Pure renames (no edits) emit
 ///   the extended headers and stop; rename-with-edit appends the
@@ -92,6 +97,7 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         let old_path = change.old_path.as_deref().unwrap_or(&change.path);
         let is_rename = change.old_path.as_deref().is_some_and(|old| old != change.path);
         let is_added = change.kind == "added";
+        let is_deleted = change.kind == "deleted";
 
         // Renames must emit headers even when there's no hunk body
         // (pure rename = identical content). Other kinds need at least
@@ -126,6 +132,14 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
             // lands, thread it through here.
             buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
             buf.push_str("new file mode 100644\n");
+        } else if is_deleted {
+            // Mirror of the add case: `deleted file mode 100644` is the
+            // git-canonical default for a regular text blob. Paired with
+            // `+++ /dev/null` below, it tells git to unlink the path
+            // rather than truncate it to empty. Real-mode detection, if
+            // it lands, threads through here too.
+            buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
+            buf.push_str("deleted file mode 100644\n");
         }
 
         if is_added {
@@ -133,7 +147,11 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         } else {
             buf.push_str(&format!("--- a/{old_path}\n"));
         }
-        buf.push_str(&format!("+++ b/{}\n", change.path));
+        if is_deleted {
+            buf.push_str("+++ /dev/null\n");
+        } else {
+            buf.push_str(&format!("+++ b/{}\n", change.path));
+        }
         if let Some(lines) = lines_ref {
             render_patch_hunks(change, lines, &mut buf);
         }
