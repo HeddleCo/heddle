@@ -24,6 +24,7 @@ uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
+pollster = "0.4"
 tempfile.workspace = true
 
 [features]

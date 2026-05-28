@@ -141,6 +141,54 @@ fn test_resolve() {
     assert_eq!(resolved, Some(id));
 }
 #[test]
+fn test_corerefbackend_trait_methods_dispatch() {
+    // The CLI calls RefManager's inherent (sync) methods; the generic
+    // backend plumbing (Importer/RefEmitter, hosted server) calls the
+    // async trait methods. Exercise the trait surface explicitly so the
+    // `impl CoreRefBackend for RefManager` async bodies are covered.
+    let (_temp, refs) = create_ref_manager();
+    let thread_id = ChangeId::generate();
+    let marker_id = ChangeId::generate();
+
+    CoreRefBackend::set_thread(&refs, &ThreadName::new("main"), &thread_id).unwrap();
+    assert_eq!(
+        pollster::block_on(CoreRefBackend::get_thread(
+            &refs,
+            &ThreadName::new("main")
+        ))
+        .unwrap(),
+        Some(thread_id)
+    );
+
+    pollster::block_on(CoreRefBackend::create_marker(
+        &refs,
+        &MarkerName::new("v1.0.0"),
+        &marker_id,
+    ))
+    .unwrap();
+    assert_eq!(
+        pollster::block_on(CoreRefBackend::get_marker(
+            &refs,
+            &MarkerName::new("v1.0.0")
+        ))
+        .unwrap(),
+        Some(marker_id)
+    );
+
+    refs.write_head(&Head::Attached {
+        thread: ThreadName::new("main"),
+    })
+    .unwrap();
+    assert_eq!(
+        pollster::block_on(CoreRefBackend::resolve(&refs, "main")).unwrap(),
+        Some(thread_id)
+    );
+    assert_eq!(
+        pollster::block_on(CoreRefBackend::resolve(&refs, "@")).unwrap(),
+        Some(thread_id)
+    );
+}
+#[test]
 fn test_track_cas_conflict() {
     let (_temp, refs) = create_ref_manager();
     let id1 = ChangeId::generate();
