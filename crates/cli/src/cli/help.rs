@@ -122,8 +122,9 @@ pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> 
             writeln!(out)?;
             writeln!(
                 out,
-                "Output: `--output auto` renders text on a TTY and JSON when piped; \
-                 use `--output text` or `--output json` to force a mode."
+                "Output: text is the default; pass `--output json` for the \
+                 machine contract (stable `output_kind`, exit codes, recovery \
+                 templates). No TTY/pipe auto-detection."
             )?;
             writeln!(out)?;
             writeln!(

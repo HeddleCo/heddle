@@ -135,6 +135,21 @@ mod tests {
     }
 
     #[test]
+    fn config_parse_preserves_toml_source_as_data_err() {
+        // Regression for Codex R4 (cid 3315305484): `ConfigParse` must keep
+        // the `toml::de::Error` as its source so the chain-walk still
+        // classifies it, rather than flattening to a String and falling
+        // through to `IoErr`.
+        let toml_err = toml::from_str::<toml::Value>("= nope").unwrap_err();
+        let err: anyhow::Error = objects::error::HeddleError::ConfigParse {
+            path: std::path::PathBuf::from("/tmp/config.toml"),
+            source: toml_err,
+        }
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
     fn serde_json_is_data_err() {
         let err: anyhow::Error = serde_json::from_str::<serde_json::Value>("{")
             .unwrap_err()

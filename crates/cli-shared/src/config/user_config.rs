@@ -278,7 +278,21 @@ impl UserConfig {
         let mut file = fs::File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        Ok(toml::from_str(&contents)?)
+        // Route TOML parse failures through `HeddleError::ConfigParse` so
+        // the CLI error envelope (see `print_error_with_hint`) can
+        // classify them and render the *actual* source file in the
+        // recovery advice — not a hard-coded `.heddle/config.toml`
+        // (Codex R3 cid 3313132711 on #271). The path is canonicalized
+        // so the rendered hint is copy/paste-safe even when the caller
+        // passed a relative or env-derived path.
+        toml::from_str::<Self>(&contents).map_err(|err| {
+            let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            objects::error::HeddleError::ConfigParse {
+                path: resolved,
+                source: err,
+            }
+            .into()
+        })
     }
 
     pub fn load_default() -> anyhow::Result<Self> {

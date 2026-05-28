@@ -22,6 +22,16 @@ pub enum HeddleError {
     Serialization(String),
     #[error("configuration error: {0}")]
     Config(String),
+    #[error("configuration parse error at {path}: {source}")]
+    ConfigParse {
+        path: std::path::PathBuf,
+        // Keep the original `toml::de::Error` as the error source — not a
+        // flattened string — so `HeddleExitCode::from_error` can still
+        // downcast through the chain and classify config-parse failures as
+        // EX_DATAERR (65) rather than falling through to EX_IOERR (74).
+        #[source]
+        source: toml::de::Error,
+    },
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("compression error: {0}")]
