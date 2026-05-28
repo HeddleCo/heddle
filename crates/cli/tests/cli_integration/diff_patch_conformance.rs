@@ -1434,6 +1434,58 @@ fn plain_git_rm_cached_then_edit_coalesces() {
 }
 
 // ---------------------------------------------------------------------------
+// Decoration-trim conformance (cid 3320364905). `trim_trailing_added_decorations`
+// drops an added "decoration" line (`#[...]`, `///`, `@`, …) when an identical
+// context line follows the inserted block, so the PRETTY diff anchors on the
+// existing item instead of showing a duplicated attribute. That trim is a
+// display-only nicety, but it used to be baked into the canonical hunk body
+// while the `@@` header line-counts were computed *before* trimming — so the
+// `--patch`/JSON render emitted one fewer `+` line than its header claimed, and
+// `git apply` rejected the patch as corrupt ("corrupt patch at line N") or
+// reconstructed the wrong file. The fix keeps the canonical body untrimmed (the
+// trim now lives in `print_diff` alone). These cells add a `#[test] fn …` block
+// ending in a decoration line immediately before an existing `#[test]`, then
+// round-trip through real `git apply` with a content assertion — so re-coupling
+// the trim to the patch path fails CI here, on every backend, not in review.
+//
+// The pre/post pair is shaped so the diff is a faithful 3-line insertion that
+// `keep_annotations_with_inserted_items` leaves untouched: the trim is the
+// *sole* transform that could desync the body from the header.
+// ---------------------------------------------------------------------------
+
+const DECORATION_PRE: &str = "mod m {}\n#[test]\nfn existing() {}\n";
+const DECORATION_POST: &str =
+    "mod m {}\nfn h() {}\n#[test]\nfn added() {}\n#[test]\nfn existing() {}\n";
+
+#[test]
+fn native_added_decoration_before_identical_line_round_trips() {
+    native_cell(
+        &[normal("tests.rs", DECORATION_PRE)],
+        |dir| write_entry(dir, &normal("tests.rs", DECORATION_POST)),
+        &[Expect::Present(normal("tests.rs", DECORATION_POST))],
+    );
+}
+
+#[test]
+fn state_added_decoration_before_identical_line_round_trips() {
+    state_cell(
+        &[normal("tests.rs", DECORATION_PRE)],
+        |dir| write_entry(dir, &normal("tests.rs", DECORATION_POST)),
+        &[Expect::Present(normal("tests.rs", DECORATION_POST))],
+    );
+}
+
+#[test]
+fn plain_git_added_decoration_before_identical_line_round_trips() {
+    plain_git_cell(
+        &[normal("tests.rs", DECORATION_PRE)],
+        false,
+        |dir| write_entry(dir, &normal("tests.rs", DECORATION_POST)),
+        &[Expect::Present(normal("tests.rs", DECORATION_POST))],
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Surfaces — trust-visible fast path (adopted repo, branch advanced
 // outside heddle). Covers cid 3318629234 (rename+edit must keep its hunk).
 // ---------------------------------------------------------------------------

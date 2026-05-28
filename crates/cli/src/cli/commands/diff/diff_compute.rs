@@ -1547,7 +1547,14 @@ fn unified_hunks(lines: Vec<LineDiff>, context: usize, eol: &FileEolState) -> Ve
             old_line: None,
             new_line: None,
         });
-        output.extend(trim_trailing_added_decorations(&lines[start..end]));
+        // Emit the hunk body UNTRIMMED. Decoration trimming drops a real
+        // `+` line, which is a pretty-display nicety only — applying it
+        // here would desync the body from the `@@` header counts computed
+        // above (via `hunk_span`) and corrupt the `--patch`/JSON line
+        // model so `git apply` rejects or mis-reconstructs the file (cid
+        // 3320364905). The trim now lives in `print_diff` alone, via
+        // `trim_added_decorations_for_display`.
+        output.extend_from_slice(&lines[start..end]);
     }
     output
 }
@@ -1570,6 +1577,38 @@ fn eol_only_tail_hunk(lines: Vec<LineDiff>, context: usize) -> Vec<LineDiff> {
         new_line: None,
     });
     output.extend_from_slice(&lines[start..end]);
+    output
+}
+
+/// Pretty-display transform: drop a leading added "decoration" line
+/// (`#[...]`, `///`, `@`, etc.) when an identical context line already
+/// follows the inserted block, so the diff anchors on the existing item
+/// rather than showing a duplicated attribute.
+///
+/// DISPLAY ONLY. This drops a real `+` line, so it must never reach the
+/// `--patch`/JSON line model — the dropped line is a genuine change and
+/// omitting it desyncs the `@@` header counts, corrupting `git apply`
+/// (cid 3320364905). `unified_hunks` keeps the canonical (untrimmed)
+/// hunk body; `print_diff` calls this purely for human-facing rendering.
+///
+/// Applied per hunk body (segmented on the `@` header lines) so the
+/// decoration match can never cross a hunk boundary into an unrelated
+/// context line.
+pub(crate) fn trim_added_decorations_for_display(lines: &[LineDiff]) -> Vec<LineDiff> {
+    let mut output = Vec::with_capacity(lines.len());
+    let mut body_start = 0usize;
+    for (index, line) in lines.iter().enumerate() {
+        if line.prefix == "@" {
+            if body_start < index {
+                output.extend(trim_trailing_added_decorations(&lines[body_start..index]));
+            }
+            output.push(line.clone());
+            body_start = index + 1;
+        }
+    }
+    if body_start < lines.len() {
+        output.extend(trim_trailing_added_decorations(&lines[body_start..]));
+    }
     output
 }
 
@@ -2421,8 +2460,13 @@ mod tests {
         assert_eq!(counts.deleted, 0);
     }
 
+    /// The canonical hunk body (the one `--patch`/JSON consume) must keep
+    /// every real `+` line, including a leading `+#[test]` decoration that
+    /// duplicates a following context line. Dropping it here desyncs the
+    /// `@@` header counts and corrupts `git apply` (cid 3320364905) — the
+    /// trim is now a display-only transform, not a property of the model.
     #[test]
-    fn unified_hunks_keeps_context_decoration_when_added_block_ends_before_matching_item() {
+    fn unified_hunks_keeps_added_decoration_in_canonical_body() {
         let lines = vec![
             LineDiff::with_lines("+", "#[test]", None, Some(1)),
             LineDiff::with_lines("+", "fn added() {}", None, Some(2)),
@@ -2432,16 +2476,61 @@ mod tests {
 
         let hunk = unified_hunks(lines, 3, &FileEolState::default());
 
+        let header = hunk
+            .iter()
+            .find(|line| line.prefix == "@")
+            .expect("hunk should carry an `@@` header");
+        // Two added (`+`) lines + two context lines on the new side → +4.
+        assert_eq!(
+            header.content, "@ -1,2 +1,4 @@",
+            "header counts must match the untrimmed body: {hunk:?}"
+        );
         assert!(
             hunk.iter()
-                .filter(|line| line.content == "#[test]")
-                .all(|line| line.prefix == " "),
-            "existing context attribute should own the decoration: {hunk:?}"
+                .any(|line| line.prefix == "+" && line.content == "#[test]"),
+            "added decoration line must survive in the canonical body: {hunk:?}"
         );
         assert!(
             hunk.iter()
                 .any(|line| line.prefix == "+" && line.content == "fn added() {}"),
             "added function body should remain: {hunk:?}"
+        );
+    }
+
+    /// The display transform DOES trim the leading `+#[test]` so the
+    /// pretty diff anchors on the existing item — but only the body lines
+    /// move; the `@@` header (untrimmed counts) is preserved verbatim.
+    #[test]
+    fn display_trim_drops_added_decoration_but_keeps_header() {
+        use super::trim_added_decorations_for_display;
+
+        let lines = vec![
+            LineDiff::with_lines("+", "#[test]", None, Some(1)),
+            LineDiff::with_lines("+", "fn added() {}", None, Some(2)),
+            LineDiff::with_lines(" ", "#[test]", Some(1), Some(3)),
+            LineDiff::with_lines(" ", "fn existing() {}", Some(2), Some(4)),
+        ];
+        let hunk = unified_hunks(lines, 3, &FileEolState::default());
+
+        let display = trim_added_decorations_for_display(&hunk);
+
+        assert!(
+            display
+                .iter()
+                .filter(|line| line.content == "#[test]")
+                .all(|line| line.prefix == " "),
+            "display trim should let existing context own the decoration: {display:?}"
+        );
+        assert!(
+            display
+                .iter()
+                .any(|line| line.prefix == "+" && line.content == "fn added() {}"),
+            "added function body should remain after display trim: {display:?}"
+        );
+        assert_eq!(
+            display.iter().find(|line| line.prefix == "@").map(|l| l.content.as_str()),
+            Some("@ -1,2 +1,4 @@"),
+            "display trim must not rewrite the `@@` header: {display:?}"
         );
     }
 }

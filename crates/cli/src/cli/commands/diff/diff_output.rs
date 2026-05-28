@@ -9,6 +9,7 @@ use std::{
 
 use objects::object::FileMode;
 
+use super::diff_compute::trim_added_decorations_for_display;
 use super::diff_types::{
     DiffOutput, FileChange, LineDiff, SemanticChangeEntry, should_render_modified_pair,
 };
@@ -521,6 +522,11 @@ pub(crate) fn print_diff(output: &DiffOutput) {
         }
 
         if let Some(lines) = &change.lines {
+            // Decoration trimming is a pretty-display-only nicety; the
+            // canonical `change.lines` stays untrimmed for the
+            // `--patch`/JSON path (cid 3320364905). Apply it here, for
+            // human rendering, against a local copy.
+            let lines = trim_added_decorations_for_display(lines);
             let mut index = 0;
             while index < lines.len() {
                 let line = &lines[index];
