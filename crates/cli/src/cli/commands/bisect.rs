@@ -56,7 +56,11 @@ pub fn cmd_bisect(cli: &Cli, command: BisectCommands) -> Result<()> {
             fs::write(&state_path, "{}\n")?;
 
             if should_output_json(cli, Some(repo.config())) {
-                println!("{{\"status\": \"started\"}}");
+                let envelope = serde_json::json!({
+                    "output_kind": "bisect_start",
+                    "status": "started",
+                });
+                println!("{}", serde_json::to_string(&envelope)?);
             } else {
                 println!("Bisect started");
             }
@@ -68,10 +72,12 @@ pub fn cmd_bisect(cli: &Cli, command: BisectCommands) -> Result<()> {
 
             let resolved = resolve_commit(&repo, commit.as_deref())?;
             if should_output_json(cli, Some(repo.config())) {
-                println!(
-                    "{{\"status\": \"marked_good\", \"commit\": \"{}\"}}",
-                    resolved
-                );
+                let envelope = serde_json::json!({
+                    "output_kind": "bisect_good",
+                    "status": "marked_good",
+                    "commit": resolved,
+                });
+                println!("{}", serde_json::to_string(&envelope)?);
             } else {
                 println!("Marked {} as good", resolved);
             }
@@ -83,10 +89,12 @@ pub fn cmd_bisect(cli: &Cli, command: BisectCommands) -> Result<()> {
 
             let resolved = resolve_commit(&repo, commit.as_deref())?;
             if should_output_json(cli, Some(repo.config())) {
-                println!(
-                    "{{\"status\": \"marked_bad\", \"commit\": \"{}\"}}",
-                    resolved
-                );
+                let envelope = serde_json::json!({
+                    "output_kind": "bisect_bad",
+                    "status": "marked_bad",
+                    "commit": resolved,
+                });
+                println!("{}", serde_json::to_string(&envelope)?);
             } else {
                 println!("Marked {} as bad", resolved);
             }
@@ -95,7 +103,11 @@ pub fn cmd_bisect(cli: &Cli, command: BisectCommands) -> Result<()> {
             reset_bisect_state(&repo)?;
 
             if should_output_json(cli, Some(repo.config())) {
-                println!("{{\"status\": \"reset\"}}");
+                let envelope = serde_json::json!({
+                    "output_kind": "bisect_reset",
+                    "status": "reset",
+                });
+                println!("{}", serde_json::to_string(&envelope)?);
             } else {
                 println!("Bisect reset");
             }

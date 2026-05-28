@@ -18,6 +18,7 @@ use crate::{
 
 #[derive(Serialize)]
 struct ForkOutput {
+    output_kind: &'static str,
     change_id: String,
     content_hash: String,
     thread: Option<String>,
@@ -93,6 +94,7 @@ pub fn cmd_fork(cli: &Cli, name: Option<String>, from: Option<String>) -> Result
         .record_fork(&new_state.change_id, &source_state.change_id)?;
 
     let output = ForkOutput {
+        output_kind: "fork",
         change_id: new_state.change_id.short(),
         content_hash: new_state.compute_hash().short(),
         thread: name.clone(),

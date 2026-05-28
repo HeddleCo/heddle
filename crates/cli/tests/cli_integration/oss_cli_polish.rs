@@ -2902,6 +2902,30 @@ fn core_loop_schemas_are_discoverable() {
 }
 
 #[test]
+fn review_next_envelope_top_level_keys_match_registered_schema() {
+    // The output_kind sweep wrapped `review next --output json` in a
+    // stable envelope (`output_kind` + the flattened pending view +
+    // `next`), replacing the old bare `NextStateView`/top-level-`null`
+    // shape. Pin the wire contract against the registered schema mirror
+    // so the doc/schema can't drift back. A fresh capture carries no
+    // signatures, so it surfaces as the pending state — exercising the
+    // richer flattened envelope (all five top-level keys), a superset of
+    // the empty `{output_kind, next: null}` case.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("review.txt"), "needs review\n").unwrap();
+    heddle(&["capture", "-m", "seed review"], Some(temp.path())).unwrap();
+
+    let value = json_value(temp.path(), &["review", "next"]);
+    assert_eq!(value["output_kind"], "review_next");
+    assert!(
+        value.get("next").is_some(),
+        "review next must always emit a `next` field (object or null): {value}"
+    );
+    assert_schema_declares_runtime_top_level(&["review", "next"], &value);
+}
+
+#[test]
 fn isolated_thread_json_outputs_match_registered_schemas() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();

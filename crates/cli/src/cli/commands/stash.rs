@@ -27,11 +27,13 @@ struct StashListEntry {
 
 #[derive(Serialize)]
 struct StashListOutput {
+    output_kind: &'static str,
     stashes: Vec<StashListEntry>,
 }
 
 #[derive(Serialize)]
 struct StashShowOutput {
+    output_kind: &'static str,
     modified: Vec<String>,
     added: Vec<String>,
     deleted: Vec<String>,
@@ -110,7 +112,10 @@ fn cmd_stash_list(cli: &Cli, repo: &Repository) -> Result<()> {
             .collect();
         println!(
             "{}",
-            serde_json::to_string(&StashListOutput { stashes: entries })?
+            serde_json::to_string(&StashListOutput {
+                output_kind: "stash_list",
+                stashes: entries
+            })?
         );
     } else if stashes.is_empty() {
         println!("No stashes.");
@@ -253,6 +258,7 @@ fn cmd_stash_show(cli: &Cli, repo: &Repository) -> Result<()> {
         println!(
             "{}",
             serde_json::to_string(&StashShowOutput {
+                output_kind: "stash_show",
                 modified,
                 added,
                 deleted,

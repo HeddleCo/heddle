@@ -42,10 +42,13 @@ pub fn cmd_cherry_pick(
 
     if no_commit {
         if should_output_json(cli, Some(repo.config())) {
-            println!(
-                "{{\"status\": \"applied\", \"commit\": \"{}\", \"no_commit\": true}}",
-                commit
-            );
+            let envelope = serde_json::json!({
+                "output_kind": "cherry_pick",
+                "status": "applied",
+                "commit": commit,
+                "no_commit": true,
+            });
+            println!("{}", serde_json::to_string(&envelope)?);
         } else {
             println!("Applied {} (not committed)", commit);
         }
@@ -56,11 +59,13 @@ pub fn cmd_cherry_pick(
         let new_state = repo.snapshot_with_attribution(Some(cherry_message), None, attribution)?;
 
         if should_output_json(cli, Some(repo.config())) {
-            println!(
-                "{{\"status\": \"committed\", \"commit\": \"{}\", \"new_commit\": \"{}\"}}",
-                commit,
-                new_state.change_id.short()
-            );
+            let envelope = serde_json::json!({
+                "output_kind": "cherry_pick",
+                "status": "committed",
+                "commit": commit,
+                "new_commit": new_state.change_id.short(),
+            });
+            println!("{}", serde_json::to_string(&envelope)?);
         } else {
             println!(
                 "Cherry-picked {} as {}",

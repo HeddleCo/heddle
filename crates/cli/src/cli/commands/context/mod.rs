@@ -73,6 +73,19 @@ impl AnnotationOutput {
 
 #[derive(Serialize)]
 pub(crate) struct ContextGetOutput {
+    pub(crate) output_kind: &'static str,
+    pub(crate) target_kind: String,
+    pub(crate) target: String,
+    pub(crate) annotations: Vec<AnnotationOutput>,
+}
+
+/// A single `context list` row. Identical to [`ContextGetOutput`] minus
+/// the per-row `output_kind`: the `context_list` envelope owns the
+/// discriminator, so list rows must not repeat it (consumers that route
+/// recursively on `output_kind` would otherwise misclassify a list row
+/// as a standalone `context get` payload).
+#[derive(Serialize)]
+pub(crate) struct ContextListRow {
     pub(crate) target_kind: String,
     pub(crate) target: String,
     pub(crate) annotations: Vec<AnnotationOutput>,
@@ -80,6 +93,7 @@ pub(crate) struct ContextGetOutput {
 
 #[derive(Serialize)]
 pub(crate) struct AnnotationHistoryOutput {
+    pub(crate) output_kind: &'static str,
     pub(crate) annotation_id: String,
     pub(crate) target_kind: String,
     pub(crate) target: String,
@@ -370,6 +384,7 @@ pub(crate) fn print_context_get(
     let (target_kind, target_label) = target_label(target);
     if should_output_json(cli, None) {
         let output = ContextGetOutput {
+            output_kind: "context_get",
             target_kind,
             target: target_label,
             annotations: annotations
