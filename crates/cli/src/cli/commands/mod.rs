@@ -148,7 +148,7 @@ pub use diagnose::cmd_diagnose;
 pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor_docs::cmd_doctor_docs;
-pub use doctor_schemas::cmd_doctor_schemas;
+pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
 pub use error_envelope::{print_error_with_hint, print_parse_error_json_envelope};
 pub use fetch::cmd_fetch;
 pub use fork::cmd_fork;

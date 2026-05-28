@@ -31,7 +31,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use cli::cli::commands::{
-    CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, build_command_catalog, schema_for_verb,
+    CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, build_command_catalog,
+    documented_samples_with_bound_verbs, schema_for_verb,
 };
 
 use super::{heddle, heddle_output};
@@ -260,6 +261,40 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         "workspace show" => Some("workspace_summary"),
         _ => None,
     }
+}
+
+/// Read `docs/json-schemas.md` from the workspace root.
+fn read_json_schemas_doc() -> String {
+    let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .join("docs/json-schemas.md");
+    std::fs::read_to_string(&doc_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", doc_path.display()))
+}
+
+/// The single source of truth for the doc-vs-runtime sweep: every catalog
+/// discriminator whose field is `output_kind`, as `(display, value,
+/// has_schema_verb)`. Driving the doc invariants from this set — rather
+/// than a hand-maintained `SWEPT_272`-style subset — is what makes a stale
+/// sample for ANY swept verb (the early PR #251 verbs included) fail CI
+/// mechanically. `has_schema_verb` is false only for transport-envelope
+/// discriminators with no backing schema (e.g. `clone_connection`), which
+/// carry no documented sample and are pinned separately.
+fn catalog_output_kind_discriminators() -> Vec<(String, String, bool)> {
+    build_command_catalog()
+        .json_discriminators
+        .into_iter()
+        .filter(|discriminator| discriminator.field == "output_kind")
+        .map(|discriminator| {
+            (
+                discriminator.display,
+                discriminator.value,
+                discriminator.schema_verb.is_some(),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -494,64 +529,72 @@ fn unswept_verbs_have_no_output_kind_declaration() {
 }
 
 #[test]
-fn swept_verb_doc_samples_show_output_kind() {
-    // heddle#272 r5 (Codex P1): the `docs/json-schemas.md` sample for
-    // each #272-swept verb must show the `output_kind` field so the
-    // documented machine contract matches the runtime emission. The
-    // `doctor schemas` gate only checks that a sample's keys are a
-    // subset of the schema's properties (it does not enforce
-    // required-field presence), so it would NOT catch a sample that
-    // silently drops `output_kind`; this test does.
+fn doc_samples_carry_catalog_output_kind_for_every_discriminated_verb() {
+    // heddle#272 r5/r8 (Codex P1, cid 3318094405): every documented sample
+    // for a verb whose catalog advertises an `output_kind` discriminator
+    // must show that discriminator with a catalog-advertised value. The
+    // `doctor schemas` gate only checks that a sample's keys are a subset
+    // of the schema's properties (it does not enforce required-field
+    // presence), so it would NOT catch a sample that silently drops or
+    // misnames `output_kind`; this test does.
     //
-    // Verbs documented with one representative sample for a pipe-listed
-    // group (e.g. `bisect start|good|bad|reset`) show the first
-    // variant's value; the per-variant value is mechanically
-    // `display.replace(['-', ' '], "_")`.
-    let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .join("docs/json-schemas.md");
-    let doc = std::fs::read_to_string(&doc_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", doc_path.display()));
+    // This drives from the FULL catalog discriminator set and binds each
+    // sample to its verb the same way `doctor schemas` does (heading +
+    // inline hint), so it is exhaustive over every documented sample — not
+    // a hand-maintained subset. A grouped sample bound to several verbs
+    // (e.g. the single `heddle undo|redo` sample) is accepted when its
+    // `output_kind` matches ANY of the verbs it binds to.
+    let doc = read_json_schemas_doc();
 
-    const REQUIRED: &[&str] = &[
-        "goto",
-        "clean",
-        "revert",
-        "fork",
-        "cherry_pick",
-        "stack",
-        "stack_ready",
-        "stack_snapshot",
-        "stash_list",
-        "stash_show",
-        "review_show",
-        "review_sign",
-        "review_next",
-        "review_health",
-        "bisect_start",
-        "purge_apply",
-        "redact_apply",
-        "redact_trust_add",
-        "discuss_open",
-        "discuss_list",
-        "context_set",
-        "context_list",
-    ];
+    // display -> set of advertised output_kind values (clone advertises
+    // both `clone` and `clone_connection`).
+    let mut advertised: std::collections::BTreeMap<String, BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for (display, value, _) in catalog_output_kind_discriminators() {
+        advertised.entry(display).or_default().insert(value);
+    }
+    let verbs: Vec<&str> = advertised.keys().map(String::as_str).collect();
 
-    let missing: Vec<&str> = REQUIRED
-        .iter()
-        .copied()
-        .filter(|value| !doc.contains(&format!("\"output_kind\": \"{value}\"")))
-        .collect();
+    let mut failures = Vec::new();
+    let mut checked = 0usize;
+    for (sample, bound) in documented_samples_with_bound_verbs(&doc, &verbs) {
+        let allowed: BTreeSet<&str> = bound
+            .iter()
+            .filter_map(|verb| advertised.get(verb))
+            .flat_map(|values| values.iter().map(String::as_str))
+            .collect();
+        let Some(object) = sample.as_object() else {
+            failures.push(format!(
+                "sample bound to {bound:?} is not a JSON object, so it cannot carry the \
+                 required `output_kind` discriminator (catalog advertises {allowed:?})"
+            ));
+            continue;
+        };
+        checked += 1;
+        match object.get("output_kind").and_then(Value::as_str) {
+            None => failures.push(format!(
+                "sample bound to {bound:?} omits the `output_kind` discriminator \
+                 (catalog advertises {allowed:?})"
+            )),
+            Some(found) if !allowed.contains(found) => failures.push(format!(
+                "sample bound to {bound:?} declares output_kind=`{found}`, which is not a \
+                 catalog-advertised value for those verbs ({allowed:?})"
+            )),
+            Some(_) => {}
+        }
+    }
 
     assert!(
-        missing.is_empty(),
-        "docs/json-schemas.md is missing `output_kind` in the sample(s) for \
-         these heddle#272-swept verbs: {missing:?}. Add `\"output_kind\": \
-         \"<value>\"` to each sample so the documented contract matches the \
-         runtime discriminator."
+        failures.is_empty(),
+        "Documented samples drift from the catalog `output_kind` contract. The catalog is the \
+         source of truth; every sample bound to a discriminator verb must carry a catalog \
+         value:\n  - {}",
+        failures.join("\n  - ")
+    );
+    assert!(
+        checked >= 30,
+        "expected the catalog-driven doc sweep to inspect many discriminator samples; only \
+         {checked} were bound — the heading/inline binding likely regressed"
     );
 }
 
@@ -698,57 +741,6 @@ fn doc_sample_top_level_keys(doc: &str, output_kind_value: &str) -> Option<BTree
     }
     None
 }
-
-/// The heddle#272 named-by-persona sweep group (mirrors the second block of
-/// [`SWEPT`]). The doc-sample-vs-runtime invariant is EXHAUSTIVE over every
-/// one of these verbs that carries a documented `output_kind` sample — there
-/// is no hand-picked subset. Verbs whose specific `output_kind` is not
-/// individually documented (they ride a grouped sample under a representative
-/// sibling, e.g. `purge list` under `purge_apply`) are skipped automatically
-/// because no sample with their discriminator exists.
-const SWEPT_272: &[&str] = &[
-    "stack",
-    "stack ready",
-    "stack snapshot",
-    "goto",
-    "fork",
-    "revert",
-    "purge apply",
-    "purge list",
-    "redact apply",
-    "redact list",
-    "redact show",
-    "redact trust add",
-    "redact trust list",
-    "redact trust remove",
-    "stash list",
-    "stash show",
-    "clean",
-    "discuss open",
-    "discuss append",
-    "discuss resolve",
-    "discuss list",
-    "discuss show",
-    "context set",
-    "context get",
-    "context list",
-    "context history",
-    "context edit",
-    "context supersede",
-    "context rm",
-    "context check",
-    "context suggest",
-    "context audit",
-    "review show",
-    "review sign",
-    "review next",
-    "review health",
-    "cherry-pick",
-    "bisect start",
-    "bisect good",
-    "bisect bad",
-    "bisect reset",
-];
 
 fn sv(args: &[&str]) -> Vec<String> {
     args.iter().map(|s| s.to_string()).collect()
@@ -907,56 +899,62 @@ fn schema_property_names(verb: &str) -> BTreeSet<String> {
 }
 
 #[test]
-fn doc_samples_match_runtime_for_every_swept_272_verb() {
-    // heddle#272 r7 (Codex P2 x7): the r6 doc-sample-vs-runtime check ran a
-    // hand-picked list of three verbs, so seven more stale samples
-    // (cherry-pick, purge apply, bisect start, fork, redact apply, redact
-    // trust add, review next) sailed through and Codex had to find them by
-    // hand. This invariant closes the loophole: it is EXHAUSTIVE over the
-    // entire #272 sweep group. Every #272 verb that carries a documented
-    // `output_kind` sample must either
+fn doc_samples_match_runtime_for_every_catalog_discriminator() {
+    // heddle#272 r7/r8 (Codex P2, cid 3319783461): the r7 doc-sample-vs-runtime
+    // check iterated a hand-maintained `SWEPT_272` subset, so documented
+    // samples for earlier-swept verbs (`init`, `status`, `verify`, `clone`,
+    // `thread list/show`, the bridge/doctor commands, ...) were never compared
+    // against live payloads and could drift silently. This invariant re-roots
+    // the loop on the FULL catalog discriminator set, so every verb the catalog
+    // advertises an `output_kind` for is checked.
+    //
+    // For each catalog `output_kind` value with a documented sample, the sample
+    // must either
     //
     //   (a) be invoked here against a fixture, with the documented sample's
-    //       top-level key set asserted EXACTLY equal to the live payload's,
-    //       or
+    //       top-level key set asserted EXACTLY equal to the live payload's, or
     //   (b) have a registered schema that pins every documented key
     //       (doc-keys ⊆ schema-properties), so `doctor schemas` guards it.
     //
-    // (b) is required because a few verbs can't be exercised with a synthetic
-    // fixture (`review sign` cryptographically validates its `--signature`).
-    // Crucially, the inline `serde_json::json!` verbs resolve to a GENERIC
-    // operation-record schema (`additionalProperties: true`) that pins NONE
-    // of their real fields, so (b) fails for them and they are forced down
-    // path (a). A new generic-schema verb added to the doc without a runtime
-    // case here fails this test rather than deferring to an r8.
-    let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root")
-        .join("docs/json-schemas.md");
-    let doc = std::fs::read_to_string(&doc_path)
-        .unwrap_or_else(|err| panic!("read {}: {err}", doc_path.display()));
+    // (b) covers verbs that can't be exercised with a synthetic fixture
+    // (`review sign` cryptographically validates its `--signature`; `verify`/
+    // `status` need elaborate verification fixtures). Crucially, the inline
+    // `serde_json::json!` opaque verbs resolve to a GENERIC schema
+    // (`additionalProperties: true`) that pins NONE of their real fields, so
+    // (b) fails for them and they are forced down path (a). A new generic-schema
+    // verb documented without a runtime case here fails this test rather than
+    // deferring to a later round.
+    let doc = read_json_schemas_doc();
 
     let mut failures = Vec::new();
     let mut covered_by_runtime = 0usize;
     let mut covered_by_schema = 0usize;
 
-    for &verb in SWEPT_272 {
-        let output_kind = expected_output_kind(verb);
-        let Some(doc_keys) = doc_sample_top_level_keys(&doc, &output_kind) else {
-            // This verb's discriminator is not individually documented
-            // (grouped under a representative sibling) — nothing to check.
+    for (display, value, has_schema_verb) in catalog_output_kind_discriminators() {
+        // Transport-envelope discriminators (e.g. `clone_connection`) have no
+        // schema verb and no documented sample; they are pinned separately.
+        if !has_schema_verb {
+            continue;
+        }
+        let Some(doc_keys) = doc_sample_top_level_keys(&doc, &value) else {
+            // This value is not individually documented (it rides a grouped
+            // sample under a representative sibling, e.g. `redo` under `undo`,
+            // `purge list` under `purge_apply`) — nothing to compare here.
+            // `doc_samples_carry_catalog_output_kind_for_every_discriminated_verb`
+            // still guards the grouped sample's discriminator.
             continue;
         };
 
+        // `doc_sample_top_level_keys` matched on the `output_kind` value, so
+        // the key is present by construction; assert it defensively.
         if !doc_keys.contains("output_kind") {
             failures.push(format!(
-                "{output_kind} ({verb}): documented sample is missing the `output_kind` key"
+                "{value} ({display}): documented sample is missing the `output_kind` key"
             ));
             continue;
         }
 
-        if let Some((fixture, argv)) = runtime_doc_case(&output_kind) {
+        if let Some((fixture, argv)) = runtime_doc_case(&value) {
             let argv_refs: Vec<&str> = std::iter::once("--output")
                 .chain(std::iter::once("json"))
                 .chain(argv.iter().map(String::as_str))
@@ -964,14 +962,14 @@ fn doc_samples_match_runtime_for_every_swept_272_verb() {
             let runtime_keys = runtime_top_level_keys(&argv_refs, fixture.path());
             if !runtime_keys.contains("output_kind") {
                 failures.push(format!(
-                    "{output_kind} ({verb}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
+                    "{value} ({display}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
                 ));
             }
             if doc_keys != runtime_keys {
                 let doc_only: Vec<&String> = doc_keys.difference(&runtime_keys).collect();
                 let runtime_only: Vec<&String> = runtime_keys.difference(&doc_keys).collect();
                 failures.push(format!(
-                    "{output_kind} ({verb}): documented sample does not match the live \
+                    "{value} ({display}): documented sample does not match the live \
                      `--output json` payload.\n      in doc only:     {doc_only:?}\n      \
                      in runtime only: {runtime_only:?}\n      doc keys:     {doc_keys:?}\n      \
                      runtime keys: {runtime_keys:?}"
@@ -983,7 +981,7 @@ fn doc_samples_match_runtime_for_every_swept_272_verb() {
 
         // No runtime case: the registered schema MUST pin every documented
         // key, otherwise the sample is unguarded and could drift freely.
-        let schema_props = schema_property_names(verb);
+        let schema_props = schema_property_names(&display);
         let unpinned: Vec<&String> = doc_keys
             .iter()
             .filter(|k| k.as_str() != "output_kind")
@@ -993,7 +991,7 @@ fn doc_samples_match_runtime_for_every_swept_272_verb() {
             covered_by_schema += 1;
         } else {
             failures.push(format!(
-                "{output_kind} ({verb}): no runtime case AND its registered schema does not pin \
+                "{value} ({display}): no runtime case AND its registered schema does not pin \
                  documented keys {unpinned:?} (schema is generic). Add a `runtime_doc_case` arm \
                  so the sample is checked against the live payload."
             ));
@@ -1002,20 +1000,20 @@ fn doc_samples_match_runtime_for_every_swept_272_verb() {
 
     assert!(
         failures.is_empty(),
-        "Documented #272 samples drifted from runtime / are unguarded:\n  - {}",
+        "Documented samples drifted from runtime / are unguarded:\n  - {}",
         failures.join("\n  - ")
     );
 
-    // Sanity floor: the seven Codex r7 findings are all runtime-checked, and
-    // at least one verb leans on the schema path (`review sign`). If these
-    // collapse to zero the harness silently stopped covering anything.
+    // Sanity floor: the #272 persona verbs are runtime-checked, and the
+    // earlier-swept verbs lean on the schema path. If either collapses the
+    // harness silently stopped covering anything.
     assert!(
         covered_by_runtime >= 18,
-        "expected the #272 sweep to runtime-check most documented verbs; only {covered_by_runtime} ran"
+        "expected the sweep to runtime-check most documented persona verbs; only {covered_by_runtime} ran"
     );
     assert!(
-        covered_by_schema >= 1,
-        "expected at least one schema-guarded #272 verb (review sign); got {covered_by_schema}"
+        covered_by_schema >= 5,
+        "expected several schema-guarded earlier-swept verbs (clone, status, verify, ...); got {covered_by_schema}"
     );
 }
 

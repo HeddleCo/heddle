@@ -108,6 +108,7 @@ metadata only; it does not import Git history or write Git-tracked files.
 
 ```json
 {
+  "output_kind": "init",
   "status": "initialized",
   "action": "init",
   "path": "/repo/.heddle",
@@ -155,6 +156,7 @@ in-progress operation.
 
 ```json
 {
+  "output_kind": "status",
   "repository_capability": "git-overlay",
   "repository_label": "Git + Heddle",
   "storage_model": "git+heddle-sidecar",
@@ -323,7 +325,7 @@ blocked verification state on stdout.
 
 ```json
 {
-  "output_kind": "verification",
+  "output_kind": "verify",
   "clean": true,
   "repository_label": "Git + Heddle",
   "verified": true,
@@ -370,7 +372,7 @@ blocked verification state on stdout.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `output_kind` | string | required | Always `verification`; lets agents identify the proof payload without a wrapper object. |
+| `output_kind` | string | required | Always `verify`; lets agents identify the proof payload without a wrapper object. |
 | `repository_label` | string | required | Human-facing repository identity; managed Git-overlay child checkouts use `"Git + Heddle isolated checkout"`. |
 | `repository_context` | object | optional | Present for managed child checkouts; includes `kind`, `parent_repository`, and any recorded `target_thread` / `parent_thread`. |
 | `verified` | bool | required | `true` only when all verification checks are clean or not applicable. |
@@ -421,7 +423,6 @@ standard recovery fields plus nested verification proof:
     }
   ],
   "verification": {
-    "output_kind": "verification",
     "clean": false,
     "verified": false,
     "status": "dirty_worktree",
@@ -447,6 +448,7 @@ surface; the native first-run loop should prefer `commit`.
 
 ```json
 {
+  "output_kind": "capture",
   "status": "captured",
   "action": "capture",
   "change_id": "hd-capture123",
@@ -468,6 +470,7 @@ surface; the native first-run loop should prefer `commit`.
 
 ```json
 {
+  "output_kind": "checkpoint",
   "status": "checkpointed",
   "action": "checkpoint",
   "change_id": "hd-capture123",
@@ -483,6 +486,7 @@ surface; the native first-run loop should prefer `commit`.
 
 ```json
 {
+  "output_kind": "commit",
   "status": "committed",
   "action": "commit",
   "change_id": "hd-capture123",
@@ -602,6 +606,7 @@ state and worktree/default comparison target.
 
 ```json
 {
+  "output_kind": "diff",
   "from_state": "hd-base123",
   "to_state": "hd-head456",
   "changes": []
@@ -1615,6 +1620,7 @@ carries `git_overlay_import_hint`.
 
 ```json
 {
+  "output_kind": "bridge_git_status",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
   "mirror_path": "/repo/.heddle/git",
@@ -1811,6 +1817,7 @@ State detail view, pretty-printed.
 
 ```json
 {
+  "output_kind": "thread_list",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
   "hosted_enabled": false,
@@ -1901,6 +1908,7 @@ Control-tower view across every active thread.
 
 ```json
 {
+  "output_kind": "workspace_summary",
   "repository": "/work/project",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
@@ -2327,8 +2335,8 @@ key naming:
 |------|-------|
 | `init` | `{"initialized": true, "path": "..."}` |
 | `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
-| `import` | `{"commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N}` |
-| `sync` | `{"states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
+| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N}` |
+| `sync` | `{"output_kind": "bridge_git_sync", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
 | `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
 | `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
 
@@ -2347,13 +2355,13 @@ key naming:
 `heddle bridge git import --output json` emits:
 
 ```json
-{"commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "partial_mirror_refs": 0, "already_in_sync": false}
+{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "partial_mirror_refs": 0, "already_in_sync": false}
 ```
 
 `heddle bridge git sync --output json` emits:
 
 ```json
-{"states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
+{"output_kind": "bridge_git_sync", "states_exported": 3, "commits_imported": 4, "threads_synced": 1, "markers_synced": 2}
 ```
 
 `heddle bridge git push --output json` emits:
@@ -2377,8 +2385,9 @@ List every runtime schema verb and the subset enforced by
 
 ```json
 {
-  "schema_verbs": ["status", "verification", "try"],
-  "documented_schema_verbs": ["status", "verification", "try"]
+  "output_kind": "schemas",
+  "schema_verbs": ["status", "verify", "try"],
+  "documented_schema_verbs": ["status", "verify", "try"]
 }
 ```
 
@@ -2838,6 +2847,7 @@ Preview or apply a ref reconciliation between Git and Heddle.
 
 ```json
 {
+  "output_kind": "bridge_git_reconcile",
   "status": "preview",
   "prefer": null,
   "ref_name": "main",
