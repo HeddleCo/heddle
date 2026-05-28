@@ -90,10 +90,12 @@ as the routine catch-up**, not just a one-time conversion — the name connotes
 ### The machine surface already foregrounds the reverse path
 
 This is the key finding. The command-contract catalog
-(`crates/cli/src/cli/commands/command_catalog.rs`) already encodes, for every
-bridge verb, both a de-emphasis tier and a redirect to the native canonical
-command. Verified live via `heddle commands --command "bridge git" --output
-json`:
+(`crates/cli/src/cli/commands/command_catalog.rs`) already encodes a
+de-emphasis tier for every bridge verb, and a redirect to the native canonical
+command for most of them. The exceptions are `bridge git ingest` and `bridge
+git reason`, which are catalogued `surface(...)`-only and carry no
+`canonical_command` (the `—` rows below). Verified live via `heddle commands
+--command "bridge git" --output json`:
 
 | bridge verb | tier | canonical → | kind |
 |---|---|---|---|
@@ -108,14 +110,17 @@ json`:
 | `bridge git ingest` | advanced | — | — |
 | `bridge git reason` | advanced | — | — |
 
-Source: every bridge verb is built with `git_adapter_action` /
+Source: the redirecting bridge verbs are built with `git_adapter_action` /
 `git_adapter_alias`, which stamp `help_visibility: "git_adapter"` and a
 `canonical_command` (`command_catalog.rs:978-1004`). The import/sync/reconcile
 entries explicitly carry `canonical_command = "adopt"` with note "Use adopt
 for the guided Git-to-Heddle conversion workflow"
 (`command_catalog.rs:1238-1240`, `:1261-1263`, `:1284-1286`); export is
-aliased to `push` (`command_catalog.rs:1214-1224`). `help_visibility:
-"git_adapter"` falls through to tier `"advanced"`
+aliased to `push` (`command_catalog.rs:1214-1224`). The two exceptions —
+`bridge git ingest` and `bridge git reason` — are registered with `surface(…,
+"git_adapter")` only (`command_catalog.rs:1323-1335`), so they get the
+`git_adapter` visibility but no `canonical_command` (it is `None`).
+`help_visibility: "git_adapter"` falls through to tier `"advanced"`
 (`help_visibility_to_tier`, `command_catalog.rs:3664-3670`) — so none of these
 appear in the `everyday` tier of `heddle commands`.
 
@@ -238,8 +243,11 @@ JSON/machine contract destructively:
   diagnostic verbs and name their native canonical (`adopt --ref`, `pull`),
   (3) re-scope `export`'s text to "seed an external mirror + redaction-aware
   export," and (4) reorder the enum so reverse/diagnostic verbs precede the
-  rarely-needed forward ones. Pull the canonical names from the catalog so the
-  two surfaces can't drift. Size **S**. No JSON change.
+  rarely-needed forward ones. For the verbs that have a `canonical_command`,
+  pull the canonical name from the catalog so the two surfaces can't drift;
+  `ingest` and `reason` are surface-only (`canonical_command: None`) and must
+  be handled explicitly rather than assumed to redirect. Size **S**. No JSON
+  change.
 
 - **Sub-issue B — forward-verb no-op self-explanation (Option 2).** When
   `export` (and the `export` half of `sync`) has nothing new to mirror in
