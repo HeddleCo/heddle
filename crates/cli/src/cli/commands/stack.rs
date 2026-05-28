@@ -45,6 +45,7 @@ fn resolve_target_thread(repo: &Repository, explicit: Option<String>) -> Result<
 
 #[derive(Serialize)]
 struct StackDescribeOutput {
+    output_kind: &'static str,
     /// The thread whose stack we scoped to. `None` when HEAD is detached
     /// and no `--thread` was given — then `stacks` lists every stack in
     /// the repo.
@@ -126,6 +127,7 @@ fn cmd_stack_describe(cli: &Cli, repo: &Repository, thread: Option<String>) -> R
 
     let stack_entries: Vec<StackEntry> = stacks.iter().map(stack_to_entry).collect();
     let output = StackDescribeOutput {
+        output_kind: "stack",
         thread: target.clone(),
         stack: scoped_stack.as_ref().map(stack_to_entry),
         stacks: stack_entries,
@@ -178,6 +180,7 @@ fn print_tree(node: &StackNode, depth: usize) {
 
 #[derive(Serialize)]
 struct StackReadyOutput {
+    output_kind: &'static str,
     thread: String,
     next_action: StackNextAction,
 }
@@ -189,6 +192,7 @@ fn cmd_stack_ready(cli: &Cli, repo: &Repository, thread: Option<String>) -> Resu
 
     if should_output_json(cli, Some(repo.config())) {
         let out = StackReadyOutput {
+            output_kind: "stack_ready",
             thread: target,
             next_action: action,
         };
@@ -234,14 +238,25 @@ fn cmd_stack_snapshot(cli: &Cli, repo: &Repository, thread: Option<String>) -> R
         None => full,
     };
 
+    let envelope = StackSnapshotOutput {
+        output_kind: "stack_snapshot",
+        snapshot: &snapshot,
+    };
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&snapshot)?);
+        println!("{}", serde_json::to_string(&envelope)?);
     } else {
         // Text mode still emits JSON — the snapshot is structured data
         // by definition. Pretty-print it so terminal output is readable.
-        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        println!("{}", serde_json::to_string_pretty(&envelope)?);
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct StackSnapshotOutput<'a> {
+    output_kind: &'static str,
+    #[serde(flatten)]
+    snapshot: &'a RepositorySnapshot,
 }
 
 #[cfg(test)]

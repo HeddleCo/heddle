@@ -790,6 +790,34 @@ fn extract_samples(doc: &str) -> Vec<DocSample> {
     samples
 }
 
+/// Every `docs/json-schemas.md` ```json sample that binds to at least one
+/// verb in `verbs`, paired with the subset of `verbs` it binds to (via
+/// section heading or inline `heddle <verb>` hint), in document order.
+///
+/// This is the same heading/inline binding `heddle doctor schemas`
+/// validates samples with, exposed so the `output_kind` discriminator
+/// invariant can assert — sample-by-sample — that every documented sample
+/// for a catalog-advertised discriminator verb carries the right
+/// discriminator. Returning the full bound-verb set (not one verb at a
+/// time) lets the invariant accept a grouped sample, e.g. the single
+/// `heddle undo|redo` sample binds to both `undo` and `redo` and may
+/// legitimately show either variant's discriminator. Sharing the binding
+/// keeps the invariant and the production drift gate agreeing on which
+/// sample documents which verb.
+pub fn documented_samples_with_bound_verbs(doc: &str, verbs: &[&str]) -> Vec<(Value, Vec<String>)> {
+    extract_samples(doc)
+        .into_iter()
+        .filter_map(|sample| {
+            let bound: Vec<String> = verbs
+                .iter()
+                .filter(|verb| sample_matches_verb_with_hints(&sample, verb))
+                .map(|verb| (*verb).to_string())
+                .collect();
+            (!bound.is_empty()).then_some((sample.json, bound))
+        })
+        .collect()
+}
+
 /// Bind a sample to a verb using inline hints first, then heading
 /// fallback.
 fn sample_matches_verb_with_hints(sample: &DocSample, verb: &str) -> bool {

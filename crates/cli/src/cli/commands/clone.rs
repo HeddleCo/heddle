@@ -40,6 +40,18 @@ use crate::{
     remote::{Remote, RemoteConfig, RemoteTarget},
 };
 
+/// `output_kind` value carried by the final `heddle clone --output json`
+/// payload. Referenced by the command catalog and the catalog/runtime
+/// invariant test to keep the runtime emission and the advertised
+/// discriminator from drifting apart.
+pub const CLONE_OUTPUT_KIND: &str = "clone";
+
+/// `output_kind` value carried by the *preliminary* JSON record emitted
+/// by `clone_network` before the final clone payload. Hosted clones
+/// emit two JSON objects on one invocation (connection envelope, then
+/// the clone result), so the catalog advertises both discriminators.
+pub const CLONE_CONNECTION_OUTPUT_KIND: &str = "clone_connection";
+
 /// Pull/materialization options shared by local and network clone paths.
 struct CloneOptions {
     thread: Option<String>,
@@ -86,7 +98,7 @@ struct GitOverlayCloneOutputInput {
 
 fn git_overlay_clone_output(input: GitOverlayCloneOutputInput) -> CloneOutput {
     CloneOutput {
-        output_kind: "clone",
+        output_kind: CLONE_OUTPUT_KIND,
         action: "clone",
         status: "cloned",
         success: true,
@@ -113,7 +125,7 @@ fn heddle_clone_output(
     trust: Option<RepositoryVerificationState>,
 ) -> CloneOutput {
     CloneOutput {
-        output_kind: "clone",
+        output_kind: CLONE_OUTPUT_KIND,
         action: "clone",
         status: "cloned",
         success: true,
@@ -1218,7 +1230,7 @@ async fn clone_network(
         println!(
             "{}",
             serde_json::json!({
-                "output_kind": "clone_connection",
+                "output_kind": CLONE_CONNECTION_OUTPUT_KIND,
                 "status": "connected",
                 "address": addr.to_string(),
             })

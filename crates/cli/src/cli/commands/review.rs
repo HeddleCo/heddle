@@ -38,6 +38,7 @@ pub async fn run(cli: &Cli, command: &ReviewCommands) -> Result<()> {
 
 #[derive(Serialize)]
 struct ReviewShowOutput {
+    output_kind: &'static str,
     change_id: String,
     headline: String,
     agent_narrative: Option<String>,
@@ -138,6 +139,7 @@ async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
         .collect();
 
     let output = ReviewShowOutput {
+        output_kind: "review_show",
         change_id: bytes_to_change_id_string(&payload_resp.state_id),
         headline: summary.headline,
         agent_narrative: opt_string(payload_resp.agent_narrative),
@@ -296,6 +298,7 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
     if should_output_json(cli, None) {
         let state_str = bytes_to_change_id_string(&resp.state_id);
         let out = serde_json::json!({
+            "output_kind": "review_sign",
             "signature_id": resp.signature_id,
             "change_id": state_str,
         });
@@ -376,13 +379,28 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
     }
 
     if should_output_json(cli, None) {
-        match &next_state {
-            Some(view) => println!(
-                "{}",
-                serde_json::to_string(view).context("serialize next pending review")?
-            ),
-            None => println!("null"),
-        }
+        // `review next` returns either the pending state's view flattened
+        // alongside `output_kind`, or `next: null` when the window holds
+        // none. Keeping a single envelope shape lets agents key off
+        // `output_kind` without branching on payload shape.
+        let envelope = match &next_state {
+            Some(view) => serde_json::json!({
+                "output_kind": "review_next",
+                "change_id": view.change_id,
+                "headline": view.headline,
+                "existing_signatures": view.existing_signatures,
+                "next": view,
+            }),
+            None => serde_json::json!({
+                "output_kind": "review_next",
+                "next": serde_json::Value::Null,
+            }),
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&envelope)
+                .context("serialize review next envelope")?
+        );
     } else {
         match &next_state {
             Some(view) => {
@@ -432,6 +450,7 @@ async fn run_health(cli: &Cli, args: &ReviewHealthArgs) -> Result<()> {
             })
             .collect();
         let out = serde_json::json!({
+            "output_kind": "review_health",
             "entries": entries,
             "window_states": resp.window_states,
         });

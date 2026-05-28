@@ -49,6 +49,7 @@ pub fn cmd_redact(cli: &Cli, command: RedactCommands) -> Result<()> {
 
 #[derive(Serialize)]
 struct RedactApplyOutput {
+    output_kind: &'static str,
     redaction_id: String,
     blob: String,
     state: String,
@@ -170,6 +171,7 @@ fn cmd_redact_apply(cli: &Cli, repo: &Repository, args: RedactApplyArgs) -> Resu
     let ignore_hint = ignore_hint_for_path(repo, &args.path)?;
 
     let output = RedactApplyOutput {
+        output_kind: "redact_apply",
         redaction_id: primary_id.short(),
         blob: blob.short(),
         state: state.short(),
@@ -296,6 +298,7 @@ fn cmd_redact_list(cli: &Cli, repo: &Repository, _args: RedactListArgs) -> Resul
     }
     #[derive(Serialize)]
     struct Listing {
+        output_kind: &'static str,
         redactions: Vec<Row>,
         count: usize,
     }
@@ -320,6 +323,7 @@ fn cmd_redact_list(cli: &Cli, repo: &Repository, _args: RedactListArgs) -> Resul
 
     let count = rows.len();
     let payload = Listing {
+        output_kind: "redact_list",
         redactions: rows,
         count,
     };
@@ -369,6 +373,7 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
 
     #[derive(Serialize)]
     struct ShowOutput<'a> {
+        output_kind: &'static str,
         redaction_id: String,
         blob: String,
         state: String,
@@ -385,6 +390,7 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
         stub_preview: String,
     }
     let output = ShowOutput {
+        output_kind: "redact_show",
         redaction_id: id.short(),
         blob: blob.short(),
         state: redaction.state.short(),
@@ -603,9 +609,23 @@ struct TrustEntryOutput {
 }
 
 #[derive(Serialize)]
+struct TrustAddOutput {
+    output_kind: &'static str,
+    #[serde(flatten)]
+    entry: TrustEntryOutput,
+}
+
+#[derive(Serialize)]
 struct TrustListOutput {
+    output_kind: &'static str,
     trusted_keys: Vec<TrustEntryOutput>,
     count: usize,
+}
+
+#[derive(Serialize)]
+struct TrustRemoveOutput {
+    output_kind: &'static str,
+    removed: usize,
 }
 
 fn cmd_redact_trust(cli: &Cli, repo: &Repository, command: RedactTrustCommands) -> Result<()> {
@@ -708,19 +728,23 @@ fn cmd_redact_trust_add(cli: &Cli, repo: &Repository, args: RedactTrustAddArgs) 
     std::fs::write(&config_path, serialized)
         .with_context(|| format!("write '{}'", config_path.display()))?;
 
-    let output = TrustEntryOutput {
+    let entry = TrustEntryOutput {
         algorithm,
         public_key,
         label: args.label,
+    };
+    let output = TrustAddOutput {
+        output_kind: "redact_trust_add",
+        entry,
     };
     if should_output_json(cli, None) {
         println!("{}", serde_json::to_string(&output)?);
     } else {
         println!(
             "trusted {} key {} ({})",
-            output.algorithm,
-            short_key(&output.public_key),
-            output.label.as_deref().unwrap_or("unlabeled"),
+            output.entry.algorithm,
+            short_key(&output.entry.public_key),
+            output.entry.label.as_deref().unwrap_or("unlabeled"),
         );
     }
     Ok(())
@@ -740,6 +764,7 @@ fn cmd_redact_trust_list(cli: &Cli, repo: &Repository, _args: RedactTrustListArg
         .collect();
     let count = keys.len();
     let output = TrustListOutput {
+        output_kind: "redact_trust_list",
         trusted_keys: keys,
         count,
     };
@@ -816,7 +841,11 @@ fn cmd_redact_trust_remove(
         .with_context(|| format!("write '{}'", config_path.display()))?;
 
     if should_output_json(cli, None) {
-        println!("{{\"removed\":{removed}}}");
+        let output = TrustRemoveOutput {
+            output_kind: "redact_trust_remove",
+            removed,
+        };
+        println!("{}", serde_json::to_string(&output)?);
     } else {
         println!(
             "removed {removed} trust entry/entries matching {}",

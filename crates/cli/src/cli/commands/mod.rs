@@ -121,7 +121,10 @@ pub use bridge::cmd_bridge_git;
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clean::cmd_clean;
-pub use clone::{GitOverlayBlobHydrator, cmd_clone, register_git_overlay_factory};
+pub use clone::{
+    CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, GitOverlayBlobHydrator, cmd_clone,
+    register_git_overlay_factory,
+};
 pub use collapse::cmd_collapse;
 pub use command_catalog::{
     CommandCatalogOutput, build_command_catalog, cmd_commands, command_canonical_command,
@@ -145,7 +148,7 @@ pub use diagnose::cmd_diagnose;
 pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor_docs::cmd_doctor_docs;
-pub use doctor_schemas::cmd_doctor_schemas;
+pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
 pub use error_envelope::{print_error_with_hint, print_parse_error_json_envelope};
 pub use fetch::cmd_fetch;
 pub use fork::cmd_fork;

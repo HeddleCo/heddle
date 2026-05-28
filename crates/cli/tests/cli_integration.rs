@@ -51,6 +51,10 @@ mod hooks;
 mod misc;
 #[path = "cli_integration/oss_cli_polish.rs"]
 mod oss_cli_polish;
+#[path = "cli_integration/output_kind_invariant.rs"]
+mod output_kind_invariant;
+#[path = "cli_integration/output_kind_runtime.rs"]
+mod output_kind_runtime;
 #[path = "cli_integration/output_mode_no_auto.rs"]
 mod output_mode_no_auto;
 #[path = "cli_integration/perf_core_loop.rs"]

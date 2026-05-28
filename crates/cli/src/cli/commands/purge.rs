@@ -28,6 +28,7 @@ pub fn cmd_purge(cli: &Cli, command: PurgeCommands) -> Result<()> {
 
 #[derive(Serialize)]
 struct PurgeApplyOutput {
+    output_kind: &'static str,
     redaction_id: Option<String>,
     blob: String,
     state: String,
@@ -103,6 +104,7 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
     let ignore_hint = super::redact::ignore_hint_for_path(repo, &args.path)?;
 
     let output = PurgeApplyOutput {
+        output_kind: "purge_apply",
         redaction_id: outcome.redaction_id.map(|h| h.short()),
         blob: blob.short(),
         state: state.short(),
@@ -143,6 +145,7 @@ fn cmd_purge_list(cli: &Cli, repo: &Repository, _args: PurgeListArgs) -> Result<
     }
     #[derive(Serialize)]
     struct Listing {
+        output_kind: &'static str,
         purges: Vec<Row>,
         count: usize,
     }
@@ -165,6 +168,7 @@ fn cmd_purge_list(cli: &Cli, repo: &Repository, _args: PurgeListArgs) -> Result<
     }
     let count = rows.len();
     let payload = Listing {
+        output_kind: "purge_list",
         purges: rows,
         count,
     };
