@@ -853,6 +853,183 @@ fn rename_with_edit_and_chmod_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
+// Matrix — rename-candidate × type change (cid 3320838479). A delete + add at
+// *different* paths whose bytes are identical scores as a rename (similarity
+// 1.0). The rename-collapse must NOT merge such a pair when the two sides
+// cross git's regular↔symlink type boundary: collapsing emits a `rename
+// from/to` carrying a mismatched `old mode 100644`/`new mode 120000`, which
+// `git apply` rejects ("new mode … does not match old mode …"). The pair has
+// to stay a separate delete + add. A regular↔executable move stays *within*
+// git's regular-file type class, so it is still a legal rename-with-mode-change
+// that `git apply` accepts — the guard must not over-block it. These run on
+// BOTH heddle rename-collapse backends: the worktree-status path (`native_cell`,
+// which reads the added symlink's blob by *following* the link on disk) and the
+// committed-tree path (`state_cell`, which reads the symlink's stored target
+// bytes). The plain-Git fast path does no rename collapse, so its cross-type
+// pair is already a delete + add — `plain_git_*` below is the regression guard
+// that it stays that way.
+// ---------------------------------------------------------------------------
+
+/// Worktree surface: a tracked regular file deleted at one path and a symlink
+/// added at another, both resolving to identical bytes (the link points at an
+/// unchanged anchor file with the same content, so the worktree similarity —
+/// which follows the link — scores it as a rename). Must stay delete + add.
+#[cfg(unix)]
+#[test]
+fn native_regular_to_symlink_rename_candidate_stays_split() {
+    let shared = "shared payload\n";
+    native_cell(
+        &[normal("mover.txt", shared), normal("anchor.txt", shared)],
+        |dir| {
+            std::fs::remove_file(dir.join("mover.txt")).unwrap();
+            // `linked` -> `anchor.txt`; the worktree blob read follows the
+            // link, so the added side's bytes equal the deleted file's bytes
+            // and the pair scores as a rename candidate.
+            write_entry(dir, &symlink("linked", "anchor.txt"));
+        },
+        &[
+            Expect::Absent("mover.txt"),
+            Expect::Present(symlink("linked", "anchor.txt")),
+            Expect::Present(normal("anchor.txt", shared)),
+        ],
+    );
+}
+
+/// Committed-tree surface: a regular file whose content equals a symlink's
+/// target string. The stored symlink blob is its target bytes, so the deleted
+/// regular blob and the added symlink blob are byte-identical → rename
+/// candidate → must stay delete + add across the type boundary.
+#[cfg(unix)]
+#[test]
+fn state_regular_to_symlink_rename_candidate_stays_split() {
+    state_cell(
+        &[normal("mover.txt", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("mover.txt")).unwrap();
+            write_entry(dir, &symlink("linked", "dest/dir/file"));
+        },
+        &[
+            Expect::Absent("mover.txt"),
+            Expect::Present(symlink("linked", "dest/dir/file")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+/// The reverse direction: a symlink deleted at one path, a regular file
+/// carrying the link's target bytes added at another. Still a cross-type
+/// rename candidate (120000 ↔ 100644), still delete + add.
+#[cfg(unix)]
+#[test]
+fn state_symlink_to_regular_rename_candidate_stays_split() {
+    state_cell(
+        &[symlink("mover", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("mover")).unwrap();
+            write_entry(dir, &normal("landed.txt", "dest/dir/file"));
+        },
+        &[
+            Expect::Absent("mover"),
+            Expect::Present(normal("landed.txt", "dest/dir/file")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+/// The companion must-not-over-block guard: a regular→executable move at
+/// different paths stays within git's regular-file type class, so it MUST
+/// still collapse into a rename carrying an `old mode 100644`/`new mode
+/// 100755` pair that `git apply` accepts. Runs on the committed-tree surface
+/// (the worktree surface is already covered by `rename_with_chmod_*`).
+#[cfg(unix)]
+#[test]
+fn state_regular_to_exec_rename_candidate_collapses() {
+    let body = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    write_entry(h.path(), &normal("old.sh", body));
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+    std::fs::remove_file(h.path().join("old.sh")).unwrap();
+    write_entry(h.path(), &exec("new.sh", body));
+    heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
+
+    let patch = heddle(&["diff", "HEAD~1", "HEAD", "--patch"], Some(h.path())).unwrap();
+    assert!(
+        patch.contains("rename from old.sh") && patch.contains("rename to new.sh"),
+        "regular→exec move must still collapse into a rename:\n{patch}"
+    );
+    assert!(
+        patch.contains("old mode 100644") && patch.contains("new mode 100755"),
+        "regular→exec rename must carry the `old mode`/`new mode` pair:\n{patch}"
+    );
+    apply_oracle(
+        &[normal("old.sh", body)],
+        &patch,
+        &[
+            Expect::Absent("old.sh"),
+            Expect::Present(exec("new.sh", body)),
+        ],
+    );
+}
+
+/// Pin the rendered shape, not just the round-trip: a cross-type rename
+/// candidate must emit `deleted file mode 100644` + `new file mode 120000`
+/// and NEVER a `rename from`, so a regression that round-trips by some other
+/// mechanism (or re-introduces the cross-type rename) trips here.
+#[cfg(unix)]
+#[test]
+fn cross_type_rename_candidate_renders_as_split_not_rename() {
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    write_entry(h.path(), &normal("mover.txt", "dest/dir/file"));
+    write_entry(h.path(), &normal("keep.txt", "keep\n"));
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+    std::fs::remove_file(h.path().join("mover.txt")).unwrap();
+    write_entry(h.path(), &symlink("linked", "dest/dir/file"));
+    heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
+
+    let patch = heddle(&["diff", "HEAD~1", "HEAD", "--patch"], Some(h.path())).unwrap();
+    assert!(
+        !patch.contains("rename from"),
+        "cross-type move must not collapse into a rename:\n{patch}"
+    );
+    assert!(
+        patch.contains("deleted file mode 100644") && patch.contains("new file mode 120000"),
+        "cross-type move must render as delete(100644) + add(120000):\n{patch}"
+    );
+    apply_oracle(
+        &[normal("mover.txt", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &patch,
+        &[
+            Expect::Absent("mover.txt"),
+            Expect::Present(symlink("linked", "dest/dir/file")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+/// Plain-Git both-path guard: the fast path does no rename collapse, so a
+/// cross-type delete+add is already two separate stanzas. This pins that it
+/// stays delete + add (never a future cross-type rename) and round-trips.
+#[cfg(unix)]
+#[test]
+fn plain_git_regular_to_symlink_rename_candidate_stays_split() {
+    plain_git_cell(
+        &[normal("mover.txt", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        true,
+        |dir| {
+            std::fs::remove_file(dir.join("mover.txt")).unwrap();
+            write_entry(dir, &symlink("linked", "dest/dir/file"));
+        },
+        &[
+            Expect::Absent("mover.txt"),
+            Expect::Present(symlink("linked", "dest/dir/file")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Matrix — file ↔ directory type changes. Covers cid 3319049665 — a tracked
 // file replaced by a directory (or vice-versa) must emit the deletion of the
 // blocking path so `git apply` can create the new tree over it.
@@ -2006,6 +2183,99 @@ proptest! {
             prop_assert_eq!(
                 std::fs::read(g.path().join("node")).unwrap(),
                 body.as_bytes().to_vec()
+            );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
+
+    /// A delete + add at *different* paths whose bytes are identical scores as
+    /// a rename (similarity 1.0); when the two sides cross git's regular↔symlink
+    /// type boundary the rename-collapse must refuse to merge them, leaving a
+    /// delete + add `git apply` accepts — never a `rename from/to` carrying a
+    /// mismatched `old mode`/`new mode` (cid 3320838479). The committed-tree
+    /// surface stores a symlink's blob as its target bytes, so setting the
+    /// regular side's content equal to the link target makes every generated
+    /// pair a genuine rename candidate. Randomizes the direction and the shared
+    /// bytes — the randomized layer for the hand-enumerated cross-type
+    /// rename-candidate cells.
+    #[cfg(unix)]
+    #[test]
+    fn cross_type_rename_candidate_stays_split(
+        regular_deleted in any::<bool>(),
+        shared in "[a-z][a-z/]{0,18}[a-z]",
+    ) {
+        // `shared` doubles as the symlink target and the regular file's
+        // content, so the two blobs are byte-identical (similarity 1.0).
+        let (pre, post): (Entry, Entry) = if regular_deleted {
+            (normal("mover", &shared), symlink("landed", &shared))
+        } else {
+            (symlink("mover", &shared), normal("landed", &shared))
+        };
+
+        let h = TempDir::new().unwrap();
+        heddle(&["init"], Some(h.path())).unwrap();
+        write_entry(h.path(), &pre);
+        write_entry(h.path(), &normal("anchor.txt", "anchor\n"));
+        heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+        std::fs::remove_file(h.path().join("mover")).unwrap();
+        write_entry(h.path(), &post);
+        heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
+
+        let patch = heddle(&["diff", "HEAD~1", "HEAD", "--patch"], Some(h.path())).unwrap();
+        prop_assert!(!patch.trim().is_empty());
+        // The cross-type pair must never become a rename.
+        prop_assert!(
+            !patch.contains("rename from"),
+            "cross-type move collapsed into a rename:\n{patch}"
+        );
+        let json_patch = json_diff_patch_field(h.path(), &["HEAD~1", "HEAD"]);
+        prop_assert_eq!(json_patch.as_deref(), Some(patch.as_str()));
+
+        // Oracle: seed `pre`, apply, assert the post type + content materializes.
+        let g = TempDir::new().unwrap();
+        git_init(g.path());
+        write_entry(g.path(), &pre);
+        write_entry(g.path(), &normal("anchor.txt", "anchor\n"));
+        git(g.path(), &["add", "-A"]);
+        git(g.path(), &["commit", "-q", "-m", "seed"]);
+
+        let check = pipe_git(g.path(), &["apply", "--check"], &patch);
+        prop_assert!(
+            check.status.success(),
+            "git apply --check failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let applied = pipe_git(g.path(), &["apply"], &patch);
+        prop_assert!(
+            applied.status.success(),
+            "git apply failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+
+        prop_assert!(
+            !g.path().join("mover").exists(),
+            "the moved-from path should be gone after apply"
+        );
+        let meta = std::fs::symlink_metadata(g.path().join("landed")).unwrap();
+        if regular_deleted {
+            prop_assert!(
+                meta.file_type().is_symlink(),
+                "landed should be a symlink after apply"
+            );
+            let link = std::fs::read_link(g.path().join("landed")).unwrap();
+            let link = link.to_string_lossy();
+            prop_assert_eq!(link.as_bytes(), shared.as_bytes());
+        } else {
+            prop_assert!(
+                !meta.file_type().is_symlink(),
+                "landed should be a regular file after apply"
+            );
+            prop_assert_eq!(
+                std::fs::read(g.path().join("landed")).unwrap(),
+                shared.as_bytes().to_vec()
             );
         }
     }

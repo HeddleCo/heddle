@@ -1896,6 +1896,26 @@ fn detect_clear_renames(
         return Ok(changes);
     }
 
+    // Snapshot each side's git mode so a candidate can be rejected when the
+    // deleted and added sides differ in git *type class* (regular vs
+    // symlink). git never renames across a type boundary: `git apply`
+    // rejects a `rename from/to` whose `old mode`/`new mode` cross S_IFMT
+    // (e.g. `100644` → `120000`). Such a pair must stay a delete + add,
+    // which the cross-path delete/add rendering already round-trips. A
+    // regular↔executable move stays *within* the regular class, so it is
+    // intentionally still collapsible — git emits it as a rename with an
+    // `old mode`/`new mode` pair that `git apply` accepts.
+    let deleted_side_modes = changes
+        .iter()
+        .filter(|change| change.kind == "deleted")
+        .map(|change| (change.path.as_str(), change.mode))
+        .collect::<std::collections::BTreeMap<&str, Option<FileMode>>>();
+    let added_side_modes = changes
+        .iter()
+        .filter(|change| change.kind == "added")
+        .map(|change| (change.path.as_str(), change.mode))
+        .collect::<std::collections::BTreeMap<&str, Option<FileMode>>>();
+
     let mut candidates = Vec::new();
     for old_path in &deleted {
         let Some(old_blob) = blob_from_tree(repo, from_tree, old_path)? else {
@@ -1907,6 +1927,18 @@ fn detect_clear_renames(
             // emits both halves and collapsing them back into a
             // `foo → foo` rename would drop the type swap.
             if old_path == new_path {
+                continue;
+            }
+            // A cross-*type* move (regular ↔ symlink) at different paths is
+            // never a rename either: collapsing it would emit a rename
+            // header carrying a mismatched `old mode`/`new mode`, which
+            // `git apply` rejects. Leave the pair as a separate delete +
+            // add. (Regular↔executable stays compatible — see the
+            // mode-snapshot comment above.)
+            if !rename_mode_compatible(
+                deleted_side_modes.get(old_path).copied().flatten(),
+                added_side_modes.get(new_path).copied().flatten(),
+            ) {
                 continue;
             }
             let Some(new_blob) = new_blob_for_rename(repo, to_tree, new_path)? else {
@@ -2048,6 +2080,20 @@ fn new_blob_for_rename(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Whether a delete + add can be collapsed into a single `renamed` change
+/// given the two sides' git file modes. git only renames *within* one
+/// S_IFMT type class: regular files (`100644`) and executables (`100755`)
+/// share the regular-file type, so a move between them renders as a rename
+/// with an `old mode`/`new mode` pair that `git apply` accepts; a symlink
+/// (`120000`) is a distinct type, so a regular↔symlink move is never a
+/// rename — `git apply` rejects a `rename from/to` whose `new mode
+/// (120000)` doesn't match its `old mode (100644)`. A missing mode falls
+/// back to the regular-file default the renderer also assumes.
+fn rename_mode_compatible(old: Option<FileMode>, new: Option<FileMode>) -> bool {
+    let is_symlink = |mode: Option<FileMode>| matches!(mode, Some(FileMode::Symlink));
+    is_symlink(old) == is_symlink(new)
 }
 
 fn rename_similarity(old_blob: &Blob, new_blob: &Blob) -> f64 {
