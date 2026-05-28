@@ -34,6 +34,7 @@ clap_complete.workspace = true
 ed25519-dalek.workspace = true
 fs2.workspace = true
 futures.workspace = true
+gix-config = "0.53"
 gix-index = "0.48"
 gix-pack = "0.67"
 gix-protocol = { version = "0.58", features = ["blocking-client"] }

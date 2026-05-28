@@ -1209,3 +1209,121 @@ struct PullNetworkOptions<'a> {
     lazy: bool,
     cli: &'a Cli,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_git(root: &Path) {
+        gix::init(root).expect("init git repo");
+    }
+
+    #[test]
+    fn parses_quoted_url_with_equals_and_strips_quotes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        fs::write(
+            tmp.path().join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = \"https://example.com/repo?ref=main&a=b\"\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("origin").map(String::as_str),
+            Some("https://example.com/repo?ref=main&a=b"),
+        );
+    }
+
+    #[test]
+    fn strips_inline_comments_from_url() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        fs::write(
+            tmp.path().join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = https://example.com/repo ; trailing comment\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("origin").map(String::as_str),
+            Some("https://example.com/repo"),
+        );
+    }
+
+    #[test]
+    fn follows_include_directives() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("extra.config"),
+            "[remote \"upstream\"]\n\turl = https://example.com/upstream\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config"),
+            "[include]\n\tpath = extra.config\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("upstream").map(String::as_str),
+            Some("https://example.com/upstream"),
+        );
+    }
+
+    #[test]
+    fn worktree_config_overrides_local_when_extension_enabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[extensions]\n\tworktreeConfig = true\n\
+             [remote \"origin\"]\n\turl = https://example.com/local\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config.worktree"),
+            "[remote \"origin\"]\n\turl = https://example.com/worktree\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("origin").map(String::as_str),
+            Some("https://example.com/worktree"),
+        );
+    }
+
+    #[test]
+    fn ignores_worktree_config_when_extension_disabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"]\n\turl = https://example.com/local\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config.worktree"),
+            "[remote \"origin\"]\n\turl = https://example.com/worktree\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("origin").map(String::as_str),
+            Some("https://example.com/local"),
+        );
+    }
+}

@@ -2801,6 +2801,7 @@ dependencies = [
  "fs2",
  "futures",
  "gix",
+ "gix-config",
  "gix-index",
  "gix-pack",
  "gix-protocol",
