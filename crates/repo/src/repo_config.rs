@@ -276,16 +276,48 @@ impl Default for DefaultsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     Json,
-    // `auto` is the historical name for the default; accept it as an
-    // alias so user configs from before the TTY-detection rip survive
-    // an upgrade without a hard error. New writes use `text`.
-    #[serde(alias = "auto")]
     #[default]
     Text,
+}
+
+// Hand-written Deserialize so a legacy `output.format = "auto"` fails
+// with a field-named, value-named message instead of the default serde
+// "unknown variant" wording. The bug class #271 closes is the silent
+// JSON-when-piped surprise the old `auto` mode produced; rather than
+// keeping an alias that would re-route it to `text`, pre-1.0 we error
+// loudly so the operator updates the config. The error string is the
+// load-bearing contract — the CLI's error envelope (see
+// `print_error_with_hint`) classifies it by substring match.
+impl<'de> Deserialize<'de> for OutputFormat {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct OutputFormatVisitor;
+        impl<'de> serde::de::Visitor<'de> for OutputFormatVisitor {
+            type Value = OutputFormat;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("'text' or 'json'")
+            }
+            fn visit_str<E>(self, value: &str) -> std::result::Result<OutputFormat, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "text" => Ok(OutputFormat::Text),
+                    "json" => Ok(OutputFormat::Json),
+                    other => Err(E::custom(format!(
+                        "invalid output.format: '{other}' — valid values are 'text' or 'json'"
+                    ))),
+                }
+            }
+        }
+        deserializer.deserialize_str(OutputFormatVisitor)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -396,7 +428,18 @@ impl RepoConfig {
         let mut file = std::fs::File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        Ok(toml::from_str(&contents)?)
+        // Wrap parse failures in `HeddleError::ConfigParse` so the CLI
+        // error envelope can render the actual config file in the
+        // recovery hint (Codex R3 cid 3313132711 on #271). The implicit
+        // `From<toml::de::Error>` would lose the path; we attach it
+        // here where we still know which file produced the failure.
+        toml::from_str::<Self>(&contents).map_err(|err| {
+            let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            objects::error::HeddleError::ConfigParse {
+                path: resolved,
+                source: err,
+            }
+        })
     }
 
     /// Save configuration to a file.
@@ -444,6 +487,56 @@ version = 1
         assert!(config.policies.default_policy.is_none());
         assert!(config.agent.provider.is_none());
         assert!(config.agent.model.is_none());
+    }
+
+    #[test]
+    fn output_format_text_and_json_parse_normally() {
+        let toml_text = r#"
+[repository]
+version = 1
+[output]
+format = "text"
+"#;
+        let config: RepoConfig = toml::from_str(toml_text).expect("text should parse");
+        assert_eq!(config.output.format, Some(OutputFormat::Text));
+
+        let toml_json = r#"
+[repository]
+version = 1
+[output]
+format = "json"
+"#;
+        let config: RepoConfig = toml::from_str(toml_json).expect("json should parse");
+        assert_eq!(config.output.format, Some(OutputFormat::Json));
+    }
+
+    #[test]
+    fn output_format_auto_is_rejected_with_field_specific_message() {
+        // Pre-1.0: no silent alias. A repo config with `output.format =
+        // "auto"` must fail loudly so the operator updates it to `text`
+        // or `json` rather than silently inheriting the
+        // JSON-when-piped surprise that motivated #271.
+        let toml_auto = r#"
+[repository]
+version = 1
+[output]
+format = "auto"
+"#;
+        let err = toml::from_str::<RepoConfig>(toml_auto)
+            .expect_err("output.format='auto' must reject");
+        let message = err.to_string();
+        assert!(
+            message.contains("output.format"),
+            "error should name the field: {message}"
+        );
+        assert!(
+            message.contains("'auto'"),
+            "error should name the rejected value: {message}"
+        );
+        assert!(
+            message.contains("'text'") && message.contains("'json'"),
+            "error should list the valid values: {message}"
+        );
     }
 
     #[test]

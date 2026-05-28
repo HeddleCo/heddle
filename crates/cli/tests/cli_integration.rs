@@ -53,6 +53,8 @@ mod oss_cli_polish;
 mod output_kind_invariant;
 #[path = "cli_integration/output_kind_runtime.rs"]
 mod output_kind_runtime;
+#[path = "cli_integration/output_mode_no_auto.rs"]
+mod output_mode_no_auto;
 #[path = "cli_integration/perf_core_loop.rs"]
 mod perf_core_loop;
 #[path = "cli_integration/realworld_git.rs"]
