@@ -604,6 +604,193 @@ fn runtime_invocation_args(display: &str) -> Option<(&'static [&'static str], bo
 }
 
 #[test]
+fn runtime_init_emits_output_kind() {
+    // heddle#272 r6 (Codex P2): `init` is in SWEPT and the catalog
+    // advertises `output_kind: "init"`, but the previous runtime sweep
+    // never invoked `init` (it needs a fresh, un-init'd directory, so it
+    // wasn't in `runtime_invocation_args`). That left an
+    // advertise-without-emit gap the catalog injection in
+    // `heddle schemas` could not catch. Pin it here: a clean directory
+    // initialised with `--output json` must carry `output_kind: "init"`.
+    let temp = TempDir::new().expect("tempdir");
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "init",
+            "--principal-name",
+            "Heddle Test",
+            "--principal-email",
+            "heddle@test.example",
+        ],
+        Some(temp.path()),
+    )
+    .expect("heddle init --output json");
+
+    assert!(
+        output.status.success(),
+        "init exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout.lines().next().unwrap_or("").trim();
+    let parsed: Value =
+        serde_json::from_str(first_line).expect("init stdout is parseable JSON");
+    assert_eq!(
+        parsed.get("output_kind").and_then(|v| v.as_str()),
+        Some("init"),
+        "`heddle init --output json` must emit `output_kind: \"init\"`; payload: {first_line}"
+    );
+}
+
+/// Top-level key set of the first JSON object emitted by `argv` in
+/// `dir`. Panics with the captured output on failure so doc-vs-runtime
+/// mismatches surface a readable diff.
+fn runtime_top_level_keys(argv: &[&str], dir: &std::path::Path) -> BTreeSet<String> {
+    let output = heddle_output(argv, Some(dir))
+        .unwrap_or_else(|err| panic!("spawn {argv:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "{argv:?} exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout.lines().next().unwrap_or("").trim();
+    let parsed: Value = serde_json::from_str(first_line)
+        .unwrap_or_else(|err| panic!("{argv:?} stdout not JSON: {err}\n  line: {first_line}"));
+    parsed
+        .as_object()
+        .unwrap_or_else(|| panic!("{argv:?} top-level JSON is not an object: {first_line}"))
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// First fenced ```json block in `doc` whose top-level `output_kind`
+/// equals `value`, returned as its top-level key set. `None` if no such
+/// documented sample exists.
+fn doc_sample_top_level_keys(doc: &str, output_kind_value: &str) -> Option<BTreeSet<String>> {
+    let mut in_block = false;
+    let mut buf = String::new();
+    for line in doc.lines() {
+        let trimmed = line.trim();
+        if !in_block {
+            if trimmed == "```json" {
+                in_block = true;
+                buf.clear();
+            }
+            continue;
+        }
+        if trimmed == "```" {
+            in_block = false;
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&buf) {
+                if map.get("output_kind").and_then(|v| v.as_str()) == Some(output_kind_value) {
+                    return Some(map.keys().cloned().collect());
+                }
+            }
+            buf.clear();
+            continue;
+        }
+        buf.push_str(line);
+        buf.push('\n');
+    }
+    None
+}
+
+#[test]
+fn swept_doc_samples_match_runtime_keys() {
+    // heddle#272 r6 (Codex P2 x2): `doctor schemas` only checks that a
+    // documented sample's keys are a SUBSET of the schema's properties —
+    // it never checks the sample against the actual `--output json`
+    // payload. So a sample can describe a stale shape (the old
+    // key/value-style context payload; the `thread`/`snapshot` stack
+    // wrapper) and pass. This test closes that gap: for verbs we can
+    // invoke in a fixture, the documented sample's top-level keys must be
+    // a subset of the real runtime keys, and `output_kind` must be
+    // present in both. Doc drift now turns CI red until the sample is
+    // corrected.
+    let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .join("docs/json-schemas.md");
+    let doc = std::fs::read_to_string(&doc_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", doc_path.display()));
+
+    let fixture = init_fixture();
+    // Build a stack so `stack snapshot` has a member to scope to (an
+    // empty repo's `main` is not part of any stack).
+    heddle(
+        &["start", "feature-x", "--workspace", "solid"],
+        Some(fixture.path()),
+    )
+    .expect("heddle start feature-x");
+    std::fs::write(fixture.path().join("annotated.txt"), "content")
+        .expect("write annotated fixture file");
+
+    // (output_kind value, runtime argv) — each invocation must succeed in
+    // the fixture and the documented sample must mirror its key set.
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "stack_snapshot",
+            &["--output", "json", "stack", "snapshot", "--thread", "feature-x"],
+        ),
+        (
+            "context_set",
+            &[
+                "--output",
+                "json",
+                "context",
+                "set",
+                "--path",
+                "annotated.txt",
+                "--scope",
+                "file",
+                "-m",
+                "owner note",
+            ],
+        ),
+        ("context_list", &["--output", "json", "context", "list"]),
+    ];
+
+    let mut failures = Vec::new();
+    for (output_kind, argv) in cases {
+        let runtime_keys = runtime_top_level_keys(argv, fixture.path());
+        let Some(doc_keys) = doc_sample_top_level_keys(&doc, output_kind) else {
+            failures.push(format!(
+                "{output_kind}: no documented `{output_kind}` sample found in docs/json-schemas.md"
+            ));
+            continue;
+        };
+        if !doc_keys.contains("output_kind") {
+            failures.push(format!(
+                "{output_kind}: documented sample is missing the `output_kind` key"
+            ));
+        }
+        if !runtime_keys.contains("output_kind") {
+            failures.push(format!(
+                "{output_kind}: runtime payload is missing the `output_kind` key (keys: {runtime_keys:?})"
+            ));
+        }
+        let extra: Vec<&String> = doc_keys.difference(&runtime_keys).collect();
+        if !extra.is_empty() {
+            failures.push(format!(
+                "{output_kind}: documented sample has keys absent from the real `--output json` \
+                 payload: {extra:?}\n      doc keys:     {doc_keys:?}\n      runtime keys: {runtime_keys:?}"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Documented samples drifted from the real runtime payloads:\n  - {}",
+        failures.join("\n  - ")
+    );
+}
+
+#[test]
 fn runtime_emits_output_kind_for_invokable_swept_verbs() {
     let fixture = init_fixture();
     let mut failures = Vec::new();

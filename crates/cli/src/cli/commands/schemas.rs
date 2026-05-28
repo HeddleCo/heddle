@@ -2806,6 +2806,61 @@ mod tests {
         }
     }
 
+    /// Every documented (non-opaque) verb whose catalog advertises an
+    /// `output_kind` discriminator must declare the `output_kind`
+    /// property on its *registered schema struct*, not merely rely on the
+    /// runtime injection in [`schema_for_verb`].
+    ///
+    /// heddle#272 r6 (Codex P2): `schema_for_verb` injects the
+    /// discriminator from the catalog after deriving the struct schema,
+    /// so `heddle schemas <verb>` already surfaces `output_kind`. That
+    /// injection masks the fact that the Rust mirror struct (e.g.
+    /// `CleanSchema`, `GotoSchema`) never declares the field. The mirror
+    /// is the source of truth a reader greps; it must be honest about the
+    /// discriminator the runtime always emits. This check reads the
+    /// *pre-injection* struct schema so a missing field fails CI rather
+    /// than being papered over by the catalog.
+    #[test]
+    fn documented_swept_schema_structs_declare_output_kind() {
+        let mut missing = Vec::new();
+        for verb in documented_schema_verbs() {
+            // Opaque verbs expose a generic object schema; their
+            // discriminator is genuinely catalog-only (there is no
+            // Serialize mirror struct to declare it on).
+            if opaque_schema_verbs().contains(verb) {
+                continue;
+            }
+            let Some(discriminator) =
+                command_catalog::command_json_discriminator_for_schema_verb(verb)
+            else {
+                continue;
+            };
+            if discriminator.field != "output_kind" {
+                continue;
+            }
+            let bare = schema_for_registered_verb(verb)
+                .unwrap_or_else(|| panic!("documented verb `{verb}` has no registered schema"));
+            let declares = bare
+                .get("properties")
+                .and_then(|properties| properties.get("output_kind"))
+                .is_some();
+            if !declares {
+                missing.push(format!(
+                    "{verb}: catalog advertises output_kind=`{}` but the schema struct declares no `output_kind` property",
+                    discriminator.value
+                ));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "Documented swept schema structs missing the `output_kind` property. Add \
+             `pub output_kind: String` to each mirror struct so it matches the runtime \
+             emission (the catalog injection masks this at the `heddle schemas` layer, \
+             but the struct must be honest):\n  - {}",
+            missing.join("\n  - ")
+        );
+    }
+
     #[test]
     fn implementation_registry_matches_command_contract_registry() {
         let advertised = schema_verbs();
