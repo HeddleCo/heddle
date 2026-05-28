@@ -372,24 +372,36 @@ mod current_thread_runtime_tests {
 
     use super::*;
 
+    /// Connection URL for the integration test: the CI `postgres-tests`
+    /// job sets `DATABASE_URL` to the service container; everywhere else it
+    /// is unset and we fall back to a deliberately-unreachable endpoint
+    /// (port 1) so the call still round-trips through the runtime bridge
+    /// without depending on a real database.
+    fn test_database_url() -> String {
+        std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://heddle-test@127.0.0.1:1/heddle_test".to_string())
+    }
+
     /// Issue #62: `PgOpLogBackend`'s sync methods must not panic when the
     /// caller is on a `current_thread` Tokio runtime. The pre-fix
     /// `tokio::task::block_in_place(...)` path is only valid on a
     /// `multi_thread` runtime; on `current_thread` it panics with
     /// `"can call blocking only when running on the multi-threaded runtime"`.
     ///
-    /// The pool is built with `connect_lazy` — no real database is required.
-    /// Method calls return an `Err` when the bridged future fails to
-    /// connect, which is fine: this test only asserts that the call returns
-    /// a `Result` instead of panicking.
+    /// `#[ignore]`: the postgres integration suite only runs under the CI
+    /// `postgres-tests` job (`cargo test --features postgres -- --ignored`)
+    /// which provides a real `DATABASE_URL`. Without it the pool points at an
+    /// unreachable endpoint, so the method returns `Err` rather than `Ok` —
+    /// either way the contract under test is the *absence of a panic*.
     #[tokio::test(flavor = "current_thread")]
+    #[ignore = "postgres integration: needs DATABASE_URL (CI postgres-tests job)"]
     async fn pg_oplog_methods_do_not_panic_on_current_thread_runtime() {
-        // Short `acquire_timeout` keeps the test snappy: the future will
-        // resolve to `Err(PoolTimedOut)` instead of waiting for sqlx's
-        // 30 s default against the unreachable endpoint.
+        // Short `acquire_timeout` keeps the test snappy when the endpoint is
+        // unreachable: the future resolves to `Err(PoolTimedOut)` instead of
+        // waiting for sqlx's 30 s default.
         let pool = PgPoolOptions::new()
             .acquire_timeout(std::time::Duration::from_millis(200))
-            .connect_lazy("postgres://heddle-test@127.0.0.1:1/heddle_test")
+            .connect_lazy(&test_database_url())
             .expect("connect_lazy accepts the URL");
         let backend = PgOpLogBackend::new(Arc::new(pool), Uuid::new_v4());
         // `last()` is the cheapest read; the panic surfaces inside
