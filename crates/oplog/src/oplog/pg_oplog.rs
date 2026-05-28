@@ -28,10 +28,13 @@ fn sqlx_err(e: sqlx::Error) -> HeddleError {
 
 /// Postgres-backed operation log backend for the stateless server.
 ///
-/// Synchronous `OpLogBackend` methods drive their `sqlx` futures through a
-/// shared [`RuntimeBridge`] so the backend is safe to call from any caller
-/// flavor — including a current-thread Tokio runtime and non-Tokio
-/// threads. See [`PgOpLogBackend::bridge`] for the lazy-init pattern.
+/// The `async` batch reads (`recent_batches_scoped`, `undo_batches_scoped`,
+/// `redo_batches_scoped`) `.await` `sqlx` directly — no runtime bridge. The
+/// remaining synchronous `OpLogBackend` methods still drive their `sqlx`
+/// futures through a shared [`RuntimeBridge`] so they're safe to call from
+/// any caller flavor — including a current-thread Tokio runtime and
+/// non-Tokio threads. See [`PgOpLogBackend::bridge`] for the lazy-init
+/// pattern.
 #[derive(Clone)]
 pub struct PgOpLogBackend {
     pool: Arc<PgPool>,
@@ -187,7 +190,11 @@ impl PgOpLogBackend {
         .map_err(sqlx_err)
     }
 
-    fn fetch_scoped_batches(
+    /// Native-async batch fetch shared by `recent`/`undo`/`redo`. Borrows
+    /// `self`, `extra_where`, and `order` for the duration of the returned
+    /// future — no `'static` worker-thread bridge — so the hosted server
+    /// awaits `sqlx` directly.
+    async fn fetch_scoped_batches(
         &self,
         count: usize,
         scope: Option<&str>,
@@ -195,38 +202,35 @@ impl PgOpLogBackend {
         order: &str,
         asc: bool,
     ) -> Result<Vec<OpBatch>> {
-        let pool = Arc::clone(&self.pool);
+        let pool = self.pool.as_ref();
         let repo_id = self.repo_id;
-        let scope = scope.map(str::to_string);
-        self.block(async move {
-            let batch_ids: Vec<i64> = if let Some(scope) = scope.as_deref() {
-                let sql = format!(
-                    "SELECT DISTINCT batch_id FROM oplog
-                     WHERE repo_id = $1 {extra_where} AND scope = $2
-                     ORDER BY batch_id {order} LIMIT $3"
-                );
-                sqlx::query_scalar::<_, i64>(&sql)
-                    .bind(repo_id)
-                    .bind(scope)
-                    .bind(count as i64)
-                    .fetch_all(pool.as_ref())
-                    .await
-                    .map_err(sqlx_err)?
-            } else {
-                let sql = format!(
-                    "SELECT DISTINCT batch_id FROM oplog
-                     WHERE repo_id = $1 {extra_where}
-                     ORDER BY batch_id {order} LIMIT $2"
-                );
-                sqlx::query_scalar::<_, i64>(&sql)
-                    .bind(repo_id)
-                    .bind(count as i64)
-                    .fetch_all(pool.as_ref())
-                    .await
-                    .map_err(sqlx_err)?
-            };
-            Self::fetch_batches_by_ids(&pool, repo_id, &batch_ids, asc).await
-        })
+        let batch_ids: Vec<i64> = if let Some(scope) = scope {
+            let sql = format!(
+                "SELECT DISTINCT batch_id FROM oplog
+                 WHERE repo_id = $1 {extra_where} AND scope = $2
+                 ORDER BY batch_id {order} LIMIT $3"
+            );
+            sqlx::query_scalar::<_, i64>(&sql)
+                .bind(repo_id)
+                .bind(scope)
+                .bind(count as i64)
+                .fetch_all(pool)
+                .await
+                .map_err(sqlx_err)?
+        } else {
+            let sql = format!(
+                "SELECT DISTINCT batch_id FROM oplog
+                 WHERE repo_id = $1 {extra_where}
+                 ORDER BY batch_id {order} LIMIT $2"
+            );
+            sqlx::query_scalar::<_, i64>(&sql)
+                .bind(repo_id)
+                .bind(count as i64)
+                .fetch_all(pool)
+                .await
+                .map_err(sqlx_err)?
+        };
+        Self::fetch_batches_by_ids(pool, repo_id, &batch_ids, asc).await
     }
 }
 
@@ -305,16 +309,19 @@ impl OpLogBackend for PgOpLogBackend {
         })
     }
 
-    fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         self.fetch_scoped_batches(count, scope, "", "DESC", false)
+            .await
     }
 
-    fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         self.fetch_scoped_batches(count, scope, "AND undone = false", "DESC", false)
+            .await
     }
 
-    fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         self.fetch_scoped_batches(count, scope, "AND undone = true", "ASC", true)
+            .await
     }
 
     fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch> {

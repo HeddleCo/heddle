@@ -125,8 +125,16 @@ impl OpLog {
         Ok(guard.as_ref().unwrap().recent_entries(count))
     }
 
+    pub fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.recent_batches_scoped(count, None)
+    }
+
     pub fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         self.collect_batches_scoped(count, |_| true, scope)
+    }
+
+    pub fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.undo_batches_scoped(count, None)
     }
 
     pub fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
@@ -135,6 +143,10 @@ impl OpLog {
             |batch| batch.entries.iter().any(|e| !e.undone),
             scope,
         )
+    }
+
+    pub fn redo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
+        self.redo_batches_scoped(count, None)
     }
 
     pub fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
@@ -384,7 +396,7 @@ impl OpLogBackend for OpLog {
         OpLog::record_batch_scoped(self, operations, scope)
     }
 
-    fn record_batch_scoped_if_no_transaction(
+    async fn record_batch_scoped_if_no_transaction(
         &self,
         operations: Vec<OpRecord>,
         scope: Option<&str>,
@@ -408,15 +420,15 @@ impl OpLogBackend for OpLog {
         OpLog::recent(self, count)
     }
 
-    fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         OpLog::recent_batches_scoped(self, count, scope)
     }
 
-    fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         OpLog::undo_batches_scoped(self, count, scope)
     }
 
-    fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         OpLog::redo_batches_scoped(self, count, scope)
     }
 

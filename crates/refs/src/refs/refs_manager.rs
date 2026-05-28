@@ -354,7 +354,7 @@ impl CoreRefBackend for RefManager {
     fn write_head_cas(&self, expected: RefExpectation<Head>, head: &Head) -> Result<()> {
         RefManager::write_head_cas(self, expected, head)
     }
-    fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
+    async fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
         RefManager::get_thread(self, name)
     }
     fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<()> {
@@ -381,10 +381,10 @@ impl CoreRefBackend for RefManager {
     fn list_threads(&self) -> Result<Vec<ThreadName>> {
         RefManager::list_threads(self)
     }
-    fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
+    async fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
         RefManager::get_marker(self, name)
     }
-    fn create_marker(&self, name: &MarkerName, state: &ChangeId) -> Result<()> {
+    async fn create_marker(&self, name: &MarkerName, state: &ChangeId) -> Result<()> {
         RefManager::create_marker(self, name, state)
     }
     fn set_marker_cas(
@@ -411,7 +411,7 @@ impl CoreRefBackend for RefManager {
     fn update_refs(&self, updates: &[RefUpdate]) -> Result<()> {
         RefManager::update_refs(self, updates)
     }
-    fn resolve(&self, refspec: &str) -> Result<Option<ChangeId>> {
+    async fn resolve(&self, refspec: &str) -> Result<Option<ChangeId>> {
         RefManager::resolve(self, refspec)
     }
 }
