@@ -292,4 +292,69 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn mem_backend_exercises_full_trait_surface() {
+        let backend = MemRefBackend::default();
+        let thread_id = ChangeId::generate();
+        let marker_id = ChangeId::generate();
+        let head_id = ChangeId::generate();
+
+        // write_head_cas writes through to the head slot.
+        let head = Head::Detached { state: head_id };
+        backend
+            .write_head_cas(RefExpectation::Any, &head)
+            .unwrap();
+        assert_eq!(backend.read_head().unwrap(), head);
+
+        // set_thread_cas inserts; list_threads + get_thread observe it.
+        let main = ThreadName::new("main");
+        backend
+            .set_thread_cas(&main, RefExpectation::Missing, &thread_id)
+            .unwrap();
+        assert_eq!(
+            backend.list_threads().unwrap(),
+            vec![ThreadName::new("main")]
+        );
+        assert_eq!(
+            pollster::block_on(backend.get_thread(&main)).unwrap(),
+            Some(thread_id)
+        );
+
+        // delete_thread returns the removed value; delete_thread_cas is a
+        // no-op that still reports success.
+        assert_eq!(backend.delete_thread(&main).unwrap(), Some(thread_id));
+        assert_eq!(backend.delete_thread(&main).unwrap(), None);
+        backend
+            .delete_thread_cas(&main, RefExpectation::Any)
+            .unwrap();
+        assert!(backend.list_threads().unwrap().is_empty());
+
+        // create_marker (async) inserts; list_markers + get_marker observe it.
+        let tag = MarkerName::new("v1");
+        pollster::block_on(backend.create_marker(&tag, &marker_id)).unwrap();
+        assert_eq!(backend.list_markers().unwrap(), vec![MarkerName::new("v1")]);
+        assert_eq!(
+            pollster::block_on(backend.get_marker(&tag)).unwrap(),
+            Some(marker_id)
+        );
+
+        // delete_marker returns the removed value; delete_marker_cas is a
+        // no-op that still reports success.
+        assert_eq!(backend.delete_marker(&tag).unwrap(), Some(marker_id));
+        assert_eq!(backend.delete_marker(&tag).unwrap(), None);
+        backend
+            .delete_marker_cas(&tag, RefExpectation::Any)
+            .unwrap();
+        assert!(backend.list_markers().unwrap().is_empty());
+
+        // update_refs accepts the batch shape without error.
+        backend
+            .update_refs(&[RefUpdate::Thread {
+                name: ThreadName::new("main"),
+                expected: RefExpectation::Any,
+                new: Some(thread_id),
+            }])
+            .unwrap();
+    }
 }
