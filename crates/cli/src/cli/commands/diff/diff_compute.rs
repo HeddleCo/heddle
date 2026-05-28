@@ -312,20 +312,19 @@ pub fn cmd_diff(
             })
             .collect()
     };
-    // Worktree diffs (no `to_tree`) can carry a dir→file type change that
-    // heddle status reports as a single `modified` entry; expand it into
-    // the nested deletions + new-file add git would emit before renames.
-    let file_changes = if to_tree.is_none() {
-        expand_dir_to_file_type_changes(
-            &repo,
-            from_tree.as_ref(),
-            file_changes,
-            !(name_only || stat),
-            unified,
-        )?
-    } else {
-        file_changes
-    };
+    let file_changes = sort_changes_by_path(file_changes);
+    // A type change (dir ↔ file/symlink, or regular ↔ symlink) surfaces as
+    // a single `modified` entry that git records as delete-old + add-new.
+    // Expand it on both diff surfaces — worktree and state-to-state — so
+    // committed diffs round-trip too, before renames are detected.
+    let file_changes = expand_type_changes(
+        &repo,
+        from_tree.as_ref(),
+        to_tree.as_ref(),
+        file_changes,
+        !(name_only || stat),
+        unified,
+    )?;
     let file_changes = detect_clear_renames(
         &repo,
         from_tree.as_ref(),
@@ -417,6 +416,19 @@ fn populate_patch_text(output: &mut DiffOutput) {
     if !text.is_empty() {
         output.patch = Some(text);
     }
+}
+
+/// Order a state-to-state change list deterministically by path. `diff_trees`
+/// yields its change set in hash order, which differs between process
+/// invocations — so `heddle diff <a> <b> --patch` and the JSON `.patch` field
+/// from a separate run disagree on the order of unrelated files. git emits
+/// diff entries in path order; sorting here matches that and keeps every
+/// render of the same diff byte-identical. Sort *before* `expand_type_changes`
+/// so each type change's local delete-before-add ordering stays intact (the
+/// expansion replaces a single entry in place).
+fn sort_changes_by_path(mut changes: Vec<FileChange>) -> Vec<FileChange> {
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    changes
 }
 
 fn render_plain_git_head_diff(
@@ -724,11 +736,12 @@ fn render_worktree_status_diff(
     };
 
     let changes = file_changes_from_status(status, want_hunks, repo, from_tree.as_ref(), unified);
-    // Expand a dir→file type change (`modified` directory path now a file)
-    // into its nested deletions + new-file add, matching `git diff`.
+    // Expand a type change (dir ↔ file/symlink, regular ↔ symlink) into the
+    // delete-old + add-new pair git emits. Worktree surface, so the new side
+    // is read from disk (`to_tree = None`).
     let changes = match repo {
         Some(repo) => {
-            expand_dir_to_file_type_changes(repo, from_tree.as_ref(), changes, want_hunks, unified)?
+            expand_type_changes(repo, from_tree.as_ref(), None, changes, want_hunks, unified)?
         }
         None => changes,
     };
@@ -874,58 +887,190 @@ fn build_worktree_change(
     }
 }
 
-/// heddle's worktree status reports a tracked directory replaced by a file
-/// (`data/` → `data`) as a single `modified` entry at the directory's path;
-/// the nested file deletions are never surfaced. `git diff` represents that
-/// as deletions of every blob under the old directory plus an add of the
-/// new file, so we rewrite such an entry into that set — otherwise the
-/// patch tries to modify a path that is a directory on the old side and
-/// `git apply` cannot create the file over the still-present directory.
+/// The object kind a path resolves to on one side of a diff.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SideKind {
+    Absent,
+    Dir,
+    /// A regular or executable file (`100644` / `100755`).
+    Regular,
+    Symlink,
+}
+
+/// Classify a path's kind within a tree (the old side of a diff, or the
+/// new side of a state-to-state diff). `find_entry_in_tree` resolves blob
+/// and symlink leaves; a `None` there means either a directory or a
+/// missing path, disambiguated by `dir_subtree_in_tree`.
+fn tree_side_kind(repo: &Repository, tree: Option<&Tree>, path: &str) -> Result<SideKind> {
+    let Some(tree) = tree else {
+        return Ok(SideKind::Absent);
+    };
+    if let Some(entry) = find_entry_in_tree(repo, tree, path)? {
+        return Ok(if entry.entry_type == EntryType::Symlink {
+            SideKind::Symlink
+        } else {
+            SideKind::Regular
+        });
+    }
+    if dir_subtree_in_tree(repo, tree, path)?.is_some() {
+        Ok(SideKind::Dir)
+    } else {
+        Ok(SideKind::Absent)
+    }
+}
+
+/// Classify a path's new-side kind: the `to_tree` entry for a
+/// state-to-state diff, otherwise the live worktree.
+fn new_side_kind(repo: &Repository, to_tree: Option<&Tree>, path: &str) -> Result<SideKind> {
+    match to_tree {
+        Some(tree) => tree_side_kind(repo, Some(tree), path),
+        None => Ok(worktree_side_kind(&repo.root().join(path))),
+    }
+}
+
+/// Classify a worktree path. `symlink_metadata` does not follow links, so
+/// a symlink (even one pointing at a directory) reports `Symlink`, not
+/// `Dir`. A missing path is `Absent`.
+fn worktree_side_kind(path: &Path) -> SideKind {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return SideKind::Absent;
+    };
+    if meta.file_type().is_symlink() {
+        SideKind::Symlink
+    } else if meta.is_dir() {
+        SideKind::Dir
+    } else {
+        SideKind::Regular
+    }
+}
+
+/// A `modified` entry whose two sides are different object *kinds* — git
+/// can't represent it as a chmod and `git apply` rejects the attempt.
+fn is_type_change(old: SideKind, new: SideKind) -> bool {
+    use SideKind::{Dir, Regular, Symlink};
+    matches!(
+        (old, new),
+        (Dir, Regular)
+            | (Dir, Symlink)
+            | (Regular, Dir)
+            | (Symlink, Dir)
+            | (Regular, Symlink)
+            | (Symlink, Regular)
+    )
+}
+
+/// Rewrite a `modified` entry that is actually a *type change* into the
+/// delete-old + add-new pair `git diff` emits, so `git apply` can swap one
+/// object kind for another instead of attempting a cross-type chmod.
 ///
-/// (The mirror — a file replaced by a directory — is handled upstream by
-/// `worktree_modified_type_change`, which downgrades the modify to a
-/// deletion; the directory's new files arrive as separate `added` entries.)
-fn expand_dir_to_file_type_changes(
+/// Two shapes need this (both verified against `git diff`):
+/// * **dir ↔ file/symlink** — a tracked directory replaced by a file (or
+///   the reverse). git emits a deletion of every leaf under the old
+///   directory plus an add of the new file (or vice versa); a bare
+///   `old mode`/`new mode` chmod cannot turn a directory into a file
+///   (cid 3319484717 — the committed-diff side dropped this entirely).
+/// * **regular ↔ symlink** — `100644`/`100755` ⇄ `120000`. git emits a
+///   delete of the old object and an add of the new; `git apply` rejects
+///   the `old mode 100644`/`new mode 120000` chmod form across this
+///   boundary (cid 3319484727).
+///
+/// Shared by the worktree path (`to_tree == None`, new side read from
+/// disk) and the state-to-state path (`to_tree == Some`, new side read
+/// from the object store) so the split is byte-identical on both — fixing
+/// it in only one place would leave committed diffs (`heddle diff HEAD~1
+/// HEAD --patch`) emitting the form git rejects.
+///
+/// The worktree path never sees a *file → dir* `modified` entry here:
+/// `worktree_modified_type_change` downgrades it to a deletion upstream
+/// and the directory's new leaves arrive as separate `added` entries from
+/// status. The state path has no such upstream pass, so both directions
+/// are handled below.
+fn expand_type_changes(
     repo: &Repository,
     from_tree: Option<&Tree>,
+    to_tree: Option<&Tree>,
     changes: Vec<FileChange>,
     want_hunks: bool,
     unified: usize,
 ) -> Result<Vec<FileChange>> {
-    let Some(from_tree) = from_tree else {
-        return Ok(changes);
-    };
     let mut output = Vec::with_capacity(changes.len());
     for change in changes {
-        if change.kind == "modified"
-            && let Some(subtree) = dir_subtree_in_tree(repo, from_tree, &change.path)?
-            && worktree_path_is_nondir_file(&repo.root().join(&change.path))
-        {
-            let mut nested = Vec::new();
-            collect_subtree_blob_paths(repo, &subtree, &change.path, &mut nested)?;
-            for nested_path in nested {
-                output.push(make_type_change_part(
-                    repo,
-                    Some(from_tree),
-                    &nested_path,
-                    "deleted",
-                    DiffKind::Deleted,
-                    want_hunks,
-                    unified,
-                ));
+        if change.kind != "modified" {
+            output.push(change);
+            continue;
+        }
+        let old_kind = tree_side_kind(repo, from_tree, &change.path)?;
+        let new_kind = new_side_kind(repo, to_tree, &change.path)?;
+        if !is_type_change(old_kind, new_kind) {
+            output.push(change);
+            continue;
+        }
+
+        // Delete the old side: every leaf under a directory, else the
+        // single old object.
+        if old_kind == SideKind::Dir {
+            if let Some(from_tree) = from_tree
+                && let Some(subtree) = dir_subtree_in_tree(repo, from_tree, &change.path)?
+            {
+                let mut nested = Vec::new();
+                collect_subtree_blob_paths(repo, &subtree, &change.path, &mut nested)?;
+                for nested_path in nested {
+                    output.push(make_type_change_part(
+                        repo,
+                        Some(from_tree),
+                        to_tree,
+                        &nested_path,
+                        DiffKind::Deleted,
+                        want_hunks,
+                        unified,
+                    ));
+                }
             }
+        } else {
             output.push(make_type_change_part(
                 repo,
-                Some(from_tree),
+                from_tree,
+                to_tree,
                 &change.path,
-                "added",
+                DiffKind::Deleted,
+                want_hunks,
+                unified,
+            ));
+        }
+
+        // Add the new side: every leaf under a directory, else the single
+        // new object. A new-side directory only occurs in the state path
+        // (the worktree path reclassifies file→dir upstream), so its
+        // leaves come from `to_tree`.
+        if new_kind == SideKind::Dir {
+            if let Some(to_tree) = to_tree
+                && let Some(subtree) = dir_subtree_in_tree(repo, to_tree, &change.path)?
+            {
+                let mut nested = Vec::new();
+                collect_subtree_blob_paths(repo, &subtree, &change.path, &mut nested)?;
+                for nested_path in nested {
+                    output.push(make_type_change_part(
+                        repo,
+                        from_tree,
+                        Some(to_tree),
+                        &nested_path,
+                        DiffKind::Added,
+                        want_hunks,
+                        unified,
+                    ));
+                }
+            }
+        } else {
+            output.push(make_type_change_part(
+                repo,
+                from_tree,
+                to_tree,
+                &change.path,
                 DiffKind::Added,
                 want_hunks,
                 unified,
             ));
-            continue;
         }
-        output.push(change);
     }
     Ok(output)
 }
@@ -933,30 +1078,56 @@ fn expand_dir_to_file_type_changes(
 fn make_type_change_part(
     repo: &Repository,
     from_tree: Option<&Tree>,
+    to_tree: Option<&Tree>,
     path_str: &str,
-    kind: &str,
     diff_kind: DiffKind,
     want_hunks: bool,
     unified: usize,
 ) -> FileChange {
-    if want_hunks {
-        build_worktree_change(repo, from_tree, path_str, kind, diff_kind, unified)
-    } else {
-        FileChange {
+    let kind = diff_kind.to_string();
+    if !want_hunks {
+        return FileChange {
             path: path_str.to_string(),
-            kind: kind.to_string(),
+            kind,
             ..Default::default()
+        };
+    }
+    match to_tree {
+        Some(to_tree) => {
+            build_state_change(repo, from_tree, to_tree, path_str, &kind, diff_kind, unified)
         }
+        None => build_worktree_change(repo, from_tree, path_str, &kind, diff_kind, unified),
     }
 }
 
-/// A worktree path that exists and is not a directory (regular file or
-/// symlink). Used to confirm a dir→file type change: the path is a file on
-/// disk while `from_tree` still holds a directory there.
-fn worktree_path_is_nondir_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|meta| !meta.is_dir())
-        .unwrap_or(false)
+/// State-to-state analogue of `build_worktree_change`: both sides come
+/// from the object store, so the new-side mode and content are read from
+/// `to_tree` rather than the live worktree.
+fn build_state_change(
+    repo: &Repository,
+    from_tree: Option<&Tree>,
+    to_tree: &Tree,
+    path_str: &str,
+    kind: &str,
+    diff_kind: DiffKind,
+    unified: usize,
+) -> FileChange {
+    let (old_mode, mode) = change_file_modes(repo, from_tree, Some(to_tree), path_str, kind);
+    let (lines, eol, binary) = match get_state_diff(repo, from_tree, to_tree, path_str, &diff_kind) {
+        Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false),
+        Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default(), true),
+        Err(_) => (None, FileEolState::default(), false),
+    };
+    FileChange {
+        path: path_str.to_string(),
+        kind: kind.to_string(),
+        binary,
+        lines,
+        eol,
+        mode,
+        old_mode,
+        ..Default::default()
+    }
 }
 
 /// Resolve `path` to its subtree if it names a directory in `tree`,
@@ -1079,31 +1250,26 @@ pub fn compute_state_diff(
     let file_changes: Vec<FileChange> = changes
         .iter()
         .map(|change| {
-            let diff_result = get_state_diff(
+            build_state_change(
                 repo,
                 from_tree.as_ref(),
                 &to_tree,
                 &change.path,
-                &change.kind,
-            );
-            let binary = diff_result
-                .as_ref()
-                .err()
-                .is_some_and(is_binary_diff_error);
-            let (lines, eol) = match diff_result {
-                Ok((lines, eol)) => (Some(unified_hunks(lines, unified, &eol)), eol),
-                Err(_) => (None, FileEolState::default()),
-            };
-            FileChange {
-                path: change.path.clone(),
-                kind: change.kind.to_string(),
-                binary,
-                lines,
-                eol,
-                ..Default::default()
-            }
+                &change.kind.to_string(),
+                change.kind,
+                unified,
+            )
         })
         .collect();
+    let file_changes = sort_changes_by_path(file_changes);
+    let file_changes = expand_type_changes(
+        repo,
+        from_tree.as_ref(),
+        Some(&to_tree),
+        file_changes,
+        true,
+        unified,
+    )?;
     let file_changes = detect_clear_renames(
         repo,
         from_tree.as_ref(),
@@ -1120,14 +1286,16 @@ pub fn compute_state_diff(
             .collect()
     });
 
-    Ok(DiffOutput::new(
+    let mut output = DiffOutput::new(
         Some(from_change_id.short()),
         Some(to_change_id.short()),
         file_changes,
         semantic_changes,
         None,
         None,
-    ))
+    );
+    populate_patch_text(&mut output);
+    Ok(output)
 }
 
 /// Compute a diff from an existing state to an in-memory tree.
@@ -1183,31 +1351,26 @@ pub fn compute_tree_diff(
     let file_changes: Vec<FileChange> = changes
         .iter()
         .map(|change| {
-            let diff_result = get_state_diff(
+            build_state_change(
                 repo,
                 from_tree.as_ref(),
                 to_tree,
                 &change.path,
-                &change.kind,
-            );
-            let binary = diff_result
-                .as_ref()
-                .err()
-                .is_some_and(is_binary_diff_error);
-            let (lines, eol) = match diff_result {
-                Ok((lines, eol)) => (Some(unified_hunks(lines, unified, &eol)), eol),
-                Err(_) => (None, FileEolState::default()),
-            };
-            FileChange {
-                path: change.path.clone(),
-                kind: change.kind.to_string(),
-                binary,
-                lines,
-                eol,
-                ..Default::default()
-            }
+                &change.kind.to_string(),
+                change.kind,
+                unified,
+            )
         })
         .collect();
+    let file_changes = sort_changes_by_path(file_changes);
+    let file_changes = expand_type_changes(
+        repo,
+        from_tree.as_ref(),
+        Some(to_tree),
+        file_changes,
+        true,
+        unified,
+    )?;
     let file_changes = detect_clear_renames(
         repo,
         from_tree.as_ref(),
@@ -1224,14 +1387,16 @@ pub fn compute_tree_diff(
             .collect()
     });
 
-    Ok(DiffOutput::new(
+    let mut output = DiffOutput::new(
         Some(from_change_id.short()),
         Some(to_label.into()),
         file_changes,
         semantic_changes,
         None,
         None,
-    ))
+    );
+    populate_patch_text(&mut output);
+    Ok(output)
 }
 
 fn strip_line_hunks(changes: Vec<FileChange>) -> Vec<FileChange> {
@@ -1522,6 +1687,15 @@ fn get_worktree_diff(
             if let Some(tree) = from_tree
                 && let Some(old_blob) = find_blob_in_tree(repo, tree, path)?
             {
+                // Content-identical modify — a pure mode change (chmod /
+                // exec-bit flip), including on a binary file. Return an
+                // empty text body so the renderer takes the mode-only
+                // chmod path (`old mode`/`new mode`) instead of the
+                // binary branch: there's no content delta to refuse, and
+                // git round-trips the permission change on its own.
+                if old_blob.content() == new_blob.content() {
+                    return Ok((Vec::new(), FileEolState::default()));
+                }
                 ensure_text_diffable(&old_blob)?;
                 ensure_text_diffable(&new_blob)?;
                 let eol = eol_for_modified(&old_blob, &new_blob);
@@ -1619,6 +1793,13 @@ fn detect_clear_renames(
             continue;
         };
         for new_path in &added {
+            // A delete + add at the *same* path is a type change
+            // (regular ↔ symlink), not a rename — `expand_type_changes`
+            // emits both halves and collapsing them back into a
+            // `foo → foo` rename would drop the type swap.
+            if old_path == new_path {
+                continue;
+            }
             let Some(new_blob) = new_blob_for_rename(repo, to_tree, new_path)? else {
                 continue;
             };
@@ -1841,6 +2022,13 @@ fn get_state_diff(
             if let Some(tree) = from_tree
                 && let Some(old_blob) = find_blob_in_tree(repo, tree, path)?
             {
+                // Content-identical modify — a pure mode change (chmod /
+                // exec-bit flip), including on a binary file. Return an
+                // empty text body so the renderer takes the mode-only
+                // chmod path instead of the binary branch.
+                if old_blob.content() == new_blob.content() {
+                    return Ok((Vec::new(), FileEolState::default()));
+                }
                 ensure_text_diffable(&old_blob)?;
                 ensure_text_diffable(&new_blob)?;
                 let eol = eol_for_modified(&old_blob, &new_blob);

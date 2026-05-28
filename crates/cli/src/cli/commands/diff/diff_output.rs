@@ -69,8 +69,10 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 }
 
 /// Render the diff as standard unified-diff text — no gutter, no
-/// inline-edit `~` lines, no ANSI styling. Output is suitable for
-/// `patch(1)` and `git apply` round-trip. Each line is `prefix + content`
+/// inline-edit `~` lines, no ANSI styling. Output targets a clean
+/// `git apply` round-trip; `patch(1)` compatibility is best-effort (it
+/// does not consume git's extended headers, so type changes and empty
+/// add/delete hunks are git-apply-only). Each line is `prefix + content`
 /// because the hunk-header `LineDiff` already encodes the second `@`
 /// (prefix=`@`, content=`@ -a,b +c,d @@`), so concatenation yields the
 /// canonical `@@ -a,b +c,d @@` shape.
@@ -92,6 +94,14 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 ///   rename from old / rename to new`. Pure renames (no edits) emit
 ///   the extended headers and stop; rename-with-edit appends the
 ///   usual `--- a/old / +++ b/new` + hunk body.
+///
+/// Every rendered file also opens with a `diff --git a/<p> b/<p>` line,
+/// including a plain content modify (which carries no extended-mode
+/// block). The header is what delimits one file's stanza from the next:
+/// a bare `--- a/<path>` is ambiguous, and git binds it to the preceding
+/// `diff --git` stanza when one is still open (a header-only empty-add or
+/// mode-only change just above), misattributing this file's hunk. The
+/// explicit per-file header makes ordering irrelevant.
 ///
 /// An empty-file add/delete is still a real patch: git emits the
 /// extended header with no hunk body (and `git apply` creates/unlinks
@@ -123,6 +133,24 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         // of kind. `lines: Some(_)` (even empty) means we have a
         // readable text side.
         let has_text = change.lines.is_some();
+
+        // A binary *content* change (add/delete/modify of a file heddle
+        // cannot diff as text). heddle has no git binary delta to emit
+        // (its blob hashes are not git SHAs), and silently dropping the
+        // change would let `git apply` "succeed" while the binary content
+        // stays stale — the false round-trip cid 3319484747 flagged. Emit
+        // git's `Binary files … differ` marker with a *placeholder* index
+        // line: that index line is what makes `git apply` recognize a
+        // binary patch and refuse the *whole* patch ("without full index
+        // line") instead of skipping the block. Without the index line git
+        // treats the marker as an empty patch and silently ignores it. A
+        // content-identical mode-only change is never `binary` (the diff
+        // readers short-circuit it to an empty text body), so this only
+        // fires on a real binary content change, never a chmod.
+        if change.binary && !is_rename {
+            render_binary_change(change, is_added, is_deleted, mode_changed, &mut buf);
+            continue;
+        }
 
         // Decide whether this change emits anything at all:
         // * renames always do (the extended headers carry the move even
@@ -194,9 +222,7 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         } else if mode_changed {
             // A modify whose mode changed (with or without a content
             // hunk). Emit the `diff --git` + `old mode`/`new mode`
-            // header pair; a plain content modify still skips the
-            // `diff --git` line (git apply accepts the bare `---`/`+++`
-            // form, and the existing renderer never emitted it).
+            // header pair.
             buf.push_str(&format!(
                 "diff --git {} {}\n",
                 quote_path_for_patch("a/", &change.path),
@@ -204,6 +230,21 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
             ));
             buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
             buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
+        } else {
+            // A plain content modify. Emit the `diff --git` header so
+            // every file stanza is self-delimiting. A bare `--- a/<path>`
+            // is ambiguous: git's parser binds it to the *preceding*
+            // `diff --git` stanza when one is still open — e.g. a
+            // header-only empty-add (`diff --git ... / new file mode`) or
+            // a mode-only change immediately above — and misreads this
+            // file's `---` as the prior file's source side, corrupting the
+            // patch ("expected /dev/null"). The explicit header closes the
+            // prior stanza and opens this one. (cid 3319484717 ordering.)
+            buf.push_str(&format!(
+                "diff --git {} {}\n",
+                quote_path_for_patch("a/", &change.path),
+                quote_path_for_patch("b/", &change.path)
+            ));
         }
 
         // An empty-file add/delete (text side present but zero lines)
@@ -237,6 +278,61 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         }
     }
     buf
+}
+
+/// Render a binary content change (add / delete / plain modify / modify
+/// with a mode change) as git's `Binary files … differ` marker.
+///
+/// heddle cannot emit a git binary delta — its blob hashes are not git
+/// SHAs — so the marker is the most faithful thing it can produce. The
+/// catch (cid 3319484747): a bare `Binary files … differ` marker with no
+/// `index` header is treated by `git apply` as an empty patch and
+/// *silently skipped*, which would let the apply "succeed" while the
+/// binary content stays stale. Emitting a *placeholder* `index
+/// 0000000..0000000` line flips git into binary-patch mode, where it
+/// refuses the whole patch ("cannot apply binary patch … without full
+/// index line") rather than ignoring it. That refusal is the correct
+/// outcome: heddle has no delta to apply, so the honest result is a hard
+/// failure, never a false round-trip.
+fn render_binary_change(
+    change: &FileChange,
+    is_added: bool,
+    is_deleted: bool,
+    mode_changed: bool,
+    buf: &mut String,
+) {
+    let path = &change.path;
+    buf.push_str(&format!(
+        "diff --git {} {}\n",
+        quote_path_for_patch("a/", path),
+        quote_path_for_patch("b/", path)
+    ));
+    if is_added {
+        buf.push_str(&format!("new file mode {}\n", mode_str(change.mode)));
+        buf.push_str("index 0000000..0000000\n");
+    } else if is_deleted {
+        buf.push_str(&format!("deleted file mode {}\n", mode_str(change.mode)));
+        buf.push_str("index 0000000..0000000\n");
+    } else if mode_changed {
+        buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
+        buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
+        buf.push_str("index 0000000..0000000\n");
+    } else {
+        // Plain binary modify: git stamps the mode at the end of the
+        // index line (`index <old>..<new> 100644`).
+        buf.push_str(&format!("index 0000000..0000000 {}\n", mode_str(change.mode)));
+    }
+    let (a, b) = if is_added {
+        ("/dev/null".to_string(), quote_path_for_patch("b/", path))
+    } else if is_deleted {
+        (quote_path_for_patch("a/", path), "/dev/null".to_string())
+    } else {
+        (
+            quote_path_for_patch("a/", path),
+            quote_path_for_patch("b/", path),
+        )
+    };
+    buf.push_str(&format!("Binary files {a} and {b} differ\n"));
 }
 
 /// Map a tracked file mode to the git unified-diff mode string. `None`
@@ -1207,23 +1303,107 @@ mod tests {
         );
     }
 
-    /// `lines: None` is the binary / unreadable case. The patch
-    /// renderer must skip it without emitting a header (otherwise
-    /// downstream tools would see `--- a/foo` `+++ b/foo` followed by
-    /// nothing, which `patch(1)` reads as a malformed hunk).
+    /// A binary content modify (`binary: true`, `lines: None`) must emit
+    /// git's `Binary files … differ` marker with a *placeholder* index
+    /// line. Silently dropping it would let `git apply` "succeed" while
+    /// the binary content stayed stale (cid 3319484747); the index line
+    /// flips git into binary-patch mode so it refuses the whole patch
+    /// instead of skipping the block.
     #[test]
-    fn render_diff_patch_skips_change_with_no_lines() {
+    fn render_diff_patch_binary_modify_emits_marker_with_index() {
         let change = FileChange {
             path: "binary.bin".to_string(),
             kind: "modified".to_string(),
             binary: true,
             lines: None,
+            mode: Some(FileMode::Normal),
+            old_mode: Some(FileMode::Normal),
             ..Default::default()
         };
         let rendered = render_diff_patch(&diff_output_with(vec![change]));
         assert!(
-            rendered.is_empty(),
-            "binary-only change must emit nothing: {rendered:?}"
+            rendered.contains("diff --git a/binary.bin b/binary.bin"),
+            "binary modify must emit a diff header:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("index 0000000..0000000 100644"),
+            "binary modify must emit a placeholder index line:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Binary files a/binary.bin and b/binary.bin differ"),
+            "binary modify must emit the binary marker:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("--- a/binary.bin"),
+            "binary modify must not emit a text hunk header:\n{rendered}"
+        );
+    }
+
+    /// A binary modify whose mode *also* changed emits the
+    /// `old mode`/`new mode` pair (so the chmod is recorded) followed by
+    /// the placeholder index + binary marker — never a mode-only chmod
+    /// patch that git apply would accept while leaving stale binary
+    /// content (cid 3319484747).
+    #[test]
+    fn render_diff_patch_binary_modify_with_mode_change_keeps_marker() {
+        let change = FileChange {
+            path: "binary.bin".to_string(),
+            kind: "modified".to_string(),
+            binary: true,
+            lines: None,
+            old_mode: Some(FileMode::Normal),
+            mode: Some(FileMode::Executable),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![change]));
+        assert!(
+            rendered.contains("old mode 100644") && rendered.contains("new mode 100755"),
+            "binary+mode change must still record the chmod:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("index 0000000..0000000"),
+            "binary+mode change must emit the placeholder index line:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("Binary files a/binary.bin and b/binary.bin differ"),
+            "binary+mode change must still emit the binary marker:\n{rendered}"
+        );
+    }
+
+    /// A binary add emits `new file mode` + placeholder index + marker;
+    /// a binary delete mirrors it with `deleted file mode`.
+    #[test]
+    fn render_diff_patch_binary_add_and_delete_emit_markers() {
+        let added = FileChange {
+            path: "added.bin".to_string(),
+            kind: "added".to_string(),
+            binary: true,
+            lines: None,
+            mode: Some(FileMode::Normal),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![added]));
+        assert!(
+            rendered.contains("new file mode 100644")
+                && rendered.contains("index 0000000..0000000")
+                && rendered.contains("Binary files /dev/null and b/added.bin differ"),
+            "binary add marker:\n{rendered}"
+        );
+
+        let deleted = FileChange {
+            path: "gone.bin".to_string(),
+            kind: "deleted".to_string(),
+            binary: true,
+            lines: None,
+            mode: Some(FileMode::Normal),
+            ..Default::default()
+        };
+        let rendered = render_diff_patch(&diff_output_with(vec![deleted]));
+        assert!(
+            rendered.contains("deleted file mode 100644")
+                && rendered.contains("index 0000000..0000000")
+                && rendered.contains("Binary files a/gone.bin and /dev/null differ"),
+            "binary delete marker:\n{rendered}"
         );
     }
 

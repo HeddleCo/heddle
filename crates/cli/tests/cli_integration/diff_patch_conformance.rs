@@ -84,6 +84,26 @@ fn symlink(path: &str, target: &str) -> Entry {
     }
 }
 
+/// A regular file with arbitrary (binary) bytes. heddle treats a body with
+/// embedded NULs as binary, so these exercise the `Binary files … differ`
+/// path rather than a text hunk.
+fn binary(path: &str, body: &[u8]) -> Entry {
+    Entry {
+        path: path.to_string(),
+        body: body.to_vec(),
+        kind: Kind::Normal,
+    }
+}
+
+#[cfg(unix)]
+fn binary_exec(path: &str, body: &[u8]) -> Entry {
+    Entry {
+        path: path.to_string(),
+        body: body.to_vec(),
+        kind: Kind::Exec,
+    }
+}
+
 /// What a path must look like in the applied worktree.
 enum Expect {
     Present(Entry),
@@ -266,12 +286,45 @@ fn apply_oracle(pre: &[Entry], patch: &str, expect: &[Expect]) {
     }
 }
 
+/// Seed a git repo with `pre`, then assert `git apply --check` *refuses* the
+/// heddle-produced `patch`. This is the F5 fail-loud contract (cid
+/// 3319484747): a binary *content* change is emitted as a `Binary files …
+/// differ` marker carrying a placeholder `index 0000000..0000000` line. git
+/// apply cannot apply a binary patch without a full index, so it refuses the
+/// *whole* patch atomically rather than silently skipping the binary block —
+/// which would leave stale binary content on disk while reporting success.
+fn apply_refusal_oracle(pre: &[Entry], patch: &str) {
+    let g = TempDir::new().unwrap();
+    git_init(g.path());
+    for entry in pre {
+        write_entry(g.path(), entry);
+    }
+    git(g.path(), &["add", "-A"]);
+    git(g.path(), &["commit", "-q", "-m", "seed"]);
+
+    let check = pipe_git(g.path(), &["apply", "--check"], patch);
+    assert!(
+        !check.status.success(),
+        "git apply --check accepted a patch carrying a binary content change; \
+         it must refuse rather than leave stale binary content (false round-trip);\npatch=\n{patch}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Native-path cell runner (heddle init + capture + worktree mutate)
 // ---------------------------------------------------------------------------
 
 fn json_patch_field(cwd: &Path) -> Option<String> {
-    let out = heddle_output(&["--output", "json", "diff"], Some(cwd)).expect("heddle json diff");
+    json_diff_patch_field(cwd, &[])
+}
+
+/// Like `json_patch_field` but for a state-to-state diff: `extra` carries the
+/// `<from> <to>` revisions so `heddle --output json diff HEAD~1 HEAD` can be
+/// asserted to mirror its `--patch` render too.
+fn json_diff_patch_field(cwd: &Path, extra: &[&str]) -> Option<String> {
+    let mut args = vec!["--output", "json", "diff"];
+    args.extend_from_slice(extra);
+    let out = heddle_output(&args, Some(cwd)).expect("heddle json diff");
     assert!(
         out.status.success(),
         "heddle --output json diff should succeed; stderr={}",
@@ -309,6 +362,38 @@ fn native_cell(pre: &[Entry], mutate: impl Fn(&Path), expect: &[Expect]) {
         json_patch.as_deref(),
         Some(patch.as_str()),
         "JSON `.patch` field must equal the `--patch` stdout"
+    );
+
+    apply_oracle(pre, &patch, expect);
+}
+
+/// Run one native state-to-state cell: capture `pre` as `v1`, mutate, capture
+/// `v2`, then assert the committed-diff render (`heddle diff HEAD~1 HEAD
+/// --patch`) round-trips through `git apply` to `expect`. This is the
+/// committed-tree surface — the one that took the `to_tree`-present branch
+/// and dropped type changes in r8 (cid 3319484717) — so every type-change
+/// cell that runs here is the regression guard for that path.
+fn state_cell(pre: &[Entry], mutate: impl Fn(&Path), expect: &[Expect]) {
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    for entry in pre {
+        write_entry(h.path(), entry);
+    }
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+    mutate(h.path());
+    heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
+
+    let patch = heddle(&["diff", "HEAD~1", "HEAD", "--patch"], Some(h.path())).unwrap();
+    assert!(
+        !patch.trim().is_empty(),
+        "state cell produced an empty patch (no change detected?)"
+    );
+
+    let json_patch = json_diff_patch_field(h.path(), &["HEAD~1", "HEAD"]);
+    assert_eq!(
+        json_patch.as_deref(),
+        Some(patch.as_str()),
+        "state-to-state JSON `.patch` field must equal the `--patch` stdout"
     );
 
     apply_oracle(pre, &patch, expect);
@@ -811,11 +896,132 @@ fn dir_to_file_type_change_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
-// Matrix — binary content: heddle refuses, must not corrupt the patch
+// Matrix — regular ↔ symlink type changes (cid 3319484727). A regular file
+// replaced by a symlink (or vice-versa) is NOT a chmod — `git apply` rejects
+// an `old mode 100644`/`new mode 120000` flip. It must be split into a delete
+// of the old type + an add of the new type with the right `new file mode`.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn regular_to_symlink_type_change_round_trips() {
+    // `node` is a tracked regular file; it becomes a symlink. git represents
+    // that as delete(100644 node) + add(120000 node -> target).
+    native_cell(
+        &[normal("node", "real contents\n"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("node")).unwrap();
+            write_entry(dir, &symlink("node", "some/target/path"));
+        },
+        &[
+            Expect::Present(symlink("node", "some/target/path")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_to_regular_type_change_round_trips() {
+    // The mirror: a tracked symlink becomes a regular file.
+    native_cell(
+        &[symlink("node", "some/target/path"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("node")).unwrap();
+            write_entry(dir, &normal("node", "now real contents\n"));
+        },
+        &[
+            Expect::Present(normal("node", "now real contents\n")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Matrix — state-to-state type changes (cid 3319484717). The committed-tree
+// surface (`heddle diff HEAD~1 HEAD`) took the `to_tree`-present branch, which
+// in r8 skipped the type-change expansion entirely — so a file→dir or
+// regular→symlink change between two commits silently dropped. These run the
+// same type-change classes through the committed surface via `state_cell`.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn binary_modify_is_refused_not_emitted() {
+fn state_file_to_dir_type_change_round_trips() {
+    state_cell(
+        &[normal("conf", "old config\n"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("conf")).unwrap();
+            write_entry(dir, &normal("conf/nested.txt", "nested\nvalue\n"));
+        },
+        &[
+            Expect::Present(normal("conf/nested.txt", "nested\nvalue\n")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[test]
+fn state_dir_to_file_type_change_round_trips() {
+    state_cell(
+        &[normal("data/item.txt", "x\ny\n"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("data/item.txt")).unwrap();
+            std::fs::remove_dir(dir.join("data")).unwrap();
+            write_entry(dir, &normal("data", "now a file\n"));
+        },
+        &[
+            Expect::Present(normal("data", "now a file\n")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_regular_to_symlink_type_change_round_trips() {
+    state_cell(
+        &[normal("node", "real contents\n"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("node")).unwrap();
+            write_entry(dir, &symlink("node", "some/target/path"));
+        },
+        &[
+            Expect::Present(symlink("node", "some/target/path")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_symlink_to_regular_type_change_round_trips() {
+    state_cell(
+        &[symlink("node", "some/target/path"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("node")).unwrap();
+            write_entry(dir, &normal("node", "now real contents\n"));
+        },
+        &[
+            Expect::Present(normal("node", "now real contents\n")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Matrix — binary content (cid 3319484747). heddle has no git binary delta to
+// emit (its blob hashes are not git SHAs), so a binary *content* change is
+// rendered as git's `Binary files … differ` marker plus a placeholder
+// `index 0000000..0000000` line. That index line is load-bearing: it makes
+// `git apply` recognize a binary patch and *refuse the whole patch* ("without
+// full index line"). Without it git silently treats the marker as empty and
+// applies the rest — leaving the binary content stale while reporting success
+// (the false round-trip F5 caught). The fail-loud contract is: a patch that
+// touches binary content must be *refused*, never partially applied.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn binary_modify_emits_marker_and_is_refused() {
     let h = TempDir::new().unwrap();
     heddle(&["init"], Some(h.path())).unwrap();
     write_entry(h.path(), &normal("data.bin", "text\n"));
@@ -826,22 +1032,82 @@ fn binary_modify_is_refused_not_emitted() {
     write_entry(h.path(), &normal("notes.txt", "edited\n"));
 
     let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
-    // The text edit still renders; the binary file is omitted rather than
-    // emitted as a corrupt text hunk.
+    // The text edit still renders as a normal hunk.
     assert!(
         patch.contains("notes.txt") && patch.contains("+edited"),
         "the text edit must still render:\n{patch}"
     );
+    // The binary change is surfaced as a marker + placeholder index, not
+    // dropped and not mangled into a text hunk.
     assert!(
-        !patch.contains("data.bin"),
-        "binary file must be refused, not emitted as a hunk:\n{patch}"
+        patch.contains("Binary files a/data.bin and b/data.bin differ"),
+        "binary modify must emit git's `Binary files … differ` marker:\n{patch}"
+    );
+    assert!(
+        patch.contains("index 0000000..0000000"),
+        "binary marker needs the placeholder index line to force refusal:\n{patch}"
+    );
+    assert!(
+        !patch.contains("--- a/data.bin"),
+        "binary file must not be rendered as a text hunk:\n{patch}"
+    );
+    let json_patch = json_patch_field(h.path());
+    assert_eq!(
+        json_patch.as_deref(),
+        Some(patch.as_str()),
+        "JSON `.patch` must equal the `--patch` stdout for the binary case too"
     );
 
-    // The text-only remainder must still round-trip.
-    apply_oracle(
-        &[normal("notes.txt", "keep\n")],
+    // The whole patch is refused — git apply will not silently skip the
+    // binary block and apply the text edit, which would leave stale content
+    // while claiming success.
+    apply_refusal_oracle(
+        &[normal("data.bin", "text\n"), normal("notes.txt", "keep\n")],
         &patch,
-        &[Expect::Present(normal("notes.txt", "edited\n"))],
+    );
+}
+
+/// A binary content change *paired with* a mode change must still refuse:
+/// the renderer emits `old mode`/`new mode` + placeholder index + marker, so
+/// git apply cannot downgrade it to a mode-only chmod that leaves stale binary
+/// content (the precise F5 false round-trip).
+#[cfg(unix)]
+#[test]
+fn binary_modify_with_chmod_is_refused() {
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    write_entry(h.path(), &normal("data.bin", "text\n"));
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+    // Change content to binary AND flip the exec bit.
+    std::fs::write(h.path().join("data.bin"), [0u8, 9, 8, 0, 7]).unwrap();
+    set_mode(&h.path().join("data.bin"), 0o755);
+
+    let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
+    assert!(
+        patch.contains("old mode 100644") && patch.contains("new mode 100755"),
+        "binary+chmod must carry the mode headers:\n{patch}"
+    );
+    assert!(
+        patch.contains("Binary files a/data.bin and b/data.bin differ")
+            && patch.contains("index 0000000..0000000"),
+        "binary+chmod must still emit the binary marker + index, not a bare chmod:\n{patch}"
+    );
+    apply_refusal_oracle(&[normal("data.bin", "text\n")], &patch);
+}
+
+/// The companion guard: a *pure* chmod on a binary file (content byte-identical,
+/// only the mode flips) must NOT be refused. The content-equality short-circuit
+/// routes it through the mode-only chmod path (no marker), which git apply
+/// accepts and which correctly leaves the binary content untouched. Proves the
+/// fail-loud refusal fires on content change, not merely on "the file is binary".
+#[cfg(unix)]
+#[test]
+fn binary_pure_chmod_round_trips() {
+    let bytes: &[u8] = &[0u8, 1, 2, 0, 255, 0, 42];
+    native_cell(
+        &[binary("data.bin", bytes)],
+        |dir| set_mode(&dir.join("data.bin"), 0o755),
+        &[Expect::Present(binary_exec("data.bin", bytes))],
     );
 }
 
@@ -1073,6 +1339,67 @@ fn state_to_state_add_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
+// Surface — embedded diff payload (`merge --with-diff --output json`). Covers
+// cid 3319484733: `compute_state_diff`/`compute_tree_diff` returned a
+// `DiffOutput` whose `.patch` defaulted to `None`, so structured consumers of
+// the merge preview saw hunks in `.changes` but no applicable patch text.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merge_with_diff_json_carries_patch() {
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    write_entry(h.path(), &normal("base.txt", "base\n"));
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+
+    // Advance a thread ahead of main (a clean fast-forward), so the preview
+    // diff is main-state → merged-result and reconstructs the thread tree.
+    heddle(&["thread", "create", "feature"], Some(h.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(h.path())).unwrap();
+    write_entry(h.path(), &normal("base.txt", "base\nfeature\n"));
+    write_entry(h.path(), &normal("new.txt", "new\n"));
+    heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
+    heddle(&["thread", "switch", "main"], Some(h.path())).unwrap();
+
+    let out = heddle_output(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature",
+            "--preview",
+            "--with-diff",
+        ],
+        Some(h.path()),
+    )
+    .expect("merge --with-diff should run");
+    assert!(
+        out.status.success(),
+        "merge --with-diff --output json should succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: Value = serde_json::from_slice(&out.stdout).expect("merge output should be JSON");
+    let patch = parsed["diff"]["patch"]
+        .as_str()
+        .unwrap_or_else(|| panic!("merge preview `.diff.patch` must be populated, not null: {parsed}"));
+    assert!(
+        patch.contains("+feature") && patch.contains("new.txt"),
+        "embedded patch must carry the incoming hunks:\n{patch}"
+    );
+
+    // The embedded patch is a real, applicable patch: seeded at main's state
+    // it reconstructs the merged (fast-forwarded) tree.
+    apply_oracle(
+        &[normal("base.txt", "base\n")],
+        patch,
+        &[
+            Expect::Present(normal("base.txt", "base\nfeature\n")),
+            Expect::Present(normal("new.txt", "new\n")),
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Proptest — random tree + random edits through the same oracle
 // ---------------------------------------------------------------------------
 
@@ -1285,6 +1612,174 @@ proptest! {
                 &got, &entry.body,
                 "content mismatch for {} after apply", entry.path
             );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
+
+    /// A regular file replaced by a symlink (or the reverse) must round-trip
+    /// as delete(old type) + add(new type), never an `old mode`/`new mode`
+    /// flip that `git apply` rejects (cid 3319484727). Randomizes direction,
+    /// the file body, and the link target — the randomized layer for the
+    /// hand-enumerated `regular_to_symlink_type_change_round_trips` cells.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_type_change_round_trips(
+        file_to_link in any::<bool>(),
+        body in "[a-z]{1,12}\n",
+        target in "[a-z][a-z/]{0,18}[a-z]",
+    ) {
+        let (pre, post): (Entry, Entry) = if file_to_link {
+            (normal("node", &body), symlink("node", &target))
+        } else {
+            (symlink("node", &target), normal("node", &body))
+        };
+
+        let h = TempDir::new().unwrap();
+        heddle(&["init"], Some(h.path())).unwrap();
+        write_entry(h.path(), &pre);
+        write_entry(h.path(), &normal("anchor.txt", "anchor\n"));
+        heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+
+        std::fs::remove_file(h.path().join("node")).unwrap();
+        write_entry(h.path(), &post);
+
+        let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
+        prop_assert!(
+            !patch.trim().is_empty(),
+            "type change must produce a patch; file_to_link={file_to_link}"
+        );
+        let json_patch = json_patch_field(h.path());
+        prop_assert_eq!(json_patch.as_deref(), Some(patch.as_str()));
+
+        // Oracle: seed `pre`, apply, assert the post type + content materializes.
+        let g = TempDir::new().unwrap();
+        git_init(g.path());
+        write_entry(g.path(), &pre);
+        write_entry(g.path(), &normal("anchor.txt", "anchor\n"));
+        git(g.path(), &["add", "-A"]);
+        git(g.path(), &["commit", "-q", "-m", "seed"]);
+
+        let check = pipe_git(g.path(), &["apply", "--check"], &patch);
+        prop_assert!(
+            check.status.success(),
+            "git apply --check failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let applied = pipe_git(g.path(), &["apply"], &patch);
+        prop_assert!(
+            applied.status.success(),
+            "git apply failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+
+        let meta = std::fs::symlink_metadata(g.path().join("node")).unwrap();
+        if file_to_link {
+            prop_assert!(
+                meta.file_type().is_symlink(),
+                "node should be a symlink after apply"
+            );
+            let link = std::fs::read_link(g.path().join("node")).unwrap();
+            let link = link.to_string_lossy();
+            prop_assert_eq!(link.as_bytes(), target.as_bytes());
+        } else {
+            prop_assert!(
+                !meta.file_type().is_symlink(),
+                "node should be a regular file after apply"
+            );
+            prop_assert_eq!(
+                std::fs::read(g.path().join("node")).unwrap(),
+                body.as_bytes().to_vec()
+            );
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+
+    /// The committed-tree surface (`heddle diff HEAD~1 HEAD`) must round-trip
+    /// the same random text-tree edits as the worktree surface. This is the
+    /// `to_tree`-present branch that silently dropped changes in r8
+    /// (cid 3319484717); proptesting it keeps the committed and worktree
+    /// surfaces in lockstep instead of catching the gap one Codex round later.
+    #[test]
+    fn state_diff_round_trips_random_tree(
+        pre in tree_strategy(),
+        post in tree_strategy(),
+    ) {
+        prop_assume!(pre != post);
+
+        let pre_entries: Vec<Entry> =
+            pre.iter().map(|(p, c)| normal(p, c)).collect();
+
+        let h = TempDir::new().unwrap();
+        heddle(&["init"], Some(h.path())).unwrap();
+        for entry in &pre_entries {
+            write_entry(h.path(), entry);
+        }
+        heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+
+        // Mutate worktree to `post`, then commit it as `v2` so the diff is
+        // computed state-to-state rather than against the worktree.
+        for name in pre.keys() {
+            if !post.contains_key(name) {
+                std::fs::remove_file(h.path().join(name)).ok();
+            }
+        }
+        for (name, content) in &post {
+            write_entry(h.path(), &normal(name, content));
+        }
+        heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
+
+        let patch = heddle(&["diff", "HEAD~1", "HEAD", "--patch"], Some(h.path())).unwrap();
+        prop_assert!(
+            !patch.trim().is_empty(),
+            "non-equal trees must produce a patch; pre={pre:?} post={post:?}"
+        );
+
+        let json_patch = json_diff_patch_field(h.path(), &["HEAD~1", "HEAD"]);
+        prop_assert_eq!(json_patch.as_deref(), Some(patch.as_str()));
+
+        // Oracle: seed `pre`, apply, assert the worktree equals `post`.
+        let g = TempDir::new().unwrap();
+        git_init(g.path());
+        for entry in &pre_entries {
+            write_entry(g.path(), entry);
+        }
+        git(g.path(), &["add", "-A"]);
+        git(g.path(), &["commit", "-q", "-m", "seed"]);
+
+        let check = pipe_git(g.path(), &["apply", "--check"], &patch);
+        prop_assert!(
+            check.status.success(),
+            "git apply --check failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let applied = pipe_git(g.path(), &["apply"], &patch);
+        prop_assert!(
+            applied.status.success(),
+            "git apply failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+
+        for (name, content) in &post {
+            let got = std::fs::read(g.path().join(name)).unwrap();
+            prop_assert_eq!(
+                &got,
+                &content.as_bytes().to_vec(),
+                "content mismatch for {} after apply", name
+            );
+        }
+        for name in pre.keys() {
+            if !post.contains_key(name) {
+                prop_assert!(
+                    !g.path().join(name).exists(),
+                    "deleted path {} still present after apply", name
+                );
+            }
         }
     }
 }

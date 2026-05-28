@@ -441,7 +441,7 @@ pub struct DiffArgs {
     #[arg(long)]
     pub context: bool,
 
-    /// Output patch in standard unified-diff format suitable for `patch(1)` / `git apply`.
+    /// Output patch in standard unified-diff format. Targets a clean `git apply` round-trip; `patch(1)` is best-effort.
     #[arg(short = 'p', long = "patch")]
     pub patch: bool,
 }
