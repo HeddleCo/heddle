@@ -1247,7 +1247,7 @@ pub struct PullArgs {
 #[command(after_help = "\
 Behavior:
   Default thread (no --thread): cloning a Git repository lands on the remote's advertised default branch (its Git HEAD); if the remote advertises none, it falls back to a thread named `main`, then to the alphabetically first imported thread. Cloning a Heddle remote (local path or hosted) lands on `main`. It never prompts.
-  Depth (Heddle remotes only — Git-overlay clones reject --depth): --depth 0 (the default) clones full history. --depth N keeps roughly N generations of ancestry — a shallow clone. States beyond that boundary are not fetched, so `heddle log` stops at the shallow edge.
+  Depth (Heddle remotes only): --depth 0 (the default) clones full history. --depth 1 materializes the tip plus its immediate parents, then marks the next generation shallow; more generally --depth N keeps the tip plus N generations of ancestry materialized. The first generation past that boundary is grafted (marked shallow) and not fetched, so `heddle log` stops at the shallow edge. Git-overlay clones reject a nonzero --depth; --depth 0 is accepted and clones full history (the default).
   Depth bounds history, not file content: every state the clone keeps is fully materialized. A shallow clone is smaller because it holds fewer states, not because their blobs are absent.
 
   See `heddle help threads` for the thread model and `heddle help advanced` for power surfaces.
@@ -1255,7 +1255,7 @@ Behavior:
 Examples:
   heddle clone https://example.com/repo.git ./clone   # Git repo: lands on the remote's default branch
   heddle clone ./repo ./clone --thread main           # check out a named thread after cloning
-  heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: keep the tip, drop older ancestry
+  heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: keep the tip plus its immediate parents
 ")]
 pub struct CloneArgs {
     /// Remote repository path.

@@ -42,10 +42,18 @@ fn clone_help_pins_behavior_stanza() {
         help.contains("shallow") && help.contains("shallow edge"),
         "clone help should explain shallow depth semantics: {help}"
     );
-    // Depth is a Heddle-remote-only flag; Git-overlay clones reject it.
+    // Depth on Git-overlay clones: nonzero is rejected, --depth 0 is accepted
+    // (= the full-clone default, since cmd_clone normalizes 0 to None before
+    // the rejection check).
     assert!(
-        help.contains("Git-overlay clones reject --depth"),
-        "clone help should note that Git-overlay clones reject --depth: {help}"
+        help.contains("Git-overlay clones reject a nonzero --depth")
+            && help.contains("--depth 0 is accepted"),
+        "clone help should distinguish nonzero --depth (rejected) from --depth 0 (accepted) for Git-overlay clones: {help}"
+    );
+    // Depth-1 materializes the tip plus its immediate parents, not just the tip.
+    assert!(
+        help.contains("tip plus its immediate parents"),
+        "clone help should explain that --depth 1 keeps the tip plus immediate parents: {help}"
     );
     // Cross-reference to the thread model topic.
     assert!(
