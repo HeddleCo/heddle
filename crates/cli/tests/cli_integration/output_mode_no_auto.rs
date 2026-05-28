@@ -19,6 +19,11 @@ use tempfile::TempDir;
 
 use super::{assert_json_recovery_advice_fields, heddle, heddle_output};
 
+/// `EX_DATAERR` from BSD `sysexits.h` — the exit code Heddle assigns to a
+/// `toml::de::Error` in the error chain (see `HeddleExitCode::from_error`).
+/// A config-parse failure is well-formed-but-rejected input, not an IO error.
+const EX_DATAERR: i32 = 65;
+
 #[test]
 fn piped_status_with_no_output_flag_renders_text() {
     // Post-PR251 default — re-asserted here because the failure mode this
@@ -320,6 +325,110 @@ fn user_config_with_output_format_auto_via_home_path_errors_with_typed_envelope(
     assert!(
         !hint.contains(".heddle/config.toml"),
         "hint must not point at the repo config when the bad value is in the HOME user config: hint={hint}"
+    );
+}
+
+#[test]
+fn repo_config_output_format_auto_exits_data_err() {
+    // Codex R4 (cid 3315305484): the r3 `ConfigParse` wrapping stored only
+    // `err.to_string()`, flattening the source `toml::de::Error` out of the
+    // chain. `HeddleExitCode::from_error` classifies config-parse failures by
+    // downcasting to `toml::de::Error`; with the source gone it fell through
+    // to `EX_IOERR` (74). The exit code must stay `EX_DATAERR` (65) so retry
+    // agents and the JSON envelope's `exit_code` report the failure class
+    // correctly.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init should succeed");
+    let config_path = temp.path().join(".heddle").join("config.toml");
+    let existing = std::fs::read_to_string(&config_path).expect("repo config exists after init");
+    let mutated = existing.replace("[output]\n", "[output]\nformat = \"auto\"\n");
+    std::fs::write(&config_path, &mutated).expect("write mutated config");
+
+    let out = heddle_output(&["status"], Some(temp.path())).expect("status runs with bad config");
+    assert_eq!(
+        out.status.code(),
+        Some(EX_DATAERR),
+        "repo config output.format='auto' must exit EX_DATAERR (65), not EX_IOERR (74): stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json_out = heddle_output(&["--output", "json", "status"], Some(temp.path()))
+        .expect("status --output json runs with bad config");
+    assert_eq!(
+        json_out.status.code(),
+        Some(EX_DATAERR),
+        "JSON-mode exit code must also be EX_DATAERR (65): stderr={}",
+        String::from_utf8_lossy(&json_out.stderr)
+    );
+    let envelope = parse_envelope(&json_out.stderr);
+    assert_eq!(
+        envelope["exit_code"].as_u64(),
+        Some(EX_DATAERR as u64),
+        "JSON envelope exit_code must report EX_DATAERR (65): {envelope}"
+    );
+}
+
+#[test]
+fn user_config_heddle_config_output_format_auto_exits_data_err() {
+    // Mirror of the repo-config case for the `HEDDLE_CONFIG` source.
+    let temp = TempDir::new().unwrap();
+    let bad_user_config = temp.path().join("user-config.toml");
+    std::fs::write(&bad_user_config, "[output]\nformat = \"auto\"\n")
+        .expect("write bad user config");
+
+    let out = run_with_bad_user_config(&bad_user_config, None, &["status"]);
+    assert_eq!(
+        out.status.code(),
+        Some(EX_DATAERR),
+        "HEDDLE_CONFIG output.format='auto' must exit EX_DATAERR (65), not EX_IOERR (74): stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json_out =
+        run_with_bad_user_config(&bad_user_config, None, &["--output", "json", "status"]);
+    assert_eq!(
+        json_out.status.code(),
+        Some(EX_DATAERR),
+        "JSON-mode exit code must also be EX_DATAERR (65): stderr={}",
+        String::from_utf8_lossy(&json_out.stderr)
+    );
+    let envelope = parse_envelope(&json_out.stderr);
+    assert_eq!(
+        envelope["exit_code"].as_u64(),
+        Some(EX_DATAERR as u64),
+        "JSON envelope exit_code must report EX_DATAERR (65): {envelope}"
+    );
+}
+
+#[test]
+fn user_config_home_output_format_auto_exits_data_err() {
+    // Mirror of the repo-config case for the `$HOME/.config` source.
+    let temp = TempDir::new().unwrap();
+    let fake_home = temp.path();
+    let config_path = fake_home.join(".config").join("heddle").join("config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).expect("mkdir config parent");
+    std::fs::write(&config_path, "[output]\nformat = \"auto\"\n").expect("write bad home config");
+
+    let out = run_with_home_user_config(fake_home, None, &["status"]);
+    assert_eq!(
+        out.status.code(),
+        Some(EX_DATAERR),
+        "HOME user output.format='auto' must exit EX_DATAERR (65), not EX_IOERR (74): stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let json_out = run_with_home_user_config(fake_home, None, &["--output", "json", "status"]);
+    assert_eq!(
+        json_out.status.code(),
+        Some(EX_DATAERR),
+        "JSON-mode exit code must also be EX_DATAERR (65): stderr={}",
+        String::from_utf8_lossy(&json_out.stderr)
+    );
+    let envelope = parse_envelope(&json_out.stderr);
+    assert_eq!(
+        envelope["exit_code"].as_u64(),
+        Some(EX_DATAERR as u64),
+        "JSON envelope exit_code must report EX_DATAERR (65): {envelope}"
     );
 }
 
