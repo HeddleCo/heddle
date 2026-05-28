@@ -116,7 +116,7 @@ schema_registry! {
     (&["review health"], ReviewHealthSchema),
     (&["inspect"], InspectSchema),
     (&["retro"], RetroSchema),
-    (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionSchema),
+    (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionEnvelopeSchema),
     (&["discuss list"], DiscussionListSchema),
     (&["query"], QuerySchema),
     (&["transaction commit"], TransactionCommitSchema),
@@ -755,6 +755,20 @@ pub struct DiscussionSchema {
     pub resolved_annotation_id: Option<String>,
 }
 
+/// Per-discussion verbs (`open`/`append`/`resolve`/`show`) emit the
+/// discussion payload flattened beneath an `output_kind` discriminator,
+/// mirroring `DiscussionEnvelope` in `discuss.rs`. `discuss list` reuses
+/// the bare [`DiscussionSchema`] for its inner items — those carry no
+/// per-item discriminator (the list envelope owns it), so the
+/// discriminator lives on this wrapper rather than on the shared inner
+/// struct.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiscussionEnvelopeSchema {
+    pub output_kind: String,
+    #[serde(flatten)]
+    pub discussion: DiscussionSchema,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionResolutionSchema {
     pub kind: String,
@@ -773,6 +787,7 @@ pub struct DiscussionTurnSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiscussionListSchema {
+    pub output_kind: String,
     pub discussions: Vec<DiscussionSchema>,
 }
 
@@ -807,6 +822,7 @@ pub struct OperationRecordSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct InitSchema {
+    pub output_kind: String,
     pub status: String,
     pub action: String,
     pub path: String,
@@ -949,6 +965,7 @@ pub struct UndoSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct CleanSchema {
+    pub output_kind: String,
     pub removed: Vec<String>,
     pub dry_run: bool,
 }
@@ -978,6 +995,7 @@ pub struct DiffStatsSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GotoSchema {
+    pub output_kind: String,
     pub target: String,
     pub intent: Option<String>,
     pub message: String,
@@ -2237,6 +2255,7 @@ pub struct WorkspaceGroupSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewShowSchema {
+    pub output_kind: String,
     pub change_id: String,
     pub headline: String,
     pub agent_narrative: Option<String>,
@@ -2250,6 +2269,7 @@ pub struct ReviewShowSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewSignSchema {
+    pub output_kind: String,
     pub signature_id: String,
     pub change_id: String,
 }
@@ -2280,6 +2300,7 @@ pub struct ReviewNextStateSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ReviewHealthSchema {
+    pub output_kind: String,
     pub entries: Vec<ReviewHealthEntrySchema>,
     pub window_states: usize,
 }
@@ -2569,6 +2590,7 @@ pub struct StashMutationSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct StashListSchema {
+    pub output_kind: String,
     pub stashes: Vec<StashListEntrySchema>,
 }
 
@@ -2581,6 +2603,7 @@ pub struct StashListEntrySchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct StashShowSchema {
+    pub output_kind: String,
     pub modified: Vec<String>,
     pub added: Vec<String>,
     pub deleted: Vec<String>,
@@ -2588,6 +2611,7 @@ pub struct StashShowSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RevertSchema {
+    pub output_kind: String,
     pub change_id: Option<String>,
     pub reverted_state: String,
     pub files_affected: Vec<String>,

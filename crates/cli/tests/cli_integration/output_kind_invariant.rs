@@ -685,10 +685,10 @@ fn doc_sample_top_level_keys(doc: &str, output_kind_value: &str) -> Option<BTree
         }
         if trimmed == "```" {
             in_block = false;
-            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&buf) {
-                if map.get("output_kind").and_then(|v| v.as_str()) == Some(output_kind_value) {
-                    return Some(map.keys().cloned().collect());
-                }
+            if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&buf)
+                && map.get("output_kind").and_then(|v| v.as_str()) == Some(output_kind_value)
+            {
+                return Some(map.keys().cloned().collect());
             }
             buf.clear();
             continue;

@@ -2866,10 +2866,10 @@ Preview or apply a ref reconciliation between Git and Heddle.
 {"output_kind": "stack_ready", "thread": "main", "next_action": {"kind": "unknown"}}
 ```
 
-`heddle stack snapshot` emits:
+`heddle stack snapshot` emits a `RepositorySnapshot` flattened beneath the discriminator, so the root carries `output_kind` alongside `version`, `captured_at`, `stacks`, and `threads` — there is no `thread`/`snapshot` wrapper:
 
 ```json
-{"output_kind": "stack_snapshot", "thread": "main", "snapshot": null}
+{"output_kind": "stack_snapshot", "version": 1, "captured_at": "2026-05-28T15:43:36Z", "stacks": [{"root": {"name": "feature-x", "children": []}}], "threads": [{"thread": "feature-x", "parent_thread": null, "base_state": "hd-sqr398dvx9ay", "current_state": "hd-sqr398dvx9ay", "state": "active", "freshness": "current"}]}
 ```
 
 ---
@@ -3027,12 +3027,16 @@ outside clean verification coverage.
 {"conflicts": [{"id": "conflict-1", "kind": "content", "path": "src/lib.rs", "candidate_resolutions": []}]}
 ```
 
-`heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`):
-
-`context list` wraps its rows in an `{"output_kind": "context_list", "items": [...]}` envelope; the rows themselves carry no per-row discriminator (the envelope owns it).
+`heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
 
 ```json
-{"output_kind": "context_set", "path": "src/lib.rs", "key": "owner", "value": "platform", "entries": [{"path": "src/lib.rs", "key": "owner", "value": "platform"}], "suggestions": [], "issues": []}
+{"output_kind": "context_set", "target": "src/lib.rs", "annotations": 1, "state": "hd-k6a0wfrbgcg7"}
+```
+
+`heddle context list --output json` wraps its rows in an `items` envelope; the rows themselves carry no per-row discriminator (the envelope owns it). Each row is `{"target_kind": ..., "target": ..., "annotations": [...]}` — it emits:
+
+```json
+{"output_kind": "context_list", "items": [{"target_kind": "file", "target": "src/lib.rs", "annotations": [{"annotation_id": "hd-hy06md66hab4qb5ctkwphyc22r", "attribution": "A. Engineer <a@example.com>", "content": "returns false on timing mismatch", "created_at": 1767225600, "kind": "rationale", "revision_count": 1, "scope": "file", "status": "active", "supersedes_annotation_id": null, "supersedes_rewrite_pct": null, "tags": []}]}]}
 ```
 
 `heddle daemon serve|status|stop --output json` emit:
