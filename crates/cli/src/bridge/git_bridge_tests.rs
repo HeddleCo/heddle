@@ -23,7 +23,7 @@ use tempfile::TempDir;
 
 use crate::bridge::{
     git_core::{copy_local_repo_to_bare, delete_reference_if_present, set_reference, GitPushScope},
-    git_export::export_tree,
+    git_export::{export_all, export_tree},
     git_import::{import_all, import_git_tree},
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
     GitBridge,
@@ -1698,6 +1698,116 @@ fn export_to_path_is_idempotent_against_existing_destination() {
     bridge
         .export_to_path(&dest_path)
         .expect("second export against existing dest should not error");
+}
+
+/// heddle#289: in the common git-overlay case every state is already
+/// mapped to an original git commit, so `states_exported` (newly minted)
+/// is legitimately 0 — but `commits_total` must still count the commits
+/// that landed in the destination so the summary doesn't read a
+/// misleading "exported 0 states" against a fully-populated repo.
+#[test]
+fn export_stats_report_total_commits_when_all_states_pre_mapped() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_source_temp, source_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&source_repo);
+    let first = commit_with_tree(&source_repo, None, tree_oid, "first", &[]);
+    let second = commit_with_tree(
+        &source_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "second",
+        &[first],
+    );
+    create_annotated_tag(&source_repo, "v1.0", second, "release");
+
+    let mut bridge = GitBridge::new(&repo);
+    bridge
+        .import(Some(source_repo.workdir().expect("workdir")))
+        .expect("import from git");
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let stats = bridge.export_to_path(&dest_path).expect("export");
+
+    // Every state came from git with its SHA preserved → nothing is
+    // freshly minted, yet the destination holds both commits.
+    assert_eq!(
+        stats.states_exported, 0,
+        "SHA-stable overlay export mints no new commits"
+    );
+    assert!(
+        stats.commits_total >= 2,
+        "commits_total must count every state that landed in the destination, got {}",
+        stats.commits_total
+    );
+    assert!(
+        stats.commits_total > stats.states_exported,
+        "total must exceed newly-minted in the overlay case"
+    );
+    // AC3: branch/tag detail carries tip SHAs for the summary.
+    assert!(
+        stats.branches.iter().any(|b| b.name == "main"),
+        "branch detail should list main with its tip: {:?}",
+        stats.branches
+    );
+    assert!(
+        stats.tags.iter().any(|t| t.name == "v1.0"),
+        "tag detail should list v1.0 with its tip: {:?}",
+        stats.tags
+    );
+}
+
+/// heddle#289: a sync of an already-synced overlay must report consistent
+/// "total vs. new" accounting on both halves — the export side gains the
+/// same total/new split the import side has carried since heddle#147.
+#[test]
+fn sync_export_and_import_report_consistent_total_and_new() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_source_temp, source_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&source_repo);
+    let first = commit_with_tree(&source_repo, None, tree_oid, "first", &[]);
+    commit_with_tree(
+        &source_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "second",
+        &[first],
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    bridge
+        .import(Some(source_repo.workdir().expect("workdir")))
+        .expect("import from git");
+
+    // Re-running the sync halves against the already-synced overlay: both
+    // sides should report the total they walked while their "new" count
+    // drops to 0 — the "already in sync" signal.
+    let export_stats = export_all(&mut bridge).expect("re-export");
+    let import_stats =
+        import_all(&mut bridge, Some(source_repo.workdir().expect("workdir"))).expect("re-import");
+
+    assert_eq!(
+        export_stats.states_exported, 0,
+        "nothing new to export on a synced overlay"
+    );
+    assert!(
+        export_stats.commits_total >= 2,
+        "export total still reflects the populated destination: {}",
+        export_stats.commits_total
+    );
+    assert_eq!(
+        import_stats.states_created, 0,
+        "nothing new to import on a synced overlay"
+    );
+    assert!(
+        import_stats.commits_imported >= 2,
+        "import total still reflects the walked commits: {}",
+        import_stats.commits_imported
+    );
 }
 
 /// Phase A: `commits_imported` and `states_created` should both reflect new
