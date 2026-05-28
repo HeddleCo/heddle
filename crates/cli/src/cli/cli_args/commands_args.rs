@@ -1246,16 +1246,16 @@ pub struct PullArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  Default thread: with --thread omitted, the clone checks out the remote's advertised default branch (its Git HEAD). If the remote advertises none, it falls back to a thread named `main`, then to the alphabetically first imported thread. It never prompts.
-  Depth: --depth 0 (the default) clones full history. --depth N keeps roughly N generations of ancestry — a shallow clone — and marks states beyond that boundary as grafted, so `heddle log` stops at the shallow edge.
+  Default thread (no --thread): cloning a Git repository lands on the remote's advertised default branch (its Git HEAD); if the remote advertises none, it falls back to a thread named `main`, then to the alphabetically first imported thread. Cloning a Heddle remote (local path or hosted) lands on `main`. It never prompts.
+  Depth (Heddle remotes only — Git-overlay clones reject --depth): --depth 0 (the default) clones full history. --depth N keeps roughly N generations of ancestry — a shallow clone. States beyond that boundary are not fetched, so `heddle log` stops at the shallow edge.
   Depth bounds history, not file content: every state the clone keeps is fully materialized. A shallow clone is smaller because it holds fewer states, not because their blobs are absent.
 
-  See `heddle help threads` for the thread model.
+  See `heddle help threads` for the thread model and `heddle help advanced` for power surfaces.
 
 Examples:
-  heddle clone ./repo ./clone                # full clone; lands on the remote's default thread
-  heddle clone ./repo ./clone --thread main  # check out a named thread after cloning
-  heddle clone ./repo ./clone --depth 1      # shallow clone: keep the tip, graft older ancestry
+  heddle clone https://example.com/repo.git ./clone   # Git repo: lands on the remote's default branch
+  heddle clone ./repo ./clone --thread main           # check out a named thread after cloning
+  heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: keep the tip, drop older ancestry
 ")]
 pub struct CloneArgs {
     /// Remote repository path.

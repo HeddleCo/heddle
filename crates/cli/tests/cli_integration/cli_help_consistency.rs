@@ -16,16 +16,22 @@ fn clone_help_pins_behavior_stanza() {
         help.contains("Behavior:"),
         "clone help should include a Behavior stanza: {help}"
     );
-    // Default-thread resolution: omitting --thread lands on the remote's
-    // advertised default branch.
+    // Default-thread resolution for Git-overlay clones: lands on the
+    // remote's advertised default branch (its Git HEAD).
     assert!(
-        help.contains("--thread omitted") && help.contains("default branch"),
+        help.contains("no --thread") && help.contains("default branch"),
         "clone help should explain where an unhinted clone lands: {help}"
     );
-    // The documented fallback chain (main, then first imported thread).
+    // The Git-overlay fallback chain (main, then first imported thread).
     assert!(
         help.contains("`main`") && help.contains("alphabetically first"),
         "clone help should name the default-thread fallback chain: {help}"
+    );
+    // The transport distinction: native Heddle remotes default to `main`,
+    // not the Git-HEAD chain — the inaccuracy this stanza must not regress.
+    assert!(
+        help.contains("Heddle remote") && help.contains("lands on `main`"),
+        "clone help should distinguish the Heddle-remote default from the Git-overlay chain: {help}"
     );
     // Depth semantics: 0 means full history, N is shallow.
     assert!(
@@ -33,8 +39,13 @@ fn clone_help_pins_behavior_stanza() {
         "clone help should explain that --depth 0 is full history: {help}"
     );
     assert!(
-        help.contains("shallow") && help.contains("grafted"),
-        "clone help should explain shallow/grafted depth semantics: {help}"
+        help.contains("shallow") && help.contains("shallow edge"),
+        "clone help should explain shallow depth semantics: {help}"
+    );
+    // Depth is a Heddle-remote-only flag; Git-overlay clones reject it.
+    assert!(
+        help.contains("Git-overlay clones reject --depth"),
+        "clone help should note that Git-overlay clones reject --depth: {help}"
     );
     // Cross-reference to the thread model topic.
     assert!(
