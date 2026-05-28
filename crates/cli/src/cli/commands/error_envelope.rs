@@ -420,15 +420,16 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             // `$HOME/.config/heddle/config.toml`, or the repo's
             // `.heddle/config.toml`) — not a hard-coded path that may
             // not be the one that produced the failure (Codex R3 on #271).
-            if let HeddleError::ConfigParse { path, message } = heddle_err
-                && message.contains("invalid output.format")
+            if let HeddleError::ConfigParse { path, source } = heddle_err
+                && source.to_string().contains("invalid output.format")
             {
+                let message = source.to_string();
                 let path_display = path.display().to_string();
                 return ErrorClassification {
                     kind: "invalid_repo_config_output_format".to_string(),
                     human_error: Some(format!(
                         "{} (in {})",
-                        extract_invalid_output_format_message(message),
+                        extract_invalid_output_format_message(&message),
                         path_display
                     )),
                     hint: format!(

@@ -437,7 +437,7 @@ impl RepoConfig {
             let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             objects::error::HeddleError::ConfigParse {
                 path: resolved,
-                message: err.to_string(),
+                source: err,
             }
         })
     }
