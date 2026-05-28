@@ -307,6 +307,40 @@ fn status_json(path: &std::path::Path) -> Value {
     serde_json::from_str(&output).expect("status output should be JSON")
 }
 
+/// Run `git <args>` in `dir` under a fully isolated environment, asserting
+/// success. Hermetic by construction: global/system config, `$HOME`,
+/// init templates, and hooks are all neutralised so a developer's or CI's
+/// ambient Git setup can never leak into a temp-repo fixture and flake the
+/// tests. Identity is pinned via `-c` so commits don't depend on a global
+/// `user.name`/`user.email`. Shared by the exit-code and error-envelope
+/// fixtures (HeddleCo/heddle#252) so the isolation lives in one place.
+pub(crate) fn git_hermetic(args: &[&str], dir: &std::path::Path) {
+    let status = Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", dir)
+        .env("GIT_TEMPLATE_DIR", "")
+        .env_remove("GIT_DIR")
+        .status()
+        .unwrap_or_else(|err| panic!("spawn git {args:?}: {err}"));
+    assert!(status.success(), "git {args:?} failed in {}", dir.display());
+}
+
 fn git_test_signature() -> gix::actor::Signature {
     gix::actor::Signature {
         name: "Heddle Test".into(),

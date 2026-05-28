@@ -14,11 +14,11 @@
 //! for a reproducible documented condition of each swept command so the
 //! contract can't regress.
 
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 use tempfile::TempDir;
 
-use super::heddle_output;
+use super::{git_hermetic, heddle_output};
 
 /// Assert `heddle <args>` exits with `expected`, surfacing stderr on
 /// mismatch so a regression names the divergent code directly.
@@ -53,14 +53,9 @@ fn init_repo() -> TempDir {
     temp
 }
 
-/// Run `git <args>` in `dir`, asserting success.
+/// Run `git <args>` in `dir` under an isolated environment, asserting success.
 fn git(args: &[&str], dir: &Path) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .unwrap_or_else(|err| panic!("spawn git {args:?}: {err}"));
-    assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    git_hermetic(args, dir);
 }
 
 /// A git repo with one commit on `main`, adopted into a Heddle git overlay.

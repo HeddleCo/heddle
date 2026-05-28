@@ -22,12 +22,12 @@
 //! subset whose codes `docs/exit-codes.md` documents; `SWEPT_COVERAGE`
 //! guards that each is exercised here.
 
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::heddle_output;
+use super::{git_hermetic, heddle_output};
 
 /// Swept commands whose error envelopes this lint exercises. Mirrors the
 /// `docs/exit-codes.md` Coverage list. A divergence between this and the
@@ -56,12 +56,7 @@ struct ErrorCase {
 }
 
 fn git(args: &[&str], dir: &Path) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .status()
-        .unwrap_or_else(|err| panic!("spawn git {args:?}: {err}"));
-    assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    git_hermetic(args, dir);
 }
 
 /// A directory that is not a Heddle repo — commands that need one fail
@@ -165,7 +160,18 @@ fn cases() -> Vec<ErrorCase> {
             fixture: adopted_git_overlay,
         },
         ErrorCase {
-            covers: &["bridge git sync", "bridge git reconcile"],
+            // `sync` has its own handler (bridge.rs `GitCommands::Sync`)
+            // that builds the error envelope independently of reconcile —
+            // exercise it directly so a regression that drops Sync's `Next:`
+            // fields fails the lint. A `--path` at a nonexistent source
+            // reaches the handler (export runs, then the import half fails).
+            covers: &["bridge git sync"],
+            label: "bridge git sync against a missing source",
+            argv: &["bridge", "git", "sync", "--path", "/heddle/no/such/source"],
+            fixture: adopted_git_overlay,
+        },
+        ErrorCase {
+            covers: &["bridge git reconcile"],
             label: "bridge git reconcile without a --prefer side",
             argv: &["bridge", "git", "reconcile", "--ref", "main"],
             fixture: adopted_git_overlay,
