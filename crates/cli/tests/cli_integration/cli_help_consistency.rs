@@ -33,14 +33,14 @@ fn clone_help_pins_behavior_stanza() {
         help.contains("Heddle remote") && help.contains("lands on `main`"),
         "clone help should distinguish the Heddle-remote default from the Git-overlay chain: {help}"
     );
-    // Depth semantics: 0 means full history, N is shallow.
+    // Depth semantics: 0 means full history, N keeps the tip plus N ancestry levels.
     assert!(
         help.contains("--depth 0") && help.contains("full history"),
         "clone help should explain that --depth 0 is full history: {help}"
     );
     assert!(
-        help.contains("shallow") && help.contains("shallow edge"),
-        "clone help should explain shallow depth semantics: {help}"
+        help.contains("hydrated on demand") && help.contains("depth boundary"),
+        "clone help should explain that history past the depth boundary is hydrated on demand: {help}"
     );
     // Depth on Git-overlay clones: nonzero is rejected, --depth 0 is accepted
     // (= the full-clone default, since cmd_clone normalizes 0 to None before
