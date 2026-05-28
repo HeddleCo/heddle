@@ -511,6 +511,126 @@ fn chmod_only_emits_header_only_patch() {
 }
 
 // ---------------------------------------------------------------------------
+// Matrix — special-character paths (git C-style header quoting). Covers
+// cid 3319049648 — paths with tab/newline/quote/backslash/space/non-ASCII
+// must be quoted in every header site so `git apply` parses them.
+// ---------------------------------------------------------------------------
+
+/// Names heddle can track in a committed tree (`validate_name` rejects
+/// control characters and the `\` path-separator byte, but allows quotes,
+/// spaces, and non-ASCII). These exercise the full capture → modify /
+/// delete / rename → `git apply` round-trip, so the quoting must hold at
+/// every header site for a *tracked* file.
+fn capturable_quoting_paths() -> Vec<&'static str> {
+    vec![
+        "quo\"te.txt",
+        " leading.txt",
+        "trailing .txt",
+        "café_ünïcode.txt",
+        "dir with space/child.txt",
+    ]
+}
+
+/// Names heddle refuses in a committed tree (tab/newline control bytes,
+/// backslash) but that still appear in patches as *worktree adds* (and in
+/// the plain-Git surface, where git — not heddle — owns the tree). The add
+/// path never validates a tree name, so these must still quote correctly.
+fn worktree_only_quoting_paths() -> Vec<&'static str> {
+    vec![
+        "tab\tname.txt",
+        "new\nline.txt",
+        "back\\slash.txt",
+    ]
+}
+
+#[test]
+fn special_char_path_add_round_trips() {
+    let mut paths = capturable_quoting_paths();
+    paths.extend(worktree_only_quoting_paths());
+    for path in paths {
+        native_cell(
+            &[normal("anchor.txt", "anchor\n")],
+            |dir| write_entry(dir, &normal(path, "alpha\nbeta\n")),
+            &[Expect::Present(normal(path, "alpha\nbeta\n"))],
+        );
+    }
+}
+
+#[test]
+fn special_char_path_modify_round_trips() {
+    for path in capturable_quoting_paths() {
+        native_cell(
+            &[normal(path, "l1\nl2\nl3\n")],
+            |dir| write_entry(dir, &normal(path, "l1\nCHANGED\nl3\n")),
+            &[Expect::Present(normal(path, "l1\nCHANGED\nl3\n"))],
+        );
+    }
+}
+
+#[test]
+fn special_char_path_delete_round_trips() {
+    for path in capturable_quoting_paths() {
+        native_cell(
+            &[normal(path, "doomed\ncontent\n"), normal("keep.txt", "keep\n")],
+            move |dir| std::fs::remove_file(dir.join(path)).unwrap(),
+            &[
+                Expect::Absent(path),
+                Expect::Present(normal("keep.txt", "keep\n")),
+            ],
+        );
+    }
+}
+
+#[test]
+fn special_char_path_rename_round_trips() {
+    // Rename a quote-named file to a unicode-named file: every header site
+    // (`diff --git`, `rename from`/`to`) must quote both sides. Both names
+    // are heddle-capturable (no control/backslash bytes).
+    let body = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    native_cell(
+        &[normal("fro\"m.txt", body)],
+        |dir| {
+            std::fs::remove_file(dir.join("fro\"m.txt")).unwrap();
+            write_entry(dir, &normal("tö nÿ.txt", body));
+        },
+        &[
+            Expect::Absent("fro\"m.txt"),
+            Expect::Present(normal("tö nÿ.txt", body)),
+        ],
+    );
+}
+
+/// Control-char / backslash names that heddle can't track but git can:
+/// exercise modify + delete on the plain-Git surface so the header quoting
+/// holds for the gix-read tree side too.
+#[test]
+fn plain_git_special_char_path_modify_round_trips() {
+    for path in worktree_only_quoting_paths() {
+        plain_git_cell(
+            &[normal(path, "a\nb\nc\n")],
+            false,
+            move |dir| write_entry(dir, &normal(path, "a\nB\nc\n")),
+            &[Expect::Present(normal(path, "a\nB\nc\n"))],
+        );
+    }
+}
+
+#[test]
+fn plain_git_special_char_path_delete_round_trips() {
+    for path in worktree_only_quoting_paths() {
+        plain_git_cell(
+            &[normal(path, "x\ny\n"), normal("keep.txt", "keep\n")],
+            true,
+            move |dir| std::fs::remove_file(dir.join(path)).unwrap(),
+            &[
+                Expect::Absent(path),
+                Expect::Present(normal("keep.txt", "keep\n")),
+            ],
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Matrix — rename
 // ---------------------------------------------------------------------------
 
@@ -571,6 +691,121 @@ fn pure_rename_populates_json_patch_field() {
         &[
             Expect::Absent("from.txt"),
             Expect::Present(normal("to.txt", body)),
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Matrix — combined ops (rename × mode). Covers cid 3319049643 — a rename
+// paired with a chmod/type change must carry `old mode`/`new mode` so the
+// permission change round-trips alongside the move.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn rename_with_chmod_round_trips() {
+    let body = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    native_cell(
+        &[normal("old.sh", body)],
+        |dir| {
+            std::fs::remove_file(dir.join("old.sh")).unwrap();
+            write_entry(dir, &exec("new.sh", body));
+        },
+        &[
+            Expect::Absent("old.sh"),
+            Expect::Present(exec("new.sh", body)),
+        ],
+    );
+}
+
+/// Pin the header shape: rename+chmod must emit `old mode`/`new mode`
+/// before `similarity index`, matching `git diff`. A regression that drops
+/// the deleted-side mode (the cid 3319049643 bug) trips here.
+#[cfg(unix)]
+#[test]
+fn rename_with_chmod_emits_mode_headers() {
+    let body = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    write_entry(h.path(), &normal("old.sh", body));
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+    std::fs::remove_file(h.path().join("old.sh")).unwrap();
+    write_entry(h.path(), &exec("new.sh", body));
+
+    let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
+    assert!(
+        patch.contains("rename from old.sh") && patch.contains("rename to new.sh"),
+        "rename+chmod must still emit the rename headers:\n{patch}"
+    );
+    assert!(
+        patch.contains("old mode 100644") && patch.contains("new mode 100755"),
+        "rename+chmod must carry `old mode`/`new mode`:\n{patch}"
+    );
+    let old_mode_idx = patch.find("old mode").unwrap();
+    let sim_idx = patch.find("similarity index").unwrap();
+    assert!(
+        old_mode_idx < sim_idx,
+        "`old mode` must precede `similarity index` (git order):\n{patch}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rename_with_edit_and_chmod_round_trips() {
+    let before = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+    let after = "l1\nl2\nCHANGED\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+    native_cell(
+        &[normal("src.sh", before)],
+        |dir| {
+            std::fs::remove_file(dir.join("src.sh")).unwrap();
+            write_entry(dir, &exec("dst.sh", after));
+        },
+        &[
+            Expect::Absent("src.sh"),
+            Expect::Present(exec("dst.sh", after)),
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Matrix — file ↔ directory type changes. Covers cid 3319049665 — a tracked
+// file replaced by a directory (or vice-versa) must emit the deletion of the
+// blocking path so `git apply` can create the new tree over it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn file_to_dir_type_change_round_trips() {
+    // `conf` is a tracked file; it becomes a directory `conf/` with a
+    // nested file. git represents that as a deletion of `conf` + an add of
+    // `conf/nested.txt`. Present(conf/nested.txt) implies `conf` is a dir.
+    native_cell(
+        &[normal("conf", "old config\n"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("conf")).unwrap();
+            write_entry(dir, &normal("conf/nested.txt", "nested\nvalue\n"));
+        },
+        &[
+            Expect::Present(normal("conf/nested.txt", "nested\nvalue\n")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[test]
+fn dir_to_file_type_change_round_trips() {
+    // The mirror: a tracked `data/item.txt` (so `data` is a directory) is
+    // replaced by a regular file `data`. git deletes `data/item.txt` and
+    // adds the `data` file.
+    native_cell(
+        &[normal("data/item.txt", "x\ny\n"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("data/item.txt")).unwrap();
+            std::fs::remove_dir(dir.join("data")).unwrap();
+            write_entry(dir, &normal("data", "now a file\n"));
+        },
+        &[
+            Expect::Present(normal("data", "now a file\n")),
+            Expect::Present(normal("keep.txt", "keep\n")),
         ],
     );
 }
@@ -714,6 +949,46 @@ fn plain_git_unborn_head_add_round_trips() {
     );
 }
 
+/// Plain-Git same-path delete+add: `git rm --cached f` removes `f` from the
+/// index (HEAD still has it, the worktree copy becomes untracked), then the
+/// untracked `f` is edited. `plain_git_worktree_status` reports `f` as BOTH
+/// deleted (index-vs-HEAD) and added (untracked worktree); emitting both an
+/// add and a delete patch for one path is a pair `git apply` rejects. The
+/// pair must coalesce into a single HEAD→worktree modify. Covers cid 3319049659.
+#[test]
+fn plain_git_rm_cached_then_edit_coalesces() {
+    let h = TempDir::new().unwrap();
+    git_init(h.path());
+    write_entry(h.path(), &normal("f.txt", "v1\nshared\ntail\n"));
+    git(h.path(), &["add", "-A"]);
+    git(h.path(), &["commit", "-q", "-m", "seed"]);
+    // Drop from the index (HEAD keeps it; worktree copy is now untracked),
+    // then edit the untracked copy so its body differs from HEAD.
+    git(h.path(), &["rm", "--cached", "-q", "f.txt"]);
+    write_entry(h.path(), &normal("f.txt", "v2\nshared\ntail\n"));
+
+    let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
+    assert!(
+        patch.contains("--- a/f.txt") && patch.contains("+++ b/f.txt"),
+        "same-path delete+add must coalesce into a single modify:\n{patch}"
+    );
+    assert!(
+        !patch.contains("/dev/null"),
+        "coalesced modify must not emit add/delete `/dev/null` headers:\n{patch}"
+    );
+    let json_patch = json_patch_field(h.path());
+    assert_eq!(
+        json_patch.as_deref(),
+        Some(patch.as_str()),
+        "plain-Git JSON `.patch` must equal `--patch` stdout"
+    );
+    apply_oracle(
+        &[normal("f.txt", "v1\nshared\ntail\n")],
+        &patch,
+        &[Expect::Present(normal("f.txt", "v2\nshared\ntail\n"))],
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Surfaces — trust-visible fast path (adopted repo, branch advanced
 // outside heddle). Covers cid 3318629234 (rename+edit must keep its hunk).
@@ -801,7 +1076,21 @@ fn state_to_state_add_round_trips() {
 // Proptest — random tree + random edits through the same oracle
 // ---------------------------------------------------------------------------
 
-const NAME_POOL: &[&str] = &["a.txt", "b.txt", "sub/c.txt", "d.txt"];
+// Includes special-character names (space, quote, non-ASCII) so random
+// runs exercise git's header quoting. Limited to heddle-capturable names
+// (`validate_name` rejects control bytes and `\`), and none is a path
+// prefix of another, keeping every generated tree filesystem-consistent.
+// (Control-char / backslash names + file↔dir type changes get their own
+// dedicated cells.)
+const NAME_POOL: &[&str] = &[
+    "a.txt",
+    "b.txt",
+    "sub/c.txt",
+    "d.txt",
+    "g h.txt",
+    "i\"j.txt",
+    "mün\u{f6}.txt",
+];
 
 /// Text content with varied shapes: empty, single line w/o eol, multi
 /// line w/ or w/o trailing newline. ASCII-only so heddle never treats it
@@ -910,6 +1199,92 @@ proptest! {
                     "deleted path {} still present after apply", name
                 );
             }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 16, ..ProptestConfig::default() })]
+
+    /// A tracked file replaced by a directory (or the reverse) must
+    /// round-trip: the type change emits a deletion of the blocking path
+    /// plus the new tree, and `git apply` reconstructs it. Randomizes the
+    /// direction and both file bodies — the randomized layer for the
+    /// hand-enumerated `file_to_dir_type_change_round_trips` cell
+    /// (cid 3319049665).
+    #[test]
+    fn type_change_round_trips(
+        file_to_dir in any::<bool>(),
+        body_a in "[a-z]{1,8}\n",
+        body_b in "[a-z]{1,8}\n",
+    ) {
+        // `pre` is the captured baseline; `post_files` is what the worktree
+        // (and the applied oracle tree) must look like afterwards.
+        let (pre, post_files): (Vec<Entry>, Vec<Entry>) = if file_to_dir {
+            (
+                vec![normal("node", &body_a), normal("anchor.txt", "anchor\n")],
+                vec![normal("node/leaf.txt", &body_b)],
+            )
+        } else {
+            (
+                vec![normal("node/leaf.txt", &body_a), normal("anchor.txt", "anchor\n")],
+                vec![normal("node", &body_b)],
+            )
+        };
+
+        let h = TempDir::new().unwrap();
+        heddle(&["init"], Some(h.path())).unwrap();
+        for entry in &pre {
+            write_entry(h.path(), entry);
+        }
+        heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+
+        // Swap the type in the worktree.
+        if file_to_dir {
+            std::fs::remove_file(h.path().join("node")).unwrap();
+        } else {
+            std::fs::remove_file(h.path().join("node/leaf.txt")).unwrap();
+            std::fs::remove_dir(h.path().join("node")).unwrap();
+        }
+        for entry in &post_files {
+            write_entry(h.path(), entry);
+        }
+
+        let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
+        prop_assert!(
+            !patch.trim().is_empty(),
+            "type change must produce a patch; file_to_dir={file_to_dir}"
+        );
+        let json_patch = json_patch_field(h.path());
+        prop_assert_eq!(json_patch.as_deref(), Some(patch.as_str()));
+
+        // Oracle: seed `pre`, apply, assert the post tree materializes.
+        let g = TempDir::new().unwrap();
+        git_init(g.path());
+        for entry in &pre {
+            write_entry(g.path(), entry);
+        }
+        git(g.path(), &["add", "-A"]);
+        git(g.path(), &["commit", "-q", "-m", "seed"]);
+
+        let check = pipe_git(g.path(), &["apply", "--check"], &patch);
+        prop_assert!(
+            check.status.success(),
+            "git apply --check failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let applied = pipe_git(g.path(), &["apply"], &patch);
+        prop_assert!(
+            applied.status.success(),
+            "git apply failed: {}\npatch=\n{patch}",
+            String::from_utf8_lossy(&applied.stderr)
+        );
+        for entry in &post_files {
+            let got = std::fs::read(g.path().join(&entry.path)).unwrap();
+            prop_assert_eq!(
+                &got, &entry.body,
+                "content mismatch for {} after apply", entry.path
+            );
         }
     }
 }

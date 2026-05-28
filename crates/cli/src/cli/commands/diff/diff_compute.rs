@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Core diff command logic.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, anyhow};
 use objects::{
@@ -248,10 +251,21 @@ pub fn cmd_diff(
                 // Pre-Phase-D bug: case 2 fell through to `lines = None`,
                 // and `print_diff` rendered the catch-all
                 // "Binary file or unable to diff" — even on plain text.
-                let diff_result = if let Some(ref tree) = to_tree {
-                    get_state_diff(&repo, from_tree.as_ref(), tree, &change.path, &change.kind)
+                // Worktree diffs (no `to_tree`) reclassify a `modified`
+                // path that is now a directory into a deletion (file→dir
+                // type change); state-to-state diffs read from trees and
+                // never hit the filesystem, so they keep `change.kind`.
+                let effective_kind = if to_tree.is_none() {
+                    worktree_modified_type_change(repo.root(), &change.path, change.kind)
+                        .map(|(_, diff_kind)| diff_kind)
+                        .unwrap_or(change.kind)
                 } else {
-                    get_worktree_diff(&repo, from_tree.as_ref(), &change.path, &change.kind)
+                    change.kind
+                };
+                let diff_result = if let Some(ref tree) = to_tree {
+                    get_state_diff(&repo, from_tree.as_ref(), tree, &change.path, &effective_kind)
+                } else {
+                    get_worktree_diff(&repo, from_tree.as_ref(), &change.path, &effective_kind)
                 };
                 let binary = diff_result
                     .as_ref()
@@ -276,7 +290,7 @@ pub fn cmd_diff(
                     )
                 };
 
-                let kind = change.kind.to_string();
+                let kind = effective_kind.to_string();
                 let (old_mode, mode) = change_file_modes(
                     &repo,
                     from_tree.as_ref(),
@@ -297,6 +311,20 @@ pub fn cmd_diff(
                 }
             })
             .collect()
+    };
+    // Worktree diffs (no `to_tree`) can carry a dir→file type change that
+    // heddle status reports as a single `modified` entry; expand it into
+    // the nested deletions + new-file add git would emit before renames.
+    let file_changes = if to_tree.is_none() {
+        expand_dir_to_file_type_changes(
+            &repo,
+            from_tree.as_ref(),
+            file_changes,
+            !(name_only || stat),
+            unified,
+        )?
+    } else {
+        file_changes
     };
     let file_changes = detect_clear_renames(
         &repo,
@@ -471,6 +499,17 @@ fn plain_git_file_changes_with_hunks(
     } else {
         Some(git_repo.head_tree()?)
     };
+    // `plain_git_worktree_status` can report the same path as BOTH
+    // deleted (index-vs-HEAD) and added (untracked worktree) — e.g.
+    // `git rm --cached f` followed by editing the still-present untracked
+    // `f`. Emitting an add patch and a separate delete patch for one path
+    // produces a conflicting pair `git apply` rejects; git renders that
+    // state as a single modify (HEAD content -> worktree content), so we
+    // coalesce here.
+    let added_set: BTreeSet<&Path> = probe.changes.added.iter().map(PathBuf::as_path).collect();
+    let deleted_set: BTreeSet<&Path> =
+        probe.changes.deleted.iter().map(PathBuf::as_path).collect();
+
     let mut changes = Vec::with_capacity(probe.changes.change_count());
     for path in &probe.changes.modified {
         changes.push(plain_git_file_change(
@@ -484,17 +523,26 @@ fn plain_git_file_changes_with_hunks(
         )?);
     }
     for path in &probe.changes.added {
+        let (kind, diff_kind) = if deleted_set.contains(path.as_path()) {
+            ("modified", DiffKind::Modified)
+        } else {
+            ("added", DiffKind::Added)
+        };
         changes.push(plain_git_file_change(
             &git_repo,
             head_tree.as_mut(),
             &probe.root,
             path,
-            "added",
-            DiffKind::Added,
+            kind,
+            diff_kind,
             unified,
         )?);
     }
     for path in &probe.changes.deleted {
+        // Already emitted as a coalesced modify in the added loop.
+        if added_set.contains(path.as_path()) {
+            continue;
+        }
         changes.push(plain_git_file_change(
             &git_repo,
             head_tree.as_mut(),
@@ -676,6 +724,14 @@ fn render_worktree_status_diff(
     };
 
     let changes = file_changes_from_status(status, want_hunks, repo, from_tree.as_ref(), unified);
+    // Expand a dir→file type change (`modified` directory path now a file)
+    // into its nested deletions + new-file add, matching `git diff`.
+    let changes = match repo {
+        Some(repo) => {
+            expand_dir_to_file_type_changes(repo, from_tree.as_ref(), changes, want_hunks, unified)?
+        }
+        None => changes,
+    };
     let changes = if detect_renames {
         // `want_hunks` (a `--patch`/JSON render) needs the rename pair's
         // edit hunk preserved; pass it through as `include_lines` and
@@ -763,27 +819,51 @@ fn make_status_file_change(
     unified: usize,
 ) -> FileChange {
     let path_str = path.display().to_string();
-    let (lines, eol, binary, mode, old_mode) = if want_hunks && let Some(repo) = repo {
-        // Worktree status diffs have no `to_tree`; the new-side mode comes
-        // from the live worktree, the old-side mode from `from_tree`.
-        let (old_mode, mode) = change_file_modes(repo, from_tree, None, &path_str, kind);
-        match get_worktree_diff(repo, from_tree, &path_str, &diff_kind) {
-            Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false, mode, old_mode),
-            Err(error) if is_binary_diff_error(&error) => {
-                (None, FileEolState::default(), true, mode, old_mode)
-            }
-            // Worktree read errors on a status-listed file mean the
-            // file vanished between the status scan and the diff
-            // attempt. Fall back to status-only; the renderer prints
-            // the file header without a body, matching git's
-            // behaviour for transient races.
-            Err(_) => (None, FileEolState::default(), false, mode, old_mode),
+    // Reclassify a `modified` path that is now a directory (file→dir type
+    // change) into a deletion so the renderer emits `+++ /dev/null` and
+    // `git apply` removes the blocking file before the nested adds land.
+    let (kind, diff_kind) = match repo
+        .and_then(|repo| worktree_modified_type_change(repo.root(), &path_str, diff_kind))
+    {
+        Some(reclassified) => reclassified,
+        None => (kind, diff_kind),
+    };
+    match repo {
+        Some(repo) if want_hunks => {
+            build_worktree_change(repo, from_tree, &path_str, kind, diff_kind, unified)
         }
-    } else {
-        (None, FileEolState::default(), false, None, None)
+        _ => FileChange {
+            path: path_str,
+            kind: kind.to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+/// Build a worktree-side `FileChange` with its hunk vector, EOL metadata,
+/// and `(old_mode, mode)` pair. Worktree status diffs have no `to_tree`:
+/// the new-side mode comes from the live worktree, the old-side mode from
+/// `from_tree`.
+fn build_worktree_change(
+    repo: &Repository,
+    from_tree: Option<&Tree>,
+    path_str: &str,
+    kind: &str,
+    diff_kind: DiffKind,
+    unified: usize,
+) -> FileChange {
+    let (old_mode, mode) = change_file_modes(repo, from_tree, None, path_str, kind);
+    let (lines, eol, binary) = match get_worktree_diff(repo, from_tree, path_str, &diff_kind) {
+        Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false),
+        Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default(), true),
+        // Worktree read errors on a status-listed file mean the file
+        // vanished between the status scan and the diff attempt. Fall back
+        // to status-only; the renderer prints the file header without a
+        // body, matching git's behaviour for transient races.
+        Err(_) => (None, FileEolState::default(), false),
     };
     FileChange {
-        path: path_str,
+        path: path_str.to_string(),
         kind: kind.to_string(),
         binary,
         lines,
@@ -792,6 +872,136 @@ fn make_status_file_change(
         old_mode,
         ..Default::default()
     }
+}
+
+/// heddle's worktree status reports a tracked directory replaced by a file
+/// (`data/` → `data`) as a single `modified` entry at the directory's path;
+/// the nested file deletions are never surfaced. `git diff` represents that
+/// as deletions of every blob under the old directory plus an add of the
+/// new file, so we rewrite such an entry into that set — otherwise the
+/// patch tries to modify a path that is a directory on the old side and
+/// `git apply` cannot create the file over the still-present directory.
+///
+/// (The mirror — a file replaced by a directory — is handled upstream by
+/// `worktree_modified_type_change`, which downgrades the modify to a
+/// deletion; the directory's new files arrive as separate `added` entries.)
+fn expand_dir_to_file_type_changes(
+    repo: &Repository,
+    from_tree: Option<&Tree>,
+    changes: Vec<FileChange>,
+    want_hunks: bool,
+    unified: usize,
+) -> Result<Vec<FileChange>> {
+    let Some(from_tree) = from_tree else {
+        return Ok(changes);
+    };
+    let mut output = Vec::with_capacity(changes.len());
+    for change in changes {
+        if change.kind == "modified"
+            && let Some(subtree) = dir_subtree_in_tree(repo, from_tree, &change.path)?
+            && worktree_path_is_nondir_file(&repo.root().join(&change.path))
+        {
+            let mut nested = Vec::new();
+            collect_subtree_blob_paths(repo, &subtree, &change.path, &mut nested)?;
+            for nested_path in nested {
+                output.push(make_type_change_part(
+                    repo,
+                    Some(from_tree),
+                    &nested_path,
+                    "deleted",
+                    DiffKind::Deleted,
+                    want_hunks,
+                    unified,
+                ));
+            }
+            output.push(make_type_change_part(
+                repo,
+                Some(from_tree),
+                &change.path,
+                "added",
+                DiffKind::Added,
+                want_hunks,
+                unified,
+            ));
+            continue;
+        }
+        output.push(change);
+    }
+    Ok(output)
+}
+
+fn make_type_change_part(
+    repo: &Repository,
+    from_tree: Option<&Tree>,
+    path_str: &str,
+    kind: &str,
+    diff_kind: DiffKind,
+    want_hunks: bool,
+    unified: usize,
+) -> FileChange {
+    if want_hunks {
+        build_worktree_change(repo, from_tree, path_str, kind, diff_kind, unified)
+    } else {
+        FileChange {
+            path: path_str.to_string(),
+            kind: kind.to_string(),
+            ..Default::default()
+        }
+    }
+}
+
+/// A worktree path that exists and is not a directory (regular file or
+/// symlink). Used to confirm a dir→file type change: the path is a file on
+/// disk while `from_tree` still holds a directory there.
+fn worktree_path_is_nondir_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|meta| !meta.is_dir())
+        .unwrap_or(false)
+}
+
+/// Resolve `path` to its subtree if it names a directory in `tree`,
+/// descending component by component. Returns `None` for a missing path or
+/// a blob/symlink leaf.
+fn dir_subtree_in_tree(repo: &Repository, tree: &Tree, path: &str) -> Result<Option<Tree>> {
+    let mut current = tree.clone();
+    let mut parts = path.split('/').peekable();
+    while let Some(name) = parts.next() {
+        let Some(entry) = current.get(name) else {
+            return Ok(None);
+        };
+        if !entry.is_tree() {
+            return Ok(None);
+        }
+        let Some(subtree) = repo.store().get_tree(&entry.hash)? else {
+            return Ok(None);
+        };
+        if parts.peek().is_none() {
+            return Ok(Some(subtree));
+        }
+        current = subtree;
+    }
+    Ok(None)
+}
+
+/// Collect every blob/symlink leaf path under `subtree`, prefixed with the
+/// subtree's path, so a dir→file type change can emit a deletion per file.
+fn collect_subtree_blob_paths(
+    repo: &Repository,
+    subtree: &Tree,
+    prefix: &str,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    for entry in subtree.entries() {
+        let child_path = format!("{prefix}/{}", entry.name);
+        if entry.is_tree() {
+            if let Some(nested) = repo.store().get_tree(&entry.hash)? {
+                collect_subtree_blob_paths(repo, &nested, &child_path, out)?;
+            }
+        } else {
+            out.push(child_path);
+        }
+    }
+    Ok(())
 }
 
 fn head_from_tree(repo: &Repository) -> Result<Option<Tree>> {
@@ -1330,6 +1540,26 @@ fn get_worktree_diff(
     }
 }
 
+/// A tracked file replaced by a directory (`foo` → `foo/bar`) surfaces in
+/// heddle's worktree status as a `modified` path whose worktree side is
+/// now a directory. `git diff` represents that as a *deletion* of the file
+/// (the directory's new files arrive as separate `added` entries), so we
+/// reclassify the modify to a deletion: otherwise `read_worktree_blob_for_diff`
+/// fails reading the directory, the change collapses to `lines: None`, and
+/// the renderer drops it — leaving `git apply` unable to create `foo/bar`
+/// over the still-present `foo`. Returns the effective `(kind, DiffKind)`.
+fn worktree_modified_type_change(
+    repo_root: &Path,
+    path: &str,
+    diff_kind: DiffKind,
+) -> Option<(&'static str, DiffKind)> {
+    if matches!(diff_kind, DiffKind::Modified) && repo_root.join(path).is_dir() {
+        Some(("deleted", DiffKind::Deleted))
+    } else {
+        None
+    }
+}
+
 fn read_worktree_blob_for_diff(path: &std::path::Path) -> Result<Blob> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
@@ -1427,6 +1657,16 @@ fn detect_clear_renames(
         .iter()
         .map(|(old_path, _, _)| old_path.as_str())
         .collect::<BTreeSet<_>>();
+    // The deleted entry (whose `mode` carries the rename's *old-side*
+    // mode) is dropped below, so snapshot old-side modes keyed by path
+    // first. A rename paired with a chmod/type change (`old.sh` -> `new.sh`
+    // made executable) needs both modes on the collapsed `renamed` change
+    // so the renderer can emit `old mode`/`new mode`.
+    let deleted_modes = changes
+        .iter()
+        .filter(|change| change.kind == "deleted")
+        .map(|change| (change.path.clone(), change.mode))
+        .collect::<std::collections::BTreeMap<String, Option<FileMode>>>();
 
     let mut output = Vec::with_capacity(changes.len() - renames.len());
     for mut change in changes {
@@ -1454,6 +1694,10 @@ fn detect_clear_renames(
             change.similarity_score = Some(score);
             change.lines = lines;
             change.eol = eol;
+            // `change.mode` already holds the added (new) side mode; pull
+            // the deleted (old) side mode off the snapshot so a rename+chmod
+            // surfaces both modes in the patch headers.
+            change.old_mode = deleted_modes.get(old_path).copied().flatten();
             // The original `added` carried a stat-path tally that
             // counted the file as a pure insertion; after we collapse
             // the (added, deleted) pair into one rename, those line

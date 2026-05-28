@@ -146,7 +146,22 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         }
 
         if is_rename {
-            buf.push_str(&format!("diff --git a/{old_path} b/{}\n", change.path));
+            buf.push_str(&format!(
+                "diff --git {} {}\n",
+                quote_path_for_patch("a/", old_path),
+                quote_path_for_patch("b/", &change.path)
+            ));
+            // A rename paired with a chmod/type change (`old.sh` renamed
+            // to `new.sh` and made executable) carries both modes; emit
+            // the `old mode`/`new mode` pair before `similarity index`,
+            // matching `git diff`, so `git apply` reproduces the
+            // permission change as well as the move.
+            if let (Some(old), Some(new)) = (change.old_mode, change.mode)
+                && old != new
+            {
+                buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
+                buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
+            }
             let pct = (change
                 .similarity_score
                 .unwrap_or(1.0)
@@ -154,8 +169,8 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
                 * 100.0)
                 .round() as u32;
             buf.push_str(&format!("similarity index {pct}%\n"));
-            buf.push_str(&format!("rename from {old_path}\n"));
-            buf.push_str(&format!("rename to {}\n", change.path));
+            buf.push_str(&format!("rename from {}\n", quote_path_for_patch("", old_path)));
+            buf.push_str(&format!("rename to {}\n", quote_path_for_patch("", &change.path)));
             // Pure rename — extended headers alone suffice; emitting
             // `--- a/old / +++ b/new` without hunks would tell git to
             // apply an empty patch and warn about a stray header.
@@ -163,10 +178,18 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
                 continue;
             }
         } else if is_added {
-            buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
+            buf.push_str(&format!(
+                "diff --git {} {}\n",
+                quote_path_for_patch("a/", &change.path),
+                quote_path_for_patch("b/", &change.path)
+            ));
             buf.push_str(&format!("new file mode {}\n", mode_str(change.mode)));
         } else if is_deleted {
-            buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
+            buf.push_str(&format!(
+                "diff --git {} {}\n",
+                quote_path_for_patch("a/", &change.path),
+                quote_path_for_patch("b/", &change.path)
+            ));
             buf.push_str(&format!("deleted file mode {}\n", mode_str(change.mode)));
         } else if mode_changed {
             // A modify whose mode changed (with or without a content
@@ -174,7 +197,11 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
             // header pair; a plain content modify still skips the
             // `diff --git` line (git apply accepts the bare `---`/`+++`
             // form, and the existing renderer never emitted it).
-            buf.push_str(&format!("diff --git a/{} b/{}\n", change.path, change.path));
+            buf.push_str(&format!(
+                "diff --git {} {}\n",
+                quote_path_for_patch("a/", &change.path),
+                quote_path_for_patch("b/", &change.path)
+            ));
             buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
             buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
         }
@@ -198,12 +225,12 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
         if is_added {
             buf.push_str("--- /dev/null\n");
         } else {
-            buf.push_str(&format!("--- a/{old_path}\n"));
+            buf.push_str(&format!("--- {}\n", quote_path_for_patch("a/", old_path)));
         }
         if is_deleted {
             buf.push_str("+++ /dev/null\n");
         } else {
-            buf.push_str(&format!("+++ b/{}\n", change.path));
+            buf.push_str(&format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
         }
         if let Some(lines) = lines_ref {
             render_patch_hunks(change, lines, &mut buf);
@@ -219,6 +246,59 @@ fn mode_str(mode: Option<FileMode>) -> &'static str {
         Some(FileMode::Executable) => "100755",
         Some(FileMode::Symlink) => "120000",
         Some(FileMode::Normal) | None => "100644",
+    }
+}
+
+/// Quote a patch-header path the way `git diff` does (C-style quoting,
+/// `core.quotePath` defaults to true). A path containing a tab, newline,
+/// double-quote, backslash, control byte, or non-ASCII byte is wrapped in
+/// double quotes with the bytes escaped; a "simple" path is emitted bare.
+///
+/// `prefix` is the in-quote prefix git stamps on `diff --git`/`--- `/`+++ `
+/// headers (`a/`, `b/`) — git puts the prefix *inside* the quotes
+/// (`"a/tab\there"`), so it is escaped alongside the path. `rename from`/
+/// `rename to` pass an empty prefix (git quotes the bare path there).
+///
+/// Verified byte-for-byte against `git diff` for tab, newline, quote,
+/// backslash, and non-ASCII (UTF-8 → per-byte octal) paths.
+fn quote_path_for_patch(prefix: &str, path: &str) -> String {
+    if !needs_c_quoting(prefix) && !needs_c_quoting(path) {
+        return format!("{prefix}{path}");
+    }
+    let mut out = String::with_capacity(prefix.len() + path.len() + 2);
+    out.push('"');
+    push_c_quoted(&mut out, prefix);
+    push_c_quoted(&mut out, path);
+    out.push('"');
+    out
+}
+
+fn needs_c_quoting(s: &str) -> bool {
+    s.bytes().any(byte_needs_escape)
+}
+
+/// git escapes any byte below 0x20, the DEL byte and everything above it
+/// (0x7f..=0xff — `core.quotePath` octal-escapes non-ASCII), plus the two
+/// in-quote metacharacters `"` and `\`.
+fn byte_needs_escape(byte: u8) -> bool {
+    matches!(byte, b'"' | b'\\') || !(0x20..0x7f).contains(&byte)
+}
+
+fn push_c_quoted(out: &mut String, s: &str) {
+    for byte in s.bytes() {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            0x07 => out.push_str("\\a"),
+            0x08 => out.push_str("\\b"),
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0b => out.push_str("\\v"),
+            0x0c => out.push_str("\\f"),
+            0x0d => out.push_str("\\r"),
+            0x20..=0x7e => out.push(byte as char),
+            other => out.push_str(&format!("\\{other:03o}")),
+        }
     }
 }
 
@@ -1023,7 +1103,7 @@ mod tests {
 
     use super::{
         SIGNATURE_CHANGE_SEPARATOR, aligned_added_tokens, group_semantic_changes, paint_line,
-        paint_signature_change_item_lines, render_diff_patch,
+        paint_signature_change_item_lines, quote_path_for_patch, render_diff_patch,
         signature_change_display_segments,
     };
     use crate::cli::commands::diff::diff_types::{
@@ -1321,6 +1401,35 @@ mod tests {
         assert!(
             rendered.contains("-tail\n\\ No newline at end of file\n"),
             "marker must follow the OLD tail deletion line:\n{rendered}"
+        );
+    }
+
+    /// Pin git's C-style path quoting byte-for-byte. The conformance
+    /// harness round-trips the common classes through real `git apply`;
+    /// this covers the exact escape spellings (including the `\a \b \v \f
+    /// \r` controls and octal fallback) the integration cells don't reach.
+    #[test]
+    fn quote_path_matches_git_c_style() {
+        // Simple paths — and spaces, which git leaves bare — emit unquoted.
+        assert_eq!(quote_path_for_patch("a/", "src/main.rs"), "a/src/main.rs");
+        assert_eq!(
+            quote_path_for_patch("a/", "with space.txt"),
+            "a/with space.txt"
+        );
+        // Tab/newline/quote/backslash force quoting; the prefix is escaped
+        // inside the quotes, matching git's `quote_two`.
+        assert_eq!(quote_path_for_patch("a/", "tab\there"), "\"a/tab\\there\"");
+        assert_eq!(quote_path_for_patch("b/", "line\nbreak"), "\"b/line\\nbreak\"");
+        assert_eq!(quote_path_for_patch("a/", "quo\"te"), "\"a/quo\\\"te\"");
+        assert_eq!(quote_path_for_patch("a/", "back\\slash"), "\"a/back\\\\slash\"");
+        // Non-ASCII (UTF-8 é = 0xC3 0xA9) → per-byte octal.
+        assert_eq!(quote_path_for_patch("a/", "café"), "\"a/caf\\303\\251\"");
+        // `rename from`/`rename to` quote the bare path (empty prefix).
+        assert_eq!(quote_path_for_patch("", "x\ty"), "\"x\\ty\"");
+        // The remaining named C-escapes plus a low control byte (octal).
+        assert_eq!(
+            quote_path_for_patch("", "\u{07}\u{08}\u{0b}\u{0c}\r\u{01}"),
+            "\"\\a\\b\\v\\f\\r\\001\""
         );
     }
 
