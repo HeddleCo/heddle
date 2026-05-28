@@ -182,7 +182,20 @@ async fn async_main() -> Result<()> {
     let command_name = command_contract.display.clone();
     let command_supports_op_id = command_contract.supports_op_id;
     let config_start = Instant::now();
-    let user_config = UserConfig::load_default()?;
+    // Route early UserConfig load failures through the same typed
+    // envelope as command-body errors. Without this, a legacy
+    // `output.format = "auto"` in the global user config (or via
+    // `HEDDLE_CONFIG`) exits with a raw TOML parse error and bypasses
+    // the `Next:` / JSON-envelope contract #271 promised — `?` here
+    // would propagate to `main` and print via anyhow's Debug impl.
+    let user_config = match UserConfig::load_default() {
+        Ok(config) => config,
+        Err(err) => {
+            let code = HeddleExitCode::from_error(&err);
+            print_error_with_hint(&cli, &err);
+            std::process::exit(code.into());
+        }
+    };
     let config_load_ms = config_start.elapsed().as_millis();
     let logging_start = Instant::now();
     // Foreground CLI commands default to WARN-level logs so the human-facing
