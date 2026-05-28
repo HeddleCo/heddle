@@ -933,24 +933,10 @@ fn is_local_git_repository(path: &Path) -> bool {
 }
 
 fn plain_git_remote_items(root: &Path) -> BTreeMap<String, String> {
-    let mut remotes = BTreeMap::new();
-    for config_path in plain_git_config_paths(root) {
-        parse_git_config_remotes(&config_path, &mut remotes);
-    }
-    remotes
-}
-
-fn plain_git_config_paths(root: &Path) -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-    let dot_git = root.join(".git");
-    paths.push(dot_git.join("config"));
-    if let Some(git_dir) = pointed_git_dir(&dot_git) {
-        paths.push(git_dir.join("config"));
-        if let Some(common_dir) = common_git_dir(&git_dir) {
-            paths.push(common_dir.join("config"));
-        }
-    }
-    paths
+    let Some(ctx) = GitConfigContext::discover(root) else {
+        return BTreeMap::new();
+    };
+    ctx.remotes(ctx.layered_paths())
 }
 
 fn default_remote_from_items(items: &BTreeMap<String, String>) -> Option<String> {
@@ -964,76 +950,106 @@ fn default_remote_from_items(items: &BTreeMap<String, String>) -> Option<String>
 }
 
 fn git_overlay_config_remotes(repo: &Repository) -> BTreeMap<String, String> {
-    let mut remotes = BTreeMap::new();
-    for config_path in git_overlay_config_paths(repo) {
-        parse_git_config_remotes(&config_path, &mut remotes);
-    }
-    remotes
-}
-
-fn git_overlay_config_paths(repo: &Repository) -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-    paths.push(repo.root().join(".git").join("config"));
-    if let Some(git_dir) = pointed_git_dir(&repo.root().join(".git")) {
-        paths.push(git_dir.join("config"));
-        if let Some(common_dir) = common_git_dir(&git_dir) {
-            paths.push(common_dir.join("config"));
-        }
-    }
-    paths.push(repo.heddle_dir().join("git").join("config"));
-    paths
-}
-
-fn pointed_git_dir(dot_git: &Path) -> Option<std::path::PathBuf> {
-    if dot_git.is_dir() {
-        return Some(dot_git.to_path_buf());
-    }
-    let contents = fs::read_to_string(dot_git).ok()?;
-    let target = contents.trim().strip_prefix("gitdir:")?.trim();
-    let path = Path::new(target);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        dot_git.parent()?.join(path)
-    })
-}
-
-fn common_git_dir(git_dir: &Path) -> Option<std::path::PathBuf> {
-    let contents = fs::read_to_string(git_dir.join("commondir")).ok()?;
-    let target = contents.trim();
-    let path = Path::new(target);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        git_dir.join(path)
-    })
-}
-
-fn parse_git_config_remotes(path: &Path, remotes: &mut BTreeMap<String, String>) {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return;
+    let Some(ctx) = GitConfigContext::discover(repo.root()) else {
+        return BTreeMap::new();
     };
-    let mut current_remote: Option<String> = None;
-    for raw in contents.lines() {
-        let line = raw.trim();
-        if line.starts_with('[') && line.ends_with(']') {
-            current_remote = line
-                .strip_prefix("[remote \"")
-                .and_then(|rest| rest.strip_suffix("\"]"))
-                .map(str::to_string);
-            continue;
+    let mut paths = ctx.layered_paths();
+    paths.push(repo.heddle_dir().join("git").join("config"));
+    ctx.remotes(paths)
+}
+
+/// The resolved Git directory layout for a repository, used to read remote
+/// definitions from `.git/config` (and its layered companions) through
+/// `gix_config`, which correctly handles quoting, inline comments, include
+/// directives, and conditional `includeIf` directives.
+struct GitConfigContext {
+    git_dir: std::path::PathBuf,
+    common_dir: std::path::PathBuf,
+    branch: Option<gix::refs::FullName>,
+}
+
+impl GitConfigContext {
+    fn discover(root: &Path) -> Option<Self> {
+        let git = gix::discover(root).ok()?;
+        Some(Self {
+            git_dir: git.git_dir().to_path_buf(),
+            common_dir: git.common_dir().to_path_buf(),
+            branch: git.head_name().ok().flatten(),
+        })
+    }
+
+    fn branch_ref(&self) -> Option<&gix::refs::FullNameRef> {
+        self.branch.as_ref().map(AsRef::as_ref)
+    }
+
+    /// The standard repository config files, ordered highest-precedence first:
+    /// the per-worktree `config.worktree` (only when `extensions.worktreeConfig`
+    /// is enabled), then the git-dir `config`, then the shared common-dir
+    /// `config` for linked worktrees.
+    fn layered_paths(&self) -> Vec<std::path::PathBuf> {
+        let mut paths = Vec::new();
+        if self.worktree_config_enabled() {
+            paths.push(self.git_dir.join("config.worktree"));
         }
-        let Some(name) = current_remote.as_ref() else {
-            continue;
+        paths.push(self.git_dir.join("config"));
+        if self.common_dir != self.git_dir {
+            paths.push(self.common_dir.join("config"));
+        }
+        paths
+    }
+
+    fn worktree_config_enabled(&self) -> bool {
+        let mut paths = vec![self.git_dir.join("config")];
+        if self.common_dir != self.git_dir {
+            paths.push(self.common_dir.join("config"));
+        }
+        self.load(paths)
+            .and_then(|file| file.boolean("extensions.worktreeConfig"))
+            .and_then(Result::ok)
+            .unwrap_or(false)
+    }
+
+    fn remotes(&self, paths: Vec<std::path::PathBuf>) -> BTreeMap<String, String> {
+        let mut remotes = BTreeMap::new();
+        let Some(file) = self.load(paths) else {
+            return remotes;
         };
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
+        let Some(sections) = file.sections_by_name("remote") else {
+            return remotes;
         };
-        if key.trim() == "url" {
+        for section in sections {
+            let Some(name) = section.header().subsection_name() else {
+                continue;
+            };
+            let Some(url) = section.value("url") else {
+                continue;
+            };
             remotes
-                .entry(name.clone())
-                .or_insert_with(|| value.trim().to_string());
+                .entry(name.to_string())
+                .or_insert_with(|| url.to_string());
         }
+        remotes
+    }
+
+    fn load(&self, paths: Vec<std::path::PathBuf>) -> Option<gix_config::File<'static>> {
+        let options = gix_config::file::init::Options {
+            includes: gix_config::file::includes::Options::follow(
+                gix_config::path::interpolate::Context::default(),
+                gix_config::file::includes::conditional::Context {
+                    git_dir: Some(&self.git_dir),
+                    branch_name: self.branch_ref(),
+                },
+            ),
+            lossy: true,
+            ignore_io_errors: true,
+        };
+        let mut metadata = paths
+            .into_iter()
+            .map(|path| gix_config::file::Metadata::from(gix_config::Source::Local).at(path));
+        let mut buf = Vec::new();
+        gix_config::File::from_paths_metadata_buf(&mut metadata, &mut buf, false, options)
+            .ok()
+            .flatten()
     }
 }
 
@@ -1058,12 +1074,8 @@ fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
 }
 
 fn git_overlay_config_path_for_write(repo: &Repository) -> Option<std::path::PathBuf> {
-    let dot_git = repo.root().join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git.join("config"));
-    }
-    let git_dir = pointed_git_dir(&dot_git)?;
-    Some(common_git_dir(&git_dir).unwrap_or(git_dir).join("config"))
+    let git = gix::discover(repo.root()).ok()?;
+    Some(git.common_dir().join("config"))
 }
 
 fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
