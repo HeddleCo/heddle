@@ -1810,6 +1810,79 @@ fn sync_export_and_import_report_consistent_total_and_new() {
     );
 }
 
+/// heddle#289 r2: the export "total" must count only commits that land
+/// in the destination — i.e. states reachable from an exported ref. A
+/// state whose thread was dropped (its ref deleted) is orphaned in the
+/// store; it gets minted into the local mirror but never reaches the
+/// destination's ref graph, so it must NOT inflate `commits_total`.
+#[test]
+fn export_total_excludes_orphaned_unreferenced_states() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_source_temp, source_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&source_repo);
+    // main: two-commit history → 2 states reachable from the branch tip.
+    let first = commit_with_tree(&source_repo, None, tree_oid, "first", &[]);
+    commit_with_tree(
+        &source_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "second",
+        &[first],
+    );
+    // feature: an independent root commit → 1 state reachable only via
+    // this branch, sharing no history with main.
+    commit_with_tree(
+        &source_repo,
+        Some("refs/heads/feature"),
+        tree_oid,
+        "feature-only",
+        &[],
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    bridge
+        .import(Some(source_repo.workdir().expect("workdir")))
+        .expect("import from git");
+
+    // All three states now exist in the store.
+    assert_eq!(
+        bridge.heddle_repo.store().list_states().expect("states").len(),
+        3,
+        "import should have created three states (two on main, one on feature)"
+    );
+
+    // Drop the feature thread: its ref is gone, so its state is now an
+    // orphan — present in the store, reachable from no exported ref.
+    bridge
+        .heddle_repo
+        .refs()
+        .delete_thread(&ThreadName::new("feature"))
+        .expect("delete feature thread");
+
+    let stats = export_all(&mut bridge).expect("export");
+
+    // Only main's two commits land in the destination; the orphaned
+    // feature state is excluded from the total.
+    assert_eq!(
+        stats.commits_total, 2,
+        "export total must count only ref-reachable commits (main's 2), \
+         not the orphaned feature state, got {}",
+        stats.commits_total
+    );
+    assert!(
+        stats.branches.iter().any(|b| b.name == "main"),
+        "main branch should still be exported: {:?}",
+        stats.branches
+    );
+    assert!(
+        !stats.branches.iter().any(|b| b.name == "feature"),
+        "dropped feature thread must not appear as an exported branch: {:?}",
+        stats.branches
+    );
+}
+
 /// Phase A: `commits_imported` and `states_created` should both reflect new
 /// state writes for a fresh import.
 #[test]

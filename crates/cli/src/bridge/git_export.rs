@@ -207,10 +207,9 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         // original commit bytes are already present (and whose SHAs we
         // want to preserve verbatim, which means NOT recreating them).
         if bridge.mapping.has_heddle(&state_id) {
-            // Already mapped to an existing commit — it still lands in
-            // the destination, so it counts toward the total even though
-            // nothing is minted here.
-            stats.commits_total += 1;
+            // Already mapped to an existing commit — nothing to mint.
+            // Whether it counts toward the total is decided below by
+            // ref-reachability, not by membership in the walked set.
             continue;
         }
         let message_override = bridge
@@ -227,7 +226,6 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         )?;
         bridge.mapping.insert(state_id, git_oid);
         stats.states_exported += 1;
-        stats.commits_total += 1;
 
         // Attach a heddle note to the freshly-created commit so the
         // change_id survives a fresh `git clone` of the destination
@@ -267,6 +265,13 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 .collect()
         }
     };
+    // State ids at the tip of every ref actually written to the
+    // destination. The export "total" is the count of states reachable
+    // from these tips — i.e. the commits that land in the destination's
+    // ref graph. States with no surviving ref (e.g. a dropped thread's
+    // orphaned history) are minted into the local mirror but never reach
+    // the destination, so they must not inflate the headline total.
+    let mut exported_ref_tips: Vec<ChangeId> = Vec::new();
     for track_name in threads {
         if let Some(state_id) = bridge.heddle_repo.refs().get_thread(&ThreadName::new(&track_name))?
             && let Some(git_oid) = bridge.mapping.get_git(&state_id)
@@ -277,6 +282,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 name: track_name.clone(),
                 tip: git_oid,
             });
+            exported_ref_tips.push(state_id);
         }
     }
 
@@ -292,9 +298,15 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                     name: marker_name.to_string(),
                     tip: git_oid,
                 });
+                exported_ref_tips.push(state_id);
             }
         }
     }
+
+    // Total = unique states reachable from the exported ref tips. This is
+    // exactly what lands in the destination (newly-minted + already-mapped
+    // commits under an exported branch/tag); orphaned states are excluded.
+    stats.commits_total = reachable_states(bridge.heddle_repo, &exported_ref_tips)?.len();
 
     bridge.save_mapping_to_disk()?;
 
