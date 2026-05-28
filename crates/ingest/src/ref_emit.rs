@@ -49,15 +49,17 @@ pub struct RefEmitStats {
 
 /// Writes threads (branches) and markers (tags) into a Heddle repo.
 ///
-/// Takes a `&dyn RefBackend` so the same emitter works against the local
-/// `RefManager` (CLI / tests) and the server's Postgres-backed backend.
-pub struct RefEmitter<'a> {
-    refs: &'a dyn RefBackend,
+/// Generic over the [`RefBackend`] so the same emitter works against the
+/// local `RefManager` (CLI / tests) and the server's Postgres-backed
+/// backend — the trait's `async fn` reads forbid `&dyn` dispatch, so the
+/// backend is a type parameter.
+pub struct RefEmitter<'a, R: RefBackend> {
+    refs: &'a R,
     map: &'a ShaMap,
 }
 
-impl<'a> RefEmitter<'a> {
-    pub fn new(refs: &'a dyn RefBackend, map: &'a ShaMap) -> Self {
+impl<'a, R: RefBackend> RefEmitter<'a, R> {
+    pub fn new(refs: &'a R, map: &'a ShaMap) -> Self {
         Self { refs, map }
     }
 
@@ -65,7 +67,11 @@ impl<'a> RefEmitter<'a> {
     /// twice with the same input is a no-op for any ref whose commit
     /// hasn't moved (the underlying `set_thread` / `create_marker`
     /// overwrite atomically).
-    pub fn emit(&self, heads: &[RefHead]) -> crate::Result<RefEmitStats> {
+    ///
+    /// `async` because the marker read (`get_marker`) is an `async`
+    /// backend method; for the local `RefManager` the future is
+    /// immediately ready.
+    pub async fn emit(&self, heads: &[RefHead]) -> crate::Result<RefEmitStats> {
         let mut stats = RefEmitStats::default();
         for head in heads {
             let Some(cid) = self.map.get_commit(&head.target_sha) else {
@@ -101,6 +107,7 @@ impl<'a> RefEmitter<'a> {
                     let existing = self
                         .refs
                         .get_marker(&marker_name)
+                        .await
                         .map_err(IngestError::from)?;
                     if existing != Some(cid) {
                         self.refs
@@ -156,7 +163,7 @@ mod tests {
             sample_head("main", RefNamespace::Branch, &git_sha),
             sample_head("v0.1", RefNamespace::Tag, &git_sha),
         ];
-        let stats = RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
+        let stats = pollster::block_on(RefEmitter::new(&mgr, &map).emit(&heads)).unwrap();
 
         assert_eq!(stats.threads_written, 1);
         assert_eq!(stats.markers_written, 1);
@@ -183,7 +190,7 @@ mod tests {
             RefNamespace::Branch,
             &git_sha,
         )];
-        RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
+        pollster::block_on(RefEmitter::new(&mgr, &map).emit(&heads)).unwrap();
 
         assert_eq!(
             mgr.get_thread(&ThreadName::new("feature/ingest")).unwrap(),
@@ -199,7 +206,7 @@ mod tests {
         let git_sha = "c".repeat(40);
         let heads = vec![sample_head("orphan", RefNamespace::Branch, &git_sha)];
 
-        let stats = RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
+        let stats = pollster::block_on(RefEmitter::new(&mgr, &map).emit(&heads)).unwrap();
         assert_eq!(stats.threads_written, 0);
         assert_eq!(stats.skipped_unmapped, 1);
         assert_eq!(mgr.get_thread(&ThreadName::new("orphan")).unwrap(), None);
@@ -223,7 +230,7 @@ mod tests {
             sample_head("main", RefNamespace::Branch, &local_sha),
             sample_head("origin/main", RefNamespace::RemoteBranch, &remote_sha),
         ];
-        let stats = RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
+        let stats = pollster::block_on(RefEmitter::new(&mgr, &map).emit(&heads)).unwrap();
 
         assert_eq!(stats.threads_written, 2);
         assert_eq!(
@@ -245,8 +252,8 @@ mod tests {
         map.insert_commit(&git_sha, cid).unwrap();
         let heads = vec![sample_head("main", RefNamespace::Branch, &git_sha)];
 
-        let first = RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
-        let second = RefEmitter::new(&mgr, &map).emit(&heads).unwrap();
+        let first = pollster::block_on(RefEmitter::new(&mgr, &map).emit(&heads)).unwrap();
+        let second = pollster::block_on(RefEmitter::new(&mgr, &map).emit(&heads)).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(mgr.get_thread(&ThreadName::new("main")).unwrap(), Some(cid));
