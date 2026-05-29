@@ -3,9 +3,9 @@
 
 use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
-use objects::object::{ChangeId, ContentHash, MarkerName};
+use objects::object::{ChangeId, ContentHash};
 use oplog::{OpBatch, OpRecord};
-use refs::RefExpectation;
+use refs::UNDO_RECOVERY_HANDLE;
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
 
@@ -21,11 +21,20 @@ use super::{
 };
 use crate::cli::{Cli, should_output_json, style};
 
-/// Marker that `undo` points at the pre-undo state before resetting, so the
+/// Well-known handle that `undo` records the pre-undo state under, so the
 /// worktree content the undone batch absorbed stays a first-class, addressable
-/// recovery point in heddle's thread history. A single rolling marker
+/// recovery point in heddle's thread history. A single rolling ref
 /// (ORIG_HEAD-style): each undo overwrites it with its own pre-undo tip.
-const UNDO_RECOVERY_MARKER: &str = "undo-recovery";
+///
+/// Invariant: this is a heddle-INTERNAL ref (`refs::RefManager::set_undo_recovery`,
+/// stored at `.heddle/UNDO_RECOVERY`), NOT a user marker. No heddle-internal
+/// bookkeeping ref may live in a user-writable namespace (`refs/markers/`,
+/// `refs/threads/`, `refs/remotes/`): doing so coupled recovery to a
+/// user-writable name and let the `MarkerDelete` undo inverse collide with it.
+/// `apply_undo_batch` replays only user-marker/thread inverses, so it can never
+/// see or clobber this internal pointer. `heddle goto undo-recovery` resolves
+/// it via the [`refs::UNDO_RECOVERY_HANDLE`] fallback in `RefManager::resolve`.
+const UNDO_RECOVERY_MARKER: &str = UNDO_RECOVERY_HANDLE;
 
 #[derive(Serialize)]
 struct OpListOutput {
@@ -167,19 +176,19 @@ pub fn cmd_undo(
     // heddle#305: capture the pre-undo state into thread history BEFORE the
     // reset, so the worktree content the undone batch(es) absorbed is never
     // silently discarded. The reset below hard-resets the Git mirror and
-    // rewinds the heddle thread; recording the current tip as the
-    // `undo-recovery` marker keeps it a first-class, addressable recovery
-    // point — durable even if a later divergent capture/commit strands the
-    // redo path. The preflights above guarantee the worktree is clean, so the
-    // tip's tree *is* the pre-undo worktree. Durability lives in heddle's
-    // immutable store + refs; undo never records itself as Git history.
+    // rewinds the heddle thread; recording the current tip in the internal
+    // recovery ref keeps it a first-class, addressable recovery point —
+    // durable even if a later divergent capture/commit strands the redo path.
+    // The preflights above guarantee the worktree is clean, so the tip's tree
+    // *is* the pre-undo worktree. Durability lives in heddle's immutable store
+    // + refs; undo never records itself as Git history.
+    //
+    // heddle#305 r2: this is written to a heddle-INTERNAL ref, not a user
+    // marker — see UNDO_RECOVERY_MARKER. Keeping it out of `refs/markers/`
+    // means the `MarkerDelete` undo inverse below can never collide with it.
     let recovery_state = repo.head()?;
     if let Some(state) = recovery_state {
-        repo.refs().set_marker_cas(
-            &MarkerName::new(UNDO_RECOVERY_MARKER),
-            RefExpectation::Any,
-            &state,
-        )?;
+        repo.refs().set_undo_recovery(&state)?;
     }
 
     let mut updated_batches = Vec::with_capacity(batches.len());
@@ -225,7 +234,7 @@ pub fn cmd_undo(
         print_head(&post_undo_repo)?;
         if let Some(state) = &output.recovery_state {
             println!(
-                "Preserved pre-undo state {} as marker `{}` (recover with `heddle goto {}`)",
+                "Preserved pre-undo state {} as `{}` (recover with `heddle goto {}`)",
                 style::change_id(state),
                 UNDO_RECOVERY_MARKER,
                 UNDO_RECOVERY_MARKER,

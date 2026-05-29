@@ -423,3 +423,52 @@ fn test_ref_summary_index_falls_back_when_sidecar_is_corrupt() {
         vec![ThreadName::new("main")]
     );
 }
+
+/// heddle#305 r2: the internal undo-recovery ref must live OUTSIDE the
+/// user-writable marker namespace. It coexists with a user marker of the same
+/// literal name, is invisible to `list_markers`, and a user `create_marker` /
+/// `delete_marker` of that name never touches the internal pointer — and vice
+/// versa. This closes the namespace-collision class structurally: the
+/// `MarkerDelete` undo inverse (`create_marker(undo-recovery, Missing)`) can
+/// never collide with recovery bookkeeping.
+#[test]
+fn undo_recovery_ref_is_isolated_from_user_marker_namespace() {
+    let (_temp, refs) = create_ref_manager();
+    let recovery_state = ChangeId::generate();
+    let user_state = ChangeId::generate();
+    assert_ne!(recovery_state, user_state);
+
+    refs.set_undo_recovery(&recovery_state).unwrap();
+
+    // The internal recovery ref is invisible to user marker enumeration and
+    // unreadable through the marker API.
+    assert!(
+        refs.list_markers().unwrap().is_empty(),
+        "the internal recovery ref must never appear as a user marker"
+    );
+    assert_eq!(
+        refs.get_marker(&MarkerName::new(UNDO_RECOVERY_HANDLE)).unwrap(),
+        None,
+        "the internal recovery ref must not be readable as a user marker"
+    );
+
+    // A user may create a marker with the same literal name; the `Missing`
+    // expectation succeeds because the internal ref does not occupy the
+    // marker namespace. This is exactly the `MarkerDelete` undo-inverse shape
+    // that previously risked colliding with the recovery write.
+    refs.create_marker(&MarkerName::new(UNDO_RECOVERY_HANDLE), &user_state)
+        .unwrap();
+    // The two pointers are independent.
+    assert_eq!(refs.get_undo_recovery().unwrap(), Some(recovery_state));
+    assert_eq!(
+        refs.get_marker(&MarkerName::new(UNDO_RECOVERY_HANDLE)).unwrap(),
+        Some(user_state)
+    );
+
+    // Deleting the user marker leaves the internal recovery ref intact.
+    refs.delete_marker(&MarkerName::new(UNDO_RECOVERY_HANDLE)).unwrap();
+    assert_eq!(refs.get_undo_recovery().unwrap(), Some(recovery_state));
+
+    // With no user marker, the handle resolves the internal recovery ref.
+    assert_eq!(refs.resolve(UNDO_RECOVERY_HANDLE).unwrap(), Some(recovery_state));
+}

@@ -873,8 +873,9 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
 
 /// heddle#305 (git-overlay): `commit` then `undo` hard-resets the Git mirror
 /// to the parent — no revert commit recorded as Git history — while preserving
-/// the pre-undo state in heddle's thread history via the `undo-recovery`
-/// marker, so the absorbed worktree edits are never silently discarded. The
+/// the pre-undo state in heddle's thread history via the internal
+/// `undo-recovery` handle (heddle#305 r2: a heddle-internal ref, not a user
+/// marker), so the absorbed worktree edits are never silently discarded. The
 /// durability lives in heddle's store, not in Git history.
 #[test]
 fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
@@ -934,17 +935,21 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
     );
 
     // The pre-undo state is preserved in heddle's thread history via the
-    // recovery marker, even though Git was hard-reset.
+    // internal recovery handle, even though Git was hard-reset. heddle#305 r2:
+    // it must NOT leak into the user marker namespace.
     let markers = assert_clean_json_without_git(&["--output", "json", "marker", "list"], &work);
-    let recovery = markers["markers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["name"] == "undo-recovery")
-        .expect("undo must record an `undo-recovery` marker for the pre-undo state");
+    assert!(
+        markers["markers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["name"] != "undo-recovery"),
+        "recovery bookkeeping must not appear as a user marker"
+    );
+    assert_eq!(undo["recovery_marker"], "undo-recovery");
     assert_eq!(
-        recovery["change_id"], friction_state,
-        "recovery marker must point at the pre-undo (friction) heddle state"
+        undo["recovery_state"], friction_state,
+        "recovery handle must pin the pre-undo (friction) heddle state"
     );
 
     // And `redo` round-trips the absorbed content back into the worktree.

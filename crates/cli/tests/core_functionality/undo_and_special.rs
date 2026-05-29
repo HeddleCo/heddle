@@ -527,21 +527,18 @@ fn test_undo_captures_pre_undo_state_into_recovery_marker() {
     );
 
     // (a) The pre-undo worktree content is captured into thread history: undo
-    // records a recovery marker pointing at the pre-undo state.
-    let markers: Value = serde_json::from_str(&heddle_must_succeed(
-        &["--output", "json", "marker", "list"],
-        temp.path(),
-    ))
-    .unwrap();
-    let recovery = markers["markers"]
-        .as_array()
+    // records the pre-undo state in the heddle-internal recovery ref (NOT a
+    // user marker — see heddle#305 r2).
+    let repo = Repository::open(temp.path()).unwrap();
+    let recovery = repo
+        .refs()
+        .get_undo_recovery()
         .unwrap()
-        .iter()
-        .find(|m| m["name"] == "undo-recovery")
-        .expect("undo must record an `undo-recovery` marker for the pre-undo state");
+        .expect("undo must record the pre-undo state in the internal recovery ref");
     assert_eq!(
-        recovery["change_id"], friction_state,
-        "the recovery marker must point at the pre-undo (friction) state, not the reset target"
+        recovery.short(),
+        friction_state,
+        "the recovery ref must point at the pre-undo (friction) state, not the reset target"
     );
 
     // (b) `redo` restores the captured content (round-trips the worktree).
@@ -575,26 +572,22 @@ fn test_undo_recovery_marker_survives_divergent_capture() {
     std::fs::write(temp.path().join("notes.md"), "different direction\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "diverge"], temp.path());
 
-    // The durable recovery marker still pins the pre-undo (friction) state.
-    let markers: Value = serde_json::from_str(&heddle_must_succeed(
-        &["--output", "json", "marker", "list"],
-        temp.path(),
-    ))
-    .unwrap();
-    let recovery = markers["markers"]
-        .as_array()
+    // The durable internal recovery ref still pins the pre-undo (friction)
+    // state, untouched by the divergent capture.
+    let repo = Repository::open(temp.path()).unwrap();
+    let recovery = repo
+        .refs()
+        .get_undo_recovery()
         .unwrap()
-        .iter()
-        .find(|m| m["name"] == "undo-recovery")
-        .expect("recovery marker must survive a divergent capture");
-    assert_eq!(recovery["change_id"], friction_state);
+        .expect("recovery ref must survive a divergent capture");
+    assert_eq!(recovery.short(), friction_state);
 
-    // Recover the pre-undo content by name.
+    // Recover the pre-undo content via the well-known handle.
     heddle_must_succeed(&["goto", "undo-recovery"], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION ONE\nFRICTION TWO\n",
-        "the pre-undo content must be recoverable via the durable recovery marker"
+        "the pre-undo content must be recoverable via the durable recovery handle"
     );
 }
 
