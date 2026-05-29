@@ -232,6 +232,94 @@ fn recapture_to_empty_tree_prunes_stale_intent_to_add() {
     );
 }
 
+/// Git's index cannot hold both `foo` (a blob) and `foo/bar` (a blob
+/// under a directory) — they are mutually exclusive (a path is either a
+/// file or a directory). When a recapture introduces a path that
+/// file/dir-PREFIX-conflicts with a still-tracked real entry, the ADD
+/// pass must NOT write an intent-to-add entry for it: the real entry
+/// wins, and a conflicting placeholder would corrupt the index into a
+/// file/dir conflict.
+///
+/// Direction A: Git tracks `foo` (a file); the worktree replaces it with
+/// a directory `foo/` holding `foo/bar`. Recapture must not add an
+/// intent-to-add entry for `foo/bar` alongside the tracked `foo`.
+#[test]
+fn recapture_skips_intent_to_add_that_conflicts_with_tracked_file() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::write(source.path().join("foo"), "i am a file\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    // Replace the tracked file `foo` with a directory `foo/` containing
+    // `foo/bar`. The captured state now has `foo/bar`, but the real
+    // index entry `foo` is still present (no checkpoint has committed
+    // the change). Adding intent-to-add for `foo/bar` would conflict.
+    std::fs::remove_file(source.path().join("foo")).unwrap();
+    std::fs::create_dir(source.path().join("foo")).unwrap();
+    std::fs::write(source.path().join("foo").join("bar"), "now a dir\n").unwrap();
+    heddle(&["capture", "-m", "file becomes directory"], Some(source.path()))
+        .expect("recapture should record the file→dir change");
+
+    // The index must stay valid: never both `foo` and `foo/bar`.
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    let has_foo = staged.lines().any(|l| l.ends_with("\tfoo"));
+    let has_foo_bar = staged.lines().any(|l| l.ends_with("\tfoo/bar"));
+    assert!(
+        !(has_foo && has_foo_bar),
+        "index must not hold both `foo` and `foo/bar` (file/dir conflict). ls-files:\n{staged}"
+    );
+    // git status must still run cleanly over the index.
+    let _ = git_status_porcelain(source.path());
+}
+
+/// Direction B (reverse): Git tracks `foo/bar` (a blob under a dir); the
+/// worktree replaces the directory with a file `foo`. The captured state
+/// has `foo`, but the real index entry `foo/bar` is still present.
+/// Adding intent-to-add for `foo` would conflict with the tracked
+/// `foo/bar`, so it must be skipped.
+#[test]
+fn recapture_skips_intent_to_add_that_conflicts_with_tracked_dir() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::create_dir(source.path().join("foo")).unwrap();
+    std::fs::write(source.path().join("foo").join("bar"), "i am under a dir\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    // Replace the directory `foo/` with a file `foo`. The captured state
+    // now has `foo`, but the real index entry `foo/bar` is still present.
+    std::fs::remove_dir_all(source.path().join("foo")).unwrap();
+    std::fs::write(source.path().join("foo"), "now a file\n").unwrap();
+    heddle(&["capture", "-m", "dir becomes file"], Some(source.path()))
+        .expect("recapture should record the dir→file change");
+
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    let has_foo = staged.lines().any(|l| l.ends_with("\tfoo"));
+    let has_foo_bar = staged.lines().any(|l| l.ends_with("\tfoo/bar"));
+    assert!(
+        !(has_foo && has_foo_bar),
+        "index must not hold both `foo` and `foo/bar` (file/dir conflict). ls-files:\n{staged}"
+    );
+    let _ = git_status_porcelain(source.path());
+}
+
 #[test]
 fn test_cli_bridge_git_init() {
     let temp = TempDir::new().unwrap();
