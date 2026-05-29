@@ -664,3 +664,145 @@ pub trait ObjectStore: Send + Sync {
         Ok(Vec::new())
     }
 }
+
+#[cfg(test)]
+mod any_store_tests {
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::object::{Attribution, Operation, Principal};
+
+    fn fs_any_store() -> (TempDir, AnyStore) {
+        let temp = TempDir::new().unwrap();
+        let store = FsStore::new(temp.path().join(".heddle"));
+        store.init().unwrap();
+        (temp, AnyStore::Fs(store))
+    }
+
+    /// Drive every `ObjectStore` method through the `AnyStore::Fs` dispatch arm
+    /// so the enum's match-dispatch is exercised end-to-end. This is the
+    /// coverage seam for heddle#283: each arm forwards to the inner concrete
+    /// store, and a missing arm would fail to compile or silently fall back to
+    /// a trait default.
+    #[test]
+    fn fs_variant_dispatches_every_object_store_method() {
+        let (_temp, store) = fs_any_store();
+
+        // ── Blobs ──
+        let blob = Blob::from("any-store dispatch blob");
+        let blob_hash = store.put_blob(&blob).unwrap();
+        assert_eq!(store.get_blob(&blob_hash).unwrap().unwrap().content(), blob.content());
+        assert!(store.has_blob(&blob_hash).unwrap());
+        assert_eq!(
+            store.get_blob_bytes(&blob_hash).unwrap().unwrap().as_ref(),
+            blob.content()
+        );
+        assert_eq!(store.blob_size(&blob_hash).unwrap().unwrap(), blob.content().len() as u64);
+        assert!(store.loose_blob_path(&blob_hash).is_some());
+        store.promote_to_loose_uncompressed(&blob_hash).unwrap();
+        assert!(store.list_blobs().unwrap().contains(&blob_hash));
+
+        let bytes_blob = Blob::from("put-with-hash blob");
+        let bytes_hash = bytes_blob.hash();
+        assert_eq!(
+            store.put_blob_with_hash(&bytes_blob, bytes_hash).unwrap(),
+            bytes_hash
+        );
+        let raw_blob = Blob::from("raw bytes blob");
+        let raw_hash = raw_blob.hash();
+        assert_eq!(
+            store
+                .put_blob_bytes_with_hash(raw_blob.content(), raw_hash)
+                .unwrap(),
+            raw_hash
+        );
+
+        // ── Trees ──
+        let tree = Tree::new();
+        let tree_hash = store.put_tree(&tree).unwrap();
+        assert!(store.get_tree(&tree_hash).unwrap().is_some());
+        assert!(store.has_tree(&tree_hash).unwrap());
+        assert!(store.list_trees().unwrap().contains(&tree_hash));
+        let tree2 = Tree::new();
+        let tree2_bytes = rmp_serde::to_vec_named(&tree2).unwrap();
+        assert_eq!(
+            store.put_tree_serialized(&tree2_bytes, tree2.hash()).unwrap(),
+            tree2.hash()
+        );
+
+        // ── States ──
+        let attribution =
+            Attribution::human(Principal::new("AnyStore Test", "anystore@example.com"));
+        let state = State::new(tree_hash, vec![], attribution.clone());
+        let change_id = state.change_id;
+        store.put_state(&state).unwrap();
+        assert!(store.get_state(&change_id).unwrap().is_some());
+        assert!(store.has_state(&change_id).unwrap());
+        assert!(store.list_states().unwrap().contains(&change_id));
+        let state2 = State::new(tree2.hash(), vec![], attribution.clone());
+        let state2_bytes = rmp_serde::to_vec_named(&state2).unwrap();
+        store
+            .put_state_serialized(&state2_bytes, state2.change_id)
+            .unwrap();
+
+        // ── Actions ──
+        let mut action = Action::new(
+            None,
+            ChangeId::generate(),
+            Operation::Snapshot,
+            "any-store action",
+            attribution,
+        );
+        let action_id = store.put_action(&mut action).unwrap();
+        assert!(store.get_action(&action_id).unwrap().is_some());
+        assert!(store.list_actions().unwrap().contains(&action_id));
+        let action_bytes = rmp_serde::to_vec_named(&action).unwrap();
+        store
+            .put_action_serialized(&action_bytes, action_id)
+            .unwrap();
+
+        // ── Packs ──
+        let packed = Blob::from("packed-via-any-store");
+        let packed_hash = packed.hash();
+        store
+            .put_blobs_packed(vec![(packed_hash, packed.into_content())])
+            .unwrap();
+        assert!(
+            store
+                .get_pack_object(&pack::PackObjectId::Hash(packed_hash))
+                .unwrap()
+                .is_some()
+        );
+        store.pack_objects(false).unwrap();
+        store.prune_loose_objects().unwrap();
+        // install_pack / install_pack_streaming need valid packfile inputs;
+        // exercising the dispatch arm with bogus data is enough — we only
+        // assert the call routes through the enum, not the backend behaviour.
+        let _ = store.install_pack(&[], &[]);
+        let _ = store.install_pack_streaming(
+            std::path::Path::new("/nonexistent/pack"),
+            std::path::Path::new("/nonexistent/idx"),
+        );
+
+        // ── Snapshot write batch ──
+        store.begin_snapshot_write_batch().unwrap();
+        store.flush_snapshot_write_batch().unwrap();
+        store.begin_snapshot_write_batch().unwrap();
+        store.abort_snapshot_write_batch();
+
+        // ── Redactions ──
+        let redaction = b"any-store redaction bytes";
+        store
+            .put_redactions_bytes_for_blob(&blob_hash, redaction)
+            .unwrap();
+        assert!(store.has_redactions_for_blob(&blob_hash).unwrap());
+        assert_eq!(
+            store.get_redactions_bytes_for_blob(&blob_hash).unwrap().as_deref(),
+            Some(redaction.as_slice())
+        );
+        assert!(store.list_blobs_with_redactions().unwrap().contains(&blob_hash));
+
+        // ── Caches ──
+        store.clear_recent_caches();
+    }
+}

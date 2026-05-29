@@ -37,6 +37,31 @@ fn test_init_creates_structure() {
 }
 
 #[test]
+fn test_open_with_store_threads_a_custom_object_store() {
+    // heddle#283: `Repository::open_with_store` is generic over the object
+    // store `S`, so the whole `Repository<RefManager, OpLog, S>` plumbing has
+    // to compile and run with a concrete store that is *not* the default
+    // `AnyStore`. Inject a bare `FsStore` and round-trip an object through it.
+    use objects::store::FsStore;
+
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let heddle_dir = repo.heddle_dir().to_path_buf();
+    drop(repo);
+
+    let store = FsStore::new(&heddle_dir);
+    let repo: Repository<_, _, FsStore> =
+        Repository::open_with_store(&heddle_dir, store).unwrap();
+
+    let blob = objects::object::Blob::from("open_with_store round-trip");
+    let hash = repo.store().put_blob(&blob).unwrap();
+    assert_eq!(
+        repo.store().get_blob(&hash).unwrap().unwrap().content(),
+        blob.content()
+    );
+}
+
+#[test]
 fn test_init_fails_if_exists() {
     let temp_dir = TempDir::new().unwrap();
     Repository::init_default(temp_dir.path()).unwrap();
