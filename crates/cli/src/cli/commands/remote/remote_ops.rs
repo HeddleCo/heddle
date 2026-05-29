@@ -1012,31 +1012,87 @@ impl GitConfigContext {
             .unwrap_or(false)
     }
 
-    /// The config layer a write to remote `name` must target so the next
-    /// `remote list` read resolves the value we just wrote. Returns the
-    /// highest-precedence layer that already defines the remote (matching
-    /// `layered_paths` read precedence); when no layer defines it, the
+    /// The file a write to remote `name` must target so the next
+    /// `remote list` read resolves the value we just wrote. The
+    /// highest-precedence file that already defines the remote, resolved
+    /// through `include.path`/`includeIf` indirection — not merely the
+    /// top-level layer that *follows* the include, whose physical text has
+    /// no `[remote]` section to edit. When no file defines the remote, the
     /// common config — git's default target for a brand-new remote.
-    fn write_layer_for(&self, name: &str) -> std::path::PathBuf {
-        self.layered_paths()
-            .into_iter()
-            .find(|path| self.layer_defines_remote(path, name))
-            .unwrap_or_else(|| self.common_dir.join("config"))
+    ///
+    /// Errors when the defining file lies outside the repository's Git
+    /// directory (reached via an include), so a reported-successful write is
+    /// never a silent no-op against a file heddle won't edit.
+    fn write_file_for(&self, name: &str) -> Result<std::path::PathBuf> {
+        match self.defining_files_for(name).into_iter().next() {
+            Some(path) => {
+                if !self.owns_config_file(&path) {
+                    anyhow::bail!(RecoveryAdvice::git_remote_in_included_config(name, &path));
+                }
+                Ok(path)
+            }
+            None => Ok(self.common_dir.join("config")),
+        }
     }
 
-    /// Every config layer that currently defines remote `name`. A remove
-    /// must clear all of them, otherwise a lower-precedence definition
-    /// resurfaces — or a higher-precedence one keeps winning — on the next
-    /// read, leaving the "successful" removal silently divergent.
-    fn remove_layers_for(&self, name: &str) -> Vec<std::path::PathBuf> {
-        self.layered_paths()
-            .into_iter()
-            .filter(|path| self.layer_defines_remote(path, name))
-            .collect()
+    /// Every file that currently defines remote `name`, resolved through
+    /// includes. A remove must clear all of them, otherwise a
+    /// lower-precedence definition resurfaces — or a higher-precedence one
+    /// keeps winning — on the next read, leaving the "successful" removal
+    /// silently divergent. Errors when any defining file lies outside the
+    /// repository's Git directory rather than no-op'ing against it.
+    fn remove_files_for(&self, name: &str) -> Result<Vec<std::path::PathBuf>> {
+        let files = self.defining_files_for(name);
+        for path in &files {
+            if !self.owns_config_file(path) {
+                anyhow::bail!(RecoveryAdvice::git_remote_in_included_config(name, path));
+            }
+        }
+        Ok(files)
     }
 
-    fn layer_defines_remote(&self, path: &Path, name: &str) -> bool {
-        self.remotes(vec![path.to_path_buf()]).contains_key(name)
+    /// The file(s) whose `[remote "<name>"]` section the reader resolves,
+    /// following `include.path`/`includeIf`. Returned highest-precedence
+    /// first, matching `remotes` read precedence (first-seen wins). The
+    /// section metadata records the file each section physically lives in,
+    /// so an include-defined remote resolves to the included file — the one
+    /// a write must edit — not the including config.
+    fn defining_files_for(&self, name: &str) -> Vec<std::path::PathBuf> {
+        let Some(file) = self.load(self.layered_paths()) else {
+            return Vec::new();
+        };
+        let Some(sections) = file.sections_by_name("remote") else {
+            return Vec::new();
+        };
+        let mut files = Vec::new();
+        for section in sections {
+            let matches = section
+                .header()
+                .subsection_name()
+                .map(|subsection| subsection.to_string());
+            if matches.as_deref() != Some(name) {
+                continue;
+            }
+            let Some(path) = section.meta().path.clone() else {
+                continue;
+            };
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+        files
+    }
+
+    /// Whether heddle may rewrite `path`: only config files within the
+    /// repository's own Git directory tree (git-dir / common-dir). A section
+    /// pulled in from a file outside that tree via `include.path`/`includeIf`
+    /// (e.g. a user-global config) is not ours to edit.
+    fn owns_config_file(&self, path: &Path) -> bool {
+        let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        [&self.git_dir, &self.common_dir].into_iter().any(|root| {
+            let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            target.starts_with(&root)
+        })
     }
 
     fn remotes(&self, paths: Vec<std::path::PathBuf>) -> BTreeMap<String, String> {
@@ -1090,7 +1146,7 @@ fn sync_git_overlay_remote_add(repo: &Repository, name: &str, url: &str) -> Resu
     validate_git_overlay_remote_name(name)?;
     let ctx = GitConfigContext::discover(repo.root())
         .context("Git-overlay remote add requires a writable Git config")?;
-    upsert_git_remote_config(&ctx.write_layer_for(name), name, url)
+    upsert_git_remote_config(&ctx.write_file_for(name)?, name, url)
 }
 
 fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
@@ -1100,7 +1156,7 @@ fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
     let Some(ctx) = GitConfigContext::discover(repo.root()) else {
         return Ok(());
     };
-    for config_path in ctx.remove_layers_for(name) {
+    for config_path in ctx.remove_files_for(name)? {
         remove_git_remote_config(&config_path, name)?;
     }
     Ok(())
