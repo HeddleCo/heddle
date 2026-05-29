@@ -172,6 +172,66 @@ fn recapture_prunes_stale_intent_to_add_for_removed_file() {
     );
 }
 
+/// The prune must run on EVERY recapture path, including the one where
+/// the recaptured state is EMPTY (no files at all). An early `captured
+/// .is_empty()` fast path that returns before the reconcile lets stale
+/// intent-to-add entries survive: capture a new file (it becomes
+/// intent-to-add), then delete every file so the next capture yields an
+/// empty tree — the old intent-to-add entry must still be pruned, not
+/// left behind as a phantom.
+#[test]
+fn recapture_to_empty_tree_prunes_stale_intent_to_add() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    // Capture a new file: it becomes intent-to-add in the colocated index.
+    std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
+    heddle(&["capture", "-m", "add new file"], Some(source.path()))
+        .expect("capture should record the new file");
+
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage", "new_file.txt"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8(staged.stdout).unwrap().contains(EMPTY_BLOB_OID),
+        "precondition: new_file.txt must be intent-to-add after first capture"
+    );
+
+    // Delete EVERY file so the recaptured state is an empty tree, hitting
+    // the `captured.is_empty()` fast path. The intent-to-add entry for
+    // new_file.txt is now stale and must still be pruned.
+    std::fs::remove_file(source.path().join("new_file.txt")).unwrap();
+    std::fs::remove_file(source.path().join("tracked.txt")).unwrap();
+    heddle(&["capture", "-m", "remove everything"], Some(source.path()))
+        .expect("recapture should record the empty tree");
+
+    let status = git_status_porcelain(source.path());
+    assert!(
+        !status.lines().any(|line| line.ends_with("new_file.txt")),
+        "stale intent-to-add must be pruned even when the recapture yields an empty tree. Status was:\n{status}"
+    );
+
+    // The intent-to-add index entry must be gone entirely.
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage", "new_file.txt"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    assert!(
+        staged.trim().is_empty(),
+        "stale intent-to-add index entry must be removed on the empty-tree path, got: {staged:?}"
+    );
+}
+
 #[test]
 fn test_cli_bridge_git_init() {
     let temp = TempDir::new().unwrap();
