@@ -566,7 +566,7 @@ impl WorktreeWalkPolicy for TreeBuildPolicy<'_> {
             return Err(HeddleError::InvalidSymlinkTarget(target));
         }
 
-        let blob = Blob::new(target.to_string_lossy().as_bytes().to_vec());
+        let blob = Blob::new(objects::util::symlink_target_bytes(&target));
         let hash = blob.hash();
         let enqueue_start = Instant::now();
         self.enqueue_blob(blob, hash)?;

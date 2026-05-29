@@ -98,7 +98,7 @@ pub fn git_worktree_entry_state(
             return Ok(GitWorktreeEntryState::Modified);
         }
         let target = fs::read_link(&absolute)?;
-        let target_bytes = symlink_target_bytes(&target);
+        let target_bytes = objects::util::symlink_target_bytes(&target);
         return hash_and_compare(expected_oid, &target_bytes);
     }
 
@@ -136,25 +136,6 @@ fn hash_and_compare(expected_oid: gix::ObjectId, bytes: &[u8]) -> Result<GitWork
     } else {
         GitWorktreeEntryState::Modified
     })
-}
-
-/// Read a symlink target as the raw bytes git would store in its blob.
-/// On Unix the target is an arbitrary byte sequence; `to_string_lossy`
-/// would replace non-UTF-8 bytes with U+FFFD and produce a hash that
-/// never matches git's. Use the OS-byte representation directly.
-fn symlink_target_bytes(target: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        target.as_os_str().as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows symlinks store text targets; lossy is acceptable
-        // because the underlying filesystem doesn't preserve arbitrary
-        // byte sequences anyway.
-        target.to_string_lossy().as_bytes().to_vec()
-    }
 }
 
 #[cfg(test)]

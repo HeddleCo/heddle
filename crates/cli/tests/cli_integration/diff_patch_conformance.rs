@@ -84,6 +84,18 @@ fn symlink(path: &str, target: &str) -> Entry {
     }
 }
 
+/// A symlink whose target is an arbitrary byte sequence (need not be valid
+/// UTF-8). Git stores symlink targets as raw bytes; this exercises the path
+/// where a lossy `to_string_lossy` conversion would corrupt the target.
+#[cfg(unix)]
+fn symlink_bytes(path: &str, target: &[u8]) -> Entry {
+    Entry {
+        path: path.to_string(),
+        body: target.to_vec(),
+        kind: Kind::Symlink,
+    }
+}
+
 /// A regular file with arbitrary (binary) bytes. heddle treats a body with
 /// embedded NULs as binary, so these exercise the `Binary files … differ`
 /// path rather than a text hunk.
@@ -134,7 +146,11 @@ fn write_entry(dir: &Path, entry: &Entry) {
         Kind::Symlink => {
             #[cfg(unix)]
             {
-                let target = String::from_utf8(entry.body.clone()).unwrap();
+                use std::os::unix::ffi::OsStrExt;
+                // Git stores symlink targets as raw bytes, which need not be
+                // valid UTF-8. Build the target from raw OS bytes so the
+                // non-UTF-8 target cell round-trips byte-exactly.
+                let target = std::ffi::OsStr::from_bytes(&entry.body);
                 // Replace any stale entry so re-materializing a state is
                 // idempotent.
                 let _ = std::fs::remove_file(&full);
@@ -168,12 +184,25 @@ fn assert_present(dir: &Path, entry: &Entry) {
                 entry.path
             );
             let target = std::fs::read_link(&full).unwrap();
-            assert_eq!(
-                target.to_string_lossy().as_bytes(),
-                entry.body.as_slice(),
-                "`{}` symlink target mismatch",
-                entry.path
-            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                assert_eq!(
+                    target.as_os_str().as_bytes(),
+                    entry.body.as_slice(),
+                    "`{}` symlink target mismatch",
+                    entry.path
+                );
+            }
+            #[cfg(not(unix))]
+            {
+                assert_eq!(
+                    target.to_string_lossy().as_bytes(),
+                    entry.body.as_slice(),
+                    "`{}` symlink target mismatch",
+                    entry.path
+                );
+            }
         }
         Kind::Exec => {
             assert_eq!(
@@ -913,6 +942,66 @@ fn rename_with_edit_and_chmod_round_trips() {
         &[
             Expect::Absent("src.sh"),
             Expect::Present(exec("dst.sh", after)),
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Matrix — non-UTF-8 symlink target × rename (cid 3322251771). Git stores a
+// symlink's target as RAW bytes, which need not be valid UTF-8. The worktree
+// blob read (`read_worktree_blob_for_diff`) must preserve those bytes; a
+// `to_string_lossy` conversion replaces invalid bytes with U+FFFD, so the
+// similarity score drops AND the generated patch encodes the corrupted target
+// — `git apply` then creates a link pointing at the wrong place. The same
+// lossy bug lived in the capture path (the stored blob) and the status hash;
+// all now route through one raw-bytes helper. A symlink moved to a new path
+// with an identical (non-UTF-8) target scores similarity 1.0 and collapses
+// into a header-only rename, exercising the target bytes through the rename
+// path on both the worktree surface (`native_cell` — the read that took the
+// lossy path) and the committed-tree surface (`state_cell`).
+// ---------------------------------------------------------------------------
+
+/// Non-UTF-8 target with a high-bit-set invalid byte sequence. `\xFF\xFE` is
+/// never valid UTF-8, so `to_string_lossy` would mangle it.
+#[cfg(unix)]
+const NON_UTF8_TARGET: &[u8] = b"dest/\xff\xfe/link-target";
+
+/// Worktree surface: a symlink with a non-UTF-8 target moved to a new path.
+/// The added side's target is read via `read_worktree_blob_for_diff` — the
+/// read that r15 converted with `to_string_lossy`. Raw bytes must survive so
+/// the rename collapses and `git apply` reproduces the byte-exact target.
+#[cfg(unix)]
+#[test]
+fn native_non_utf8_symlink_rename_round_trips() {
+    native_cell(
+        &[symlink_bytes("from-link", NON_UTF8_TARGET), normal("anchor.txt", "anchor\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("from-link")).unwrap();
+            write_entry(dir, &symlink_bytes("to-link", NON_UTF8_TARGET));
+        },
+        &[
+            Expect::Absent("from-link"),
+            Expect::Present(symlink_bytes("to-link", NON_UTF8_TARGET)),
+            Expect::Present(normal("anchor.txt", "anchor\n")),
+        ],
+    );
+}
+
+/// Committed-tree surface: same non-UTF-8 symlink rename through the
+/// `HEAD~1 HEAD` diff path. Stored target bytes must round-trip byte-exactly.
+#[cfg(unix)]
+#[test]
+fn state_non_utf8_symlink_rename_round_trips() {
+    state_cell(
+        &[symlink_bytes("from-link", NON_UTF8_TARGET), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("from-link")).unwrap();
+            write_entry(dir, &symlink_bytes("to-link", NON_UTF8_TARGET));
+        },
+        &[
+            Expect::Absent("from-link"),
+            Expect::Present(symlink_bytes("to-link", NON_UTF8_TARGET)),
+            Expect::Present(normal("keep.txt", "keep\n")),
         ],
     );
 }

@@ -1922,7 +1922,7 @@ fn read_worktree_blob_for_diff(path: &std::path::Path) -> Result<Blob> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
         let target = std::fs::read_link(path)?;
-        return Ok(Blob::new(target.to_string_lossy().as_bytes().to_vec()));
+        return Ok(Blob::new(objects::util::symlink_target_bytes(&target)));
     }
     Ok(Blob::new(std::fs::read(path)?))
 }
