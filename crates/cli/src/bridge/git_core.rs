@@ -146,6 +146,23 @@ pub(crate) fn is_reserved_git_remote_name(remote: &str) -> bool {
     remote == REMOTE_NAME_FOR_LOCAL_GIT_REPO
 }
 
+/// Reject a remote name that collides with [`REMOTE_NAME_FOR_LOCAL_GIT_REPO`].
+/// Surfaced at the public fetch/pull accept boundary with an actionable
+/// message, and re-applied as an invariant net at every
+/// `refs/remotes/{name}/...` write site, so a remote named `git` can never be
+/// treated as a normal remote-tracking namespace — keeping the writers
+/// consistent with [`parse_git_ref`], which already rejects such refs.
+fn reject_reserved_git_remote_name(remote: &str) -> GitResult<()> {
+    if is_reserved_git_remote_name(remote) {
+        return Err(GitBridgeError::Git(format!(
+            "a Git remote named '{remote}' collides with heddle's reserved namespace \
+             (local refs are recorded under the '{REMOTE_NAME_FOR_LOCAL_GIT_REPO}' sentinel); \
+             rename the remote (e.g. `git remote rename {remote} origin`) and retry"
+        )));
+    }
+    Ok(())
+}
+
 /// The kind of Git ref [`parse_git_ref`] recognizes. Ported from jj's
 /// `GitRefKind` (`lib/src/git.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -816,12 +833,19 @@ impl<'a> GitBridge<'a> {
         scope: GitFetchScope,
         refresh_checkout: RefreshCheckoutAfterFetch,
     ) -> GitResult<()> {
+        reject_reserved_git_remote_name(remote_name)?;
         self.init_mirror()?;
         let current_branch = self.heddle_repo.git_overlay_current_branch()?;
         let tracking_remote = checkout_tracking_remote_name(self.heddle_repo.root(), remote_name)?
             .or_else(|| {
                 (!looks_like_remote_location(remote_name)).then(|| remote_name.to_string())
             });
+        // A URL/path remote can still resolve onto a configured remote literally
+        // named `git`; reject that here too so the constructed tracking refs
+        // never land under the reserved namespace.
+        if let Some(tracking_remote) = tracking_remote.as_deref() {
+            reject_reserved_git_remote_name(tracking_remote)?;
+        }
 
         let mirror_repo = self.open_git_repo()?;
         match self.resolve_remote(remote_name, gix::remote::Direction::Fetch)? {
@@ -1315,6 +1339,7 @@ impl<'a> GitBridge<'a> {
         else {
             return Ok(());
         };
+        reject_reserved_git_remote_name(&tracking_remote)?;
 
         let mirror_repo = self.open_git_repo()?;
         let branch_ref = format!("refs/heads/{branch}");
@@ -1348,6 +1373,7 @@ impl<'a> GitBridge<'a> {
         else {
             return Ok(());
         };
+        reject_reserved_git_remote_name(&tracking_remote)?;
 
         let mirror_repo = self.open_git_repo()?;
         let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
@@ -2310,6 +2336,7 @@ fn apply_remote_tracking_ref_updates(
     updates: &[RefUpdate],
     log_message: &str,
 ) -> GitResult<()> {
+    reject_reserved_git_remote_name(remote_name)?;
     for update in updates
         .iter()
         .filter(|update| update.namespace == RefNamespace::Branch)
