@@ -542,14 +542,19 @@ fn write_full<W: std::io::Write>(
     output: &LogOutput,
     verbose: bool,
 ) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "Repository: {}",
-        crate::cli::render::repository_mode_label(
-            &output.repository_capability,
-            &output.storage_model
-        )
-    )?;
+    // The mode preamble is diagnostic noise on the common read path
+    // (heddle#275); `heddle status` already exposes it. Keep it under
+    // `-v` for troubleshooting.
+    if verbose {
+        writeln!(
+            out,
+            "Repository: {}",
+            crate::cli::render::repository_mode_label(
+                &output.repository_capability,
+                &output.storage_model
+            )
+        )?;
+    }
     if let Some(hint) = &output.git_overlay_import_hint {
         writeln!(
             out,

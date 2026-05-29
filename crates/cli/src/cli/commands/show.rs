@@ -190,13 +190,17 @@ fn render_plain_git_show(
 }
 
 fn render_state(output: &ShowOutput, verbose: bool) {
-    println!(
-        "Repository: {}",
-        crate::cli::render::repository_mode_label(
-            &output.repository_capability,
-            &output.storage_model
-        )
-    );
+    // Mode preamble is read-path noise (heddle#275); show it only under
+    // `-v`. `heddle status` covers it for the common case.
+    if verbose {
+        println!(
+            "Repository: {}",
+            crate::cli::render::repository_mode_label(
+                &output.repository_capability,
+                &output.storage_model
+            )
+        );
+    }
     if let Some(hint) = &output.git_overlay_import_hint {
         println!(
             "{}",

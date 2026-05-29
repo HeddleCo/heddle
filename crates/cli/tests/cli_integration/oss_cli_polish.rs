@@ -7147,10 +7147,12 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
         vec!["--quiet", "--output", "text", "workspace", "show"],
         &["Workspace", "main"],
     );
+    // The `Repository:` mode preamble is dropped from the default read
+    // view (heddle#275); the everyday surface leads with bridge state.
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "bridge", "git", "status"],
-        &["Repository", "Git import"],
+        &["Git import"],
     );
     assert_text_surface(
         temp.path(),
