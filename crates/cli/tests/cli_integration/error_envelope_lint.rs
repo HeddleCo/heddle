@@ -262,6 +262,125 @@ fn error_envelopes_carry_actionable_next_step() {
     );
 }
 
+/// The `_argv` null-sibling trap (HeddleCo/heddle#254) must stay dropped on
+/// the wire. A recovery action is carried as the human `primary_command`
+/// string plus the fillable `primary_command_template` object — never the
+/// parsed `*_command_argv` / `*_action_argv` sibling, which is null for
+/// placeholder actions and silently reads as "no action" to agents.
+#[test]
+fn error_envelopes_omit_argv_siblings() {
+    const FORBIDDEN_KEYS: &[&str] = &[
+        "primary_command_argv",
+        "recommended_action_argv",
+        "recovery_command_argv",
+        "next_action_argv",
+    ];
+
+    let mut failures = Vec::new();
+    for case in cases() {
+        let fixture = (case.fixture)();
+        let dir = fixture.path();
+
+        let mut json_argv = vec!["--output", "json"];
+        json_argv.extend_from_slice(case.argv);
+        let json_out = heddle_output(&json_argv, Some(dir))
+            .unwrap_or_else(|err| panic!("[{}] spawn {json_argv:?}: {err}", case.label));
+        let stderr = String::from_utf8_lossy(&json_out.stderr);
+        let envelope = parse_json_envelope(&stderr, case.label);
+        let object = envelope
+            .as_object()
+            .unwrap_or_else(|| panic!("[{}] envelope is not a JSON object", case.label));
+
+        for key in FORBIDDEN_KEYS {
+            if object.contains_key(*key) {
+                failures.push(format!(
+                    "[{}] envelope still emits the dropped `_argv` sibling `{key}`",
+                    case.label
+                ));
+            }
+        }
+
+        // The canonical machine shape must still be present.
+        if !object
+            .get("primary_command_template")
+            .is_some_and(Value::is_object)
+        {
+            failures.push(format!(
+                "[{}] envelope is missing the canonical `primary_command_template` object",
+                case.label
+            ));
+        }
+        if object
+            .get("primary_command")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        {
+            failures.push(format!(
+                "[{}] envelope is missing the human `primary_command` string",
+                case.label
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "error envelopes must not carry `_argv` siblings (HeddleCo/heddle#254):\n  - {}",
+        failures.join("\n  - ")
+    );
+}
+
+/// The same trap on the status *success* payload (status.rs): when no
+/// action is recommended the dropped `_argv` field used to serialize as
+/// `null`, crashing agents that index `payload.recommended_action_argv[0]`.
+#[test]
+fn status_success_payload_omits_argv_siblings() {
+    const FORBIDDEN_KEYS: &[&str] = &[
+        "recommended_action_argv",
+        "recovery_command_argv",
+        "next_action_argv",
+    ];
+
+    let fixture = committed_repo();
+    let out = heddle_output(&["--output", "json", "status"], Some(fixture.path()))
+        .expect("heddle status --output json");
+    assert!(
+        out.status.success(),
+        "status should exit 0 on a clean committed repo"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let payload: Value =
+        serde_json::from_str(stdout.trim()).expect("status payload is JSON");
+
+    let mut offending = Vec::new();
+    collect_keys(&payload, &mut |key| {
+        if FORBIDDEN_KEYS.contains(&key) {
+            offending.push(key.to_string());
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "status success payload still emits dropped `_argv` sibling(s) {offending:?}: {payload}"
+    );
+}
+
+/// Recurse a JSON value, invoking `visit` for every object key encountered.
+fn collect_keys(value: &Value, visit: &mut impl FnMut(&str)) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                visit(key);
+                collect_keys(child, visit);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_keys(item, visit);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[test]
 fn swept_commands_have_envelope_coverage() {
     let covered: std::collections::BTreeSet<&str> =

@@ -70,6 +70,87 @@ fn untyped_error_sites_do_not_regress() {
     );
 }
 
+/// Close-the-class guard against the `_argv` null-sibling trap
+/// (HeddleCo/heddle#254).
+///
+/// Recovery/advice surfaces used to emit a recommended action three ways:
+/// a human `_string`, a parsed `_argv`, and a fillable `_template`. The
+/// `_argv` sibling is a trap: it is `null` for every placeholder action
+/// (`heddle commit -m "<message>"`), so an agent that prefers `_argv` to
+/// avoid shell parsing reads `null`, treats it as "no action," and
+/// silently skips recovery. We collapsed the triplet to one canonical
+/// machine shape (`_template`, always present for a valid action) plus the
+/// human `_string`, and dropped every `_argv` sibling.
+///
+/// This lint forbids re-introducing the pattern: no struct field
+/// declaration or emitted JSON key naming a recovery/recommended *action*
+/// or *command* as a parsed `_argv` may exist. A future PR that re-adds
+/// e.g. `recommended_action_argv` fails here. Unrelated `_argv` names that
+/// are not action/command siblings (`incoming_argv`, `harness_argv`) are
+/// allowed.
+#[test]
+fn argv_action_command_siblings_are_forbidden() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/commands");
+    let mut sites = Vec::new();
+    walk_rs_files(&root, &mut |path, contents| {
+        for (line_no, line) in contents.lines().enumerate() {
+            if let Some(ident) = forbidden_argv_sibling(line) {
+                let rel = path.strip_prefix(&root).unwrap_or(path);
+                sites.push(format!("{}:{} ({ident})", rel.display(), line_no + 1));
+            }
+        }
+    });
+
+    assert!(
+        sites.is_empty(),
+        "the `_argv` null-sibling trap was re-introduced (HeddleCo/heddle#254): a \
+         recovery/recommended action or command must be emitted as a fillable \
+         `_template` (always present) plus the human `_string` — never as a \
+         parsed `_argv` sibling, which is null for every placeholder action and \
+         silently reads as \"no action\" to agents. Drop the `_argv` field/key and \
+         use the `_template`.\nOffending sites:\n{}",
+        sites.join("\n")
+    );
+}
+
+/// Detect a struct field declaration (`<name>_argv: …`) or an emitted JSON
+/// key (`"<name>_argv"`) where `<name>` denotes a recovery/recommended
+/// action or command. Returns the offending identifier. Field/key *uses*
+/// (`trust.recommended_action_argv.clone()`), function definitions
+/// (`fn recommended_action_argv(`), and unrelated `_argv` names
+/// (`incoming_argv`) are not matched.
+fn forbidden_argv_sibling(line: &str) -> Option<String> {
+    const SUFFIX: &str = "_argv";
+    let bytes = line.as_bytes();
+    for (idx, _) in line.match_indices(SUFFIX) {
+        let ident_end = idx + SUFFIX.len();
+        // Walk back to the start of the identifier.
+        let mut start = idx;
+        while start > 0 {
+            let c = bytes[start - 1];
+            if c.is_ascii_alphanumeric() || c == b'_' {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let ident = &line[start..ident_end];
+        // Only action/command siblings are the trap; allow `incoming_argv`,
+        // `harness_argv`, `normalized_argv`, the bare `argv`, etc.
+        if !(ident.contains("action") || ident.contains("command")) {
+            continue;
+        }
+        let prev_is_quote = start > 0 && bytes[start - 1] == b'"';
+        let next_is_quote = ident_end < bytes.len() && bytes[ident_end] == b'"';
+        let after = line[ident_end..].trim_start();
+        let is_field_decl = after.starts_with(':') && !after.starts_with("::");
+        if is_field_decl || (prev_is_quote && next_is_quote) {
+            return Some(ident.to_string());
+        }
+    }
+    None
+}
+
 fn walk_rs_files(dir: &Path, visit: &mut impl FnMut(&Path, &str)) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
