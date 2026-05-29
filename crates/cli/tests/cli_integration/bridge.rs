@@ -2,6 +2,324 @@
 use super::*;
 use objects::object::ThreadName;
 
+/// Initialize a colocated (drop-in) Git repo on `main` with one
+/// committed file, mirroring the bootstrap the overlay tests use.
+fn init_colocated_git_repo(path: &std::path::Path) {
+    assert!(Command::new("git")
+        .arg("init")
+        .current_dir(path)
+        .status()
+        .unwrap()
+        .success());
+    for (k, v) in [
+        ("user.name", "Heddle Test"),
+        ("user.email", "heddle@example.com"),
+        ("init.defaultBranch", "main"),
+    ] {
+        Command::new("git")
+            .args(["config", k, v])
+            .current_dir(path)
+            .status()
+            .unwrap();
+    }
+    Command::new("git")
+        .args(["checkout", "-B", "main"])
+        .current_dir(path)
+        .status()
+        .unwrap();
+}
+
+fn git_commit_all_in(path: &std::path::Path, message: &str) {
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(path)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(path)
+        .status()
+        .unwrap()
+        .success());
+}
+
+fn git_status_porcelain(path: &std::path::Path) -> String {
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git status --porcelain must succeed");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// The empty-blob object id (SHA-1). An intent-to-add index entry points
+/// at this rather than a real blob — that is what makes Git treat the
+/// path as "added, content not yet staged".
+const EMPTY_BLOB_OID: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+
+/// After `heddle capture` records a NEW file in a colocated checkout,
+/// `git status` should report it as intent-to-add ("Heddle knows about
+/// it; no Git blob committed yet") rather than `??` (untracked, "Git
+/// knows nothing"). This is byte-for-byte the state `git add -N`
+/// produces — Git 2.43 renders the porcelain code as ` A` (older docs,
+/// and the issue, call it `AM`); the version-stable invariant is the
+/// empty-blob index entry, which we assert directly. Already-tracked,
+/// unchanged files must NOT be touched.
+#[test]
+fn capture_marks_new_file_intent_to_add_in_colocated_index() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
+    heddle(&["capture", "-m", "add new file"], Some(source.path()))
+        .expect("capture should record the new file");
+
+    let status = git_status_porcelain(source.path());
+
+    let new_file_line = status
+        .lines()
+        .find(|line| line.ends_with("new_file.txt"))
+        .unwrap_or_else(|| panic!("new_file.txt must appear in git status. Status was:\n{status}"));
+    // Intent-to-add shows an `A` in the status code (` A`, `AM`, or `A `
+    // across Git versions) — never `??`.
+    assert!(
+        new_file_line[..2].contains('A'),
+        "new file should be intent-to-add (contains `A`), got {new_file_line:?}. Status was:\n{status}"
+    );
+    assert!(
+        !status.contains("?? new_file.txt"),
+        "new file must no longer show as untracked (??). Status was:\n{status}"
+    );
+
+    // The version-stable proof of intent-to-add: the staged entry points
+    // at the empty blob, not a real object copied into `.git/objects`.
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage", "new_file.txt"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    assert!(
+        staged.contains(EMPTY_BLOB_OID),
+        "new file's index entry must be intent-to-add (empty-blob oid), got: {staged:?}"
+    );
+
+    assert!(
+        !status.lines().any(|line| line.ends_with("tracked.txt")),
+        "an already-tracked, unchanged file must not be marked. Status was:\n{status}"
+    );
+}
+
+/// `update_intent_to_add` must RECONCILE, not just append: when a file
+/// that was previously marked intent-to-add is no longer in the captured
+/// state (e.g. it was created, captured, then deleted before checkpoint),
+/// its stale index entry must be pruned. A surviving intent-to-add entry
+/// whose worktree file is gone makes `git status` report a phantom ` D`
+/// deletion that Heddle never intended.
+#[test]
+fn recapture_prunes_stale_intent_to_add_for_removed_file() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    // Capture a new file: it becomes intent-to-add in the colocated index.
+    std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
+    heddle(&["capture", "-m", "add new file"], Some(source.path()))
+        .expect("capture should record the new file");
+
+    let status = git_status_porcelain(source.path());
+    assert!(
+        status.lines().any(|line| line.ends_with("new_file.txt")),
+        "precondition: new_file.txt must be intent-to-add after first capture. Status was:\n{status}"
+    );
+
+    // Delete the file before any checkpoint commits it, then recapture.
+    // The captured state no longer contains new_file.txt, so its
+    // intent-to-add index entry is now stale and must be pruned.
+    std::fs::remove_file(source.path().join("new_file.txt")).unwrap();
+    heddle(&["capture", "-m", "remove new file"], Some(source.path()))
+        .expect("recapture should record the deletion");
+
+    let status = git_status_porcelain(source.path());
+    assert!(
+        !status.lines().any(|line| line.ends_with("new_file.txt")),
+        "stale intent-to-add for a deleted file must be pruned — no phantom ` D` entry. Status was:\n{status}"
+    );
+
+    // The index entry must be gone entirely, not merely re-pointed.
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage", "new_file.txt"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    assert!(
+        staged.trim().is_empty(),
+        "stale intent-to-add index entry must be removed, got: {staged:?}"
+    );
+}
+
+/// The prune must run on EVERY recapture path, including the one where
+/// the recaptured state is EMPTY (no files at all). An early `captured
+/// .is_empty()` fast path that returns before the reconcile lets stale
+/// intent-to-add entries survive: capture a new file (it becomes
+/// intent-to-add), then delete every file so the next capture yields an
+/// empty tree — the old intent-to-add entry must still be pruned, not
+/// left behind as a phantom.
+#[test]
+fn recapture_to_empty_tree_prunes_stale_intent_to_add() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    // Capture a new file: it becomes intent-to-add in the colocated index.
+    std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
+    heddle(&["capture", "-m", "add new file"], Some(source.path()))
+        .expect("capture should record the new file");
+
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage", "new_file.txt"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8(staged.stdout).unwrap().contains(EMPTY_BLOB_OID),
+        "precondition: new_file.txt must be intent-to-add after first capture"
+    );
+
+    // Delete EVERY file so the recaptured state is an empty tree, hitting
+    // the `captured.is_empty()` fast path. The intent-to-add entry for
+    // new_file.txt is now stale and must still be pruned.
+    std::fs::remove_file(source.path().join("new_file.txt")).unwrap();
+    std::fs::remove_file(source.path().join("tracked.txt")).unwrap();
+    heddle(&["capture", "-m", "remove everything"], Some(source.path()))
+        .expect("recapture should record the empty tree");
+
+    let status = git_status_porcelain(source.path());
+    assert!(
+        !status.lines().any(|line| line.ends_with("new_file.txt")),
+        "stale intent-to-add must be pruned even when the recapture yields an empty tree. Status was:\n{status}"
+    );
+
+    // The intent-to-add index entry must be gone entirely.
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage", "new_file.txt"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    assert!(
+        staged.trim().is_empty(),
+        "stale intent-to-add index entry must be removed on the empty-tree path, got: {staged:?}"
+    );
+}
+
+/// Git's index cannot hold both `foo` (a blob) and `foo/bar` (a blob
+/// under a directory) — they are mutually exclusive (a path is either a
+/// file or a directory). When a recapture introduces a path that
+/// file/dir-PREFIX-conflicts with a still-tracked real entry, the ADD
+/// pass must NOT write an intent-to-add entry for it: the real entry
+/// wins, and a conflicting placeholder would corrupt the index into a
+/// file/dir conflict.
+///
+/// Direction A: Git tracks `foo` (a file); the worktree replaces it with
+/// a directory `foo/` holding `foo/bar`. Recapture must not add an
+/// intent-to-add entry for `foo/bar` alongside the tracked `foo`.
+#[test]
+fn recapture_skips_intent_to_add_that_conflicts_with_tracked_file() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::write(source.path().join("foo"), "i am a file\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    // Replace the tracked file `foo` with a directory `foo/` containing
+    // `foo/bar`. The captured state now has `foo/bar`, but the real
+    // index entry `foo` is still present (no checkpoint has committed
+    // the change). Adding intent-to-add for `foo/bar` would conflict.
+    std::fs::remove_file(source.path().join("foo")).unwrap();
+    std::fs::create_dir(source.path().join("foo")).unwrap();
+    std::fs::write(source.path().join("foo").join("bar"), "now a dir\n").unwrap();
+    heddle(&["capture", "-m", "file becomes directory"], Some(source.path()))
+        .expect("recapture should record the file→dir change");
+
+    // The index must stay valid: never both `foo` and `foo/bar`.
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    let has_foo = staged.lines().any(|l| l.ends_with("\tfoo"));
+    let has_foo_bar = staged.lines().any(|l| l.ends_with("\tfoo/bar"));
+    assert!(
+        !(has_foo && has_foo_bar),
+        "index must not hold both `foo` and `foo/bar` (file/dir conflict). ls-files:\n{staged}"
+    );
+    // git status must still run cleanly over the index.
+    let _ = git_status_porcelain(source.path());
+}
+
+/// Direction B (reverse): Git tracks `foo/bar` (a blob under a dir); the
+/// worktree replaces the directory with a file `foo`. The captured state
+/// has `foo`, but the real index entry `foo/bar` is still present.
+/// Adding intent-to-add for `foo` would conflict with the tracked
+/// `foo/bar`, so it must be skipped.
+#[test]
+fn recapture_skips_intent_to_add_that_conflicts_with_tracked_dir() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::create_dir(source.path().join("foo")).unwrap();
+    std::fs::write(source.path().join("foo").join("bar"), "i am under a dir\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    // Replace the directory `foo/` with a file `foo`. The captured state
+    // now has `foo`, but the real index entry `foo/bar` is still present.
+    std::fs::remove_dir_all(source.path().join("foo")).unwrap();
+    std::fs::write(source.path().join("foo"), "now a file\n").unwrap();
+    heddle(&["capture", "-m", "dir becomes file"], Some(source.path()))
+        .expect("recapture should record the dir→file change");
+
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    let has_foo = staged.lines().any(|l| l.ends_with("\tfoo"));
+    let has_foo_bar = staged.lines().any(|l| l.ends_with("\tfoo/bar"));
+    assert!(
+        !(has_foo && has_foo_bar),
+        "index must not hold both `foo` and `foo/bar` (file/dir conflict). ls-files:\n{staged}"
+    );
+    let _ = git_status_porcelain(source.path());
+}
+
 #[test]
 fn test_cli_bridge_git_init() {
     let temp = TempDir::new().unwrap();

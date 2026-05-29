@@ -25,7 +25,7 @@ use gix_transport::{
 };
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ChangeIdParseError, Principal, ThreadName, Tree},
+    object::{ChangeId, ChangeIdParseError, FileMode, Principal, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
@@ -1162,6 +1162,140 @@ impl<'a> GitBridge<'a> {
         self.write_through_current_checkout()
     }
 
+    /// Mark files that Heddle has captured but that Git still sees as
+    /// untracked as `intent-to-add` in the colocated checkout's index,
+    /// so a colocated developer's `git status` shows `AM new_file`
+    /// ("Heddle knows about it; no Git blob committed yet") instead of
+    /// `?? new_file` ("untracked — Git knows nothing"). The placeholder
+    /// entry uses the empty-blob oid and a zeroed stat, so Git always
+    /// reports the working-tree content as modified-against-index.
+    ///
+    /// Ported from jujutsu's `update_intent_to_add` (`lib/src/git.rs`),
+    /// which diffs `old_tree` vs `new_tree` and flags paths present in
+    /// the new tree but absent from the old one. Here `new_tree` is the
+    /// just-captured Heddle state's tree and `old_tree` is whatever the
+    /// checkout's index already tracks — paths already in the index are
+    /// not `??`, so they are left untouched (no spurious marking of
+    /// tracked or unchanged files).
+    ///
+    /// Call frequency mirrors jj: this fires at a Heddle parent/state
+    /// change (`capture`), not on every command. A later `checkpoint`
+    /// rebuilds the index from the committed tree via
+    /// [`Self::write_through_current_checkout`], replacing these
+    /// placeholder entries with real ones — so the index is never
+    /// churned by read-only invocations.
+    pub fn update_intent_to_add(&self, state_id: &ChangeId) -> GitResult<()> {
+        let root = self.heddle_repo.root();
+        if !root.join(".git").exists() {
+            return Ok(());
+        }
+        let checkout_repo = gix::discover(root).map_err(git_err)?;
+        // Skip detached HEAD: write-through only mirrors attached
+        // threads, and there is no branch context to reason about here.
+        if checkout_repo
+            .head()
+            .map(|head| head.is_detached())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        // `new_tree`: every file the just-captured state contains.
+        let Some(state) = self.heddle_repo.store().get_state(state_id)? else {
+            return Ok(());
+        };
+        let Some(tree) = self.heddle_repo.store().get_tree(&state.tree)? else {
+            return Ok(());
+        };
+        let mut captured: Vec<(String, FileMode)> = Vec::new();
+        collect_capture_paths(self.heddle_repo.store(), &tree, "", &mut captured)?;
+        // No early return on an empty captured set: the reconcile below must
+        // run on EVERY recapture path. When the recaptured state is empty,
+        // `captured_paths` is empty too, so the PRUNE pass clears every prior
+        // intent-to-add entry (all are now stale) and the ADD loop is a no-op.
+
+        // Reconcile the index's intent-to-add set against the captured
+        // state. Real (committed) entries are left untouched; the
+        // intent-to-add set must end up equal to the captured paths that
+        // are not yet real entries. So we both ADD newly-captured paths
+        // and PRUNE intent-to-add entries whose path left the captured
+        // set (deleted, or now committed) — otherwise a stale entry
+        // surfaces as a phantom ` D path` in `git status`.
+        let mut index = checkout_repo.open_index().map_err(git_err)?;
+
+        // Partition existing entries: real tracked paths vs. the
+        // intent-to-add placeholders we manage here.
+        let mut real_tracked: HashSet<String> = HashSet::new();
+        let mut existing_ita: HashSet<String> = HashSet::new();
+        for entry in index.entries() {
+            let path = entry.path_in(index.path_backing()).to_str_lossy().into_owned();
+            if entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD) {
+                existing_ita.insert(path);
+            } else {
+                real_tracked.insert(path);
+            }
+        }
+
+        // Desired intent-to-add set: captured paths not backed by a real
+        // (committed) index entry.
+        let captured_paths: HashSet<&str> = captured.iter().map(|(p, _)| p.as_str()).collect();
+
+        // PRUNE: any intent-to-add entry whose path is no longer desired.
+        let mut changed = false;
+        index.remove_entries(|_, path, entry| {
+            let stale = entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD)
+                && !captured_paths.contains(path.to_str_lossy().as_ref());
+            if stale {
+                changed = true;
+            }
+            stale
+        });
+
+        // ADD: newly-captured paths not already tracked or marked.
+        let empty_blob = checkout_repo.object_hash().empty_blob();
+        for (path, mode) in &captured {
+            if real_tracked.contains(path) || existing_ita.contains(path) {
+                continue;
+            }
+            // Git's index cannot hold both a blob `foo` and a blob
+            // `foo/bar` — a path is either a file or a directory. An
+            // added path that file↔directory-PREFIX-conflicts with a
+            // still-tracked real entry is not a clean "new file": the
+            // real entry wins. Writing an intent-to-add placeholder for
+            // it would corrupt the index into a file/dir conflict, so
+            // skip it (checked in both directions).
+            if real_tracked
+                .iter()
+                .any(|tracked| path_prefix_conflict(path, tracked))
+            {
+                continue;
+            }
+            let entry_mode = match mode {
+                FileMode::Executable => gix_index::entry::Mode::FILE_EXECUTABLE,
+                FileMode::Symlink => gix_index::entry::Mode::SYMLINK,
+                FileMode::Normal => gix_index::entry::Mode::FILE,
+            };
+            index.dangerously_push_entry(
+                gix_index::entry::Stat::default(),
+                empty_blob,
+                gix_index::entry::Flags::INTENT_TO_ADD | gix_index::entry::Flags::EXTENDED,
+                entry_mode,
+                path.as_bytes().as_bstr(),
+            );
+            changed = true;
+        }
+
+        if changed {
+            // `dangerously_push_entry` appends without preserving sort
+            // order; restore it so subsequent path lookups stay correct.
+            index.sort_entries();
+            index
+                .write(gix_index::write::Options::default())
+                .map_err(git_err)?;
+        }
+        Ok(())
+    }
+
     /// Make the checkout's real `.git` view agree with a specific Heddle
     /// thread. `thread switch` uses this after writing Heddle HEAD because
     /// resolving "current" through Git-overlay discovery can still see the
@@ -1925,6 +2059,47 @@ pub(crate) fn set_reference(
     };
     repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
         .map_err(git_err)?;
+    Ok(())
+}
+
+/// Whether two index paths file↔directory-PREFIX-conflict: one names a
+/// blob that is a directory prefix of the other (`foo` vs `foo/bar`, in
+/// either order). Git's index cannot hold both, since a path is either a
+/// file or a directory. Equal paths do NOT count here — that case is an
+/// exact match handled separately by the caller.
+fn path_prefix_conflict(a: &str, b: &str) -> bool {
+    let child_of = |parent: &str, child: &str| {
+        child
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    child_of(a, b) || child_of(b, a)
+}
+
+/// Recursively collect every file path (blob and symlink) in `tree`,
+/// resolving subtrees through `store`. Missing subtree objects are
+/// skipped rather than treated as errors, matching the repo's other
+/// tree walks. Paths use `/` separators, the form Git's index expects.
+fn collect_capture_paths<S: ObjectStore + ?Sized>(
+    store: &S,
+    tree: &Tree,
+    prefix: &str,
+    out: &mut Vec<(String, FileMode)>,
+) -> GitResult<()> {
+    for entry in tree.iter() {
+        let path = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{prefix}/{}", entry.name)
+        };
+        if entry.is_tree() {
+            if let Some(subtree) = store.get_tree(&entry.hash)? {
+                collect_capture_paths(store, &subtree, &path, out)?;
+            }
+        } else {
+            out.push((path, entry.mode));
+        }
+    }
     Ok(())
 }
 
