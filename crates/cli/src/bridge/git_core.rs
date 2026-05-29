@@ -1209,9 +1209,10 @@ impl<'a> GitBridge<'a> {
         };
         let mut captured: Vec<(String, FileMode)> = Vec::new();
         collect_capture_paths(self.heddle_repo.store(), &tree, "", &mut captured)?;
-        if captured.is_empty() {
-            return Ok(());
-        }
+        // No early return on an empty captured set: the reconcile below must
+        // run on EVERY recapture path. When the recaptured state is empty,
+        // `captured_paths` is empty too, so the PRUNE pass clears every prior
+        // intent-to-add entry (all are now stale) and the ADD loop is a no-op.
 
         // Reconcile the index's intent-to-add set against the captured
         // state. Real (committed) entries are left untouched; the
