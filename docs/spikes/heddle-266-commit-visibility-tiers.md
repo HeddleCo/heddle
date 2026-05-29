@@ -933,14 +933,19 @@ requires widening the single-`ChangeId` request shape:
    the unique maximal served descendant of its prior advertised tip — and **every
    *other*** maximal served state (every member on a *sibling* line, i.e. not a
    descendant of `<thread>`'s prior tip) gets its own `RefEntry` under a
-   **deterministic derived name** `<thread>@<full-changeid>`, the name a pure
+   **deterministic derived name in Heddle's reserved namespace**,
+   `heddle/frontier/<thread>/<full-changeid>`, a pure
    function of the served `ChangeId` (`RefEntry.change_id`, `:91`) so it is stable,
    identity-bound, and never reused for a different state. The name carries the
    **full** `ChangeId` — `ChangeId::to_string_full()` (`crates/objects/src/object/hash.rs:129`,
    the `hd-`+base32 form that round-trips via `parse()`, `:143`) — **never** the
    truncatable `short()`/`Display` form (`:137`, `:167-170`): two distinct sibling
-   `ChangeId`s must map to two distinct ref names or one frontier root would
-   overwrite the other (Invariant C, §5.4). So `<thread>` **advances
+   `ChangeId`s must map to two distinct names or one frontier root would
+   overwrite the other. But uniqueness alone is **not** collision-proof: the name lives
+   in the **reserved `heddle/` namespace** that user `ThreadName`s structurally cannot
+   occupy (Invariant C, §5.4 — name-validation rejects the reserved first-segment, so
+   no user thread's `RefEntry` can ever share the synthetic name and confuse CLI
+   resolution). So `<thread>` **advances
    forward** as its own line extends (`A → A2` once `A`'s descendants become
    served) and is **never frozen at a stale ancestor** just because a sibling line
    is also maximal; it is likewise **never assigned by topological or lexicographic
@@ -977,9 +982,22 @@ requires widening the single-`ChangeId` request shape:
    raises `NonFastForwardRef` (`:2457`). An own-line advance `A → A2` is a
    descendant and is accepted; a lateral jump to a sibling `B` or a regress to an
    ancestor is rejected. Each *other* incomparable maximal served
-   state is published under a deterministic synthetic branch
-   `refs/heads/<thread>@<full-changeid>` so a plain `git clone` can still fetch
-   every visible side. Adding a synthetic ref is
+   state is published under a deterministic synthetic ref in **Heddle's reserved Git
+   namespace** — `refs/heddle/frontier/<thread>/<full-changeid>`, **never** the
+   user-thread path `refs/heads/{track_name}` that `sync_track_to_branch`
+   (`git_sync.rs:129`) writes (Invariant C, §5.4). The reservation is what makes the
+   synthetic ref collision-proof: `refs/heddle/*` is **disjoint from** `refs/heads/*`,
+   so no user thread — published only ever to `refs/heads/{track_name}` — and no
+   raw-Git / imported `refs/heads/main@hd-…` branch can target the synthetic ref's
+   location. *(Tradeoff: a **vanilla** `git clone` with the default
+   `refs/heads/*`+`refs/tags/*` refspec will not auto-fetch `refs/heddle/frontier/*`,
+   so the sibling-line roots are fetched by a **Heddle-aware** clone whose refspec
+   includes the reserved namespace — the deliberate cost of collision-proofness. The
+   own-line frontier remains under `refs/heads/<thread>`, so vanilla clone still gets
+   the primary line; sibling-line discovery is a Heddle-overlay operation regardless.
+   We do **not** keep the synthetic ref under `refs/heads/` to preserve vanilla-clone
+   reach, because **any** `refs/heads/` sub-name is user/raw-Git-creatable — there is
+   no collision-proof sub-namespace of `refs/heads/`.)* Adding a synthetic ref is
    forward-only (it never rewinds `<thread>`); the names are pure functions of the
    served `ChangeId`, so re-runs are deterministic and no published ref is ever
    rewritten (r4 identity-stability). A synthetic ref retires **only** once a
@@ -1078,8 +1096,9 @@ ref's "own line" at the initial condition; rules 1–4 govern every move thereaf
 2. **Never switch lines (no lateral move).** The ref is **never** reassigned to a
    *sibling* antichain member — a maximal served state that is **not** a descendant
    of its prior tip — even when that sibling is also maximal. Sibling lines are
-   reached only through their own derived/synthetic names
-   (`<thread>@<full-changeid>`, pure functions of the served `ChangeId`), never by
+   reached only through their own derived/synthetic names in the reserved namespace
+   (`heddle/frontier/<thread>/<full-changeid>`, pure functions of the served
+   `ChangeId`; §5.4 Invariant C), never by
    moving `<thread>` onto them. No ordering-based selection (topological,
    lexicographic) is ever used to *place* the moving ref; ordering is admissible
    only to mint the stable derived names for the non-moving siblings.
@@ -1100,8 +1119,9 @@ meanwhile a *sibling* line `B` is also maximal, behind a hidden merge `M` that i
 not served (so the antichain is `{A2, B}` and `A` is now **non-maximal**). Then
 `<thread>` advertises **`A2`** — its own-line maximal descendant — **never `A`**
 (freezing at a non-maximal ancestor violates rule 1) and **never `B`** (jumping to
-a sibling line violates rule 2). `B` is published only as `<thread>@<b-changeid>`
-(B's **full** `ChangeId`, not a truncatable prefix — Invariant C).
+a sibling line violates rule 2). `B` is published only as
+`heddle/frontier/<thread>/<b-changeid>` — B's **full** `ChangeId`, in Heddle's
+reserved namespace that no user thread can occupy (Invariant C, §5.4).
 When `M` later becomes served and reunifies the fork, `<thread>` advances FF to `M`
 (now a unique dominating descendant on the merged line) and the `B` synthetic ref
 retires, since its state is then reachable from `<thread>`.
@@ -1333,8 +1353,9 @@ Every multi-host hazard in this design is foreclosed by **exactly four** named
 guarantees, each stated **once** here and never re-derived per mechanism. They are
 **orthogonal axes** — A fixes *when* a fact is bound, propagate-before-use fixes *that*
 a host waits for the propagated fact before acting, B fixes *how* genuinely-concurrent
-conflicting facts converge, and C fixes *how* served states are named so addressing
-never collides — and every concrete mechanism (the tier promotion, the antichain
+conflicting facts converge, and C fixes *where* synthetic/internal refs live — in a
+reserved namespace users cannot create or be published into — so addressing never
+collides — and every concrete mechanism (the tier promotion, the antichain
 anchor, the synthetic ref, any future placement/visibility fact) routes to exactly one
 of them rather than restating its own rule:
 
@@ -1369,16 +1390,93 @@ of them rather than restating its own rule:
   initial-anchor rule, §5.3 rule 0) *and* conflict-free merge across concurrent anchor
   facts.
 
-- **Invariant C — collision-proof naming (the *how-name*).** Every synthetic name or
-  key that must **uniquely address** a served state uses a **collision-proof
-  encoding** — the **full** `ChangeId` (`ChangeId::to_string_full()`, `hash.rs:129`;
-  round-trips via `parse()`, `:143`), **never** the truncatable `short()` / `Display`
-  form (`:137`, `:167-170`) that two distinct `ChangeId`s could share. Synthetic refs
-  are `refs/heads/<thread>@<full-changeid>`, so two maximal served siblings with
-  distinct `ChangeId`s always map to distinct `RefEntry` / ref names; the multi-root
-  advertisement (§5.3) therefore guarantees every maximal served state is **uniquely
-  named *and* fetchable** — no frontier root is overwritten or made undiscoverable by
-  a prefix collision.
+- **Invariant C — collision-proof namespace (the *how-name*).** Every synthetic /
+  internal ref lives in a **reserved namespace users structurally cannot create or be
+  published into** — not merely under a *unique name*. A unique encoding is necessary
+  but **not sufficient**: a name is collision-proof only if no user artifact can ever
+  occupy it, and a `ThreadName` is just a string — `ThreadName::new` does **no
+  validation** (`identifiers.rs:23-25,99-102`) and `validate_ref_name`
+  (`name.rs:11-31`) rejects only controls / `..` / `//` / backslash / slash-edges /
+  leading-`.` / `.lock`, **allowing** `@` (legitimately used by scoped names like
+  `main@review`, §3 Design C). So a user could create a thread `main@hd-<changeid>`
+  whose name *equals* the encoded synthetic form, and the bridge publishes every user
+  thread to `refs/heads/{track_name}` (`sync_track_to_branch`, `git_sync.rs:129`) —
+  the user thread and the synthetic sibling root would target the **same Git ref**,
+  overwriting one frontier root despite the full-`ChangeId` suffix. Uniqueness of the
+  key cannot help when the user writes into the **same** namespace. Heddle therefore
+  **reserves the `heddle/` first-segment** for itself — `refs/heddle/*` on the Git
+  side (extending the convention by which Heddle already reserves its own name in the
+  ref tree, e.g. `refs/notes/heddle`) and the `heddle/`-rooted name on the wire — and
+  enforces the reservation on **both** boundaries the artifact crosses:
+  1. **Name-validation boundary** (`name.rs:11-31`, enforced on the `ThreadName`
+     creation path — which today bypasses the validator entirely, `identifiers.rs:23-25`):
+     reject any user thread / marker name whose first `/`-segment is the reserved
+     `heddle` sigil. *(Reserve the prefix rather than "pick a marker users can't type":
+     one prefix rule closes the whole class, keeps synthetic names human-legible /
+     greppable, mirrors Git's own `refs/notes/heddle` reservation, and — unlike
+     forbidding `@` — does **not** break legitimate scoped names like `main@review`. A
+     user can still name a thread `heddle`, `heddlefoo`, or `my/heddle`; only the
+     `heddle/`-rooted **namespace** is reserved.)*
+  2. **Bridge / publish boundary** (`sync_track_to_branch`, `git_sync.rs:124-154`):
+     synthetic frontier roots are **never** published through the user-thread path
+     `refs/heads/{track_name}` (`:129`); they are published under the reserved
+     `refs/heddle/frontier/<thread>/<full-changeid>` Git namespace the bridge owns. The
+     full `ChangeId` (`ChangeId::to_string_full()`, `hash.rs:129`; round-trips via
+     `parse()`, `:143`; **never** the truncatable `short()` / `Display` form, `:137`,
+     `:167-170`) supplies **uniqueness *within*** the reserved namespace; the
+     reservation supplies **disjointness *from* user space**.
+
+  **Both boundaries are required — neither alone suffices, because they protect
+  different namespaces.** *Name reservation without publish separation* still collides
+  on the **Git-ref** surface: `refs/heads/*` is writable by *raw Git*
+  (`git branch` / `git update-ref`) and by *imported foreign branches* — neither passes
+  through Heddle's validator — so a branch `refs/heads/main@hd-…` can exist that Heddle
+  never named; only moving synthetic refs **out of** `refs/heads/` forecloses that.
+  *Publish separation without name reservation* still collides on the **wire /
+  CLI-resolution** surface: `ListRefs` names a synthetic root with a `ThreadName`-shaped
+  `RefEntry.name`; if a user may create a real thread of that name, two `RefEntry`s
+  share a name and heddle's CLI ref-resolution cannot disambiguate the user thread from
+  the synthetic root. The reserved `heddle/` sigil is the **single** principle applied
+  to both surfaces — the same lesson as the recovery-handle reservation: an internal
+  artifact must live in a reserved namespace, **never** share a user-writable one under
+  a merely-"unique" name.
+
+  *Namespace sweep — every internal/synthetic Git/wire surface routes through this one
+  reservation (so the class is closed, not just this instance).* Auditing every
+  artifact the design places on a Git ref or a wire name:
+  - **Synthetic frontier roots** (sibling lines) — the artifact this finding named:
+    now `refs/heddle/frontier/<thread>/<full-changeid>` (Git) / `heddle/`-rooted
+    `RefEntry.name` (wire), reserved on **both** boundaries above. ✔ reserved.
+  - **The moving `<thread>` ref** (`refs/heads/<thread>`, and its wire `RefEntry`) — the
+    **real** user thread, published 1:1; it *is* the user namespace, so it needs no
+    reservation (it is never synthesized). ✔ user-owned by design.
+  - **The antichain anchor** (which member `<thread>` names at first advertisement) — a
+    **persisted fact** replicated over the record-sync path (`sync.rs:268-302`), keyed by
+    `(thread, audience)`; it is **never** exposed as a Git ref or a `ThreadName`-shaped
+    wire name, so there is no user-writable surface for it to collide with. ✔ not a
+    nameable surface.
+  - **Promotion / visibility records** (`StateVisibility`, `OpRecord::StateVisibilityPromote`)
+    — oplog records + sidecar blobs replicated over the same record-sync path; **not**
+    Git refs, **not** ThreadName-shaped. ✔ not a nameable surface.
+  - **Marker → tag** (`refs/tags/<marker>`, `sync_marker_to_tag`, `git_sync.rs:157`) — a
+    user `MarkerName` published 1:1, and on embargo it is **withheld**, never replaced by
+    a synthetic tag name (§5.3); no internal artifact is minted into tag space. The
+    `heddle/`-first-segment reservation in name-validation covers `MarkerName` too (the
+    rule is stated over "user thread / marker name"), pre-empting any future synthetic
+    tag. ✔ withheld-not-synthesized; reserved for symmetry.
+  - **State notes** (`refs/notes/heddle`) — already under the reserved `heddle` segment;
+    this is the **precedent** the reservation generalizes. ✔ already reserved.
+  - **`HEAD` symref + bulk export/push** — `HEAD` resolves to a served `refs/heads/<thread>`
+    (a real user ref); no synthetic name is minted. ✔ resolves to user-owned ref.
+
+  Conclusion: the **only** internal artifact that minted a *new* name into a
+  user-writable namespace was the synthetic frontier root; every other internal artifact
+  is either a persisted fact replicated as data (anchor, promotion/visibility records —
+  never a ref or wire name), a user artifact published 1:1 with **withholding** rather
+  than synthesis (the moving `<thread>` ref, markers→tags, `HEAD`), or already under the
+  reserved `heddle` namespace (notes). Reserving the `heddle/` first-segment on both
+  boundaries therefore closes the **whole class** — no internal artifact anywhere in the
+  design can collide with a user-creatable or user-publishable name.
 
 - **Propagate-before-use — the persisted-fact principle (the *that-it-waits*).** A
   decision about **what** is served (a tier promotion) or **where** a moving ref sits
@@ -1403,8 +1501,9 @@ A into a persisted fact **at capture**, after which only the fact is read. There
 fact to read before the first writer mints one, which is exactly why only the writer
 computes; genuinely-concurrent writers converge by Invariant B. All four guarantees
 converge on the same §5.4 outcome — once a decision is bound, no clock, config drift,
-replica holding a different fact set, concurrent minter, or duplicate name can walk it
-back, fork it, or hide a served state behind a colliding name.
+replica holding a different fact set, concurrent minter, or user-writable name colliding
+with a synthetic ref can walk it back, fork it, or hide a served state behind a
+colliding name.
 
 ### 5.5 Oplog records (append at the tail — hard constraint)
 
@@ -1427,7 +1526,7 @@ mirroring the `Redact` / `Purge` audit-trail pattern (`oplog_types.rs:109,123`).
 | object store | per-state `visibility/` sidecar dir + read/write + `has_visibility_for_state` | mirrors redactions dir (`fs_paths.rs:46-50`, `repository_redaction.rs:490`) |
 | `oplog` | tail-append `StateVisibilitySet` / `StateVisibilityPromote` | tail-append rule (`oplog_types.rs:14-21`) |
 | `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); the **operator-local courtesy stub** is rendered at the **state walk** (where the `ChangeId` is in scope), never in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) — the public mirror emits absence, not a stub (§5.0/§5.3) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
-| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before *every* ref-publishing/state-emitting surface** via one shared `resolve_frontier` chokepoint (§5.3) — branch ref-sync (`:277-288`, lag `refs/heads/main` to the frontier, **not** the raw `get_thread` tip `:278`), marker→tag sync (`:290-296`, withhold `refs/tags/<marker>` unless served — conflict-not-FF, `git_sync.rs:163-170`), **state notes `refs/notes/heddle`** (write a note only for a served state — `git_export.rs:242-245,252-261`, `git_core.rs:1105-1109`; forced mirror `+refs/notes/*`, `git_core.rs:300`; note payload carries `change_id`/attribution/agent, `git_notes.rs:33-56`), and the **`HEAD` symref + bulk push** (`git_core.rs:2398-2407,751`); merge-frontier antichain ≥2 → `<thread>` advances along its own line to its prior tip's maximal served descendant; publish every *other* sibling line under deterministic `refs/heads/<thread>@<full-changeid>` synthetic refs; the frontier rule is categorical over all surfaces (§5.3), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2446`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2446`), notes (`git_notes.rs:29`) |
+| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before *every* ref-publishing/state-emitting surface** via one shared `resolve_frontier` chokepoint (§5.3) — branch ref-sync (`:277-288`, lag `refs/heads/main` to the frontier, **not** the raw `get_thread` tip `:278`), marker→tag sync (`:290-296`, withhold `refs/tags/<marker>` unless served — conflict-not-FF, `git_sync.rs:163-170`), **state notes `refs/notes/heddle`** (write a note only for a served state — `git_export.rs:242-245,252-261`, `git_core.rs:1105-1109`; forced mirror `+refs/notes/*`, `git_core.rs:300`; note payload carries `change_id`/attribution/agent, `git_notes.rs:33-56`), and the **`HEAD` symref + bulk push** (`git_core.rs:2398-2407,751`); merge-frontier antichain ≥2 → `<thread>` advances along its own line to its prior tip's maximal served descendant; publish every *other* sibling line under deterministic synthetic refs in the **reserved** `refs/heddle/frontier/<thread>/<full-changeid>` namespace (Invariant C, §5.4 — never the user-writable `refs/heads/{track_name}` path `git_sync.rs:129` writes); the frontier rule is categorical over all surfaces (§5.3), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2446`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2446`), notes (`git_notes.rs:29`) |
 | `proto` / wire | new `ObjectType::Visibility` in the sync plan (mirroring `emit_redaction_plan`), itself gated — a record is served only when its state is served, so it never leaks an embargoed `ChangeId`/tier/date (§8.4); **new** tier-aware **downward-closed reachability gate** — resolve the visibility frontier as a pre-pass, then serve the forward closure of the ancestry-closed visible set rooted at that frontier (no `ObjectType::State` header for an embargoed commit); **multi-root merge frontier** — `ListRefs` advertises one `RefEntry` per maximal served state into the existing `Vec<RefEntry>` (`message_refs.rs:85`), client issues one single-root `Pull` per root (`message_pushpull.rs:91`) with `exclude_states` dedup (`:95`), so no widened request shape is needed. NOT a `collect_excluded` extension (root-exclusion over-withholds, §5.3) and no set difference is needed (a child of a hidden parent is never served, so nothing shared to subtract) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`); `Vec<RefEntry>` (`message_refs.rs:85`) |
 | weft (closed) | **authoritative** server-side downward-closed gate in `ListRefs`/`Pull` (above); grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
 | config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution *precedence pattern* (namespace → repo → fallback) — but `resolve_default_visibility` is typed to `AnnotationVisibility` (`namespace_policy.rs:68,75`), so it must be generalized over the tier enum (ties O4) and its `Internal` fallback replaced with the stricter `Private` (§8.1) | `resolve_default_visibility` (`namespace_policy.rs:68`) |
@@ -1725,8 +1824,10 @@ serve `S` — which §5.4 explicitly forecloses.
   `HEAD` symref, and the bulk export/push (§5.3 surfaces 4–6, §10 #5). And a
   hidden merge that leaves ≥2 incomparable maximal served states is
   handled by the multi-root path — `ListRefs` advertises the antichain as multiple
-  `RefEntry`s and the Git mirror publishes synthetic `<thread>@<full-changeid>`
-  refs (§5.3) — so no visible side is silently unreachable. The earlier "permanent
+  `RefEntry`s and the Git mirror publishes synthetic refs in the reserved
+  `refs/heddle/frontier/<thread>/<full-changeid>` namespace (§5.3, Invariant C §5.4 —
+  never the user-writable `refs/heads/` path) — so no visible side is silently
+  unreachable. The earlier "permanent
   stub commit" fallback is **dropped**: it would publish the descendant against a
   synthetic stub parent (a partial embargoed-commit view + a parent-edge rewrite),
   which §5.0.1 rules out. Stub-swap and graft-reparent `N+1` onto `N-1` are
@@ -1810,7 +1911,8 @@ issues are checked against:
   bases** (gate selects no base); frontier **computation** (least-fixed-point
   topological pass) and **transmission** without leaking (absence ≡ non-existence);
   the **multi-root protocol path** (advertise antichain, N single-root pulls,
-  synthetic Git refs); **antichain ref-placement stability** — the moving ref
+  synthetic Git refs in the reserved `refs/heddle/*` namespace, Invariant C §5.4);
+  **antichain ref-placement stability** — the moving ref
   (`<thread>` / `refs/heads/<thread>`) is stable + forward-only across antichain
   members: it advances forward **along its own line** to the maximal served
   descendant of its prior tip (e.g. `A → A2`, never frozen at a non-maximal
@@ -1843,10 +1945,15 @@ issues are checked against:
   state — issue #3); **B — deterministic conflict-free merge** (two genuinely-
   concurrent first-advertisement / placement facts with no superseding order converge
   by a content-intrinsic `min`-`ChangeId` merge, identical on every replica, **no
-  lease / single-writer** — issue #4); **C — collision-proof naming** (every synthetic
-  ref/addressing name uses the **full** `ChangeId` via `to_string_full()`, **never** a
-  truncatable `short()`/prefix form, so two distinct siblings never collide and every
-  maximal served state is uniquely named *and* fetchable — issues #4/#5).
+  lease / single-writer** — issue #4); **C — collision-proof namespace** (every
+  synthetic/internal ref lives in the **reserved `heddle/` namespace** users
+  structurally cannot create or be published into — `refs/heddle/*` disjoint from user
+  `refs/heads/*`, and the `heddle/` first-segment reserved in `ThreadName`/`MarkerName`
+  validation — with the **full** `ChangeId` via `to_string_full()` supplying uniqueness
+  *within* that namespace; enforced on **both** the name-validation (`name.rs`) and
+  bridge-publish (`sync_track_to_branch`) boundaries, so no user thread, raw-Git branch,
+  or imported `refs/heads/*` ref can collide with or overwrite a frontier root — issues
+  #4/#5).
 
 1. **impl(objects/repo): `StateVisibility` object + per-state sidecar store.**
    Add `StateVisibility` / `StateVisibilityBlob` (objects), the `visibility/`
@@ -1891,11 +1998,18 @@ issues are checked against:
    state** into the existing `Vec<RefEntry>` (`message_refs.rs:85`): `<thread>`
    **advances along its own line to the maximal served descendant of its prior
    tip** (never frozen at a non-maximal ancestor) and **only the *other* members**
-   (sibling lines) get deterministic `<thread>@<full-changeid>` names — **Invariant C
-   (collision-proof naming, §5.4): the name carries the full `ChangeId` via
+   (sibling lines) get deterministic names in the **reserved `heddle/` namespace**,
+   `heddle/frontier/<thread>/<full-changeid>` — **Invariant C
+   (collision-proof namespace, §5.4): the name carries the full `ChangeId` via
    `ChangeId::to_string_full()` (`hash.rs:129`), never a truncatable `short()`/prefix
-   form (`:137`/`:167-170`)**, so two siblings with distinct `ChangeId`s never collide
-   onto one `RefEntry`. `<thread>` itself is **never** chosen by topological/
+   form (`:137`/`:167-170`), *and* lives in the reserved `heddle/` first-segment that
+   user `ThreadName`s structurally cannot occupy** — so two siblings with distinct
+   `ChangeId`s never collide onto one `RefEntry`, **and** no user thread's `RefEntry`
+   can ever share a synthetic root's name (this issue MUST also **reserve the `heddle/`
+   first-segment in `ThreadName`/`validate_ref_name`**, `name.rs:11-31` — which today
+   allows `@` and the `heddle/` prefix — and enforce it on the `ThreadName` creation
+   path that currently bypasses the validator, `identifiers.rs:23-25`). `<thread>`
+   itself is **never** chosen by topological/
    lexicographic order and **never** jumps to a sibling (that would move the main ref
    sideways to an incomparable sibling, §5.3 "antichain ref placement, the definitive
    statement"). A conformance test must assert two siblings sharing any `ChangeId`
@@ -1990,14 +2104,24 @@ issues are checked against:
    - **Multi-root merge frontier** (§5.3): when the antichain has ≥2 incomparable
      maximal served states, publish each antichain member **other than the one
      `<thread>` names** (every sibling line) under a deterministic
-     synthetic `refs/heads/<thread>@<full-changeid>` (append-only, retires once a
-     served descendant reunifies the fork), so a plain `git clone` fetches every
-     visible side. **Invariant C (collision-proof naming, §5.4): the synthetic name
-     carries the full `ChangeId` via `ChangeId::to_string_full()` (`hash.rs:129`),
-     never a truncatable `short()`/prefix form (`:137`/`:167-170`)**, so two siblings
-     that share any prefix still map to distinct refs and neither frontier root is
-     overwritten or made undiscoverable; a conformance test must assert prefix-sharing
-     siblings get distinct, individually-fetchable refs. `<thread>` itself only ever
+     synthetic ref in the **reserved `refs/heddle/frontier/<thread>/<full-changeid>`
+     namespace** — **never** the user-thread path `refs/heads/{track_name}` that
+     `sync_track_to_branch` (`git_sync.rs:129`) writes (append-only, retires once a
+     served descendant reunifies the fork). **Invariant C (collision-proof namespace,
+     §5.4): the synthetic name carries the full `ChangeId` via
+     `ChangeId::to_string_full()` (`hash.rs:129`), never a truncatable `short()`/prefix
+     form (`:137`/`:167-170`), *and* lives in the reserved `refs/heddle/*` namespace
+     disjoint from user `refs/heads/*`** — so two siblings that share any prefix still
+     map to distinct refs **and** no user thread / raw-Git / imported `refs/heads/*`
+     branch can target a synthetic ref's location, neither overwriting nor hiding a
+     frontier root. This issue MUST publish synthetic roots under `refs/heddle/frontier/*`
+     (a new bridge publish path, **not** `sync_track_to_branch`) and add the
+     reserved-namespace fetch refspec so a Heddle-aware clone fetches them (a vanilla
+     `git clone` gets only the own-line `refs/heads/<thread>`, the deliberate cost of
+     collision-proofness, §5.3). A conformance test must assert (a) prefix-sharing
+     siblings get distinct, individually-fetchable refs, and (b) a user thread named
+     `<thread>@hd-…` (or a raw-Git branch at that `refs/heads/` location) does **not**
+     collide with or overwrite any synthetic frontier root. `<thread>` itself only ever
      advances FF **along its own line** to the maximal served descendant of its prior
      tip, else retains its prior tip — **never moves sideways to a sibling member and
      never regresses** (antichain ref-placement stability, §5.3; structurally enforced
