@@ -227,12 +227,19 @@ pub fn cmd_diff(
     };
 
     let file_changes: Vec<FileChange> = if name_only {
+        // Status-only entries, but modes captured before rename detection so
+        // the cross-type guard fires here too (cid 3321103601) — see
+        // `make_status_only_change`.
         changes
             .iter()
-            .map(|change| FileChange {
-                path: change.path.clone(),
-                kind: change.kind.to_string(),
-                ..Default::default()
+            .map(|change| {
+                make_status_only_change(
+                    Some(&repo),
+                    from_tree.as_ref(),
+                    to_tree.as_ref(),
+                    &change.path,
+                    &change.kind.to_string(),
+                )
             })
             .collect()
     } else {
@@ -923,11 +930,40 @@ fn make_status_file_change(
         Some(repo) if want_hunks => {
             build_worktree_change(repo, from_tree, &path_str, kind, diff_kind, unified)
         }
-        _ => FileChange {
-            path: path_str,
-            kind: kind.to_string(),
-            ..Default::default()
-        },
+        _ => make_status_only_change(repo, from_tree, None, &path_str, kind),
+    }
+}
+
+/// Build a status-only `FileChange` (no hunk body) that still carries its
+/// `(old_mode, mode)` pair. Modes are cheap metadata that *every* output mode
+/// needs, not just `--patch`/JSON: rename detection rejects a cross-type
+/// (regular↔symlink) collapse by comparing the two sides' modes, and the
+/// renderers stamp rename+mode headers from them. Gating mode capture on the
+/// hunk-only flag dropped them on the default/`--stat`/`--name-only` paths, so
+/// a cross-type move silently re-collapsed into a rename there while `--patch`
+/// (which kept the modes) correctly stayed split (cid 3321103601). This is the
+/// single chokepoint every status-only construction site routes through — the
+/// worktree-status path, the type-change split, and the `--name-only` builder
+/// — so the capture can't diverge between them again. `repo == None` is the
+/// plain-Git fast path, which has no object store to resolve modes from (and
+/// runs no rename collapse), so it stays modeless.
+fn make_status_only_change(
+    repo: Option<&Repository>,
+    from_tree: Option<&Tree>,
+    to_tree: Option<&Tree>,
+    path_str: &str,
+    kind: &str,
+) -> FileChange {
+    let (old_mode, mode) = match repo {
+        Some(repo) => change_file_modes(repo, from_tree, to_tree, path_str, kind),
+        None => (None, None),
+    };
+    FileChange {
+        path: path_str.to_string(),
+        kind: kind.to_string(),
+        mode,
+        old_mode,
+        ..Default::default()
     }
 }
 
@@ -1164,11 +1200,7 @@ fn make_type_change_part(
 ) -> FileChange {
     let kind = diff_kind.to_string();
     if !want_hunks {
-        return FileChange {
-            path: path_str.to_string(),
-            kind,
-            ..Default::default()
-        };
+        return make_status_only_change(Some(repo), from_tree, to_tree, path_str, &kind);
     }
     match to_tree {
         Some(to_tree) => {

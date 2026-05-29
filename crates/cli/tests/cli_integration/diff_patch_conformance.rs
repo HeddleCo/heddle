@@ -1030,6 +1030,205 @@ fn plain_git_regular_to_symlink_rename_candidate_stays_split() {
 }
 
 // ---------------------------------------------------------------------------
+// Matrix — rename×type on the STATUS path (cid 3321103601). The cells above
+// assert `--patch`/JSON, which capture each side's mode and so feed the
+// rename-collapse its cross-type guard. The default, `--stat`, and
+// `--name-only` renders take the status-only path, which used to drop modes
+// (they were gated on the hunk-only flag) — so the same cross-type move that
+// `--patch` keeps split silently re-collapsed into a rename there. These pin
+// every status render to the patch render's verdict, on BOTH rename-collapse
+// backends: the worktree-status path (`status_renders`) and the committed-tree
+// path (`state_status_renders`, `heddle diff HEAD~1 HEAD`).
+// ---------------------------------------------------------------------------
+
+/// The three non-`--patch` renders of one repo state, captured together so a
+/// single setup exercises every status-path renderer.
+struct StatusRenders {
+    default: String,
+    stat: String,
+    name_only: String,
+}
+
+/// Worktree-status renders: capture `pre`, mutate the worktree, then run
+/// `heddle diff` with no flag / `--stat` / `--name-only` (all read-only, so
+/// they share one worktree).
+fn status_renders(pre: &[Entry], mutate: impl Fn(&Path)) -> StatusRenders {
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    for entry in pre {
+        write_entry(h.path(), entry);
+    }
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+    mutate(h.path());
+    StatusRenders {
+        default: heddle(&["diff"], Some(h.path())).unwrap(),
+        stat: heddle(&["diff", "--stat"], Some(h.path())).unwrap(),
+        name_only: heddle(&["diff", "--name-only"], Some(h.path())).unwrap(),
+    }
+}
+
+/// Committed-tree renders: capture `pre` as v1, mutate, capture v2, then run
+/// `heddle diff HEAD~1 HEAD` with no flag / `--stat` / `--name-only`.
+fn state_status_renders(pre: &[Entry], mutate: impl Fn(&Path)) -> StatusRenders {
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    for entry in pre {
+        write_entry(h.path(), entry);
+    }
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+    mutate(h.path());
+    heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
+    StatusRenders {
+        default: heddle(&["diff", "HEAD~1", "HEAD"], Some(h.path())).unwrap(),
+        stat: heddle(&["diff", "HEAD~1", "HEAD", "--stat"], Some(h.path())).unwrap(),
+        name_only: heddle(&["diff", "HEAD~1", "HEAD", "--name-only"], Some(h.path())).unwrap(),
+    }
+}
+
+/// Assert the three status renders all treat the change as a cross-type
+/// delete + add — never a rename — naming both the deleted and added paths.
+fn assert_split_not_rename(renders: &StatusRenders, deleted: &str, added: &str) {
+    assert!(
+        !renders.default.contains("rename from"),
+        "default render must keep the cross-type move split, not a rename:\n{}",
+        renders.default
+    );
+    assert!(
+        !renders.stat.contains("renamed") && !renders.stat.contains(" -> "),
+        "--stat must keep the cross-type move split, not a rename:\n{}",
+        renders.stat
+    );
+    assert!(
+        renders.name_only.lines().any(|line| line == deleted)
+            && renders.name_only.lines().any(|line| line == added),
+        "--name-only must list both `{deleted}` (deleted) and `{added}` (added), \
+         not collapse to one renamed path:\n{}",
+        renders.name_only
+    );
+}
+
+/// Worktree surface: a regular file removed at one path and a symlink (whose
+/// followed bytes equal the removed file's) added at another scores as a
+/// rename candidate, but crosses the regular↔symlink boundary — so every
+/// status render must keep it split, matching `--patch`
+/// (`native_regular_to_symlink_rename_candidate_stays_split`).
+#[cfg(unix)]
+#[test]
+fn status_regular_to_symlink_rename_candidate_stays_split() {
+    let shared = "shared payload\n";
+    let renders = status_renders(
+        &[normal("mover.txt", shared), normal("anchor.txt", shared)],
+        |dir| {
+            std::fs::remove_file(dir.join("mover.txt")).unwrap();
+            write_entry(dir, &symlink("linked", "anchor.txt"));
+        },
+    );
+    assert_split_not_rename(&renders, "mover.txt", "linked");
+}
+
+/// Committed-tree surface: a regular file whose stored bytes equal a symlink's
+/// target string. The `--name-only` committed-diff render took its own
+/// modeless builder, so the cross-type guard could not fire there either.
+#[cfg(unix)]
+#[test]
+fn state_status_regular_to_symlink_rename_candidate_stays_split() {
+    let renders = state_status_renders(
+        &[normal("mover.txt", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("mover.txt")).unwrap();
+            write_entry(dir, &symlink("linked", "dest/dir/file"));
+        },
+    );
+    assert_split_not_rename(&renders, "mover.txt", "linked");
+}
+
+/// The must-not-over-block companion: a regular→executable move stays within
+/// git's regular-file type class, so every status render MUST still collapse
+/// it into a rename (and `--patch` round-trips through `git apply`). Capturing
+/// modes for the guard must not start blocking the legal rename+chmod.
+#[cfg(unix)]
+#[test]
+fn status_regular_to_exec_move_still_collapses_to_rename() {
+    let body = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    let renders = status_renders(
+        &[normal("old.sh", body)],
+        |dir| {
+            std::fs::remove_file(dir.join("old.sh")).unwrap();
+            write_entry(dir, &exec("new.sh", body));
+        },
+    );
+    assert!(
+        renders.stat.contains("renamed") && renders.stat.contains("old.sh -> new.sh"),
+        "--stat must show the regular→exec move as a rename:\n{}",
+        renders.stat
+    );
+    assert!(
+        renders.default.contains("rename from old.sh")
+            && renders.default.contains("rename to new.sh"),
+        "default render must show the regular→exec move as a rename:\n{}",
+        renders.default
+    );
+    // `--name-only` collapses to the single new path — `old.sh` is gone.
+    assert!(
+        renders.name_only.lines().any(|line| line == "new.sh")
+            && !renders.name_only.lines().any(|line| line == "old.sh"),
+        "--name-only must list only the renamed-to path for a regular→exec move:\n{}",
+        renders.name_only
+    );
+    // And the patch form of the same move still round-trips with its chmod.
+    let patch = {
+        let h = TempDir::new().unwrap();
+        heddle(&["init"], Some(h.path())).unwrap();
+        write_entry(h.path(), &normal("old.sh", body));
+        heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+        std::fs::remove_file(h.path().join("old.sh")).unwrap();
+        write_entry(h.path(), &exec("new.sh", body));
+        heddle(&["diff", "--patch"], Some(h.path())).unwrap()
+    };
+    assert!(
+        patch.contains("old mode 100644") && patch.contains("new mode 100755"),
+        "rename+chmod patch must still carry the mode headers:\n{patch}"
+    );
+    apply_oracle(
+        &[normal("old.sh", body)],
+        &patch,
+        &[Expect::Absent("old.sh"), Expect::Present(exec("new.sh", body))],
+    );
+}
+
+/// A *same-path* regular↔symlink type change must split into a delete + add on
+/// the status renders too — never surface as a single `modified` chmod. This
+/// drives the type-change split (`expand_type_changes` → `make_type_change_part`)
+/// in its no-hunk mode (`--stat`/`--name-only`), the sibling status-path
+/// construction site, so it also captures modes through the shared helper.
+#[cfg(unix)]
+#[test]
+fn status_same_path_regular_to_symlink_splits_not_modified() {
+    let renders = status_renders(
+        &[normal("swap", "shared payload\n"), normal("anchor.txt", "shared payload\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("swap")).unwrap();
+            write_entry(dir, &symlink("swap", "anchor.txt"));
+        },
+    );
+    assert!(
+        renders.stat.contains("deleted")
+            && renders.stat.contains("added")
+            && !renders.stat.contains("modified")
+            && !renders.stat.contains("renamed"),
+        "--stat must split a same-path type change into delete + add:\n{}",
+        renders.stat
+    );
+    // `--name-only` lists the path on both the delete and add halves.
+    assert_eq!(
+        renders.name_only.lines().filter(|line| *line == "swap").count(),
+        2,
+        "--name-only must list the split path twice (delete + add):\n{}",
+        renders.name_only
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Matrix — file ↔ directory type changes. Covers cid 3319049665 — a tracked
 // file replaced by a directory (or vice-versa) must emit the deletion of the
 // blocking path so `git apply` can create the new tree over it.

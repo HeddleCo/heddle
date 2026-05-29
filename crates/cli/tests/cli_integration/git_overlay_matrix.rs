@@ -5530,6 +5530,70 @@ fn git_overlay_matrix_clean_dangling_symlink_does_not_look_committable() {
     );
 }
 
+/// Git-overlay status path (`render_worktree_status_diff`, the path cid
+/// 3321103601 flagged): a tracked regular file removed and a symlink (whose
+/// followed bytes match the removed file's) added scores as a rename
+/// candidate but crosses the regular↔symlink boundary. The `--patch`/JSON
+/// render captures each side's mode and so keeps it split; the status renders
+/// (default / `--stat` / `--name-only`) used to drop modes before rename
+/// detection and silently re-collapse it into a rename. Pin every status
+/// render on this overlay path to "split, not rename".
+#[cfg(unix)]
+#[test]
+fn git_overlay_matrix_diff_status_keeps_cross_type_move_split() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("mover.txt"), "shared payload\n").unwrap();
+    std::fs::write(temp.path().join("anchor.txt"), "shared payload\n").unwrap();
+    std::fs::write(temp.path().join("filler.txt"), "filler\n").unwrap();
+    git_commit_all(temp.path(), "seed mover + anchor");
+    heddle_adopt(temp.path());
+
+    // Advance the Git branch outside Heddle (an unrelated commit) so the repo
+    // enters `git_branch_advanced` — that drift state is what makes
+    // `trust_visible_worktree_status` trust the live worktree and route
+    // `heddle diff` through `render_worktree_status_diff` (the path cid
+    // 3321103601 flagged), instead of the heddle-native builder.
+    std::fs::write(temp.path().join("filler.txt"), "filler edit\n").unwrap();
+    git(&["add", "filler.txt"], temp.path());
+    git(&["commit", "-m", "advance branch outside heddle"], temp.path());
+
+    // The cross-type move stays UNCOMMITTED in the worktree: `linked` follows
+    // to `anchor.txt`, so the worktree blob read for the added side equals the
+    // removed `mover.txt` bytes — a similarity-1.0 rename candidate that must
+    // still stay split across the regular↔symlink boundary.
+    std::fs::remove_file(temp.path().join("mover.txt")).unwrap();
+    symlink("anchor.txt", temp.path().join("linked")).unwrap();
+
+    // Sanity: confirm we are actually on the `render_worktree_status_diff`
+    // path — the drift state must be `git_branch_advanced`.
+    let status = json(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(
+        status["verification"]["status"], "git_branch_advanced",
+        "test must exercise the trusted-worktree status path: {status}"
+    );
+
+    let default = heddle(&["diff"], Some(temp.path())).unwrap();
+    assert!(
+        !default.contains("rename from"),
+        "overlay default render must keep the cross-type move split:\n{default}"
+    );
+    let stat = heddle(&["diff", "--stat"], Some(temp.path())).unwrap();
+    assert!(
+        !stat.contains("renamed") && !stat.contains(" -> "),
+        "overlay --stat must keep the cross-type move split:\n{stat}"
+    );
+    let name_only = heddle(&["diff", "--name-only"], Some(temp.path())).unwrap();
+    assert!(
+        name_only.lines().any(|line| line == "mover.txt")
+            && name_only.lines().any(|line| line == "linked"),
+        "overlay --name-only must list both `mover.txt` (deleted) and `linked` \
+         (added), not collapse to one renamed path:\n{name_only}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn git_overlay_matrix_diff_added_symlink_renders_link_target() {
