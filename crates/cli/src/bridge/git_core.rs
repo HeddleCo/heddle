@@ -2703,6 +2703,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_git_ref_local_branch() {
+        let parsed = parse_git_ref("refs/heads/main").expect("local branch parses");
+        assert_eq!(parsed.kind, GitRefKind::Branch);
+        assert_eq!(parsed.name, "main");
+        assert_eq!(parsed.remote, REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+    }
+
+    #[test]
+    fn parse_git_ref_remote_branch_keeps_nested_name() {
+        let parsed =
+            parse_git_ref("refs/remotes/origin/feature/x").expect("remote branch parses");
+        assert_eq!(parsed.kind, GitRefKind::Branch);
+        assert_eq!(parsed.name, "feature/x");
+        assert_eq!(parsed.remote, "origin");
+    }
+
+    #[test]
+    fn parse_git_ref_tag() {
+        let parsed = parse_git_ref("refs/tags/v1.0").expect("tag parses");
+        assert_eq!(parsed.kind, GitRefKind::Tag);
+        assert_eq!(parsed.name, "v1.0");
+        assert_eq!(parsed.remote, REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+    }
+
+    #[test]
+    fn parse_git_ref_skips_head_symrefs() {
+        assert_eq!(parse_git_ref("refs/heads/HEAD"), None);
+        assert_eq!(parse_git_ref("refs/remotes/origin/HEAD"), None);
+    }
+
+    #[test]
+    fn parse_git_ref_rejects_unknown_or_malformed() {
+        assert_eq!(parse_git_ref("refs/notes/heddle"), None);
+        assert_eq!(parse_git_ref("HEAD"), None);
+        // A remote ref with no branch component beneath the remote name.
+        assert_eq!(parse_git_ref("refs/remotes/origin"), None);
+    }
+
+    #[test]
+    fn refspec_forced_round_trips_git_format() {
+        let spec = RefSpec::forced("refs/heads/main", "refs/heads/main");
+        assert_eq!(spec.to_git_format(), "+refs/heads/main:refs/heads/main");
+        assert_eq!(
+            spec.to_git_format_not_forced(),
+            "refs/heads/main:refs/heads/main"
+        );
+    }
+
+    #[test]
+    fn refspec_delete_has_empty_source() {
+        let spec = RefSpec::delete("refs/heads/stale");
+        assert_eq!(spec.to_git_format(), ":refs/heads/stale");
+        assert_eq!(spec.to_git_format_not_forced(), ":refs/heads/stale");
+    }
+
+    #[test]
+    fn negative_refspec_prefixes_caret() {
+        let spec = NegativeRefSpec::new("refs/heads/wip/*");
+        assert_eq!(spec.to_git_format(), "^refs/heads/wip/*");
+    }
+
+    #[test]
+    fn mirror_fetch_refspecs_cover_branches_and_notes() {
+        assert_eq!(
+            heddle_mirror_fetch_refspecs(),
+            [
+                "+refs/heads/*:refs/heads/*".to_string(),
+                "+refs/notes/*:refs/notes/*".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn fast_forward_guard_reports_exact_rewrite_before_after() {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo = gix::init_bare(tmp.path()).expect("init bare repo");
