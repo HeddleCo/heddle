@@ -1429,9 +1429,11 @@ of them rather than restating its own rule:
   **reserves the `heddle/` first-segment** for itself — `refs/heddle/*` on the Git
   side (extending the convention by which Heddle already reserves its own name in the
   ref tree, e.g. `refs/notes/heddle`) and the `heddle/`-rooted name on the wire — and
-  enforces the reservation on the **two write-boundaries** the artifact crosses, and
-  recognizes the synthetic **type** on the **consume-boundary** so the reserved root
-  stays fetchable:
+  enforces the reservation on **every boundary at which an actor could write the
+  namespace** — Heddle name-validation and bridge publish (the two write-boundaries the
+  artifact itself crosses) *and* the **raw-Git receive/import** path by which an external
+  or imported actor could forge a ref into it — while recognizing the synthetic **type**
+  on the **consume-boundary** so the reserved root stays fetchable:
   1. **Name-validation boundary** (`name.rs:11-31`, enforced on the `ThreadName`
      creation path — which today bypasses the validator entirely, `identifiers.rs:23-25`):
      reject any user thread / marker name whose first `/`-segment is the reserved
@@ -1462,8 +1464,30 @@ of them rather than restating its own rule:
      fetch the antichain — leaving the reserved root **uncreateable by users *and*
      unfetchable by Heddle**. Recognizing the synthetic **type** is what lets the reservation
      protect the name without foreclosing its own fetch path.
+  4. **Raw-Git receive / import boundary** — the boundary at which a write *not
+     originating from Heddle's own typed synthetic-ref writer* could land in the
+     namespace. Boundaries 1–2 protect the artifact as **Heddle** writes it, but
+     `refs/heddle/*` is, on the Git side, just a normal ref namespace: a raw `git push`
+     / `git update-ref`, or an imported foreign branch, bypasses the `ThreadName`
+     validator entirely. This boundary has **two faces, both enforced**:
+     *(i) Heddle-side import chokepoint (live code path):* every git→Heddle import —
+     `sync_branches` / `sync_tags` (`git_sync.rs:79,108,113`) and the ingest ref-emit
+     path — funnels through `set_thread` / `set_marker` → `update_refs` →
+     `validate_ref_name` (`name.rs:11-31`, called at the store write sites
+     `refs_storage.rs:60,102,118,122,133`). Because the boundary-1 reservation is
+     enforced at the **store write-validator chokepoint** — not merely at a CLI-facing
+     `ThreadName::new` the import actor never calls (`identifiers.rs:23-25`) — an
+     imported `heddle/`-rooted branch or tag is rejected at store time.
+     *(ii) Hosted-mirror receive-pack (required impl gate):* Heddle the CLI is
+     **client-only** — there is no server-side receive-pack (the only
+     `Service::ReceivePack`, `git_core.rs:2886`, is the *outbound* push handshake). Where
+     the published mirror lives on a Git server that raw Git clients can push to, **that
+     host's receive path (receive-pack hook / `update-ref` guard) MUST reject raw-client
+     writes to `refs/heddle/*`**; only Heddle's bridge publish path (boundary 2) may
+     create/update them. No such server code exists in this repo, so this is a required
+     impl gate on the hosting side, not a heddle-CLI path.
 
-  **All three boundaries are required — none alone suffices, because they protect
+  **All four boundaries are required — none alone suffices, because they protect
   different surfaces.** *Name reservation without publish separation* still collides
   on the **Git-ref** surface: `refs/heads/*` is writable by *raw Git*
   (`git branch` / `git update-ref`) and by *imported foreign branches* — neither passes
@@ -1478,7 +1502,15 @@ of them rather than restating its own rule:
   thread name into `ThreadName::new` when persisting a remote ref (`fetch.rs:234,321`) and
   the mirror filters on `!is_thread` (`mod.rs:291,327`), so a `heddle/`-rooted root
   advertised as a thread is **rejected by its own reservation at store time** — fetchable
-  only once the wire entity is *typed* and every consume site routes by type. The reserved
+  only once the wire entity is *typed* and every consume site routes by type. *All three
+  of those, without a raw-Git receive guard,* still break on the **Git-host write**
+  surface: `refs/heddle/*`, like any ref namespace, is writable by a raw `git push` /
+  `update-ref` against a hosted mirror — bypassing Heddle's validator entirely — so an
+  external actor could pre-create or overwrite a synthetic frontier root unless the host's
+  receive path rejects raw writes to it (boundary 4); the Heddle-side import face of that
+  same boundary is closed by enforcing the reservation at the store write-validator (so
+  `sync_branches`/`sync_tags`/ref-emit imports cannot smuggle a `heddle/`-rooted ref in).
+  The reserved
   `heddle/` sigil is the **single** naming principle applied across both write-surfaces,
   and the synthetic **`RefKind`** is the **single** type recognized across every
   consume/store/mirror site — the same lesson as the recovery-handle reservation: an
@@ -1528,6 +1560,71 @@ of them rather than restating its own rule:
   coercing into a `ThreadName`**, therefore closes the **whole class** — no internal
   artifact anywhere in the design can collide with a user-creatable or user-publishable
   name, and the reservation never renders its own synthetic root unfetchable.
+
+  *Namespace-protection boundaries — the complete set.* The reservation is meaningful
+  only if **every** layer at which an actor (Heddle-aware *or* raw-Git) could create or
+  overwrite a ref in the synthetic namespace enforces it. There are exactly **four**, and
+  each is covered:
+  - **(a) Heddle name-validation** — `validate_ref_name` (`name.rs:11-31`), enforced at
+    the store write-validator chokepoint every ref write funnels through
+    (`refs_storage.rs:60,102,118,122,133`) and on the `ThreadName`/`MarkerName` creation
+    path that today bypasses it (`identifiers.rs:23-25`): rejects any user thread / marker
+    whose first `/`-segment is `heddle`. **(r19.)** ✔ covered.
+  - **(b) Bridge publish** — `sync_track_to_branch` (`git_sync.rs:124-154`): user threads
+    publish 1:1 to `refs/heads/{track_name}` (`:129`) and are **never** routed into the
+    reserved namespace; synthetic roots are published only under `refs/heddle/frontier/*`
+    by the bridge's own typed writer. **(r19.)** ✔ covered.
+  - **(c) Client consume / store / mirror** — `fetch.rs:296-322`, `grpc_hosted/mod.rs:291,327`:
+    synthetic roots cross the wire as a type-distinct `RefKind::SyntheticFrontierRoot`
+    (`message_refs.rs:92`) and **every** consume site routes by `RefKind` to the
+    synthetic-ref store path, never coercing them into a `ThreadName` (which (a) would
+    then reject). **(r21.)** ✔ covered.
+  - **(d) Raw-Git receive / import** — the write that does **not** originate from Heddle's
+    typed synthetic-ref writer. Two faces, both enforced: *(i) the Heddle-side import
+    chokepoint* — `sync_branches`/`sync_tags` (`git_sync.rs:79,108,113`) and the ingest
+    ref-emit path all write through `set_thread`/`set_marker` → `update_refs` →
+    `validate_ref_name`, so (a)'s reservation, enforced at the store write-validator,
+    rejects an imported `heddle/`-rooted ref at store time; *(ii) the hosted-mirror
+    receive-pack* — Heddle the CLI is client-only (no server-side receive-pack; the lone
+    `Service::ReceivePack`, `git_core.rs:2886`, is the outbound push), so where the
+    published mirror is hosted on a Git server raw clients can push to, that host's
+    receive path MUST reject raw writes to `refs/heddle/*`. **(this round; (ii) is a
+    required impl gate on the hosting side.)** ✔ covered (import) / ⊟ impl gate (receive).
+
+  These four are the **complete** set of boundaries between Heddle's synthetic-ref
+  namespace and any actor — Heddle-aware or raw-Git — that could create or overwrite a
+  ref. **"Structurally cannot create" holds because every one is enforced:** (a) and the
+  import face of (d) gate every write that funnels through the Heddle store validator; (b)
+  keeps the publisher from minting into the namespace; (c) lets the reserved root stay
+  fetchable without being coerced into a user type; and the receive face of (d) closes the
+  one surface that bypasses Heddle entirely — a raw `git push` against a hosted mirror.
+  This is the same **heddle-vs-git exclusivity** the CRDT respects: synthetic frontier
+  refs are a **Heddle-owned, heddle-exclusive** surface — Git sees only what Heddle
+  publishes (resolved output), never Heddle-internal machinery — and the raw-Git write
+  boundary enforces that no external Git actor can forge or overwrite them.
+
+  *Fifth-path sweep — is there any other actor that could forge a synthetic ref?* Auditing
+  every remaining path by which a ref could enter `refs/heddle/*` (or any Heddle-internal
+  namespace) without passing through Heddle's typed writer:
+  - **Fetch-from-peer / foreign-branch import** — *is* the (d) import chokepoint;
+    `sync_branches`/`sync_tags`/ref-emit all write through `validate_ref_name`. ✔ already
+    covered, not a new surface.
+  - **A second mirror / additional publish target** — just another instance of the (b)
+    publish + (d) receive boundary; each mirror's receive path applies the same
+    `refs/heddle/*` guard and only the bridge's typed writer publishes to it. ✔ no new
+    surface.
+  - **`gc` / `repack`** — repacks objects and rewrites pack files; it does **not** create
+    or rename refs, so it cannot forge a ref into the namespace. ✔ not a ref-creation path.
+  - **Object alternates** — share an *object database*, not the ref store (refs are
+    per-repo); an alternate cannot place a ref in this repo's `refs/heddle/*`. ✔ not a
+    ref-write path.
+  - **Submodule import** — submodule gitlinks are *tree entries*, not refs, and never land
+    in `refs/heddle/*`; Heddle has no submodule-ref import path. ✔ not a ref surface.
+  Conclusion: there is **no fifth path**. Every actor that can place a ref in the synthetic
+  namespace passes through one of the four boundaries; objects-only operations
+  (gc/repack/alternates) and tree-level constructs (submodules) cannot create refs at all.
+  The enumeration is exhaustive — no actor on any path can forge or overwrite a synthetic
+  ref.
 
 - **Propagate-before-use — the persisted-fact principle (the *that-it-waits*).** A
   decision about **what** is served (a tier promotion) or **where** a moving ref sits
@@ -2064,7 +2161,20 @@ issues are checked against:
    can ever share a synthetic root's name (this issue MUST also **reserve the `heddle/`
    first-segment in `ThreadName`/`validate_ref_name`**, `name.rs:11-31` — which today
    allows `@` and the `heddle/` prefix — and enforce it on the `ThreadName` creation
-   path that currently bypasses the validator, `identifiers.rs:23-25`). **The reservation
+   path that currently bypasses the validator, `identifiers.rs:23-25`). **Enforce the
+   reservation at the store write-validator chokepoint** (`validate_ref_name`, called at
+   `refs_storage.rs:60,102,118,122,133`) every ref write funnels through — not merely at a
+   CLI-facing `ThreadName::new` — so the reservation also rejects a `heddle/`-rooted ref
+   *imported from Git* via `sync_branches`/`sync_tags` (`git_sync.rs:79,108,113`) or the
+   ingest ref-emit path (the raw-Git receive/import boundary, §5.4 four-boundary
+   enumeration), closing the namespace to imported foreign branches as well as user-typed
+   names. **Raw-Git receive gate (impl, hosting side):** Heddle the CLI is client-only —
+   no server-side receive-pack (the lone `Service::ReceivePack`, `git_core.rs:2886`, is the
+   outbound push) — so where the published mirror is hosted on a Git server raw clients can
+   push to, **that host's receive path (receive-pack hook / `update-ref` guard) MUST reject
+   raw writes to `refs/heddle/*`**, leaving Heddle's bridge publish path the only writer of
+   the synthetic namespace; a conformance/integration test on the hosted mirror MUST assert
+   a raw `git push refs/heddle/frontier/<thread>/<changeid>` is rejected. **The reservation
    composes with a type-distinct wire entity (Invariant C end-to-end typed path, §5.4):
    this issue MUST widen the `RefEntry` discriminator from the boolean `is_thread`
    (`message_refs.rs:92`, today only *thread* vs *marker*) to a three-way `RefKind`
@@ -2184,7 +2294,11 @@ issues are checked against:
      disjoint from user `refs/heads/*`** — so two siblings that share any prefix still
      map to distinct refs **and** no user thread / raw-Git / imported `refs/heads/*`
      branch can target a synthetic ref's location, neither overwriting nor hiding a
-     frontier root. This issue MUST publish synthetic roots under `refs/heddle/frontier/*`
+     frontier root — and `refs/heddle/*` itself is protected at the raw-Git receive/import
+     boundary (§5.4 four-boundary enumeration: Heddle-side imports rejected at the
+     `validate_ref_name` store chokepoint, hosted-mirror raw pushes rejected by the host's
+     receive path), so a raw `git push` to a writable mirror cannot forge one either. This
+     issue MUST publish synthetic roots under `refs/heddle/frontier/*`
      (a new bridge publish path, **not** `sync_track_to_branch`) and add the
      reserved-namespace fetch refspec so a Heddle-aware clone fetches them (a vanilla
      `git clone` gets only the own-line `refs/heads/<thread>`, the deliberate cost of
