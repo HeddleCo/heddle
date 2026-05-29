@@ -939,9 +939,13 @@ requires widening the single-`ChangeId` request shape:
    sibling — a non-fast-forward move a client cannot distinguish from a rewritten
    ref, the exact opposite of the §5.0/§7.1 forward-only guarantee. (If `<thread>`
    has *no* prior advertised member at this audience — the thread's very first
-   advertisement already forks into an antichain — the member it adopts is fixed
-   **once** by the deterministic rule and then held; chosen once, never re-chosen,
-   and thereafter advanced only forward along that chosen line.) The antichain is
+   advertisement already forks into an antichain, so there is no prior tip to define
+   "own line" — the anchor is fixed by the **initial-anchor rule** (rule 0 of the
+   definitive statement below): the member whose **`ChangeId` is least by raw byte
+   order** (`ChangeId` is `[u8; 16]`, `crates/objects/src/object/hash.rs:99`), a
+   host-independent per-state identity key applied a single time and then persisted as
+   a fact, so every export/serve host adopts the **same** member; chosen once, never
+   re-chosen, and thereafter advanced only forward along that chosen line.) The antichain is
    thereby **discoverable**: the client reads every served root out of the one
    `Vec`, with `<thread>` advancing forward on its own line.
 2. **Wire request — single-root pull, issued per root.** Each `Pull` carries one
@@ -976,9 +980,64 @@ requires widening the single-`ChangeId` request shape:
    ref": access to the commit survives via `<thread>`).
 
 **General rule — antichain ref placement, the definitive statement (closes cid
-3326047821; refined by cid 3326161852).** A served *moving* ref (`<thread>` on the
-wire, `refs/heads/<thread>` on the mirror, and every single-tip ref) obeys four
-rules, exhaustively:
+3326047821; refined by cid 3326161852; initial anchor added per cid 3326236661).**
+A served *moving* ref (`<thread>` on the wire, `refs/heads/<thread>` on the mirror,
+and every single-tip ref) obeys five rules, exhaustively. Rule 0 establishes the
+ref's "own line" at the initial condition; rules 1–4 govern every move thereafter:
+
+0. **Establish the anchor (the initial condition rules 1–4 presume).** Rules 1–4 all
+   move a ref *relative to its prior advertised tip* — its "own line." When the thread
+   has a prior advertised member at audience `A`, that member **is** the own line and
+   rules 1–4 govern directly. When it has **none** — the thread's very first
+   advertisement at `A` already forks into an antichain of ≥2 maximal served states,
+   so there is no prior tip to define "own line" — the anchor is fixed by a
+   **content-intrinsic, host-independent, one-time tiebreak**: `<thread>` adopts the
+   antichain member whose **`ChangeId` is least by raw byte order** (`ChangeId` is
+   `[u8; 16]`, `crates/objects/src/object/hash.rs:99`, deriving `Ord`/`PartialOrd` at
+   `:98` — lexicographic over the 16 identity bytes; the anchor is `min` over the
+   antichain members' `ChangeId`s, the same value `RefEntry.change_id` carries on the
+   wire, `crates/proto/src/message_refs.rs:91`). This tiebreak is:
+   - **host-independent.** A `ChangeId` is the state's *persisted identity*, assigned
+     once at change creation (`generate()`, `hash.rs:103`) and replicated **verbatim**
+     to every host (it travels in `RefEntry.change_id` and in every synced record), so
+     the same antichain yields the same `min`-member on **every** export/serve host,
+     wire or mirror. The git commit `ObjectId` is deliberately **not** the key: it is
+     minted only at git-export time (`git_export.rs:84-93`), so a wire-only serve host
+     that never mints commits could not compute it, and it would diverge from the wire
+     anchor; `ChangeId` exists on every host before any mint. The mirror's `<thread>`
+     follows the `ChangeId`-selected anchor through the `ChangeId`→OID map, so wire and
+     mirror name the **same** state.
+   - **not the ordering rule 2 forbids.** Rule 2 bars *topological/lexicographic
+     placement* because re-applying a positional or name order on a **mutating**
+     antichain moves the ref *sideways* — a non-fast-forward jump a client cannot
+     distinguish from a rewrite. This key is different in kind: a per-state
+     **identity** order (independent of serve order, tier, host, wall-clock, and DAG
+     position) applied **exactly once** to bootstrap when no own line yet exists, then
+     **frozen** — never re-applied as members enter or leave the antichain. The
+     prohibition is on ordering-based *re-placement*; the anchor is a one-time
+     identity tiebreak, not a re-placement.
+   - **chosen once, persisted, never re-chosen.** The selected anchor is written as a
+     **persisted fact** (`<thread>`'s own-line record at `A`) and replicated
+     host-to-host over the same authoritative record-sync substrate as
+     visibility/promotion records (`crates/client/src/grpc_hosted/sync.rs:268-302`,
+     §5.4). Every host thereafter **reads** the anchor; it never recomputes it from the
+     current (mutable) antichain. A host lacking the record — the genuine first
+     advertiser, or a fresh replica that has not yet synced it — recomputes the same
+     `min`-`ChangeId` member (identical because the antichain is itself a deterministic
+     function of synced facts, §5.4 "never recomputed from a mutable input," and the
+     key is a fixed per-state identity) and persists it; replication lag is governed by
+     §5.4 (fail toward last-known-public, never re-hide), never by re-anchoring.
+
+   Once the anchor exists it **is** the own line, and rules 1–4 take over verbatim;
+   the anchor is never re-selected. **Behavior when the anchored line's visible tip
+   changes** is therefore fully determined by rules 1–3: a served descendant appearing
+   on the anchored line advances `<thread>` forward to it (rule 1, `A → A2`); the
+   anchored line forking into ≥2 incomparable served descendants, or *only* a sibling
+   line gaining a served tip, **holds** the ref at its last served member (rules 2–3 —
+   a hold, never a lateral hop, never a regress). Because §5.4 forbids re-embargoing an
+   already-served state, the anchor never disappears once advertised: a not-yet-served
+   descendant is simply not an advance, so the ref holds its last visible member rather
+   than regressing or re-anchoring.
 
 1. **Advance along its OWN line.** On each re-advertisement the ref moves forward to
    the **maximal served descendant of its prior advertised tip** — the unique
@@ -1702,7 +1761,13 @@ issues are checked against:
    stability is a conformance requirement:** assert the advertised `<thread>` tip is
    forward-only across re-advertisements — it advances only to a served descendant
    **of its own prior tip** (its own-line maximal descendant), never to an
-   incomparable sibling, and never regresses. **Transmission
+   incomparable sibling, and never regresses. **Initial anchor is deterministic +
+   host-independent:** when the thread's first advertisement at an audience is already
+   an antichain (no prior tip), persist `<thread>`'s own line as the member with the
+   **byte-order-least `ChangeId`** (`hash.rs:99`), written as a fact over the
+   record-sync path (`sync.rs:268-302`) and never re-selected from the mutable
+   antichain — so every host adopts the same member (§5.3 "definitive statement,"
+   rule 0). **Transmission
    must not leak:** no withheld-state count, gap, or placeholder; the
    `ObjectType::Visibility` record is itself gated so it is served only when its
    state is **to a client** (§8.4 client-facing gate).
