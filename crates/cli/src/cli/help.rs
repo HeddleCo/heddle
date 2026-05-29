@@ -704,6 +704,7 @@ mod tests {
     fn topic_text_returns_some_for_advertised_topics() {
         for topic in [
             "advanced",
+            "agent-flags",
             "git-overlay",
             "agent",
             "daemon",
@@ -787,6 +788,83 @@ mod tests {
                 "`{verb}` belongs behind advanced/topic help, not the core-loop surface"
             );
         }
+    }
+
+    /// heddle#278. The hidden agent-automation flags on `capture` need a
+    /// discovery route: `heddle help agent-flags` must list them with their
+    /// env equivalents.
+    #[test]
+    fn agent_flags_topic_lists_hidden_capture_flags() {
+        let text = topic_text("agent-flags").expect("agent-flags topic should exist");
+        for flag in [
+            "--agent-provider",
+            "--agent-model",
+            "--agent-session",
+            "--agent-segment",
+            "--policy",
+            "--no-policy",
+            "--no-agent",
+            "--split",
+            "--into",
+            "--path",
+        ] {
+            assert!(text.contains(flag), "agent-flags topic missing `{flag}`");
+        }
+        for env in [
+            "HEDDLE_AGENT_PROVIDER",
+            "HEDDLE_AGENT_MODEL",
+            "HEDDLE_AGENT_POLICY",
+            "HEDDLE_SESSION_ID",
+            "HEDDLE_SESSION_SEGMENT",
+        ] {
+            assert!(text.contains(env), "agent-flags topic missing env `{env}`");
+        }
+    }
+
+    /// heddle#278. The agent flags stay `hide = true` in the default surface
+    /// but `--help-agent` reveals every one of them.
+    #[test]
+    fn capture_agent_flags_hidden_by_default_revealed_on_demand() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let capture = cmd
+            .find_subcommand("capture")
+            .expect("capture subcommand exists");
+        for id in CAPTURE_AGENT_FLAG_IDS {
+            let arg = capture
+                .get_arguments()
+                .find(|arg| arg.get_id().as_str() == *id)
+                .unwrap_or_else(|| panic!("capture has no `{id}` arg"));
+            assert!(arg.is_hide_set(), "`{id}` should be hidden by default");
+        }
+        let revealed = reveal_capture_agent_flags(capture.clone());
+        for id in CAPTURE_AGENT_FLAG_IDS {
+            let arg = revealed
+                .get_arguments()
+                .find(|arg| arg.get_id().as_str() == *id)
+                .expect("revealed arg present");
+            assert!(!arg.is_hide_set(), "`{id}` should be revealed by --help-agent");
+        }
+    }
+
+    /// heddle#278. `--help-agent` is intercepted only for `capture`.
+    #[test]
+    fn capture_help_agent_intercept_is_capture_scoped() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let owned = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(
+            print_capture_agent_help_for_raw(&cmd, &owned(&["capture", "--help-agent"])).is_some(),
+            "capture --help-agent should be intercepted"
+        );
+        assert!(
+            print_capture_agent_help_for_raw(&cmd, &owned(&["status", "--help-agent"])).is_none(),
+            "--help-agent on a non-capture verb should fall through"
+        );
+        assert!(
+            print_capture_agent_help_for_raw(&cmd, &owned(&["capture", "--help"])).is_none(),
+            "plain --help should fall through to normal help"
+        );
     }
 
     #[test]
