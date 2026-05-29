@@ -32,6 +32,7 @@
 //! the print sites short-circuit on JSON mode before any styled
 //! helper runs.
 
+use objects::store::ObjectStore;
 use std::{
     path::{Path, PathBuf},
     sync::{

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use objects::store::ObjectStore;
 use std::{collections::BTreeSet, path::Path};
 
 use objects::object::{ContentHash, EntryType, FileProvenance, State, Tree, TreeEntry};

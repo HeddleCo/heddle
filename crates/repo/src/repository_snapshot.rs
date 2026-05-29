@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Snapshot operations for Repository.
 
+use objects::store::ObjectStore;
 use objects::{
     lock::RepositoryLockExt,
     object::{Attribution, ChangeId, State, Tree},

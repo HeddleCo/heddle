@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Import Git commits into Heddle states functionality.
 
+use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
 use chrono::{TimeZone, Utc};

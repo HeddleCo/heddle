@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Clone command - clone from remote.
 
+use objects::store::ObjectStore;
 use std::{
     fs,
     path::{Path, PathBuf},

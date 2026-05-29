@@ -3,6 +3,7 @@
 //!
 //! Tests for resolve, fetch, fsck, clone, cherry-pick, rebase, bisect, blame, gc.
 
+use objects::store::ObjectStore;
 use std::{fs, process::Command, str};
 
 use ntest::timeout;

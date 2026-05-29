@@ -92,7 +92,7 @@ struct AddedIndex<'a> {
     sorted_by_size: Vec<usize>,
 }
 
-pub(crate) fn flatten_tree(store: &dyn ObjectStore, tree: &Tree, prefix: &str) -> Result<FlatTree> {
+pub(crate) fn flatten_tree(store: &impl ObjectStore, tree: &Tree, prefix: &str) -> Result<FlatTree> {
     let mut result = HashMap::new();
 
     for entry in tree.entries() {
@@ -118,7 +118,7 @@ pub(crate) fn flatten_tree(store: &dyn ObjectStore, tree: &Tree, prefix: &str) -
 }
 
 pub(crate) fn detect_renames(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     base: &FlatTree,
     branch: &FlatTree,
     config: RenameMatcherConfig,
@@ -127,7 +127,7 @@ pub(crate) fn detect_renames(
 }
 
 pub(crate) fn detect_renames_with_stats(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     base: &FlatTree,
     branch: &FlatTree,
     config: RenameMatcherConfig,
@@ -337,7 +337,7 @@ fn match_exact_hashes(
 }
 
 fn load_candidate_files<'a>(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     entries: &[(usize, &'a str, &ContentHash)],
     load_content: bool,
     stats: &mut RenameMatcherStats,
@@ -367,7 +367,7 @@ fn load_candidate_files<'a>(
 }
 
 fn build_added_index<'a>(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     entries: &[(usize, &'a str, &ContentHash)],
     load_content: bool,
     stats: &mut RenameMatcherStats,

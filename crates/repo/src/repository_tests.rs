@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use objects::store::ObjectStore;
 use std::fs;
 
 use objects::object::{ChangeId, ThreadName};
@@ -33,6 +34,31 @@ fn test_init_creates_structure() {
     assert!(state.parents.is_empty());
     let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
     assert!(tree.is_empty());
+}
+
+#[test]
+fn test_open_with_store_threads_a_custom_object_store() {
+    // heddle#283: `Repository::open_with_store` is generic over the object
+    // store `S`, so the whole `Repository<RefManager, OpLog, S>` plumbing has
+    // to compile and run with a concrete store that is *not* the default
+    // `AnyStore`. Inject a bare `FsStore` and round-trip an object through it.
+    use objects::store::FsStore;
+
+    let temp_dir = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let heddle_dir = repo.heddle_dir().to_path_buf();
+    drop(repo);
+
+    let store = FsStore::new(&heddle_dir);
+    let repo: Repository<_, _, FsStore> =
+        Repository::open_with_store(&heddle_dir, store).unwrap();
+
+    let blob = objects::object::Blob::from("open_with_store round-trip");
+    let hash = repo.store().put_blob(&blob).unwrap();
+    assert_eq!(
+        repo.store().get_blob(&hash).unwrap().unwrap().content(),
+        blob.content()
+    );
 }
 
 #[test]
@@ -1167,6 +1193,8 @@ mod blob_hydrator_callback {
         object::{Blob, ContentHash},
     };
 
+    use objects::store::ObjectStore;
+
     use super::create_test_repo;
     use crate::{BlobHydrator, HeddleError, Repository};
 
@@ -1458,6 +1486,7 @@ mod require_tree_callback {
     //! cover the on-disk wiring.
 
     use objects::object::{ContentHash, Tree};
+    use objects::store::ObjectStore;
 
     use super::create_test_repo;
     use crate::{HeddleError, Repository};

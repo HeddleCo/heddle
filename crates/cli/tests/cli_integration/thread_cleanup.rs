@@ -18,6 +18,7 @@
 //! storage and visibility halves are what `thread list` and
 //! `thread cleanup` actually read.
 
+use objects::store::ObjectStore;
 use std::fs;
 
 use chrono::{Duration, Utc};

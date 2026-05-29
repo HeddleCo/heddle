@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rebase command - replay commits onto another thread.
 
+use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Result, anyhow};

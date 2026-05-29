@@ -19,6 +19,7 @@ libc.workspace = true
 # This cache short-circuits that into an `Arc<[u8]>` clone.
 lru = { workspace = true }
 objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
+oplog = { path = "../oplog", package = "heddle-oplog", version = "0.2" }
 refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.2" }
 # `serde`/`serde_json` carry the framed control-plane messages between
@@ -75,7 +76,6 @@ criterion = "0.8"
 # `fuse_mount_serves_mmap_readers` regression test that locks in
 # `FUSE_DIRECT_IO_ALLOW_MMAP` opt-in (kernel 5.16+).
 memmap2.workspace = true
-oplog = { path = "../oplog", package = "heddle-oplog" }
 proptest.workspace = true
 tempfile.workspace = true
 

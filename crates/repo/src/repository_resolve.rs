@@ -2,6 +2,7 @@
 //! State resolution helpers for the Repository.
 
 use objects::object::{Agent, ChangeId};
+use objects::store::ObjectStore;
 
 use super::{HeddleError, Repository, Result};
 
@@ -134,6 +135,7 @@ mod tests {
     use std::fs;
 
     use objects::object::{ChangeId, MarkerName};
+    use objects::store::ObjectStore;
     use tempfile::TempDir;
 
     use crate::{HeddleError, Repository};

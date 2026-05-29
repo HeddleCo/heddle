@@ -1673,7 +1673,7 @@ pub(crate) fn bench_three_way_merge(
 }
 
 pub(crate) fn bench_detect_renames(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     base_tree: &Tree,
     branch_tree: &Tree,
 ) -> Result<(usize, rename_matcher::RenameMatcherStats)> {

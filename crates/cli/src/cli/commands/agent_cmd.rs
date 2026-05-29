@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stable JSON-first agent reservation API.
 
+use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::object::ThreadName;

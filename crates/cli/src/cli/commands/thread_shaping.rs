@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Heddle-native thread shaping helpers.
 
+use objects::store::ObjectStore;
 use std::{fs, path::Path};
 
 use anyhow::{Result, anyhow};

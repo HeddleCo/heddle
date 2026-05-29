@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Export Heddle states to Git commits functionality.
 
+use objects::store::ObjectStore;
 use std::collections::HashSet;
 
 use gix::bstr::ByteSlice;

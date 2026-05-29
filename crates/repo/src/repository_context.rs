@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Context annotation helpers for attaching metadata to file and state targets.
 
+use objects::store::ObjectStore;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

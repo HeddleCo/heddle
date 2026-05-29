@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread commands.
 
+use objects::store::ObjectStore;
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},

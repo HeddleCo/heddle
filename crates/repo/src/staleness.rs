@@ -213,7 +213,7 @@ fn resolve_current_symbol(
 
 /// Resolve a blob at a file path within a tree by walking the tree hierarchy.
 fn get_blob_at_path(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     tree: &Tree,
     path: &str,
 ) -> Result<Option<Blob>, anyhow::Error> {
@@ -222,7 +222,7 @@ fn get_blob_at_path(
 }
 
 fn get_blob_recursive(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     tree: &Tree,
     parts: &[&str],
 ) -> Result<Option<Blob>, anyhow::Error> {

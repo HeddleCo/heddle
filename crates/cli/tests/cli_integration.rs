@@ -6,6 +6,7 @@
 //! NOTE: These tests run the built binary via CARGO_BIN_EXE_heddle so they can
 //! execute from temporary directories without relying on `cargo run`.
 
+use objects::store::ObjectStore;
 use std::{
     io::Write,
     process::{Command, Output, Stdio},

@@ -10,6 +10,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 
+use objects::store::ObjectStore;
 use std::{collections::HashMap, path::Path};
 
 use objects::object::{ChangeId, ContentHash, FileProvenance, State};

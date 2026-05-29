@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared worktree apply planning and execution.
 
+use objects::store::ObjectStore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,

@@ -4,6 +4,7 @@
 mod context_mutate;
 mod context_query;
 
+use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 pub use context_mutate::*;
 pub use context_query::*;

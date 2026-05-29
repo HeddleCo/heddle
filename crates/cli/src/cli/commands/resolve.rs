@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Resolve command implementation.
 
+use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};

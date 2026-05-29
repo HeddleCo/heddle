@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared worktree walking infrastructure.
 
+use objects::store::ObjectStore;
 use std::{
     fs::{self, File},
     io::Read,
