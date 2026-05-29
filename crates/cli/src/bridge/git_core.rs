@@ -1957,6 +1957,75 @@ fn collect_ref_updates(repo: &gix::Repository) -> GitResult<Vec<RefUpdate>> {
     Ok(updates)
 }
 
+/// A partition of the commits that land in the destination, computed over
+/// the SINGLE copied ref set. `total` is every unique commit reachable from
+/// the copied branch/tag tips; `newly` is the subset minted during this
+/// export run. `already` is the remainder. Because `newly` is a subset of
+/// the same walk that produced `total`, `newly + already == total` holds by
+/// construction — the summary can never report more "newly written" than
+/// "total", and no orphan/unreferenced state (minted but reachable from no
+/// copied ref, hence never in the walk) can inflate any count.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ExportedCommitCounts {
+    pub total: usize,
+    pub newly: usize,
+}
+
+/// Count and partition the commits reachable from the branch and tag tips
+/// that `collect_ref_updates` writes to a destination. Derived from the SAME
+/// ref set `copy_mirror_to_path` copies, so the reported counts equal what
+/// actually lands in the destination — including stale mirror refs left
+/// behind by a dropped Heddle thread (export does not prune them, so the
+/// commit is still copied and must still be counted; pruning would be a
+/// separate behavior change). Notes refs are excluded: they carry
+/// metadata, not history, so they don't count as exported commits.
+///
+/// `newly_minted` is the set of git OIDs freshly minted during this export
+/// run; a commit in the walk that is in this set is counted as `newly`, the
+/// rest as `already`. Routing both the total and the newly count through
+/// this single walk guarantees they can never diverge.
+pub(crate) fn count_exported_commits(
+    repo: &gix::Repository,
+    newly_minted: &HashSet<ObjectId>,
+) -> GitResult<ExportedCommitCounts> {
+    let tips: Vec<ObjectId> = collect_ref_updates(repo)?
+        .into_iter()
+        .filter(|update| matches!(update.namespace, RefNamespace::Branch | RefNamespace::Tag))
+        .map(|update| update.target)
+        .collect();
+
+    let mut stack = tips;
+    let mut seen = HashSet::new();
+    let mut counts = ExportedCommitCounts::default();
+    while let Some(oid) = stack.pop() {
+        if !seen.insert(oid) {
+            continue;
+        }
+        let object = repo.find_object(oid).map_err(git_err)?;
+        match object.kind {
+            gix::objs::Kind::Commit => {
+                counts.total += 1;
+                if newly_minted.contains(&oid) {
+                    counts.newly += 1;
+                }
+                let commit = repo.find_commit(oid).map_err(git_err)?;
+                for parent in commit.parent_ids() {
+                    stack.push(parent.detach());
+                }
+            }
+            // An annotated tag dereferences to its target (commit, or a
+            // blob/tree for the rare blob/tree-pointing tag). Follow it;
+            // only a Commit at the end increments the count.
+            gix::objs::Kind::Tag => {
+                let tag = repo.find_tag(oid).map_err(git_err)?;
+                stack.push(tag.target_id().map_err(git_err)?.detach());
+            }
+            gix::objs::Kind::Tree | gix::objs::Kind::Blob => {}
+        }
+    }
+    Ok(counts)
+}
+
 fn collect_ref_updates_for_push(
     repo: &gix::Repository,
     scope: GitPushScope,

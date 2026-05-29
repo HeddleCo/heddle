@@ -2521,10 +2521,19 @@ pub struct BridgeInitSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
+pub struct ExportedRefSchema {
+    pub name: String,
+    pub tip: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct BridgeExportSchema {
     pub states_exported: u64,
+    pub commits_total: u64,
     pub threads_synced: u64,
     pub markers_synced: u64,
+    pub branches: Vec<ExportedRefSchema>,
+    pub tags: Vec<ExportedRefSchema>,
     pub destination: String,
 }
 
@@ -2555,6 +2564,7 @@ pub struct BridgeSyncSchema {
     pub action: Option<String>,
     pub summary: String,
     pub states_exported: u64,
+    pub commits_exported_total: u64,
     pub commits_imported: u64,
     pub threads_synced: u64,
     pub markers_synced: u64,

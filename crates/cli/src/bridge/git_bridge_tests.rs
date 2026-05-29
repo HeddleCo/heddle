@@ -23,7 +23,7 @@ use tempfile::TempDir;
 
 use crate::bridge::{
     git_core::{copy_local_repo_to_bare, delete_reference_if_present, set_reference, GitPushScope},
-    git_export::export_tree,
+    git_export::{export_all, export_tree},
     git_import::{import_all, import_git_tree},
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
     GitBridge,
@@ -1698,6 +1698,332 @@ fn export_to_path_is_idempotent_against_existing_destination() {
     bridge
         .export_to_path(&dest_path)
         .expect("second export against existing dest should not error");
+}
+
+/// heddle#289: in the common git-overlay case every state is already
+/// mapped to an original git commit, so `states_exported` (newly minted)
+/// is legitimately 0 — but `commits_total` must still count the commits
+/// that landed in the destination so the summary doesn't read a
+/// misleading "exported 0 states" against a fully-populated repo.
+#[test]
+fn export_stats_report_total_commits_when_all_states_pre_mapped() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_source_temp, source_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&source_repo);
+    let first = commit_with_tree(&source_repo, None, tree_oid, "first", &[]);
+    let second = commit_with_tree(
+        &source_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "second",
+        &[first],
+    );
+    create_annotated_tag(&source_repo, "v1.0", second, "release");
+
+    let mut bridge = GitBridge::new(&repo);
+    bridge
+        .import(Some(source_repo.workdir().expect("workdir")))
+        .expect("import from git");
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let stats = bridge.export_to_path(&dest_path).expect("export");
+
+    // Every state came from git with its SHA preserved → nothing is
+    // freshly minted, yet the destination holds both commits.
+    assert_eq!(
+        stats.states_exported, 0,
+        "SHA-stable overlay export mints no new commits"
+    );
+    assert!(
+        stats.commits_total >= 2,
+        "commits_total must count every state that landed in the destination, got {}",
+        stats.commits_total
+    );
+    assert!(
+        stats.commits_total > stats.states_exported,
+        "total must exceed newly-minted in the overlay case"
+    );
+    // AC3: branch/tag detail carries tip SHAs for the summary.
+    assert!(
+        stats.branches.iter().any(|b| b.name == "main"),
+        "branch detail should list main with its tip: {:?}",
+        stats.branches
+    );
+    assert!(
+        stats.tags.iter().any(|t| t.name == "v1.0"),
+        "tag detail should list v1.0 with its tip: {:?}",
+        stats.tags
+    );
+}
+
+/// heddle#289: a sync of an already-synced overlay must report consistent
+/// "total vs. new" accounting on both halves — the export side gains the
+/// same total/new split the import side has carried since heddle#147.
+#[test]
+fn sync_export_and_import_report_consistent_total_and_new() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_source_temp, source_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&source_repo);
+    let first = commit_with_tree(&source_repo, None, tree_oid, "first", &[]);
+    commit_with_tree(
+        &source_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "second",
+        &[first],
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    bridge
+        .import(Some(source_repo.workdir().expect("workdir")))
+        .expect("import from git");
+
+    // Re-running the sync halves against the already-synced overlay: both
+    // sides should report the total they walked while their "new" count
+    // drops to 0 — the "already in sync" signal.
+    let export_stats = export_all(&mut bridge).expect("re-export");
+    let import_stats =
+        import_all(&mut bridge, Some(source_repo.workdir().expect("workdir"))).expect("re-import");
+
+    assert_eq!(
+        export_stats.states_exported, 0,
+        "nothing new to export on a synced overlay"
+    );
+    assert!(
+        export_stats.commits_total >= 2,
+        "export total still reflects the populated destination: {}",
+        export_stats.commits_total
+    );
+    assert_eq!(
+        import_stats.states_created, 0,
+        "nothing new to import on a synced overlay"
+    );
+    assert!(
+        import_stats.commits_imported >= 2,
+        "import total still reflects the walked commits: {}",
+        import_stats.commits_imported
+    );
+}
+
+/// heddle#289 r3: the export "total" must equal what actually lands in
+/// the destination. Export does NOT prune stale mirror refs, so a branch
+/// exported once and whose Heddle thread is later dropped still has a
+/// `refs/heads/<branch>` in the mirror — and `copy_mirror_to_path` copies
+/// that ref (and its commit) to the destination. The total is derived from
+/// the same `collect_ref_updates` set the copy uses, so it counts that
+/// still-copied commit. Counting only current Heddle refs (r2) diverged
+/// from reality; this guards that the count == the destination.
+#[test]
+fn export_total_counts_stale_mirror_ref_left_by_dropped_thread() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_source_temp, source_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&source_repo);
+    // main: two-commit history → 2 commits reachable from the branch tip.
+    let first = commit_with_tree(&source_repo, None, tree_oid, "first", &[]);
+    commit_with_tree(
+        &source_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "second",
+        &[first],
+    );
+    // feature: an independent root commit → 1 commit reachable only via
+    // this branch, sharing no history with main.
+    let feature_tip = commit_with_tree(
+        &source_repo,
+        Some("refs/heads/feature"),
+        tree_oid,
+        "feature-only",
+        &[],
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    bridge
+        .import(Some(source_repo.workdir().expect("workdir")))
+        .expect("import from git");
+
+    // All three states now exist in the store, and the import populated
+    // the mirror with refs/heads/{main,feature}.
+    assert_eq!(
+        bridge.heddle_repo.store().list_states().expect("states").len(),
+        3,
+        "import should have created three states (two on main, one on feature)"
+    );
+
+    // Drop the feature *thread* (Heddle-side ref). Export never prunes the
+    // mirror's refs/heads/feature, so the stale mirror ref — and its
+    // commit — still travel to the destination.
+    bridge
+        .heddle_repo
+        .refs()
+        .delete_thread(&ThreadName::new("feature"))
+        .expect("delete feature thread");
+
+    let dest_temp = TempDir::new().expect("dest temp");
+    let dest_path = dest_temp.path().join("dest.git");
+    let stats = bridge.export_to_path(&dest_path).expect("export to path");
+
+    // The total counts every commit that lands in the destination: main's
+    // two plus the stale feature ref's one. "What we report" == "what we
+    // copy".
+    assert_eq!(
+        stats.commits_total, 3,
+        "export total must count what lands in the destination — main's 2 \
+         plus the stale feature ref's 1, got {}",
+        stats.commits_total
+    );
+
+    // Prove the count matches reality: the destination really does contain
+    // refs/heads/feature at the feature tip.
+    let dest = gix::open(&dest_path).expect("open destination");
+    let feature_ref = dest
+        .find_reference("refs/heads/feature")
+        .expect("destination must contain the stale feature ref");
+    assert_eq!(
+        feature_ref.id().detach(),
+        feature_tip,
+        "the stale feature ref in the destination points at the feature tip"
+    );
+    assert!(
+        dest.find_reference("refs/heads/main").is_ok(),
+        "destination must contain the main branch"
+    );
+
+    // The dropped thread is not a *current* Heddle thread, so it is not
+    // reported as a synced branch — that gap between `branches` (current
+    // threads) and `commits_total` (what's copied) is exactly what this
+    // fix reconciles for the headline count.
+    assert!(
+        !stats.branches.iter().any(|b| b.name == "feature"),
+        "dropped feature thread is not a current synced branch: {:?}",
+        stats.branches
+    );
+}
+
+/// heddle#289 r4: EVERY count in the export summary must be a partition of
+/// the single copied ref set, so a state minted into the mirror but
+/// reachable from no copied ref inflates none of them. r3 fixed
+/// `commits_total` but left `states_exported` ("newly") tallied inline over
+/// `list_states()`, so a Heddle-native thread created and dropped before
+/// export would still be minted and counted as newly-written even though it
+/// never lands in the destination — producing the impossible
+/// "1 total (2 newly written)" summary. This drives `states_exported` from
+/// the same walk as `commits_total`: the orphan is excluded from BOTH and
+/// `newly + already == total` holds by construction.
+#[test]
+fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
+    use objects::object::{Attribution, Principal, State};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let bridge = GitBridge::new(&repo);
+
+    let attribution =
+        || Attribution::human(Principal::new("Alice", "alice@example.com"));
+    let put_state = |parents: Vec<ChangeId>| -> State {
+        let store = bridge.heddle_repo.store();
+        let blob_hash = store.put_blob(&Blob::from_slice(b"contents")).expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(tree_hash, parents, attribution());
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // A native `main` thread with a two-commit history → both minted into
+    // the mirror and reachable from refs/heads/main, so both land in the
+    // destination.
+    let main_first = put_state(Vec::new());
+    let main_tip = put_state(vec![main_first.change_id]);
+    bridge
+        .heddle_repo
+        .refs()
+        .set_thread(&ThreadName::new("main"), &main_tip.change_id)
+        .expect("set main thread");
+
+    // A native `scratch` thread, dropped before export. Its state stays in
+    // the store (delete_thread only removes the ref), so the export walk
+    // over `list_states()` still mints it — but no copied ref points at it,
+    // so it reaches no destination and must inflate no count.
+    let orphan = put_state(Vec::new());
+    bridge
+        .heddle_repo
+        .refs()
+        .set_thread(&ThreadName::new("scratch"), &orphan.change_id)
+        .expect("set scratch thread");
+    bridge
+        .heddle_repo
+        .refs()
+        .delete_thread(&ThreadName::new("scratch"))
+        .expect("delete scratch thread");
+
+    // The orphan state is still present in the store — proving the walk
+    // would have minted (and, pre-r4, counted) it.
+    let mut bridge = bridge;
+    assert_eq!(
+        bridge.heddle_repo.store().list_states().expect("states").len(),
+        3,
+        "store holds main's two states plus the dropped scratch state"
+    );
+
+    let dest_temp = TempDir::new().expect("dest temp");
+    let dest_path = dest_temp.path().join("dest.git");
+    let stats = bridge.export_to_path(&dest_path).expect("export to path");
+
+    // Both summary counts are partitions of the copied ref set: total =
+    // main's two commits; newly = the same two (freshly minted this run).
+    // The orphan is in neither.
+    assert_eq!(
+        stats.commits_total, 2,
+        "total counts only the copied ref set (main's 2), not the orphan, got {}",
+        stats.commits_total
+    );
+    assert_eq!(
+        stats.states_exported, 2,
+        "newly counts only minted commits that landed (main's 2), not the orphan, got {}",
+        stats.states_exported
+    );
+
+    // The invariant the close-the-class fix guarantees: newly is a subset of
+    // total, so the "1 total (2 newly written)" impossibility cannot occur.
+    let already = stats.commits_total.saturating_sub(stats.states_exported);
+    assert!(
+        stats.states_exported <= stats.commits_total,
+        "newly ({}) must never exceed total ({})",
+        stats.states_exported,
+        stats.commits_total
+    );
+    assert_eq!(
+        stats.states_exported + already,
+        stats.commits_total,
+        "newly + already must equal total by construction"
+    );
+
+    // The orphan's commit reaches no ref in the destination.
+    let dest = gix::open(&dest_path).expect("open destination");
+    assert!(
+        dest.find_reference("refs/heads/main").is_ok(),
+        "destination must contain the main branch"
+    );
+    assert!(
+        dest.find_reference("refs/heads/scratch").is_err(),
+        "dropped scratch thread must not appear in the destination"
+    );
+    assert!(
+        !stats.branches.iter().any(|b| b.name == "scratch"),
+        "dropped scratch thread is not a synced branch: {:?}",
+        stats.branches
+    );
 }
 
 /// Phase A: `commits_imported` and `states_created` should both reflect new
