@@ -1257,6 +1257,19 @@ impl<'a> GitBridge<'a> {
             if real_tracked.contains(path) || existing_ita.contains(path) {
                 continue;
             }
+            // Git's index cannot hold both a blob `foo` and a blob
+            // `foo/bar` — a path is either a file or a directory. An
+            // added path that file↔directory-PREFIX-conflicts with a
+            // still-tracked real entry is not a clean "new file": the
+            // real entry wins. Writing an intent-to-add placeholder for
+            // it would corrupt the index into a file/dir conflict, so
+            // skip it (checked in both directions).
+            if real_tracked
+                .iter()
+                .any(|tracked| path_prefix_conflict(path, tracked))
+            {
+                continue;
+            }
             let entry_mode = match mode {
                 FileMode::Executable => gix_index::entry::Mode::FILE_EXECUTABLE,
                 FileMode::Symlink => gix_index::entry::Mode::SYMLINK,
@@ -2047,6 +2060,20 @@ pub(crate) fn set_reference(
     repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
         .map_err(git_err)?;
     Ok(())
+}
+
+/// Whether two index paths file↔directory-PREFIX-conflict: one names a
+/// blob that is a directory prefix of the other (`foo` vs `foo/bar`, in
+/// either order). Git's index cannot hold both, since a path is either a
+/// file or a directory. Equal paths do NOT count here — that case is an
+/// exact match handled separately by the caller.
+fn path_prefix_conflict(a: &str, b: &str) -> bool {
+    let child_of = |parent: &str, child: &str| {
+        child
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    child_of(a, b) || child_of(b, a)
 }
 
 /// Recursively collect every file path (blob and symlink) in `tree`,
