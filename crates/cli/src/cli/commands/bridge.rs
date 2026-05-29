@@ -30,6 +30,7 @@ use crate::{
         git_core::clone_url_to_bare,
         git_export::export_all,
         git_import::{import_all, import_selected_refs},
+        git_util::ExportedRef,
         GitBridge,
     },
     cli::{cli_args::GitSource, should_output_json, style, Cli, GitCommands},
@@ -257,6 +258,7 @@ struct BridgeGitSyncOutput {
     action: &'static str,
     summary: String,
     states_exported: usize,
+    commits_exported_total: usize,
     commits_imported: usize,
     threads_synced: usize,
     markers_synced: usize,
@@ -269,6 +271,58 @@ struct BridgeGitSyncOutput {
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
+}
+
+/// Render the `commits:` line for an export/sync summary: the total
+/// commits written to the destination, broken down into newly-minted vs.
+/// already-present. In the common git-overlay case `newly` is 0 and this
+/// reads "N total (already in sync)" rather than a misleading bare 0.
+fn export_commits_summary(total: usize, newly: usize) -> String {
+    let already = total.saturating_sub(newly);
+    let breakdown = if total == 0 {
+        String::new()
+    } else if newly == 0 {
+        format!(" ({})", style::accent("already in sync"))
+    } else if already == 0 {
+        format!(" ({} newly written)", style::bold(&newly.to_string()))
+    } else {
+        format!(
+            " ({} newly written, {} already in sync)",
+            style::bold(&newly.to_string()),
+            style::bold(&already.to_string())
+        )
+    };
+    format!("{} total{}", style::bold(&total.to_string()), breakdown)
+}
+
+/// Render a `branches:`/`tags:` line: the count, then each ref name with
+/// its tip short-SHA, e.g. `3   main af25b9d · spike-ok 7f1002c`.
+fn exported_refs_summary(refs: &[ExportedRef]) -> String {
+    let count = style::bold(&refs.len().to_string());
+    if refs.is_empty() {
+        return count;
+    }
+    let listing = refs
+        .iter()
+        .map(|r| {
+            format!(
+                "{} {}",
+                r.name,
+                style::dim(&r.tip.to_hex_with_len(7).to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    format!("{count}   {listing}")
+}
+
+/// JSON projection of exported refs: `[{"name":..,"tip":<full sha>}]`.
+fn exported_refs_json(refs: &[ExportedRef]) -> serde_json::Value {
+    serde_json::Value::Array(
+        refs.iter()
+            .map(|r| serde_json::json!({ "name": r.name, "tip": r.tip.to_string() }))
+            .collect(),
+    )
 }
 
 fn cmd_bridge_git_status(cli: &Cli, repo: &Repository) -> Result<()> {
@@ -603,37 +657,34 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             if should_output_json(cli, Some(repo.config())) {
                 let out = serde_json::json!({
                     "states_exported": stats.states_exported,
+                    "commits_total": stats.commits_total,
                     "threads_synced": stats.threads_synced,
                     "markers_synced": stats.markers_synced,
+                    "branches": exported_refs_json(&stats.branches),
+                    "tags": exported_refs_json(&stats.tags),
                     "destination": destination.display().to_string(),
                 });
                 println!("{out}");
             } else {
                 println!(
-                    "{} exported {} to {}",
+                    "{} exported to {}",
                     style::ok_marker(),
-                    style::count(stats.states_exported, "state"),
                     style::dim(&destination.display().to_string())
                 );
                 println!(
                     "  {}",
                     style::field(
-                        "threads",
-                        &format!(
-                            "{} synced to branches",
-                            style::bold(&stats.threads_synced.to_string())
-                        )
+                        "commits",
+                        &export_commits_summary(stats.commits_total, stats.states_exported)
                     )
                 );
                 println!(
                     "  {}",
-                    style::field(
-                        "markers",
-                        &format!(
-                            "{} synced to tags",
-                            style::bold(&stats.markers_synced.to_string())
-                        )
-                    )
+                    style::field("branches", &exported_refs_summary(&stats.branches))
+                );
+                println!(
+                    "  {}",
+                    style::field("tags", &exported_refs_summary(&stats.tags))
                 );
             }
         }
@@ -760,6 +811,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     )
                 },
                 states_exported: export_stats.states_exported,
+                commits_exported_total: export_stats.commits_total,
                 commits_imported: sync_commits_imported,
                 threads_synced,
                 markers_synced,
@@ -778,7 +830,10 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     "  {}",
                     style::field(
                         "exported",
-                        &style::count(sync_output.states_exported, "state")
+                        &export_commits_summary(
+                            sync_output.commits_exported_total,
+                            sync_output.states_exported
+                        )
                     )
                 );
                 println!(

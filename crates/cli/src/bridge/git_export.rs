@@ -13,11 +13,12 @@ use repo::Repository as HeddleRepository;
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, LocalGitIdentity, SyncMapping,
-        git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
+        count_exported_commits, git_config_identity_with_global_fallback, git_err,
+        principal_is_default_unknown,
     },
     git_notes,
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
-    git_util::ExportStats,
+    git_util::{ExportStats, ExportedRef},
 };
 
 const SUBMODULE_PREFIX: &str = "heddle-submodule:";
@@ -201,12 +202,22 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
 
+    // Git OIDs minted during this run. Used below to partition the copied
+    // ref set into newly-written vs already-mapped — so the "newly" count
+    // is a subset of the same walk that produces the total, never a
+    // parallel tally over `list_states()` that could include an orphan
+    // state reachable from no copied ref.
+    let mut newly_minted: HashSet<gix::hash::ObjectId> = HashSet::new();
+
     for state_id in sorted_states {
         // Skip states already mapped to a git object that exists in the
         // mirror — that's the common case for git-imported states whose
         // original commit bytes are already present (and whose SHAs we
         // want to preserve verbatim, which means NOT recreating them).
         if bridge.mapping.has_heddle(&state_id) {
+            // Already mapped to an existing commit — nothing to mint.
+            // Whether it counts toward the total is decided below by
+            // ref-reachability, not by membership in the walked set.
             continue;
         }
         let message_override = bridge
@@ -222,7 +233,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             message_override,
         )?;
         bridge.mapping.insert(state_id, git_oid);
-        stats.states_exported += 1;
+        newly_minted.insert(git_oid);
 
         // Attach a heddle note to the freshly-created commit so the
         // change_id survives a fresh `git clone` of the destination
@@ -268,6 +279,10 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         {
             sync_track_to_branch(&repo, &track_name, git_oid)?;
             stats.threads_synced += 1;
+            stats.branches.push(ExportedRef {
+                name: track_name.clone(),
+                tip: git_oid,
+            });
         }
     }
 
@@ -279,9 +294,27 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             {
                 sync_marker_to_tag(&repo, &marker_name, git_oid)?;
                 stats.markers_synced += 1;
+                stats.tags.push(ExportedRef {
+                    name: marker_name.to_string(),
+                    tip: git_oid,
+                });
             }
         }
     }
+
+    // Every count in the summary is a partition of the SINGLE copied ref
+    // set: `total` is unique commits reachable from the mirror's branch/tag
+    // tips (the exact ref set `copy_mirror_to_path` writes via
+    // `collect_ref_updates`), and `states_exported` ("newly") is the subset
+    // of THAT walk minted this run. Deriving both from one walk — rather
+    // than tallying `states_exported` inline over `list_states()` — makes
+    // `newly + already == total` hold by construction: a state minted into
+    // the mirror but reachable from no copied ref (e.g. a dropped thread's
+    // orphan history) is in neither count, so the impossible
+    // "1 total (2 newly written)" summary cannot occur.
+    let counts = count_exported_commits(&repo, &newly_minted)?;
+    stats.commits_total = counts.total;
+    stats.states_exported = counts.newly;
 
     bridge.save_mapping_to_disk()?;
 
