@@ -2445,6 +2445,105 @@ fn git_overlay_commit_respects_staged_index_and_leaves_extra_work() {
 }
 
 #[test]
+fn git_overlay_commit_empty_index_sweeps_whole_worktree() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+
+    // Nothing staged: a worktree edit plus an untracked file.
+    std::fs::write(temp.path().join("file.txt"), "base\nswept\n").unwrap();
+    std::fs::write(temp.path().join("scratch.txt"), "untracked\n").unwrap();
+
+    let commit = json_value(temp.path(), &["commit", "-m", "sweep all", "--output", "json"]);
+    assert_eq!(
+        commit["git_index"]["commit_mode"], "worktree_all",
+        "an empty index should commit all worktree paths: {commit}"
+    );
+    let names = git_stdout_for_json_contract(temp.path(), &["show", "--name-only", "--format="]);
+    assert!(
+        names.contains("file.txt") && names.contains("scratch.txt"),
+        "empty-index commit should sweep both the edited and the untracked path: {names}"
+    );
+}
+
+#[test]
+fn git_overlay_commit_no_all_forces_index_only_with_empty_index() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+
+    // Nothing staged: only worktree edits + an untracked file exist.
+    std::fs::write(temp.path().join("file.txt"), "base\nworktree edit\n").unwrap();
+    std::fs::write(temp.path().join("scratch.txt"), "untracked\n").unwrap();
+
+    // `--no-all` forces the index-only path even though nothing is staged, so
+    // the worktree sweep never happens.
+    let output = heddle_output(
+        &["--output", "json", "commit", "--no-all", "-m", "index only"],
+        Some(temp.path()),
+    )
+    .expect("commit --no-all should run");
+    assert!(
+        output.status.success(),
+        "commit --no-all should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commit: Value =
+        serde_json::from_slice(&output.stdout).expect("commit --no-all JSON should parse");
+    assert_eq!(
+        commit["git_index"]["commit_mode"], "staged_index",
+        "--no-all must report an index-only commit, not a worktree sweep: {commit}"
+    );
+    assert_eq!(
+        commit["git_index"]["will_commit"],
+        serde_json::json!([]),
+        "--no-all with an empty index must commit nothing from the worktree: {commit}"
+    );
+    assert_eq!(
+        commit["git_index"]["preserved_after_commit"],
+        serde_json::json!(["unstaged: file.txt", "untracked: scratch.txt"]),
+        "--no-all must preserve the unswept worktree paths: {commit}"
+    );
+
+    // The commit reflects only the (empty) index, so HEAD:file.txt keeps the
+    // base content and both the worktree edit and the untracked file remain.
+    let head_file = git_stdout_for_json_contract(temp.path(), &["show", "HEAD:file.txt"]);
+    assert_eq!(
+        head_file, "base",
+        "--no-all must not sweep worktree edits into the commit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
+        "base\nworktree edit\n",
+        "the worktree edit should remain after --no-all"
+    );
+    assert!(
+        temp.path().join("scratch.txt").exists(),
+        "the untracked file should remain after --no-all"
+    );
+}
+
+#[test]
+fn commit_help_surfaces_index_vs_worktree_auto_switch() {
+    let commit = heddle(&["commit", "--help"], None).expect("heddle commit --help should render");
+    assert!(
+        commit.contains("auto-switches on the Git index")
+            && commit.contains("with nothing staged it commits all worktree paths")
+            && commit.contains("with staged paths it commits only the index")
+            && commit.contains("--no-all"),
+        "commit help should surface the accurate index-vs-worktree auto-switch: {commit}"
+    );
+    assert!(
+        !commit.contains("by default behaves like `git commit -a`"),
+        "commit help must not use the misleading default-is-`git commit -a` framing: {commit}"
+    );
+}
+
+#[test]
 fn git_overlay_commit_discloses_pending_capture_when_checkpointing_later_delta() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
@@ -8786,9 +8885,8 @@ fn op_id_help_is_visible_only_for_supported_commands() {
         "op-id capable command help should expose --op-id: {commit}"
     );
     assert!(
-        commit.contains(
-            "captures and checkpoints all modified, deleted, and untracked worktree paths"
-        ) && commit.contains("checkpoints exactly the staged index")
+        commit.contains("with nothing staged it commits all worktree paths")
+            && commit.contains("with staged paths it commits only the index")
             && commit.contains("--all"),
         "commit help should explain all-worktree and staged-index semantics for Git users: {commit}"
     );
