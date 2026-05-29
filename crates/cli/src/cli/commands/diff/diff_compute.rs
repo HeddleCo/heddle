@@ -226,10 +226,21 @@ pub fn cmd_diff(
         changes
     };
 
-    let file_changes: Vec<FileChange> = if name_only {
-        // Status-only entries, but modes captured before rename detection so
-        // the cross-type guard fires here too (cid 3321103601) — see
-        // `make_status_only_change`.
+    // Patch text (the `.patch` field + the `--patch` body) is produced
+    // whenever `--patch` OR JSON output is requested; the summary flags must
+    // NOT suppress it (cid 3321875382: `--output json --stat`/`--name-only`
+    // dropped `.patch`). `want_hunks` is therefore the single gate for
+    // inflating the per-file hunk vector: patch text needs it, and so does
+    // the default pretty render. Only a HUMAN `--stat`/`--name-only` (no
+    // patch, no JSON) may skip it for performance. Modes are captured in
+    // every mode regardless — rename/type detection compares them.
+    let json = should_output_json(cli, Some(repo.config()));
+    let patch_text_needed = patch || json;
+    let want_hunks = patch_text_needed || !(name_only || stat);
+    let file_changes: Vec<FileChange> = if name_only && !patch_text_needed {
+        // Human `--name-only`: only paths + modes are rendered. Modes are
+        // still captured before rename detection so the cross-type guard fires
+        // here too (cid 3321103601) — see `make_status_only_change`.
         changes
             .iter()
             .map(|change| {
@@ -282,12 +293,14 @@ pub fn cmd_diff(
                     Ok((lines, eol)) => (Some(lines), eol),
                     Err(_) => (None, FileEolState::default()),
                 };
-                // `--stat` only needs the per-file tally; the unified
-                // hunks would be allocated only for `strip_line_hunks`
-                // to throw them away. Count once and drop the vector
-                // immediately so a 10MB diff costs ~24 bytes/file in
-                // retained memory instead of Vec<LineDiff>-per-file.
-                let (lines, line_counts) = if stat {
+                // A HUMAN `--stat` (no patch, no JSON) only needs the per-file
+                // tally; the unified hunks would be allocated only for
+                // `strip_line_hunks` to throw them away. Count once and drop
+                // the vector immediately so a 10MB diff costs ~24 bytes/file in
+                // retained memory instead of Vec<LineDiff>-per-file. When patch
+                // text IS needed (`--patch`/JSON, even alongside `--stat`), keep
+                // the hunks so `populate_patch_text` can render the `.patch`.
+                let (lines, line_counts) = if stat && !patch_text_needed {
                     let counts = change_line_counts(raw_lines.as_deref());
                     (None, Some(counts))
                 } else {
@@ -329,7 +342,7 @@ pub fn cmd_diff(
         from_tree.as_ref(),
         to_tree.as_ref(),
         file_changes,
-        !(name_only || stat),
+        want_hunks,
         unified,
     )?;
     let file_changes = detect_clear_renames(
@@ -337,7 +350,7 @@ pub fn cmd_diff(
         from_tree.as_ref(),
         to_tree.as_ref(),
         file_changes,
-        !(name_only || stat),
+        want_hunks,
         unified,
     )?;
 
@@ -362,11 +375,6 @@ pub fn cmd_diff(
     };
 
     let stats = DiffStats::from_changes(&file_changes, semantic_changes.as_deref());
-    let file_changes = if stat {
-        strip_line_hunks(file_changes)
-    } else {
-        file_changes
-    };
     let mut output = DiffOutput::with_stats(
         from_id.map(|id| id.short()),
         to.clone(),
@@ -382,9 +390,20 @@ pub fn cmd_diff(
             .transpose()?,
         stats,
     );
+    // Render `.patch` from the full per-file hunks BEFORE stripping anything —
+    // the top-level patch text must round-trip in every mode (cid 3321875382).
     populate_patch_text(&mut output);
+    // `--stat` is a per-change stat payload (the per-file tally + top-level
+    // `stats`), not a hunk payload — drop the per-change hunk vectors. This
+    // runs AFTER `populate_patch_text` so a `--stat` JSON/`--patch` render
+    // still carries the round-trippable `.patch` while each row stays
+    // stat-shaped. A human `--stat` already built no hunks, so this is a
+    // no-op there.
+    if stat {
+        output.changes = strip_line_hunks(std::mem::take(&mut output.changes));
+    }
 
-    if should_output_json(cli, Some(repo.config())) {
+    if json {
         println!("{}", serde_json::to_string(&output)?);
     } else if name_only {
         for change in &output.changes {
@@ -448,15 +467,20 @@ fn render_plain_git_head_diff(
 ) -> Result<()> {
     // The plain-Git fast path has no heddle Repository, so there is
     // no in-tree blob source `get_worktree_diff` can read from. When
-    // `--patch` is requested we read the HEAD blobs through `gix`
+    // patch text is needed we read the HEAD blobs through `gix`
     // and feed them through the same `diff_blobs` + renderer pipeline
     // the heddle paths use — that way the `\ No newline at end of
     // file` handling stays in one place.
     //
-    // JSON output carries a `.patch` field whenever a repo is available,
-    // regardless of the `--patch` flag, so we inflate hunks for JSON too.
+    // "Is patch text needed?" — and nothing else — gates hunk inflation:
+    // `--patch` prints the body and JSON always carries a `.patch` field
+    // when a repo is available. The summary flags must NOT suppress it.
+    // Gating on `!stat && !name_only` dropped the `.patch` field from
+    // `heddle --output json diff --stat` (cid 3321875382), so drive the
+    // decision off `patch || json` and let `render_status_changes` pick the
+    // human renderer (which still honours --stat/--name-only).
     let json = should_output_json(cli, None);
-    if (patch || json) && !stat && !name_only {
+    if patch || json {
         let changes = plain_git_file_changes_with_hunks(probe, unified)?;
         return render_status_changes(cli, changes, stat, name_only, patch);
     }
@@ -480,7 +504,13 @@ fn render_status_changes(
     patch: bool,
 ) -> Result<()> {
     let mut output = DiffOutput::new(Some("HEAD".to_string()), None, changes, None, None, None);
+    // `.patch` is rendered from the full hunks first; `--stat` then drops the
+    // per-change hunk vectors so a `--stat` JSON row stays stat-shaped while
+    // `.patch` still round-trips (cid 3321875382).
     populate_patch_text(&mut output);
+    if stat {
+        output.changes = strip_line_hunks(std::mem::take(&mut output.changes));
+    }
 
     if should_output_json(cli, None) {
         println!("{}", serde_json::to_string(&output)?);
@@ -803,21 +833,28 @@ fn render_worktree_status_diff(
     unified: usize,
     repo: Option<&Repository>,
 ) -> Result<()> {
-    // `--patch` and JSON output are the two consumers that actually
-    // need the hunk vector: `--patch` prints it, and JSON always carries
-    // a `.patch` field when a repo is available (regardless of the CLI
-    // flag). The other printers — `--stat`, `--name-only`, the default
-    // pretty printer — read only kind/path off the status entries, so we
-    // keep the cheap status-only construction for them.
+    // Two independent decisions, each driven by what the DATA is for — never
+    // by the display flags:
+    //
+    // 1. Hunk inflation (`want_hunks`) is needed when patch text is produced:
+    //    `--patch` prints the body and JSON always carries a `.patch` field
+    //    when a repo is available. `--stat`/`--name-only` must NOT suppress it
+    //    when JSON is requested (cid 3321875382) — so it is `patch || json`,
+    //    not gated on the summary flags. A human `--stat`/`--name-only` render
+    //    (no patch, no JSON) keeps the cheap status-only construction.
+    //
+    // 2. The from-tree feeds rename/type detection, which compares both sides'
+    //    git modes. Detection must see IDENTICAL inputs in every output mode,
+    //    so the head tree is loaded whenever a repo is present — NOT gated on
+    //    `want_hunks`. Gating it let a DELETED entry's mode (e.g. a deleted
+    //    symlink) go unread on the default/--stat/--name-only renders, and a
+    //    symlink→regular move then re-collapsed into a rename there while
+    //    `--patch` (which had the modes) kept it split (cid 3321875377).
     let json = should_output_json(cli, None);
-    let want_hunks = (patch || json)
-        && !stat
-        && !name_only
-        && repo.is_some();
-    let from_tree = if want_hunks && let Some(repo) = repo {
-        head_from_tree(repo)?
-    } else {
-        None
+    let want_hunks = (patch || json) && repo.is_some();
+    let from_tree = match repo {
+        Some(repo) => head_from_tree(repo)?,
+        None => None,
     };
 
     let changes = file_changes_from_status(status, want_hunks, repo, from_tree.as_ref(), unified);
@@ -840,7 +877,13 @@ fn render_worktree_status_diff(
         changes
     };
     let mut output = DiffOutput::new(Some("HEAD".to_string()), None, changes, None, None, None);
+    // `.patch` is rendered from the full hunks first; `--stat` then drops the
+    // per-change hunk vectors so a `--stat` JSON row stays stat-shaped while
+    // `.patch` still round-trips (cid 3321875382).
     populate_patch_text(&mut output);
+    if stat {
+        output.changes = strip_line_hunks(std::mem::take(&mut output.changes));
+    }
 
     if should_output_json(cli, None) {
         println!("{}", serde_json::to_string(&output)?);

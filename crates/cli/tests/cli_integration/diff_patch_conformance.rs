@@ -337,6 +337,77 @@ fn json_diff_patch_field(cwd: &Path, extra: &[&str]) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// The full JSON diff payload for `heddle --output json diff <base> <mode>`.
+fn json_diff_value(cwd: &Path, base: &[&str], mode: &[&str]) -> Value {
+    let mut args = vec!["--output", "json", "diff"];
+    args.extend_from_slice(base);
+    args.extend_from_slice(mode);
+    let out = heddle_output(&args, Some(cwd)).expect("heddle json diff");
+    assert!(
+        out.status.success(),
+        "heddle --output json diff {base:?} {mode:?} should succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).expect("diff output should be JSON")
+}
+
+/// Extract the rename/type-detection signature from a diff's JSON `changes`
+/// array: the sorted `(kind, path, old_path)` triples. This is the verdict
+/// rename/type detection reaches, independent of how a given mode renders it.
+/// A `--stat` render that collapses a cross-type move into a rename (or drops
+/// a type-change split) produces a *different* signature here — which is
+/// exactly the mode-divergence class we are closing.
+fn change_signature(value: &Value) -> Vec<(String, String, String)> {
+    let mut sig: Vec<(String, String, String)> = value
+        .get("changes")
+        .and_then(Value::as_array)
+        .map(|changes| {
+            changes
+                .iter()
+                .map(|change| {
+                    let field = |key| {
+                        change
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    (field("kind"), field("path"), field("old_path"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    sig.sort();
+    sig
+}
+
+/// The structural close-the-class assertion (cids 3321875377 + 3321875382):
+/// for ONE repo state, every output mode must agree on rename/type detection,
+/// and every JSON render — with OR without a summary flag — must carry the
+/// round-trippable `.patch` field equal to the `--patch` stdout. Folded into
+/// every cell runner so a future mode-divergence (a `--stat`/`--name-only`
+/// render that drops `.patch` or collapses a type change differently from
+/// `--patch`) is a red test rather than the next Codex round. `base` is the
+/// diff's leading revision args (`[]` for the worktree surface, `["HEAD~1",
+/// "HEAD"]` for the committed surface).
+fn assert_modes_consistent(cwd: &Path, base: &[&str], patch_stdout: &str) {
+    let modes: [&[&str]; 4] = [&[], &["--stat"], &["--name-only"], &["--patch"]];
+    let reference = change_signature(&json_diff_value(cwd, base, &[]));
+    for mode in modes {
+        let value = json_diff_value(cwd, base, mode);
+        assert_eq!(
+            value.get("patch").and_then(Value::as_str),
+            Some(patch_stdout),
+            "`--output json diff {base:?} {mode:?}` must carry the same `.patch` as `--patch` stdout"
+        );
+        assert_eq!(
+            change_signature(&value),
+            reference,
+            "`--output json diff {base:?} {mode:?}` rename/type detection diverged from the default render"
+        );
+    }
+}
+
 /// Run one native-path cell: capture `pre`, mutate the worktree, then
 /// assert the `--patch` text round-trips through `git apply` to `expect`
 /// and that the JSON `.patch` field matches the `--patch` stdout.
@@ -355,14 +426,10 @@ fn native_cell(pre: &[Entry], mutate: impl Fn(&Path), expect: &[Expect]) {
         "native cell produced an empty patch (no change detected?)"
     );
 
-    // JSON `.patch` is the same render as `--patch` and must be present
-    // even without the flag — structured consumers rely on it.
-    let json_patch = json_patch_field(h.path());
-    assert_eq!(
-        json_patch.as_deref(),
-        Some(patch.as_str()),
-        "JSON `.patch` field must equal the `--patch` stdout"
-    );
+    // Every output mode must agree on rename/type detection, and every JSON
+    // render — including `--stat`/`--name-only` — must carry the `.patch`
+    // field equal to the `--patch` stdout (cids 3321875377 + 3321875382).
+    assert_modes_consistent(h.path(), &[], &patch);
 
     apply_oracle(pre, &patch, expect);
 }
@@ -389,12 +456,10 @@ fn state_cell(pre: &[Entry], mutate: impl Fn(&Path), expect: &[Expect]) {
         "state cell produced an empty patch (no change detected?)"
     );
 
-    let json_patch = json_diff_patch_field(h.path(), &["HEAD~1", "HEAD"]);
-    assert_eq!(
-        json_patch.as_deref(),
-        Some(patch.as_str()),
-        "state-to-state JSON `.patch` field must equal the `--patch` stdout"
-    );
+    // Committed-surface analogue of the worktree check: every output mode of
+    // `heddle diff HEAD~1 HEAD` must agree on rename/type detection and carry
+    // `.patch` in every JSON render (cids 3321875377 + 3321875382).
+    assert_modes_consistent(h.path(), &["HEAD~1", "HEAD"], &patch);
 
     apply_oracle(pre, &patch, expect);
 }
@@ -1142,6 +1207,39 @@ fn state_status_regular_to_symlink_rename_candidate_stays_split() {
     assert_split_not_rename(&renders, "mover.txt", "linked");
 }
 
+/// The reverse direction (cid 3321875377): the cross-type-ness lives on the
+/// DELETED side. A *symlink* is removed and a regular file whose bytes equal
+/// the symlink's target string is added — so a render that reads the deleted
+/// entry's mode as a (modeless) regular file would collapse the pair into a
+/// rename, while `--patch` keeps it split. `status_regular_to_symlink_*` above
+/// covers the added-side direction; this pins the deleted-side one.
+#[cfg(unix)]
+#[test]
+fn status_symlink_to_regular_rename_candidate_stays_split() {
+    let renders = status_renders(
+        &[symlink("mover_link", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("mover_link")).unwrap();
+            write_entry(dir, &normal("newreg.txt", "dest/dir/file"));
+        },
+    );
+    assert_split_not_rename(&renders, "mover_link", "newreg.txt");
+}
+
+/// Committed-tree surface of the deleted-symlink direction.
+#[cfg(unix)]
+#[test]
+fn state_status_symlink_to_regular_rename_candidate_stays_split() {
+    let renders = state_status_renders(
+        &[symlink("mover_link", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("mover_link")).unwrap();
+            write_entry(dir, &normal("newreg.txt", "dest/dir/file"));
+        },
+    );
+    assert_split_not_rename(&renders, "mover_link", "newreg.txt");
+}
+
 /// The must-not-over-block companion: a regular→executable move stays within
 /// git's regular-file type class, so every status render MUST still collapse
 /// it into a rename (and `--patch` round-trips through `git apply`). Capturing
@@ -1226,6 +1324,73 @@ fn status_same_path_regular_to_symlink_splits_not_modified() {
         "--name-only must list the split path twice (delete + add):\n{}",
         renders.name_only
     );
+}
+
+// ---------------------------------------------------------------------------
+// Matrix — rename×type on the GIT-OVERLAY status path (cid 3321875377). The
+// cells above run pure-heddle repos, which take the `cmd_diff` path where the
+// head tree is always loaded. The git-overlay-trust path — `heddle diff`
+// rendering `render_worktree_status_diff` with a repo — is reached only when
+// heddle trusts the visible git worktree status (e.g. the git branch advanced
+// past the heddle import). There the head tree was loaded ONLY when hunks were
+// inflated (`--patch`/JSON), so the default/--stat/--name-only renders saw a
+// modeless deleted entry and a symlink→regular move re-collapsed into a rename
+// while `--patch` kept it split. These pin every git-overlay status render to
+// the `--patch` verdict — the actual surface the Codex finding pointed at.
+// ---------------------------------------------------------------------------
+
+/// Set up a git-overlay repo whose git branch has advanced past the heddle
+/// import (so `heddle diff` trusts the git worktree status), then capture the
+/// four renders of `mutate`'s worktree change plus the `--patch` oracle. `pre`
+/// is committed BEFORE `heddle adopt`, so its blobs/modes live in heddle's
+/// imported head tree where rename detection resolves them; the advancing
+/// commit is unrelated content so it never appears in the worktree diff.
+#[cfg(unix)]
+fn git_overlay_status_renders(pre: &[Entry], mutate: impl Fn(&Path)) -> (StatusRenders, String) {
+    let h = TempDir::new().unwrap();
+    git_init(h.path());
+    for entry in pre {
+        write_entry(h.path(), entry);
+    }
+    git(h.path(), &["add", "-A"]);
+    git(h.path(), &["commit", "-q", "-m", "seed"]);
+    heddle(&["adopt"], Some(h.path())).unwrap();
+    // Advance the git branch past the import with an UNRELATED commit so heddle
+    // flips to trusting the git-overlay worktree status (`git_branch_advanced`).
+    write_entry(h.path(), &normal("unrelated_advance.txt", "advance\n"));
+    git(h.path(), &["add", "-A"]);
+    git(h.path(), &["commit", "-q", "-m", "advance"]);
+    mutate(h.path());
+    let renders = StatusRenders {
+        default: heddle(&["diff"], Some(h.path())).unwrap(),
+        stat: heddle(&["diff", "--stat"], Some(h.path())).unwrap(),
+        name_only: heddle(&["diff", "--name-only"], Some(h.path())).unwrap(),
+    };
+    let patch = heddle(&["diff", "--patch"], Some(h.path())).unwrap();
+    (renders, patch)
+}
+
+/// The git-overlay reproduction of cid 3321875377: a symlink committed into the
+/// imported head, removed in the worktree, and a regular file with the same
+/// bytes added (so the pair scores as a rename candidate). `--patch` loads the
+/// head tree and keeps the cross-type pair split; the default/--stat/
+/// --name-only renders must reach the same verdict, not collapse to a rename.
+#[cfg(unix)]
+#[test]
+fn git_overlay_status_symlink_to_regular_rename_candidate_stays_split() {
+    let (renders, patch) = git_overlay_status_renders(
+        &[symlink("mover_link", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("mover_link")).unwrap();
+            write_entry(dir, &normal("newreg.txt", "dest/dir/file"));
+        },
+    );
+    // The oracle: `--patch` must keep the cross-type pair split.
+    assert!(
+        !patch.contains("rename from"),
+        "git-overlay --patch must keep the symlink→regular move split:\n{patch}"
+    );
+    assert_split_not_rename(&renders, "mover_link", "newreg.txt");
 }
 
 // ---------------------------------------------------------------------------
@@ -1540,12 +1705,10 @@ fn plain_git_cell(pre: &[Entry], stage: bool, mutate: impl Fn(&Path), expect: &[
         !patch.trim().is_empty(),
         "plain-Git cell produced an empty patch"
     );
-    let json_patch = json_patch_field(h.path());
-    assert_eq!(
-        json_patch.as_deref(),
-        Some(patch.as_str()),
-        "plain-Git JSON `.patch` must equal `--patch` stdout"
-    );
+    // Same all-modes contract on the plain-Git backend: `--output json --stat`
+    // and `--name-only` must still carry `.patch` (cid 3321875382), and every
+    // mode must agree on the change set.
+    assert_modes_consistent(h.path(), &[], &patch);
     apply_oracle(pre, &patch, expect);
 }
 
@@ -2091,9 +2254,10 @@ proptest! {
             "non-equal trees must produce a patch; pre={pre:?} post={post:?}"
         );
 
-        // JSON `.patch` must mirror the `--patch` render.
-        let json_patch = json_patch_field(h.path());
-        prop_assert_eq!(json_patch.as_deref(), Some(patch.as_str()));
+        // Every output mode must agree on the change set and carry `.patch`
+        // in every JSON render — the random-tree layer of the all-modes
+        // invariant (cids 3321875377 + 3321875382).
+        assert_modes_consistent(h.path(), &[], &patch);
 
         // Oracle: seed `pre`, apply, assert the worktree equals `post`.
         let g = TempDir::new().unwrap();
