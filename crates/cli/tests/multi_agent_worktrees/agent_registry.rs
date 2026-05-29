@@ -311,3 +311,84 @@ fn actor_spawn_no_thread_attaches_to_current_thread_without_minting() {
         serde_json::to_string(&after).unwrap()
     );
 }
+
+#[test]
+fn actor_spawn_no_thread_conflicts_with_explicit_thread() {
+    let main = setup_repo("base.txt", "base");
+
+    // `--no-thread` and `--thread` are mutually exclusive: one attaches
+    // to the current thread, the other targets a named thread.
+    let err = heddle(
+        &[
+            "actor",
+            "spawn",
+            "--no-thread",
+            "--thread",
+            "main",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-sonnet-4-6",
+        ],
+        Some(main.path()),
+    )
+    .expect_err("--no-thread with --thread should be rejected");
+    assert!(
+        err.contains("cannot be used with"),
+        "clap should report the --no-thread/--thread conflict: {err}"
+    );
+}
+
+#[test]
+fn actor_spawn_no_thread_on_detached_head_fails_cleanly() {
+    let main = setup_repo("base.txt", "base");
+    // A second state so `goto HEAD~1` lands on a real prior change and
+    // detaches HEAD (no current thread to attach an actor to).
+    fs::write(main.path().join("base.txt"), "base updated").unwrap();
+    heddle(&["capture", "-m", "second"], Some(main.path())).unwrap();
+    heddle(&["goto", "HEAD~1"], Some(main.path())).unwrap();
+
+    let before: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "thread", "list"], Some(main.path())).unwrap(),
+    )
+    .unwrap();
+    let before_count = before["threads"].as_array().unwrap().len();
+
+    let err = heddle(
+        &[
+            "actor",
+            "spawn",
+            "--no-thread",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-sonnet-4-6",
+        ],
+        Some(main.path()),
+    )
+    .expect_err("--no-thread on detached HEAD should fail cleanly");
+    assert!(
+        err.contains("current thread"),
+        "detached-HEAD spawn should explain there is no current thread to attach to: {err}"
+    );
+
+    // Clean failure: no actor thread minted, no registry side effects.
+    let after: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "thread", "list"], Some(main.path())).unwrap(),
+    )
+    .unwrap();
+    let threads = after["threads"].as_array().unwrap();
+    assert_eq!(
+        threads.len(),
+        before_count,
+        "failed --no-thread spawn must not add a thread: {}",
+        serde_json::to_string(&after).unwrap()
+    );
+    assert!(
+        threads
+            .iter()
+            .all(|thread| !thread["name"].as_str().unwrap_or("").starts_with("actor/")),
+        "no actor/* thread should exist after a failed --no-thread spawn: {}",
+        serde_json::to_string(&after).unwrap()
+    );
+}

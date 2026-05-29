@@ -10030,13 +10030,14 @@ fn actor_explain_json_detects_harness_without_active_actor() {
     );
     assert_eq!(
         parsed["recommended_action"],
-        "heddle actor spawn --provider openai --model gpt-5.3-codex"
+        "heddle actor spawn --no-thread --provider openai --model gpt-5.3-codex"
     );
     assert_eq!(
         parsed["recommended_action_template"]["argv_template"],
         heddle_argv_json([
             "actor",
             "spawn",
+            "--no-thread",
             "--provider",
             "openai",
             "--model",

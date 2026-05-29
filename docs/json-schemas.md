@@ -1186,7 +1186,7 @@ array.
     "principal_email": "agent@example.com",
     "signals": ["CODEX_THREAD_ID"]
   },
-  "recommended_action": "heddle actor spawn --provider openai --model gpt-5",
+  "recommended_action": "heddle actor spawn --no-thread --provider openai --model gpt-5",
   "verification": {
     "verified": true,
     "status": "clean",
