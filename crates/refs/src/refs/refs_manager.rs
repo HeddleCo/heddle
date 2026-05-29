@@ -15,6 +15,14 @@ use super::{
 };
 use crate::fs_atomic::sync_directory;
 
+/// Well-known refspec that resolves the heddle-internal pre-undo recovery
+/// pointer (so `heddle goto undo-recovery` still works). It is NOT a user
+/// marker: it lives in a reserved internal namespace the marker CLI cannot
+/// create, delete, or enumerate. A user marker of the same literal name takes
+/// resolution precedence (their explicit ref wins); the internal pointer is the
+/// fallback, and is always preserved regardless of any same-named user marker.
+pub const UNDO_RECOVERY_HANDLE: &str = "undo-recovery";
+
 /// Manager for references (threads, markers, HEAD).
 pub struct RefManager {
     pub(crate) root: PathBuf,
@@ -216,6 +224,25 @@ impl RefManager {
         self.list_markers_from_storage()
     }
 
+    /// Record the heddle-internal pre-undo recovery pointer (ORIG_HEAD-style:
+    /// a single rolling ref each undo overwrites). Stored OUTSIDE the
+    /// user-writable marker namespace so `marker create/delete` — and their
+    /// undo inverses — can never collide with it. See
+    /// [`UNDO_RECOVERY_HANDLE`] for the resolution handle.
+    pub fn set_undo_recovery(&self, state: &ChangeId) -> Result<()> {
+        let _lock = self.lock_refs()?;
+        self.write_string(
+            &self.undo_recovery_path(),
+            &super::format_change_id_text(state),
+        )
+    }
+
+    /// Read the heddle-internal pre-undo recovery pointer, if one has been
+    /// recorded. Returns `None` when no undo has run in this repo.
+    pub fn get_undo_recovery(&self) -> Result<Option<ChangeId>> {
+        self.read_change_id_at(&self.undo_recovery_path(), "undo recovery", UNDO_RECOVERY_HANDLE)
+    }
+
     pub fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
         let path = self.remote_thread_path(remote, thread)?;
         self.read_change_id_at(&path, "remote thread", &format!("{}/{}", remote, thread))
@@ -288,12 +315,25 @@ impl RefManager {
     }
 
     pub fn resolve(&self, refspec: &str) -> Result<Option<ChangeId>> {
-        resolve_refspec(
+        if let Some(id) = resolve_refspec(
             refspec,
             || self.read_head(),
             |name| self.get_thread(&ThreadName::new(name)),
             |name| self.get_marker(&MarkerName::new(name)),
-        )
+        )? {
+            return Ok(Some(id));
+        }
+        // Fallback: the heddle-internal recovery handle. Reached only when
+        // nothing else matched (no thread/marker of this name, and it is not a
+        // bare change-id), so an explicit same-named user marker always wins
+        // while `heddle goto undo-recovery` still resolves the preserved
+        // pre-undo state.
+        if refspec == UNDO_RECOVERY_HANDLE
+            && let Some(id) = self.get_undo_recovery()?
+        {
+            return Ok(Some(id));
+        }
+        Ok(None)
     }
 
     pub fn pack_refs(&self) -> Result<()> {

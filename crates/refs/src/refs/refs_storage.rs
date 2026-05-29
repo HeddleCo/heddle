@@ -72,6 +72,15 @@ impl RefManager {
             .cloned()
             .unwrap_or_else(|| self.root.join("HEAD"))
     }
+    /// Path of the heddle-internal pre-undo recovery pointer. Deliberately
+    /// a root-level sibling of `HEAD` (ORIG_HEAD-style), OUTSIDE the
+    /// user-writable ref namespaces under `refs/` (threads, markers,
+    /// remotes). Keeping it here makes a collision with a user marker named
+    /// `undo-recovery` impossible by construction: the marker CLI only ever
+    /// touches `refs/markers/`.
+    pub(super) fn undo_recovery_path(&self) -> PathBuf {
+        self.root.join("UNDO_RECOVERY")
+    }
     pub(super) fn packed_refs_path(&self) -> PathBuf {
         self.refs_dir().join("packed-refs")
     }

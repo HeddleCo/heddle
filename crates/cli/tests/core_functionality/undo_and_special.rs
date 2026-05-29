@@ -598,6 +598,80 @@ fn test_undo_recovery_marker_survives_divergent_capture() {
     );
 }
 
+/// heddle#305 r2: the pre-undo recovery pointer must live in a heddle-internal
+/// reserved ref, NOT the user marker namespace. Storing it as a user marker
+/// named `undo-recovery` couples heddle bookkeeping to a user-writable name:
+/// the `MarkerDelete` undo inverse re-creates user markers with a `Missing`
+/// expectation, so a same-named recovery marker pre-written by `undo` would
+/// make that inverse fail (`create_marker(undo-recovery, Missing)` collides).
+/// Moving recovery out of `refs/markers/` makes the whole class impossible by
+/// construction: user `marker create/delete` (and their inverses) can never
+/// see or clobber the internal pointer, and vice versa.
+#[test]
+fn test_undo_recovery_lives_outside_user_marker_namespace() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    std::fs::write(temp.path().join("notes.md"), "FRICTION\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
+    let friction_state = head_short(temp.path());
+
+    heddle_must_succeed(&["undo"], temp.path());
+
+    // (a) recovery must NOT pollute the user marker namespace.
+    let markers: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "marker", "list"],
+        temp.path(),
+    ))
+    .unwrap();
+    assert!(
+        markers["markers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["name"] != "undo-recovery"),
+        "recovery bookkeeping must not appear as a user marker"
+    );
+
+    // (b) it lives in the heddle-internal recovery ref, pinning the pre-undo
+    // state — a namespace the user marker CLI cannot enumerate or collide with.
+    let repo = Repository::open(temp.path()).unwrap();
+    let recovery = repo
+        .refs()
+        .get_undo_recovery()
+        .unwrap()
+        .expect("undo must preserve the pre-undo state in the internal recovery ref");
+    assert_eq!(
+        recovery.short(),
+        friction_state,
+        "internal recovery ref must pin the pre-undo (friction) state"
+    );
+
+    // (c) the recovery UX is preserved: `goto undo-recovery` resolves the
+    // internal ref and restores the pre-undo content.
+    heddle_must_succeed(&["goto", "undo-recovery"], temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "FRICTION\n",
+        "the pre-undo content must be recoverable via the internal handle"
+    );
+
+    // (d) coexistence: a user may now legitimately create and delete their own
+    // marker named `undo-recovery` without colliding with — or disturbing —
+    // the internal recovery pointer. This is the closed class: the two
+    // namespaces are independent.
+    heddle_must_succeed(&["marker", "create", "undo-recovery"], temp.path());
+    heddle_must_succeed(&["marker", "delete", "undo-recovery"], temp.path());
+    let repo = Repository::open(temp.path()).unwrap();
+    assert_eq!(
+        repo.refs().get_undo_recovery().unwrap().map(|id| id.short()),
+        Some(friction_state),
+        "user marker create/delete must not touch the internal recovery ref"
+    );
+}
+
 /// Fast-forward merge undo, full restoration: HEAD *and* the merged-into
 /// thread ref both rewind to the pre-merge tip. This pins the heddle#99 fix —
 /// before it landed, the FF merge recorded an `OpRecord::Goto` whose inverse
