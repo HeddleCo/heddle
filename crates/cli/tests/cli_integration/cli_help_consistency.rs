@@ -27,11 +27,19 @@ fn clone_help_pins_behavior_stanza() {
         help.contains("`main`") && help.contains("alphabetically first"),
         "clone help should name the default-thread fallback chain: {help}"
     );
-    // The transport distinction: native Heddle remotes default to `main`,
-    // not the Git-HEAD chain — the inaccuracy this stanza must not regress.
+    // The transport distinction: native-local and hosted Heddle clones target
+    // `main` directly (no Git-HEAD fallback chain) — the inaccuracy this stanza
+    // must not regress.
     assert!(
-        help.contains("Heddle remote") && help.contains("lands on `main`"),
+        help.contains("Native-local and hosted Heddle clones")
+            && help.contains("target `main` directly"),
         "clone help should distinguish the Heddle-remote default from the Git-overlay chain: {help}"
+    );
+    // The failure mode: an unhinted native/hosted clone fails when the remote
+    // has no `main` thread, and the user must pass `--thread <name>`.
+    assert!(
+        help.contains("the clone fails") && help.contains("--thread <name>"),
+        "clone help should document that an unhinted native/hosted clone fails when the remote has no `main` thread: {help}"
     );
     // Depth semantics: 0 means full history, N keeps the tip plus N ancestry levels.
     assert!(
