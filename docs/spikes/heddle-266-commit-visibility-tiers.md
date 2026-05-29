@@ -645,10 +645,11 @@ this list. **Six** surfaces, each the same frontier projected:
    notes head and **parents each new notes commit on it** (`read_notes_head` →
    `git_notes.rs:180`; `new_commit_as(sig, sig, msg, tree, parents=[prev_head])`
    → `git_notes.rs:195-204`), so `refs/notes/heddle` is its **own accreting commit
-   chain**: every note ever written — including one minted for a state that was
-   public-then-embargoed, or written before the audience gate existed — stays
-   reachable through the ref's **parent chain** even if the *current* (HEAD) notes
-   tree omits it. The forced `+refs/notes/*` mirror (`git_core.rs:300`) transfers
+   chain**: every note ever written for a state that is **still embargoed** (never
+   validly served to this audience — e.g. a legacy/pre-gate note written before the
+   audience gate existed) stays reachable through the ref's **parent chain** even if
+   the *current* (HEAD) notes tree omits it. The forced `+refs/notes/*` mirror
+   (`git_core.rs:300`) transfers
    the **whole chain**, so publishing the ref still ships the embargoed note's
    blob/tree out-of-band and leaks its `change_id`/attribution/agent/signal
    metadata. Filtering only the tip tree is the notes analogue of the unsound
@@ -657,8 +658,14 @@ this list. **Six** surfaces, each the same frontier projected:
    **REBUILD the published notes ref**: before public export/push, reconstruct the
    notes commit chain (squash/rewrite) so that **no embargoed-state note object is
    reachable through the published ref's history** — a notes commit (or chain)
-   whose every reachable tree maps only served states. This is the §5.0/r4–r5
-   content-addressing principle (*you cannot hide an object that is still reachable
+   whose every reachable tree maps only served states. The rebuild applies **only to
+   never-public (still-embargoed) state notes**; it is **not** a mechanism to re-hide
+   a note for an already-served state. Re-embargoing an already-served state is
+   rejected outright (§5.4 — you cannot un-send bytes: a public puller may already
+   hold the note blob/tree), so a note once validly served stays published and the
+   rebuild only ever excludes note objects that should never have been reachable to
+   this audience. This is the §5.0/r4–r5 content-addressing principle (*you cannot
+   hide an object that is still reachable
    from a published ref*) applied to an **auxiliary, history-bearing ref**, and it
    generalizes immediately below.
 6. **Symref / bulk-publication surfaces — `HEAD` and the whole-mirror
