@@ -2,4 +2,5 @@
 //! Internal helpers for materialized thread checkouts.
 
 pub(crate) mod helpers;
+pub(crate) mod hydrate;
 pub(crate) mod shared_target;

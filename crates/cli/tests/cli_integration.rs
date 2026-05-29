@@ -68,6 +68,8 @@ mod output_mode_no_auto;
 mod perf_core_loop;
 #[path = "cli_integration/realworld_git.rs"]
 mod realworld_git;
+#[path = "cli_integration/hydrate.rs"]
+mod hydrate;
 #[path = "cli_integration/redact_purge.rs"]
 mod redact_purge;
 #[path = "cli_integration/refs_and_history.rs"]

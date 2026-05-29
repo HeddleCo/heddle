@@ -44,7 +44,7 @@ use super::{
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
     worktree_cmd::{
         helpers::{prepare_worktree_target, write_isolated_checkout},
-        shared_target,
+        hydrate, shared_target,
     },
     worktree_safety::ensure_worktree_clean,
 };
@@ -1777,6 +1777,30 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
                         "existing .cargo/config.toml preserved; --shared-target redirect not applied"
                     );
                     shared_target_dir_path = None;
+                }
+            }
+            // `--hydrate`: symlink the origin checkout's top-level ignored
+            // dependency dirs (node_modules, .venv, target, …) into the
+            // new checkout so it's immediately buildable. The links stay
+            // ignored — they're never captured into heddle.
+            if args.hydrate {
+                let sources = hydrate::hydratable_ignored_dirs(repo)?;
+                let linked = hydrate::hydrate_checkout(&abs_path, &sources)?;
+                if linked.is_empty() {
+                    eprintln!(
+                        "{}: --hydrate found no ignored dependency directories at the origin \
+                         checkout root to link.",
+                        style::warn("note"),
+                    );
+                } else {
+                    eprintln!(
+                        "{}: hydrated {} ignored dependency dir(s) into '{}' via symlink: {} \
+                         (shared with the origin checkout; they stay ignored and are not captured).",
+                        style::warn("note"),
+                        linked.len(),
+                        args.name,
+                        linked.join(", "),
+                    );
                 }
             }
         }
