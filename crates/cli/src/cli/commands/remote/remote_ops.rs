@@ -4,9 +4,10 @@
 use objects::store::ObjectStore;
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{borrow::Cow, collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Context, Result};
+use gix::bstr::{BStr, BString};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::PullMaterialization;
 use objects::{
@@ -696,12 +697,17 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             if !merged_remote_items(&repo)?.contains_key(&name) {
                 return Err(RecoveryAdvice::remote_not_found(&name).into());
             }
+            // Remove the git-overlay side FIRST so its uneditable-include
+            // refusal (raised before any file is touched) leaves the Heddle
+            // config unmutated. Persisting the Heddle removal ahead of this
+            // fallible step stranded the repo in partial state: the Heddle
+            // remote gone, the Git remote still present.
+            sync_git_overlay_remote_remove(&repo, &name)?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
             match cfg.remove(&name) {
                 Ok(()) | Err(RemoteError::NotFound(_)) => {}
                 Err(err) => return Err(anyhow::Error::msg(err)),
             }
-            sync_git_overlay_remote_remove(&repo, &name)?;
             render_remote_mutation(
                 RemoteMutationOutput {
                     output_kind: "remote_remove",
@@ -937,24 +943,10 @@ fn is_local_git_repository(path: &Path) -> bool {
 }
 
 fn plain_git_remote_items(root: &Path) -> BTreeMap<String, String> {
-    let mut remotes = BTreeMap::new();
-    for config_path in plain_git_config_paths(root) {
-        parse_git_config_remotes(&config_path, &mut remotes);
-    }
-    remotes
-}
-
-fn plain_git_config_paths(root: &Path) -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-    let dot_git = root.join(".git");
-    paths.push(dot_git.join("config"));
-    if let Some(git_dir) = pointed_git_dir(&dot_git) {
-        paths.push(git_dir.join("config"));
-        if let Some(common_dir) = common_git_dir(&git_dir) {
-            paths.push(common_dir.join("config"));
-        }
-    }
-    paths
+    let Some(ctx) = GitConfigContext::discover(root) else {
+        return BTreeMap::new();
+    };
+    ctx.remotes(ctx.layered_paths())
 }
 
 fn default_remote_from_items(items: &BTreeMap<String, String>) -> Option<String> {
@@ -968,76 +960,189 @@ fn default_remote_from_items(items: &BTreeMap<String, String>) -> Option<String>
 }
 
 fn git_overlay_config_remotes(repo: &Repository) -> BTreeMap<String, String> {
-    let mut remotes = BTreeMap::new();
-    for config_path in git_overlay_config_paths(repo) {
-        parse_git_config_remotes(&config_path, &mut remotes);
-    }
-    remotes
-}
-
-fn git_overlay_config_paths(repo: &Repository) -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-    paths.push(repo.root().join(".git").join("config"));
-    if let Some(git_dir) = pointed_git_dir(&repo.root().join(".git")) {
-        paths.push(git_dir.join("config"));
-        if let Some(common_dir) = common_git_dir(&git_dir) {
-            paths.push(common_dir.join("config"));
-        }
-    }
-    paths.push(repo.heddle_dir().join("git").join("config"));
-    paths
-}
-
-fn pointed_git_dir(dot_git: &Path) -> Option<std::path::PathBuf> {
-    if dot_git.is_dir() {
-        return Some(dot_git.to_path_buf());
-    }
-    let contents = fs::read_to_string(dot_git).ok()?;
-    let target = contents.trim().strip_prefix("gitdir:")?.trim();
-    let path = Path::new(target);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        dot_git.parent()?.join(path)
-    })
-}
-
-fn common_git_dir(git_dir: &Path) -> Option<std::path::PathBuf> {
-    let contents = fs::read_to_string(git_dir.join("commondir")).ok()?;
-    let target = contents.trim();
-    let path = Path::new(target);
-    Some(if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        git_dir.join(path)
-    })
-}
-
-fn parse_git_config_remotes(path: &Path, remotes: &mut BTreeMap<String, String>) {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return;
+    let Some(ctx) = GitConfigContext::discover(repo.root()) else {
+        return BTreeMap::new();
     };
-    let mut current_remote: Option<String> = None;
-    for raw in contents.lines() {
-        let line = raw.trim();
-        if line.starts_with('[') && line.ends_with(']') {
-            current_remote = line
-                .strip_prefix("[remote \"")
-                .and_then(|rest| rest.strip_suffix("\"]"))
-                .map(str::to_string);
-            continue;
+    let mut paths = ctx.layered_paths();
+    paths.push(repo.heddle_dir().join("git").join("config"));
+    ctx.remotes(paths)
+}
+
+/// The resolved Git directory layout for a repository, used to read remote
+/// definitions from `.git/config` (and its layered companions) through
+/// `gix_config`, which correctly handles quoting, inline comments, include
+/// directives, and conditional `includeIf` directives.
+struct GitConfigContext {
+    git_dir: std::path::PathBuf,
+    common_dir: std::path::PathBuf,
+    branch: Option<gix::refs::FullName>,
+}
+
+impl GitConfigContext {
+    fn discover(root: &Path) -> Option<Self> {
+        let git = gix::discover(root).ok()?;
+        Some(Self {
+            git_dir: git.git_dir().to_path_buf(),
+            common_dir: git.common_dir().to_path_buf(),
+            branch: git.head_name().ok().flatten(),
+        })
+    }
+
+    fn branch_ref(&self) -> Option<&gix::refs::FullNameRef> {
+        self.branch.as_ref().map(AsRef::as_ref)
+    }
+
+    /// The standard repository config files, ordered highest-precedence first:
+    /// the per-worktree `config.worktree` (only when `extensions.worktreeConfig`
+    /// is enabled), then the git-dir `config`, then the shared common-dir
+    /// `config` for linked worktrees.
+    fn layered_paths(&self) -> Vec<std::path::PathBuf> {
+        let mut paths = Vec::new();
+        if self.worktree_config_enabled() {
+            paths.push(self.git_dir.join("config.worktree"));
         }
-        let Some(name) = current_remote.as_ref() else {
-            continue;
+        paths.push(self.git_dir.join("config"));
+        if self.common_dir != self.git_dir {
+            paths.push(self.common_dir.join("config"));
+        }
+        paths
+    }
+
+    fn worktree_config_enabled(&self) -> bool {
+        let mut paths = vec![self.git_dir.join("config")];
+        if self.common_dir != self.git_dir {
+            paths.push(self.common_dir.join("config"));
+        }
+        self.load(paths)
+            .and_then(|file| file.boolean("extensions.worktreeConfig"))
+            .and_then(Result::ok)
+            .unwrap_or(false)
+    }
+
+    /// The file a write to remote `name` must target so the next
+    /// `remote list` read resolves the value we just wrote. The
+    /// highest-precedence file that already defines the remote, resolved
+    /// through `include.path`/`includeIf` indirection — not merely the
+    /// top-level layer that *follows* the include, whose physical text has
+    /// no `[remote]` section to edit. When no file defines the remote, the
+    /// common config — git's default target for a brand-new remote.
+    ///
+    /// Errors when the defining file lies outside the repository's Git
+    /// directory (reached via an include), so a reported-successful write is
+    /// never a silent no-op against a file heddle won't edit.
+    fn write_file_for(&self, name: &str) -> Result<std::path::PathBuf> {
+        match self.defining_files_for(name).into_iter().next() {
+            Some(path) => {
+                if !self.owns_config_file(&path) {
+                    anyhow::bail!(RecoveryAdvice::git_remote_in_included_config(name, &path));
+                }
+                Ok(path)
+            }
+            None => Ok(self.common_dir.join("config")),
+        }
+    }
+
+    /// Every file that currently defines remote `name`, resolved through
+    /// includes. A remove must clear all of them, otherwise a
+    /// lower-precedence definition resurfaces — or a higher-precedence one
+    /// keeps winning — on the next read, leaving the "successful" removal
+    /// silently divergent. Errors when any defining file lies outside the
+    /// repository's Git directory rather than no-op'ing against it.
+    fn remove_files_for(&self, name: &str) -> Result<Vec<std::path::PathBuf>> {
+        let files = self.defining_files_for(name);
+        for path in &files {
+            if !self.owns_config_file(path) {
+                anyhow::bail!(RecoveryAdvice::git_remote_in_included_config(name, path));
+            }
+        }
+        Ok(files)
+    }
+
+    /// The file(s) whose `[remote "<name>"]` section the reader resolves,
+    /// following `include.path`/`includeIf`. Returned highest-precedence
+    /// first, matching `remotes` read precedence (first-seen wins). The
+    /// section metadata records the file each section physically lives in,
+    /// so an include-defined remote resolves to the included file — the one
+    /// a write must edit — not the including config.
+    fn defining_files_for(&self, name: &str) -> Vec<std::path::PathBuf> {
+        let Some(file) = self.load(self.layered_paths()) else {
+            return Vec::new();
         };
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
+        let Some(sections) = file.sections_by_name("remote") else {
+            return Vec::new();
         };
-        if key.trim() == "url" {
+        let mut files = Vec::new();
+        for section in sections {
+            let matches = section
+                .header()
+                .subsection_name()
+                .map(|subsection| subsection.to_string());
+            if matches.as_deref() != Some(name) {
+                continue;
+            }
+            let Some(path) = section.meta().path.clone() else {
+                continue;
+            };
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
+        files
+    }
+
+    /// Whether heddle may rewrite `path`: only config files within the
+    /// repository's own Git directory tree (git-dir / common-dir). A section
+    /// pulled in from a file outside that tree via `include.path`/`includeIf`
+    /// (e.g. a user-global config) is not ours to edit.
+    fn owns_config_file(&self, path: &Path) -> bool {
+        let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        [&self.git_dir, &self.common_dir].into_iter().any(|root| {
+            let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            target.starts_with(&root)
+        })
+    }
+
+    fn remotes(&self, paths: Vec<std::path::PathBuf>) -> BTreeMap<String, String> {
+        let mut remotes = BTreeMap::new();
+        let Some(file) = self.load(paths) else {
+            return remotes;
+        };
+        let Some(sections) = file.sections_by_name("remote") else {
+            return remotes;
+        };
+        for section in sections {
+            let Some(name) = section.header().subsection_name() else {
+                continue;
+            };
+            let Some(url) = section.value("url") else {
+                continue;
+            };
             remotes
-                .entry(name.clone())
-                .or_insert_with(|| value.trim().to_string());
+                .entry(name.to_string())
+                .or_insert_with(|| url.to_string());
         }
+        remotes
+    }
+
+    fn load(&self, paths: Vec<std::path::PathBuf>) -> Option<gix_config::File<'static>> {
+        let options = gix_config::file::init::Options {
+            includes: gix_config::file::includes::Options::follow(
+                gix_config::path::interpolate::Context::default(),
+                gix_config::file::includes::conditional::Context {
+                    git_dir: Some(&self.git_dir),
+                    branch_name: self.branch_ref(),
+                },
+            ),
+            lossy: true,
+            ignore_io_errors: true,
+        };
+        let mut metadata = paths
+            .into_iter()
+            .map(|path| gix_config::file::Metadata::from(gix_config::Source::Local).at(path));
+        let mut buf = Vec::new();
+        gix_config::File::from_paths_metadata_buf(&mut metadata, &mut buf, false, options)
+            .ok()
+            .flatten()
     }
 }
 
@@ -1046,28 +1151,22 @@ fn sync_git_overlay_remote_add(repo: &Repository, name: &str, url: &str) -> Resu
         return Ok(());
     }
     validate_git_overlay_remote_name(name)?;
-    let config_path = git_overlay_config_path_for_write(repo)
+    let ctx = GitConfigContext::discover(repo.root())
         .context("Git-overlay remote add requires a writable Git config")?;
-    upsert_git_remote_config(&config_path, name, url)
+    upsert_git_remote_config(&ctx.write_file_for(name)?, name, url)
 }
 
 fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Ok(());
     }
-    let Some(config_path) = git_overlay_config_path_for_write(repo) else {
+    let Some(ctx) = GitConfigContext::discover(repo.root()) else {
         return Ok(());
     };
-    remove_git_remote_config(&config_path, name)
-}
-
-fn git_overlay_config_path_for_write(repo: &Repository) -> Option<std::path::PathBuf> {
-    let dot_git = repo.root().join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git.join("config"));
+    for config_path in ctx.remove_files_for(name)? {
+        remove_git_remote_config(&config_path, name)?;
     }
-    let git_dir = pointed_git_dir(&dot_git)?;
-    Some(common_git_dir(&git_dir).unwrap_or(git_dir).join("config"))
+    Ok(())
 }
 
 fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
@@ -1089,115 +1188,78 @@ fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add or replace the `[remote "<name>"]` section in a single physical config
+/// file via `gix_config`'s structured editing, so the writer resolves the same
+/// section the reader does regardless of the surface header form (quoted
+/// `[remote "x"]`, legacy dotted `[remote.x]`, or comment-suffixed). Every
+/// existing definition of the remote is dropped before a fresh canonical
+/// section is appended, so an upsert replaces rather than appends a duplicate
+/// that the first-seen (stale) section would win over on the next read.
 fn upsert_git_remote_config(config_path: &Path, name: &str, url: &str) -> Result<()> {
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let original = fs::read_to_string(config_path).unwrap_or_default();
-    let mut rewritten = String::new();
-    let mut skipping_remote = false;
-    for line in original.lines() {
-        if let Some(section_name) = parse_git_remote_section_name(line) {
-            skipping_remote = section_name == name;
-            if skipping_remote {
-                continue;
-            }
-        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
-            skipping_remote = false;
-        }
-        if !skipping_remote {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        }
-    }
-    if !rewritten.is_empty() && !rewritten.ends_with("\n\n") {
-        rewritten.push('\n');
-    }
-    rewritten.push_str(&format!(
-        "[remote \"{}\"]\n\turl = {}\n\tfetch = {}\n",
-        git_config_quoted_section(name),
-        git_config_quoted_value(url),
-        git_config_quoted_value(&format!("+refs/heads/*:refs/remotes/{name}/*"))
-    ));
-    write_file_atomic(config_path, rewritten.as_bytes())?;
+    let mut file = load_config_file_for_edit(config_path)?;
+    remove_remote_sections(&mut file, name);
+    let mut section = file
+        .new_section("remote", Some(Cow::Owned(BString::from(name))))
+        .with_context(|| format!("invalid git remote section name '{name}'"))?;
+    section.push(git_config_key("url")?, Some(BStr::new(url)));
+    let fetch = format!("+refs/heads/*:refs/remotes/{name}/*");
+    section.push(git_config_key("fetch")?, Some(BStr::new(fetch.as_str())));
+    let serialized = file.to_bstring();
+    write_file_atomic(config_path, &serialized)?;
     Ok(())
 }
 
+/// Remove every `[remote "<name>"]` section from a single physical config file
+/// via `gix_config`, matching whatever header form the reader resolves the
+/// remote through. No-ops (no write) when the file is absent or defines no such
+/// remote.
 fn remove_git_remote_config(config_path: &Path, name: &str) -> Result<()> {
-    let Ok(original) = fs::read_to_string(config_path) else {
-        return Ok(());
-    };
-    let mut rewritten = String::new();
-    let mut skipping_remote = false;
-    let mut removed = false;
-    for line in original.lines() {
-        if let Some(section_name) = parse_git_remote_section_name(line) {
-            skipping_remote = section_name == name;
-            if skipping_remote {
-                removed = true;
-                continue;
-            }
-        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
-            skipping_remote = false;
-        }
-        if !skipping_remote {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        }
-    }
-    if !removed {
+    if !config_path.exists() {
         return Ok(());
     }
-    write_file_atomic(config_path, rewritten.as_bytes())?;
+    let mut file = load_config_file_for_edit(config_path)?;
+    if !remove_remote_sections(&mut file, name) {
+        return Ok(());
+    }
+    let serialized = file.to_bstring();
+    write_file_atomic(config_path, &serialized)?;
     Ok(())
 }
 
-fn parse_git_remote_section_name(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    let inner = trimmed.strip_prefix("[remote \"")?.strip_suffix("\"]")?;
-    unescape_git_config_string(inner)
-}
-
-fn unescape_git_config_string(value: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            '\\' => out.push('\\'),
-            '"' => out.push('"'),
-            'n' => out.push('\n'),
-            't' => out.push('\t'),
-            'r' => out.push('\r'),
-            'b' => out.push('\u{0008}'),
-            escaped => out.push(escaped),
-        }
+/// Drop every `[remote "<name>"]` section from `file`, returning whether any
+/// was removed. `gix_config` keys sections by parsed name + subsection, so this
+/// matches the remote regardless of its surface header syntax. `remove_section`
+/// removes only the last match, so loop until none remain.
+fn remove_remote_sections(file: &mut gix_config::File<'static>, name: &str) -> bool {
+    let mut removed = false;
+    while file
+        .remove_section("remote", Some(BStr::new(name)))
+        .is_some()
+    {
+        removed = true;
     }
-    Some(out)
+    removed
 }
 
-fn git_config_quoted_section(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn git_config_quoted_value(value: &str) -> String {
-    let mut quoted = String::from("\"");
-    for ch in value.chars() {
-        match ch {
-            '\\' => quoted.push_str("\\\\"),
-            '"' => quoted.push_str("\\\""),
-            '\n' => quoted.push_str("\\n"),
-            '\t' => quoted.push_str("\\t"),
-            '\r' => quoted.push_str("\\r"),
-            '\u{0008}' => quoted.push_str("\\b"),
-            ch => quoted.push(ch),
-        }
+/// Load a single physical config file for in-place editing. Includes are NOT
+/// followed: the caller already resolved the physical file that defines the
+/// remote (see `defining_files_for`), and a write must round-trip that file
+/// alone rather than inline the content of any files it includes. A missing
+/// file yields an empty document so a brand-new remote can be appended.
+fn load_config_file_for_edit(config_path: &Path) -> Result<gix_config::File<'static>> {
+    if !config_path.exists() {
+        return Ok(gix_config::File::default());
     }
-    quoted.push('"');
-    quoted
+    gix_config::File::from_path_no_includes(config_path.to_path_buf(), gix_config::Source::Local)
+        .with_context(|| format!("reading git config at {}", config_path.display()))
+}
+
+fn git_config_key(key: &'static str) -> Result<gix_config::parse::section::ValueName<'static>> {
+    gix_config::parse::section::ValueName::try_from(key)
+        .with_context(|| format!("invalid git config key '{key}'"))
 }
 
 #[cfg(feature = "client")]
@@ -1212,4 +1274,386 @@ struct PullNetworkOptions<'a> {
     local_thread: Option<&'a str>,
     lazy: bool,
     cli: &'a Cli,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn init_git(root: &Path) {
+        gix::init(root).expect("init git repo");
+    }
+
+    #[test]
+    fn parses_quoted_url_with_equals_and_strips_quotes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        fs::write(
+            tmp.path().join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = \"https://example.com/repo?ref=main&a=b\"\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("origin").map(String::as_str),
+            Some("https://example.com/repo?ref=main&a=b"),
+        );
+    }
+
+    #[test]
+    fn strips_inline_comments_from_url() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        fs::write(
+            tmp.path().join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = https://example.com/repo ; trailing comment\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("origin").map(String::as_str),
+            Some("https://example.com/repo"),
+        );
+    }
+
+    #[test]
+    fn follows_include_directives() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("extra.config"),
+            "[remote \"upstream\"]\n\turl = https://example.com/upstream\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config"),
+            "[include]\n\tpath = extra.config\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("upstream").map(String::as_str),
+            Some("https://example.com/upstream"),
+        );
+    }
+
+    #[test]
+    fn worktree_config_overrides_local_when_extension_enabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[extensions]\n\tworktreeConfig = true\n\
+             [remote \"origin\"]\n\turl = https://example.com/local\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config.worktree"),
+            "[remote \"origin\"]\n\turl = https://example.com/worktree\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("origin").map(String::as_str),
+            Some("https://example.com/worktree"),
+        );
+    }
+
+    #[test]
+    fn ignores_worktree_config_when_extension_disabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"]\n\turl = https://example.com/local\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config.worktree"),
+            "[remote \"origin\"]\n\turl = https://example.com/worktree\n",
+        )
+        .unwrap();
+
+        let remotes = plain_git_remote_items(tmp.path());
+
+        assert_eq!(
+            remotes.get("origin").map(String::as_str),
+            Some("https://example.com/local"),
+        );
+    }
+
+    #[test]
+    fn remove_clears_worktree_layer_when_extension_enabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[extensions]\n\tworktreeConfig = true\n\
+             [remote \"origin\"]\n\turl = https://example.com/common\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config.worktree"),
+            "[remote \"origin\"]\n\turl = https://example.com/worktree\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        for path in ctx.remove_files_for("origin").unwrap() {
+            remove_git_remote_config(&path, "origin").unwrap();
+        }
+
+        // The visible (per-worktree) remote must be gone after a remove;
+        // a common-only removal would leave it winning on the next read.
+        assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
+    }
+
+    #[test]
+    fn add_targets_worktree_layer_so_next_read_reflects_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[extensions]\n\tworktreeConfig = true\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config.worktree"),
+            "[remote \"origin\"]\n\turl = https://example.com/old\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        upsert_git_remote_config(
+            &ctx.write_file_for("origin").unwrap(),
+            "origin",
+            "https://example.com/new",
+        )
+        .unwrap();
+
+        // The upsert must hit the per-worktree layer (where the remote
+        // lives and wins on read); writing to common would leave the
+        // stale per-worktree url winning, a silent read/write divergence.
+        assert_eq!(
+            plain_git_remote_items(tmp.path()).get("origin").map(String::as_str),
+            Some("https://example.com/new"),
+        );
+    }
+
+    #[test]
+    fn remove_clears_remote_defined_via_include_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("extra.config"),
+            "[remote \"upstream\"]\n\turl = https://example.com/upstream\n",
+        )
+        .unwrap();
+        fs::write(git_dir.join("config"), "[include]\n\tpath = extra.config\n").unwrap();
+
+        // The reader follows the include, so the remote is visible...
+        assert!(plain_git_remote_items(tmp.path()).contains_key("upstream"));
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        for path in ctx.remove_files_for("upstream").unwrap() {
+            remove_git_remote_config(&path, "upstream").unwrap();
+        }
+
+        // ...and a remove must clear the section from the *included* file
+        // it actually lives in, not no-op against the including config.
+        assert!(!plain_git_remote_items(tmp.path()).contains_key("upstream"));
+    }
+
+    #[test]
+    fn write_to_included_remote_targets_the_defining_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("extra.config"),
+            "[remote \"origin\"]\n\turl = https://example.com/old\n",
+        )
+        .unwrap();
+        fs::write(git_dir.join("config"), "[include]\n\tpath = extra.config\n").unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        let target = ctx.write_file_for("origin").unwrap();
+        assert_eq!(target, git_dir.join("extra.config"));
+        upsert_git_remote_config(&target, "origin", "https://example.com/new").unwrap();
+
+        assert_eq!(
+            plain_git_remote_items(tmp.path())
+                .get("origin")
+                .map(String::as_str),
+            Some("https://example.com/new"),
+        );
+    }
+
+    #[test]
+    fn write_to_remote_in_external_include_errors_rather_than_no_ops() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        // An included config that lives *outside* the repository's Git tree.
+        let external = tmp.path().join("external.config");
+        fs::write(
+            &external,
+            "[remote \"origin\"]\n\turl = https://example.com/external\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config"),
+            format!("[include]\n\tpath = {}\n", external.display()),
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        assert!(ctx.write_file_for("origin").is_err());
+        assert!(ctx.remove_files_for("origin").is_err());
+    }
+
+    #[test]
+    fn add_new_remote_targets_common_layer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[extensions]\n\tworktreeConfig = true\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        // A brand-new remote (no layer defines it yet) follows git's
+        // default: the common config.
+        assert_eq!(ctx.write_file_for("origin").unwrap(), git_dir.join("config"));
+        upsert_git_remote_config(
+            &ctx.write_file_for("origin").unwrap(),
+            "origin",
+            "https://example.com/new",
+        )
+        .unwrap();
+        assert_eq!(
+            plain_git_remote_items(tmp.path()).get("origin").map(String::as_str),
+            Some("https://example.com/new"),
+        );
+    }
+
+    #[test]
+    fn remove_clears_comment_suffixed_remote_header() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        // A valid Git header gix accepts but the hand-rolled writer didn't:
+        // an inline comment trails the `[remote "origin"]` header.
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"] # primary mirror\n\turl = https://example.com/repo\n",
+        )
+        .unwrap();
+
+        // The reader resolves it, so it shows up in `remote list`...
+        assert!(plain_git_remote_items(tmp.path()).contains_key("origin"));
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        for path in ctx.remove_files_for("origin").unwrap() {
+            remove_git_remote_config(&path, "origin").unwrap();
+        }
+
+        // ...so a remove must actually clear it, not silently no-op against a
+        // header form the writer can't parse.
+        assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
+    }
+
+    #[test]
+    fn remove_clears_dotted_remote_header() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        // The legacy dotted subsection form, equally valid to gix.
+        fs::write(
+            git_dir.join("config"),
+            "[remote.origin]\n\turl = https://example.com/repo\n",
+        )
+        .unwrap();
+
+        assert!(plain_git_remote_items(tmp.path()).contains_key("origin"));
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        for path in ctx.remove_files_for("origin").unwrap() {
+            remove_git_remote_config(&path, "origin").unwrap();
+        }
+
+        assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
+    }
+
+    #[test]
+    fn upsert_replaces_comment_suffixed_remote_header_without_duplicating() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"] # primary mirror\n\turl = https://example.com/old\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        upsert_git_remote_config(
+            &ctx.write_file_for("origin").unwrap(),
+            "origin",
+            "https://example.com/new",
+        )
+        .unwrap();
+
+        // The upsert must update the existing section, not append a second
+        // `[remote "origin"]` the first-seen (stale) section wins over on read.
+        assert_eq!(
+            plain_git_remote_items(tmp.path())
+                .get("origin")
+                .map(String::as_str),
+            Some("https://example.com/new"),
+        );
+    }
+
+    #[test]
+    fn upsert_replaces_dotted_remote_header() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[remote.origin]\n\turl = https://example.com/old\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        upsert_git_remote_config(
+            &ctx.write_file_for("origin").unwrap(),
+            "origin",
+            "https://example.com/new",
+        )
+        .unwrap();
+
+        assert_eq!(
+            plain_git_remote_items(tmp.path())
+                .get("origin")
+                .map(String::as_str),
+            Some("https://example.com/new"),
+        );
+    }
 }

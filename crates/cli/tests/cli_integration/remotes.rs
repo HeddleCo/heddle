@@ -605,6 +605,79 @@ fn git_overlay_remote_list_show_labels_local_bare_git_remote_as_git_overlay() {
     );
 }
 
+#[test]
+fn git_overlay_remote_remove_uneditable_include_leaves_both_configs_unmutated() {
+    // Regression: a git-overlay remote defined in BOTH `.heddle/remotes.toml`
+    // and a Git config pulled in via an include from OUTSIDE the Git directory
+    // must not be half-removed. The removal has to refuse on the uneditable
+    // include BEFORE persisting the Heddle side — either both configs drop the
+    // remote or neither does. The old order saved the Heddle removal first and
+    // only then hit the include refusal, stranding partial state.
+    let work = TempDir::new().unwrap();
+    gix::init(work.path()).expect("init git worktree");
+    heddle(&["init"], Some(work.path())).unwrap();
+
+    // A `[remote "origin"]` section in a config file outside the repository's
+    // own Git directory, reachable only through `include.path`.
+    let external = work.path().join("external.config");
+    std::fs::write(
+        &external,
+        "[remote \"origin\"]\n\turl = https://example.com/repo\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+    )
+    .unwrap();
+    let git_config = work.path().join(".git").join("config");
+    std::fs::write(
+        &git_config,
+        format!(
+            "[core]\n\trepositoryformatversion = 0\n[include]\n\tpath = {}\n",
+            external.display()
+        ),
+    )
+    .unwrap();
+    // The same remote also adopted into the native Heddle config.
+    let remotes_toml = work.path().join(".heddle").join("remotes.toml");
+    std::fs::write(
+        &remotes_toml,
+        "default = \"origin\"\n\n[remotes.origin]\nurl = \"https://example.com/repo\"\n",
+    )
+    .unwrap();
+
+    let before_remotes_toml = std::fs::read_to_string(&remotes_toml).unwrap();
+    let before_git_config = std::fs::read_to_string(&git_config).unwrap();
+    let before_external = std::fs::read_to_string(&external).unwrap();
+
+    let output = heddle_output(
+        &["--output", "json", "remote", "remove", "origin"],
+        Some(work.path()),
+    )
+    .expect("invoke remote remove");
+    assert!(
+        !output.status.success(),
+        "removing a remote defined in an uneditable include must refuse, not partially apply"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr)
+        .unwrap_or_else(|err| panic!("uneditable-include refusal should emit JSON: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "git_remote_in_included_config", "{stderr}");
+
+    // No partial state: every config the command could have touched is unchanged.
+    assert_eq!(
+        std::fs::read_to_string(&remotes_toml).unwrap(),
+        before_remotes_toml,
+        "Heddle remote config must be untouched when the git-side removal refuses"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&git_config).unwrap(),
+        before_git_config,
+        "Git config must be untouched when the removal refuses"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&external).unwrap(),
+        before_external,
+        "included config must be untouched when the removal refuses"
+    );
+}
+
 fn setup_git_overlay_push_fixture() -> (TempDir, TempDir, gix::Repository) {
     let work = TempDir::new().unwrap();
     let remote = TempDir::new().unwrap();
