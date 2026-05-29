@@ -54,11 +54,19 @@ fn git_status_porcelain(path: &std::path::Path) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+/// The empty-blob object id (SHA-1). An intent-to-add index entry points
+/// at this rather than a real blob — that is what makes Git treat the
+/// path as "added, content not yet staged".
+const EMPTY_BLOB_OID: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+
 /// After `heddle capture` records a NEW file in a colocated checkout,
-/// `git status` should report it as `AM` (intent-to-add: Heddle knows
-/// about it, the blob isn't a real Git commit yet) rather than `??`
-/// (untracked, "Heddle knows nothing"). Already-tracked, unchanged files
-/// must NOT be touched.
+/// `git status` should report it as intent-to-add ("Heddle knows about
+/// it; no Git blob committed yet") rather than `??` (untracked, "Git
+/// knows nothing"). This is byte-for-byte the state `git add -N`
+/// produces — Git 2.43 renders the porcelain code as ` A` (older docs,
+/// and the issue, call it `AM`); the version-stable invariant is the
+/// empty-blob index entry, which we assert directly. Already-tracked,
+/// unchanged files must NOT be touched.
 #[test]
 fn capture_marks_new_file_intent_to_add_in_colocated_index() {
     let source = TempDir::new().unwrap();
@@ -76,14 +84,34 @@ fn capture_marks_new_file_intent_to_add_in_colocated_index() {
 
     let status = git_status_porcelain(source.path());
 
+    let new_file_line = status
+        .lines()
+        .find(|line| line.ends_with("new_file.txt"))
+        .unwrap_or_else(|| panic!("new_file.txt must appear in git status. Status was:\n{status}"));
+    // Intent-to-add shows an `A` in the status code (` A`, `AM`, or `A `
+    // across Git versions) — never `??`.
     assert!(
-        status.lines().any(|line| line == "AM new_file.txt"),
-        "new file should be intent-to-add (AM), not untracked. Status was:\n{status}"
+        new_file_line[..2].contains('A'),
+        "new file should be intent-to-add (contains `A`), got {new_file_line:?}. Status was:\n{status}"
     );
     assert!(
         !status.contains("?? new_file.txt"),
         "new file must no longer show as untracked (??). Status was:\n{status}"
     );
+
+    // The version-stable proof of intent-to-add: the staged entry points
+    // at the empty blob, not a real object copied into `.git/objects`.
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage", "new_file.txt"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    assert!(
+        staged.contains(EMPTY_BLOB_OID),
+        "new file's index entry must be intent-to-add (empty-blob oid), got: {staged:?}"
+    );
+
     assert!(
         !status.lines().any(|line| line.ends_with("tracked.txt")),
         "an already-tracked, unchanged file must not be marked. Status was:\n{status}"
