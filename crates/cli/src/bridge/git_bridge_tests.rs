@@ -1810,19 +1810,22 @@ fn sync_export_and_import_report_consistent_total_and_new() {
     );
 }
 
-/// heddle#289 r2: the export "total" must count only commits that land
-/// in the destination — i.e. states reachable from an exported ref. A
-/// state whose thread was dropped (its ref deleted) is orphaned in the
-/// store; it gets minted into the local mirror but never reaches the
-/// destination's ref graph, so it must NOT inflate `commits_total`.
+/// heddle#289 r3: the export "total" must equal what actually lands in
+/// the destination. Export does NOT prune stale mirror refs, so a branch
+/// exported once and whose Heddle thread is later dropped still has a
+/// `refs/heads/<branch>` in the mirror — and `copy_mirror_to_path` copies
+/// that ref (and its commit) to the destination. The total is derived from
+/// the same `collect_ref_updates` set the copy uses, so it counts that
+/// still-copied commit. Counting only current Heddle refs (r2) diverged
+/// from reality; this guards that the count == the destination.
 #[test]
-fn export_total_excludes_orphaned_unreferenced_states() {
+fn export_total_counts_stale_mirror_ref_left_by_dropped_thread() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_source_temp, source_repo) = init_git_repo();
 
     let tree_oid = empty_tree_oid(&source_repo);
-    // main: two-commit history → 2 states reachable from the branch tip.
+    // main: two-commit history → 2 commits reachable from the branch tip.
     let first = commit_with_tree(&source_repo, None, tree_oid, "first", &[]);
     commit_with_tree(
         &source_repo,
@@ -1831,9 +1834,9 @@ fn export_total_excludes_orphaned_unreferenced_states() {
         "second",
         &[first],
     );
-    // feature: an independent root commit → 1 state reachable only via
+    // feature: an independent root commit → 1 commit reachable only via
     // this branch, sharing no history with main.
-    commit_with_tree(
+    let feature_tip = commit_with_tree(
         &source_repo,
         Some("refs/heads/feature"),
         tree_oid,
@@ -1846,39 +1849,60 @@ fn export_total_excludes_orphaned_unreferenced_states() {
         .import(Some(source_repo.workdir().expect("workdir")))
         .expect("import from git");
 
-    // All three states now exist in the store.
+    // All three states now exist in the store, and the import populated
+    // the mirror with refs/heads/{main,feature}.
     assert_eq!(
         bridge.heddle_repo.store().list_states().expect("states").len(),
         3,
         "import should have created three states (two on main, one on feature)"
     );
 
-    // Drop the feature thread: its ref is gone, so its state is now an
-    // orphan — present in the store, reachable from no exported ref.
+    // Drop the feature *thread* (Heddle-side ref). Export never prunes the
+    // mirror's refs/heads/feature, so the stale mirror ref — and its
+    // commit — still travel to the destination.
     bridge
         .heddle_repo
         .refs()
         .delete_thread(&ThreadName::new("feature"))
         .expect("delete feature thread");
 
-    let stats = export_all(&mut bridge).expect("export");
+    let dest_temp = TempDir::new().expect("dest temp");
+    let dest_path = dest_temp.path().join("dest.git");
+    let stats = bridge.export_to_path(&dest_path).expect("export to path");
 
-    // Only main's two commits land in the destination; the orphaned
-    // feature state is excluded from the total.
+    // The total counts every commit that lands in the destination: main's
+    // two plus the stale feature ref's one. "What we report" == "what we
+    // copy".
     assert_eq!(
-        stats.commits_total, 2,
-        "export total must count only ref-reachable commits (main's 2), \
-         not the orphaned feature state, got {}",
+        stats.commits_total, 3,
+        "export total must count what lands in the destination — main's 2 \
+         plus the stale feature ref's 1, got {}",
         stats.commits_total
     );
-    assert!(
-        stats.branches.iter().any(|b| b.name == "main"),
-        "main branch should still be exported: {:?}",
-        stats.branches
+
+    // Prove the count matches reality: the destination really does contain
+    // refs/heads/feature at the feature tip.
+    let dest = gix::open(&dest_path).expect("open destination");
+    let feature_ref = dest
+        .find_reference("refs/heads/feature")
+        .expect("destination must contain the stale feature ref");
+    assert_eq!(
+        feature_ref.id().detach(),
+        feature_tip,
+        "the stale feature ref in the destination points at the feature tip"
     );
     assert!(
+        dest.find_reference("refs/heads/main").is_ok(),
+        "destination must contain the main branch"
+    );
+
+    // The dropped thread is not a *current* Heddle thread, so it is not
+    // reported as a synced branch — that gap between `branches` (current
+    // threads) and `commits_total` (what's copied) is exactly what this
+    // fix reconciles for the headline count.
+    assert!(
         !stats.branches.iter().any(|b| b.name == "feature"),
-        "dropped feature thread must not appear as an exported branch: {:?}",
+        "dropped feature thread is not a current synced branch: {:?}",
         stats.branches
     );
 }

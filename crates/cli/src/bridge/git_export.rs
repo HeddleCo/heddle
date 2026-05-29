@@ -13,7 +13,8 @@ use repo::Repository as HeddleRepository;
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, LocalGitIdentity, SyncMapping,
-        git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
+        count_exported_commits, git_config_identity_with_global_fallback, git_err,
+        principal_is_default_unknown,
     },
     git_notes,
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
@@ -265,13 +266,6 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 .collect()
         }
     };
-    // State ids at the tip of every ref actually written to the
-    // destination. The export "total" is the count of states reachable
-    // from these tips — i.e. the commits that land in the destination's
-    // ref graph. States with no surviving ref (e.g. a dropped thread's
-    // orphaned history) are minted into the local mirror but never reach
-    // the destination, so they must not inflate the headline total.
-    let mut exported_ref_tips: Vec<ChangeId> = Vec::new();
     for track_name in threads {
         if let Some(state_id) = bridge.heddle_repo.refs().get_thread(&ThreadName::new(&track_name))?
             && let Some(git_oid) = bridge.mapping.get_git(&state_id)
@@ -282,7 +276,6 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 name: track_name.clone(),
                 tip: git_oid,
             });
-            exported_ref_tips.push(state_id);
         }
     }
 
@@ -298,15 +291,18 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                     name: marker_name.to_string(),
                     tip: git_oid,
                 });
-                exported_ref_tips.push(state_id);
             }
         }
     }
 
-    // Total = unique states reachable from the exported ref tips. This is
-    // exactly what lands in the destination (newly-minted + already-mapped
-    // commits under an exported branch/tag); orphaned states are excluded.
-    stats.commits_total = reachable_states(bridge.heddle_repo, &exported_ref_tips)?.len();
+    // Total = unique commits reachable from the mirror's branch/tag tips —
+    // the exact ref set `copy_mirror_to_path` writes to the destination via
+    // `collect_ref_updates`. Deriving the count from the copy path (rather
+    // than a parallel walk over current Heddle refs) structurally
+    // guarantees "what we report" == "what we copy": a stale mirror ref
+    // left by a dropped thread is still copied to the destination, so its
+    // commits are still counted here.
+    stats.commits_total = count_exported_commits(&repo)?;
 
     bridge.save_mapping_to_disk()?;
 
