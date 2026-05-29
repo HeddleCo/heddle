@@ -245,14 +245,13 @@ pub struct SnapshotArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  With nothing staged in the Git index, `heddle commit -m ...` captures and checkpoints all modified, deleted, and untracked worktree paths.
-  When the Git index has staged paths, plain `heddle commit -m ...` checkpoints exactly the staged index and leaves extra unstaged/untracked paths in the worktree.
-  Add `--all` only when you intentionally want those extra paths included too.
+  Heddle's commit auto-switches on the Git index: with nothing staged it commits all worktree paths (like `git commit -a`, incl. untracked); with staged paths it commits only the index (like `git commit`). Pass `--no-all` to force index-only even when nothing is staged; pass `--all` to include unstaged/untracked paths even when the index has staged paths.
 
 Examples:
-  heddle commit -m 'add login route'       # save work; Git-overlay repos also checkpoint Git
-  heddle commit -m 'wip' --confidence 0.6  # record honest confidence
-  heddle commit --all -m 'save everything' # include unstaged/untracked paths even when the Git index is staged
+  heddle commit -m 'add login route'        # save work; Git-overlay repos also checkpoint Git
+  heddle commit -m 'wip' --confidence 0.6   # record honest confidence
+  heddle commit --no-all -m 'index only'    # commit only the Git index, never sweep the worktree
+  heddle commit --all -m 'save everything'  # include unstaged/untracked paths even when the Git index is staged
 ")]
 pub struct CommitArgs {
     /// Commit/capture message.
@@ -266,6 +265,10 @@ pub struct CommitArgs {
     /// Include unstaged and untracked paths when the Git index already has staged changes.
     #[arg(long)]
     pub all: bool,
+
+    /// Force an index-only commit even when nothing is staged, instead of sweeping the worktree.
+    #[arg(long = "no-all", conflicts_with = "all")]
+    pub no_all: bool,
 
     /// Allow a large or deletion-heavy capture without the safety preflight.
     #[arg(short, long)]
