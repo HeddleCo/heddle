@@ -223,28 +223,20 @@ fn reveal_capture_agent_flags(command: clap::Command) -> clap::Command {
     })
 }
 
-/// Intercept `heddle capture --help-agent`: render `capture`'s
-/// clap-derived help with the hidden agent-automation flags revealed.
-/// Returns `None` when the request isn't a `capture --help-agent`
-/// invocation, so `main` falls through to normal parsing.
-pub fn print_capture_agent_help_for_raw(
-    cmd: &clap::Command,
-    raw: &[String],
-) -> Option<std::io::Result<()>> {
-    if !raw.iter().any(|arg| arg == "--help-agent") {
-        return None;
-    }
-    // Run before clap parses, so skip any leading global options (and the
-    // values of valued ones, e.g. `-C <path>`, `--output <fmt>`) before
-    // reading the verb — otherwise a flag's value gets mistaken for the
-    // subcommand. Shares the valued-global skip with the `--help` path.
-    let subcommand = first_subcommand_after_globals(cmd, raw)?;
-    if subcommand.get_name() != "capture" {
-        return None;
-    }
-    let bin_name = format!("{} {}", cmd.get_name(), subcommand.get_name());
-    let mut help = reveal_capture_agent_flags(subcommand.clone()).bin_name(bin_name);
-    Some(help.print_long_help())
+/// Render `capture`'s clap-derived help with the hidden agent-automation
+/// flags revealed. Called from the `Commands::Capture` dispatch arm once
+/// clap has parsed `--help-agent` (a first-class flag on `capture`).
+///
+/// Because clap owns the parsing, every global spelling it accepts —
+/// `-C <path>`, `--output <fmt>`, clustered `-vC <path>`, attached forms, in
+/// any legal position — is handled natively; there is no hand-rolled
+/// pre-parse token scan to keep in sync with clap's grammar.
+pub fn print_capture_agent_help(cmd: &clap::Command) -> std::io::Result<()> {
+    let capture = find_subcommand_or_alias(cmd, "capture")
+        .expect("capture subcommand exists in the clap command tree");
+    let bin_name = format!("{} {}", cmd.get_name(), capture.get_name());
+    let mut help = reveal_capture_agent_flags(capture.clone()).bin_name(bin_name);
+    help.print_long_help()
 }
 
 fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::Command> {
@@ -283,16 +275,16 @@ fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::C
 
 /// Whether `token` names an option on `command` — in either its `--long`
 /// or `-x` separated spelling — and, if so, whether the following token is
-/// that option's value. The single source of truth for the valued-global
-/// skip shared by the `--help` and `--help-agent` intercepts, so they can't
-/// drift on which globals (`-C <path>`, `--output <fmt>`, ...) consume a
-/// following value. Derived from clap's own arg definitions, so short and
-/// long forms stay covered as globals are added or renamed.
+/// that option's value. Used by the `heddle <path> --help` pre-parse scan
+/// (`command_path_from_raw_help_request`) so a valued global before the verb
+/// (`-C <path>`, `--output <fmt>`) isn't mistaken for the command path.
+/// Derived from clap's own arg definitions, so short and long forms stay
+/// covered as globals are added or renamed.
 ///
 /// Only the *separated* spellings (`-C path`, `--output fmt`) need a
 /// following-value skip. Attached spellings (`--output=fmt`, `-Cpath`,
 /// `-C=path`) carry the value in the same token, so they never set
-/// `skip_next`; the leading-dash fall-through in the scan loops already
+/// `skip_next`; the leading-dash fall-through in the scan loop already
 /// drops them without consuming the next token.
 fn global_option_takes_value(command: &clap::Command, token: &str) -> Option<bool> {
     command
@@ -304,39 +296,6 @@ fn global_option_takes_value(command: &clap::Command, token: &str) -> Option<boo
                     .is_some_and(|short| token == format!("-{short}"))
         })
         .map(|arg| arg.get_action().takes_values())
-}
-
-/// Skip leading global options (and the values of valued ones) in `raw`,
-/// then return the first token that resolves to a subcommand. Used by the
-/// `--help-agent` intercept, which runs before clap parses and so must do
-/// its own global handling via [`global_option_takes_value`].
-fn first_subcommand_after_globals<'a>(
-    cmd: &'a clap::Command,
-    raw: &[String],
-) -> Option<&'a clap::Command> {
-    let mut skip_next = false;
-    for token in raw {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if token == "--help" || token == "-h" {
-            continue;
-        }
-        if let Some(takes_value) = global_option_takes_value(cmd, token) {
-            skip_next = takes_value;
-            continue;
-        }
-        if token.starts_with('-') {
-            continue;
-        }
-        if let Some(subcommand) = find_subcommand_or_alias(cmd, token) {
-            return Some(subcommand);
-        }
-        // A non-flag token that isn't a subcommand — e.g. the value after a
-        // short valued global like `-C <path>`. Keep scanning for the verb.
-    }
-    None
 }
 
 fn find_subcommand_or_alias<'a>(
@@ -984,95 +943,108 @@ mod tests {
         }
     }
 
-    /// heddle#278. `--help-agent` is intercepted only for `capture`.
+    /// heddle#278 r4 (cid 3327325850). Close-the-class: `--help-agent` is a
+    /// first-class clap flag on `capture`, so clap parses the whole command
+    /// line and the dispatch arm inspects the parsed result. Whether the
+    /// reveal help shows is exactly "did clap resolve `capture` with
+    /// `--help-agent` set?" — no hand-rolled pre-parse verb scan, so every
+    /// global spelling clap accepts is handled for free.
+    ///
+    /// `wants_reveal` mirrors the decision the `Commands::Capture` arm in
+    /// `main.rs` makes (`matches!(cli.command, Commands::Capture(a) if
+    /// a.help_agent)`), driven entirely by clap's parse.
+    fn wants_reveal(args: &[&str]) -> bool {
+        use crate::cli::cli_args::{Cli, Commands};
+        use clap::Parser;
+        let argv = std::iter::once("heddle").chain(args.iter().copied());
+        match Cli::try_parse_from(argv) {
+            Ok(cli) => matches!(&cli.command, Commands::Capture(a) if a.help_agent),
+            // A parse error (e.g. `--help-agent` on a verb that has no such
+            // flag) means: don't reveal — clap reports it as it would any
+            // other invalid invocation.
+            Err(_) => false,
+        }
+    }
+
+    /// heddle#278. `--help-agent` reveals capture's agent flags only for the
+    /// `capture` verb; plain `--help` and `--help-agent` on another verb do
+    /// not.
     #[test]
-    fn capture_help_agent_intercept_is_capture_scoped() {
-        use clap::CommandFactory;
-        let cmd = crate::cli::cli_args::Cli::command();
-        let owned = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    fn capture_help_agent_is_capture_scoped() {
         assert!(
-            print_capture_agent_help_for_raw(&cmd, &owned(&["capture", "--help-agent"])).is_some(),
-            "capture --help-agent should be intercepted"
+            wants_reveal(&["capture", "--help-agent"]),
+            "capture --help-agent should request the reveal help"
         );
         assert!(
-            print_capture_agent_help_for_raw(&cmd, &owned(&["status", "--help-agent"])).is_none(),
-            "--help-agent on a non-capture verb should fall through"
+            !wants_reveal(&["status", "--help-agent"]),
+            "--help-agent on a non-capture verb is not a capture reveal request"
         );
+        // `capture --help` is clap's own help; it exits during parse (a
+        // DisplayHelp error), so it is never a `help_agent` reveal request.
         assert!(
-            print_capture_agent_help_for_raw(&cmd, &owned(&["capture", "--help"])).is_none(),
-            "plain --help should fall through to normal help"
+            !wants_reveal(&["capture", "--help"]),
+            "plain --help is clap's help, not the agent reveal"
         );
     }
 
-    /// heddle#278 r2 (cids 3327112975 / 3327131739). The `--help-agent`
-    /// intercept runs before clap parses, so a VALUED global flag preceding
-    /// the verb (`-C <path>`, `--output <fmt>`) must not be mistaken for the
-    /// subcommand. The skip reuses the same valued-global logic as the
-    /// `--help` path so the two can't drift.
+    /// heddle#278 r2/r3/r4 (cids 3327112975 / 3327231819 / 3327325850).
+    /// Because clap now owns parsing, every global spelling it accepts —
+    /// long valued (`--output <fmt>`), short valued (`-C <path>`), and
+    /// clustered short (`-vC <path>`) — is handled natively. With a repo dir
+    /// literally named `capture`, the `-C` VALUE must not be read as the verb.
+    /// This is the whole class the per-form pre-scan kept missing.
     #[test]
-    fn capture_help_agent_intercept_skips_valued_globals_before_verb() {
-        use clap::CommandFactory;
-        let cmd = crate::cli::cli_args::Cli::command();
-        let owned = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    fn capture_help_agent_handles_every_global_form_clap_accepts() {
+        // Valued global before the verb: long and short, separated forms.
         assert!(
-            print_capture_agent_help_for_raw(
-                &cmd,
-                &owned(&["-C", "/tmp/repo", "capture", "--help-agent"])
-            )
-            .is_some(),
-            "`-C <path> capture --help-agent` should reveal the agent flags, \
-             not pick the path as the verb"
+            wants_reveal(&["-C", "/tmp/repo", "capture", "--help-agent"]),
+            "`-C <path> capture --help-agent` should reveal — clap parses the path"
         );
         assert!(
-            print_capture_agent_help_for_raw(
-                &cmd,
-                &owned(&["--output", "text", "capture", "--help-agent"])
-            )
-            .is_some(),
-            "`--output text capture --help-agent` should reveal the agent flags, \
-             not pick `text` as the verb"
+            wants_reveal(&["--output", "text", "capture", "--help-agent"]),
+            "`--output text capture --help-agent` should reveal"
+        );
+        // Repo dir named `capture`: the `-C` value is `capture`, the verb is
+        // the following `capture`.
+        assert!(
+            wants_reveal(&["-C", "capture", "capture", "--help-agent"]),
+            "`-C capture capture --help-agent` (repo dir named `capture`) should reveal"
+        );
+        // r4: clustered short global `-vC <path>` — `-v` then valued `-C`.
+        assert!(
+            wants_reveal(&["-vC", "/tmp/repo", "capture", "--help-agent"]),
+            "`-vC <path> capture --help-agent` (clustered short globals) should reveal"
         );
         assert!(
-            print_capture_agent_help_for_raw(&cmd, &owned(&["capture", "--help-agent"])).is_some(),
-            "plain `capture --help-agent` should still be intercepted"
+            wants_reveal(&["-vC", "capture", "capture", "--help-agent"]),
+            "`-vC capture capture --help-agent` (clustered, repo dir named `capture`) should reveal"
         );
+        // Attached short form `-C<path>`: value rides in the token.
         assert!(
-            print_capture_agent_help_for_raw(
-                &cmd,
-                &owned(&["--output", "text", "status", "--help-agent"])
-            )
-            .is_none(),
-            "a non-capture verb behind a valued global should still fall through"
+            wants_reveal(&["-C/tmp/repo", "capture", "--help-agent"]),
+            "`-C<path> capture --help-agent` (attached) should reveal"
         );
-    }
+        // Plain invocation still reveals.
+        assert!(
+            wants_reveal(&["capture", "--help-agent"]),
+            "plain `capture --help-agent` should reveal"
+        );
 
-    /// heddle#278 r3 (cid 3327231819). The valued-global skip must also cover
-    /// the SHORT spelling of valued globals — `-C <path>` — not just the long
-    /// `--output <fmt>`. With a repo dir literally named `capture`, the `-C`
-    /// VALUE must not be mistaken for the verb. Close-the-class: every valued
-    /// global is recognized in both `-x` and `--long` separated forms.
-    #[test]
-    fn capture_help_agent_intercept_skips_short_valued_globals_before_verb() {
-        use clap::CommandFactory;
-        let cmd = crate::cli::cli_args::Cli::command();
-        let owned = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Fall-through cases: the verb is NOT capture, so no reveal. With a
+        // repo dir named `capture`, the `-C` value is consumed by clap and
+        // `status` is the verb — `status` has no `--help-agent`, so clap
+        // errors and we do not reveal.
         assert!(
-            print_capture_agent_help_for_raw(
-                &cmd,
-                &owned(&["-C", "capture", "capture", "--help-agent"])
-            )
-            .is_some(),
-            "`-C capture capture --help-agent` (repo dir named `capture`) should \
-             reveal the agent flags, not pick the `-C` value as the verb"
+            !wants_reveal(&["-C", "capture", "status", "--help-agent"]),
+            "`-C capture status --help-agent` — verb is `status`, no reveal"
         );
         assert!(
-            print_capture_agent_help_for_raw(
-                &cmd,
-                &owned(&["-C", "capture", "status", "--help-agent"])
-            )
-            .is_none(),
-            "`-C capture status --help-agent` should fall through — the `-C` \
-             value must not be read as the `capture` verb"
+            !wants_reveal(&["-vC", "capture", "status", "--help-agent"]),
+            "`-vC capture status --help-agent` (clustered) — verb is `status`, no reveal"
+        );
+        assert!(
+            !wants_reveal(&["--output", "text", "status", "--help-agent"]),
+            "`--output text status --help-agent` — verb is `status`, no reveal"
         );
     }
 

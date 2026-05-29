@@ -69,3 +69,45 @@ fn clone_help_pins_behavior_stanza() {
         "clone help should point at the threads topic: {help}"
     );
 }
+
+/// heddle#278 r4 (cid 3327325850). `capture --help-agent` is a first-class
+/// clap flag, so clap parses the whole command line and the dispatch arm
+/// renders the reveal help. End-to-end through the real binary: the hidden
+/// agent-automation flags appear, and every global spelling clap accepts —
+/// including the clustered short `-vC <path>` that the old hand-rolled
+/// pre-parse scan kept missing — reaches the reveal help.
+#[test]
+fn capture_help_agent_reveals_hidden_flags_through_clap() {
+    let expect_revealed = |help: &str, ctx: &str| {
+        for flag in [
+            "--agent-provider",
+            "--agent-model",
+            "--agent-session",
+            "--agent-segment",
+            "--policy",
+            "--no-policy",
+            "--no-agent",
+            "--split",
+            "--into",
+        ] {
+            assert!(
+                help.contains(flag),
+                "`{ctx}` should reveal `{flag}` inline: {help}"
+            );
+        }
+    };
+
+    let plain = heddle(&["capture", "--help-agent"], None).expect("capture --help-agent renders");
+    expect_revealed(&plain, "capture --help-agent");
+
+    // Clustered short globals before the verb: `-v` then valued `-C <path>`.
+    // clap parses the path natively; the verb is still `capture`.
+    let clustered = heddle(&["-vC", ".", "capture", "--help-agent"], None)
+        .expect("-vC <path> capture --help-agent renders");
+    expect_revealed(&clustered, "-vC <path> capture --help-agent");
+
+    // Long valued global before the verb.
+    let long_global = heddle(&["--output", "text", "capture", "--help-agent"], None)
+        .expect("--output text capture --help-agent renders");
+    expect_revealed(&long_global, "--output text capture --help-agent");
+}

@@ -188,6 +188,13 @@ Agent automation flags (provider/model/session/policy/split) are hidden here.
 Run `heddle help agent-flags`, or `heddle capture --help-agent` to list them inline.
 ")]
 pub struct SnapshotArgs {
+    /// Reveal the hidden agent-automation flags inline instead of capturing.
+    /// A first-class clap flag so the whole command line (including global
+    /// options in any spelling clap accepts) is parsed by clap; the dispatch
+    /// arm inspects the parsed result rather than scanning raw tokens.
+    #[arg(long, hide = true)]
+    pub help_agent: bool,
+
     /// Natural language intent for this recoverable step.
     #[arg(short = 'm', long, visible_alias = "message")]
     pub intent: Option<String>,
