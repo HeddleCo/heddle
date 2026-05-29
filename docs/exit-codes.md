@@ -35,11 +35,13 @@ intentionally — let it surface naturally.
 - **`76` (Protocol) means the inputs are the problem, not the network.**
   Don't loop. Surface to the human or change strategy.
 - **`78` (Config) is the right code when a precondition is missing**
-  (no upstream, no remote configured, ambiguous identity). Agents should
-  print the missing setting rather than retry.
+  (no upstream, no remote configured, no default remote for `push`/`pull`,
+  ambiguous identity). Agents should print the missing setting rather than
+  retry.
 - **`65` (DataErr) covers semantic rejection of well-formed input**
-  (e.g. `commit` against a dirty worktree, `merge` with unresolvable
-  conflict). Agents must surface the condition; no retry will help.
+  (e.g. `commit` with nothing to capture, `merge` with unresolvable
+  conflict, `bridge git reconcile` that needs a `--prefer` side chosen).
+  Agents must surface the condition; no retry will help.
 - **`74` (IoErr) is the catch-all.** When a command's contract does not
   declare a more specific code, treat a non-zero exit as `IoErr` and surface
   the stderr envelope.
