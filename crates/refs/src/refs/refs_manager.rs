@@ -15,6 +15,24 @@ use super::{
 };
 use crate::fs_atomic::sync_directory;
 
+/// Well-known refspec that resolves the heddle-internal pre-undo recovery
+/// pointer (so `heddle goto .undo-recovery` works). It is UNSHADOWABLE by any
+/// user marker or thread, in BOTH directions (heddle#305 r3):
+///
+/// - **Write side:** the leading `.` is rejected by [`validate_ref_name`], so a
+///   user can never `marker create` / `thread` a ref with this name. The
+///   recovery state therefore lives in a reserved namespace no user ref can
+///   occupy.
+/// - **Resolve side:** [`resolve_refspec`] routes this handle to the internal
+///   recovery pointer BEFORE consulting user threads/markers, so no user ref
+///   can intercept the advertised handle.
+///
+/// Invariant: an advertised handle for an internal ref must use a reserved form
+/// that user-namespace names cannot take — never a bare user-namespace name.
+///
+/// [`validate_ref_name`]: super::name::validate_ref_name
+pub const UNDO_RECOVERY_HANDLE: &str = ".undo-recovery";
+
 /// Manager for references (threads, markers, HEAD).
 pub struct RefManager {
     pub(crate) root: PathBuf,
@@ -216,6 +234,25 @@ impl RefManager {
         self.list_markers_from_storage()
     }
 
+    /// Record the heddle-internal pre-undo recovery pointer (ORIG_HEAD-style:
+    /// a single rolling ref each undo overwrites). Stored OUTSIDE the
+    /// user-writable marker namespace so `marker create/delete` — and their
+    /// undo inverses — can never collide with it. See
+    /// [`UNDO_RECOVERY_HANDLE`] for the resolution handle.
+    pub fn set_undo_recovery(&self, state: &ChangeId) -> Result<()> {
+        let _lock = self.lock_refs()?;
+        self.write_string(
+            &self.undo_recovery_path(),
+            &super::format_change_id_text(state),
+        )
+    }
+
+    /// Read the heddle-internal pre-undo recovery pointer, if one has been
+    /// recorded. Returns `None` when no undo has run in this repo.
+    pub fn get_undo_recovery(&self) -> Result<Option<ChangeId>> {
+        self.read_change_id_at(&self.undo_recovery_path(), "undo recovery", UNDO_RECOVERY_HANDLE)
+    }
+
     pub fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
         let path = self.remote_thread_path(remote, thread)?;
         self.read_change_id_at(&path, "remote thread", &format!("{}/{}", remote, thread))
@@ -293,6 +330,7 @@ impl RefManager {
             || self.read_head(),
             |name| self.get_thread(&ThreadName::new(name)),
             |name| self.get_marker(&MarkerName::new(name)),
+            || self.get_undo_recovery(),
         )
     }
 

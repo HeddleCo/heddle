@@ -72,6 +72,26 @@ impl RefManager {
             .cloned()
             .unwrap_or_else(|| self.root.join("HEAD"))
     }
+    /// Path of the heddle-internal pre-undo recovery pointer. A sibling of the
+    /// per-checkout `HEAD` (ORIG_HEAD-style), OUTSIDE the user-writable ref
+    /// namespaces under `refs/` (threads, markers, remotes). Keeping it out of
+    /// `refs/` makes a collision with a user marker named `undo-recovery`
+    /// impossible by construction (the marker CLI only ever touches
+    /// `refs/markers/`).
+    ///
+    /// **Invariant: undo/redo recovery state is scoped to the same checkout as
+    /// the history it recovers — never the shared ref root.** In
+    /// objectstore-pointer worktrees the ref root is shared across sibling
+    /// checkouts but `local_head` (and `op_scope`) is per-worktree; pinning the
+    /// recovery pointer beside the local `HEAD` keeps a `heddle undo` in one
+    /// checkout from clobbering a sibling checkout's recovery pointer. Tracks
+    /// `head_path` so both land in the same directory.
+    pub(super) fn undo_recovery_path(&self) -> PathBuf {
+        self.head_path()
+            .parent()
+            .map(|dir| dir.join("UNDO_RECOVERY"))
+            .unwrap_or_else(|| self.root.join("UNDO_RECOVERY"))
+    }
     pub(super) fn packed_refs_path(&self) -> PathBuf {
         self.refs_dir().join("packed-refs")
     }

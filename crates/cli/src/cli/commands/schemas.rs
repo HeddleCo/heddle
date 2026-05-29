@@ -951,6 +951,12 @@ pub struct UndoSchema {
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
+    /// heddle#305: the pre-undo state preserved for recovery, and the marker
+    /// pointing at it. Present only on a completed `undo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_marker: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
