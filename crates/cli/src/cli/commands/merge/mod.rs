@@ -23,8 +23,8 @@ use super::{
     command_catalog::ActionTemplate,
     diff::{DiffOutput, SemanticChangeEntry, compute_state_diff, compute_tree_diff},
     git_overlay_health::{
-        RepositoryVerificationState, action_argv, action_template,
-        build_repository_verification_state, override_trust_recommended_action,
+        RepositoryVerificationState, action_template, build_repository_verification_state,
+        override_trust_recommended_action,
         repository_verification_blocked_advice,
     },
     operator_core::{OperatorCommandOutput, blocked_operator_exit_code},
@@ -76,14 +76,12 @@ pub struct ThreadPreviewReport {
     pub conflict_count: usize,
     pub blockers: Vec<String>,
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplate>,
     pub thread_health: String,
 }
 
 impl ThreadPreviewReport {
     pub(crate) fn refresh_recommended_action_metadata(&mut self) {
-        self.recommended_action_argv = action_argv(&self.recommended_action);
         self.recommended_action_template = action_template(&self.recommended_action);
     }
 }
@@ -1883,7 +1881,6 @@ fn build_thread_preview_report_with_graph(
         conflict_count,
         conflicts,
         blockers: advice.blockers,
-        recommended_action_argv: action_argv(&recommended_action),
         recommended_action_template: action_template(&recommended_action),
         recommended_action,
         thread_health: advice.thread_health,
@@ -2855,20 +2852,12 @@ mod tests {
         let post_snapshot = coordination_blocker_recommended_action(None, Some(&merge_state));
         assert_eq!(post_snapshot, "heddle checkpoint -m \"...\"");
         assert!(
-            action_argv(&post_snapshot).is_none(),
-            "checkpoint placeholder must stay display-only until a message is supplied"
-        );
-        assert!(
             action_template(&post_snapshot).is_some(),
             "checkpoint placeholder should carry a fillable template"
         );
 
         let pre_snapshot = coordination_blocker_recommended_action(None, None);
         assert_eq!(pre_snapshot, "heddle merge <thread> --git-commit");
-        assert!(
-            action_argv(&pre_snapshot).is_none(),
-            "thread placeholder must stay display-only until a thread is supplied"
-        );
         assert!(
             action_template(&pre_snapshot).is_some(),
             "thread placeholder should carry a fillable template"

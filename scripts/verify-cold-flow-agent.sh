@@ -303,7 +303,7 @@ if data.get("kind") == "verify_failed":
 branch = sys.argv[2]
 expected = f"heddle adopt --ref {branch}"
 expected_suffix = ["adopt", "--ref", branch]
-argv = data.get("recommended_action_argv") or []
+argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 heddle_argv = bool(argv) and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
 if data.get("verified") is not False or data.get("status") != "needs_init":
     raise SystemExit(f"first-run verify should require adoption, got {data!r}")
@@ -312,7 +312,7 @@ if data.get("recommended_action") != expected or not heddle_argv or argv[1:] != 
 checks = {check.get("name"): check for check in data.get("checks", [])}
 for name in ("Heddle", "Mapping"):
     check = checks.get(name) or {}
-    check_argv = check.get("recommended_action_argv") or []
+    check_argv = (check.get("recommended_action_template") or {}).get("argv_template") or []
     check_heddle_argv = bool(check_argv) and (
         check_argv[0] == "heddle" or check_argv[0].endswith("/heddle")
     )
@@ -330,7 +330,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 if data.get("kind") == "verify_failed":
     data = data.get("verification") or {}
-argv = data.get("recommended_action_argv") or []
+argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 heddle_argv = bool(argv) and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
 if data.get("verified") is not False or data.get("status") != "needs_init":
     raise SystemExit(f"first-run verify should require adoption, got {data!r}")
@@ -339,7 +339,7 @@ if data.get("recommended_action") != "heddle adopt" or not heddle_argv or argv[1
 checks = {check.get("name"): check for check in data.get("checks", [])}
 for name in ("Heddle", "Mapping"):
     check = checks.get(name) or {}
-    check_argv = check.get("recommended_action_argv") or []
+    check_argv = (check.get("recommended_action_template") or {}).get("argv_template") or []
     check_heddle_argv = bool(check_argv) and (
         check_argv[0] == "heddle" or check_argv[0].endswith("/heddle")
     )
@@ -674,7 +674,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 thread = sys.argv[2]
 expected = f"heddle merge {thread} --preview"
 context_expected_suffix = ["merge", thread, "--preview"]
-argv = data.get("recommended_action_argv") or []
+argv = (data.get("recommended_action_template") or {}).get("argv_template") or []
 context_ready = (
     len(argv) >= 6
     and (argv[0] == "heddle" or argv[0].endswith("/heddle"))
@@ -694,7 +694,7 @@ if data.get("next_action") != data.get("recommended_action") or not (context_rea
 verify = data.get("verification") or {}
 if verify.get("verified") is not True or verify.get("status") != "clean":
     raise SystemExit(f"ready work should keep repository verify clean, got {data!r}")
-verify_argv = verify.get("recommended_action_argv") or []
+verify_argv = (verify.get("recommended_action_template") or {}).get("argv_template") or []
 verify_context_ready = (
     len(verify_argv) >= 6
     and (verify_argv[0] == "heddle" or verify_argv[0].endswith("/heddle"))
@@ -724,27 +724,22 @@ import json
 import sys
 data = json.load(sys.stdin)
 data = data.get("verification", data)
-args = data.get("recommended_action_argv") or []
-if args:
-    if args[0] != "heddle" and not args[0].endswith("/heddle"):
-        raise SystemExit(f"unexpected structured recommended action: {data!r}")
-else:
-    template = data.get("recommended_action_template")
-    if not template:
-        raise SystemExit(f"expected argv or template recommended action: {data!r}")
-    if template.get("action") != data.get("recommended_action"):
-        raise SystemExit(f"template/action mismatch: {data!r}")
-    if template.get("required_inputs") != ["message"]:
-        raise SystemExit(f"unexpected template inputs: {template!r}")
-    if template.get("agent_may_fill") is not True:
-        raise SystemExit(f"agent should be allowed to fill this template: {template!r}")
-    message = sys.argv[1]
-    args = [
-        message if arg == "<message>" else arg
-        for arg in template.get("argv_template", [])
-    ]
-    if not args or (args[0] != "heddle" and not args[0].endswith("/heddle")):
-        raise SystemExit(f"unexpected recommended action template: {template!r}")
+template = data.get("recommended_action_template")
+if not template:
+    raise SystemExit(f"expected template recommended action: {data!r}")
+if template.get("action") != data.get("recommended_action"):
+    raise SystemExit(f"template/action mismatch: {data!r}")
+if template.get("required_inputs") != ["message"]:
+    raise SystemExit(f"unexpected template inputs: {template!r}")
+if template.get("agent_may_fill") is not True:
+    raise SystemExit(f"agent should be allowed to fill this template: {template!r}")
+message = sys.argv[1]
+args = [
+    message if arg == "<message>" else arg
+    for arg in template.get("argv_template", [])
+]
+if not args or (args[0] != "heddle" and not args[0].endswith("/heddle")):
+    raise SystemExit(f"unexpected recommended action template: {template!r}")
 for arg in args[1:]:
     print(arg)
 ' "$message"

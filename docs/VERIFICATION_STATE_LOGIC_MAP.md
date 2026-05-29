@@ -26,9 +26,11 @@ Target rows describe the next model and must not be cited as shipped behavior.
   push can keep repository verification clean while setting a next action.
 - `workflow_status` is separate from `status`. Ready work changes workflow
   guidance; it does not disverify an otherwise clean checkout.
-- `recommended_action` is human display text. `recommended_action_argv` is the
-  executable form. `recommended_action_template` is the fillable form for
-  placeholders such as a commit message or thread name.
+- `recommended_action` is human display text. `recommended_action_template` is
+  the canonical machine-readable form: `argv_template` is the executable argv
+  (always present for a valid action), and `required_inputs`/`agent_may_fill`
+  describe placeholders such as a commit message or thread name. (The always-null
+  `recommended_action_argv` sidecar was dropped — see HeddleCo/heddle#254.)
 
 ## Verification State Dimensions
 

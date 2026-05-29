@@ -800,29 +800,11 @@ mod tests {
             }
             .to_string(),
             recommended_action: (!verified).then(|| "heddle adopt --ref main".to_string()),
-            recommended_action_argv: (!verified).then(|| {
-                vec![
-                    "heddle".to_string(),
-                    "adopt".to_string(),
-                    "--ref".to_string(),
-                    "main".to_string(),
-                ]
-            }),
             recommended_action_template: None,
             recovery_commands: if verified {
                 Vec::new()
             } else {
                 vec!["heddle adopt --ref main".to_string()]
-            },
-            recovery_command_argv: if verified {
-                Vec::new()
-            } else {
-                vec![vec![
-                    "heddle".to_string(),
-                    "adopt".to_string(),
-                    "--ref".to_string(),
-                    "main".to_string(),
-                ]]
             },
             recovery_action_templates: Vec::new(),
             details: std::collections::BTreeMap::new(),
@@ -853,10 +835,8 @@ mod tests {
             workflow_status: "clean".to_string(),
             workflow_summary: "no workflow attention needed".to_string(),
             recommended_action: check.recommended_action.clone().unwrap_or_default(),
-            recommended_action_argv: check.recommended_action_argv.clone(),
             recommended_action_template: check.recommended_action_template.clone(),
             recovery_commands: check.recovery_commands.clone(),
-            recovery_command_argv: check.recovery_command_argv.clone(),
             recovery_action_templates: check.recovery_action_templates.clone(),
             checks: vec![check],
         }

@@ -52,10 +52,8 @@ struct CheckpointOutput {
     storage_model: String,
     committed_at: String,
     next_action: Option<String>,
-    next_action_argv: Option<Vec<String>>,
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
@@ -353,10 +351,8 @@ fn build_output(
         storage_model: repo.storage_model_label().to_string(),
         committed_at: record.committed_at.clone(),
         next_action: recommended_action.clone(),
-        next_action_argv: trust.recommended_action_argv.clone(),
         next_action_template: trust.recommended_action_template.clone(),
         recommended_action,
-        recommended_action_argv: trust.recommended_action_argv.clone(),
         recommended_action_template: trust.recommended_action_template.clone(),
         trust,
     }

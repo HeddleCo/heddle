@@ -16,8 +16,8 @@ use serde::Serialize;
 use super::{
     action_line::print_next_step,
     git_overlay_health::{
-        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_argv,
-        action_template, build_git_overlay_health, build_plain_git_verification_probe,
+        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_template,
+        build_git_overlay_health, build_plain_git_verification_probe,
         build_repository_verification_state, remote_tracking_with_verification_action,
         serialize_empty_action_as_null, trust_visible_worktree_status,
     },
@@ -49,10 +49,8 @@ pub(crate) struct DiagnoseOutput {
     health: DiagnoseHealthOutput,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
-    recovery_command_argv: Vec<Vec<String>>,
     profile: Option<DiagnoseProfileOutput>,
 }
 
@@ -120,7 +118,6 @@ struct DiagnoseHealthOutput {
     blockers: Vec<String>,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
 }
 
@@ -226,14 +223,11 @@ fn build_plain_git_diagnose_output(cli: &Cli) -> Result<Option<DiagnoseOutput>> 
             status: trust.status.clone(),
             blockers: vec![trust.summary.clone()],
             recommended_action: trust.recommended_action.clone(),
-            recommended_action_argv: trust.recommended_action_argv.clone(),
             recommended_action_template: trust.recommended_action_template.clone(),
         },
         recommended_action: trust.recommended_action.clone(),
-        recommended_action_argv: trust.recommended_action_argv.clone(),
         recommended_action_template: trust.recommended_action_template.clone(),
         recovery_commands: trust.recovery_commands.clone(),
-        recovery_command_argv: trust.recovery_command_argv.clone(),
         profile: None,
     }))
 }
@@ -358,7 +352,6 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         DiagnoseHealthOutput {
             output_kind: "diagnose_health",
             recommended_action: recommended_action.clone(),
-            recommended_action_argv: action_argv(&recommended_action),
             recommended_action_template: action_template(&recommended_action),
             ..health
         }
@@ -367,11 +360,6 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         health.recommended_action.clone()
     } else {
         trust.recommended_action.clone()
-    };
-    let recommended_action_argv = if trust.verified {
-        health.recommended_action_argv.clone()
-    } else {
-        trust.recommended_action_argv.clone()
     };
     let recommended_action_template = if trust.verified {
         health.recommended_action_template.clone()
@@ -403,10 +391,8 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
         workspace,
         health,
         recommended_action,
-        recommended_action_argv,
         recommended_action_template,
         recovery_commands: trust.recovery_commands.clone(),
-        recovery_command_argv: trust.recovery_command_argv.clone(),
         profile,
     })
 }
@@ -496,7 +482,6 @@ fn diagnose_health(
             .to_string(),
             blockers: Vec::new(),
             recommended_action: recommended_action.to_string(),
-            recommended_action_argv: action_argv(recommended_action),
             recommended_action_template: action_template(recommended_action),
         };
     };
@@ -547,7 +532,6 @@ fn diagnose_health(
         status: advice.thread_health,
         blockers: advice.blockers,
         recommended_action: recommended_action.clone(),
-        recommended_action_argv: action_argv(&recommended_action),
         recommended_action_template: action_template(&recommended_action),
     }
 }

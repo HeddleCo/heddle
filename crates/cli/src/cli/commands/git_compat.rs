@@ -64,10 +64,8 @@ struct CommitCompatOutput {
     principal: CommitPrincipalOutput,
     agent: Option<CommitAgentOutput>,
     next_action: Option<String>,
-    next_action_argv: Option<Vec<String>>,
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
@@ -174,10 +172,8 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     principal: state.attribution.principal.into(),
                     agent: state.attribution.agent.map(CommitAgentOutput::from),
                     next_action: commit_next_action(&trust),
-                    next_action_argv: None,
                     next_action_template: None,
                     recommended_action: None,
-                    recommended_action_argv: None,
                     recommended_action_template: None,
                     trust,
                 };
@@ -228,10 +224,8 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                 .agent
                 .map(CommitAgentOutput::from),
             next_action: commit_next_action(&trust),
-            next_action_argv: None,
             next_action_template: None,
             recommended_action: None,
-            recommended_action_argv: None,
             recommended_action_template: None,
             trust,
         };
@@ -317,10 +311,8 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             .agent
             .map(CommitAgentOutput::from),
         next_action: commit_next_action(&trust),
-        next_action_argv: None,
         next_action_template: None,
         recommended_action: None,
-        recommended_action_argv: None,
         recommended_action_template: None,
         trust,
     };
@@ -399,10 +391,8 @@ fn commit_staged_index(
             .agent
             .map(CommitAgentOutput::from),
         next_action: commit_next_action(&trust),
-        next_action_argv: None,
         next_action_template: None,
         recommended_action: None,
-        recommended_action_argv: None,
         recommended_action_template: None,
         trust,
     };
@@ -988,9 +978,7 @@ fn with_commit_action_metadata(mut output: CommitCompatOutput) -> CommitCompatOu
     let next_action = ActionFields::from_optional_action_ref(output.next_action.as_deref());
     let recommended_action =
         ActionFields::from_optional_action_ref(output.recommended_action.as_deref());
-    output.next_action_argv = next_action.argv;
     output.next_action_template = next_action.template;
-    output.recommended_action_argv = recommended_action.argv;
     output.recommended_action_template = recommended_action.template;
     output
 }
@@ -1329,10 +1317,8 @@ mod tests {
             workflow_summary: "no ready threads are waiting to land".to_string(),
             summary: "Git merge is in progress".to_string(),
             recommended_action: "heddle continue".to_string(),
-            recommended_action_argv: Some(vec!["heddle".to_string(), "continue".to_string()]),
             recommended_action_template: None,
             recovery_commands: vec!["heddle continue".to_string()],
-            recovery_command_argv: vec![vec!["heddle".to_string(), "continue".to_string()]],
             recovery_action_templates: Vec::new(),
             checks: Vec::new(),
         };

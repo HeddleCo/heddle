@@ -2231,7 +2231,7 @@ fn test_merge_git_commit_blocks_on_unrelated_uncommitted_git_changes() {
         parsed["recommended_action"], "heddle merge feature --git-commit",
         "blocked pre-snapshot git coordination should recommend a concrete Heddle retry, not prose: {parsed}"
     );
-    let action_tail = parsed["recommended_action_argv"]
+    let action_tail = parsed["recommended_action_template"]["argv_template"]
         .as_array()
         .expect("concrete recommended action should expose argv")
         .iter()
@@ -2246,7 +2246,6 @@ fn test_merge_git_commit_blocks_on_unrelated_uncommitted_git_changes() {
             Value::String("--git-commit".to_string()),
         ]
     );
-    assert_eq!(parsed["recommended_action_template"], Value::Null);
 }
 
 #[test]

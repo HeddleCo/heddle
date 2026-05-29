@@ -98,31 +98,24 @@ fn try_succeeds_creates_thread_and_preserves_parent_head() {
         "try should expose the cross-command action field for agents: {raw}"
     );
     assert_eq!(
-        value["recommended_action_argv"],
+        value["recommended_action_template"]["argv_template"],
         heddle_argv_json(["merge", thread_name, "--preview"]),
         "try should provide argv for the primary action: {raw}"
     );
     assert_eq!(
-        value["next_action_argv"],
+        value["next_action_template"]["argv_template"],
         heddle_argv_json(["merge", thread_name, "--preview"]),
         "try should provide argv for the next action too: {raw}"
     );
-    assert!(value["recommended_action_template"].is_null());
-    assert!(value["next_action_template"].is_null());
     assert_eq!(
         value["recovery_commands"],
         serde_json::json!([format!("heddle thread drop {thread_name}")]),
         "try should expose discard as recovery, not inline prose: {raw}"
     );
     assert_eq!(
-        value["recovery_command_argv"],
-        serde_json::json!([heddle_argv_json(["thread", "drop", thread_name])]),
-        "try should provide argv for discard recovery: {raw}"
-    );
-    assert_eq!(
-        value["recovery_action_templates"],
-        serde_json::json!([]),
-        "try should expose recovery templates even when every recovery is concrete argv: {raw}"
+        value["recovery_action_templates"][0]["argv_template"],
+        heddle_argv_json(["thread", "drop", thread_name]),
+        "try should provide a fillable template for discard recovery: {raw}"
     );
 
     // Parent's HEAD must not have advanced.

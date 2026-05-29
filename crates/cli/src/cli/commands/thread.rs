@@ -30,8 +30,8 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, recommended_action_template},
     git_overlay_health::{
-        RepositoryVerificationState, action_argv, build_repository_verification_state,
-        canonical_adopt_ref_command, canonical_bridge_reconcile_ref_preview_command, command_argvs,
+        RepositoryVerificationState, build_repository_verification_state,
+        canonical_adopt_ref_command, canonical_bridge_reconcile_ref_preview_command,
         override_trust_recommended_action, serialize_empty_action_as_null,
     },
     mount_lifecycle,
@@ -135,7 +135,6 @@ pub struct ThreadSummary {
     pub blockers: Vec<String>,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplate>,
     pub git_branch_tip: Option<String>,
     pub history_imported: bool,
@@ -157,7 +156,6 @@ pub struct AvailableGitRef {
     pub name: String,
     pub git_commit: String,
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplate>,
 }
 
@@ -235,7 +233,6 @@ impl ThreadSummary {
             thread_health: "clean".to_string(),
             blockers: Vec::new(),
             recommended_action: String::new(),
-            recommended_action_argv: None,
             recommended_action_template: None,
             git_branch_tip: None,
             history_imported: true,
@@ -274,10 +271,8 @@ struct ThreadListOutput {
     trust: RepositoryVerificationState,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
     recovery_commands: Vec<String>,
-    recovery_command_argv: Vec<Vec<String>>,
     recovery_action_templates: Vec<ActionTemplate>,
     /// Carried for the human-readable renderer only. Not part of the
     /// JSON contract: import-hint information is exposed via
@@ -304,13 +299,11 @@ struct ThreadShowOutput {
     summary: ThreadSummary,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     next_action: String,
-    next_action_argv: Option<Vec<String>>,
     next_action_template: Option<ActionTemplate>,
     recommended_action_template: Option<ActionTemplate>,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     recovery_commands: Vec<String>,
-    recovery_command_argv: Vec<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -321,10 +314,8 @@ pub(crate) struct ThreadOpOutput {
     pub name: String,
     pub message: String,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplate>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplate>,
     pub thread: Option<ThreadSummary>,
     pub path: Option<String>,
@@ -701,7 +692,6 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
         if summary.last_progress_at.is_some() {
             summary.last_activity_at = summary.last_progress_at.clone();
         }
-        summary.recommended_action_argv = action_argv(&summary.recommended_action);
         summary.recommended_action_template =
             recommended_action_template(&summary.recommended_action);
     }
@@ -753,7 +743,6 @@ pub(crate) fn suppress_thread_actions_while_trust_blocked(
     };
     for summary in summaries {
         if summary.thread_health == "remote_tracking" {
-            summary.recommended_action_argv = action_argv(&summary.recommended_action);
             summary.recommended_action_template =
                 recommended_action_template(&summary.recommended_action);
             continue;
@@ -768,13 +757,11 @@ pub(crate) fn suppress_thread_actions_while_trust_blocked(
                 .recommended_action
                 .starts_with("heddle adopt --ref ")
         {
-            summary.recommended_action_argv = action_argv(&summary.recommended_action);
             summary.recommended_action_template =
                 recommended_action_template(&summary.recommended_action);
             continue;
         }
         summary.recommended_action.clear();
-        summary.recommended_action_argv = None;
         summary.recommended_action_template = None;
     }
 }
@@ -1059,7 +1046,6 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
             &summary.recommended_action,
         );
     }
-    summary.recommended_action_argv = action_argv(&summary.recommended_action);
     summary.recommended_action_template = recommended_action_template(&summary.recommended_action);
     Ok(Some(summary))
 }
@@ -1232,10 +1218,6 @@ fn available_git_ref_from_summary(summary: &ThreadSummary) -> AvailableGitRef {
         name: summary.name.clone(),
         git_commit: summary.git_branch_tip.clone().unwrap_or_default(),
         recommended_action: summary.recommended_action.clone(),
-        recommended_action_argv: summary
-            .recommended_action_argv
-            .clone()
-            .or_else(|| action_argv(&summary.recommended_action)),
         recommended_action_template: summary
             .recommended_action_template
             .clone()
@@ -1300,10 +1282,8 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         storage_model: repo.storage_model_label().to_string(),
         hosted_enabled: repo.hosted_enabled(),
         recommended_action: recommended_action.clone(),
-        recommended_action_argv: action_argv(&recommended_action),
         recommended_action_template: recommended_action_template(&recommended_action),
         recovery_commands: trust.recovery_commands.clone(),
-        recovery_command_argv: command_argvs(&trust.recovery_commands),
         recovery_action_templates: trust.recovery_action_templates.clone(),
         trust,
         git_overlay_import_hint: if as_json {
@@ -2680,7 +2660,6 @@ pub(crate) fn show_thread_summary(
     if !trust.verified {
         summary.thread_health = trust.status.clone();
         summary.recommended_action = trust.recommended_action.clone();
-        summary.recommended_action_argv = trust.recommended_action_argv.clone();
         summary.recommended_action_template = trust.recommended_action_template.clone();
     } else {
         let action = primary_next_action_with_verification(
@@ -2698,7 +2677,6 @@ pub(crate) fn show_thread_summary(
         );
         if !action.is_empty() {
             summary.recommended_action = action;
-            summary.recommended_action_argv = action_argv(&summary.recommended_action);
             summary.recommended_action_template =
                 recommended_action_template(&summary.recommended_action);
         }
@@ -2737,14 +2715,12 @@ pub(crate) fn show_thread_summary(
                 repository_label: presentation.label,
                 repository_context: presentation.context,
                 next_action: summary.recommended_action.clone(),
-                next_action_argv: summary.recommended_action_argv.clone(),
                 next_action_template: recommended_action_template(&summary.recommended_action),
                 recommended_action_template: recommended_action_template(
                     &summary.recommended_action
                 ),
                 summary,
                 recovery_commands: trust.recovery_commands.clone(),
-                recovery_command_argv: command_argvs(&trust.recovery_commands),
                 trust,
             })?
         );
@@ -3127,7 +3103,6 @@ fn thread_op_output(
                 .as_ref()
                 .and_then(|trust| non_empty_action(&trust.recommended_action))
         });
-    let recommended_action_argv = recommended_action.as_deref().and_then(action_argv);
     let recommended_action_template = recommended_action
         .as_deref()
         .and_then(recommended_action_template);
@@ -3138,10 +3113,8 @@ fn thread_op_output(
         name,
         message,
         next_action: recommended_action.clone(),
-        next_action_argv: recommended_action_argv.clone(),
         next_action_template: recommended_action_template.clone(),
         recommended_action,
-        recommended_action_argv,
         recommended_action_template,
         thread,
         path,

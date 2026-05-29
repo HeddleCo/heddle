@@ -155,12 +155,10 @@ struct AttemptOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     next_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    next_action_argv: Option<Vec<String>>,
     next_action_template: Option<ActionTemplate>,
     #[serde(skip_serializing_if = "Option::is_none")]
     recommended_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
 }
 
@@ -532,10 +530,8 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
         attempts: all_results,
         recommended,
         next_action: next_action.action,
-        next_action_argv: next_action.argv,
         next_action_template: next_action.template,
         recommended_action: recommended_action.action,
-        recommended_action_argv: recommended_action.argv,
         recommended_action_template: recommended_action.template,
     };
 
