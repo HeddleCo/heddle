@@ -2149,9 +2149,16 @@ fn new_blob_for_rename(
         return find_blob_in_tree(repo, tree, path);
     }
 
+    // Rename similarity must compare the bytes git would store as the blob,
+    // per entry type: a regular file → its content, a symlink → its target
+    // *path* bytes. `read_worktree_blob_for_diff` branches on the entry type
+    // (`read_link` for symlinks, `read` for files) — a blind `std::fs::read`
+    // here would *follow* a symlink and score the dereferenced target file's
+    // content, collapsing a symlink move into a wrong-target rename whose
+    // patch leaves the old link target after `git apply` (cid 3322115749).
     let worktree_path = repo.root().join(path);
-    match std::fs::read(worktree_path) {
-        Ok(content) => Ok(Some(Blob::new(content))),
+    match std::fs::symlink_metadata(&worktree_path) {
+        Ok(_) => Ok(Some(read_worktree_blob_for_diff(&worktree_path)?)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }

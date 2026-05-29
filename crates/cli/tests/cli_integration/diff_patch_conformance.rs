@@ -1095,6 +1095,134 @@ fn plain_git_regular_to_symlink_rename_candidate_stays_split() {
 }
 
 // ---------------------------------------------------------------------------
+// Matrix — symlink↔symlink / symlink→regular rename candidates (cid
+// 3322115749). Rename similarity must compare the bytes git stores as the
+// blob, per entry type: a regular file → its content, a symlink → its target
+// *path* bytes (`read_link`). The worktree rename path used to read the new
+// candidate with a blind `std::fs::read`, which *follows* a symlink and reads
+// the dereferenced target FILE's content instead of the link's own target
+// bytes. A tracked symlink moved to a new symlink whose dereferenced target
+// happened to match the old link's target string then collapsed into a pure
+// rename — and `git apply` left the OLD link target on disk instead of
+// creating the NEW one. These cells run on BOTH backends: the worktree-status
+// path (`native_cell`) and the committed-tree path (`state_cell`, which reads
+// the stored target bytes via `find_blob_in_tree`). Every cell also flows
+// through `assert_modes_consistent`, so all output modes are covered.
+// ---------------------------------------------------------------------------
+
+/// The exact cid 3322115749 trap on the worktree backend: `mover` is a symlink
+/// whose target STRING equals the *content* of `anchor.txt`, and the new
+/// symlink `moved` points AT `anchor.txt`. A blind `fs::read("moved")` follows
+/// the link to `anchor.txt` and reads `"dest/dir/file"` — byte-identical to the
+/// old link's stored target — scoring a false 1.0 rename that, as a pure
+/// header-only rename, would leave `moved → dest/dir/file` (the OLD target)
+/// after apply. Reading the link's own target (`anchor.txt`) instead scores
+/// low → stays delete + add → `moved` materializes with the correct target.
+#[cfg(unix)]
+#[test]
+fn native_symlink_to_symlink_different_target_round_trips() {
+    native_cell(
+        &[
+            symlink("mover", "dest/dir/file"),
+            normal("anchor.txt", "dest/dir/file"),
+        ],
+        |dir| {
+            std::fs::remove_file(dir.join("mover")).unwrap();
+            write_entry(dir, &symlink("moved", "anchor.txt"));
+        },
+        &[
+            Expect::Absent("mover"),
+            Expect::Present(symlink("moved", "anchor.txt")),
+            Expect::Present(normal("anchor.txt", "dest/dir/file")),
+        ],
+    );
+}
+
+/// Committed-tree backend of the same shape: the stored symlink blob is the
+/// link's target bytes, so the new candidate is `"anchor.txt"`, never the
+/// dereferenced file content — the pair stays split and round-trips with the
+/// correct new target.
+#[cfg(unix)]
+#[test]
+fn state_symlink_to_symlink_different_target_round_trips() {
+    state_cell(
+        &[
+            symlink("mover", "dest/dir/file"),
+            normal("anchor.txt", "dest/dir/file"),
+        ],
+        |dir| {
+            std::fs::remove_file(dir.join("mover")).unwrap();
+            write_entry(dir, &symlink("moved", "anchor.txt"));
+        },
+        &[
+            Expect::Absent("mover"),
+            Expect::Present(symlink("moved", "anchor.txt")),
+            Expect::Present(normal("anchor.txt", "dest/dir/file")),
+        ],
+    );
+}
+
+/// A symlink moved to a symlink with the SAME target IS a legitimate rename;
+/// whether it collapses or stays split, the new link must carry the right
+/// target after apply. Reading link-target bytes (not dereferenced content)
+/// keeps the target intact on both detection and patch generation.
+#[cfg(unix)]
+#[test]
+fn native_symlink_to_symlink_same_target_round_trips() {
+    native_cell(
+        &[symlink("mover", "shared/target/path")],
+        |dir| {
+            std::fs::remove_file(dir.join("mover")).unwrap();
+            write_entry(dir, &symlink("moved", "shared/target/path"));
+        },
+        &[
+            Expect::Absent("mover"),
+            Expect::Present(symlink("moved", "shared/target/path")),
+        ],
+    );
+}
+
+/// Committed-tree backend of the same-target symlink move.
+#[cfg(unix)]
+#[test]
+fn state_symlink_to_symlink_same_target_round_trips() {
+    state_cell(
+        &[symlink("mover", "shared/target/path"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("mover")).unwrap();
+            write_entry(dir, &symlink("moved", "shared/target/path"));
+        },
+        &[
+            Expect::Absent("mover"),
+            Expect::Present(symlink("moved", "shared/target/path")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+/// Worktree backend of the symlink→regular cross-type candidate: a symlink
+/// deleted at one path, a regular file carrying the link's target string added
+/// at another. The deleted-side mode is `120000`, the added-side `100644`, so
+/// `rename_mode_compatible` keeps the pair split regardless of similarity — the
+/// worktree complement of `state_symlink_to_regular_rename_candidate_stays_split`.
+#[cfg(unix)]
+#[test]
+fn native_symlink_to_regular_rename_candidate_stays_split() {
+    native_cell(
+        &[symlink("mover", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        |dir| {
+            std::fs::remove_file(dir.join("mover")).unwrap();
+            write_entry(dir, &normal("landed.txt", "dest/dir/file"));
+        },
+        &[
+            Expect::Absent("mover"),
+            Expect::Present(normal("landed.txt", "dest/dir/file")),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Matrix — rename×type on the STATUS path (cid 3321103601). The cells above
 // assert `--patch`/JSON, which capture each side's mode and so feed the
 // rename-collapse its cross-type guard. The default, `--stat`, and
