@@ -1786,6 +1786,13 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             if args.hydrate {
                 let sources = hydrate::hydratable_ignored_dirs(repo)?;
                 let linked = hydrate::hydrate_checkout(&abs_path, &sources)?;
+                // Preserve the origin's effective ignore rule for the
+                // linked deps in the checkout's own (native) ignore
+                // source. The isolated checkout has no `.git`, so it
+                // can't fall back on the origin's `.gitignore` — without
+                // this the symlinks would read as added paths and
+                // capture would choke on the out-of-checkout link target.
+                hydrate::preserve_hydrated_ignores(&abs_path, &linked)?;
                 if linked.is_empty() {
                     eprintln!(
                         "{}: --hydrate found no ignored dependency directories at the origin \

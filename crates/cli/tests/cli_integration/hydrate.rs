@@ -33,6 +33,93 @@ fn init_deps_in_ignored_dir_project(dir: &std::path::Path) {
     std::fs::write(venv.join("bin").join("python"), "#!/bin/sh\n").unwrap();
 }
 
+/// Set up a git-overlay heddle repo whose dependency dirs are ignored
+/// ONLY via `.gitignore` (no `.heddleignore` anywhere) — the common
+/// drop-in git-overlay setup. The origin's effective ignore set includes
+/// `.gitignore` because the repo is in git-overlay mode; the isolated
+/// checkout reopened as a native heddle repo does NOT read `.gitignore`.
+fn init_gitignore_only_overlay_project(dir: &std::path::Path) {
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git should run");
+        assert!(status.success(), "git {args:?} should succeed");
+    };
+    git(&["init"]);
+    git(&["config", "user.name", "Heddle Test"]);
+    git(&["config", "user.email", "heddle@example.com"]);
+    git(&["checkout", "-b", "main"]);
+
+    // Deps ignored ONLY via .gitignore — deliberately no .heddleignore.
+    std::fs::write(dir.join(".gitignore"), "node_modules/\n.venv/\n").unwrap();
+    std::fs::write(dir.join("index.ts"), "export const x = 1;\n").unwrap();
+
+    let node_modules = dir.join("node_modules");
+    std::fs::create_dir_all(node_modules.join("left-pad")).unwrap();
+    std::fs::write(
+        node_modules.join("left-pad").join("index.js"),
+        "module.exports = () => {};\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn hydrate_preserves_gitignore_only_ignores_in_isolated_checkout() {
+    // P1 (cid 3327140634): in a git-overlay repo that ignores deps ONLY
+    // via `.gitignore`, the isolated checkout is reopened as a native
+    // heddle repo whose ignore resolution reads `.heddleignore`, not
+    // `.gitignore`. hydrate must materialize the ignore rule into the
+    // checkout's native source so the symlinked dep dirs stay ignored —
+    // otherwise they surface as added symlinks and capture fails on the
+    // absolute, out-of-checkout link target.
+    let temp = TempDir::new().unwrap();
+    init_gitignore_only_overlay_project(temp.path());
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
+
+    // A git-overlay repo refuses to start a thread inside itself, so the
+    // isolated checkout lives in a sibling temp dir.
+    let checkout_root = TempDir::new().unwrap();
+    let thread_path = checkout_root.path().join("iso");
+    heddle(
+        &[
+            "start",
+            "iso",
+            "--path",
+            thread_path.to_str().unwrap(),
+            "--hydrate",
+        ],
+        Some(temp.path()),
+    )
+    .expect("start --hydrate should succeed");
+
+    // The dep dir is hydrated as a symlink...
+    let linked = thread_path.join("node_modules");
+    assert!(
+        std::fs::symlink_metadata(&linked)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "node_modules should be hydrated as a symlink"
+    );
+
+    // ...and IGNORED in the isolated checkout even though the origin
+    // expressed the rule only via `.gitignore`: `status` from the
+    // checkout must not surface it as added worktree content.
+    let status = heddle(&["status"], Some(&thread_path))
+        .expect("status should run from the hydrated checkout");
+    assert!(
+        !status.contains("node_modules"),
+        "hydrated node_modules must stay ignored in a .gitignore-only overlay; got:\n{status}"
+    );
+
+    // Capture must not choke on the absolute, out-of-checkout link
+    // target — the ignored link is pruned before capture follows it.
+    heddle(&["capture", "-m", "iso work"], Some(&thread_path))
+        .expect("capture in the hydrated checkout must succeed");
+}
+
 #[test]
 fn hydrate_symlinks_ignored_dep_dirs_into_checkout() {
     let temp = TempDir::new().unwrap();

@@ -120,6 +120,82 @@ pub(crate) fn hydrate_checkout(checkout: &Path, sources: &[PathBuf]) -> Result<V
     Ok(linked)
 }
 
+/// Make the hydrated dep symlinks stay ignored in the isolated checkout.
+///
+/// The origin may ignore deps only via `.gitignore` (the common
+/// git-overlay setup). The isolated checkout has no `.git` and is
+/// reopened as a *native* heddle repo, whose ignore resolution reads
+/// `.heddleignore` — never `.gitignore`. Without preserving the rule the
+/// symlinked dep dirs surface as uncaptured *added* paths, and capture
+/// fails trying to follow the absolute link target out of the checkout.
+///
+/// We materialize the effective ignore rule for each linked name into
+/// the checkout's own `.heddleignore`, so the checkout is self-consistent
+/// regardless of which ignore source the origin used. Names already
+/// covered by an existing `.heddleignore` are left untouched. When we
+/// create the file from scratch it self-ignores, so the generated
+/// artifact does not itself surface as uncaptured content.
+pub(crate) fn preserve_hydrated_ignores(checkout: &Path, linked: &[String]) -> Result<()> {
+    if linked.is_empty() {
+        return Ok(());
+    }
+
+    let ignore_path = checkout.join(".heddleignore");
+    let existing = match std::fs::read_to_string(&ignore_path) {
+        Ok(contents) => Some(contents),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("read '{}'", ignore_path.display()));
+        }
+    };
+
+    let patterns: Vec<String> = existing
+        .iter()
+        .flat_map(|c| c.lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+
+    let mut to_add: Vec<String> = Vec::new();
+
+    // When creating the file fresh, ignore it too — it's a hydration
+    // artifact local to this checkout, not source the user authored.
+    if existing.is_none() {
+        to_add.push(".heddleignore".to_string());
+    }
+
+    for name in linked {
+        // Already covered by the checkout's native ignore source? Leave
+        // the existing rule in place rather than appending a duplicate.
+        let mut probe = patterns.clone();
+        probe.extend(to_add.iter().cloned());
+        if objects::worktree::should_ignore(Path::new(name), &probe) {
+            continue;
+        }
+        // Trailing-slash (dir-only) rule mirrors how deps are ignored —
+        // it fires on the bare symlink entry (heddle#303).
+        to_add.push(format!("{name}/"));
+    }
+
+    if to_add.is_empty() {
+        return Ok(());
+    }
+
+    let mut out = existing.unwrap_or_default();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    for line in &to_add {
+        out.push_str(line);
+        out.push('\n');
+    }
+    std::fs::write(&ignore_path, out)
+        .with_context(|| format!("write hydrate ignore rules to '{}'", ignore_path.display()))?;
+    Ok(())
+}
+
 #[cfg(unix)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
