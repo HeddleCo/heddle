@@ -130,6 +130,147 @@ pub(crate) struct RefUpdate {
     pub namespace: RefNamespace,
 }
 
+/// Sentinel remote name for refs owned by the local repository
+/// (`refs/heads/*` and `refs/tags/*`). Ported from jj's
+/// `REMOTE_NAME_FOR_LOCAL_GIT_REPO` (`lib/src/git.rs`). Because a remote
+/// literally named `git` would collide with this sentinel, such a name must
+/// be rejected when remotes are configured.
+pub const REMOTE_NAME_FOR_LOCAL_GIT_REPO: &str = "git";
+
+/// The kind of Git ref [`parse_git_ref`] recognizes. Ported from jj's
+/// `GitRefKind` (`lib/src/git.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitRefKind {
+    /// `refs/heads/<name>` or `refs/remotes/<remote>/<name>`.
+    Branch,
+    /// `refs/tags/<name>`.
+    Tag,
+}
+
+/// A parsed Git ref name: its kind, short name, and owning remote. Borrows
+/// from the input ref name. Ported from jj's `RemoteRefSymbol` shape
+/// (`lib/src/git.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedGitRef<'a> {
+    pub kind: GitRefKind,
+    /// Short name beneath the namespace, e.g. `main` for `refs/heads/main`
+    /// or `feature/x` for `refs/remotes/origin/feature/x`.
+    pub name: &'a str,
+    /// Owning remote. Local refs (`refs/heads/*`, `refs/tags/*`) report
+    /// [`REMOTE_NAME_FOR_LOCAL_GIT_REPO`].
+    pub remote: &'a str,
+}
+
+/// Parse a fully-qualified Git ref name into its [`GitRefKind`], short name,
+/// and owning remote. Returns `None` for refs outside the
+/// branch/remote-branch/tag namespaces (e.g. `refs/notes/*`, `HEAD`).
+///
+/// Ported from jj's `parse_git_ref` (`lib/src/git.rs`); like jj, the symbolic
+/// `HEAD` and `refs/remotes/<remote>/HEAD` entries are not treated as refs.
+pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
+    if let Some(name) = ref_name.strip_prefix("refs/heads/") {
+        // Git rejects `HEAD` as a branch name.
+        (name != "HEAD").then_some(ParsedGitRef {
+            kind: GitRefKind::Branch,
+            name,
+            remote: REMOTE_NAME_FOR_LOCAL_GIT_REPO,
+        })
+    } else if let Some(remote_and_name) = ref_name.strip_prefix("refs/remotes/") {
+        let (remote, name) = remote_and_name.split_once('/')?;
+        // `refs/remotes/<remote>/HEAD` is the remote's symbolic default, not a
+        // real remote-tracking branch.
+        (name != "HEAD").then_some(ParsedGitRef {
+            kind: GitRefKind::Branch,
+            name,
+            remote,
+        })
+    } else {
+        ref_name
+            .strip_prefix("refs/tags/")
+            .map(|name| ParsedGitRef {
+                kind: GitRefKind::Tag,
+                name,
+                remote: REMOTE_NAME_FOR_LOCAL_GIT_REPO,
+            })
+    }
+}
+
+/// A Git refspec: an optional `source`, a `destination`, and a `forced` (`+`)
+/// marker. Ported from jj's `RefSpec` (`lib/src/git.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefSpec {
+    forced: bool,
+    /// `None` encodes a delete refspec (`:destination`).
+    source: Option<String>,
+    destination: String,
+}
+
+impl RefSpec {
+    /// A forced (`+`) refspec mapping `source` onto `destination`.
+    pub fn forced(source: impl Into<String>, destination: impl Into<String>) -> Self {
+        Self {
+            forced: true,
+            source: Some(source.into()),
+            destination: destination.into(),
+        }
+    }
+
+    /// A delete refspec (`:destination`). Not forced: deleting a destination
+    /// that has no source cannot lose work.
+    pub fn delete(destination: impl Into<String>) -> Self {
+        Self {
+            forced: false,
+            source: None,
+            destination: destination.into(),
+        }
+    }
+
+    /// Render in `git` refspec syntax, including the leading `+` when forced.
+    pub fn to_git_format(&self) -> String {
+        format!(
+            "{}{}",
+            if self.forced { "+" } else { "" },
+            self.to_git_format_not_forced()
+        )
+    }
+
+    /// Render in `git` refspec syntax without the leading `+`, even when forced.
+    pub fn to_git_format_not_forced(&self) -> String {
+        format!("{}:{}", self.source.as_deref().unwrap_or(""), self.destination)
+    }
+}
+
+/// A negative refspec (`^source`) excluding refs from a fetch or push. Ported
+/// from jj's `NegativeRefSpec` (`lib/src/git.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegativeRefSpec {
+    source: String,
+}
+
+impl NegativeRefSpec {
+    /// A negative refspec excluding `source`.
+    pub fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+        }
+    }
+
+    /// Render in `git` refspec syntax (`^source`).
+    pub fn to_git_format(&self) -> String {
+        format!("^{}", self.source)
+    }
+}
+
+/// The fetch refspecs heddle uses to mirror a remote: every branch and every
+/// heddle note, forced. Built through [`RefSpec`] so the wire format has a
+/// single typed source of truth.
+fn heddle_mirror_fetch_refspecs() -> [String; 2] {
+    [
+        RefSpec::forced("refs/heads/*", "refs/heads/*").to_git_format(),
+        RefSpec::forced("refs/notes/*", "refs/notes/*").to_git_format(),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitPushScope {
     CurrentThread,
@@ -2319,7 +2460,7 @@ fn clone_url_to_bare_via_gix(
     let mut remote = repo.remote_at(url.clone()).map_err(git_err)?;
     remote
         .replace_refspecs(
-            ["+refs/heads/*:refs/heads/*", "+refs/notes/*:refs/notes/*"],
+            heddle_mirror_fetch_refspecs().iter().map(String::as_str),
             gix::remote::Direction::Fetch,
         )
         .map_err(git_err)?;
@@ -2469,7 +2610,7 @@ fn fetch_network_remote(
     let mut remote = mirror_repo.remote_at(url.clone()).map_err(git_err)?;
     remote
         .replace_refspecs(
-            ["+refs/heads/*:refs/heads/*", "+refs/notes/*:refs/notes/*"],
+            heddle_mirror_fetch_refspecs().iter().map(String::as_str),
             gix::remote::Direction::Fetch,
         )
         .map_err(git_err)?;

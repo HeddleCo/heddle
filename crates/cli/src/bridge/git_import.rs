@@ -14,7 +14,7 @@ pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, RefNamespace, RefUpdate, SyncMapping,
-        apply_ref_updates, copy_reachable_objects, git_err, open_repo,
+        apply_ref_updates, copy_reachable_objects, git_err, open_repo, parse_git_ref,
         thread_is_unclaimed_bootstrap,
     },
     git_notes,
@@ -83,6 +83,7 @@ fn remote_tracking_ref_suggestions(
         let Some(_) = reference.target().try_id() else {
             continue;
         };
+        let full = reference.name().as_bstr().to_string();
         let short = reference.name().shorten().to_string();
         if short.ends_with("/HEAD") {
             continue;
@@ -90,10 +91,10 @@ fn remote_tracking_ref_suggestions(
         if peel_to_commit_oid(repo, &mut reference)?.is_err() {
             continue;
         }
-        let Some((_remote, branch)) = short.split_once('/') else {
+        let Some(parsed) = parse_git_ref(&full) else {
             continue;
         };
-        if missing.contains(branch) {
+        if missing.contains(parsed.name) {
             suggestions.push(format!(
                 "Remote-tracking branch '{short}' exists. Import it with `heddle bridge git import --ref {short}`. If you want a local branch with the shorter name later, create it in Heddle and sync it back through `heddle push`."
             ));
