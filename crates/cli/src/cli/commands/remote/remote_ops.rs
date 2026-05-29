@@ -3,9 +3,10 @@
 
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{borrow::Cow, collections::BTreeMap, fs, path::Path};
 
 use anyhow::{Context, Result};
+use gix::bstr::{BStr, BString};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::PullMaterialization;
 use objects::{
@@ -695,12 +696,17 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             if !merged_remote_items(&repo)?.contains_key(&name) {
                 return Err(RecoveryAdvice::remote_not_found(&name).into());
             }
+            // Remove the git-overlay side FIRST so its uneditable-include
+            // refusal (raised before any file is touched) leaves the Heddle
+            // config unmutated. Persisting the Heddle removal ahead of this
+            // fallible step stranded the repo in partial state: the Heddle
+            // remote gone, the Git remote still present.
+            sync_git_overlay_remote_remove(&repo, &name)?;
             let mut cfg = RemoteConfig::open(&repo).map_err(anyhow::Error::msg)?;
             match cfg.remove(&name) {
                 Ok(()) | Err(RemoteError::NotFound(_)) => {}
                 Err(err) => return Err(anyhow::Error::msg(err)),
             }
-            sync_git_overlay_remote_remove(&repo, &name)?;
             render_remote_mutation(
                 RemoteMutationOutput {
                     output_kind: "remote_remove",
@@ -1181,115 +1187,78 @@ fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add or replace the `[remote "<name>"]` section in a single physical config
+/// file via `gix_config`'s structured editing, so the writer resolves the same
+/// section the reader does regardless of the surface header form (quoted
+/// `[remote "x"]`, legacy dotted `[remote.x]`, or comment-suffixed). Every
+/// existing definition of the remote is dropped before a fresh canonical
+/// section is appended, so an upsert replaces rather than appends a duplicate
+/// that the first-seen (stale) section would win over on the next read.
 fn upsert_git_remote_config(config_path: &Path, name: &str, url: &str) -> Result<()> {
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let original = fs::read_to_string(config_path).unwrap_or_default();
-    let mut rewritten = String::new();
-    let mut skipping_remote = false;
-    for line in original.lines() {
-        if let Some(section_name) = parse_git_remote_section_name(line) {
-            skipping_remote = section_name == name;
-            if skipping_remote {
-                continue;
-            }
-        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
-            skipping_remote = false;
-        }
-        if !skipping_remote {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        }
-    }
-    if !rewritten.is_empty() && !rewritten.ends_with("\n\n") {
-        rewritten.push('\n');
-    }
-    rewritten.push_str(&format!(
-        "[remote \"{}\"]\n\turl = {}\n\tfetch = {}\n",
-        git_config_quoted_section(name),
-        git_config_quoted_value(url),
-        git_config_quoted_value(&format!("+refs/heads/*:refs/remotes/{name}/*"))
-    ));
-    write_file_atomic(config_path, rewritten.as_bytes())?;
+    let mut file = load_config_file_for_edit(config_path)?;
+    remove_remote_sections(&mut file, name);
+    let mut section = file
+        .new_section("remote", Some(Cow::Owned(BString::from(name))))
+        .with_context(|| format!("invalid git remote section name '{name}'"))?;
+    section.push(git_config_key("url")?, Some(BStr::new(url)));
+    let fetch = format!("+refs/heads/*:refs/remotes/{name}/*");
+    section.push(git_config_key("fetch")?, Some(BStr::new(fetch.as_str())));
+    let serialized = file.to_bstring();
+    write_file_atomic(config_path, &serialized)?;
     Ok(())
 }
 
+/// Remove every `[remote "<name>"]` section from a single physical config file
+/// via `gix_config`, matching whatever header form the reader resolves the
+/// remote through. No-ops (no write) when the file is absent or defines no such
+/// remote.
 fn remove_git_remote_config(config_path: &Path, name: &str) -> Result<()> {
-    let Ok(original) = fs::read_to_string(config_path) else {
-        return Ok(());
-    };
-    let mut rewritten = String::new();
-    let mut skipping_remote = false;
-    let mut removed = false;
-    for line in original.lines() {
-        if let Some(section_name) = parse_git_remote_section_name(line) {
-            skipping_remote = section_name == name;
-            if skipping_remote {
-                removed = true;
-                continue;
-            }
-        } else if line.trim_start().starts_with('[') && line.trim_end().ends_with(']') {
-            skipping_remote = false;
-        }
-        if !skipping_remote {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-        }
-    }
-    if !removed {
+    if !config_path.exists() {
         return Ok(());
     }
-    write_file_atomic(config_path, rewritten.as_bytes())?;
+    let mut file = load_config_file_for_edit(config_path)?;
+    if !remove_remote_sections(&mut file, name) {
+        return Ok(());
+    }
+    let serialized = file.to_bstring();
+    write_file_atomic(config_path, &serialized)?;
     Ok(())
 }
 
-fn parse_git_remote_section_name(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    let inner = trimmed.strip_prefix("[remote \"")?.strip_suffix("\"]")?;
-    unescape_git_config_string(inner)
-}
-
-fn unescape_git_config_string(value: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            out.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            '\\' => out.push('\\'),
-            '"' => out.push('"'),
-            'n' => out.push('\n'),
-            't' => out.push('\t'),
-            'r' => out.push('\r'),
-            'b' => out.push('\u{0008}'),
-            escaped => out.push(escaped),
-        }
+/// Drop every `[remote "<name>"]` section from `file`, returning whether any
+/// was removed. `gix_config` keys sections by parsed name + subsection, so this
+/// matches the remote regardless of its surface header syntax. `remove_section`
+/// removes only the last match, so loop until none remain.
+fn remove_remote_sections(file: &mut gix_config::File<'static>, name: &str) -> bool {
+    let mut removed = false;
+    while file
+        .remove_section("remote", Some(BStr::new(name)))
+        .is_some()
+    {
+        removed = true;
     }
-    Some(out)
+    removed
 }
 
-fn git_config_quoted_section(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn git_config_quoted_value(value: &str) -> String {
-    let mut quoted = String::from("\"");
-    for ch in value.chars() {
-        match ch {
-            '\\' => quoted.push_str("\\\\"),
-            '"' => quoted.push_str("\\\""),
-            '\n' => quoted.push_str("\\n"),
-            '\t' => quoted.push_str("\\t"),
-            '\r' => quoted.push_str("\\r"),
-            '\u{0008}' => quoted.push_str("\\b"),
-            ch => quoted.push(ch),
-        }
+/// Load a single physical config file for in-place editing. Includes are NOT
+/// followed: the caller already resolved the physical file that defines the
+/// remote (see `defining_files_for`), and a write must round-trip that file
+/// alone rather than inline the content of any files it includes. A missing
+/// file yields an empty document so a brand-new remote can be appended.
+fn load_config_file_for_edit(config_path: &Path) -> Result<gix_config::File<'static>> {
+    if !config_path.exists() {
+        return Ok(gix_config::File::default());
     }
-    quoted.push('"');
-    quoted
+    gix_config::File::from_path_no_includes(config_path.to_path_buf(), gix_config::Source::Local)
+        .with_context(|| format!("reading git config at {}", config_path.display()))
+}
+
+fn git_config_key(key: &'static str) -> Result<gix_config::parse::section::ValueName<'static>> {
+    gix_config::parse::section::ValueName::try_from(key)
+        .with_context(|| format!("invalid git config key '{key}'"))
 }
 
 #[cfg(feature = "client")]
