@@ -27,10 +27,15 @@ use crate::cli::{Cli, should_output_json, style};
 /// (ORIG_HEAD-style): each undo overwrites it with its own pre-undo tip.
 ///
 /// Invariant: this is a heddle-INTERNAL ref (`refs::RefManager::set_undo_recovery`,
-/// stored at `.heddle/UNDO_RECOVERY`), NOT a user marker. No heddle-internal
-/// bookkeeping ref may live in a user-writable namespace (`refs/markers/`,
-/// `refs/threads/`, `refs/remotes/`): doing so coupled recovery to a
-/// user-writable name and let the `MarkerDelete` undo inverse collide with it.
+/// stored as `UNDO_RECOVERY` beside the per-checkout `HEAD`), NOT a user marker.
+/// It is scoped to the same checkout as the undo/redo history it recovers
+/// (`op_scope`): in objectstore-pointer worktrees the ref root is shared, so a
+/// shared-root recovery pointer would let a `heddle undo` in one checkout
+/// clobber a sibling's — keying it to the local `HEAD` keeps each checkout's
+/// recovery state its own. No heddle-internal bookkeeping ref may live in a
+/// user-writable namespace (`refs/markers/`, `refs/threads/`, `refs/remotes/`):
+/// doing so coupled recovery to a user-writable name and let the `MarkerDelete`
+/// undo inverse collide with it.
 /// `apply_undo_batch` replays only user-marker/thread inverses, so it can never
 /// see or clobber this internal pointer. `heddle goto .undo-recovery` resolves
 /// it via the reserved [`refs::UNDO_RECOVERY_HANDLE`], which `resolve_refspec`
