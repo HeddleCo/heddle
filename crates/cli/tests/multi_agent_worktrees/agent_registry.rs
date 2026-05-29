@@ -241,3 +241,73 @@ fn start_without_name_is_rejected() {
     let result = heddle(&["start"], Some(main.path()));
     assert!(result.is_err(), "start without a thread name should fail");
 }
+
+#[test]
+fn actor_spawn_no_thread_attaches_to_current_thread_without_minting() {
+    let main = setup_repo("base.txt", "base");
+    let current = head_track(main.path());
+    assert!(
+        !current.is_empty(),
+        "repo should be on a thread after init + capture"
+    );
+
+    let before: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "thread", "list"], Some(main.path())).unwrap(),
+    )
+    .unwrap();
+    let before_count = before["threads"].as_array().unwrap().len();
+
+    let out = heddle(
+        &[
+            "--output",
+            "json",
+            "actor",
+            "spawn",
+            "--no-thread",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-sonnet-4-6",
+        ],
+        Some(main.path()),
+    )
+    .expect("actor spawn --no-thread should succeed");
+    let v: Value = serde_json::from_str(&out).unwrap();
+
+    // The detected agent is attached to the current thread, not a fresh
+    // `actor/<session>` thread.
+    assert_eq!(
+        v["actor"]["thread"].as_str(),
+        Some(current.as_str()),
+        "no-thread spawn should attach to the current thread: {out}"
+    );
+    assert!(
+        !v["actor"]["thread"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("actor/"),
+        "no-thread spawn must not mint a stray actor/<session> thread: {out}"
+    );
+    assert_eq!(v["actor"]["provider"].as_str(), Some("anthropic"));
+    assert_eq!(v["actor"]["model"].as_str(), Some("claude-sonnet-4-6"));
+
+    // No new thread ref was created by the spawn.
+    let after: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "thread", "list"], Some(main.path())).unwrap(),
+    )
+    .unwrap();
+    let threads = after["threads"].as_array().unwrap();
+    assert_eq!(
+        threads.len(),
+        before_count,
+        "no-thread spawn must not add a thread: {}",
+        serde_json::to_string(&after).unwrap()
+    );
+    assert!(
+        threads
+            .iter()
+            .all(|thread| !thread["name"].as_str().unwrap_or("").starts_with("actor/")),
+        "no actor/* thread should exist after --no-thread spawn: {}",
+        serde_json::to_string(&after).unwrap()
+    );
+}
