@@ -281,17 +281,27 @@ fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::C
     Some(help)
 }
 
-/// Whether `token` names an option on `command` (by its `--long` spelling)
-/// and, if so, whether the following token is that option's value. The
-/// single source of truth for the valued-global skip shared by the
-/// `--help` and `--help-agent` intercepts, so they can't drift on which
-/// globals (`-C <path>`, `--output <fmt>`, ...) consume a following value.
+/// Whether `token` names an option on `command` — in either its `--long`
+/// or `-x` separated spelling — and, if so, whether the following token is
+/// that option's value. The single source of truth for the valued-global
+/// skip shared by the `--help` and `--help-agent` intercepts, so they can't
+/// drift on which globals (`-C <path>`, `--output <fmt>`, ...) consume a
+/// following value. Derived from clap's own arg definitions, so short and
+/// long forms stay covered as globals are added or renamed.
+///
+/// Only the *separated* spellings (`-C path`, `--output fmt`) need a
+/// following-value skip. Attached spellings (`--output=fmt`, `-Cpath`,
+/// `-C=path`) carry the value in the same token, so they never set
+/// `skip_next`; the leading-dash fall-through in the scan loops already
+/// drops them without consuming the next token.
 fn global_option_takes_value(command: &clap::Command, token: &str) -> Option<bool> {
     command
         .get_arguments()
         .find(|arg| {
-            arg.get_long()
-                .is_some_and(|long| token == format!("--{long}"))
+            arg.get_long().is_some_and(|long| token == format!("--{long}"))
+                || arg
+                    .get_short()
+                    .is_some_and(|short| token == format!("-{short}"))
         })
         .map(|arg| arg.get_action().takes_values())
 }
@@ -1033,6 +1043,36 @@ mod tests {
             )
             .is_none(),
             "a non-capture verb behind a valued global should still fall through"
+        );
+    }
+
+    /// heddle#278 r3 (cid 3327231819). The valued-global skip must also cover
+    /// the SHORT spelling of valued globals — `-C <path>` — not just the long
+    /// `--output <fmt>`. With a repo dir literally named `capture`, the `-C`
+    /// VALUE must not be mistaken for the verb. Close-the-class: every valued
+    /// global is recognized in both `-x` and `--long` separated forms.
+    #[test]
+    fn capture_help_agent_intercept_skips_short_valued_globals_before_verb() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let owned = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(
+            print_capture_agent_help_for_raw(
+                &cmd,
+                &owned(&["-C", "capture", "capture", "--help-agent"])
+            )
+            .is_some(),
+            "`-C capture capture --help-agent` (repo dir named `capture`) should \
+             reveal the agent flags, not pick the `-C` value as the verb"
+        );
+        assert!(
+            print_capture_agent_help_for_raw(
+                &cmd,
+                &owned(&["-C", "capture", "status", "--help-agent"])
+            )
+            .is_none(),
+            "`-C capture status --help-agent` should fall through — the `-C` \
+             value must not be read as the `capture` verb"
         );
     }
 
