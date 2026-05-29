@@ -920,13 +920,23 @@ requires widening the single-`ChangeId` request shape:
    already a `Vec<RefEntry>` (`crates/proto/src/message_refs.rs:85`), so `ListRefs`
    advertises **one `RefEntry` per maximal served state** in the antichain. The
    moving ref `<thread>` is the entry for the unique dominating served state when
-   one exists; when the antichain has ≥2 incomparable maximal served states, each
-   *additional* maximal state gets its own `RefEntry` under a **deterministic
-   derived name** — `<thread>` for the topologically/lexicographically-first,
-   `<thread>@<changeid-prefix>` for each other maximal state, the name a pure
-   function of the served `ChangeId` (`RefEntry.change_id`, `:91`) so it is stable,
-   identity-bound, and never reused for a different state. The antichain is thereby
-   **discoverable**: the client reads every served root out of the one `Vec`.
+   one exists; when the antichain has ≥2 incomparable maximal served states,
+   `<thread>` **stays on its prior advertised member** — the served state it was
+   already advertising, which is still one of the maximal members — and **every
+   *other*** maximal state gets its own `RefEntry` under a **deterministic derived
+   name** `<thread>@<changeid-prefix>`, the name a pure function of the served
+   `ChangeId` (`RefEntry.change_id`, `:91`) so it is stable, identity-bound, and
+   never reused for a different state. `<thread>` is **never** assigned by
+   topological or lexicographic order among the members: picking a side by ordering
+   could move the advertised main ref *sideways* to an incomparable sibling while
+   renaming the old tip to a synthetic ref, which a client would see as the main ref
+   jumping to an unrelated branch — a non-fast-forward, unstable change, the exact
+   opposite of the §5.0/§7.1 forward-only guarantee. (If `<thread>` has *no* prior
+   advertised member at this audience — the thread's very first advertisement
+   already forks into an antichain — the member it adopts is fixed **once** by the
+   deterministic rule and then held; chosen once, never re-chosen.) The antichain is
+   thereby **discoverable**: the client reads every served root out of the one
+   `Vec`, with `<thread>` stable on its own line.
 2. **Wire request — single-root pull, issued per root.** Each `Pull` carries one
    `PullRequest.target_state` (`crates/proto/src/message_pushpull.rs:91`) and each
    `PullReady.remote_state` echoes one served root (`:118`), so the client issues
@@ -938,9 +948,12 @@ requires widening the single-`ChangeId` request shape:
    issuing N pulls, not in a widened `target_state`.
 3. **Git mirror — deterministic synthetic refs.** `refs/heads/<thread>` (one
    FF-only ref) advances only to a unique dominating served state, else retains its
-   tip. Each *other* incomparable maximal served state is published under a
-   deterministic synthetic branch `refs/heads/<thread>@<changeid-prefix>` so a
-   plain `git clone` can still fetch every visible side. Adding a synthetic ref is
+   prior member — **never sideways to a sibling antichain member** (the FF guard
+   would reject the non-fast-forward move anyway, but the rule is stated so no
+   surface picks a sibling by ordering). Each *other* incomparable maximal served
+   state is published under a deterministic synthetic branch
+   `refs/heads/<thread>@<changeid-prefix>` so a plain `git clone` can still fetch
+   every visible side. Adding a synthetic ref is
    forward-only (it never rewinds `<thread>`); the names are pure functions of the
    served `ChangeId`, so re-runs are deterministic and no published ref is ever
    rewritten (r4 identity-stability). A synthetic ref retires **only** once a
@@ -948,6 +961,22 @@ requires widening the single-`ChangeId` request shape:
    state — at which point the state is reachable from `<thread>`, so removing the
    redundant pointer loses no reachability (it is not "dropping an already-public
    ref": access to the commit survives via `<thread>`).
+
+**General rule — ref placement among antichain members is stable and forward-only
+(closes cid 3326047821).** A served *moving* ref (`<thread>` on the wire,
+`refs/heads/<thread>` on the mirror, and every single-tip ref) **never moves
+laterally to a sibling antichain member and never regresses.** It advances only
+forward along its own line — to a unique served *descendant* that dominates the
+rest — and otherwise holds its prior member; once `<thread>`'s member is decided it
+stays decided. The *other* maximal members are reached **only** through their own
+derived/synthetic names (`<thread>@<changeid-prefix>`), pure functions of the
+served `ChangeId`, so they never collide with or displace `<thread>`. Any
+ordering-based selection (topological, lexicographic) among incomparable members is
+**forbidden for the moving ref**: it would let the advertised tip jump between
+unrelated branches — an unstable, non-fast-forward move the public consumer cannot
+distinguish from a rewritten ref (§5.0/§7.1). Ordering is admissible *only* to mint
+the stable derived names for the non-moving siblings, never to choose which member
+`<thread>` itself names.
 
 **Cross-path disclosure ordering — forward-only regardless of order.** When a
 merge `M` has embargoed ancestors on ≥2 different parent paths that disclose at
@@ -1103,17 +1132,66 @@ raise it: a config default that drifts more-open does **not** retroactively prom
 already-captured states, because promotion is an **explicit, signed, audited
 record**, not a side effect of mutable state.
 
-**Multi-host coordination (impl requirement).** Because the authoritative host
-records the promotion as a persisted `StateVisibility` + `OpRecord`, every other
-serve/export host learns it the same way it learns any state — by **syncing the
-record**, which is itself gated so it travels only once its state is served (§8.4).
-A non-authoritative host **must not** fire a schedule from its own clock or
-recompute the tier locally; it serves strictly from the persisted records it has
-synced. The implementation must therefore (a) designate the single authoritative
-host that fires `embargo_until` (the weft serve host, O5), and (b) propagate the
-materialized promotion record to every other host before (or together with) the
-bytes that promotion authorizes — so no lagging or clock-skewed host can serve a
-state at a stricter tier than the one already served elsewhere.
+**Multi-host coordination — propagate promotion records *before* a host gates
+(impl requirement, closes cid 3326047819).** A promotion record is the authority
+that makes `S` servable to a broader audience, so it must reach a secondary
+serve/export host **before** that host can correctly gate `S`. Shipping it via the
+§8.4 audience-gate would be **circular**: §8.4 withholds a record until *its own
+state* is served to the audience, but a lagging host cannot serve `S` until it
+holds the promotion record, and cannot receive the record until it serves `S` — so
+a host that still sees `S` as private would never learn the superseding `public`
+fact and would keep gating a now-public state as private, **re-hiding** it from its
+serve (a §5.4 violation in the multi-host plane). The fix is an explicit
+ordering — **propagate/confirm, then gate**:
+
+1. **The §8.4 gate is client-facing; it is not the host-to-host channel.** §8.4
+   governs what a host serves to an under-tier *puller* — it stops an *embargo*
+   (still-private) record from betraying a hidden commit's existence. A peer
+   serve/export host is **not** an under-tier audience; it is a replica under the
+   host-to-host trust list (a peer's signed record is honored iff its key is
+   trusted, §8.4). Authoritative visibility records — the **promotion** records
+   especially — replicate host-to-host as facts, **not** behind the audience gate
+   that hides them from clients.
+2. **Promotion records propagate ahead of (or together with) the bytes they
+   authorize, and a host confirms it holds the authoritative record set before it
+   applies gating.** A host gates a request only against the promotion facts it has
+   authoritatively received; the materialized `public` record (+ `OpRecord`) lands
+   on a peer **before** — never after — that peer fields a serve that could observe
+   `S`. This rides the same propagation path redactions already use: a signed
+   sidecar record travels alongside the objects during sync and the receiver
+   verifies signature + trust list and persists it verbatim
+   (`crates/client/src/grpc_hosted/sync.rs:268-302`); the `StateVisibility`
+   promotion record replicates by the identical mechanism, just ordered **before**
+   the receiving host gates.
+3. **A host missing the authoritative records must fail toward last-known-public,
+   never re-hide.** If a host detects it may be lagging (it cannot confirm it holds
+   the records a peer may hold), it must **not** gate in the unsafe direction — it
+   does not recompute `S` as private and re-hide it. It either **withholds serving**
+   until it has synced the records, or **serves from its last-known-public state** —
+   but it **never silently re-embargoes** a state that may already be public
+   elsewhere. Re-hiding is the one §5.4-forbidden direction, so the failure mode is
+   biased toward disclosing an already-public fact, never toward re-embargo.
+
+A non-authoritative host still **must not** fire a schedule from its own clock or
+recompute the tier locally (§5.4 monotonic-fact rule); it serves strictly from the
+persisted promotion records it has confirmed it holds. So the implementation must
+(a) designate the single authoritative host that fires `embargo_until` (the weft
+serve host, O5), (b) **propagate each materialized promotion record to every other
+host, and confirm its presence there, before that host gates `S`**
+(record-before-gate, not record-after-serve), and (c) make a host that lacks the
+authoritative records fail toward last-known-public — so no lagging or clock-skewed
+host can serve a state at a stricter tier than the one already served elsewhere.
+
+**General rule (propagate-before-gate).** Every host gates visibility **only** on
+promotion facts it has authoritatively received; **no host ever re-hides a state
+because it is missing or has a stale promotion record.** Gating is applied only
+after the authoritative record set is propagated and confirmed, and a host that
+cannot confirm it holds the records fails toward last-known-public, never toward
+re-embargo. This is the host-plane companion to the persisted-monotonic-fact
+invariant above: that invariant forbids recomputing visibility from a *mutable
+input on one host*; this rule forbids gating from an *un-propagated record set
+across hosts*. Both converge on the same §5.4 guarantee — once any host has served
+`S` to an audience, no host, clock, or config drift can walk that back.
 
 ### 5.5 Oplog records (append at the tail — hard constraint)
 
@@ -1380,6 +1458,16 @@ an embargoed commit. So a visibility record for state `S` is served to audience
 withheld `S` leaves. A public puller therefore sees neither the embargoed state
 *nor* the record announcing it — closing the obvious sibling of the header leak.
 
+**This gate is *client-facing* only — it does not govern host-to-host
+replication.** It decides what a serve host hands an under-tier *puller*; it is
+**not** the channel by which one authoritative serve/export host replicates records
+to another. A peer host is a trusted replica, not an under-tier audience, so
+authoritative records — **promotion** records above all — propagate host-to-host as
+facts *before* the receiving host applies this client-facing gate (§5.4
+"propagate-before-gate"). Reading this §8.4 gate as the host-to-host transport
+would be circular — a lagging host could never learn the `public` fact that lets it
+serve `S` — which §5.4 explicitly forecloses.
+
 ---
 
 ## 9. Open questions
@@ -1438,8 +1526,13 @@ withheld `S` leaves. A public puller therefore sees neither the embargoed state
   Every host — including a skewed/rolled-back one or a lagging second host — then
   reads the tier from the **persisted record** (§5.1), never from its own clock, so a
   fired-and-served promotion can never be recomputed back to `private`. A
-  client-evaluated clock is rejected outright; multi-host propagation of the
-  materialized record is an impl requirement (§5.4, issue #5).
+  client-evaluated clock is rejected outright. Multi-host propagation is
+  **propagate-before-gate** (§5.4): the materialized record replicates host-to-host
+  (over the redaction-style record-sync path, not the §8.4 client gate) and is
+  confirmed present on a host **before** that host gates the state; a host that
+  cannot confirm it holds the authoritative records **fails toward last-known-public
+  and never re-hides** — so the missing-record case never re-embargoes a state
+  already served elsewhere. Impl requirement (§5.4, issues #4/#5).
 - **O6 — signature scope.** A `State.signature` signs the state bytes; the
   visibility sidecar is outside that, so an embargo declaration needs its **own**
   signed payload (mirror `Redaction::canonical_signing_payload`,
@@ -1494,9 +1587,14 @@ issues are checked against:
   bases** (gate selects no base); frontier **computation** (least-fixed-point
   topological pass) and **transmission** without leaking (absence ≡ non-existence);
   the **multi-root protocol path** (advertise antichain, N single-root pulls,
-  synthetic Git refs); **cross-path disclosure ordering** (forward-only under every
-  interleaving); **transitive promotion** up all parent paths; the **one-way
-  tier constraint** — no re-embargo of a served state; and **ref
+  synthetic Git refs); **antichain ref-placement stability** — the moving ref
+  (`<thread>` / `refs/heads/<thread>`) is stable + forward-only across antichain
+  members: it advances only to a dominating served descendant, else holds its prior
+  member, and **never moves laterally to a sibling member or regresses** (no
+  ordering-based selection of the moving ref, §5.3); **cross-path disclosure
+  ordering** (forward-only under every interleaving); **transitive promotion** up
+  all parent paths; the **one-way tier constraint** — no re-embargo of a served
+  state; and **ref
   history-reachability** — single-target/frontier-governed refs (branch, tag,
   `HEAD`, wire surfaces: filter/lag/withhold suffices) vs **history-bearing
   auxiliary refs** (state notes `refs/notes/heddle`, and any `+refs/notes/*`) that
@@ -1507,7 +1605,13 @@ issues are checked against:
   from a mutable input** (wall-clock / config / per-host), with the scheduled case
   *materialized before first serve* by the single authoritative host and
   *propagated across hosts*, so clock skew / a rolled-back clock / a second serve
-  host cannot re-embargo an already-served state (§5.4 durability rule).
+  host cannot re-embargo an already-served state (§5.4 durability rule); and
+  **promotion-record propagation/coordination (propagate-before-gate)** — a host
+  gates `S` **only** on promotion facts it has authoritatively received: promotion
+  records replicate host-to-host (not behind the §8.4 client gate, which would be
+  circular) and are confirmed present *before* the host gates, and a host missing
+  the records **fails toward last-known-public, never re-hides** (§5.4 multi-host
+  rule).
 
 1. **impl(objects/repo): `StateVisibility` object + per-state sidecar store.**
    Add `StateVisibility` / `StateVisibilityBlob` (objects), the `visibility/`
@@ -1540,14 +1644,23 @@ issues are checked against:
    an antichain (handles octopus >2-parent merges and criss-cross/multiple merge
    bases — the gate selects no merge base); when the antichain has ≥2 incomparable
    maximal served states, **`ListRefs` advertises one `RefEntry` per maximal served
-   state** into the existing `Vec<RefEntry>` (`message_refs.rs:85`) under
-   deterministic `<thread>@<changeid-prefix>` names, and the client issues **one
+   state** into the existing `Vec<RefEntry>` (`message_refs.rs:85`): `<thread>`
+   **stays on its prior advertised member** and **only the *other* members** get
+   deterministic `<thread>@<changeid-prefix>` names — `<thread>` is **never** chosen
+   by topological/lexicographic order (that would move the main ref sideways to an
+   incomparable sibling, §5.3 "ref placement among antichain members is stable and
+   forward-only"). The client issues **one
    single-root `Pull` per root** (`PullRequest.target_state`, `message_pushpull.rs:91`)
    carrying prior states in `exclude_states` (`:95`) — so every visible side is
    discoverable and requestable without widening the single-`ChangeId` request
-   (§5.3 "protocol path for all merge-frontier roots"). **Transmission must not
-   leak:** no withheld-state count, gap, or placeholder; the `ObjectType::Visibility`
-   record is itself gated so it is served only when its state is (§8.4).
+   (§5.3 "protocol path for all merge-frontier roots"). **Antichain ref-placement
+   stability is a conformance requirement:** assert the advertised `<thread>` tip is
+   forward-only across re-advertisements — it advances only to a served descendant
+   that dominates the antichain, else holds its prior member, and never names a
+   different sibling member than the one it previously advertised. **Transmission
+   must not leak:** no withheld-state count, gap, or placeholder; the
+   `ObjectType::Visibility` record is itself gated so it is served only when its
+   state is **to a client** (§8.4 client-facing gate).
    **Cross-path disclosure ordering** is forward-only under every interleaving, and
    a served state is **never re-embargoed** (one-way tier constraint, §5.4) — reject
    a `StateVisibility` that would lower an already-served state's tier. The serve-time
@@ -1555,8 +1668,15 @@ issues are checked against:
    non-superseded record, `redaction.rs:174`-style), **never recomputed** from
    wall-clock or per-host config (§5.4 monotonic-fact rule); this host is the single
    authority that fires scheduled `embargo_until` promotions, materializing a
-   persisted promotion record before the first public serve and propagating it to
-   other hosts (multi-host coordination, O5). Define the
+   persisted promotion record before the first public serve. **Promotion-record
+   propagation/coordination (propagate-before-gate, §5.4):** the materialized
+   promotion record replicates host-to-host as an authoritative fact — over the
+   record-sync path redactions already use (`crates/client/src/grpc_hosted/sync.rs:268-302`),
+   **not** behind the §8.4 client gate — and a secondary host **confirms it holds
+   the authoritative records before it gates `S`**; a host that cannot confirm fails
+   toward last-known-public (withhold serving or serve last-known-public, **never
+   re-hide**), so no lagging or clock-skewed host re-embargoes a state already
+   served elsewhere (O5). Define the
    grant-role → `AudienceTier` mapping (resolves O2); optional `PromoteVisibility`
    RPC. Blocked by #1; `Scope: multi` (heddle proto + weft).
 5. **impl(bridge): embargo DAG integrity across ALL Git ref-publishing surfaces +
@@ -1605,7 +1725,10 @@ issues are checked against:
      synthetic `refs/heads/<thread>@<changeid-prefix>` (append-only, retires once a
      served descendant reunifies the fork), so a plain `git clone` fetches every
      visible side; `<thread>` itself only ever advances FF to a dominator or
-     retains its tip.
+     retains its prior member — **never moves sideways to a sibling member and never
+     regresses** (antichain ref-placement stability, §5.3). A conformance test must
+     assert `refs/heads/<thread>` is forward-only across re-exports: it never names a
+     different antichain sibling than the one it previously published.
    Audience-aware minting skips under-tier states, but the **ref/tag/note tips are
    decided by the frontier, never the raw mapped state**, so embargoed commits *and
    their descendants* are absent. Disclosure FF-appends the real commits, each
@@ -1618,7 +1741,9 @@ issues are checked against:
    superseding `public` `StateVisibility` + `OpRecord::StateVisibilityPromote`
    *before* the first public serve, and visibility is read from that record, never
    recomputed from wall-clock; the materialized promotion **propagates to every
-   other serve/export host** (multi-host coordination) so no lagging or
+   other serve/export host and is confirmed present there *before* that host gates
+   the state** (propagate-before-gate, §5.4) — and a host missing the authoritative
+   records **fails toward last-known-public, never re-hides** — so no lagging or
    clock-skewed host can re-embargo a state already served elsewhere (resolves O5,
    §5.4). Blocked by #2.
 6. **decision/spike: unify `AnnotationVisibility` into a shared `VisibilityTier`**
