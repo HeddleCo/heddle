@@ -312,11 +312,18 @@ mutation. Detailed in §5–§8.
 
 - **Pros:** preserves `State` immutability and signatures (the sidecar is
   outside the hashed bytes, exactly like `Redaction`, `review_signatures`,
-  `discussions`); promotion is additive and audit-friendly; reuses the entire
-  proven substrate — `AudienceTier` + `visible()` filter + namespace-default
-  resolution + the signed / supersede / fail-closed-trust patterns; enforces at
-  the same chokepoints redaction already guards, so the integration points are
-  known; the serve-side filter is a genuine hard boundary.
+  `discussions`); promotion is additive and audit-friendly; builds on the proven
+  substrate — `AudienceTier`, the `visible()` predicate (extended with a `Private`
+  arm, §5.2), the namespace-default resolution *pattern* (generalized over the
+  tier enum, §8.1), and the signed / supersede / fail-closed-trust patterns; and
+  reuses the redaction *stub renderer* for the cooperative layer. The serve-side
+  filter is a genuine hard boundary.
+- **Caveat on integration points:** visibility does **not** drop in at the exact
+  chokepoints redaction guards. Redaction's chokepoints are blob-keyed; a
+  state-keyed tier predicate has to move one level up to the state walk (§5.3),
+  and the wire filter needs a *new* reachability pass rather than the existing
+  `collect_excluded` (§5.3). The patterns are reused; the precise call sites are
+  not the same.
 - **Cons:** a two-layer mental model (state + visibility sidecar); the *hard*
   serve filter must be implemented in the closed weft serve path (this OSS spike
   can specify the object, the records, the wire-plan exclusion, and the
@@ -459,12 +466,29 @@ operates as `--audience restricted:<embargo-label>`, reusing the already-shipped
 ### 5.3 Enforcement — hard at serve, soft in depth
 
 - **Hard (authoritative), wire serve — weft.** `ListRefs` omits any thread whose
-  tip is above the caller's tier; `Pull`'s object planner excludes states (and
-  objects reachable *only* through them) above the caller's tier — extend the
-  existing `collect_excluded` pass (`object_graph.rs:360`) with a tier predicate
-  keyed off the visibility sidecar and the caller's `AudienceTier` (derived from
-  the auth context + per-thread grant, §2.6). Under-tier bytes never leave the
-  host.
+  tip is above the caller's tier; `Pull`'s object planner withholds states — and
+  the objects reachable *only* through them — above the caller's tier, keyed off
+  the visibility sidecar and the caller's `AudienceTier` (derived from the auth
+  context + per-thread grant, §2.6). Under-tier bytes never leave the host.
+
+  **This needs a new tier-aware reachability pass, not an extension of the
+  existing `collect_excluded` (`object_graph.rs:360`).** `collect_excluded` is the
+  shallow/exclude *negotiation* pass: given refs the puller already has, it
+  blanket-marks **every** tree/blob reachable from each excluded state *and its
+  ancestors* (via `collect_tree_hashes`, `object_graph.rs:402`) as omittable —
+  sound there only because anything dropped is something the recipient already
+  possesses. Tier filtering inverts that precondition: the under-tier puller must
+  *not* receive hidden `N`'s exclusive content but *must* still receive visible
+  child `N+1`'s full tree. Because states are content-addressed snapshots, `N+1`
+  shares most of `N`'s blobs and subtrees (it changed one file); blanket-excluding
+  `N`'s closure would drop those shared objects too, and the public `N+1` could no
+  longer be checked out — the opposite of what §7.1 promises. The correct
+  computation is a **set difference**: withhold only the *hidden-exclusive*
+  closure — objects reachable from the hidden states **minus** the union of the
+  closures of every visible state served in the same response — and serve (or
+  explicitly stub) everything else. That visible-closure-minus-hidden-exclusive
+  pass is the real impl hard-part; `collect_excluded`'s root-exclusion algorithm
+  cannot express it and reusing it as-is would over-withhold.
 - **Soft (defense in depth), local + bridge — heddle OSS.** A **state-tier**
   predicate cannot be evaluated at the redaction chokepoints as they stand. Both
   are *blob/tree-keyed* and receive neither the `ChangeId` nor the caller's
@@ -539,9 +563,9 @@ mirroring the `Redact` / `Purge` audit-trail pattern (`oplog_types.rs:109,123`).
 | `oplog` | tail-append `StateVisibilitySet` / `StateVisibilityPromote` | tail-append rule (`oplog_types.rs:14-21`) |
 | `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); state-tier stub at the **state walk**, not in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
 | bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`); state-tier check + **stub-commit** for under-tier states (§7.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | redaction stub (`git_export.rs:127`), per-state mint (`git_export.rs:213-246`) |
-| `proto` / wire | new `ObjectType::Visibility` in the sync plan (propagate soft records); tier predicate in `collect_excluded` | `emit_redaction_plan` / `collect_excluded` (`object_graph.rs:346,360`) |
+| `proto` / wire | new `ObjectType::Visibility` in the sync plan (propagate soft records, mirroring `emit_redaction_plan`); **new** tier-aware reachability pass = visible-closure **minus** hidden-exclusive closure (NOT a `collect_excluded` extension — that root-exclusion pass over-withholds blobs a visible child shares with a hidden parent, §5.3) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`) |
 | weft (closed) | **authoritative** server-side tier filter in `ListRefs`/`Pull`; grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
-| config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution chain | `resolve_default_visibility` (`namespace_policy.rs:68`) |
+| config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution *precedence pattern* (namespace → repo → fallback) — but `resolve_default_visibility` is typed to `AnnotationVisibility` (`namespace_policy.rs:68,75`), so it must be generalized over the tier enum (ties O4) and its `Internal` fallback replaced with the stricter `Private` (§8.1) | `resolve_default_visibility` (`namespace_policy.rs:68`) |
 
 No change to `State` itself — its tail-append invariant and signatures are
 preserved precisely because visibility lives in the sidecar.
@@ -564,10 +588,13 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
    `restricted:security` (§5.2) — including the otherwise all-seeing `Internal`
    audience. `N+1` keeps the thread default (`public`).
 2. **Public pull (hard).** A reader with public tier calls `Pull`. The weft
-   serve planner excludes `N`'s tree and the blobs reachable *only* through `N`
-   (extended `collect_excluded`, §5.3); `N`'s state *header* may still travel so
-   the DAG is walkable, but its content does not. `N+1` serves in full. The
-   public clone can check out the fix; it cannot reconstruct the exploit.
+   serve planner withholds `N`'s tree and only the blobs/subtrees reachable
+   *exclusively* through `N` — the hidden-exclusive closure, i.e. `N`'s closure
+   **minus** everything `N+1` (served in the same response) also reaches, per the
+   set-difference pass in §5.3. Objects `N+1` shares with `N` still travel, so the
+   fix stays checkout-able; only the exploit-exclusive content is held back. `N`'s
+   state *header* may still travel so the DAG is walkable. `N+1` serves in full.
+   The public clone can check out the fix; it cannot reconstruct the exploit.
 3. **Public Git mirror (DAG integrity).** The bridge must export `N+1` to
    `refs/heads/main`, and `N+1`'s Git parent must resolve. The recommended answer
    is a **stub commit**: `export_state` mints a Git commit for `N` whose tree is
@@ -617,7 +644,9 @@ niche.** The shipped redaction family (§3) is the size and shape to match.
 
 A per-commit visibility flag on `capture`/`snapshot` would be flag-proliferation
 of the worst kind (every commit asks "who can see this?"). Instead, tiers
-**inherit**, resolved through the *existing* chain (`namespace_policy.rs:68`):
+**inherit**, resolved through the same precedence *pattern* as the annotation
+resolver (`namespace_policy.rs:68`, today typed to `AnnotationVisibility` — reuse
+means generalizing it over the tier enum, O4):
 
 1. explicit `heddle visibility set` on the state (the deliberate exception),
 2. the thread's default tier,
@@ -759,9 +788,12 @@ before filing.
    `promote` / `show` / `list`; wire the config-default resolution chain. Blocked
    by #1.
 4. **impl(weft, cross-repo): authoritative serve-side tier filter.** Filter
-   `ListRefs`/`Pull` by caller tier (extend `collect_excluded`); define the
-   grant-role → `AudienceTier` mapping (resolves O2); optional `PromoteVisibility`
-   RPC. Blocked by #1; `Scope: multi` (heddle proto + weft).
+   `ListRefs`/`Pull` by caller tier via a **new tier-aware reachability pass**
+   (visible-closure **minus** hidden-exclusive closure, §5.3) — *not* an extension
+   of the root-exclusion `collect_excluded`, which would over-withhold blobs a
+   visible child shares with a hidden parent; define the grant-role →
+   `AudienceTier` mapping (resolves O2); optional `PromoteVisibility` RPC. Blocked
+   by #1; `Scope: multi` (heddle proto + weft).
 5. **impl(bridge): embargo DAG integrity + scheduled promotion.** Stub-commit for
    embargoed states so child Git parents resolve (resolves O3); `embargo_until`
    auto-promotion at serve (resolves O5). Blocked by #2.
