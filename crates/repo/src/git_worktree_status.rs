@@ -66,7 +66,18 @@ pub fn git_worktree_entry_state(
     let absolute = root.join(path);
     let metadata = match fs::symlink_metadata(&absolute) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+        // `NotFound`: the path is simply gone. `NotADirectory`: an ancestor
+        // is no longer a directory (e.g. tracked `data/item.txt` after `data`
+        // became a regular file — a dir→file type change). In both cases the
+        // indexed path cannot exist in the worktree, which is exactly what
+        // `git status` reports as a deletion; the new file arrives as its own
+        // untracked `added` entry.
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
             return Ok(GitWorktreeEntryState::Deleted);
         }
         Err(error) => return Err(error.into()),
@@ -87,7 +98,7 @@ pub fn git_worktree_entry_state(
             return Ok(GitWorktreeEntryState::Modified);
         }
         let target = fs::read_link(&absolute)?;
-        let target_bytes = symlink_target_bytes(&target);
+        let target_bytes = objects::util::symlink_target_bytes(&target);
         return hash_and_compare(expected_oid, &target_bytes);
     }
 
@@ -127,25 +138,6 @@ fn hash_and_compare(expected_oid: gix::ObjectId, bytes: &[u8]) -> Result<GitWork
     })
 }
 
-/// Read a symlink target as the raw bytes git would store in its blob.
-/// On Unix the target is an arbitrary byte sequence; `to_string_lossy`
-/// would replace non-UTF-8 bytes with U+FFFD and produce a hash that
-/// never matches git's. Use the OS-byte representation directly.
-fn symlink_target_bytes(target: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        target.as_os_str().as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows symlinks store text targets; lossy is acceptable
-        // because the underlying filesystem doesn't preserve arbitrary
-        // byte sequences anyway.
-        target.to_string_lossy().as_bytes().to_vec()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -162,6 +154,22 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let oid = write_blob_hash(b"anything");
         let state = git_worktree_entry_state(temp.path(), "nope.txt", oid, GIT_MODE_REGULAR)
+            .expect("call");
+        assert_eq!(state, GitWorktreeEntryState::Deleted);
+    }
+
+    /// A tracked path whose ancestor became a regular file (a dir→file type
+    /// change: `data/item.txt` after `data` is replaced by a file) raises
+    /// `ENOTDIR`, not `NotFound`. The indexed path still cannot exist, so it
+    /// must report `Deleted` rather than propagating an io error.
+    #[test]
+    fn ancestor_turned_into_file_is_deleted() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // `data` is a regular file; `data/item.txt` therefore has a non-dir
+        // ancestor and cannot be statted.
+        fs::write(temp.path().join("data"), b"now a file").unwrap();
+        let oid = write_blob_hash(b"x\ny\n");
+        let state = git_worktree_entry_state(temp.path(), "data/item.txt", oid, GIT_MODE_REGULAR)
             .expect("call");
         assert_eq!(state, GitWorktreeEntryState::Deleted);
     }
