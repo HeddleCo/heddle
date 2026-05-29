@@ -6790,7 +6790,10 @@ fn verification_blocked_status_and_ready_do_not_claim_actionable_readiness() {
     let status = json_value(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["verification"]["status"], "needs_import");
     assert_eq!(status["coordination_status"], "blocked");
-    assert_eq!(status["thread_state"], "blocked");
+    assert_ne!(
+        status["thread_state"], "blocked",
+        "verification blocker is a health signal carried by coordination_status, not a lifecycle state: {status}"
+    );
     assert!(
         status["blockers"]
             .as_array()
@@ -6882,6 +6885,50 @@ fn verification_blocked_status_and_ready_do_not_claim_actionable_readiness() {
         !merge_stderr.contains("Merge is up to date, but repository verify is blocked")
             && !merge_stderr.contains("Already up to date"),
         "blocked merge preview should not claim a merge verdict: {merge_stderr}"
+    );
+}
+
+// Regression: heddle#306. `status` synthesized `thread_state: "blocked"` from a
+// repository health/verification signal while `thread list` reported the
+// thread record's lifecycle state, so the two verbs disagreed for the same
+// thread at the same instant and `status` emitted a value outside the
+// documented lifecycle enum. `thread_state` is lifecycle-only; the blocker
+// signal belongs to the documented `coordination_status` health field.
+#[test]
+fn thread_state_agrees_across_status_and_thread_list_for_blocked_verification() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    // init without adopt → repository verification is blocked (needs_import),
+    // a health signal that must not rewrite the thread's lifecycle state.
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let status = json_value(temp.path(), &["status", "--output", "json"]);
+    let threads = json_value(temp.path(), &["thread", "list", "--output", "json"]);
+    let thread = threads["threads"]
+        .as_array()
+        .and_then(|threads| threads.iter().find(|thread| thread["name"] == "main"))
+        .expect("main thread should be listed");
+
+    // Same thread, same instant: thread_state must agree across the two verbs.
+    assert_eq!(
+        status["thread_state"], thread["thread_state"],
+        "thread_state must agree across status and thread list:\nstatus={status:#}\nlist={thread:#}"
+    );
+    // ...and stay a lifecycle value, not the health-derived "blocked".
+    assert_ne!(
+        status["thread_state"], "blocked",
+        "verification/dirty-worktree health is not a lifecycle state: {status:#}"
+    );
+    // The blocker still surfaces through the documented health field, on both verbs.
+    assert_eq!(
+        status["coordination_status"], "blocked",
+        "verification blocker should surface via status coordination_status: {status:#}"
+    );
+    assert_eq!(
+        thread["coordination_status"], "blocked",
+        "verification blocker should surface via thread list coordination_status: {threads:#}"
     );
 }
 
