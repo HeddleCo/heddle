@@ -341,7 +341,9 @@ in §5–§8.
   serve gate must be implemented in the closed weft serve path (this OSS spike
   can specify the object, the records, the wire-plan reachability gate, and the
   operator-local stub, but the authoritative withhold lands in weft); time-based
-  auto-promotion introduces a wall-clock trust question (§9, O5).
+  auto-promotion raised a wall-clock trust question — **resolved** by materializing
+  the schedule into a persisted monotonic record before first serve (§5.4, O5), so
+  visibility is never recomputed from a clock.
 
 ### Design C — tier-per-ref (separate threads)
 
@@ -459,8 +461,13 @@ Stored one `rmp-serde` file per state under a `visibility/` directory keyed by
 `ChangeId`, mirroring the redactions store layout
 (`repository_redaction.rs:490-496`, `fs_paths.rs:46-50`). The *effective* tier of
 a state is the latest non-superseded record (mirroring
-`RedactionsBlob::latest`, `redaction.rs:174`), with `embargo_until` evaluated
-against wall-clock at serve time.
+`RedactionsBlob::latest`, `redaction.rs:174`) — a pure function of the **persisted
+records only**, never of wall-clock at read time. `embargo_until` is **not** a
+serve-time predicate: it is an advisory *schedule* that the authoritative host
+converts into a persisted superseding record when it fires (§5.4); the effective
+tier is then read from that record, exactly like a manual `promote`. (This is what
+keeps the tier monotonic under clock skew and across multiple serve hosts — the
+durability rule in §5.4.)
 
 ### 5.2 Map the audiences against the *real* `visible()` table — do not reuse `Internal` for private
 
@@ -1011,9 +1018,16 @@ mutation of the state or the prior record. Two triggers:
 
 - **Manual:** `heddle visibility promote <state>` (§8) — the audited "open it up
   now" moment, recorded as an `OpRecord` (§5.5).
-- **Scheduled:** an `embargo_until` timestamp; the serve filter treats a state as
-  `Public` once wall-clock passes it, without needing a write. (The trust model
-  for clock-based auto-reveal is open question O5.)
+- **Scheduled:** an `embargo_until` timestamp is an advisory *trigger*, **not** a
+  serve-time predicate. When the **authoritative serve host** (O5) first observes
+  wall-clock ≥ `embargo_until`, it **materializes** the promotion *before* the first
+  broader-audience serve — appending the same superseding `public` `StateVisibility`
+  record + `OpRecord::StateVisibilityPromote` (§5.5) that manual `promote` writes.
+  After materialization the state's effective tier is read from that persisted
+  record (§5.1), **never recomputed** from `embargo_until` vs wall-clock. So a
+  scheduled promotion that has fired-and-been-served is a durable fact, not a clock
+  comparison that a skewed/rolled-back clock or a second host could later
+  re-evaluate back to `private` (resolves O5).
 
 **Tier-raising is transitive over ancestry (the dual of downward-closure).**
 Because the gate (§5.3) serves a state only when **every ancestor** is visible to
@@ -1061,6 +1075,45 @@ removal of already-distributed content is the separate, heavyweight `purge` path
 tier.) This makes the reviewer→public and embargo→public transitions safe and the
 public→embargo transition structurally impossible, closing the "can a tier round-trip?"
 question before it is asked.
+
+**Every promotion is a persisted monotonic fact, never a recomputed predicate —
+the durability mechanism that makes one-way hold across clocks and hosts.** The
+one-way rule above is only as strong as the inputs the serve-time decision reads.
+If visibility were recomputed from a **mutable** input — wall-clock
+(`embargo_until`), per-host config, or any re-evaluated predicate — a clock skew, a
+rolled-back clock, a config drift, or a second serve/export host could compute
+`private` *after* another host already served the state `public`, silently
+re-embargoing already-distributed bytes (exactly the §5.4 violation). The invariant
+that forecloses this:
+
+> **Every visibility promotion — manual `promote`, the reviewer-PR `set` (§7.2),
+> the scheduled `embargo_until` lapse, and any future trigger — becomes a
+> persisted, monotonic `StateVisibility` record (+ `OpRecord`, §5.5) at the moment
+> it is first served to a broader audience. The serve-time visibility decision
+> reads that persisted record (the latest non-superseded record,
+> `RedactionsBlob::latest`-style, `redaction.rs:174`), and **never** recomputes
+> public-vs-private from a mutable input (wall-clock, per-host config, a recomputed
+> predicate).**
+
+Inherited defaults (§8.1) are the one resolution that *is* recomputed — but only
+for a state's **initial** tier *before any serve*. The moment a state is first
+served to an audience, that served tier is pinned by a persisted record, so a later
+change to any input can neither lower it (re-embargo, forbidden above) nor silently
+raise it: a config default that drifts more-open does **not** retroactively promote
+already-captured states, because promotion is an **explicit, signed, audited
+record**, not a side effect of mutable state.
+
+**Multi-host coordination (impl requirement).** Because the authoritative host
+records the promotion as a persisted `StateVisibility` + `OpRecord`, every other
+serve/export host learns it the same way it learns any state — by **syncing the
+record**, which is itself gated so it travels only once its state is served (§8.4).
+A non-authoritative host **must not** fire a schedule from its own clock or
+recompute the tier locally; it serves strictly from the persisted records it has
+synced. The implementation must therefore (a) designate the single authoritative
+host that fires `embargo_until` (the weft serve host, O5), and (b) propagate the
+materialized promotion record to every other host before (or together with) the
+bytes that promotion authorizes — so no lagging or clock-skewed host can serve a
+state at a stricter tier than the one already served elsewhere.
 
 ### 5.5 Oplog records (append at the tail — hard constraint)
 
@@ -1152,9 +1205,13 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
    `AudienceTier::Restricted("security")` — the authorized embargo scope (§2.6) —
    pulls and sees `N` in full: same objects, no stub. No other tier, including
    `AudienceTier::Internal`, is admitted by the `Private` arm (§5.2).
-5. **Disclosure — forward-only, never a swap.** On 2026-07-01 the `embargo_until`
-   lapses (or someone runs `heddle visibility promote N`, appending a superseding
-   `public` `StateVisibility` record + `OpRecord::StateVisibilityPromote`, §5.4).
+5. **Disclosure — forward-only, never a swap.** Disclosure happens by one of two
+   routes that converge on the **same persisted record**: either someone runs
+   `heddle visibility promote N`, or on 2026-07-01 the authoritative host observes
+   `embargo_until` has lapsed and **materializes** the promotion (§5.4). Both append
+   a superseding `public` `StateVisibility` record + `OpRecord::StateVisibilityPromote`
+   (§5.4/§5.5) *before* the first public serve; from then on the public tier is read
+   from that record, never recomputed from the clock.
    `N` becomes visible to the public tier, so `N` **and** its now-eligible
    descendants `N+1…` enter the public served set together (the downward-closure
    gate is simply re-evaluated, §5.3). Disclosure is the **first** public export
@@ -1372,11 +1429,17 @@ withheld `S` leaves. A public puller therefore sees neither the embargoed state
   `StateAudience` (more isolation, more duplication of the `visible()` table). The
   `Private` arm changes `visible()` for *all* consumers (annotations/discussions
   could use it too) — confirm that's acceptable, or scope the arm to states.
-- **O5 — clock trust for `embargo_until`.** Auto-promotion on wall-clock means a
-  client/server with a skewed or rolled-back clock could reveal early or hold
-  late. Whose clock is authoritative — only the weft serve host? Should
-  auto-promotion be advisory (the serve host still re-checks) rather than
-  client-evaluated?
+- **O5 — clock trust for `embargo_until` (RESOLVED: advisory trigger →
+  materialized persisted fact).** `embargo_until` is **not** a serve-time predicate
+  any host re-evaluates from its clock. It is an advisory schedule that the **single
+  authoritative serve host** (the weft serve host) fires: when its clock first
+  reaches `embargo_until` it materializes a superseding `public` `StateVisibility`
+  record + `OpRecord::StateVisibilityPromote` (§5.4) *before* the first public serve.
+  Every host — including a skewed/rolled-back one or a lagging second host — then
+  reads the tier from the **persisted record** (§5.1), never from its own clock, so a
+  fired-and-served promotion can never be recomputed back to `private`. A
+  client-evaluated clock is rejected outright; multi-host propagation of the
+  materialized record is an impl requirement (§5.4, issue #5).
 - **O6 — signature scope.** A `State.signature` signs the state bytes; the
   visibility sidecar is outside that, so an embargo declaration needs its **own**
   signed payload (mirror `Redaction::canonical_signing_payload`,
@@ -1438,7 +1501,13 @@ issues are checked against:
   `HEAD`, wire surfaces: filter/lag/withhold suffices) vs **history-bearing
   auxiliary refs** (state notes `refs/notes/heddle`, and any `+refs/notes/*`) that
   must be **rebuilt on withhold** so no embargoed object is reachable through the
-  published ref's history (§5.3).
+  published ref's history (§5.3); and **persisted-monotonic promotion** — every
+  visibility promotion (manual `promote`, reviewer `set`, scheduled `embargo_until`)
+  is a **persisted `StateVisibility` record read at serve time, never recomputed
+  from a mutable input** (wall-clock / config / per-host), with the scheduled case
+  *materialized before first serve* by the single authoritative host and
+  *propagated across hosts*, so clock skew / a rolled-back clock / a second serve
+  host cannot re-embargo an already-served state (§5.4 durability rule).
 
 1. **impl(objects/repo): `StateVisibility` object + per-state sidecar store.**
    Add `StateVisibility` / `StateVisibilityBlob` (objects), the `visibility/`
@@ -1481,7 +1550,13 @@ issues are checked against:
    record is itself gated so it is served only when its state is (§8.4).
    **Cross-path disclosure ordering** is forward-only under every interleaving, and
    a served state is **never re-embargoed** (one-way tier constraint, §5.4) — reject
-   a `StateVisibility` that would lower an already-served state's tier. Define the
+   a `StateVisibility` that would lower an already-served state's tier. The serve-time
+   tier decision **reads the persisted `StateVisibility` record** (the latest
+   non-superseded record, `redaction.rs:174`-style), **never recomputed** from
+   wall-clock or per-host config (§5.4 monotonic-fact rule); this host is the single
+   authority that fires scheduled `embargo_until` promotions, materializing a
+   persisted promotion record before the first public serve and propagating it to
+   other hosts (multi-host coordination, O5). Define the
    grant-role → `AudienceTier` mapping (resolves O2); optional `PromoteVisibility`
    RPC. Blocked by #1; `Scope: multi` (heddle proto + weft).
 5. **impl(bridge): embargo DAG integrity across ALL Git ref-publishing surfaces +
@@ -1538,8 +1613,14 @@ issues are checked against:
    or force-push a published commit (FF guard forbids it). **No stub commit** —
    stub-swap and parent-reparent are ruled out (§5.0.1, resolves O3). Cross-path
    disclosure ordering is forward-only under every interleaving (§5.3); a served
-   commit is never re-embargoed (§5.4). `embargo_until` auto-promotion at serve
-   (resolves O5). Blocked by #2.
+   commit is never re-embargoed (§5.4). **Scheduled `embargo_until` promotion is
+   materialized as a persisted monotonic fact:** the authoritative host appends a
+   superseding `public` `StateVisibility` + `OpRecord::StateVisibilityPromote`
+   *before* the first public serve, and visibility is read from that record, never
+   recomputed from wall-clock; the materialized promotion **propagates to every
+   other serve/export host** (multi-host coordination) so no lagging or
+   clock-skewed host can re-embargo a state already served elsewhere (resolves O5,
+   §5.4). Blocked by #2.
 6. **decision/spike: unify `AnnotationVisibility` into a shared `VisibilityTier`**
    across annotations/discussions/states (resolves O4). Small; can fold into #1
    if the maintainer approves the unification up front.
