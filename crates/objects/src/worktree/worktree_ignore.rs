@@ -117,6 +117,25 @@ mod tests {
     }
 
     #[test]
+    fn dir_only_rule_covers_symlinked_deps_dir() {
+        // heddle#303: a `node_modules` *symlink* (used as a workaround
+        // for the isolated-checkout hydrate gap) must be covered by a
+        // `node_modules/` (dir-only) rule, not treated as an uncaptured
+        // path that silently blocks `ready`. The matcher is path-based
+        // and always probes with `is_dir = true`, so it cannot — and
+        // must not — distinguish a symlink-to-dir from a real directory:
+        // the trailing-slash rule fires on the bare `node_modules` entry
+        // either way. Walker/scan callers never descend a symlink, so
+        // this is the entry that decides whether the link is ignored.
+        let patterns = vec!["node_modules/".to_string()];
+        assert!(should_ignore(&PathBuf::from("node_modules"), &patterns));
+        assert!(should_ignore(
+            &PathBuf::from("nested/node_modules"),
+            &patterns
+        ));
+    }
+
+    #[test]
     fn test_simple_pattern() {
         let patterns = vec!["node_modules".to_string()];
         assert!(should_ignore(

@@ -1650,3 +1650,158 @@ mod s3_init_nested_runtime {
         }
     }
 }
+
+/// heddle#303 (AC: "a symlinked deps dir doesn't silently block
+/// `ready`"). In a native Heddle repo, a `node_modules` *symlink* —
+/// the workaround people reach for when an isolated checkout has no
+/// installed deps — must be covered by a `node_modules/` (dir-only)
+/// ignore rule, exactly as a real `node_modules/` directory would be.
+/// Otherwise the symlink shows up as an uncaptured path and silently
+/// blocks `ready`. The cached worktree compare is the path `ready`
+/// consumes via `worktree_dirty`/`worktree_dirty_paths`.
+#[cfg(unix)]
+#[test]
+fn dir_only_ignore_covers_node_modules_symlink_native() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, repo) = create_test_repo();
+    let root = temp.path();
+
+    let real_deps = root.join("real_deps");
+    fs::create_dir(&real_deps).unwrap();
+    fs::write(real_deps.join("pkg.json"), "{}").unwrap();
+    symlink(&real_deps, root.join("node_modules")).unwrap();
+    fs::write(root.join("keep.txt"), "hi").unwrap();
+    // Only the symlink basename is ignored; the link target is left
+    // un-ignored so the assertion proves it's the `node_modules/` rule
+    // (matching the bare symlink entry) doing the work, not collateral.
+    fs::write(root.join(".heddleignore"), "node_modules/\n").unwrap();
+
+    let state = repo.current_state().unwrap().unwrap();
+    let tree = repo.require_tree(&state.tree).unwrap();
+    let status = repo.compare_worktree_cached(&tree).unwrap();
+
+    assert!(
+        !status.added.iter().any(|p| p == std::path::Path::new("node_modules")),
+        "node_modules symlink must be ignored by `node_modules/`, not reported as added: {:?}",
+        status.added,
+    );
+    assert!(
+        status.added.iter().any(|p| p == std::path::Path::new("keep.txt")),
+        "a non-ignored sibling must still be reported (proves the scan ran): {:?}",
+        status.added,
+    );
+}
+
+/// heddle#303 (AC: "a mid-session ignore broadening takes effect
+/// without `unlink`"). In a native repo, broadening `.heddleignore` to
+/// `node_modules` mid-session must retroactively mask a
+/// previously-seen *untracked* `node_modules/` tree on the very next
+/// status, with no `unlink`/removal. Guards against a stale first-seen
+/// cache decision surviving an ignore-set change.
+#[cfg(unix)]
+#[test]
+fn midsession_ignore_broadening_masks_untracked_without_unlink_native() {
+    let (temp, repo) = create_test_repo();
+    let root = temp.path();
+
+    let node_modules = root.join("node_modules");
+    fs::create_dir(&node_modules).unwrap();
+    fs::write(node_modules.join("dep.js"), "x").unwrap();
+    fs::write(root.join("keep.txt"), "hi").unwrap();
+
+    let state = repo.current_state().unwrap().unwrap();
+    let tree = repo.require_tree(&state.tree).unwrap();
+
+    // First status: no ignore yet, so the dep file is seen as untracked.
+    let before = repo.compare_worktree_cached(&tree).unwrap();
+    assert!(
+        before.added.iter().any(|p| p == std::path::Path::new("node_modules/dep.js")),
+        "precondition: node_modules/dep.js should be untracked before the ignore: {:?}",
+        before.added,
+    );
+
+    // Broaden the ignore mid-session — no removal of the path.
+    fs::write(root.join(".heddleignore"), "node_modules\n").unwrap();
+
+    let after = repo.compare_worktree_cached(&tree).unwrap();
+    assert!(
+        !after.added.iter().any(|p| p.starts_with("node_modules")),
+        "broadened ignore must mask the previously-seen node_modules tree without unlink: {:?}",
+        after.added,
+    );
+    assert!(
+        after.added.iter().any(|p| p == std::path::Path::new("keep.txt")),
+        "non-ignored sibling must still be reported after the refresh: {:?}",
+        after.added,
+    );
+}
+
+/// heddle#303, git-overlay variant of the symlink AC. The dogfood that
+/// surfaced this ran on a Git repo, so `ready` consumed
+/// `git_overlay_worktree_status`. A `node_modules` symlink with a
+/// `node_modules/` rule in `.gitignore` must be ignored there too.
+#[cfg(unix)]
+#[test]
+fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    gix::init(root).expect("init real git repository");
+    let repo = Repository::init_default(root).unwrap();
+    assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
+
+    let real_deps = root.join("real_deps");
+    fs::create_dir(&real_deps).unwrap();
+    fs::write(real_deps.join("pkg.json"), "{}").unwrap();
+    symlink(&real_deps, root.join("node_modules")).unwrap();
+    fs::write(root.join("keep.txt"), "hi").unwrap();
+    fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+
+    let status = repo.git_overlay_worktree_status().unwrap().unwrap();
+    assert!(
+        !status.added.iter().any(|p| p == std::path::Path::new("node_modules")),
+        "node_modules symlink must be ignored in git-overlay status: {:?}",
+        status.added,
+    );
+    assert!(
+        status.added.iter().any(|p| p == std::path::Path::new("keep.txt")),
+        "a non-ignored sibling must still be reported in git-overlay status: {:?}",
+        status.added,
+    );
+}
+
+/// heddle#303, git-overlay variant of the mid-session-refresh AC.
+/// Broadening `.gitignore` to `node_modules` mid-session must mask a
+/// previously-seen untracked tree on the next status, no `unlink`.
+#[cfg(unix)]
+#[test]
+fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    gix::init(root).expect("init real git repository");
+    let repo = Repository::init_default(root).unwrap();
+    assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
+
+    let node_modules = root.join("node_modules");
+    fs::create_dir(&node_modules).unwrap();
+    fs::write(node_modules.join("dep.js"), "x").unwrap();
+    fs::write(root.join("keep.txt"), "hi").unwrap();
+
+    let before = repo.git_overlay_worktree_status().unwrap().unwrap();
+    assert!(
+        before.added.iter().any(|p| p == std::path::Path::new("node_modules/dep.js")),
+        "precondition: node_modules/dep.js should be untracked before the ignore: {:?}",
+        before.added,
+    );
+
+    fs::write(root.join(".gitignore"), "node_modules\n").unwrap();
+
+    let after = repo.git_overlay_worktree_status().unwrap().unwrap();
+    assert!(
+        !after.added.iter().any(|p| p.starts_with("node_modules")),
+        "broadened .gitignore must mask the node_modules tree without unlink: {:?}",
+        after.added,
+    );
+}
