@@ -25,7 +25,7 @@ use gix_transport::{
 };
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ChangeIdParseError, Principal, ThreadName, Tree},
+    object::{ChangeId, ChangeIdParseError, FileMode, Principal, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
@@ -1162,6 +1162,96 @@ impl<'a> GitBridge<'a> {
         self.write_through_current_checkout()
     }
 
+    /// Mark files that Heddle has captured but that Git still sees as
+    /// untracked as `intent-to-add` in the colocated checkout's index,
+    /// so a colocated developer's `git status` shows `AM new_file`
+    /// ("Heddle knows about it; no Git blob committed yet") instead of
+    /// `?? new_file` ("untracked — Git knows nothing"). The placeholder
+    /// entry uses the empty-blob oid and a zeroed stat, so Git always
+    /// reports the working-tree content as modified-against-index.
+    ///
+    /// Ported from jujutsu's `update_intent_to_add` (`lib/src/git.rs`),
+    /// which diffs `old_tree` vs `new_tree` and flags paths present in
+    /// the new tree but absent from the old one. Here `new_tree` is the
+    /// just-captured Heddle state's tree and `old_tree` is whatever the
+    /// checkout's index already tracks — paths already in the index are
+    /// not `??`, so they are left untouched (no spurious marking of
+    /// tracked or unchanged files).
+    ///
+    /// Call frequency mirrors jj: this fires at a Heddle parent/state
+    /// change (`capture`), not on every command. A later `checkpoint`
+    /// rebuilds the index from the committed tree via
+    /// [`Self::write_through_current_checkout`], replacing these
+    /// placeholder entries with real ones — so the index is never
+    /// churned by read-only invocations.
+    pub fn update_intent_to_add(&self, state_id: &ChangeId) -> GitResult<()> {
+        let root = self.heddle_repo.root();
+        if !root.join(".git").exists() {
+            return Ok(());
+        }
+        let checkout_repo = gix::discover(root).map_err(git_err)?;
+        // Skip detached HEAD: write-through only mirrors attached
+        // threads, and there is no branch context to reason about here.
+        if checkout_repo
+            .head()
+            .map(|head| head.is_detached())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        // `new_tree`: every file the just-captured state contains.
+        let Some(state) = self.heddle_repo.store().get_state(state_id)? else {
+            return Ok(());
+        };
+        let Some(tree) = self.heddle_repo.store().get_tree(&state.tree)? else {
+            return Ok(());
+        };
+        let mut captured: Vec<(String, FileMode)> = Vec::new();
+        collect_capture_paths(self.heddle_repo.store(), &tree, "", &mut captured)?;
+        if captured.is_empty() {
+            return Ok(());
+        }
+
+        // `old_tree`: paths the checkout's index already tracks. Anything
+        // present here is not `??`, so it needs no intent-to-add entry.
+        let mut index = checkout_repo.open_index().map_err(git_err)?;
+        let tracked: HashSet<String> = index
+            .entries_with_paths_by_filter_map(|path, _| Some(path.to_str_lossy().into_owned()))
+            .map(|(_, path)| path)
+            .collect();
+
+        let empty_blob = checkout_repo.object_hash().empty_blob();
+        let mut added = false;
+        for (path, mode) in &captured {
+            if tracked.contains(path) {
+                continue;
+            }
+            let entry_mode = match mode {
+                FileMode::Executable => gix_index::entry::Mode::FILE_EXECUTABLE,
+                FileMode::Symlink => gix_index::entry::Mode::SYMLINK,
+                FileMode::Normal => gix_index::entry::Mode::FILE,
+            };
+            index.dangerously_push_entry(
+                gix_index::entry::Stat::default(),
+                empty_blob,
+                gix_index::entry::Flags::INTENT_TO_ADD | gix_index::entry::Flags::EXTENDED,
+                entry_mode,
+                path.as_bytes().as_bstr(),
+            );
+            added = true;
+        }
+        if added {
+            // `dangerously_push_entry` appends without preserving sort
+            // order; restore it so subsequent path lookups stay correct.
+            index.sort_entries();
+            index
+                .write(gix_index::write::Options::default())
+                .map_err(git_err)?;
+        }
+        Ok(())
+    }
+
     /// Make the checkout's real `.git` view agree with a specific Heddle
     /// thread. `thread switch` uses this after writing Heddle HEAD because
     /// resolving "current" through Git-overlay discovery can still see the
@@ -1925,6 +2015,33 @@ pub(crate) fn set_reference(
     };
     repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
         .map_err(git_err)?;
+    Ok(())
+}
+
+/// Recursively collect every file path (blob and symlink) in `tree`,
+/// resolving subtrees through `store`. Missing subtree objects are
+/// skipped rather than treated as errors, matching the repo's other
+/// tree walks. Paths use `/` separators, the form Git's index expects.
+fn collect_capture_paths<S: ObjectStore + ?Sized>(
+    store: &S,
+    tree: &Tree,
+    prefix: &str,
+    out: &mut Vec<(String, FileMode)>,
+) -> GitResult<()> {
+    for entry in tree.iter() {
+        let path = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{prefix}/{}", entry.name)
+        };
+        if entry.is_tree() {
+            if let Some(subtree) = store.get_tree(&entry.hash)? {
+                collect_capture_paths(store, &subtree, &path, out)?;
+            }
+        } else {
+            out.push((path, entry.mode));
+        }
+    }
     Ok(())
 }
 
