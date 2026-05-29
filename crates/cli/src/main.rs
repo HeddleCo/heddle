@@ -452,14 +452,14 @@ async fn async_main() -> Result<()> {
             if let Some(state) = target
                 && is_plain_git_without_heddle(start)
             {
-                return cmd_show(&cli, state.clone());
+                return cmd_show(&cli, Some(state.clone()));
             }
             let repo = repo::Repository::open(start)?;
             match target {
                 Some(name) if repo.refs().get_thread(&objects::object::ThreadName::new(name.as_str()))?.is_some() => {
                     cmd_thread_show(&cli, &repo, Some(name.clone()))
                 }
-                Some(state) => cmd_show(&cli, state.clone()),
+                Some(state) => cmd_show(&cli, Some(state.clone())),
                 None => cmd_thread_show(&cli, &repo, None),
             }
         }
