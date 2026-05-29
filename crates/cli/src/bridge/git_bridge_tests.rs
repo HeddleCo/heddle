@@ -1033,6 +1033,38 @@ fn pull_imports_remote_branches_and_tags_from_authenticated_git_http_backend() {
 }
 
 #[test]
+fn fetch_rejects_reserved_git_remote_name_at_boundary() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let mut bridge = GitBridge::new(&repo);
+
+    let err = bridge
+        .fetch("git")
+        .expect_err("fetch of reserved remote name must be rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("reserved namespace") && message.contains("rename"),
+        "fetch error must explain the reserved-namespace collision and how to fix it, got: {message}"
+    );
+}
+
+#[test]
+fn pull_rejects_reserved_git_remote_name_at_boundary() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let mut bridge = GitBridge::new(&repo);
+
+    let err = bridge
+        .pull("git")
+        .expect_err("pull of reserved remote name must be rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("reserved namespace") && message.contains("rename"),
+        "pull error must explain the reserved-namespace collision and how to fix it, got: {message}"
+    );
+}
+
+#[test]
 fn import_handles_merge_history_without_missing_parent_mappings() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");

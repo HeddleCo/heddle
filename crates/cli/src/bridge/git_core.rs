@@ -130,6 +130,177 @@ pub(crate) struct RefUpdate {
     pub namespace: RefNamespace,
 }
 
+/// Sentinel remote name for refs owned by the local repository
+/// (`refs/heads/*` and `refs/tags/*`). Ported from jj's
+/// `REMOTE_NAME_FOR_LOCAL_GIT_REPO` (`lib/src/git.rs`). Because a remote
+/// literally named `git` would collide with this sentinel, such a name must
+/// be rejected when remotes are configured.
+pub const REMOTE_NAME_FOR_LOCAL_GIT_REPO: &str = "git";
+
+/// Whether `remote` collides with [`REMOTE_NAME_FOR_LOCAL_GIT_REPO`], the
+/// sentinel reserved for refs owned by the local repository. A user remote
+/// with this name cannot be represented unambiguously against local refs, so
+/// it must be rejected at every site that parses or accepts a remote name.
+/// Single source of truth for the reserved-namespace check.
+pub(crate) fn is_reserved_git_remote_name(remote: &str) -> bool {
+    remote == REMOTE_NAME_FOR_LOCAL_GIT_REPO
+}
+
+/// Reject a remote name that collides with [`REMOTE_NAME_FOR_LOCAL_GIT_REPO`].
+/// Surfaced at the public fetch/pull accept boundary with an actionable
+/// message, and re-applied as an invariant net at every
+/// `refs/remotes/{name}/...` write site, so a remote named `git` can never be
+/// treated as a normal remote-tracking namespace — keeping the writers
+/// consistent with [`parse_git_ref`], which already rejects such refs.
+fn reject_reserved_git_remote_name(remote: &str) -> GitResult<()> {
+    if is_reserved_git_remote_name(remote) {
+        return Err(GitBridgeError::Git(format!(
+            "a Git remote named '{remote}' collides with heddle's reserved namespace \
+             (local refs are recorded under the '{REMOTE_NAME_FOR_LOCAL_GIT_REPO}' sentinel); \
+             rename the remote (e.g. `git remote rename {remote} origin`) and retry"
+        )));
+    }
+    Ok(())
+}
+
+/// The kind of Git ref [`parse_git_ref`] recognizes. Ported from jj's
+/// `GitRefKind` (`lib/src/git.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitRefKind {
+    /// `refs/heads/<name>` or `refs/remotes/<remote>/<name>`.
+    Branch,
+    /// `refs/tags/<name>`.
+    Tag,
+}
+
+/// A parsed Git ref name: its kind, short name, and owning remote. Borrows
+/// from the input ref name. Ported from jj's `RemoteRefSymbol` shape
+/// (`lib/src/git.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedGitRef<'a> {
+    pub kind: GitRefKind,
+    /// Short name beneath the namespace, e.g. `main` for `refs/heads/main`
+    /// or `feature/x` for `refs/remotes/origin/feature/x`.
+    pub name: &'a str,
+    /// Owning remote. Local refs (`refs/heads/*`, `refs/tags/*`) report
+    /// [`REMOTE_NAME_FOR_LOCAL_GIT_REPO`].
+    pub remote: &'a str,
+}
+
+/// Parse a fully-qualified Git ref name into its [`GitRefKind`], short name,
+/// and owning remote. Returns `None` for refs outside the
+/// branch/remote-branch/tag namespaces (e.g. `refs/notes/*`, `HEAD`).
+///
+/// Ported from jj's `parse_git_ref` (`lib/src/git.rs`); like jj, the symbolic
+/// `HEAD` and `refs/remotes/<remote>/HEAD` entries are not treated as refs.
+pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
+    if let Some(name) = ref_name.strip_prefix("refs/heads/") {
+        // Git rejects `HEAD` as a branch name.
+        (name != "HEAD").then_some(ParsedGitRef {
+            kind: GitRefKind::Branch,
+            name,
+            remote: REMOTE_NAME_FOR_LOCAL_GIT_REPO,
+        })
+    } else if let Some(remote_and_name) = ref_name.strip_prefix("refs/remotes/") {
+        let (remote, name) = remote_and_name.split_once('/')?;
+        // `refs/remotes/<remote>/HEAD` is the remote's symbolic default, not a
+        // real remote-tracking branch. A remote literally named `git` collides
+        // with the local sentinel ([`REMOTE_NAME_FOR_LOCAL_GIT_REPO`]); aliasing
+        // it onto local refs would make remote-tracking branches
+        // indistinguishable from `refs/heads/*`, so it is rejected here —
+        // matching jj's parser and the sentinel ownership contract.
+        (name != "HEAD" && !is_reserved_git_remote_name(remote)).then_some(ParsedGitRef {
+            kind: GitRefKind::Branch,
+            name,
+            remote,
+        })
+    } else {
+        ref_name
+            .strip_prefix("refs/tags/")
+            .map(|name| ParsedGitRef {
+                kind: GitRefKind::Tag,
+                name,
+                remote: REMOTE_NAME_FOR_LOCAL_GIT_REPO,
+            })
+    }
+}
+
+/// A Git refspec: an optional `source`, a `destination`, and a `forced` (`+`)
+/// marker. Ported from jj's `RefSpec` (`lib/src/git.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefSpec {
+    forced: bool,
+    /// `None` encodes a delete refspec (`:destination`).
+    source: Option<String>,
+    destination: String,
+}
+
+impl RefSpec {
+    /// A forced (`+`) refspec mapping `source` onto `destination`.
+    pub fn forced(source: impl Into<String>, destination: impl Into<String>) -> Self {
+        Self {
+            forced: true,
+            source: Some(source.into()),
+            destination: destination.into(),
+        }
+    }
+
+    /// A delete refspec (`:destination`). Not forced: deleting a destination
+    /// that has no source cannot lose work.
+    pub fn delete(destination: impl Into<String>) -> Self {
+        Self {
+            forced: false,
+            source: None,
+            destination: destination.into(),
+        }
+    }
+
+    /// Render in `git` refspec syntax, including the leading `+` when forced.
+    pub fn to_git_format(&self) -> String {
+        format!(
+            "{}{}",
+            if self.forced { "+" } else { "" },
+            self.to_git_format_not_forced()
+        )
+    }
+
+    /// Render in `git` refspec syntax without the leading `+`, even when forced.
+    pub fn to_git_format_not_forced(&self) -> String {
+        format!("{}:{}", self.source.as_deref().unwrap_or(""), self.destination)
+    }
+}
+
+/// A negative refspec (`^source`) excluding refs from a fetch or push. Ported
+/// from jj's `NegativeRefSpec` (`lib/src/git.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegativeRefSpec {
+    source: String,
+}
+
+impl NegativeRefSpec {
+    /// A negative refspec excluding `source`.
+    pub fn new(source: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+        }
+    }
+
+    /// Render in `git` refspec syntax (`^source`).
+    pub fn to_git_format(&self) -> String {
+        format!("^{}", self.source)
+    }
+}
+
+/// The fetch refspecs heddle uses to mirror a remote: every branch and every
+/// heddle note, forced. Built through [`RefSpec`] so the wire format has a
+/// single typed source of truth.
+fn heddle_mirror_fetch_refspecs() -> [String; 2] {
+    [
+        RefSpec::forced("refs/heads/*", "refs/heads/*").to_git_format(),
+        RefSpec::forced("refs/notes/*", "refs/notes/*").to_git_format(),
+    ]
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitPushScope {
     CurrentThread,
@@ -662,12 +833,19 @@ impl<'a> GitBridge<'a> {
         scope: GitFetchScope,
         refresh_checkout: RefreshCheckoutAfterFetch,
     ) -> GitResult<()> {
+        reject_reserved_git_remote_name(remote_name)?;
         self.init_mirror()?;
         let current_branch = self.heddle_repo.git_overlay_current_branch()?;
         let tracking_remote = checkout_tracking_remote_name(self.heddle_repo.root(), remote_name)?
             .or_else(|| {
                 (!looks_like_remote_location(remote_name)).then(|| remote_name.to_string())
             });
+        // A URL/path remote can still resolve onto a configured remote literally
+        // named `git`; reject that here too so the constructed tracking refs
+        // never land under the reserved namespace.
+        if let Some(tracking_remote) = tracking_remote.as_deref() {
+            reject_reserved_git_remote_name(tracking_remote)?;
+        }
 
         let mirror_repo = self.open_git_repo()?;
         match self.resolve_remote(remote_name, gix::remote::Direction::Fetch)? {
@@ -1161,6 +1339,7 @@ impl<'a> GitBridge<'a> {
         else {
             return Ok(());
         };
+        reject_reserved_git_remote_name(&tracking_remote)?;
 
         let mirror_repo = self.open_git_repo()?;
         let branch_ref = format!("refs/heads/{branch}");
@@ -1194,6 +1373,7 @@ impl<'a> GitBridge<'a> {
         else {
             return Ok(());
         };
+        reject_reserved_git_remote_name(&tracking_remote)?;
 
         let mirror_repo = self.open_git_repo()?;
         let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
@@ -2156,6 +2336,7 @@ fn apply_remote_tracking_ref_updates(
     updates: &[RefUpdate],
     log_message: &str,
 ) -> GitResult<()> {
+    reject_reserved_git_remote_name(remote_name)?;
     for update in updates
         .iter()
         .filter(|update| update.namespace == RefNamespace::Branch)
@@ -2319,7 +2500,7 @@ fn clone_url_to_bare_via_gix(
     let mut remote = repo.remote_at(url.clone()).map_err(git_err)?;
     remote
         .replace_refspecs(
-            ["+refs/heads/*:refs/heads/*", "+refs/notes/*:refs/notes/*"],
+            heddle_mirror_fetch_refspecs().iter().map(String::as_str),
             gix::remote::Direction::Fetch,
         )
         .map_err(git_err)?;
@@ -2469,7 +2650,7 @@ fn fetch_network_remote(
     let mut remote = mirror_repo.remote_at(url.clone()).map_err(git_err)?;
     remote
         .replace_refspecs(
-            ["+refs/heads/*:refs/heads/*", "+refs/notes/*:refs/notes/*"],
+            heddle_mirror_fetch_refspecs().iter().map(String::as_str),
             gix::remote::Direction::Fetch,
         )
         .map_err(git_err)?;
@@ -2701,6 +2882,89 @@ fn read_receive_pack_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_git_ref_local_branch() {
+        let parsed = parse_git_ref("refs/heads/main").expect("local branch parses");
+        assert_eq!(parsed.kind, GitRefKind::Branch);
+        assert_eq!(parsed.name, "main");
+        assert_eq!(parsed.remote, REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+    }
+
+    #[test]
+    fn parse_git_ref_remote_branch_keeps_nested_name() {
+        let parsed =
+            parse_git_ref("refs/remotes/origin/feature/x").expect("remote branch parses");
+        assert_eq!(parsed.kind, GitRefKind::Branch);
+        assert_eq!(parsed.name, "feature/x");
+        assert_eq!(parsed.remote, "origin");
+    }
+
+    #[test]
+    fn parse_git_ref_tag() {
+        let parsed = parse_git_ref("refs/tags/v1.0").expect("tag parses");
+        assert_eq!(parsed.kind, GitRefKind::Tag);
+        assert_eq!(parsed.name, "v1.0");
+        assert_eq!(parsed.remote, REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+    }
+
+    #[test]
+    fn parse_git_ref_skips_head_symrefs() {
+        assert_eq!(parse_git_ref("refs/heads/HEAD"), None);
+        assert_eq!(parse_git_ref("refs/remotes/origin/HEAD"), None);
+    }
+
+    #[test]
+    fn parse_git_ref_rejects_unknown_or_malformed() {
+        assert_eq!(parse_git_ref("refs/notes/heddle"), None);
+        assert_eq!(parse_git_ref("HEAD"), None);
+        // A remote ref with no branch component beneath the remote name.
+        assert_eq!(parse_git_ref("refs/remotes/origin"), None);
+    }
+
+    #[test]
+    fn parse_git_ref_rejects_reserved_git_remote_namespace() {
+        // A user remote literally named `git` collides with the local sentinel;
+        // it must not be aliased onto local refs at the parse site.
+        assert_eq!(parse_git_ref("refs/remotes/git/main"), None);
+        assert_eq!(parse_git_ref("refs/remotes/git/feature/x"), None);
+        assert!(is_reserved_git_remote_name(REMOTE_NAME_FOR_LOCAL_GIT_REPO));
+        assert!(!is_reserved_git_remote_name("origin"));
+    }
+
+    #[test]
+    fn refspec_forced_round_trips_git_format() {
+        let spec = RefSpec::forced("refs/heads/main", "refs/heads/main");
+        assert_eq!(spec.to_git_format(), "+refs/heads/main:refs/heads/main");
+        assert_eq!(
+            spec.to_git_format_not_forced(),
+            "refs/heads/main:refs/heads/main"
+        );
+    }
+
+    #[test]
+    fn refspec_delete_has_empty_source() {
+        let spec = RefSpec::delete("refs/heads/stale");
+        assert_eq!(spec.to_git_format(), ":refs/heads/stale");
+        assert_eq!(spec.to_git_format_not_forced(), ":refs/heads/stale");
+    }
+
+    #[test]
+    fn negative_refspec_prefixes_caret() {
+        let spec = NegativeRefSpec::new("refs/heads/wip/*");
+        assert_eq!(spec.to_git_format(), "^refs/heads/wip/*");
+    }
+
+    #[test]
+    fn mirror_fetch_refspecs_cover_branches_and_notes() {
+        assert_eq!(
+            heddle_mirror_fetch_refspecs(),
+            [
+                "+refs/heads/*:refs/heads/*".to_string(),
+                "+refs/notes/*:refs/notes/*".to_string(),
+            ]
+        );
+    }
 
     #[test]
     fn fast_forward_guard_reports_exact_rewrite_before_after() {
