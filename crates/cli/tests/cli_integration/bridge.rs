@@ -118,6 +118,60 @@ fn capture_marks_new_file_intent_to_add_in_colocated_index() {
     );
 }
 
+/// `update_intent_to_add` must RECONCILE, not just append: when a file
+/// that was previously marked intent-to-add is no longer in the captured
+/// state (e.g. it was created, captured, then deleted before checkpoint),
+/// its stale index entry must be pruned. A surviving intent-to-add entry
+/// whose worktree file is gone makes `git status` report a phantom ` D`
+/// deletion that Heddle never intended.
+#[test]
+fn recapture_prunes_stale_intent_to_add_for_removed_file() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    // Capture a new file: it becomes intent-to-add in the colocated index.
+    std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
+    heddle(&["capture", "-m", "add new file"], Some(source.path()))
+        .expect("capture should record the new file");
+
+    let status = git_status_porcelain(source.path());
+    assert!(
+        status.lines().any(|line| line.ends_with("new_file.txt")),
+        "precondition: new_file.txt must be intent-to-add after first capture. Status was:\n{status}"
+    );
+
+    // Delete the file before any checkpoint commits it, then recapture.
+    // The captured state no longer contains new_file.txt, so its
+    // intent-to-add index entry is now stale and must be pruned.
+    std::fs::remove_file(source.path().join("new_file.txt")).unwrap();
+    heddle(&["capture", "-m", "remove new file"], Some(source.path()))
+        .expect("recapture should record the deletion");
+
+    let status = git_status_porcelain(source.path());
+    assert!(
+        !status.lines().any(|line| line.ends_with("new_file.txt")),
+        "stale intent-to-add for a deleted file must be pruned — no phantom ` D` entry. Status was:\n{status}"
+    );
+
+    // The index entry must be gone entirely, not merely re-pointed.
+    let staged = Command::new("git")
+        .args(["ls-files", "--stage", "new_file.txt"])
+        .current_dir(source.path())
+        .output()
+        .unwrap();
+    let staged = String::from_utf8(staged.stdout).unwrap();
+    assert!(
+        staged.trim().is_empty(),
+        "stale intent-to-add index entry must be removed, got: {staged:?}"
+    );
+}
+
 #[test]
 fn test_cli_bridge_git_init() {
     let temp = TempDir::new().unwrap();
