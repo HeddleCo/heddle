@@ -1015,8 +1015,10 @@ impl GitConfigContext {
     /// `layered_paths` read precedence); when no layer defines it, the
     /// common config — git's default target for a brand-new remote.
     fn write_layer_for(&self, name: &str) -> std::path::PathBuf {
-        let _ = name;
-        self.common_dir.join("config")
+        self.layered_paths()
+            .into_iter()
+            .find(|path| self.layer_defines_remote(path, name))
+            .unwrap_or_else(|| self.common_dir.join("config"))
     }
 
     /// Every config layer that currently defines remote `name`. A remove
@@ -1024,8 +1026,10 @@ impl GitConfigContext {
     /// resurfaces — or a higher-precedence one keeps winning — on the next
     /// read, leaving the "successful" removal silently divergent.
     fn remove_layers_for(&self, name: &str) -> Vec<std::path::PathBuf> {
-        let _ = name;
-        vec![self.common_dir.join("config")]
+        self.layered_paths()
+            .into_iter()
+            .filter(|path| self.layer_defines_remote(path, name))
+            .collect()
     }
 
     fn layer_defines_remote(&self, path: &Path, name: &str) -> bool {
