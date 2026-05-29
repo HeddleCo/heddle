@@ -72,7 +72,8 @@ struct ShowGitOverlayImportHintOutput {
     recommended_command: String,
 }
 
-pub fn cmd_show(cli: &Cli, state_spec: String) -> Result<()> {
+pub fn cmd_show(cli: &Cli, state_spec: Option<String>) -> Result<()> {
+    let state_spec = state_spec.unwrap_or_else(|| "HEAD".to_string());
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
     if let Some(probe) = build_plain_git_verification_probe(start)? {

@@ -246,8 +246,8 @@ Examples:
 
     /// Show state details.
     Show {
-        /// State by change ID or hash prefix.
-        state: String,
+        /// State by change ID or hash prefix. Defaults to HEAD when omitted.
+        state: Option<String>,
     },
 
     /// Summarize a working session.
