@@ -10028,6 +10028,8 @@ fn actor_explain_json_detects_harness_without_active_actor() {
             .any(|signal| signal == "CODEX_THREAD_ID"),
         "actor explain should name detected signal keys without leaking unrelated values: {parsed}"
     );
+    // On-thread context (fresh `init` leaves HEAD attached to a thread):
+    // `--no-thread` attaches the detected identity to the current thread.
     assert_eq!(
         parsed["recommended_action"],
         "heddle actor spawn --no-thread --provider openai --model gpt-5.3-codex"
@@ -10049,6 +10051,79 @@ fn actor_explain_json_detects_harness_without_active_actor() {
     assert!(
         parsed.get("verification").is_some(),
         "actor explain should prove repository verify for agents: {parsed}"
+    );
+}
+
+#[test]
+fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
+    let base = Repository::open(temp.path())
+        .unwrap()
+        .current_state()
+        .unwrap()
+        .unwrap()
+        .change_id
+        .to_string();
+    std::fs::write(temp.path().join("tracked.txt"), "next\n").unwrap();
+    heddle(&["capture", "-m", "next"], Some(temp.path())).unwrap();
+    // `goto` to an earlier state detaches HEAD — there is no current thread
+    // to attach an actor to, so `--no-thread` would fail.
+    heddle(&["goto", &base, "--force"], Some(temp.path())).unwrap();
+    assert!(
+        matches!(
+            Repository::open(temp.path()).unwrap().head_ref().unwrap(),
+            refs::Head::Detached { .. }
+        ),
+        "goto should leave HEAD detached for this test"
+    );
+
+    let output = heddle_output_with_env(
+        &["actor", "explain", "--output", "json"],
+        Some(temp.path()),
+        &[
+            ("CODEX_THREAD_ID", "thread-cold-agent"),
+            ("CODEX_MODEL", "gpt-5.3-codex"),
+            ("CODEX_REASONING_EFFORT", "high"),
+        ],
+    )
+    .expect("invoke actor explain");
+    assert!(
+        output.status.success(),
+        "actor explain should succeed on detached HEAD; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
+    assert_eq!(parsed["attached"], false);
+    // Detached HEAD: recommend the minting form (mints a dedicated thread),
+    // NOT `--no-thread`, which cannot succeed without a current thread.
+    assert_eq!(
+        parsed["recommended_action"],
+        "heddle actor spawn --provider openai --model gpt-5.3-codex",
+        "detached HEAD should recommend the thread-minting spawn form: {parsed}"
+    );
+    assert!(
+        !parsed["recommended_action"]
+            .as_str()
+            .expect("recommended_action should be a string")
+            .contains("--no-thread"),
+        "detached HEAD must not recommend `--no-thread`: {parsed}"
+    );
+    assert_eq!(
+        parsed["recommended_action_template"]["argv_template"],
+        heddle_argv_json([
+            "actor",
+            "spawn",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.3-codex"
+        ]),
+        "actor explain should expose replayable argv for the minting spawn action: {parsed}"
     );
 }
 

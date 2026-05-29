@@ -645,7 +645,12 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
         std::env::var("HEDDLE_AGENT_POLICY").ok(),
     )?;
     let env_signals = actor_identity_env_signals();
-    let next_action = detected_actor_next_action(probe.provider.as_deref(), probe.model.as_deref());
+    let head_detached = matches!(repo.head_ref()?, Head::Detached { .. });
+    let next_action = detected_actor_next_action(
+        probe.provider.as_deref(),
+        probe.model.as_deref(),
+        head_detached,
+    );
     let next_action_template = next_action.as_deref().and_then(action_template);
 
     if should_output_json(cli, None) {
@@ -738,10 +743,21 @@ fn actor_identity_env_signals() -> Vec<String> {
     signals
 }
 
-fn detected_actor_next_action(provider: Option<&str>, model: Option<&str>) -> Option<String> {
+fn detected_actor_next_action(
+    provider: Option<&str>,
+    model: Option<&str>,
+    head_detached: bool,
+) -> Option<String> {
     match (provider, model) {
-        // Recommend `--no-thread` so the detected identity is attached to
-        // the current thread without leaving a stray `actor/<session>`.
+        // The recommendation must be runnable as-is from the current context.
+        // On a detached HEAD there is no current thread to attach to, so
+        // `--no-thread` would fail (`actor_spawn_no_thread_detached`); mint a
+        // dedicated thread instead. On a thread, `--no-thread` attaches the
+        // detected identity to the current thread without leaving a stray
+        // `actor/<session>`.
+        (Some(provider), Some(model)) if head_detached => Some(format!(
+            "heddle actor spawn --provider {provider} --model {model}"
+        )),
         (Some(provider), Some(model)) => Some(format!(
             "heddle actor spawn --no-thread --provider {provider} --model {model}"
         )),
