@@ -40,7 +40,7 @@ pub use packed_model::PackedRefsModel;
 pub use pg_refs::PgRefBackend;
 pub use ref_backend::RefBackend;
 pub use ref_summary_index::RefSummaryIndexInspection;
-pub use refs_manager::RefManager;
+pub use refs_manager::{RefManager, UNDO_RECOVERY_HANDLE};
 pub use reftable_model::{ReftableError, ReftableModel};
 pub use resolve::resolve_refspec;
 pub use text::{ChangeIdTextError, format_change_id_text, parse_change_id_text};
