@@ -78,7 +78,13 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 /// (prefix=`@`, content=`@ -a,b +c,d @@`), so concatenation yields the
 /// canonical `@@ -a,b +c,d @@` shape.
 ///
-/// Three cases require git's extended header block to round-trip:
+/// Output is `Vec<u8>`, not `String`, because a symlink's target — which
+/// git stores as the link's git blob and the patch carries verbatim in the
+/// hunk body — is an arbitrary byte sequence on Unix and need not be valid
+/// UTF-8. This is the single byte-preserving patch path; the lossy
+/// `render_diff_patch` (used for the JSON `.patch` field) is derived from it.
+///
+/// Four cases require git's extended header block to round-trip:
 ///
 /// * **Added files** get `diff --git ... / new file mode <mode> /
 ///   --- /dev/null`. Without it, `git apply` (and `patch -p1`) demand
@@ -95,6 +101,13 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 ///   rename from old / rename to new`. Pure renames (no edits) emit
 ///   the extended headers and stop; rename-with-edit appends the
 ///   usual `--- a/old / +++ b/new` + hunk body.
+/// * **Symlinks** (`120000`) carry their target bytes as the hunk body —
+///   a symlink's git blob is exactly its raw target. Every symlink change
+///   (add/delete/edit/rename) is rendered by `render_symlink_change`
+///   straight from `change.symlink`, never through `change.lines` (which a
+///   non-UTF-8 target cannot populate) and never as a binary marker (which
+///   `git apply` rejects for a `120000` entry), so a non-UTF-8 link target
+///   round-trips byte-for-byte.
 ///
 /// Every rendered file also opens with a `diff --git a/<p> b/<p>` line,
 /// including a plain content modify (which carries no extended-mode
@@ -112,173 +125,356 @@ pub(crate) fn print_stat(output: &DiffOutput) {
 /// synthesized tail hunk (see `unified_hunks`) and is rendered, and a
 /// mode-only modify (chmod) emits a header-only `diff --git` +
 /// `old mode`/`new mode` block so the permission change round-trips.
-pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
-    let mut buf = String::new();
+pub(crate) fn render_diff_patch_bytes(output: &DiffOutput) -> Vec<u8> {
+    let mut buf: Vec<u8> = Vec::new();
     for change in &output.changes {
-        let lines_ref = change.lines.as_deref();
-        let has_hunk_body = lines_ref
-            .is_some_and(|lines| lines.iter().any(|line| line.prefix != " "));
-        let old_path = change.old_path.as_deref().unwrap_or(&change.path);
-        let is_rename = change.old_path.as_deref().is_some_and(|old| old != change.path);
-        let is_added = change.kind == "added";
-        let is_deleted = change.kind == "deleted";
-        let is_modified = !is_rename && !is_added && !is_deleted;
-        // A mode-only modify (chmod / exec-bit flip / type swap) has no
-        // hunk body but is still a real change: git records it as
-        // `old mode`/`new mode` extended headers and `git apply`
-        // reproduces the permission change from those alone.
-        let mode_changed = is_modified
-            && matches!((change.old_mode, change.mode), (Some(old), Some(new)) if old != new);
-        // `lines: None` is the binary / unreadable case — there is no
-        // text body to render, so it never produces a patch regardless
-        // of kind. `lines: Some(_)` (even empty) means we have a
-        // readable text side.
-        let has_text = change.lines.is_some();
-
-        // A binary *content* change (add/delete/modify of a file heddle
-        // cannot diff as text). heddle has no git binary delta to emit
-        // (its blob hashes are not git SHAs), and silently dropping the
-        // change would let `git apply` "succeed" while the binary content
-        // stays stale — the false round-trip cid 3319484747 flagged. Emit
-        // git's `Binary files … differ` marker with a *placeholder* index
-        // line: that index line is what makes `git apply` recognize a
-        // binary patch and refuse the *whole* patch ("without full index
-        // line") instead of skipping the block. Without the index line git
-        // treats the marker as an empty patch and silently ignores it. A
-        // content-identical mode-only change is never `binary` (the diff
-        // readers short-circuit it to an empty text body), so this only
-        // fires on a real binary content change, never a chmod.
-        if change.binary && !is_rename {
-            render_binary_change(change, is_added, is_deleted, mode_changed, &mut buf);
-            continue;
-        }
-
-        // Decide whether this change emits anything at all:
-        // * renames always do (the extended headers carry the move even
-        //   for identical content);
-        // * add/delete do whenever there's a readable text side — the
-        //   empty-file case renders header-only;
-        // * a modify renders only when it has a real hunk body. A modify
-        //   with no body and matching EOL is a no-op; the
-        //   trailing-newline-only case is handled upstream in
-        //   `unified_hunks`, which synthesizes a tail hunk so this
-        //   branch sees `has_hunk_body == true`.
-        let should_render = if is_rename {
-            true
-        } else if is_added || is_deleted {
-            has_text
+        // A symlink change carries its raw target bytes in `change.symlink`,
+        // which on Unix need not be valid UTF-8. Render it byte-exact so a
+        // non-UTF-8 link target round-trips through `git apply`; every other
+        // change is UTF-8 text and is appended as its bytes.
+        if change.symlink.is_some() {
+            render_symlink_change(change, &mut buf);
         } else {
-            has_hunk_body || mode_changed
-        };
-        if !should_render {
-            continue;
-        }
-
-        if is_rename {
-            buf.push_str(&format!(
-                "diff --git {} {}\n",
-                quote_path_for_patch("a/", old_path),
-                quote_path_for_patch("b/", &change.path)
-            ));
-            // A rename paired with a chmod/type change (`old.sh` renamed
-            // to `new.sh` and made executable) carries both modes; emit
-            // the `old mode`/`new mode` pair before `similarity index`,
-            // matching `git diff`, so `git apply` reproduces the
-            // permission change as well as the move.
-            if let (Some(old), Some(new)) = (change.old_mode, change.mode)
-                && old != new
-            {
-                buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
-                buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
-            }
-            let pct = (change
-                .similarity_score
-                .unwrap_or(1.0)
-                .clamp(0.0, 1.0)
-                * 100.0)
-                .round() as u32;
-            buf.push_str(&format!("similarity index {pct}%\n"));
-            buf.push_str(&format!("rename from {}\n", quote_path_for_patch("", old_path)));
-            buf.push_str(&format!("rename to {}\n", quote_path_for_patch("", &change.path)));
-            // Pure rename — extended headers alone suffice; emitting
-            // `--- a/old / +++ b/new` without hunks would tell git to
-            // apply an empty patch and warn about a stray header.
-            if !has_hunk_body {
-                continue;
-            }
-        } else if is_added {
-            buf.push_str(&format!(
-                "diff --git {} {}\n",
-                quote_path_for_patch("a/", &change.path),
-                quote_path_for_patch("b/", &change.path)
-            ));
-            buf.push_str(&format!("new file mode {}\n", mode_str(change.mode)));
-        } else if is_deleted {
-            buf.push_str(&format!(
-                "diff --git {} {}\n",
-                quote_path_for_patch("a/", &change.path),
-                quote_path_for_patch("b/", &change.path)
-            ));
-            buf.push_str(&format!("deleted file mode {}\n", mode_str(change.mode)));
-        } else if mode_changed {
-            // A modify whose mode changed (with or without a content
-            // hunk). Emit the `diff --git` + `old mode`/`new mode`
-            // header pair.
-            buf.push_str(&format!(
-                "diff --git {} {}\n",
-                quote_path_for_patch("a/", &change.path),
-                quote_path_for_patch("b/", &change.path)
-            ));
-            buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
-            buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
-        } else {
-            // A plain content modify. Emit the `diff --git` header so
-            // every file stanza is self-delimiting. A bare `--- a/<path>`
-            // is ambiguous: git's parser binds it to the *preceding*
-            // `diff --git` stanza when one is still open — e.g. a
-            // header-only empty-add (`diff --git ... / new file mode`) or
-            // a mode-only change immediately above — and misreads this
-            // file's `---` as the prior file's source side, corrupting the
-            // patch ("expected /dev/null"). The explicit header closes the
-            // prior stanza and opens this one. (cid 3319484717 ordering.)
-            buf.push_str(&format!(
-                "diff --git {} {}\n",
-                quote_path_for_patch("a/", &change.path),
-                quote_path_for_patch("b/", &change.path)
-            ));
-        }
-
-        // An empty-file add/delete (text side present but zero lines)
-        // has no hunk body. git stops after the `new/deleted file mode`
-        // header in that case and `git apply` still creates/unlinks the
-        // path — emitting `--- /+++/@@` with no `@@` body would be a
-        // malformed hunk, so we stop here too.
-        if (is_added || is_deleted) && !has_hunk_body {
-            continue;
-        }
-        // A mode-only modify carries no content hunk: the `old mode`/
-        // `new mode` header pair is the entire patch, so stop before the
-        // `--- /+++` line-diff headers (which would be a malformed
-        // empty hunk).
-        if is_modified && !has_hunk_body {
-            continue;
-        }
-
-        if is_added {
-            buf.push_str("--- /dev/null\n");
-        } else {
-            buf.push_str(&format!("--- {}\n", quote_path_for_patch("a/", old_path)));
-        }
-        if is_deleted {
-            buf.push_str("+++ /dev/null\n");
-        } else {
-            buf.push_str(&format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
-        }
-        if let Some(lines) = lines_ref {
-            render_patch_hunks(change, lines, &mut buf);
+            let mut text = String::new();
+            render_text_change(change, &mut text);
+            buf.extend_from_slice(text.as_bytes());
         }
     }
     buf
+}
+
+/// Lossy String view of the byte-exact patch (`render_diff_patch_bytes`),
+/// for the JSON `.patch` field and String-based callers/tests. Only a
+/// non-UTF-8 symlink target (Unix-only) differs from the byte render; JSON
+/// strings cannot carry raw bytes, so a lossy view is the best a String
+/// surface can do. The round-trip surface (`heddle diff --patch`) writes the
+/// bytes directly via `render_diff_patch_bytes`, so its byte fidelity is
+/// never reduced here.
+pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
+    String::from_utf8_lossy(&render_diff_patch_bytes(output)).into_owned()
+}
+
+/// Render one non-symlink change as unified-diff text into `buf`. Symlink
+/// changes never reach here — `render_diff_patch_bytes` routes them to
+/// `render_symlink_change`, which preserves a non-UTF-8 target — so a symlink
+/// target is never forced through `change.lines` (which a non-UTF-8 target
+/// cannot populate) or `render_binary_change`.
+fn render_text_change(change: &FileChange, buf: &mut String) {
+    let lines_ref = change.lines.as_deref();
+    let has_hunk_body = lines_ref
+        .is_some_and(|lines| lines.iter().any(|line| line.prefix != " "));
+    let old_path = change.old_path.as_deref().unwrap_or(&change.path);
+    let is_rename = change.old_path.as_deref().is_some_and(|old| old != change.path);
+    let is_added = change.kind == "added";
+    let is_deleted = change.kind == "deleted";
+    let is_modified = !is_rename && !is_added && !is_deleted;
+    // A mode-only modify (chmod / exec-bit flip / type swap) has no
+    // hunk body but is still a real change: git records it as
+    // `old mode`/`new mode` extended headers and `git apply`
+    // reproduces the permission change from those alone.
+    let mode_changed = is_modified
+        && matches!((change.old_mode, change.mode), (Some(old), Some(new)) if old != new);
+    // `lines: None` is the binary / unreadable case — there is no
+    // text body to render, so it never produces a patch regardless
+    // of kind. `lines: Some(_)` (even empty) means we have a
+    // readable text side.
+    let has_text = change.lines.is_some();
+
+    // A binary *content* change (add/delete/modify of a file heddle
+    // cannot diff as text). heddle has no git binary delta to emit
+    // (its blob hashes are not git SHAs), and silently dropping the
+    // change would let `git apply` "succeed" while the binary content
+    // stays stale — the false round-trip cid 3319484747 flagged. Emit
+    // git's `Binary files … differ` marker with a *placeholder* index
+    // line: that index line is what makes `git apply` recognize a
+    // binary patch and refuse the *whole* patch ("without full index
+    // line") instead of skipping the block. Without the index line git
+    // treats the marker as an empty patch and silently ignores it. A
+    // content-identical mode-only change is never `binary` (the diff
+    // readers short-circuit it to an empty text body), so this only
+    // fires on a real binary content change, never a chmod.
+    if change.binary && !is_rename {
+        render_binary_change(change, is_added, is_deleted, mode_changed, buf);
+        return;
+    }
+
+    // Decide whether this change emits anything at all:
+    // * renames always do (the extended headers carry the move even
+    //   for identical content);
+    // * add/delete do whenever there's a readable text side — the
+    //   empty-file case renders header-only;
+    // * a modify renders only when it has a real hunk body. A modify
+    //   with no body and matching EOL is a no-op; the
+    //   trailing-newline-only case is handled upstream in
+    //   `unified_hunks`, which synthesizes a tail hunk so this
+    //   branch sees `has_hunk_body == true`.
+    let should_render = if is_rename {
+        true
+    } else if is_added || is_deleted {
+        has_text
+    } else {
+        has_hunk_body || mode_changed
+    };
+    if !should_render {
+        return;
+    }
+
+    if is_rename {
+        buf.push_str(&format!(
+            "diff --git {} {}\n",
+            quote_path_for_patch("a/", old_path),
+            quote_path_for_patch("b/", &change.path)
+        ));
+        // A rename paired with a chmod/type change (`old.sh` renamed
+        // to `new.sh` and made executable) carries both modes; emit
+        // the `old mode`/`new mode` pair before `similarity index`,
+        // matching `git diff`, so `git apply` reproduces the
+        // permission change as well as the move.
+        if let (Some(old), Some(new)) = (change.old_mode, change.mode)
+            && old != new
+        {
+            buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
+            buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
+        }
+        let pct = (change
+            .similarity_score
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0)
+            * 100.0)
+            .round() as u32;
+        buf.push_str(&format!("similarity index {pct}%\n"));
+        buf.push_str(&format!("rename from {}\n", quote_path_for_patch("", old_path)));
+        buf.push_str(&format!("rename to {}\n", quote_path_for_patch("", &change.path)));
+        // Pure rename — extended headers alone suffice; emitting
+        // `--- a/old / +++ b/new` without hunks would tell git to
+        // apply an empty patch and warn about a stray header.
+        if !has_hunk_body {
+            return;
+        }
+    } else if is_added {
+        buf.push_str(&format!(
+            "diff --git {} {}\n",
+            quote_path_for_patch("a/", &change.path),
+            quote_path_for_patch("b/", &change.path)
+        ));
+        buf.push_str(&format!("new file mode {}\n", mode_str(change.mode)));
+    } else if is_deleted {
+        buf.push_str(&format!(
+            "diff --git {} {}\n",
+            quote_path_for_patch("a/", &change.path),
+            quote_path_for_patch("b/", &change.path)
+        ));
+        buf.push_str(&format!("deleted file mode {}\n", mode_str(change.mode)));
+    } else if mode_changed {
+        // A modify whose mode changed (with or without a content
+        // hunk). Emit the `diff --git` + `old mode`/`new mode`
+        // header pair.
+        buf.push_str(&format!(
+            "diff --git {} {}\n",
+            quote_path_for_patch("a/", &change.path),
+            quote_path_for_patch("b/", &change.path)
+        ));
+        buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
+        buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
+    } else {
+        // A plain content modify. Emit the `diff --git` header so
+        // every file stanza is self-delimiting. A bare `--- a/<path>`
+        // is ambiguous: git's parser binds it to the *preceding*
+        // `diff --git` stanza when one is still open — e.g. a
+        // header-only empty-add (`diff --git ... / new file mode`) or
+        // a mode-only change immediately above — and misreads this
+        // file's `---` as the prior file's source side, corrupting the
+        // patch ("expected /dev/null"). The explicit header closes the
+        // prior stanza and opens this one. (cid 3319484717 ordering.)
+        buf.push_str(&format!(
+            "diff --git {} {}\n",
+            quote_path_for_patch("a/", &change.path),
+            quote_path_for_patch("b/", &change.path)
+        ));
+    }
+
+    // An empty-file add/delete (text side present but zero lines)
+    // has no hunk body. git stops after the `new/deleted file mode`
+    // header in that case and `git apply` still creates/unlinks the
+    // path — emitting `--- /+++/@@` with no `@@` body would be a
+    // malformed hunk, so we stop here too.
+    if (is_added || is_deleted) && !has_hunk_body {
+        return;
+    }
+    // A mode-only modify carries no content hunk: the `old mode`/
+    // `new mode` header pair is the entire patch, so stop before the
+    // `--- /+++` line-diff headers (which would be a malformed
+    // empty hunk).
+    if is_modified && !has_hunk_body {
+        return;
+    }
+
+    if is_added {
+        buf.push_str("--- /dev/null\n");
+    } else {
+        buf.push_str(&format!("--- {}\n", quote_path_for_patch("a/", old_path)));
+    }
+    if is_deleted {
+        buf.push_str("+++ /dev/null\n");
+    } else {
+        buf.push_str(&format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
+    }
+    if let Some(lines) = lines_ref {
+        render_patch_hunks(change, lines, buf);
+    }
+}
+
+/// Render a symlink change (add / delete / target-edit / rename) byte-exact.
+///
+/// A symlink's git blob is its raw target bytes, which on Unix need not be
+/// valid UTF-8 — so the hunk body is emitted straight from `change.symlink`
+/// (the single byte-preserving symlink path) rather than `change.lines`,
+/// which a non-UTF-8 target cannot populate. Marking such a change `binary`
+/// (the old behaviour) emitted a placeholder-binary stanza that `git apply`
+/// rejects for a `120000` entry; emitting the target as a text hunk is what
+/// git itself does and round-trips. The extended headers mirror
+/// `render_text_change`'s (add/delete/rename), and the mode is always
+/// `120000` so a rename never needs an `old mode`/`new mode` pair unless the
+/// two sides genuinely differ.
+fn render_symlink_change(change: &FileChange, buf: &mut Vec<u8>) {
+    let Some(sym) = change.symlink.as_ref() else {
+        return;
+    };
+    let push = |buf: &mut Vec<u8>, text: &str| buf.extend_from_slice(text.as_bytes());
+    let old_path = change.old_path.as_deref().unwrap_or(&change.path);
+    let is_rename = change.old_path.as_deref().is_some_and(|old| old != change.path);
+    let is_added = change.kind == "added";
+    let is_deleted = change.kind == "deleted";
+
+    if is_rename {
+        push(
+            buf,
+            &format!(
+                "diff --git {} {}\n",
+                quote_path_for_patch("a/", old_path),
+                quote_path_for_patch("b/", &change.path)
+            ),
+        );
+        if let (Some(old), Some(new)) = (change.old_mode, change.mode)
+            && old != new
+        {
+            push(buf, &format!("old mode {}\n", mode_str(change.old_mode)));
+            push(buf, &format!("new mode {}\n", mode_str(change.mode)));
+        }
+        let pct = (change.similarity_score.unwrap_or(1.0).clamp(0.0, 1.0) * 100.0).round() as u32;
+        push(buf, &format!("similarity index {pct}%\n"));
+        push(buf, &format!("rename from {}\n", quote_path_for_patch("", old_path)));
+        push(buf, &format!("rename to {}\n", quote_path_for_patch("", &change.path)));
+        // Pure rename (identical target) — the extended headers alone carry
+        // the move, exactly like a text rename with no hunk body.
+        if sym.old == sym.new {
+            return;
+        }
+        push(buf, &format!("--- {}\n", quote_path_for_patch("a/", old_path)));
+        push(buf, &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
+    } else if is_added {
+        push(
+            buf,
+            &format!(
+                "diff --git {} {}\n",
+                quote_path_for_patch("a/", &change.path),
+                quote_path_for_patch("b/", &change.path)
+            ),
+        );
+        push(buf, &format!("new file mode {}\n", mode_str(change.mode)));
+        push(buf, "--- /dev/null\n");
+        push(buf, &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
+    } else if is_deleted {
+        push(
+            buf,
+            &format!(
+                "diff --git {} {}\n",
+                quote_path_for_patch("a/", &change.path),
+                quote_path_for_patch("b/", &change.path)
+            ),
+        );
+        push(buf, &format!("deleted file mode {}\n", mode_str(change.mode)));
+        push(buf, &format!("--- {}\n", quote_path_for_patch("a/", &change.path)));
+        push(buf, "+++ /dev/null\n");
+    } else {
+        // A symlink target-edit. The mode is unchanged (`120000` → `120000`),
+        // so no `old mode`/`new mode` block — just the file header. An
+        // identical target would be a no-op and is never emitted by the diff
+        // backends, but guard it so an accidental empty hunk can't form.
+        if sym.old == sym.new {
+            return;
+        }
+        push(
+            buf,
+            &format!(
+                "diff --git {} {}\n",
+                quote_path_for_patch("a/", &change.path),
+                quote_path_for_patch("b/", &change.path)
+            ),
+        );
+        push(buf, &format!("--- {}\n", quote_path_for_patch("a/", &change.path)));
+        push(buf, &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
+    }
+
+    render_symlink_hunk(sym.old.as_deref(), sym.new.as_deref(), buf);
+}
+
+/// Emit the unified-diff hunk for a symlink's target bytes. A symlink's git
+/// blob has no trailing newline, so each side normally collapses to a single
+/// line carrying the `\ No newline at end of file` marker; a target that
+/// embeds a `\n` (pathological but representable) splits into multiple lines.
+/// The `@@` header mirrors `unified_hunks`'s `@@ -s,c +s,c @@` shape (counts
+/// always written, even `,1`), which `git apply` accepts.
+fn render_symlink_hunk(old: Option<&[u8]>, new: Option<&[u8]>, buf: &mut Vec<u8>) {
+    let old_lines = split_target_lines(old);
+    let new_lines = split_target_lines(new);
+    let old_count = old_lines.len();
+    let new_count = new_lines.len();
+    let old_start = if old_count == 0 { 0 } else { 1 };
+    let new_start = if new_count == 0 { 0 } else { 1 };
+    buf.extend_from_slice(
+        format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@\n").as_bytes(),
+    );
+    let old_no_eol = !target_has_trailing_newline(old);
+    let new_no_eol = !target_has_trailing_newline(new);
+    for (idx, line) in old_lines.iter().enumerate() {
+        buf.push(b'-');
+        buf.extend_from_slice(line);
+        buf.push(b'\n');
+        if old_no_eol && idx + 1 == old_count {
+            buf.extend_from_slice(NO_NEWLINE_MARKER.as_bytes());
+        }
+    }
+    for (idx, line) in new_lines.iter().enumerate() {
+        buf.push(b'+');
+        buf.extend_from_slice(line);
+        buf.push(b'\n');
+        if new_no_eol && idx + 1 == new_count {
+            buf.extend_from_slice(NO_NEWLINE_MARKER.as_bytes());
+        }
+    }
+}
+
+/// Split a symlink target's raw bytes into unified-diff lines. An absent side
+/// (`None`) or an empty blob yields no lines; a trailing `\n` is the line
+/// terminator (dropped here, surfaced via `target_has_trailing_newline`)
+/// rather than an extra empty line, matching how text blobs are line-counted.
+fn split_target_lines(target: Option<&[u8]>) -> Vec<&[u8]> {
+    let Some(bytes) = target else {
+        return Vec::new();
+    };
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<&[u8]> = bytes.split(|&byte| byte == b'\n').collect();
+    if bytes.ends_with(b"\n") {
+        lines.pop();
+    }
+    lines
+}
+
+fn target_has_trailing_newline(target: Option<&[u8]>) -> bool {
+    target.is_some_and(|bytes| bytes.ends_with(b"\n"))
 }
 
 /// Render a binary content change (add / delete / plain modify / modify
@@ -497,11 +693,13 @@ fn emit_line(buf: &mut String, line: &LineDiff) {
 }
 
 pub(crate) fn print_diff_patch(output: &DiffOutput) {
-    let rendered = output
-        .patch
-        .clone()
-        .unwrap_or_else(|| render_diff_patch(output));
-    print!("{rendered}");
+    // Write the raw patch BYTES, not `output.patch` (a lossy String): a
+    // symlink's target can be non-UTF-8, and the round-trip surface
+    // (`heddle diff --patch | git apply`) must carry those bytes verbatim.
+    // `output.patch` exists only to feed the JSON `.patch` field, where bytes
+    // can't live; rendering bytes fresh here keeps stdout byte-exact.
+    let rendered = render_diff_patch_bytes(output);
+    let _ = std::io::stdout().write_all(&rendered);
 }
 
 pub(crate) fn print_diff(output: &DiffOutput) {

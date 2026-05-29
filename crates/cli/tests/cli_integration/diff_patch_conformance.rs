@@ -1007,6 +1007,283 @@ fn state_non_utf8_symlink_rename_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
+// Matrix — non-UTF-8 symlink target IN THE HUNK BODY (cid 3323910729). r16
+// closed the rename-similarity class: an identical non-UTF-8 target on both
+// sides collapses to a *header-only* rename (no hunk body), so those cells
+// never carried raw bytes in a hunk. This round closes the patch-OUTPUT
+// class: an add / delete / target-edit of a symlink emits a real text hunk
+// whose +/- line IS the target bytes. The old code marked such a change
+// `binary` (its target failed `content_str()`), producing a placeholder
+// binary stanza that `git apply` REJECTS for a `120000` entry — so a
+// non-UTF-8 symlink add/delete/edit never round-tripped. The fix routes the
+// target through one byte-preserving path (`render_symlink_change`).
+//
+// These assert byte-exact `git apply` round-trip from RAW `--patch` stdout
+// (a non-UTF-8 target is not a valid `&str`, so the String-capturing
+// `native_cell`/`state_cell` can't carry it). Coverage is per surface ×
+// every backend: the heddle-overlay worktree path (`native_cell_bytes`), the
+// heddle-overlay committed path (`state_cell_bytes`), and the plain-Git fast
+// path (`plain_git_cell_bytes`). A regression on ANY surface fails CI here.
+//
+// The rename surface is regression-guarded by the r16 cells above: a *changed*
+// non-UTF-8 target scores similarity 0 (single line, no overlap) and never
+// collapses, so it renders as the delete + add these cells already cover; an
+// *identical* target collapses to a header-only rename (no bytes in the body).
+// ---------------------------------------------------------------------------
+
+/// Pipe a RAW-byte patch into `git <args>` (the byte analogue of `pipe_git`),
+/// for patches whose hunk body carries a non-UTF-8 symlink target.
+fn pipe_git_bytes(dir: &Path, args: &[&str], patch: &[u8]) -> Output {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git should spawn");
+    child.stdin.as_mut().unwrap().write_all(patch).unwrap();
+    child.wait_with_output().expect("git should finish")
+}
+
+/// Byte-exact analogue of `apply_oracle`: seed `pre`, then `git apply --check`
+/// + `git apply` the RAW-byte `patch`, and assert every `expect` holds.
+fn apply_oracle_bytes(pre: &[Entry], patch: &[u8], expect: &[Expect]) {
+    let g = TempDir::new().unwrap();
+    git_init(g.path());
+    for entry in pre {
+        write_entry(g.path(), entry);
+    }
+    git(g.path(), &["add", "-A"]);
+    git(g.path(), &["commit", "-q", "-m", "seed"]);
+
+    let check = pipe_git_bytes(g.path(), &["apply", "--check"], patch);
+    assert!(
+        check.status.success(),
+        "git apply --check rejected the patch;\nstderr={}\npatch=\n{}",
+        String::from_utf8_lossy(&check.stderr),
+        String::from_utf8_lossy(patch),
+    );
+    let applied = pipe_git_bytes(g.path(), &["apply"], patch);
+    assert!(
+        applied.status.success(),
+        "git apply failed;\nstderr={}\npatch=\n{}",
+        String::from_utf8_lossy(&applied.stderr),
+        String::from_utf8_lossy(patch),
+    );
+
+    for exp in expect {
+        match exp {
+            Expect::Present(entry) => assert_present(g.path(), entry),
+            Expect::Absent(path) => assert!(
+                !g.path().join(path).exists(),
+                "`{path}` should be gone after apply",
+            ),
+        }
+    }
+}
+
+/// Capture `heddle <args>` stdout as RAW bytes (the String-capturing `heddle`
+/// wrapper drops a non-UTF-8 patch to `""`). Asserts success + non-empty.
+fn patch_bytes(args: &[&str], cwd: &Path) -> Vec<u8> {
+    let out = heddle_output(args, Some(cwd)).expect("heddle diff --patch");
+    assert!(
+        out.status.success(),
+        "heddle {args:?} should succeed; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.stdout.is_empty(),
+        "cell produced an empty patch (no change detected?)"
+    );
+    out.stdout
+}
+
+/// Worktree-surface byte cell: heddle-overlay backend, `heddle diff --patch`.
+fn native_cell_bytes(pre: &[Entry], mutate: impl Fn(&Path), expect: &[Expect]) {
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    for entry in pre {
+        write_entry(h.path(), entry);
+    }
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+    mutate(h.path());
+
+    let patch = patch_bytes(&["diff", "--patch"], h.path());
+    // Same all-modes contract as the text cells: the JSON `.patch` field is
+    // the LOSSY view of these bytes, so it must equal `from_utf8_lossy(stdout)`
+    // in every render mode, and rename/type detection must agree across modes.
+    assert_modes_consistent(h.path(), &[], &String::from_utf8_lossy(&patch));
+    apply_oracle_bytes(pre, &patch, expect);
+}
+
+/// Committed-surface byte cell: heddle-overlay backend, `diff HEAD~1 HEAD`.
+fn state_cell_bytes(pre: &[Entry], mutate: impl Fn(&Path), expect: &[Expect]) {
+    let h = TempDir::new().unwrap();
+    heddle(&["init"], Some(h.path())).unwrap();
+    for entry in pre {
+        write_entry(h.path(), entry);
+    }
+    heddle(&["capture", "-m", "v1"], Some(h.path())).unwrap();
+    mutate(h.path());
+    heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
+
+    let patch = patch_bytes(&["diff", "HEAD~1", "HEAD", "--patch"], h.path());
+    assert_modes_consistent(h.path(), &["HEAD~1", "HEAD"], &String::from_utf8_lossy(&patch));
+    apply_oracle_bytes(pre, &patch, expect);
+}
+
+/// Plain-Git fast-path byte cell: no `heddle init`; HEAD read via gix.
+fn plain_git_cell_bytes(
+    pre: &[Entry],
+    stage: bool,
+    mutate: impl Fn(&Path),
+    expect: &[Expect],
+) {
+    let h = TempDir::new().unwrap();
+    git_init(h.path());
+    for entry in pre {
+        write_entry(h.path(), entry);
+    }
+    git(h.path(), &["add", "-A"]);
+    git(h.path(), &["commit", "-q", "-m", "seed"]);
+    mutate(h.path());
+    if stage {
+        git(h.path(), &["add", "-A"]);
+    }
+
+    let patch = patch_bytes(&["diff", "--patch"], h.path());
+    assert_modes_consistent(h.path(), &[], &String::from_utf8_lossy(&patch));
+    apply_oracle_bytes(pre, &patch, expect);
+}
+
+// --- add ---
+
+#[cfg(unix)]
+#[test]
+fn native_non_utf8_symlink_add_round_trips() {
+    native_cell_bytes(
+        &[normal("anchor.txt", "anchor\n")],
+        |dir| write_entry(dir, &symlink_bytes("linky", NON_UTF8_TARGET)),
+        &[Expect::Present(symlink_bytes("linky", NON_UTF8_TARGET))],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_non_utf8_symlink_add_round_trips() {
+    state_cell_bytes(
+        &[normal("keep.txt", "keep\n")],
+        |dir| write_entry(dir, &symlink_bytes("linky", NON_UTF8_TARGET)),
+        &[Expect::Present(symlink_bytes("linky", NON_UTF8_TARGET))],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_git_non_utf8_symlink_add_round_trips() {
+    plain_git_cell_bytes(
+        &[normal("anchor.txt", "anchor\n")],
+        true,
+        |dir| write_entry(dir, &symlink_bytes("linky", NON_UTF8_TARGET)),
+        &[Expect::Present(symlink_bytes("linky", NON_UTF8_TARGET))],
+    );
+}
+
+// --- delete ---
+
+#[cfg(unix)]
+#[test]
+fn native_non_utf8_symlink_delete_round_trips() {
+    native_cell_bytes(
+        &[symlink_bytes("doomed", NON_UTF8_TARGET), normal("keep.txt", "keep\n")],
+        |dir| std::fs::remove_file(dir.join("doomed")).unwrap(),
+        &[
+            Expect::Absent("doomed"),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_non_utf8_symlink_delete_round_trips() {
+    state_cell_bytes(
+        &[symlink_bytes("doomed", NON_UTF8_TARGET), normal("keep.txt", "keep\n")],
+        |dir| std::fs::remove_file(dir.join("doomed")).unwrap(),
+        &[
+            Expect::Absent("doomed"),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_git_non_utf8_symlink_delete_round_trips() {
+    plain_git_cell_bytes(
+        &[symlink_bytes("doomed", NON_UTF8_TARGET), normal("keep.txt", "keep\n")],
+        true,
+        |dir| std::fs::remove_file(dir.join("doomed")).unwrap(),
+        &[
+            Expect::Absent("doomed"),
+            Expect::Present(normal("keep.txt", "keep\n")),
+        ],
+    );
+}
+
+// --- target edit (to AND from non-UTF-8 bytes) ---
+
+/// A second non-UTF-8 target, distinct from `NON_UTF8_TARGET`, so an edit cell
+/// changes the bytes on both sides of the hunk.
+#[cfg(unix)]
+const NON_UTF8_TARGET_ALT: &[u8] = b"other/\xfe\xff/elsewhere";
+
+#[cfg(unix)]
+#[test]
+fn native_non_utf8_symlink_edit_round_trips() {
+    native_cell_bytes(
+        &[symlink_bytes("linky", NON_UTF8_TARGET)],
+        |dir| write_entry(dir, &symlink_bytes("linky", NON_UTF8_TARGET_ALT)),
+        &[Expect::Present(symlink_bytes("linky", NON_UTF8_TARGET_ALT))],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn state_non_utf8_symlink_edit_round_trips() {
+    state_cell_bytes(
+        &[symlink_bytes("linky", NON_UTF8_TARGET)],
+        |dir| write_entry(dir, &symlink_bytes("linky", NON_UTF8_TARGET_ALT)),
+        &[Expect::Present(symlink_bytes("linky", NON_UTF8_TARGET_ALT))],
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn plain_git_non_utf8_symlink_edit_round_trips() {
+    plain_git_cell_bytes(
+        &[symlink_bytes("linky", NON_UTF8_TARGET)],
+        false,
+        |dir| write_entry(dir, &symlink_bytes("linky", NON_UTF8_TARGET_ALT)),
+        &[Expect::Present(symlink_bytes("linky", NON_UTF8_TARGET_ALT))],
+    );
+}
+
+/// Edit a symlink FROM a non-UTF-8 target TO a valid-UTF-8 one (and the
+/// add/edit cells above cover the reverse): the `-` line carries raw bytes,
+/// the `+` line is plain text, so the byte renderer must mix both in one hunk.
+#[cfg(unix)]
+#[test]
+fn native_non_utf8_symlink_edit_to_utf8_round_trips() {
+    native_cell_bytes(
+        &[symlink_bytes("linky", NON_UTF8_TARGET)],
+        |dir| write_entry(dir, &symlink("linky", "plain/utf8/target")),
+        &[Expect::Present(symlink("linky", "plain/utf8/target"))],
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Matrix — rename-candidate × type change (cid 3320838479). A delete + add at
 // *different* paths whose bytes are identical scores as a rename (similarity
 // 1.0). The rename-collapse must NOT merge such a pair when the two sides

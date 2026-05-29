@@ -34,7 +34,7 @@ use super::{
     },
     diff_types::{
         ContextSnippet, DiffOutput, DiffStats, FileChange, FileContextEntry, FileEolState,
-        LineDiff, SemanticChangeEntry, change_line_counts,
+        LineDiff, SemanticChangeEntry, SymlinkChange, change_line_counts,
     },
 };
 #[cfg(feature = "semantic")]
@@ -319,15 +319,26 @@ pub fn cmd_diff(
                     &change.path,
                     &kind,
                 );
+                let symlink = symlink_change_for_paths(
+                    &repo,
+                    from_tree.as_ref(),
+                    to_tree.as_ref(),
+                    &kind,
+                    &change.path,
+                    &change.path,
+                    old_mode,
+                    mode,
+                );
                 FileChange {
                     path: change.path.clone(),
                     kind,
-                    binary,
+                    binary: binary && symlink.is_none(),
                     lines,
                     line_counts,
                     eol,
                     mode,
                     old_mode,
+                    symlink,
                     ..Default::default()
                 }
             })
@@ -658,14 +669,17 @@ fn plain_git_file_change(
         &diff_kind,
         unified,
     );
+    let symlink =
+        symlink_change_from_blobs(kind, old_blob.as_ref(), old_mode_field, new_blob.as_ref(), mode);
     Ok(FileChange {
         path: path.display().to_string(),
         kind: kind.to_string(),
-        binary,
+        binary: binary && symlink.is_none(),
         lines,
         eol,
         mode,
         old_mode: old_mode_field,
+        symlink,
         ..Default::default()
     })
 }
@@ -1033,14 +1047,17 @@ fn build_worktree_change(
         // body, matching git's behaviour for transient races.
         Err(_) => (None, FileEolState::default(), false),
     };
+    let symlink =
+        symlink_change_for_paths(repo, from_tree, None, kind, path_str, path_str, old_mode, mode);
     FileChange {
         path: path_str.to_string(),
         kind: kind.to_string(),
-        binary,
+        binary: binary && symlink.is_none(),
         lines,
         eol,
         mode,
         old_mode,
+        symlink,
         ..Default::default()
     }
 }
@@ -1272,14 +1289,25 @@ fn build_state_change(
         Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default(), true),
         Err(_) => (None, FileEolState::default(), false),
     };
+    let symlink = symlink_change_for_paths(
+        repo,
+        from_tree,
+        Some(to_tree),
+        kind,
+        path_str,
+        path_str,
+        old_mode,
+        mode,
+    );
     FileChange {
         path: path_str.to_string(),
         kind: kind.to_string(),
-        binary,
+        binary: binary && symlink.is_none(),
         lines,
         eol,
         mode,
         old_mode,
+        symlink,
         ..Default::default()
     }
 }
@@ -1928,6 +1956,87 @@ fn read_worktree_blob_for_diff(path: &std::path::Path) -> Result<Blob> {
     Ok(Blob::new(std::fs::read(path)?))
 }
 
+fn is_symlink_mode(mode: Option<FileMode>) -> bool {
+    matches!(mode, Some(FileMode::Symlink))
+}
+
+/// Whether each side of a change is a symlink, resolved per `kind`. The mode
+/// fields' meaning is kind-dependent: an `added`/`deleted` change carries the
+/// present side's mode in `mode` (with `old_mode == None` even for a delete,
+/// where `mode` is the *deleted* file's mode — see `change_file_modes`),
+/// while a `modified`/`renamed` change carries `old_mode` + `mode` per side.
+/// Reading `old_mode`/`mode` blindly would miss a deleted symlink (whose
+/// old-side mode lives in `mode`, not `old_mode`).
+fn symlink_sides(kind: &str, old_mode: Option<FileMode>, mode: Option<FileMode>) -> (bool, bool) {
+    match kind {
+        "added" => (false, is_symlink_mode(mode)),
+        "deleted" => (is_symlink_mode(mode), false),
+        _ => (is_symlink_mode(old_mode), is_symlink_mode(mode)),
+    }
+}
+
+/// The single byte-preserving extraction of symlink target content for one
+/// change. A symlink's git blob *is* its raw target bytes, so the renderer
+/// reconstructs the patch hunk from these directly — never through
+/// `content_str()`/`diff_blobs` (which require UTF-8) and never as a
+/// placeholder-binary stanza (which `git apply` rejects for a `120000`
+/// entry). A side's bytes are taken only when that side's mode is a symlink:
+/// `old`/`new` mirror the change's two sides (an add has no old side, a
+/// delete no new side, a target-edit/rename both). Returns `None` when
+/// neither side is a symlink, leaving the change to render as ordinary text.
+fn make_symlink_change(old: Option<Vec<u8>>, new: Option<Vec<u8>>) -> Option<SymlinkChange> {
+    (old.is_some() || new.is_some()).then_some(SymlinkChange { old, new })
+}
+
+/// Build the symlink content from blobs already in hand (the plain-Git path,
+/// which loads both sides up front). `blob.content()` is the raw target bytes
+/// for a symlink entry, so no lossy conversion ever occurs.
+fn symlink_change_from_blobs(
+    kind: &str,
+    old_blob: Option<&Blob>,
+    old_mode: Option<FileMode>,
+    new_blob: Option<&Blob>,
+    mode: Option<FileMode>,
+) -> Option<SymlinkChange> {
+    let (old_is_link, new_is_link) = symlink_sides(kind, old_mode, mode);
+    let old = old_is_link
+        .then(|| old_blob.map(|blob| blob.content().to_vec()))
+        .flatten();
+    let new = new_is_link
+        .then(|| new_blob.map(|blob| blob.content().to_vec()))
+        .flatten();
+    make_symlink_change(old, new)
+}
+
+/// Build the symlink content for a heddle-overlay change by loading each
+/// side's blob through the same loaders the hunk path uses
+/// (`blob_from_tree` for a tree side, `new_blob_for_rename` for the new side,
+/// which reads the live worktree via `read_worktree_blob_for_diff` when
+/// `to_tree` is `None`). `to_tree == None` means the new side is the live
+/// worktree. `old_path`/`new_path` differ only for a rename.
+#[allow(clippy::too_many_arguments)]
+fn symlink_change_for_paths(
+    repo: &Repository,
+    from_tree: Option<&Tree>,
+    to_tree: Option<&Tree>,
+    kind: &str,
+    old_path: &str,
+    new_path: &str,
+    old_mode: Option<FileMode>,
+    mode: Option<FileMode>,
+) -> Option<SymlinkChange> {
+    let (old_is_link, new_is_link) = symlink_sides(kind, old_mode, mode);
+    let old = old_is_link
+        .then(|| blob_from_tree(repo, from_tree, old_path).ok().flatten())
+        .flatten()
+        .map(|blob| blob.content().to_vec());
+    let new = new_is_link
+        .then(|| new_blob_for_rename(repo, to_tree, new_path).ok().flatten())
+        .flatten()
+        .map(|blob| blob.content().to_vec());
+    make_symlink_change(old, new)
+}
+
 fn detect_clear_renames_for_worktree_status(
     cli: &Cli,
     changes: Vec<FileChange>,
@@ -2096,6 +2205,25 @@ fn detect_clear_renames(
             // the deleted (old) side mode off the snapshot so a rename+chmod
             // surfaces both modes in the patch headers.
             change.old_mode = deleted_modes.get(old_path).copied().flatten();
+            // A symlink↔symlink rename (the only symlink move that collapses;
+            // `rename_mode_compatible` keeps regular↔symlink as delete+add)
+            // must carry byte-preserving target content so the renderer emits
+            // a target-bytes hunk for a non-UTF-8 link instead of a binary
+            // marker. Load both sides through the same loaders the rename
+            // similarity used.
+            change.symlink = symlink_change_for_paths(
+                repo,
+                from_tree,
+                to_tree,
+                "renamed",
+                old_path,
+                &change.path,
+                change.old_mode,
+                change.mode,
+            );
+            if change.symlink.is_some() {
+                change.binary = false;
+            }
             // The original `added` carried a stat-path tally that
             // counted the file as a pure insertion; after we collapse
             // the (added, deleted) pair into one rename, those line

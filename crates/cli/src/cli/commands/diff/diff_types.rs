@@ -157,6 +157,17 @@ pub struct FileChange {
     pub old_mode: Option<FileMode>,
     #[serde(skip)]
     pub binary: bool,
+    /// Raw symlink target bytes for each side of a change that touches a
+    /// symlink. Git stores a symlink's blob as the raw bytes of its target,
+    /// which on Unix need not be valid UTF-8 — so they can never flow through
+    /// `content_str()`/`diff_blobs` (which require UTF-8) or be binary-marked
+    /// (a `120000` placeholder-binary stanza is rejected by `git apply`).
+    /// When `Some`, the patch renderer reconstructs a byte-exact target hunk
+    /// from these bytes — the single byte-preserving symlink path across every
+    /// surface (add/delete/edit/rename) and both backends. `None` means the
+    /// change does not involve a symlink and renders as ordinary text.
+    #[serde(skip)]
+    pub symlink: Option<SymlinkChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<Vec<LineDiff>>,
     /// Pre-computed line tally for paths where we counted before
@@ -174,6 +185,19 @@ pub struct FileChange {
     /// status-only fast paths fall back to.
     #[serde(skip)]
     pub eol: FileEolState,
+}
+
+/// The raw symlink target bytes for each side of a symlink change. A
+/// symlink's git blob is exactly its target bytes (no trailing newline), so
+/// these are the authoritative content the patch renderer emits. `old` is
+/// `None` on an add, `new` is `None` on a delete, and both are `Some` on a
+/// target-edit or rename-with-edit. The bytes come from the same loaders the
+/// hunk path uses (`symlink_target_bytes` for the worktree, the stored blob
+/// for a tree side), so a non-UTF-8 target survives without lossy conversion.
+#[derive(Clone, Debug, Default)]
+pub struct SymlinkChange {
+    pub old: Option<Vec<u8>>,
+    pub new: Option<Vec<u8>>,
 }
 
 /// Trailing-newline state for both sides of a file change, plus the
