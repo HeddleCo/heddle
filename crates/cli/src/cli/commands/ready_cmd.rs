@@ -565,7 +565,6 @@ fn missing_ready_capture_intent_report_for(
         conflict_count: 0,
         blockers: vec!["provide -m/--message/--intent before ready captures work".to_string()],
         recommended_action: recommended_action.to_string(),
-        recommended_action_argv: super::git_overlay_health::action_argv(recommended_action),
         recommended_action_template: super::git_overlay_health::action_template(recommended_action),
         thread_health: "blocked".to_string(),
     }
@@ -669,7 +668,6 @@ fn trust_blocked_report_for(
         conflict_count: 0,
         blockers: vec!["repository verification is blocked".to_string()],
         recommended_action: recommended_action.to_string(),
-        recommended_action_argv: super::git_overlay_health::action_argv(recommended_action),
         recommended_action_template: super::git_overlay_health::action_template(recommended_action),
         thread_health: "blocked".to_string(),
     }
@@ -696,7 +694,6 @@ mod tests {
             conflict_count: 0,
             blockers: Vec::new(),
             recommended_action: recommended_action.to_string(),
-            recommended_action_argv: git_overlay_health::action_argv(recommended_action),
             recommended_action_template: git_overlay_health::action_template(recommended_action),
             thread_health: "ready".to_string(),
         }

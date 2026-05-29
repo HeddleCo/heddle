@@ -269,12 +269,12 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
     assert_eq!(verify["status"], "needs_init");
     assert_eq!(verify["recommended_action"], "heddle adopt --ref main");
     assert_eq!(
-        verify["recommended_action_argv"],
+        verify["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "main"]),
         "machine argv must replay the same Heddle binary even when PATH cannot resolve `heddle`: {verify}"
     );
     assert_eq!(
-        verify["checks"][1]["recommended_action_argv"],
+        verify["checks"][1]["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "main"]),
         "per-check argv must also be hermetic for no-PATH agents: {verify}"
     );
@@ -1142,7 +1142,7 @@ fn git_replacement_matrix_branch_like_thread_refresh_without_git_on_path() {
     assert_eq!(envelope["primary_command"], "heddle switch feature/refresh");
     assert_json_recovery_advice_fields(&envelope, "branch-like thread refresh refusal");
     assert_eq!(
-        envelope["primary_command_argv"],
+        envelope["primary_command_template"]["argv_template"],
         heddle_argv_json(["switch", "feature/refresh"])
     );
 

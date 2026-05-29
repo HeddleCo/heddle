@@ -132,7 +132,7 @@ pub use command_catalog::{
     command_persists_op_id, command_runtime_contract, command_runtime_contract_for_command,
     command_supports_json_for_command, command_supports_op_id, command_supports_op_id_for_command,
     command_surface, command_uses_bootstrap_op_id_store, observe_only_root_commands,
-    recommended_action_argv, root_commands_for_advanced_help, root_commands_for_help_visibility,
+    root_commands_for_advanced_help, root_commands_for_help_visibility,
 };
 pub use compare::cmd_compare;
 pub use completion::cmd_completion;

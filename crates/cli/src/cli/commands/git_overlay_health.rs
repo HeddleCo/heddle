@@ -23,7 +23,7 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::{
         ActionFields, ActionTemplate, build_command_catalog, heddle_action,
-        recommended_action_argv, recommended_action_template,
+        recommended_action_template,
     },
     schemas::opaque_schema_verbs,
 };
@@ -72,10 +72,8 @@ pub(crate) struct RepositoryVerificationState {
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     #[schemars(with = "Option<String>")]
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplate>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub recovery_action_templates: Vec<ActionTemplate>,
     pub checks: Vec<VerificationCheck>,
 }
@@ -159,10 +157,8 @@ pub(crate) struct VerificationCheck {
     pub clean: bool,
     pub summary: String,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplate>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub recovery_action_templates: Vec<ActionTemplate>,
     #[serde(default)]
     pub details: BTreeMap<String, String>,
@@ -386,9 +382,7 @@ impl RepositoryVerificationState {
             workflow_status,
             workflow_summary,
             summary,
-            recommended_action_argv: recommended_action_fields.argv,
             recommended_action_template: recommended_action_fields.template,
-            recovery_command_argv: command_argvs(&action_plan.recovery_commands),
             recovery_action_templates: action_templates(&action_plan.recovery_commands),
             recommended_action: action_plan.primary_action,
             recovery_commands: action_plan.recovery_commands,
@@ -452,7 +446,6 @@ pub(crate) fn override_trust_recommended_action(
 ) {
     let action = action.into();
     let action_fields = ActionFields::from_action(&action);
-    trust.recommended_action_argv = action_fields.argv.clone();
     trust.recommended_action_template = action_fields.template.clone();
     trust.recommended_action = action.clone();
     if let Some(check) = trust
@@ -460,7 +453,6 @@ pub(crate) fn override_trust_recommended_action(
         .iter_mut()
         .find(|check| check.name == "Workflow")
     {
-        check.recommended_action_argv = action_fields.argv;
         check.recommended_action_template = action_fields.template;
         check.recommended_action = Some(action);
     }
@@ -1108,7 +1100,6 @@ fn verification_check(
     recovery_commands: Vec<String>,
 ) -> VerificationCheck {
     let action = ActionFields::from_optional_action_ref(recommended_action.as_deref());
-    let recovery_command_argv = command_argvs(&recovery_commands);
     let recovery_action_templates = action_templates(&recovery_commands);
     VerificationCheck {
         name: name.to_string(),
@@ -1116,10 +1107,8 @@ fn verification_check(
         clean,
         summary: summary.to_string(),
         recommended_action,
-        recommended_action_argv: action.argv,
         recommended_action_template: action.template,
         recovery_commands,
-        recovery_command_argv,
         recovery_action_templates,
         details: BTreeMap::new(),
     }
@@ -1705,10 +1694,8 @@ pub(crate) fn build_plain_git_verification_probe(
             clean: true,
             summary: "plain Git repository found".to_string(),
             recommended_action: None,
-            recommended_action_argv: None,
             recommended_action_template: None,
             recovery_commands: Vec::new(),
-            recovery_command_argv: Vec::new(),
             recovery_action_templates: Vec::new(),
             details,
         },
@@ -1718,10 +1705,8 @@ pub(crate) fn build_plain_git_verification_probe(
             clean: false,
             summary: "Heddle data is not initialized".to_string(),
             recommended_action: Some(setup_action.clone()),
-            recommended_action_argv: setup_action_fields.argv.clone(),
             recommended_action_template: setup_action_fields.template.clone(),
             recovery_commands: setup_recovery_commands.clone(),
-            recovery_command_argv: command_argvs(&setup_recovery_commands),
             recovery_action_templates: action_templates(&setup_recovery_commands),
             details: BTreeMap::new(),
         },
@@ -1732,10 +1717,8 @@ pub(crate) fn build_plain_git_verification_probe(
                 clean: false,
                 summary: "Git history has not been imported into Heddle".to_string(),
                 recommended_action: Some(import.clone()),
-                recommended_action_argv: import_action_fields.argv,
                 recommended_action_template: import_action_fields.template,
                 recovery_commands: vec![import.clone()],
-                recovery_command_argv: command_argvs(std::slice::from_ref(&import)),
                 recovery_action_templates: action_templates(std::slice::from_ref(&import)),
                 details: BTreeMap::new(),
             }
@@ -1746,10 +1729,8 @@ pub(crate) fn build_plain_git_verification_probe(
                 clean: true,
                 summary: "No Git commits need import yet".to_string(),
                 recommended_action: None,
-                recommended_action_argv: None,
                 recommended_action_template: None,
                 recovery_commands: Vec::new(),
-                recovery_command_argv: Vec::new(),
                 recovery_action_templates: Vec::new(),
                 details: BTreeMap::new(),
             }
@@ -1838,9 +1819,7 @@ pub(crate) fn build_plain_git_verification_probe(
         workflow_status: "not_checked".to_string(),
         workflow_summary: "workflow readiness is checked after Heddle initialization".to_string(),
         summary: "Git repository has not been initialized for Heddle".to_string(),
-        recommended_action_argv: setup_action_fields.argv,
         recommended_action_template: setup_action_fields.template,
-        recovery_command_argv: command_argvs(&setup_recovery_commands),
         recovery_action_templates: action_templates(&setup_recovery_commands),
         recommended_action: setup_action,
         recovery_commands: setup_recovery_commands,
@@ -2089,20 +2068,8 @@ fn plain_git_head_has_commit(
     Ok(object.kind == gix::objs::Kind::Commit)
 }
 
-pub(crate) fn action_argv(action: &str) -> Option<Vec<String>> {
-    recommended_action_argv(action)
-        .unwrap_or_else(|err| panic!("invalid recommended action `{action}`: {err}"))
-}
-
 pub(crate) fn action_template(action: &str) -> Option<ActionTemplate> {
     recommended_action_template(action)
-}
-
-pub(crate) fn command_argvs(commands: &[String]) -> Vec<Vec<String>> {
-    commands
-        .iter()
-        .filter_map(|command| action_argv(command))
-        .collect()
 }
 
 pub(crate) fn action_templates(commands: &[String]) -> Vec<ActionTemplate> {
@@ -3462,7 +3429,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        GitOverlayHealth, RepositoryVerificationState, VerificationActionPlan, action_argv,
+        GitOverlayHealth, RepositoryVerificationState, VerificationActionPlan, action_template,
         canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_preview_command,
         machine_contract_coverage, remote_drift_decision, remote_tracking_next_action,
         repository_setup_guidance, repository_verification_blocked_advice,
@@ -3494,10 +3461,8 @@ mod tests {
             workflow_summary: "Git and Heddle disagree".to_string(),
             summary: "Git and Heddle disagree".to_string(),
             recommended_action: recommended_action.into(),
-            recommended_action_argv: None,
             recommended_action_template: None,
             recovery_commands,
-            recovery_command_argv: Vec::new(),
             recovery_action_templates: Vec::new(),
             checks: Vec::new(),
         }
@@ -3539,14 +3504,18 @@ mod tests {
     fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
         let import = canonical_bridge_import_ref_command("feature with spaces");
         assert_eq!(
-            action_argv(&import).expect("import command should expose argv")[1..],
+            action_template(&import)
+                .expect("import command should expose a template")
+                .argv_template[1..],
             ["bridge", "git", "import", "--ref", "feature with spaces"]
         );
 
         let reconcile =
             canonical_bridge_reconcile_ref_preview_command(Some("heddle"), "feature 'quoted'");
         assert_eq!(
-            action_argv(&reconcile).expect("reconcile command should expose argv")[1..],
+            action_template(&reconcile)
+                .expect("reconcile command should expose a template")
+                .argv_template[1..],
             [
                 "bridge",
                 "git",

@@ -40,7 +40,6 @@ struct AdoptOutput {
     partial_mirror_refs: usize,
     already_in_sync: bool,
     recommended_action: Option<String>,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
     // Adopt is a one-time bootstrap, not a per-mutation hot path, so it
     // keeps the verification block (PR B's serialize-skip applies only to
@@ -105,7 +104,6 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         partial_mirror_refs: stats.partial_mirror_refs.len(),
         already_in_sync,
         recommended_action,
-        recommended_action_argv: trust.recommended_action_argv.clone(),
         recommended_action_template: trust.recommended_action_template.clone(),
         trust,
     };

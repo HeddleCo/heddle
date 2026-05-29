@@ -353,17 +353,13 @@ blocked verification state on stdout.
       "clean": true,
       "summary": "Git worktree is clean",
       "recommended_action": null,
-      "recommended_action_argv": null,
       "recovery_commands": [],
-      "recovery_command_argv": [],
       "details": {}
     }
   ],
   "recommended_action": null,
-  "recommended_action_argv": null,
   "recommended_action_template": null,
   "recovery_commands": [],
-  "recovery_command_argv": [],
   "recovery_action_templates": []
 }
 ```
@@ -382,12 +378,10 @@ blocked verification state on stdout.
 | `summary` | string | required | Human-sized explanation of the top verification state. |
 | `checks` | array<object> | required | Public checklist rows for Git, Heddle, Mapping, Worktree, Remote, Operation, Machine contract, and Clone. |
 | `recommended_action` | string \| null | required | Display command for the primary next step. `null` when no action is needed. |
-| `recommended_action_argv` | array<string> \| null | required | Executable argv for `recommended_action`, using the current Heddle executable path as argv[0] when discoverable so agents do not depend on `PATH`. `null` when the display command is null or a registered placeholder. |
-| `recommended_action_template` | object \| null | required | Template for display-only action placeholders, including required inputs and argv template. |
+| `recommended_action_template` | object \| null | required | Fillable template for `recommended_action` — `argv_template` (executable argv, current Heddle executable path as argv[0]), `required_inputs`, `agent_may_fill`. Present for every valid action; `null` only when the display command is null. The canonical machine-readable action shape — the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
 | `recovery_commands` | array<string> | required | Display commands for recovery, in priority order. Empty when verified. |
-| `recovery_command_argv` | array<array<string>> | required | Executable argv forms for recovery commands that parse through the command catalog. Registered placeholders remain display-only. |
-| `recovery_action_templates` | array<object> | required | Display-only recovery templates with required inputs. |
-| `checks[].recommended_action_argv`, `checks[].recommended_action_template`, `checks[].recovery_command_argv`, `checks[].recovery_action_templates` | array/object/null | required | Structured action metadata scoped to the check row. |
+| `recovery_action_templates` | array<object> | required | Fillable templates mirroring `recovery_commands`. |
+| `checks[].recommended_action_template`, `checks[].recovery_action_templates` | object/array/null | required | Structured fillable action metadata scoped to the check row. |
 
 ### Blocked JSON verify
 
@@ -405,7 +399,6 @@ standard recovery fields plus nested verification proof:
   "would_change": "`heddle verify` is a strict proof gate and returns nonzero until every verification check is clean",
   "preserved": "verify is observe-only; repository objects, refs, index, and worktree files were left unchanged",
   "primary_command": "heddle commit -m <message>",
-  "primary_command_argv": null,
   "primary_command_template": {
     "action": "heddle commit -m <message>",
     "argv_template": ["heddle", "commit", "-m", "<message>"],
@@ -413,7 +406,6 @@ standard recovery fields plus nested verification proof:
     "agent_may_fill": true
   },
   "recovery_commands": ["heddle commit -m <message>", "heddle verify"],
-  "recovery_command_argv": [["heddle", "verify"]],
   "recovery_action_templates": [
     {
       "action": "heddle commit -m <message>",
@@ -499,10 +491,8 @@ surface; the native first-run loop should prefer `commit`.
     "model": "gpt-5-codex"
   },
   "next_action": null,
-  "next_action_argv": null,
   "next_action_template": null,
   "recommended_action": null,
-  "recommended_action_argv": null,
   "recommended_action_template": null
 }
 ```
@@ -517,10 +507,8 @@ surface; the native first-run loop should prefer `commit`.
   "message": "restored previous logical operation",
   "batches": [],
   "next_action": null,
-  "next_action_argv": null,
   "next_action_template": null,
   "recommended_action": null,
-  "recommended_action_argv": null,
   "recommended_action_template": null
 }
 ```
@@ -538,9 +526,7 @@ saves a Heddle state without recommending a Git checkpoint.
   "blockers": [],
   "warnings": [],
   "next_action": "heddle merge feature/parser --preview",
-  "next_action_argv": ["heddle", "merge", "feature/parser", "--preview"],
   "recommended_action": "heddle merge feature/parser --preview",
-  "recommended_action_argv": ["heddle", "merge", "feature/parser", "--preview"],
   "captured": true,
   "captured_state": "hd-sqr398dvx9ay",
   "thread_state": "ready",
@@ -583,8 +569,7 @@ saves a Heddle state without recommending a Git checkpoint.
 | `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo`/`redo` report `completed` or `preview`. |
 | `message`, `summary` | string \| null | required when present | Human-readable result. |
 | `next_action`, `recommended_action` | string \| null | required | Primary next command, if one is known. |
-| `next_action_argv`, `recommended_action_argv` | array<string> \| null | required | Executable argv for concrete next commands. |
-| `next_action_template`, `recommended_action_template` | object \| null | required | Fillable template metadata for placeholder next commands. |
+| `next_action_template`, `recommended_action_template` | object \| null | required | Fillable template metadata (`argv_template`, `required_inputs`, `agent_may_fill`) for the next/recommended command; present for every valid action, `null` when none. |
 | `git_commit` | string \| null | required for `checkpoint`/`commit` | Git commit OID produced by the checkpoint path; `null` for native Heddle commits. |
 | `capability`, `storage_model`, `committed_at` | string | required for `checkpoint` | Repository mode, storage model, and checkpoint timestamp. |
 | `status` | string | required for `capture`/`checkpoint`/`commit`/`ready`/`ship` | Machine-stable success status for the operation. |
@@ -653,9 +638,7 @@ Preview a merge without changing the worktree.
   "blockers": [],
   "warnings": [],
   "next_action": "heddle ship --thread feature/parser --push",
-  "next_action_argv": ["heddle", "ship", "--thread", "feature/parser", "--push"],
   "recommended_action": "heddle ship --thread feature/parser --push",
-  "recommended_action_argv": ["heddle", "ship", "--thread", "feature/parser", "--push"],
   "diff": {}
 }
 ```
@@ -667,7 +650,7 @@ Preview a merge without changing the worktree.
 | `status` | string \| null | required | Preview status. |
 | `would_merge` | bool | required | Whether the preview believes the merge can proceed. |
 | `blockers` | array<string> \| null | required | Reasons merge should not proceed. |
-| `recommended_action`, `recommended_action_argv` | string \| null, array<string> \| null | required | Primary next command and parsed argv when one exists. |
+| `recommended_action`, `recommended_action_template` | string \| null, object \| null | required | Primary next command and its fillable template when one exists. |
 | `diff` | object \| null | required | Preview diff payload. |
 | `verification` | object \| null | required | Repository verification state after the preview. Preview mode does not mutate refs or the worktree, so this proves the decision surface was computed from a verified repository state. |
 
@@ -772,10 +755,8 @@ List recent saved states on a thread.
   "name": "feature/parser",
   "message": "Dropped thread 'feature/parser'",
   "next_action": null,
-  "next_action_argv": null,
   "next_action_template": null,
   "recommended_action": null,
-  "recommended_action_argv": null,
   "recommended_action_template": null,
   "thread": null,
   "path": null,
@@ -994,10 +975,8 @@ verification.
   "thread_health": "clean",
   "blockers": [],
   "recommended_action": "",
-  "recommended_action_argv": null,
   "recommended_action_template": null,
   "next_action": null,
-  "next_action_argv": null,
   "next_action_template": null,
   "git_branch_tip": "abc123",
   "history_imported": true,
@@ -1044,7 +1023,7 @@ verification.
 | `stack_depth`, `stale_from_parent`, `is_current`, `is_isolated`, `history_imported`, `auto` | number/bool | required | Coordination metadata. |
 | `verification_summary`, `confidence_summary`, `integration_policy_result` | object | required | Structured readiness/coordination summaries. |
 | `coordination_status`, `thread_health`, `recommended_action` | string | required | Current coordination state and next action. |
-| `next_action`, `recommended_action_argv`, `recommended_action_template`, `next_action_argv`, `next_action_template` | mixed | required | Machine-readable action metadata; `null` when no action is needed or the action is display-only. |
+| `next_action`, `recommended_action_template`, `next_action_template` | mixed | required | Machine-readable action metadata; templates carry `argv_template`/`required_inputs`/`agent_may_fill` and are `null` when no action is needed. |
 | `verification` | object | required | Full repository verification proof for this checkout. |
 | `recovery_commands` | array<string> | required | Recovery commands from verification/advice. Empty when verified. |
 
@@ -1208,7 +1187,6 @@ array.
     "signals": ["CODEX_THREAD_ID"]
   },
   "recommended_action": "heddle actor spawn --provider openai --model gpt-5",
-  "recommended_action_argv": ["heddle", "actor", "spawn", "--provider", "openai", "--model", "gpt-5"],
   "verification": {
     "verified": true,
     "status": "clean",
@@ -1356,9 +1334,7 @@ the same ready envelope.
   "blockers": [],
   "warnings": [],
   "next_action": null,
-  "next_action_argv": null,
   "recommended_action": null,
-  "recommended_action_argv": null,
   "captured": false,
   "captured_state": null,
   "thread_state": "ready",
@@ -1539,10 +1515,8 @@ the same ready envelope.
   "force": false,
   "thread": "main",
   "next_action": null,
-  "next_action_argv": null,
   "next_action_template": null,
   "recommended_action": null,
-  "recommended_action_argv": null,
   "recommended_action_template": null
 }
 ```
@@ -1566,7 +1540,7 @@ the same ready envelope.
 | `force`, `force_discard_warning` | bool/string \| null | Git-overlay push only | Present for Git-overlay push. `force_discard_warning` is non-null when `--force` may move remote refs backward or discard remote-only commits. |
 | `git_notes_ref`, `git_notes_visibility_warning` | string \| null | Git-overlay push only | Heddle metadata notes ref carried with the push and the human-visible Git disclosure for that ref. |
 | `git_tracking_remote`, `git_remote_configured`, `git_upstream_configured` | mixed | Git-overlay push only | Git config side effects when Heddle configures a remote or branch upstream during push. |
-| `next_action`, `recommended_action`, `next_action_argv`, `recommended_action_argv`, `next_action_template`, `recommended_action_template` | mixed | required for push | Post-push action metadata promoted from verification; all are `null` when the push closes the remote loop. |
+| `next_action`, `recommended_action`, `next_action_template`, `recommended_action_template` | mixed | required for push | Post-push action metadata promoted from verification; all are `null` when the push closes the remote loop. |
 | `verification` | object | required for pull/push | Post-transfer verification proof. |
 
 ---
@@ -1645,9 +1619,7 @@ carries `git_overlay_import_hint`.
     ]
   },
   "recommended_action": "heddle bridge git import --ref support/import-me",
-  "recommended_action_argv": ["heddle", "bridge", "git", "import", "--ref", "support/import-me"],
-  "recovery_commands": ["heddle bridge git import --ref support/import-me"],
-  "recovery_command_argv": [["heddle", "bridge", "git", "import", "--ref", "support/import-me"]]
+  "recovery_commands": ["heddle bridge git import --ref support/import-me"]
 }
 ```
 
@@ -1666,9 +1638,8 @@ carries `git_overlay_import_hint`.
 | `git_overlay_import_hint.recommended_command` | string | required when hint is present | Suggested `heddle bridge git import …` invocation. |
 | `git_overlay_health` | object | required | Health summary derived from the shared verification engine. |
 | `recommended_action` | string | required | Top-level mirror of the verification engine's primary next command. |
-| `recommended_action_argv` | array<string> \| null | required | Parsed argv for executable actions; `null` for display-only templates. |
+| `recommended_action_template` | object \| null | required | Fillable template (`argv_template`/`required_inputs`/`agent_may_fill`) for the primary action; `null` when none. |
 | `recovery_commands` | array<string> | required | Verification recovery commands. Empty when clean. |
-| `recovery_command_argv` | array<array<string>> | required | Parsed argv for executable recovery commands. |
 | `verification` | object | required | Full `RepositoryVerificationState` proof payload shared with `heddle verify`. |
 
 ---
@@ -1837,8 +1808,7 @@ State detail view, pretty-printed.
     {
       "name": "support/git-only",
       "git_commit": "9fceb02",
-      "recommended_action": "heddle adopt --ref support/git-only",
-      "recommended_action_argv": ["heddle", "adopt", "--ref", "support/git-only"]
+      "recommended_action": "heddle adopt --ref support/git-only"
     }
   ],
   "current": "feature/parser-fast",
@@ -1903,7 +1873,7 @@ Control-tower view across every active thread.
 | `groups[].label` | string | required | Human label. |
 | `groups[].threads` | array<ThreadSummary> | required | At least one element per emitted group. |
 | `available_git_refs` | array<object> | required | Git refs available for optional adoption/import; not counted as active threads and not nested in `groups`. |
-| `available_git_refs[].name`, `git_commit`, `recommended_action`, `recommended_action_argv` | scalars | required except `recommended_action_argv` may be null | Typed import guidance for a Git ref not yet modeled as a Heddle thread. |
+| `available_git_refs[].name`, `git_commit`, `recommended_action`, `recommended_action_template` | scalars/object | required except `recommended_action_template` may be null | Typed import guidance for a Git ref not yet modeled as a Heddle thread. |
 | `thread_count` | int | required | |
 
 ```json
@@ -1948,8 +1918,7 @@ Control-tower view across every active thread.
     {
       "name": "support/git-only",
       "git_commit": "9fceb02",
-      "recommended_action": "heddle adopt --ref support/git-only",
-      "recommended_action_argv": ["heddle", "adopt", "--ref", "support/git-only"]
+      "recommended_action": "heddle adopt --ref support/git-only"
     }
   ],
   "thread_count": 1
@@ -2422,9 +2391,7 @@ include the shared verification report and the primary recovery command.
   "workspace": {"thread_count": 0},
   "health": {"status": "clean"},
   "recommended_action": "",
-  "recommended_action_argv": null,
   "recovery_commands": [],
-  "recovery_command_argv": [],
   "profile": null
 }
 ```
@@ -2442,7 +2409,6 @@ surface.
   "status": "clean",
   "verified": true,
   "recommended_action": null,
-  "recommended_action_argv": null,
   "files_scanned": 42,
   "issues": []
 }
@@ -2455,7 +2421,7 @@ surface.
 | `output_kind` | string | required | Always `doctor_docs`. |
 | `status` | string | required | `clean` when no drift is found, otherwise `drift`. |
 | `verified` | bool | required | True when docs examples match the live CLI surface. |
-| `recommended_action`, `recommended_action_argv` | string \| null, array<string> \| null | required | Re-run command for CI/debugging when drift exists. |
+| `recommended_action`, `recommended_action_template` | string \| null, object \| null | required | Re-run command for CI/debugging when drift exists, plus its fillable template. |
 | `files_scanned` | number | required | Markdown files checked. |
 | `issues` | array<object> | required | Drift findings with `file`, `line`, `invocation`, `kind`, `detail`, and optional `suggestion`. |
 
@@ -2473,9 +2439,7 @@ catalog-wide schema coverage.
   "verified": true,
   "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
   "recommended_action": null,
-  "recommended_action_argv": null,
   "recovery_commands": [],
-  "recovery_command_argv": [],
   "registered_verbs": ["status", "verify", "try"],
   "documented_verbs": ["status", "verify", "try"],
   "undocumented_verbs": [],
@@ -2612,9 +2576,7 @@ lives in `recovery_commands`.
   "merge_state": null,
   "next_action": "heddle merge try-1234abcd",
   "recommended_action": "heddle merge try-1234abcd",
-  "recommended_action_argv": ["heddle", "merge", "try-1234abcd"],
-  "recovery_commands": ["heddle thread drop try-1234abcd"],
-  "recovery_command_argv": [["heddle", "thread", "drop", "try-1234abcd"]]
+  "recovery_commands": ["heddle thread drop try-1234abcd"]
 }
 ```
 
@@ -2796,7 +2758,6 @@ name, delete, or rename it emits a thread operation result.
     "thread_health": "clean",
     "blockers": [],
     "recommended_action": "",
-    "recommended_action_argv": null,
     "git_branch_tip": null,
     "history_imported": true,
     "auto": false,
@@ -2959,9 +2920,8 @@ Top-level fields: `repository`, `repository_capability`,
 `storage_model`, `hosted_enabled`, `git_overlay_import_hint` (object
 or `null`), `operation`, `remote_tracking`, `thread`, `state`,
 `changes`, `workspace`, `health`, `recommended_action`,
-`recommended_action_argv`, `recovery_commands`,
-`recovery_command_argv`, `profile`. All fields are required;
-`Option<...>` fields serialize as explicit `null`.
+`recommended_action_template`, `recovery_commands`, `profile`. All
+fields are required; `Option<...>` fields serialize as explicit `null`.
 
 ```json
 {
@@ -2978,9 +2938,7 @@ or `null`), `operation`, `remote_tracking`, `thread`, `state`,
   "workspace": {"thread_count": 0},
   "health": {"status": "clean"},
   "recommended_action": "",
-  "recommended_action_argv": null,
   "recovery_commands": [],
-  "recovery_command_argv": [],
   "profile": null
 }
 ```
@@ -3224,10 +3182,8 @@ without scraping freeform text.
   "would_change": "the command cannot inspect or change repository state until initialization",
   "preserved": "no repository objects, refs, metadata, or worktree files were changed",
   "primary_command": "heddle init",
-  "primary_command_argv": ["/path/to/heddle", "init"],
   "primary_command_template": null,
   "recovery_commands": ["heddle init"],
-  "recovery_command_argv": [["/path/to/heddle", "init"]],
   "recovery_action_templates": []
 }
 ```
@@ -3244,11 +3200,9 @@ without scraping freeform text.
 | `would_change` | string | required | What could be lost, duplicated, or changed by proceeding blindly. |
 | `preserved` | string | required | What Heddle preserved or left untouched before failing. |
 | `primary_command` | string | required | Main recovery/inspection command. |
-| `primary_command_argv` | array<string> \| null | required | Parsed argv for `primary_command`; `null` for display-only placeholders. |
-| `primary_command_template` | object \| null | required | Fillable template for `primary_command` when it needs caller-provided inputs. |
+| `primary_command_template` | object \| null | required | Fillable template (`argv_template`/`required_inputs`/`agent_may_fill`) for `primary_command`. The canonical machine-readable shape; the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
 | `recovery_commands` | array<string> | required | Recovery commands in priority order. |
-| `recovery_command_argv` | array<array<string>> | required | Parsed argv for executable recovery commands. |
-| `recovery_action_templates` | array<object> | required | Fillable templates for recovery commands that need caller-provided inputs. |
+| `recovery_action_templates` | array<object> | required | Fillable templates mirroring `recovery_commands`. |
 | `verification` | object | present for `kind: "verify_failed"` | Nested `RepositoryVerificationState` for the blocked `heddle verify` invocation. JSON callers should read this from stderr; blocked `verify` never writes the verification object to stdout. |
 
 ### Current `kind` values

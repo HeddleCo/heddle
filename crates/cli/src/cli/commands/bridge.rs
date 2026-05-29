@@ -16,7 +16,7 @@ use super::{
     action_line::{print_next, print_next_step, print_optional},
     advice::RecoveryAdvice,
     git_overlay_health::{
-        action_argv, action_template, build_git_overlay_health, build_plain_git_verification_probe,
+        action_template, build_git_overlay_health, build_plain_git_verification_probe,
         build_repository_verification_state, canonical_adopt_ref_command,
         canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_command,
         canonical_bridge_reconcile_ref_preview_command, serialize_empty_action_as_null,
@@ -192,10 +192,8 @@ struct BridgeGitStatusOutput {
     git_overlay_health: GitOverlayHealth,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
-    recovery_command_argv: Vec<Vec<String>>,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
 }
@@ -223,10 +221,8 @@ struct BridgeGitImportOutput {
     already_in_sync: bool,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
-    recovery_command_argv: Vec<Vec<String>>,
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
@@ -242,10 +238,8 @@ struct BridgeGitReconcileOutput {
     preview: bool,
     summary: String,
     recommended_action: Option<String>,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
-    recovery_command_argv: Vec<Vec<String>>,
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
@@ -264,10 +258,8 @@ struct BridgeGitSyncOutput {
     markers_synced: usize,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
-    recovery_command_argv: Vec<Vec<String>>,
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
@@ -346,10 +338,8 @@ fn cmd_bridge_git_status(cli: &Cli, repo: &Repository) -> Result<()> {
         }),
         git_overlay_health,
         recommended_action: trust.recommended_action.clone(),
-        recommended_action_argv: trust.recommended_action_argv.clone(),
         recommended_action_template: trust.recommended_action_template.clone(),
         recovery_commands: trust.recovery_commands.clone(),
-        recovery_command_argv: trust.recovery_command_argv.clone(),
         trust,
     };
     render_bridge_git_status(&output, should_output_json(cli, Some(repo.config())));
@@ -593,10 +583,8 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                         .collect(),
                 },
                 recommended_action: probe.trust.recommended_action.clone(),
-                recommended_action_argv: probe.trust.recommended_action_argv.clone(),
                 recommended_action_template: probe.trust.recommended_action_template.clone(),
                 recovery_commands: probe.trust.recovery_commands.clone(),
-                recovery_command_argv: probe.trust.recovery_command_argv.clone(),
                 trust: probe.trust,
             };
             render_bridge_git_status(&output, should_output_json(cli, None));
@@ -755,10 +743,8 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 partial_mirror_refs: stats.partial_mirror_refs.len(),
                 already_in_sync,
                 recommended_action: trust.recommended_action.clone(),
-                recommended_action_argv: trust.recommended_action_argv.clone(),
                 recommended_action_template: trust.recommended_action_template.clone(),
                 recovery_commands: trust.recovery_commands.clone(),
-                recovery_command_argv: trust.recovery_command_argv.clone(),
                 trust,
             };
             render_bridge_git_import(cli, &repo, &output)?;
@@ -816,10 +802,8 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 threads_synced,
                 markers_synced,
                 recommended_action: trust.recommended_action.clone(),
-                recommended_action_argv: trust.recommended_action_argv.clone(),
                 recommended_action_template: trust.recommended_action_template.clone(),
                 recovery_commands: trust.recovery_commands.clone(),
-                recovery_command_argv: trust.recovery_command_argv.clone(),
                 trust,
             };
             if should_output_json(cli, Some(repo.config())) {
@@ -930,10 +914,8 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                             ),
                             recommended_action: (!trust.recommended_action.is_empty())
                                 .then(|| trust.recommended_action.clone()),
-                            recommended_action_argv: trust.recommended_action_argv.clone(),
                             recommended_action_template: trust.recommended_action_template.clone(),
                             recovery_commands: trust.recovery_commands.clone(),
-                            recovery_command_argv: trust.recovery_command_argv.clone(),
                             trust,
                         };
                         render_bridge_git_reconcile(cli, &repo, &output)?;
@@ -968,12 +950,10 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                                     ),
                                     recommended_action: (!trust.recommended_action.is_empty())
                                         .then(|| trust.recommended_action.clone()),
-                                    recommended_action_argv: trust.recommended_action_argv.clone(),
                                     recommended_action_template: trust
                                         .recommended_action_template
                                         .clone(),
                                     recovery_commands: trust.recovery_commands.clone(),
-                                    recovery_command_argv: trust.recovery_command_argv.clone(),
                                     trust,
                                 };
                                 render_bridge_git_reconcile(cli, &repo, &output)?;
@@ -1002,20 +982,11 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 recommended_action: prefer
                     .as_ref()
                     .and_then(|_| recovery_commands.first().cloned()),
-                recommended_action_argv: prefer.as_ref().and_then(|_| {
-                    recovery_commands
-                        .first()
-                        .and_then(|action| action_argv(action))
-                }),
                 recommended_action_template: prefer.as_ref().and_then(|_| {
                     recovery_commands
                         .first()
                         .and_then(|action| action_template(action))
                 }),
-                recovery_command_argv: recovery_commands
-                    .iter()
-                    .filter_map(|action| action_argv(action))
-                    .collect(),
                 recovery_commands,
                 trust,
             };

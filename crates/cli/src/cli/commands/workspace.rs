@@ -48,7 +48,6 @@ pub struct WorkspaceSummaryOutput {
     pub trust: RepositoryVerificationState,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplate>,
     pub current_thread: Option<String>,
     pub groups: Vec<WorkspaceThreadGroup>,
@@ -114,7 +113,6 @@ pub(crate) fn build_workspace_output(cli: &Cli) -> Result<WorkspaceSummaryOutput
             remote_tracking: None,
             trust: probe.trust.clone(),
             recommended_action: probe.trust.recommended_action.clone(),
-            recommended_action_argv: probe.trust.recommended_action_argv.clone(),
             recommended_action_template: probe.trust.recommended_action_template.clone(),
             current_thread: None,
             groups: Vec::new(),
@@ -289,7 +287,6 @@ pub(crate) fn build_workspace_output(cli: &Cli) -> Result<WorkspaceSummaryOutput
         remote_tracking: remote_tracking.clone(),
         trust,
         recommended_action: recommended_action.clone(),
-        recommended_action_argv: recommended_action_fields.argv,
         recommended_action_template: recommended_action_fields.template,
         current_thread,
         groups,

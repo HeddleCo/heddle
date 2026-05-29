@@ -44,7 +44,7 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     command_catalog::{ActionFields, ActionTemplate},
-    git_overlay_health::{action_templates, command_argvs},
+    git_overlay_health::action_templates,
     merge::merge_thread_into_current,
     snapshot::{create_snapshot, SnapshotAgentOverrides},
     thread::start_thread,
@@ -104,21 +104,18 @@ struct TryOutput {
     /// agent doesn't have to reconstruct the verb.
     #[serde(skip_serializing_if = "Option::is_none")]
     next_action: Option<String>,
-    next_action_argv: Option<Vec<String>>,
     next_action_template: Option<ActionTemplate>,
 
     /// Same primary command as `next_action`, under the cross-command
     /// verification/action field name agents already inspect.
     #[serde(skip_serializing_if = "Option::is_none")]
     recommended_action: Option<String>,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
 
     /// Secondary safe commands. For a successful non-auto-merge try,
     /// the primary action lands the thread and this command discards
     /// it. Keeping them separate makes every emitted action parseable.
     recovery_commands: Vec<String>,
-    recovery_command_argv: Vec<Vec<String>>,
     recovery_action_templates: Vec<ActionTemplate>,
 }
 
@@ -268,12 +265,9 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
             captured_state: None,
             merge_state: None,
             next_action: None,
-            next_action_argv: None,
             next_action_template: None,
             recommended_action: None,
-            recommended_action_argv: None,
             recommended_action_template: None,
-            recovery_command_argv: command_argvs(&recovery_commands),
             recovery_action_templates: action_templates(&recovery_commands),
             recovery_commands,
         };
@@ -374,7 +368,6 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     } else {
         Vec::new()
     };
-    let recovery_command_argv = command_argvs(&recovery_commands);
     let recovery_action_templates = action_templates(&recovery_commands);
 
     let message = if args.auto_merge {
@@ -424,13 +417,10 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
         captured_state,
         merge_state,
         next_action,
-        next_action_argv: recommended_action_fields.argv.clone(),
         next_action_template: recommended_action_fields.template.clone(),
         recommended_action,
-        recommended_action_argv: recommended_action_fields.argv,
         recommended_action_template: recommended_action_fields.template,
         recovery_commands,
-        recovery_command_argv,
         recovery_action_templates,
     };
     emit(cli, &repo, &output)
@@ -691,13 +681,10 @@ mod tests {
             captured_state: None,
             merge_state: None,
             next_action: None,
-            next_action_argv: None,
             next_action_template: None,
             recommended_action: None,
-            recommended_action_argv: None,
             recommended_action_template: None,
             recovery_commands: Vec::new(),
-            recovery_command_argv: Vec::new(),
             recovery_action_templates: Vec::new(),
         };
         let json = serde_json::to_string(&ok_output).unwrap();
@@ -719,13 +706,10 @@ mod tests {
             captured_state: None,
             merge_state: None,
             next_action: None,
-            next_action_argv: None,
             next_action_template: None,
             recommended_action: None,
-            recommended_action_argv: None,
             recommended_action_template: None,
             recovery_commands: Vec::new(),
-            recovery_command_argv: Vec::new(),
             recovery_action_templates: Vec::new(),
         };
         let json = serde_json::to_string(&err_output).unwrap();

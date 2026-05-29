@@ -862,10 +862,8 @@ pub struct CaptureSchema {
     pub heavy_impact_paths: Vec<String>,
     pub message: String,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
@@ -884,10 +882,8 @@ pub struct CommitSchema {
     pub principal: CommitPrincipalSchema,
     pub agent: Option<CommitAgentSchema>,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub op_id: Option<String>,
     pub operation_record: Option<OperationRecordSchema>,
@@ -925,10 +921,8 @@ pub struct CheckpointSchema {
     pub storage_model: String,
     pub committed_at: String,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
@@ -941,10 +935,8 @@ pub struct OperatorCommandSchema {
     pub blockers: Vec<String>,
     pub warnings: Vec<String>,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
@@ -956,10 +948,8 @@ pub struct UndoSchema {
     pub message: String,
     pub batches: Vec<Value>,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
@@ -1010,9 +1000,7 @@ pub struct BranchCompatSchema {
     pub threads: Option<Vec<ThreadSummarySchema>>,
     pub current: Option<String>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recovery_commands: Option<Vec<String>>,
-    pub recovery_command_argv: Option<Vec<Vec<String>>>,
     pub name: Option<String>,
     pub message: Option<String>,
     pub thread: Option<ThreadSummarySchema>,
@@ -1043,10 +1031,8 @@ pub struct MergePreviewSchema {
     pub blockers: Option<Vec<String>>,
     pub warnings: Option<Vec<String>>,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub fast_forward: Option<bool>,
     pub preview_only: Option<bool>,
@@ -1079,10 +1065,8 @@ pub struct AttemptSchema {
     pub attempts: Vec<AttemptResultSchema>,
     pub recommended: Option<String>,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
@@ -1110,10 +1094,8 @@ pub struct ReadySchema {
     pub blockers: Option<Vec<String>>,
     pub warnings: Option<Vec<String>>,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub captured: bool,
     pub captured_state: Option<String>,
@@ -1138,10 +1120,8 @@ pub struct ShipSchema {
     pub blockers: Option<Vec<String>>,
     pub warnings: Option<Vec<String>>,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub thread: String,
     pub captured: bool,
@@ -1180,10 +1160,8 @@ pub struct ThreadStartSchema {
     pub name: String,
     pub message: String,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub thread: Option<ThreadSummarySchema>,
     pub path: Option<String>,
@@ -1226,10 +1204,8 @@ pub struct ThreadCommandSchema {
     pub name: String,
     pub message: String,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub thread: Option<ThreadSummarySchema>,
     pub path: Option<String>,
@@ -1342,15 +1318,12 @@ pub struct ThreadShowSchema {
     #[serde(flatten)]
     pub summary: ThreadSummarySchema,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1407,7 +1380,6 @@ pub struct ThreadSummarySchema {
     pub thread_health: String,
     pub blockers: Vec<String>,
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub git_branch_tip: Option<String>,
     pub history_imported: bool,
@@ -1450,7 +1422,6 @@ pub struct AdoptSchema {
     pub partial_mirror_refs: usize,
     pub already_in_sync: bool,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
@@ -1505,8 +1476,6 @@ pub struct ActorDoneSchema {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action_argv: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
@@ -1526,8 +1495,6 @@ pub struct ActorExplainSchema {
     pub environment: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recommended_action_argv: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_action_template: Option<ActionTemplateSchema>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1806,13 +1773,11 @@ pub struct PushSchema {
     #[schemars(required)]
     pub next_action: Option<String>,
     #[schemars(required)]
-    pub next_action_argv: Option<Vec<String>>,
     #[schemars(required)]
     pub next_action_template: Option<ActionTemplateSchema>,
     #[schemars(required)]
     pub recommended_action: Option<String>,
     #[schemars(required)]
-    pub recommended_action_argv: Option<Vec<String>>,
     #[schemars(required)]
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
@@ -1896,10 +1861,8 @@ pub struct StatusSchema {
     pub thread_changed_path_count: usize,
     pub blockers: Vec<String>,
     pub recommended_action: NullableStringSchema,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub recovery_action_templates: Vec<ActionTemplateSchema>,
     pub thread_health: String,
     pub coordination_status: CoordinationStatusSchema,
@@ -1947,10 +1910,8 @@ pub struct RepositoryVerificationStateSchema {
     pub workflow_summary: String,
     pub summary: String,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub recovery_action_templates: Vec<ActionTemplateSchema>,
     pub checks: Vec<VerificationCheckSchema>,
 }
@@ -2020,10 +1981,8 @@ pub struct VerificationCheckSchema {
     pub clean: bool,
     pub summary: String,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub recovery_action_templates: Vec<ActionTemplateSchema>,
     pub details: std::collections::BTreeMap<String, String>,
 }
@@ -2048,10 +2007,8 @@ pub struct BridgeGitStatusSchema {
     pub git_overlay_import_hint: Option<GitOverlayImportHintSchema>,
     pub git_overlay_health: GitOverlayHealthSchema,
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
 }
@@ -2204,10 +2161,8 @@ pub struct ThreadListSchema {
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub recovery_action_templates: Vec<ActionTemplateSchema>,
 }
 
@@ -2216,7 +2171,6 @@ pub struct AvailableGitRefSchema {
     pub name: String,
     pub git_commit: String,
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
@@ -2236,7 +2190,6 @@ pub struct WorkspaceShowSchema {
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub current_thread: Option<String>,
     pub groups: Vec<WorkspaceGroupSchema>,
@@ -2358,7 +2311,6 @@ pub struct DoctorDocsSchema {
     #[serde(rename = "verified")]
     pub verified: bool,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub files_scanned: usize,
     pub issues: Vec<DoctorDocsIssueSchema>,
 }
@@ -2381,9 +2333,7 @@ pub struct DoctorSchemasSchema {
     pub verified: bool,
     pub summary: String,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: NullableStringArraySchema,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub registered_verbs: Vec<String>,
     pub documented_verbs: Vec<String>,
     pub undocumented_verbs: Vec<String>,
@@ -2498,13 +2448,10 @@ pub struct TrySchema {
     pub captured_state: Option<String>,
     pub merge_state: Option<String>,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub recovery_action_templates: Vec<ActionTemplateSchema>,
 }
 
@@ -2547,10 +2494,8 @@ pub struct BridgeImportSchema {
     pub partial_mirror_refs: u64,
     pub already_in_sync: bool,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2565,10 +2510,8 @@ pub struct BridgeSyncSchema {
     pub threads_synced: u64,
     pub markers_synced: u64,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2581,10 +2524,8 @@ pub struct BridgeGitReconcileSchema {
     pub preview: bool,
     pub summary: String,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2670,10 +2611,8 @@ pub struct DiagnoseSchema {
     pub workspace: Value,
     pub health: Value,
     pub recommended_action: String,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub profile: Option<Value>,
 }
 
@@ -2701,11 +2640,14 @@ pub struct DiagnoseSchema {
 //   `read_only_filesystem`, and `runtime_error`. New kinds may be added
 //   (additive); existing ones are stable.
 // - `unsafe_condition`, `would_change`, `preserved` — typed safety facts.
-// - `primary_command`, `primary_command_argv`, `primary_command_template` —
-//   the main recovery action as either parsed argv or a fillable template.
-// - `recovery_commands`, `recovery_command_argv`, `recovery_action_templates`
-//   — all recovery actions the runtime can represent as command strings,
-//   parsed argv, or fillable templates.
+// - `primary_command`, `primary_command_template` — the main recovery
+//   action as a human-readable command string plus a fillable template
+//   (always present for a valid action). The `_argv` sidecar was dropped
+//   (HeddleCo/heddle#254): it was null for every placeholder action and
+//   silently read as "no action" to agents — use the template instead.
+// - `recovery_commands`, `recovery_action_templates` — all recovery
+//   actions the runtime can represent, as command strings or fillable
+//   templates.
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ErrorEnvelopeSchema {
@@ -2721,10 +2663,8 @@ pub struct ErrorEnvelopeSchema {
     pub would_change: String,
     pub preserved: String,
     pub primary_command: String,
-    pub primary_command_argv: NullableStringArraySchema,
     pub primary_command_template: NullableActionTemplateSchema,
     pub recovery_commands: Vec<String>,
-    pub recovery_command_argv: Vec<Vec<String>>,
     pub recovery_action_templates: Vec<ActionTemplateSchema>,
 }
 
@@ -2733,14 +2673,6 @@ pub struct ErrorEnvelopeSchema {
 #[allow(dead_code)]
 pub enum NullableActionTemplateSchema {
     Template(ActionTemplateSchema),
-    Null(()),
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum NullableStringArraySchema {
-    Args(Vec<String>),
     Null(()),
 }
 
@@ -3121,10 +3053,8 @@ mod tests {
             "success",
             "transport",
             "next_action",
-            "next_action_argv",
             "next_action_template",
             "recommended_action",
-            "recommended_action_argv",
             "recommended_action_template",
         ] {
             assert!(

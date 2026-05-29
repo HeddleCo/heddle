@@ -972,7 +972,7 @@ fn json_mode_parse_errors_emit_error_envelope() {
     // panics, never intentional emission.
     assert_eq!(parsed["exit_code"], 64);
     assert_eq!(
-        parsed["primary_command_argv"],
+        parsed["primary_command_template"]["argv_template"],
         heddle_argv_json(["commands", "--output", "json"])
     );
     assert!(
@@ -1018,7 +1018,7 @@ fn confidence_parse_errors_fail_loudly_in_json_mode() {
         assert_eq!(parsed["kind"], "parse_error");
         assert_eq!(parsed["code"], "parse_error");
         assert_eq!(
-            parsed["primary_command_argv"],
+            parsed["primary_command_template"]["argv_template"],
             heddle_argv_json(["commands", "--output", "json"])
         );
         assert!(
@@ -3016,7 +3016,6 @@ fn isolated_thread_json_outputs_match_registered_schemas() {
     // their declared shape; runtime population is exercised in the
     // probe-specific tests under `crates/cli/src/harness/probe/`.
     assert!(show.get("next_action").is_some());
-    assert!(show.get("next_action_argv").is_some());
     assert!(show.get("next_action_template").is_some());
     assert!(show.get("recommended_action_template").is_some());
     assert!(
@@ -3173,15 +3172,11 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
         "captured work that only needs a Git checkpoint should not rewrite lifecycle as blocked: {status}"
     );
     assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
-    assert_eq!(
-        status["verification"]["recommended_action_argv"],
-        serde_json::Value::Null,
+    assert!(
+        status["verification"]["recommended_action_template"]["required_inputs"]
+            .as_array()
+            .is_some_and(|inputs| !inputs.is_empty()),
         "templated checkpoint advice must stay display-only until a message is supplied: {status}"
-    );
-    assert_eq!(
-        status["verification"]["recovery_command_argv"],
-        serde_json::json!([]),
-        "templated recovery commands must not masquerade as executable argv: {status}"
     );
     assert_eq!(
         status["recovery_commands"],
@@ -3249,15 +3244,11 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     let verify = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["status"], "needs_checkpoint");
     assert_eq!(verify["recommended_action"], "heddle checkpoint -m \"...\"");
-    assert_eq!(
-        verify["recommended_action_argv"],
-        serde_json::Value::Null,
-        "templated checkpoint advice must not be returned as executable argv: {verify}"
-    );
-    assert_eq!(
-        verify["recovery_command_argv"],
-        serde_json::json!([]),
-        "templated recovery commands must not be returned as executable argv: {verify}"
+    assert!(
+        verify["recommended_action_template"]["required_inputs"]
+            .as_array()
+            .is_some_and(|inputs| !inputs.is_empty()),
+        "templated checkpoint advice must stay display-only until a message is supplied: {verify}"
     );
     assert!(
         verify["checks"]
@@ -3700,13 +3691,14 @@ fn core_mutations_emit_post_verification_in_json() {
         capture["recommended_action"], capture["verification"]["recommended_action"],
         "capture should promote post-capture verify advice to the top-level recommendation: {capture}"
     );
-    assert_eq!(
-        capture["verification"]["recommended_action_argv"],
-        serde_json::Value::Null,
+    assert!(
+        capture["verification"]["recommended_action_template"]["required_inputs"]
+            .as_array()
+            .is_some_and(|inputs| !inputs.is_empty()),
         "capture's post-verify checkpoint template must be display-only: {capture}"
     );
     assert_eq!(
-        capture["recommended_action_argv"], capture["verification"]["recommended_action_argv"],
+        capture["recommended_action_template"]["argv_template"], capture["verification"]["recommended_action_template"]["argv_template"],
         "capture top-level argv should match the promoted verify action: {capture}"
     );
     assert_eq!(
@@ -3715,7 +3707,7 @@ fn core_mutations_emit_post_verification_in_json() {
         "display-only capture recommendation should carry matching top-level template metadata: {capture}"
     );
     assert_eq!(
-        capture["next_action_argv"], capture["recommended_action_argv"],
+        capture["next_action_template"]["argv_template"], capture["recommended_action_template"]["argv_template"],
         "capture next_action should carry matching argv metadata: {capture}"
     );
     assert_eq!(
@@ -3774,10 +3766,8 @@ fn core_mutations_emit_post_verification_in_json() {
     assert_eq!(undo["status"], "completed");
     assert_schema_declares_runtime_top_level(&["undo"], &undo);
     assert!(undo.get("next_action").is_some());
-    assert!(undo.get("next_action_argv").is_some());
     assert!(undo.get("next_action_template").is_some());
     assert!(undo.get("recommended_action").is_some());
-    assert!(undo.get("recommended_action_argv").is_some());
     assert!(undo.get("recommended_action_template").is_some());
     assert_eq!(
         undo["verification"]["verified"], true,
@@ -3828,7 +3818,7 @@ fn plain_git_core_save_refusals_do_not_initialize_heddle() {
         assert_eq!(envelope["kind"], "git_repo_needs_adoption");
         assert_eq!(envelope["primary_command"], "heddle adopt --ref main");
         assert_eq!(
-            envelope["primary_command_argv"],
+            envelope["primary_command_template"]["argv_template"],
             heddle_argv_json(["adopt", "--ref", "main"])
         );
         assert!(
@@ -3854,19 +3844,19 @@ fn dirty_git_repo_after_init_requires_import_before_commit() {
     assert_eq!(verify["status"], "needs_import");
     assert_eq!(verify["recommended_action"], "heddle adopt --ref main");
     assert_eq!(
-        verify["recommended_action_argv"],
+        verify["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "main"])
     );
     assert_eq!(
-        verify["recovery_command_argv"],
-        serde_json::json!([heddle_argv_json(["adopt", "--ref", "main"])])
+        verify["recovery_action_templates"][0]["argv_template"],
+        heddle_argv_json(["adopt", "--ref", "main"])
     );
     assert!(
         verify["checks"].as_array().unwrap().iter().any(|check| {
             check["name"] == "Mapping"
                 && check["status"] == "needs_import"
                 && check["recommended_action"] == "heddle adopt --ref main"
-                && check["recommended_action_argv"] == heddle_argv_json(["adopt", "--ref", "main"])
+                && check["recommended_action_template"]["argv_template"] == heddle_argv_json(["adopt", "--ref", "main"])
         }),
         "dirty first-run verify should block on import before worktree advice: {verify}"
     );
@@ -3875,12 +3865,12 @@ fn dirty_git_repo_after_init_requires_import_before_commit() {
     assert_eq!(status["verification"]["status"], "needs_import");
     assert_eq!(status["recommended_action"], "heddle adopt --ref main");
     assert_eq!(
-        status["recommended_action_argv"],
+        status["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "main"])
     );
     assert_eq!(
-        status["recovery_command_argv"],
-        serde_json::json!([heddle_argv_json(["adopt", "--ref", "main"])])
+        status["recovery_action_templates"][0]["argv_template"],
+        heddle_argv_json(["adopt", "--ref", "main"])
     );
 
     let capture = heddle_output(
@@ -3915,9 +3905,10 @@ fn dirty_git_repo_after_init_requires_import_before_commit() {
         after_import["recommended_action"],
         "heddle commit -m \"...\""
     );
-    assert_eq!(
-        after_import["recommended_action_argv"],
-        Value::Null,
+    assert!(
+        after_import["recommended_action_template"]["required_inputs"]
+            .as_array()
+            .is_some_and(|inputs| !inputs.is_empty()),
         "templated commit advice must stay display-only until a message is supplied: {after_import}"
     );
     assert_eq!(
@@ -6079,7 +6070,7 @@ feature
     assert_eq!(preview["preview_only"], true);
     assert_eq!(preview["would_merge"], true);
     assert_eq!(
-        preview["recommended_action_argv"],
+        preview["recommended_action_template"]["argv_template"],
         heddle_argv_json(["ship", "--thread", "feature/a", "--no-push"])
     );
     assert_schema_declares_runtime_top_level(&["merge", "--preview"], &preview);
@@ -6399,7 +6390,7 @@ fn ready_plain_git_refuses_before_initializing_heddle() {
         "plain Git ready should point at explicit adoption/initialization: {ready}"
     );
     assert_eq!(
-        ready["recommended_action_argv"],
+        ready["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "main"])
     );
     assert!(
@@ -7277,7 +7268,7 @@ fn missing_repo_status_emits_structured_error_in_json_mode() {
         "envelope.hint should suggest initializing the requested path: {envelope}"
     );
     assert_eq!(
-        envelope["primary_command_argv"],
+        envelope["primary_command_template"]["argv_template"],
         heddle_argv_json(["init", temp.path().to_str().expect("temp path utf8")])
     );
 }
@@ -7807,7 +7798,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         )
     );
     assert_eq!(
-        checkout_status["recommended_action_argv"],
+        checkout_status["recommended_action_template"]["argv_template"],
         heddle_argv_json([
             "--repo",
             temp.path().to_str().expect("repo path utf8"),
@@ -7823,8 +7814,8 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         "status verification should not keep the parent-repo merge action in raw, non-contextual form: {checkout_status}"
     );
     assert_eq!(
-        checkout_status["verification"]["recommended_action_argv"],
-        checkout_status["recommended_action_argv"],
+        checkout_status["verification"]["recommended_action_template"]["argv_template"],
+        checkout_status["recommended_action_template"]["argv_template"],
         "status verification argv should match the contextual top-level merge action: {checkout_status}"
     );
     let checkout_thread_show = json_value(
@@ -7899,7 +7890,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         "merge preview invoked from an isolated checkout must preserve parent repo context: {contextual_preview}"
     );
     assert_eq!(
-        contextual_preview["recommended_action_argv"],
+        contextual_preview["recommended_action_template"]["argv_template"],
         heddle_argv_json([
             "--repo",
             temp.path().to_str().expect("repo path utf8"),
@@ -7920,7 +7911,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         )
     );
     assert_eq!(
-        checkout_after_preview["recommended_action_argv"],
+        checkout_after_preview["recommended_action_template"]["argv_template"],
         heddle_argv_json([
             "--repo",
             temp.path().to_str().expect("repo path utf8"),
@@ -7937,8 +7928,8 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         "status verification should match the contextual parent-repo ship action after preview: {checkout_after_preview}"
     );
     assert_eq!(
-        checkout_after_preview["verification"]["recommended_action_argv"],
-        checkout_after_preview["recommended_action_argv"],
+        checkout_after_preview["verification"]["recommended_action_template"]["argv_template"],
+        checkout_after_preview["recommended_action_template"]["argv_template"],
         "status verification argv should match the contextual parent-repo ship action after preview: {checkout_after_preview}"
     );
 
@@ -8748,7 +8739,7 @@ fn merge_missing_thread_uses_thread_list_advice() {
         serde_json::from_str(stderr).expect("missing merge source should emit JSON envelope");
     assert_eq!(envelope["kind"], "thread_not_found");
     assert_eq!(
-        envelope["primary_command_argv"],
+        envelope["primary_command_template"]["argv_template"],
         heddle_argv_json(["thread", "list"]),
         "missing merge source should recover through thread discovery: {envelope}"
     );
@@ -9750,7 +9741,7 @@ fn actor_explain_json_detects_harness_without_active_actor() {
         "heddle actor spawn --provider openai --model gpt-5.3-codex"
     );
     assert_eq!(
-        parsed["recommended_action_argv"],
+        parsed["recommended_action_template"]["argv_template"],
         heddle_argv_json([
             "actor",
             "spawn",
@@ -9760,10 +9751,6 @@ fn actor_explain_json_detects_harness_without_active_actor() {
             "gpt-5.3-codex"
         ]),
         "actor explain should expose replayable argv for the detected spawn action: {parsed}"
-    );
-    assert!(
-        parsed["recommended_action_template"].is_null(),
-        "actor explain should expose nullable template metadata beside concrete argv: {parsed}"
     );
     assert_schema_declares_runtime_top_level(&["actor", "explain"], &parsed);
     assert!(
@@ -10221,10 +10208,8 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
         "would_change",
         "preserved",
         "primary_command",
-        "primary_command_argv",
         "primary_command_template",
         "recovery_commands",
-        "recovery_command_argv",
         "recovery_action_templates",
     ] {
         assert!(
@@ -10248,10 +10233,8 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
         "would_change",
         "preserved",
         "primary_command",
-        "primary_command_argv",
         "primary_command_template",
         "recovery_commands",
-        "recovery_command_argv",
         "recovery_action_templates",
     ] {
         assert!(
@@ -10279,10 +10262,8 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
         "would_change",
         "preserved",
         "primary_command",
-        "primary_command_argv",
         "primary_command_template",
         "recovery_commands",
-        "recovery_command_argv",
         "recovery_action_templates",
     ] {
         assert!(
@@ -10296,7 +10277,7 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
     // taxonomy in `crates/cli/src/exit.rs`.
     assert_eq!(envelope["exit_code"], 78);
     assert_eq!(
-        envelope["primary_command_argv"],
+        envelope["primary_command_template"]["argv_template"],
         heddle_argv_json(["init", temp.path().to_str().expect("temp path utf8")])
     );
 
@@ -10340,16 +10321,16 @@ fn generic_json_runtime_errors_keep_nonempty_machine_envelope() {
         "runtime error envelope must carry a non-empty hint: {envelope}"
     );
     assert_eq!(
-        envelope["primary_command_argv"],
+        envelope["primary_command_template"]["argv_template"],
         heddle_argv_json(["schemas"]),
         "schema lookup failures should recover through schema discovery, not status: {envelope}"
     );
     assert!(
-        envelope["recovery_command_argv"]
+        envelope["recovery_action_templates"]
             .as_array()
-            .is_some_and(|commands| commands
-                .iter()
-                .any(|command| command == &heddle_argv_json(["commands", "--output", "json"]))),
+            .is_some_and(|templates| templates.iter().any(|template| {
+                template["argv_template"] == heddle_argv_json(["commands", "--output", "json"])
+            })),
         "schema lookup failures should point agents at the command catalog: {envelope}"
     );
 }
@@ -10440,9 +10421,8 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "doctor schemas should summarize the machine-contract result at the top level: {output}"
     );
     assert_eq!(parsed["recommended_action"], serde_json::Value::Null);
-    assert_eq!(parsed["recommended_action_argv"], serde_json::Value::Null);
+    assert_eq!(parsed["recommended_action_template"], serde_json::Value::Null);
     assert_eq!(parsed["recovery_commands"], serde_json::json!([]));
-    assert_eq!(parsed["recovery_command_argv"], serde_json::json!([]));
     assert_eq!(
         parsed["unmatched_verbs"].as_array().map(Vec::len),
         Some(0),
@@ -10707,7 +10687,7 @@ fn push_with_unknown_remote_uses_typed_json_recovery() {
     );
     assert_eq!(envelope["primary_command"], "heddle remote list");
     assert_eq!(
-        envelope["primary_command_argv"],
+        envelope["primary_command_template"]["argv_template"],
         heddle_argv_json(["remote", "list"]),
         "{envelope}"
     );
@@ -10765,7 +10745,7 @@ fn doctor_schemas_json_failure_uses_recovery_envelope() {
         "heddle doctor schemas --output json"
     );
     assert_eq!(
-        envelope["primary_command_argv"],
+        envelope["primary_command_template"]["argv_template"],
         heddle_argv_json(["doctor", "schemas", "--output", "json"])
     );
     assert_json_recovery_advice_fields(&envelope, stderr);
@@ -11267,7 +11247,7 @@ fn verify_after_git_overlay_clone_reports_clone_verified() {
         "clean clone verify should not recommend extra recovery: {clone_json}"
     );
     assert_eq!(
-        clone_output["verification"]["recommended_action_argv"],
+        clone_output["verification"]["recommended_action_template"]["argv_template"],
         Value::Null
     );
     assert_eq!(
@@ -11434,7 +11414,7 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
         "diverged import should describe preserved partial state: {envelope}"
     );
     assert_eq!(
-        envelope["primary_command_argv"],
+        envelope["primary_command_template"]["argv_template"],
         heddle_argv_json(["bridge", "git", "reconcile", "--ref", "main", "--preview",])
     );
 }

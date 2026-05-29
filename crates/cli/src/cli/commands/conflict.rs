@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::cli::{
     cli_args::{Cli, ConflictCommands, ConflictShowArgs},
-    commands::command_catalog::{ActionTemplate, normalize_heddle_argv},
+    commands::command_catalog::{ActionTemplate, recommended_action_template},
     should_output_json,
 };
 
@@ -45,10 +45,8 @@ struct ActiveMergeConflictShowOutput {
     base_state: Option<String>,
     worktree_content: Option<String>,
     recommended_action: String,
-    recommended_action_argv: Vec<String>,
     recommended_action_template: Option<ActionTemplate>,
     next_action: String,
-    next_action_argv: Vec<String>,
     next_action_template: Option<ActionTemplate>,
 }
 
@@ -205,15 +203,7 @@ fn render_active_merge_conflict(
     } else {
         format!("heddle resolve {path}")
     };
-    let recommended_action_argv = if resolved {
-        normalize_heddle_argv(vec!["heddle".to_string(), "continue".to_string()])
-    } else {
-        normalize_heddle_argv(vec![
-            "heddle".to_string(),
-            "resolve".to_string(),
-            path.clone(),
-        ])
-    };
+    let recommended_action_template = recommended_action_template(&recommended_action);
     let view = ActiveMergeConflictShowOutput {
         output_kind: "conflict_show",
         kind: "active_merge_conflict",
@@ -226,11 +216,9 @@ fn render_active_merge_conflict(
         base_state: merge_state.base.as_ref().map(|state| state.short()),
         worktree_content,
         recommended_action: recommended_action.clone(),
-        recommended_action_argv: recommended_action_argv.clone(),
-        recommended_action_template: None,
+        recommended_action_template: recommended_action_template.clone(),
         next_action: recommended_action,
-        next_action_argv: recommended_action_argv,
-        next_action_template: None,
+        next_action_template: recommended_action_template,
     };
 
     if should_output_json(cli, Some(repo.config())) {

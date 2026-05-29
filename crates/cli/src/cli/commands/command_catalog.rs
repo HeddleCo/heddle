@@ -147,7 +147,6 @@ pub struct ActionTemplate {
 #[derive(Debug, Clone)]
 pub(crate) struct ActionFields {
     pub action: Option<String>,
-    pub argv: Option<Vec<String>>,
     pub template: Option<ActionTemplate>,
 }
 
@@ -156,10 +155,9 @@ impl ActionFields {
         let Some(action) = action.filter(|action| !action.trim().is_empty()) else {
             return Self::none();
         };
-        let argv = recommended_action_argv(&action)
+        validate_recommended_action(&action)
             .unwrap_or_else(|err| panic!("invalid recommended action `{action}`: {err}"));
         Self {
-            argv,
             template: recommended_action_template(&action),
             action: Some(action),
         }
@@ -176,7 +174,6 @@ impl ActionFields {
     pub(crate) fn none() -> Self {
         Self {
             action: None,
-            argv: None,
             template: None,
         }
     }
@@ -3482,6 +3479,9 @@ pub fn root_commands_for_advanced_help() -> Vec<&'static str> {
 
 pub(crate) fn recommended_action_template(action: &str) -> Option<ActionTemplate> {
     let trimmed = action.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
     RECOMMENDED_ACTION_TEMPLATES
         .iter()
         .find(|(template_action, _, _, _)| *template_action == trimmed)
@@ -3496,6 +3496,33 @@ pub(crate) fn recommended_action_template(action: &str) -> Option<ActionTemplate
             },
         )
         .or_else(|| dynamic_recommended_action_template(trimmed))
+        .or_else(|| concrete_recommended_action_template(trimmed))
+}
+
+/// Fallback template for a concrete, placeholder-free recommended action
+/// (e.g. `heddle status`). The template *is* the parsed argv with no inputs
+/// left to fill — agents run `argv_template` verbatim. This makes
+/// `recommended_action_template` total over every valid action so the
+/// fillable `_template` is the single canonical machine shape and the
+/// always-null `_argv` sibling could be dropped (HeddleCo/heddle#254).
+///
+/// Returns `None` for placeholder/display-only actions that lack a
+/// registered structured template (they are invalid and surface upstream),
+/// matching the previous parsed-argv contract.
+fn concrete_recommended_action_template(action: &str) -> Option<ActionTemplate> {
+    if RECOMMENDED_ACTION_PLACEHOLDERS.contains(&action) || is_display_only_template(action) {
+        return None;
+    }
+    if validate_recommended_action(action).is_err() {
+        return None;
+    }
+    let argv = split_recommended_action(action).ok()?;
+    Some(action_template_from_owned(
+        action.to_string(),
+        argv,
+        Vec::new(),
+        false,
+    ))
 }
 
 fn dynamic_recommended_action_template(action: &str) -> Option<ActionTemplate> {
@@ -3722,21 +3749,6 @@ pub(crate) fn validate_recommended_action(action: &str) -> std::result::Result<(
         )),
         None => Ok(()),
     }
-}
-
-pub fn recommended_action_argv(action: &str) -> std::result::Result<Option<Vec<String>>, String> {
-    let trimmed = action.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if RECOMMENDED_ACTION_PLACEHOLDERS.contains(&trimmed) || is_display_only_template(trimmed) {
-        validate_recommended_action(trimmed)?;
-        return Ok(None);
-    }
-    validate_recommended_action(trimmed)?;
-    split_recommended_action(trimmed)
-        .map(normalize_heddle_argv)
-        .map(Some)
 }
 
 fn is_display_only_template(action: &str) -> bool {
@@ -4516,15 +4528,6 @@ mod tests {
                     template.action
                 )
             });
-            assert_eq!(
-                recommended_action_argv(&template.action).unwrap_or_else(|err| panic!(
-                    "template `{}` should resolve: {err}",
-                    template.action
-                )),
-                None,
-                "template `{}` must not expose a literal placeholder argv",
-                template.action
-            );
         }
 
         let commit = catalog
@@ -4635,10 +4638,6 @@ mod tests {
         ] {
             let fields = ActionFields::from_action(action);
             assert_eq!(fields.action.as_deref(), Some(action));
-            assert_eq!(
-                fields.argv, None,
-                "`{action}` must not expose the literal ellipsis as executable argv"
-            );
             let template = fields
                 .template
                 .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
@@ -4666,10 +4665,6 @@ mod tests {
         ] {
             let fields = ActionFields::from_action(action);
             assert_eq!(fields.action.as_deref(), Some(action));
-            assert_eq!(
-                fields.argv, None,
-                "`{action}` must not expose the literal ellipsis as executable argv"
-            );
             let template = fields
                 .template
                 .unwrap_or_else(|| panic!("`{action}` should expose a structured template"));
@@ -4688,11 +4683,9 @@ mod tests {
             "error should explain missing template: {err}"
         );
 
-        let err = recommended_action_argv("heddle switch <missing-template>")
-            .expect_err("argv helper must not silently drop unregistered placeholders");
         assert!(
-            err.contains("structured template"),
-            "error should explain missing template: {err}"
+            recommended_action_template("heddle switch <missing-template>").is_none(),
+            "unregistered display placeholder must not resolve to a fillable template"
         );
     }
 
@@ -4724,25 +4717,32 @@ mod tests {
 
     #[test]
     fn recommended_action_parser_supports_shell_quoted_arguments() {
-        let argv = recommended_action_argv("heddle merge 'feature with spaces' --preview")
-            .expect("single-quoted thread action should parse")
-            .expect("concrete action should expose argv");
-        assert_eq!(argv[1..], ["merge", "feature with spaces", "--preview"]);
+        let template = recommended_action_template("heddle merge 'feature with spaces' --preview")
+            .expect("single-quoted thread action should resolve to a template");
+        assert_eq!(
+            template.argv_template[1..],
+            ["merge", "feature with spaces", "--preview"]
+        );
 
-        let argv = recommended_action_argv("heddle merge 'feature '\\''quoted'\\''' --preview")
-            .expect("shell-quoted apostrophe should parse")
-            .expect("concrete action should expose argv");
-        assert_eq!(argv[1..], ["merge", "feature 'quoted'", "--preview"]);
+        let template =
+            recommended_action_template("heddle merge 'feature '\\''quoted'\\''' --preview")
+                .expect("shell-quoted apostrophe should resolve to a template");
+        assert_eq!(
+            template.argv_template[1..],
+            ["merge", "feature 'quoted'", "--preview"]
+        );
     }
 
     #[test]
     fn checked_action_builder_quotes_and_validates_from_argv() {
         let action = heddle_action(["merge", "feature with spaces", "--preview"]);
         assert_eq!(action, "heddle merge 'feature with spaces' --preview");
-        let argv = recommended_action_argv(&action)
-            .expect("built action should parse")
-            .expect("built action should be executable");
-        assert_eq!(argv[1..], ["merge", "feature with spaces", "--preview"]);
+        let template = recommended_action_template(&action)
+            .expect("built action should resolve to a template");
+        assert_eq!(
+            template.argv_template[1..],
+            ["merge", "feature with spaces", "--preview"]
+        );
 
         let panic = std::panic::catch_unwind(|| checked_action_from_argv(["git", "status"]));
         assert!(

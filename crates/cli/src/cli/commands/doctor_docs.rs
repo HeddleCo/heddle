@@ -24,8 +24,8 @@ use serde_json::{Map, Value};
 use super::{
     RecoveryAdvice,
     command_catalog::{
-        CommandCatalogOption, CommandCatalogOutput, build_command_catalog,
-        feature_gated_command_roots, normalize_heddle_argv,
+        ActionTemplate, CommandCatalogOption, CommandCatalogOutput, build_command_catalog,
+        feature_gated_command_roots, recommended_action_template,
     },
 };
 use crate::cli::{Cli, DoctorDocsArgs, should_output_json};
@@ -70,7 +70,7 @@ pub struct DocsReport {
     #[serde(rename = "verified")]
     pub verified: bool,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
+    pub recommended_action_template: Option<ActionTemplate>,
     pub files_scanned: usize,
     pub issues: Vec<DocsIssue>,
 }
@@ -111,22 +111,15 @@ pub fn cmd_doctor_docs(cli: &Cli, args: DoctorDocsArgs) -> Result<()> {
 
     let clean = issues.is_empty();
     let recommended_action = (!clean).then(|| "heddle doctor docs --all --output json".to_string());
-    let recommended_action_argv = recommended_action.as_ref().map(|_| {
-        normalize_heddle_argv(vec![
-            "heddle".to_string(),
-            "doctor".to_string(),
-            "docs".to_string(),
-            "--all".to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ])
-    });
+    let recommended_action_template = recommended_action
+        .as_deref()
+        .and_then(recommended_action_template);
     let report = DocsReport {
         output_kind: "doctor_docs",
         status: if clean { "clean" } else { "drift" },
         verified: clean,
         recommended_action,
-        recommended_action_argv,
+        recommended_action_template,
         files_scanned: files.len(),
         issues,
     };
@@ -191,8 +184,8 @@ fn doctor_docs_drift_advice(report: &DocsReport) -> Result<RecoveryAdvice> {
         serde_json::to_value(&report.recommended_action)?,
     );
     extra.insert(
-        "recommended_action_argv".to_string(),
-        serde_json::to_value(&report.recommended_action_argv)?,
+        "recommended_action_template".to_string(),
+        serde_json::to_value(&report.recommended_action_template)?,
     );
     extra.insert(
         "files_scanned".to_string(),
