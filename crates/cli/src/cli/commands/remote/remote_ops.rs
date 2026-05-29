@@ -1009,6 +1009,29 @@ impl GitConfigContext {
             .unwrap_or(false)
     }
 
+    /// The config layer a write to remote `name` must target so the next
+    /// `remote list` read resolves the value we just wrote. Returns the
+    /// highest-precedence layer that already defines the remote (matching
+    /// `layered_paths` read precedence); when no layer defines it, the
+    /// common config — git's default target for a brand-new remote.
+    fn write_layer_for(&self, name: &str) -> std::path::PathBuf {
+        let _ = name;
+        self.common_dir.join("config")
+    }
+
+    /// Every config layer that currently defines remote `name`. A remove
+    /// must clear all of them, otherwise a lower-precedence definition
+    /// resurfaces — or a higher-precedence one keeps winning — on the next
+    /// read, leaving the "successful" removal silently divergent.
+    fn remove_layers_for(&self, name: &str) -> Vec<std::path::PathBuf> {
+        let _ = name;
+        vec![self.common_dir.join("config")]
+    }
+
+    fn layer_defines_remote(&self, path: &Path, name: &str) -> bool {
+        self.remotes(vec![path.to_path_buf()]).contains_key(name)
+    }
+
     fn remotes(&self, paths: Vec<std::path::PathBuf>) -> BTreeMap<String, String> {
         let mut remotes = BTreeMap::new();
         let Some(file) = self.load(paths) else {
@@ -1058,24 +1081,22 @@ fn sync_git_overlay_remote_add(repo: &Repository, name: &str, url: &str) -> Resu
         return Ok(());
     }
     validate_git_overlay_remote_name(name)?;
-    let config_path = git_overlay_config_path_for_write(repo)
+    let ctx = GitConfigContext::discover(repo.root())
         .context("Git-overlay remote add requires a writable Git config")?;
-    upsert_git_remote_config(&config_path, name, url)
+    upsert_git_remote_config(&ctx.write_layer_for(name), name, url)
 }
 
 fn sync_git_overlay_remote_remove(repo: &Repository, name: &str) -> Result<()> {
     if repo.capability() != RepositoryCapability::GitOverlay {
         return Ok(());
     }
-    let Some(config_path) = git_overlay_config_path_for_write(repo) else {
+    let Some(ctx) = GitConfigContext::discover(repo.root()) else {
         return Ok(());
     };
-    remove_git_remote_config(&config_path, name)
-}
-
-fn git_overlay_config_path_for_write(repo: &Repository) -> Option<std::path::PathBuf> {
-    let git = gix::discover(repo.root()).ok()?;
-    Some(git.common_dir().join("config"))
+    for config_path in ctx.remove_layers_for(name) {
+        remove_git_remote_config(&config_path, name)?;
+    }
+    Ok(())
 }
 
 fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
@@ -1336,6 +1357,85 @@ mod tests {
         assert_eq!(
             remotes.get("origin").map(String::as_str),
             Some("https://example.com/local"),
+        );
+    }
+
+    #[test]
+    fn remove_clears_worktree_layer_when_extension_enabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[extensions]\n\tworktreeConfig = true\n\
+             [remote \"origin\"]\n\turl = https://example.com/common\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config.worktree"),
+            "[remote \"origin\"]\n\turl = https://example.com/worktree\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        for path in ctx.remove_layers_for("origin") {
+            remove_git_remote_config(&path, "origin").unwrap();
+        }
+
+        // The visible (per-worktree) remote must be gone after a remove;
+        // a common-only removal would leave it winning on the next read.
+        assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
+    }
+
+    #[test]
+    fn add_targets_worktree_layer_so_next_read_reflects_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[extensions]\n\tworktreeConfig = true\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config.worktree"),
+            "[remote \"origin\"]\n\turl = https://example.com/old\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        upsert_git_remote_config(&ctx.write_layer_for("origin"), "origin", "https://example.com/new")
+            .unwrap();
+
+        // The upsert must hit the per-worktree layer (where the remote
+        // lives and wins on read); writing to common would leave the
+        // stale per-worktree url winning, a silent read/write divergence.
+        assert_eq!(
+            plain_git_remote_items(tmp.path()).get("origin").map(String::as_str),
+            Some("https://example.com/new"),
+        );
+    }
+
+    #[test]
+    fn add_new_remote_targets_common_layer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[extensions]\n\tworktreeConfig = true\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        // A brand-new remote (no layer defines it yet) follows git's
+        // default: the common config.
+        assert_eq!(ctx.write_layer_for("origin"), git_dir.join("config"));
+        upsert_git_remote_config(&ctx.write_layer_for("origin"), "origin", "https://example.com/new")
+            .unwrap();
+        assert_eq!(
+            plain_git_remote_items(tmp.path()).get("origin").map(String::as_str),
+            Some("https://example.com/new"),
         );
     }
 }
