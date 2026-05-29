@@ -149,6 +149,14 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             && !git_index_intent(&repo)?.staged_paths.is_empty();
         if status.is_clean() && !has_staged_index_intent {
             let trust = build_repository_verification_state(&repo);
+            // `--no-all` forces an index-only commit and must never auto-commit
+            // the captured worktree state. On this fast-path the worktree is
+            // clean and the index has no staged intent, so an index-only commit
+            // has nothing to commit — surface that instead of silently
+            // checkpointing the pending capture into Git.
+            if args.no_all {
+                return Err(anyhow!(nothing_to_commit_advice()));
+            }
             if trust.status == "needs_checkpoint" {
                 preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
                 let git_previous_commit = git_head_oid(repo.root());
