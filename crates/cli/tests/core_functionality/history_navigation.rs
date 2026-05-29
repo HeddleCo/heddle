@@ -68,3 +68,23 @@ fn test_collapse_two_states() {
         .unwrap_or("");
     assert!(intent.contains("Combined"));
 }
+
+#[test]
+fn test_show_no_arg_defaults_to_head() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("file.txt"), "content").unwrap();
+    heddle_must_succeed(&["capture", "-m", "Test"], temp.path());
+
+    let no_arg = heddle(&["show", "--output", "json"], Some(temp.path()))
+        .expect("show with no arg should succeed");
+    let explicit_head = heddle(&["show", "HEAD", "--output", "json"], Some(temp.path()))
+        .expect("show HEAD should succeed");
+
+    let no_arg_json: Value = serde_json::from_str(&no_arg).expect("no-arg show JSON");
+    let head_json: Value = serde_json::from_str(&explicit_head).expect("HEAD show JSON");
+    assert_eq!(
+        no_arg_json, head_json,
+        "bare `show` should render the same state as `show HEAD`"
+    );
+}
