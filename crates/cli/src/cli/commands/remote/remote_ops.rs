@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pull, remote management, and serve commands.
 
+use objects::store::ObjectStore;
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
 use std::{borrow::Cow, collections::BTreeMap, fs, path::Path};

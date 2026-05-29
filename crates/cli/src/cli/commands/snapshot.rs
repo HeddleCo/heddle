@@ -51,10 +51,8 @@ pub(crate) struct SnapshotOutput {
     pub heavy_impact_paths: Vec<String>,
     pub message: String,
     pub next_action: Option<String>,
-    pub next_action_argv: Option<Vec<String>>,
     pub next_action_template: Option<ActionTemplate>,
     pub recommended_action: Option<String>,
-    pub recommended_action_argv: Option<Vec<String>>,
     pub recommended_action_template: Option<ActionTemplate>,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
@@ -484,9 +482,6 @@ pub(crate) fn create_snapshot_profiled(
     let trust = build_repository_verification_state(repo);
     let recommended_action =
         (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone());
-    let recommended_action_argv = recommended_action
-        .as_ref()
-        .and(trust.recommended_action_argv.clone());
     let recommended_action_template = recommended_action
         .as_deref()
         .and_then(action_template)
@@ -515,10 +510,8 @@ pub(crate) fn create_snapshot_profiled(
             execution.state.hash().short()
         ),
         next_action: recommended_action.clone(),
-        next_action_argv: recommended_action_argv.clone(),
         next_action_template: recommended_action_template.clone(),
         recommended_action,
-        recommended_action_argv,
         recommended_action_template,
         trust,
     };
@@ -608,9 +601,6 @@ pub(crate) fn create_snapshot_from_tree_profiled(
     let trust = build_repository_verification_state(repo);
     let recommended_action =
         (!trust.recommended_action.trim().is_empty()).then(|| trust.recommended_action.clone());
-    let recommended_action_argv = recommended_action
-        .as_ref()
-        .and(trust.recommended_action_argv.clone());
     let recommended_action_template = recommended_action
         .as_deref()
         .and_then(action_template)
@@ -639,10 +629,8 @@ pub(crate) fn create_snapshot_from_tree_profiled(
             execution.state.hash().short()
         ),
         next_action: recommended_action.clone(),
-        next_action_argv: recommended_action_argv.clone(),
         next_action_template: recommended_action_template.clone(),
         recommended_action,
-        recommended_action_argv,
         recommended_action_template,
         trust,
     };

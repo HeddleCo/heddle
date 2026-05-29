@@ -42,14 +42,14 @@ use crate::{
 /// Holds a short-lived borrow of the store, sha map, and git source for
 /// the duration of one commit's translation. Cheap to construct per
 /// commit — the memoization state lives in `ShaMap`, not in this struct.
-pub struct TreeTranslator<'a> {
+pub struct TreeTranslator<'a, S: ObjectStore> {
     git: &'a GitSource,
-    store: &'a dyn ObjectStore,
+    store: &'a S,
     map: &'a mut ShaMap,
 }
 
-impl<'a> TreeTranslator<'a> {
-    pub fn new(git: &'a GitSource, store: &'a dyn ObjectStore, map: &'a mut ShaMap) -> Self {
+impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
+    pub fn new(git: &'a GitSource, store: &'a S, map: &'a mut ShaMap) -> Self {
         Self { git, store, map }
     }
 

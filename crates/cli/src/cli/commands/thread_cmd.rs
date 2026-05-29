@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread command implementation.
 
+use objects::store::ObjectStore;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -159,9 +160,9 @@ fn render_plain_git_thread_list(cli: &Cli, probe: &PlainGitVerificationProbe) ->
                 "current": null,
                 "verification": &probe.trust,
                 "recommended_action": &probe.trust.recommended_action,
-                "recommended_action_argv": &probe.trust.recommended_action_argv,
+                "recommended_action_template": &probe.trust.recommended_action_template,
                 "recovery_commands": &probe.trust.recovery_commands,
-                "recovery_command_argv": &probe.trust.recovery_command_argv,
+                "recovery_action_templates": &probe.trust.recovery_action_templates,
             }))?
         );
     } else {
@@ -193,9 +194,9 @@ fn render_plain_git_thread_show(
                 "thread": null,
                 "verification": &probe.trust,
                 "recommended_action": &probe.trust.recommended_action,
-                "recommended_action_argv": &probe.trust.recommended_action_argv,
+                "recommended_action_template": &probe.trust.recommended_action_template,
                 "recovery_commands": &probe.trust.recovery_commands,
-                "recovery_command_argv": &probe.trust.recovery_command_argv,
+                "recovery_action_templates": &probe.trust.recovery_action_templates,
             }))?
         );
     } else {

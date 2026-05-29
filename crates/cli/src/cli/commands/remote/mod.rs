@@ -129,10 +129,8 @@ struct PushOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     objects: Option<usize>,
     next_action: Option<String>,
-    next_action_argv: Option<Vec<String>>,
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
     #[allow(dead_code)]
     #[serde(skip_serializing)]
@@ -554,10 +552,8 @@ fn git_overlay_push_output(
         state: None,
         objects: None,
         next_action: action.action.clone(),
-        next_action_argv: action.argv.clone(),
         next_action_template: action.template.clone(),
         recommended_action: action.action,
-        recommended_action_argv: action.argv,
         recommended_action_template: action.template,
         trust,
     }
@@ -592,10 +588,8 @@ fn heddle_push_output(
         state,
         objects,
         next_action: action.action.clone(),
-        next_action_argv: action.argv.clone(),
         next_action_template: action.template.clone(),
         recommended_action: action.action,
-        recommended_action_argv: action.argv,
         recommended_action_template: action.template,
         trust,
     }

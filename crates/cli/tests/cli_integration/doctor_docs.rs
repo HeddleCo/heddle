@@ -65,7 +65,7 @@ fn flags_invalid_workspace_value() {
     assert_eq!(report["status"], "drift");
     assert_eq!(report["verified"], false);
     assert_eq!(
-        report["recommended_action_argv"],
+        report["recommended_action_template"]["argv_template"],
         heddle_argv_json(["doctor", "docs", "--all", "--output", "json"])
     );
     assert_eq!(report["files_scanned"], 1);

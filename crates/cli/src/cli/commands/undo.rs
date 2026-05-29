@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Undo and redo commands.
 
+use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ContentHash};
 use oplog::{OpBatch, OpRecord};
@@ -50,10 +51,8 @@ struct UndoRedoOutput {
     message: String,
     batches: Vec<OpBatchOutput>,
     next_action: Option<String>,
-    next_action_argv: Option<Vec<String>>,
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
     #[serde(skip_serializing)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,10 +125,8 @@ pub fn cmd_undo(
             ),
             batches: batches.iter().map(build_batch_output).collect(),
             next_action: None,
-            next_action_argv: None,
             next_action_template: None,
             recommended_action: None,
-            recommended_action_argv: None,
             recommended_action_template: None,
             trust: None,
         };
@@ -171,10 +168,8 @@ pub fn cmd_undo(
         ),
         batches: updated_batches.iter().map(build_batch_output).collect(),
         next_action: recommended_action.action.clone(),
-        next_action_argv: recommended_action.argv.clone(),
         next_action_template: recommended_action.template.clone(),
         recommended_action: recommended_action.action,
-        recommended_action_argv: recommended_action.argv,
         recommended_action_template: recommended_action.template,
         trust: Some(post_undo_trust),
     };
@@ -229,10 +224,8 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
             ),
             batches: batches.iter().map(build_batch_output).collect(),
             next_action: None,
-            next_action_argv: None,
             next_action_template: None,
             recommended_action: None,
-            recommended_action_argv: None,
             recommended_action_template: None,
             trust: None,
         };
@@ -276,10 +269,8 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         ),
         batches: updated_batches.iter().map(build_batch_output).collect(),
         next_action: recommended_action.action.clone(),
-        next_action_argv: recommended_action.argv.clone(),
         next_action_template: recommended_action.template.clone(),
         recommended_action: recommended_action.action,
-        recommended_action_argv: recommended_action.argv,
         recommended_action_template: recommended_action.template,
         trust: Some(post_redo_trust),
     };

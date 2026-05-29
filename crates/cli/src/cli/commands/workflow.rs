@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use objects::store::ObjectStore;
 use anyhow::{Context, Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
 use oplog::{OpBatch, OpRecord};

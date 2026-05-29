@@ -11,6 +11,7 @@
 //! pass. We report the pinned count so the audit trail in `heddle gc`
 //! output makes the invariant visible to operators.
 
+use objects::store::ObjectStore;
 use anyhow::Result;
 use repo::Repository;
 use serde::Serialize;

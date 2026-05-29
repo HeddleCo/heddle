@@ -21,6 +21,7 @@
 //!   on-read hydration completes against a real promisor remote. Run
 //!   it with `cargo test -p heddle-cli --test lazy_blob_hydration_kernel -- --include-ignored`.
 
+use objects::store::ObjectStore;
 use std::{
     path::Path,
     sync::Arc,

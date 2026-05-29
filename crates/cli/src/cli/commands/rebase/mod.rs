@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rebase command - replay commits onto another thread.
 
+use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Result, anyhow};
@@ -14,7 +15,7 @@ use super::{
     advice::RecoveryAdvice,
     ff_record::record_ff_advance,
     git_overlay_health::{
-        RepositoryVerificationState, action_argv, build_repository_verification_state,
+        RepositoryVerificationState, action_template, build_repository_verification_state,
         repository_verification_primary_command,
     },
     snapshot::ensure_current_state,
@@ -289,7 +290,7 @@ fn emit_up_to_date_blocked_by_trust(
                 "reason": "repository_verification",
                 "summary": trust.summary,
                 "recommended_action": recommended_action.clone(),
-                "recommended_action_argv": action_argv(&recommended_action),
+                "recommended_action_template": action_template(&recommended_action),
                 "recovery_commands": trust.recovery_commands,
             }))?
         );

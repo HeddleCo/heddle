@@ -6,7 +6,6 @@ use clap::error::Error as ClapError;
 use super::{
     RecoveryAdvice,
     command_catalog::{ActionTemplate, recommended_action_template, validate_recommended_action},
-    recommended_action_argv,
 };
 use crate::{
     cli::{Cli, render::shell_quote, should_output_json},
@@ -33,9 +32,7 @@ pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
             .human_error
             .as_deref()
             .unwrap_or(error.as_str());
-        let primary_command_argv = command_argv(&classification.primary_command);
         let primary_command_template = command_template(&classification.primary_command);
-        let recovery_command_argv = command_argvs(&classification.recovery_commands);
         let recovery_action_templates = command_templates(&classification.recovery_commands);
         let mut body = serde_json::json!({
             "code": kind,
@@ -47,10 +44,8 @@ pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
             "would_change": classification.would_change,
             "preserved": classification.preserved,
             "primary_command": classification.primary_command,
-            "primary_command_argv": primary_command_argv,
             "primary_command_template": primary_command_template,
             "recovery_commands": classification.recovery_commands,
-            "recovery_command_argv": recovery_command_argv,
             "recovery_action_templates": recovery_action_templates,
         });
         if let Some(op_id) = cli.op_id.as_deref()
@@ -147,7 +142,6 @@ pub fn print_parse_error_json_envelope(err: &ClapError) {
         primary_command.to_string(),
         "heddle help --output text".to_string(),
     ];
-    let recovery_command_argv = command_argvs(&recovery_commands);
     let recovery_action_templates = command_templates(&recovery_commands);
     let body = serde_json::json!({
         "code": "parse_error",
@@ -159,10 +153,8 @@ pub fn print_parse_error_json_envelope(err: &ClapError) {
         "would_change": "the command body was not executed, so no repository state could be changed",
         "preserved": "no command body was executed",
         "primary_command": primary_command,
-        "primary_command_argv": command_argv(primary_command),
         "primary_command_template": command_template(primary_command),
         "recovery_commands": recovery_commands,
-        "recovery_command_argv": recovery_command_argv,
         "recovery_action_templates": recovery_action_templates,
     });
     eprintln!("{body}");
@@ -319,28 +311,8 @@ impl AdviceActionValidation {
     }
 }
 
-fn command_argv(command: &str) -> Option<Vec<String>> {
-    match recommended_action_argv(command) {
-        Ok(argv) => argv,
-        Err(error) => {
-            debug_assert!(
-                false,
-                "invalid command action reached error envelope: {command}: {error}"
-            );
-            None
-        }
-    }
-}
-
 fn command_template(command: &str) -> Option<ActionTemplate> {
     recommended_action_template(command)
-}
-
-fn command_argvs(commands: &[String]) -> Vec<Vec<String>> {
-    commands
-        .iter()
-        .filter_map(|command| command_argv(command))
-        .collect()
 }
 
 fn command_templates(commands: &[String]) -> Vec<ActionTemplate> {

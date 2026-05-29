@@ -439,15 +439,6 @@
               "null"
             ]
           },
-          "recommended_action_argv": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "recommended_action_template": {
             "anyOf": [
               {
@@ -461,15 +452,6 @@
           "recovery_action_templates": {
             "items": {
               "$ref": "#/definitions/ActionTemplate"
-            },
-            "type": "array"
-          },
-          "recovery_command_argv": {
-            "items": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "type": "array"
           },
@@ -516,7 +498,6 @@
           "machine_contract_coverage",
           "mapping_state",
           "recovery_action_templates",
-          "recovery_command_argv",
           "recovery_commands",
           "remote_drift",
           "repository_mode",
@@ -551,15 +532,6 @@
               "null"
             ]
           },
-          "recommended_action_argv": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "recommended_action_template": {
             "anyOf": [
               {
@@ -573,15 +545,6 @@
           "recovery_action_templates": {
             "items": {
               "$ref": "#/definitions/ActionTemplate"
-            },
-            "type": "array"
-          },
-          "recovery_command_argv": {
-            "items": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "type": "array"
           },
@@ -602,7 +565,6 @@
           "clean",
           "name",
           "recovery_action_templates",
-          "recovery_command_argv",
           "recovery_commands",
           "status",
           "summary"
@@ -1070,15 +1032,6 @@
               "null"
             ]
           },
-          "recommended_action_argv": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "recommended_action_template": {
             "anyOf": [
               {
@@ -1092,15 +1045,6 @@
           "recovery_action_templates": {
             "items": {
               "$ref": "#/definitions/ActionTemplate"
-            },
-            "type": "array"
-          },
-          "recovery_command_argv": {
-            "items": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "type": "array"
           },
@@ -1147,7 +1091,6 @@
           "machine_contract_coverage",
           "mapping_state",
           "recovery_action_templates",
-          "recovery_command_argv",
           "recovery_commands",
           "remote_drift",
           "repository_mode",
@@ -1182,15 +1125,6 @@
               "null"
             ]
           },
-          "recommended_action_argv": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
           "recommended_action_template": {
             "anyOf": [
               {
@@ -1204,15 +1138,6 @@
           "recovery_action_templates": {
             "items": {
               "$ref": "#/definitions/ActionTemplate"
-            },
-            "type": "array"
-          },
-          "recovery_command_argv": {
-            "items": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
             },
             "type": "array"
           },
@@ -1233,7 +1158,6 @@
           "clean",
           "name",
           "recovery_action_templates",
-          "recovery_command_argv",
           "recovery_commands",
           "status",
           "summary"

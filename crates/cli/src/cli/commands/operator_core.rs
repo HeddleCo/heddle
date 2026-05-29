@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use objects::store::ObjectStore;
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
@@ -15,7 +16,7 @@ use serde::{ser::SerializeStruct, Serialize, Serializer};
 use super::{
     bisect::reset_bisect_state,
     git_overlay_health::{
-        action_argv, action_template, repository_verification_blockers,
+        action_template, repository_verification_blockers,
         repository_verification_primary_command, RepositoryVerificationState,
     },
     next_action::{effective_next_action, NextActionInput},
@@ -155,12 +156,10 @@ impl Serialize for OperatorCommandOutput {
     {
         let next_action = normalized_action(self.next_action.as_deref());
         let recommended_action = normalized_action(self.recommended_action.as_deref());
-        let next_action_argv = next_action.and_then(action_argv);
         let next_action_template = next_action.and_then(action_template);
-        let recommended_action_argv = recommended_action.and_then(action_argv);
         let recommended_action_template = recommended_action.and_then(action_template);
 
-        let mut len = 10;
+        let mut len = 8;
         if !self.blockers.is_empty() {
             len += 1;
         }
@@ -180,10 +179,8 @@ impl Serialize for OperatorCommandOutput {
             state.serialize_field("warnings", &self.warnings)?;
         }
         state.serialize_field("next_action", &next_action)?;
-        state.serialize_field("next_action_argv", &next_action_argv)?;
         state.serialize_field("next_action_template", &next_action_template)?;
         state.serialize_field("recommended_action", &recommended_action)?;
-        state.serialize_field("recommended_action_argv", &recommended_action_argv)?;
         state.serialize_field("recommended_action_template", &recommended_action_template)?;
         state.end()
     }
@@ -650,14 +647,12 @@ mod tests {
             clean: verified,
             summary: "repository verification fixture".to_string(),
             recommended_action: (!verified).then(|| recommended_action.to_string()),
-            recommended_action_argv: None,
             recommended_action_template: None,
             recovery_commands: if verified {
                 Vec::new()
             } else {
                 vec![recommended_action.to_string()]
             },
-            recovery_command_argv: Vec::new(),
             recovery_action_templates: Vec::new(),
             details: BTreeMap::new(),
         };
@@ -686,14 +681,12 @@ mod tests {
             } else {
                 recommended_action.to_string()
             },
-            recommended_action_argv: None,
             recommended_action_template: None,
             recovery_commands: if verified {
                 Vec::new()
             } else {
                 vec![recommended_action.to_string()]
             },
-            recovery_command_argv: Vec::new(),
             recovery_action_templates: Vec::new(),
             checks: vec![check],
         }

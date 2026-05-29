@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rebase operation execution — applying commits onto a new base.
 
+use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Result, anyhow};

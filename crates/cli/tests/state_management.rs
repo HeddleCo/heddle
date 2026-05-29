@@ -116,22 +116,10 @@ pub(crate) fn assert_json_recovery_advice_fields(envelope: &Value, context: &str
         "JSON `error` should stay concise; recovery detail belongs in structured fields: {context}"
     );
     assert!(
-        envelope.get("primary_command_argv").is_some_and(|argv| {
-            argv.is_null() || argv.as_array().is_some_and(|parts| !parts.is_empty())
-        }),
-        "JSON recovery advice should expose `primary_command_argv` as argv array or null: {context}"
-    );
-    assert!(
         envelope
             .get("primary_command_template")
             .is_some_and(|template| template.is_null() || template.is_object()),
         "JSON recovery advice should expose `primary_command_template` as object or null: {context}"
-    );
-    assert!(
-        envelope["recovery_command_argv"]
-            .as_array()
-            .is_some_and(|commands| commands.iter().all(|command| command.is_array())),
-        "JSON recovery advice should expose `recovery_command_argv` as an array of argv arrays: {context}"
     );
     assert!(
         envelope["recovery_action_templates"]

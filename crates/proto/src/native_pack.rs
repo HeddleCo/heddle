@@ -30,7 +30,7 @@ impl PackChunkState {
 }
 
 pub fn build_native_pack(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     objects: &[ObjectInfo],
 ) -> Result<NativePackBundle> {
     let mut builder = PackBuilder::new(sync_pack_compression());
@@ -68,7 +68,7 @@ fn sync_pack_compression() -> CompressionConfig {
 }
 
 pub fn install_received_pack(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     pack_data: &[u8],
     index_data: &[u8],
 ) -> Result<Vec<PackObjectId>> {

@@ -12,6 +12,7 @@
 //! userspace FS callbacks in the hot path. Disk usage is the
 //! ~zero-cost clonefile share until the agent diverges blocks.
 
+use objects::store::ObjectStore;
 use std::{
     collections::BTreeMap,
     fs,

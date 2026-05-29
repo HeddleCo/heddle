@@ -3,6 +3,7 @@
 //!
 //! Direct access to local repositories without network protocol overhead.
 
+use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
 use anyhow::{anyhow, Result};

@@ -14,7 +14,7 @@ pub struct ObjectAvailabilityPlan {
     pub partial_fetch_allowed: bool,
 }
 
-pub fn has_object(store: &dyn ObjectStore, info: &ObjectInfo) -> Result<bool> {
+pub fn has_object(store: &impl ObjectStore, info: &ObjectInfo) -> Result<bool> {
     match (&info.id, info.obj_type) {
         (ObjectId::Hash(hash), ObjectType::Blob) => Ok(store.has_blob(hash)?),
         (ObjectId::Hash(hash), ObjectType::Tree) => Ok(store.has_tree(hash)?),
@@ -31,7 +31,7 @@ pub fn has_object(store: &dyn ObjectStore, info: &ObjectInfo) -> Result<bool> {
 }
 
 pub fn plan_object_availability(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     objects: &[ObjectInfo],
 ) -> Result<ObjectAvailabilityPlan> {
     let mut plan = ObjectAvailabilityPlan::default();

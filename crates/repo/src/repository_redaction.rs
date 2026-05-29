@@ -22,6 +22,7 @@
 //! identical ids, which preserves the "redact is idempotent" property
 //! from the build brief.
 
+use objects::store::ObjectStore;
 use std::{collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result};

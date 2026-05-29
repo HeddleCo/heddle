@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Collapse command: squash multiple states into one.
 
+use objects::store::ObjectStore;
 use std::time::Instant;
 
 use anyhow::Result;

@@ -488,7 +488,7 @@ fn invalidate_drops_the_mapping() {
 /// prove `enumerate`/`attrs` don't pull blob contents through
 /// `get_blob` when only the size is needed.
 struct CountingStore {
-    inner: Box<dyn ObjectStore>,
+    inner: objects::store::FsStore,
     get_blob_calls: Arc<AtomicUsize>,
     blob_size_calls: Arc<AtomicUsize>,
 }
@@ -561,14 +561,13 @@ fn enumerate_serves_size_without_loading_blob_bytes() {
 
     let get_blob_calls = Arc::new(AtomicUsize::new(0));
     let blob_size_calls = Arc::new(AtomicUsize::new(0));
-    let inner: Box<dyn ObjectStore> =
-        Box::new(objects::store::FsStore::new(temp.path().join(".heddle")));
+    let inner = objects::store::FsStore::new(temp.path().join(".heddle"));
     let store = CountingStore {
         inner,
         get_blob_calls: get_blob_calls.clone(),
         blob_size_calls: blob_size_calls.clone(),
     };
-    let repo = Repository::open_with_store(temp.path().join(".heddle"), Box::new(store)).unwrap();
+    let repo = Repository::open_with_store(temp.path().join(".heddle"), store).unwrap();
     let mount = ContentAddressedMount::new(repo, "main").unwrap();
 
     let entries = mount.enumerate(NodeId::ROOT).unwrap();
@@ -4111,7 +4110,7 @@ mod capture_write_ops {
 
     use super::*;
 
-    fn dump_tree(store: &dyn ObjectStore, hash: &ContentHash) -> Tree {
+    fn dump_tree(store: &impl ObjectStore, hash: &ContentHash) -> Tree {
         store.get_tree(hash).unwrap().unwrap()
     }
 

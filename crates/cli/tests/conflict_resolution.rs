@@ -5,6 +5,7 @@
 //! the lifecycle a stack-aware rebase produces — start → resolve →
 //! finish / abort / carry_forward.
 
+use objects::store::ObjectStore;
 use objects::object::{ChangeId, ThreadName};
 use repo::{MergeState, MergeStateManager, Repository};
 use tempfile::TempDir;

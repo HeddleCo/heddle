@@ -1080,11 +1080,6 @@ fn test_cli_clone_git_overlay_missing_requested_branch_uses_typed_advice() {
     );
     assert_eq!(envelope["primary_command"], expected_action);
     assert_eq!(
-        envelope["primary_command_argv"],
-        Value::Null,
-        "display-only clone recovery must wait for a destination path: {stderr}"
-    );
-    assert_eq!(
         envelope["primary_command_template"]["argv_template"],
         heddle_argv_json([
             "clone",

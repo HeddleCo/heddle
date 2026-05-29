@@ -50,14 +50,14 @@ pub struct StateClosureOptions {
 }
 
 pub fn enumerate_state_closure(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     state_id: ChangeId,
 ) -> Result<Vec<ObjectInfo>> {
     enumerate_state_closure_with_options(store, state_id, StateClosureOptions::default())
 }
 
 pub fn enumerate_state_closure_with_options(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     state_id: ChangeId,
     options: StateClosureOptions,
 ) -> Result<Vec<ObjectInfo>> {
@@ -126,14 +126,14 @@ pub fn enumerate_state_closure_with_options(
 }
 
 pub fn enumerate_state_closure_plan(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     state_id: ChangeId,
 ) -> Result<Vec<PlannedObject>> {
     enumerate_state_closure_plan_with_options(store, state_id, StateClosureOptions::default())
 }
 
 pub fn enumerate_state_closure_plan_with_options(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     state_id: ChangeId,
     options: StateClosureOptions,
 ) -> Result<Vec<PlannedObject>> {
@@ -199,7 +199,7 @@ pub fn enumerate_state_closure_plan_with_options(
 }
 
 fn enumerate_tree_closure_filtered(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     tree_hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -281,7 +281,7 @@ fn enumerate_tree_closure_filtered(
 /// the closure (dedup'd by hash), so its redaction can only be emitted
 /// once too.
 fn emit_redaction_info(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     blob: &ContentHash,
     out: &mut Vec<ObjectInfo>,
 ) -> Result<()> {
@@ -297,7 +297,7 @@ fn emit_redaction_info(
 }
 
 fn enumerate_tree_plan_filtered(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     tree_hash: ContentHash,
     excluded: &HashSet<ContentHash>,
     seen: &mut HashSet<ContentHash>,
@@ -344,7 +344,7 @@ fn enumerate_tree_plan_filtered(
 }
 
 fn emit_redaction_plan(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     blob: &ContentHash,
     out: &mut Vec<PlannedObject>,
 ) -> Result<()> {
@@ -358,7 +358,7 @@ fn emit_redaction_plan(
 }
 
 fn collect_excluded(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     roots: &[ChangeId],
 ) -> Result<(HashSet<ChangeId>, HashSet<ContentHash>)> {
     if roots.is_empty() {
@@ -400,7 +400,7 @@ fn collect_excluded(
 }
 
 fn collect_tree_hashes(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     tree_hash: ContentHash,
     excluded: &mut HashSet<ContentHash>,
 ) -> Result<()> {
@@ -428,7 +428,7 @@ fn collect_tree_hashes(
 }
 
 pub fn is_ancestor(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     ancestor: ChangeId,
     descendant: ChangeId,
 ) -> Result<bool> {
@@ -463,6 +463,7 @@ pub fn is_ancestor(
 mod tests {
     use chrono::Utc;
     use objects::object::{Principal, Redaction};
+    use objects::store::ObjectStore;
     use repo::Repository;
     use tempfile::TempDir;
 

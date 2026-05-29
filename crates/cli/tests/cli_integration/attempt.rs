@@ -97,23 +97,23 @@ fn attempt_n_one_is_degenerate_try() {
         "attempt should expose the shared action field for agents: {raw}"
     );
     assert_eq!(
-        value["next_action_argv"],
+        value["next_action_template"]["argv_template"],
         heddle_argv_json(["merge", recommended, "--preview", "--with-diff"]),
-        "attempt should expose replayable argv for the preview action: {raw}"
+        "attempt should expose replayable argv_template for the preview action: {raw}"
+    );
+    assert!(
+        value["next_action_template"]["required_inputs"]
+            .as_array()
+            .is_some_and(|inputs| inputs.is_empty()),
+        "attempt's concrete preview action template should need no inputs to run: {raw}"
     );
     assert_eq!(
-        value["next_action_template"],
-        Value::Null,
-        "attempt should expose nullable template metadata for concrete actions: {raw}"
+        value["recommended_action_template"]["argv_template"], value["next_action_template"]["argv_template"],
+        "recommended action argv_template should mirror next_action argv_template: {raw}"
     );
     assert_eq!(
-        value["recommended_action_argv"], value["next_action_argv"],
-        "recommended action argv should mirror next_action argv: {raw}"
-    );
-    assert_eq!(
-        value["recommended_action_template"],
-        Value::Null,
-        "attempt should expose nullable template metadata beside recommended_action: {raw}"
+        value["recommended_action_template"], value["next_action_template"],
+        "recommended_action template metadata should mirror next_action: {raw}"
     );
 
     // Parent invariants.

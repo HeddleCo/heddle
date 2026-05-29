@@ -1014,13 +1014,9 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
         "actor completion should keep agents on the preview-first merge path: {actor_done}"
     );
     assert_eq!(
-        actor_done["recommended_action_argv"],
+        actor_done["recommended_action_template"]["argv_template"],
         heddle_argv_json(["merge", "feature/native-cli", "--preview"]),
         "{actor_done}"
-    );
-    assert!(
-        actor_done["recommended_action_template"].is_null(),
-        "actor done should expose nullable template metadata beside concrete argv: {actor_done}"
     );
 }
 

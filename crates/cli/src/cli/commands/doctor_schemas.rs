@@ -26,7 +26,7 @@ use serde_json::Value;
 
 use super::{
     advice::RecoveryAdvice,
-    command_catalog::normalize_heddle_argv,
+    command_catalog::{ActionTemplate, recommended_action_template},
     git_overlay_health::{MachineContractCoverage, machine_contract_coverage},
     schemas::{documented_schema_verbs, schema_for_verb, schema_verbs},
 };
@@ -58,12 +58,12 @@ pub struct SchemaReport {
     pub summary: String,
     /// Primary command to rerun or inspect when the report is not verified.
     pub recommended_action: Option<String>,
-    /// Executable argv for `recommended_action`; empty recommendations use null.
-    pub recommended_action_argv: Option<Vec<String>>,
+    /// Canonical fillable template for `recommended_action`; `null` when
+    /// verified (no action). The always-null `_argv` sidecar was dropped
+    /// (HeddleCo/heddle#254).
+    pub recommended_action_template: Option<ActionTemplate>,
     /// Recovery/inspection commands in priority order.
     pub recovery_commands: Vec<String>,
-    /// Executable argv forms for recovery commands.
-    pub recovery_command_argv: Vec<Vec<String>>,
     /// All verbs the runtime schema registry exposes.
     pub registered_verbs: Vec<String>,
     /// Runtime schema verbs selected by the command contract table
@@ -339,26 +339,13 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
         coverage.summary.clone()
     };
     let recommended_action = (!verified).then(|| "heddle doctor schemas --output json".to_string());
-    let recommended_action_argv = if verified {
-        None
-    } else {
-        Some(normalize_heddle_argv(vec![
-            "heddle".to_string(),
-            "doctor".to_string(),
-            "schemas".to_string(),
-            "--output".to_string(),
-            "json".to_string(),
-        ]))
-    };
+    let recommended_action_template = recommended_action
+        .as_deref()
+        .and_then(recommended_action_template);
     let recovery_commands = if verified {
         Vec::new()
     } else {
         vec!["heddle doctor schemas --output json".to_string()]
-    };
-    let recovery_command_argv = if verified {
-        Vec::new()
-    } else {
-        vec![recommended_action_argv.clone().unwrap_or_default()]
     };
 
     let report = SchemaReport {
@@ -367,9 +354,8 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
         verified,
         summary,
         recommended_action,
-        recommended_action_argv,
+        recommended_action_template,
         recovery_commands,
-        recovery_command_argv,
         registered_verbs,
         documented_verbs,
         undocumented_verbs,
@@ -1141,21 +1127,10 @@ Some prose.
             verified: false,
             summary: "1 documented schema verb lacks parseable samples".to_string(),
             recommended_action: Some("heddle doctor schemas --output json".to_string()),
-            recommended_action_argv: Some(vec![
-                "heddle".to_string(),
-                "doctor".to_string(),
-                "schemas".to_string(),
-                "--output".to_string(),
-                "json".to_string(),
-            ]),
+            recommended_action_template: recommended_action_template(
+                "heddle doctor schemas --output json",
+            ),
             recovery_commands: vec!["heddle doctor schemas --output json".to_string()],
-            recovery_command_argv: vec![vec![
-                "heddle".to_string(),
-                "doctor".to_string(),
-                "schemas".to_string(),
-                "--output".to_string(),
-                "json".to_string(),
-            ]],
             registered_verbs: vec!["status".to_string()],
             documented_verbs: vec!["status".to_string()],
             undocumented_verbs: Vec::new(),

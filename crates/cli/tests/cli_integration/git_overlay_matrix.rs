@@ -216,12 +216,12 @@ fn inject_post_verification(cwd: &std::path::Path, args: &[&str], mut value: Val
 
 fn assert_operator_json_contract(parsed: &Value, output_kind: &str) {
     assert_eq!(parsed["output_kind"], output_kind, "{parsed}");
-    for (action_field, argv_field) in [
-        ("next_action", "next_action_argv"),
-        ("recommended_action", "recommended_action_argv"),
+    for (action_field, template_field) in [
+        ("next_action", "next_action_template"),
+        ("recommended_action", "recommended_action_template"),
     ] {
         if parsed[action_field].is_null() {
-            assert_eq!(parsed[argv_field], Value::Null, "{parsed}");
+            assert_eq!(parsed[template_field], Value::Null, "{parsed}");
             continue;
         }
         let action = parsed[action_field]
@@ -231,44 +231,40 @@ fn assert_operator_json_contract(parsed: &Value, output_kind: &str) {
             !action.trim().is_empty(),
             "{action_field} should serialize absent actions as null: {parsed}"
         );
-        let concrete_command = (action.starts_with("heddle ") || action.starts_with("git "))
-            && !action.contains("...")
-            && !action.contains('<');
-        if concrete_command {
-            assert!(
-                parsed[argv_field]
-                    .as_array()
-                    .is_some_and(|argv| !argv.is_empty()),
-                "{argv_field} should accompany executable {action_field}: {parsed}"
-            );
-        }
+        // Every valid action carries the canonical fillable template
+        // (HeddleCo/heddle#254); the always-null `_argv` sibling was dropped.
+        assert!(
+            parsed[template_field]["argv_template"]
+                .as_array()
+                .is_some_and(|argv| !argv.is_empty()),
+            "{template_field} should accompany {action_field} with a fillable argv_template: {parsed}"
+        );
     }
 }
 
 fn assert_action_is_argv_or_template(label: &str, output: &Value, action: &str) {
     let concrete = !action.contains("...") && !action.contains('<');
+    let template = &output["recommended_action_template"];
+    // The canonical fillable template is always present for a valid action
+    // and exposes a non-empty argv_template (HeddleCo/heddle#254).
+    assert!(
+        template["argv_template"]
+            .as_array()
+            .is_some_and(|argv| !argv.is_empty()),
+        "{label} recommended action should expose a fillable template with argv_template: {output}"
+    );
+    let required_inputs = template["required_inputs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{label} template should list required_inputs: {output}"));
     if concrete {
         assert!(
-            output["recommended_action_argv"]
-                .as_array()
-                .is_some_and(|argv| !argv.is_empty()),
-            "{label} concrete recommended action should expose executable argv: {output}"
-        );
-        assert!(
-            output["recommended_action_template"].is_null(),
-            "{label} concrete recommended action should not also expose a template: {output}"
+            required_inputs.is_empty(),
+            "{label} concrete recommended action template should need no inputs to run: {output}"
         );
     } else {
-        assert_eq!(
-            output["recommended_action_argv"],
-            Value::Null,
-            "{label} templated recommended action must not masquerade as executable argv: {output}"
-        );
         assert!(
-            output["recommended_action_template"]["argv_template"]
-                .as_array()
-                .is_some_and(|argv| !argv.is_empty()),
-            "{label} templated recommended action should expose argv_template: {output}"
+            !required_inputs.is_empty(),
+            "{label} templated recommended action should require inputs before running: {output}"
         );
     }
 }
@@ -311,12 +307,8 @@ fn assert_remote_divergence_surface(
     match expected_argv {
         Some(argv) => {
             assert_eq!(
-                output["recommended_action_argv"], argv,
-                "{label} should expose executable argv for the primary action: {output}"
-            );
-            assert!(
-                output["recommended_action_template"].is_null(),
-                "{label} concrete action should not expose a template: {output}"
+                output["recommended_action_template"]["argv_template"], argv,
+                "{label} should expose executable argv_template for the primary action: {output}"
             );
         }
         None => assert_action_is_argv_or_template(label, output, expected_action),
@@ -938,7 +930,7 @@ fn git_overlay_matrix_plain_git_with_branches_and_tags_recommends_adopt_all() {
     assert_eq!(status["repository_capability"], "plain-git");
     assert_eq!(status["recommended_action"], "heddle adopt");
     assert_eq!(
-        status["recommended_action_argv"],
+        status["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt"])
     );
     assert_eq!(status["verification"]["recommended_action"], "heddle adopt");
@@ -1217,7 +1209,7 @@ fn git_overlay_matrix_verify_reports_git_tags_created_after_adoption() {
     assert_eq!(verify["import_state"], "tags_need_import");
     assert_eq!(verify["recommended_action"], "heddle adopt --ref v2.0.0");
     assert_eq!(
-        verify["recommended_action_argv"],
+        verify["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "v2.0.0"])
     );
     assert!(
@@ -1483,13 +1475,9 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         "thread list top-level action should match verify after ready: {thread_list_before_preview}"
     );
     assert_eq!(
-        thread_list_before_preview["recommended_action_argv"],
+        thread_list_before_preview["recommended_action_template"]["argv_template"],
         heddle_argv_json(["merge", "feature/ready-verify", "--preview"]),
         "thread list top-level action should be directly executable: {thread_list_before_preview}"
-    );
-    assert!(
-        thread_list_before_preview["recommended_action_template"].is_null(),
-        "concrete thread list actions should still expose nullable template metadata: {thread_list_before_preview}"
     );
     let workspace_before_preview = json(temp.path(), &["--output", "json", "workspace", "show"]);
     assert_eq!(
@@ -1498,13 +1486,9 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         "workspace top-level action should match verify after ready: {workspace_before_preview}"
     );
     assert_eq!(
-        workspace_before_preview["recommended_action_argv"],
+        workspace_before_preview["recommended_action_template"]["argv_template"],
         heddle_argv_json(["merge", "feature/ready-verify", "--preview"]),
         "workspace top-level action should be directly executable: {workspace_before_preview}"
-    );
-    assert!(
-        workspace_before_preview["recommended_action_template"].is_null(),
-        "concrete workspace actions should still expose nullable template metadata: {workspace_before_preview}"
     );
 
     let status_text = heddle(&["status", "--output", "text"], Some(&thread_path)).unwrap();
@@ -1610,13 +1594,9 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         "thread list should match ready/verify next action: {thread_list}"
     );
     assert_eq!(
-        listed["recommended_action_argv"],
+        listed["recommended_action_template"]["argv_template"],
         heddle_argv_json(["ship", "--thread", "feature/ready-verify", "--no-push"]),
         "thread list item actions should be directly executable: {thread_list}"
-    );
-    assert!(
-        listed["recommended_action_template"].is_null(),
-        "thread list item actions should expose nullable template metadata: {thread_list}"
     );
     let workspace = json(temp.path(), &["--output", "json", "workspace", "show"]);
     assert_eq!(
@@ -1636,13 +1616,9 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         "workspace should match ready/verify next action: {workspace}"
     );
     assert_eq!(
-        workspace_thread["recommended_action_argv"],
+        workspace_thread["recommended_action_template"]["argv_template"],
         heddle_argv_json(["ship", "--thread", "feature/ready-verify", "--no-push"]),
         "workspace item actions should be directly executable: {workspace}"
-    );
-    assert!(
-        workspace_thread["recommended_action_template"].is_null(),
-        "workspace item actions should expose nullable template metadata: {workspace}"
     );
 }
 
@@ -2015,7 +1991,7 @@ fn git_overlay_matrix_thread_and_workspace_plain_git_are_observe_only() {
     assert_eq!(thread_list["repository_capability"], "plain-git");
     assert_eq!(thread_list["recommended_action"], "heddle adopt --ref main");
     assert_eq!(
-        thread_list["recommended_action_argv"],
+        thread_list["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "main"])
     );
     assert!(
@@ -2027,7 +2003,7 @@ fn git_overlay_matrix_thread_and_workspace_plain_git_are_observe_only() {
     assert_eq!(thread_show["repository_capability"], "plain-git");
     assert_eq!(thread_show["recommended_action"], "heddle adopt --ref main");
     assert_eq!(
-        thread_show["recommended_action_argv"],
+        thread_show["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "main"])
     );
     assert!(
@@ -2040,7 +2016,7 @@ fn git_overlay_matrix_thread_and_workspace_plain_git_are_observe_only() {
     assert_eq!(workspace["verification"]["status"], "needs_init");
     assert_eq!(workspace["recommended_action"], "heddle adopt --ref main");
     assert_eq!(
-        workspace["recommended_action_argv"],
+        workspace["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "main"])
     );
     assert_verify_check_rows(&workspace["verification"]);
@@ -2617,7 +2593,7 @@ fn git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull() {
         "undo must not recommend pulling the change the user just undid: {undo}"
     );
     assert_eq!(
-        undo["verification"]["recommended_action_argv"],
+        undo["verification"]["recommended_action_template"]["argv_template"],
         heddle_argv_json(["push", "--force"]),
         "agents should receive the same publish-undo action as structured argv: {undo}"
     );
@@ -2641,7 +2617,7 @@ fn git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull() {
     );
     assert_eq!(status["recommended_action"], "heddle push --force");
     assert_eq!(
-        status["recommended_action_argv"],
+        status["recommended_action_template"]["argv_template"],
         heddle_argv_json(["push", "--force"])
     );
 
@@ -3408,16 +3384,11 @@ fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
     let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     assert_eq!(commit["output_kind"], "commit");
     assert_eq!(commit["next_action"], "heddle push");
-    assert_eq!(commit["next_action_argv"], heddle_argv_json(["push"]));
-    assert_eq!(commit["next_action_template"], serde_json::Value::Null);
+    assert_eq!(commit["next_action_template"]["argv_template"], heddle_argv_json(["push"]));
     assert_eq!(commit["recommended_action"], "heddle push");
     assert_eq!(
-        commit["recommended_action_argv"],
+        commit["recommended_action_template"]["argv_template"],
         heddle_argv_json(["push"])
-    );
-    assert_eq!(
-        commit["recommended_action_template"],
-        serde_json::Value::Null
     );
     assert!(
         commit.get("next").is_none(),
@@ -4335,7 +4306,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         "heddle adopt --ref feature/drop-in"
     );
     assert_eq!(
-        status["recommended_action_argv"],
+        status["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "feature/drop-in"])
     );
     assert_eq!(
@@ -4499,7 +4470,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
         "heddle bridge git reconcile --ref main --preview"
     );
     assert_eq!(
-        status["recommended_action_argv"],
+        status["recommended_action_template"]["argv_template"],
         heddle_argv_json(["bridge", "git", "reconcile", "--ref", "main", "--preview"])
     );
     assert!(
@@ -4867,7 +4838,7 @@ fn git_overlay_matrix_detached_head_sequence_commands() {
         "detached-head recovery should stay inside Heddle's no-git runtime: {verify}"
     );
     assert_eq!(
-        verify["recommended_action_argv"],
+        verify["recommended_action_template"]["argv_template"],
         heddle_argv_json(["switch", "feature/drop-in"])
     );
     assert!(
@@ -4931,7 +4902,7 @@ fn git_overlay_matrix_commit_refuses_detached_head_without_advancing_branch() {
         serde_json::from_str(&combined).expect("detached-head refusal should be a JSON envelope");
     assert_eq!(envelope["primary_command"], "heddle switch main");
     assert_eq!(
-        envelope["primary_command_argv"],
+        envelope["primary_command_template"]["argv_template"],
         heddle_argv_json(["switch", "main"])
     );
     assert!(
@@ -6267,7 +6238,7 @@ fn git_overlay_matrix_ship_push_without_remote_refuses_before_mutation() {
         "heddle ship --thread feature/no-remote-push --no-push"
     );
     assert_eq!(
-        preview["recommended_action_argv"],
+        preview["recommended_action_template"]["argv_template"],
         heddle_argv_json(["ship", "--thread", "feature/no-remote-push", "--no-push"])
     );
     assert_eq!(
@@ -6447,7 +6418,7 @@ fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
         "heddle ship --thread feature/partial-push --no-push"
     );
     assert_eq!(
-        preview["recommended_action_argv"],
+        preview["recommended_action_template"]["argv_template"],
         heddle_argv_json(["ship", "--thread", "feature/partial-push", "--no-push"])
     );
     assert_eq!(
@@ -6836,12 +6807,8 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         "heddle adopt --ref side"
     );
     assert_eq!(
-        thread_list["available_git_refs"][0]["recommended_action_argv"],
+        thread_list["available_git_refs"][0]["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "side"])
-    );
-    assert!(
-        thread_list["available_git_refs"][0]["recommended_action_template"].is_null(),
-        "available Git refs should expose nullable template metadata beside argv: {thread_list}"
     );
 
     let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
@@ -6857,12 +6824,8 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
     );
     assert_eq!(workspace["available_git_refs"][0]["name"], "side");
     assert_eq!(
-        workspace["available_git_refs"][0]["recommended_action_argv"],
+        workspace["available_git_refs"][0]["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "side"])
-    );
-    assert!(
-        workspace["available_git_refs"][0]["recommended_action_template"].is_null(),
-        "workspace available Git refs should expose nullable template metadata beside argv: {workspace}"
     );
 
     let bridge = json(
@@ -6930,7 +6893,7 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         "available Git refs must keep executable adopt actions even when verification is blocked: {dirty_thread_list}"
     );
     assert_eq!(
-        dirty_thread_list["available_git_refs"][0]["recommended_action_argv"],
+        dirty_thread_list["available_git_refs"][0]["recommended_action_template"]["argv_template"],
         heddle_argv_json(["adopt", "--ref", "side"])
     );
 
@@ -6941,8 +6904,8 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         "thread list and workspace show should agree on optional Git ref adoption while blocked: thread={dirty_thread_list} workspace={dirty_workspace}"
     );
     assert_eq!(
-        dirty_workspace["available_git_refs"][0]["recommended_action_argv"],
-        dirty_thread_list["available_git_refs"][0]["recommended_action_argv"],
+        dirty_workspace["available_git_refs"][0]["recommended_action_template"]["argv_template"],
+        dirty_thread_list["available_git_refs"][0]["recommended_action_template"]["argv_template"],
         "thread list and workspace show argv should match for optional Git ref adoption while blocked: thread={dirty_thread_list} workspace={dirty_workspace}"
     );
 }
@@ -7944,7 +7907,7 @@ fn git_overlay_matrix_rebase_noop_defers_up_to_date_claim_to_verification() {
     assert_eq!(rebase["verification"]["remote_drift"], "remote_behind");
     assert_eq!(rebase["recommended_action"], "heddle pull");
     assert_eq!(
-        rebase["recommended_action_argv"],
+        rebase["recommended_action_template"]["argv_template"],
         heddle_argv_json(["pull"])
     );
 }
@@ -8040,15 +8003,13 @@ fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
         "heddle resolve conflict.txt"
     );
     assert_eq!(
-        conflict_show["recommended_action_argv"],
+        conflict_show["recommended_action_template"]["argv_template"],
         heddle_argv_json(["resolve", "conflict.txt"])
     );
     assert_eq!(
-        conflict_show["next_action_argv"],
+        conflict_show["next_action_template"]["argv_template"],
         heddle_argv_json(["resolve", "conflict.txt"])
     );
-    assert!(conflict_show["recommended_action_template"].is_null());
-    assert!(conflict_show["next_action_template"].is_null());
     assert!(
         conflict_show["worktree_content"]
             .as_str()

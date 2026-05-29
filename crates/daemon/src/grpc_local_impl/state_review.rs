@@ -8,6 +8,7 @@
 // `::state_review` disambiguates from this module's own name
 // (`grpc_local_impl::state_review`), the same way the hosted impl
 // disambiguates by being in a sibling module.
+use objects::store::ObjectStore;
 use ::state_review::{
     PathSymbol, ReadingOrderPartition, SymbolKind, build_review_payload_partition,
 };

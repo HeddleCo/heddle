@@ -18,8 +18,7 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::ActionTemplate,
     git_overlay_health::{
-        RepositoryVerificationState, action_argv, action_template,
-        build_repository_verification_state,
+        RepositoryVerificationState, action_template, build_repository_verification_state,
     },
     thread::find_thread_summary,
 };
@@ -115,7 +114,6 @@ struct ActorDoneOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     recommended_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
     #[allow(dead_code)]
     #[serde(skip_serializing)]
@@ -162,7 +160,6 @@ struct ActorExplainDetectedOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     recommended_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    recommended_action_argv: Option<Vec<String>>,
     recommended_action_template: Option<ActionTemplate>,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
@@ -499,7 +496,6 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
     let recommended_action = summary.as_ref().and_then(|thread| {
         actor_done_recommended_action(&thread.name, &thread.coordination_status.to_string())
     });
-    let recommended_action_argv = recommended_action.as_deref().and_then(action_argv);
     let recommended_action_template = recommended_action.as_deref().and_then(action_template);
 
     if should_output_json(cli, None) {
@@ -511,7 +507,6 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
                 .as_ref()
                 .map(|thread| thread.coordination_status.to_string()),
             recommended_action,
-            recommended_action_argv,
             recommended_action_template,
             trust: build_repository_verification_state(&repo),
         };
@@ -617,7 +612,6 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
     )?;
     let env_signals = actor_identity_env_signals();
     let next_action = detected_actor_next_action(probe.provider.as_deref(), probe.model.as_deref());
-    let next_action_argv = next_action.as_deref().and_then(action_argv);
     let next_action_template = next_action.as_deref().and_then(action_template);
 
     if should_output_json(cli, None) {
@@ -647,7 +641,6 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
                 signals: env_signals,
             },
             recommended_action: next_action,
-            recommended_action_argv: next_action_argv,
             recommended_action_template: next_action_template,
             trust: build_repository_verification_state(repo),
         };
