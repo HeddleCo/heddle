@@ -31,6 +31,10 @@ mod context_recovery_advice;
 mod current_context_advice;
 #[path = "cli_integration/doctor_docs.rs"]
 mod doctor_docs;
+#[path = "cli_integration/error_envelope_lint.rs"]
+mod error_envelope_lint;
+#[path = "cli_integration/exit_codes.rs"]
+mod exit_codes;
 #[path = "cli_integration/fault_injection.rs"]
 mod fault_injection;
 #[path = "cli_integration/git_overlay_interop_matrix.rs"]
@@ -301,6 +305,55 @@ fn state_chain_ids(path: &std::path::Path, count: usize) -> Vec<String> {
 fn status_json(path: &std::path::Path) -> Value {
     let output = heddle(&["status", "--output", "json"], Some(path)).unwrap();
     serde_json::from_str(&output).expect("status output should be JSON")
+}
+
+/// Run `git <args>` in `dir` under a fully isolated environment, asserting
+/// success. Hermetic *by construction*: the child's environment is wiped with
+/// [`Command::env_clear`] and rebuilt from a minimal explicit allowlist, so no
+/// inherited variable — `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+/// `GIT_OBJECT_DIRECTORY`, or any other `GIT_*` / ambient var — can leak in and
+/// flake the tests. A blocklist would only ever chase the next leaking var;
+/// clearing the slate and opting variables back in closes the whole class.
+/// Identity is pinned via `-c` so commits don't depend on a global
+/// `user.name`/`user.email`. Shared by the exit-code and error-envelope
+/// fixtures (HeddleCo/heddle#252) so the isolation lives in one place.
+pub(crate) fn git_hermetic(args: &[&str], dir: &std::path::Path) {
+    let mut command = Command::new("git");
+    command.env_clear();
+    // Minimal allowlist — everything the child legitimately needs, nothing else.
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env("PATH", path);
+    }
+    command
+        .env("HOME", dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("TERM", "dumb")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .current_dir(dir);
+    let status = command
+        .status()
+        .unwrap_or_else(|err| panic!("spawn git {args:?}: {err}"));
+    assert!(status.success(), "git {args:?} failed in {}", dir.display());
 }
 
 fn git_test_signature() -> gix::actor::Signature {

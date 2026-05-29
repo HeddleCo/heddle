@@ -56,6 +56,22 @@ impl HeddleExitCode {
     /// get a code more informative than the bare `1` shell convention.
     pub fn from_error(err: &anyhow::Error) -> Self {
         for cause in err.chain() {
+            // Typed refusals carry a stable `kind` discriminator — route the
+            // ones whose documented code differs from the `IoErr` catch-all.
+            // Keyed on `kind` (not the user-visible message) so rewording the
+            // error text can't silently regress the contract.
+            if let Some(advice) = cause.downcast_ref::<crate::cli::commands::RecoveryAdvice>() {
+                match advice.kind {
+                    // No default remote configured (push/pull): a missing
+                    // precondition, not an IO failure.
+                    "remote_not_configured" => return Self::Config,
+                    // Nothing staged / no changes to capture, and a reconcile
+                    // that needs a `--prefer` side: well-formed input the
+                    // command semantically rejects.
+                    "nothing_to_commit" | "reconcile_direction_required" => return Self::DataErr,
+                    _ => {}
+                }
+            }
             if let Some(io) = cause.downcast_ref::<std::io::Error>() {
                 return match io.kind() {
                     IoErrorKind::PermissionDenied => Self::NoPerm,
@@ -94,6 +110,7 @@ impl HeddleExitCode {
         let msg = format!("{err:#}");
         if msg.contains("no upstream configured")
             || msg.contains("no remote configured")
+            || msg.contains("no default remote configured")
             || msg.contains("workspace config invalid")
             || msg.contains("repository not found")
         {
@@ -161,6 +178,63 @@ mod tests {
     fn no_upstream_string_sentinel_is_config() {
         let err = anyhow::anyhow!("push refused: no upstream configured for branch 'main'");
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn no_default_remote_string_sentinel_is_config() {
+        // `heddle pull` against a repo with no default remote surfaces the
+        // raw `RemoteError::NotFound` display via `anyhow::Error::msg`, so it
+        // is only matchable as a string. The persona-flagged divergence
+        // (HeddleCo/heddle#252) was this returning the `IoErr` catch-all.
+        let err = anyhow::anyhow!("remote not found: (no default remote configured)");
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn remote_not_configured_advice_is_config() {
+        // `heddle push`/`heddle pull` with no default remote raise the typed
+        // `remote_not_configured` advice — a missing-precondition (Config),
+        // not the `IoErr` catch-all.
+        let err = anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::remote_not_configured(
+            "push"
+        ));
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn nothing_to_commit_advice_is_data_err() {
+        // `heddle commit` with nothing staged is semantic rejection of
+        // well-formed input (DataErr), not an IO failure.
+        let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
+            "nothing_to_commit",
+            "nothing to commit",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+            "heddle status",
+            vec!["heddle status".to_string()],
+        );
+        let err = anyhow::anyhow!(advice);
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn reconcile_direction_required_advice_is_data_err() {
+        // `heddle bridge git reconcile` without a `--prefer` side requires
+        // manual resolution — the reconcile contract's documented DataErr.
+        let advice = crate::cli::commands::RecoveryAdvice::safety_refusal(
+            "reconcile_direction_required",
+            "Refusing to reconcile 'main': choose a local side before applying",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+            "heddle status",
+            vec!["heddle status".to_string()],
+        );
+        let err = anyhow::anyhow!(advice);
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
     }
 
     #[test]
