@@ -478,3 +478,54 @@ fn undo_recovery_ref_is_isolated_from_user_marker_namespace() {
         "the reserved handle still resolves to the internal recovery ref"
     );
 }
+
+/// heddle#305 r4: the undo-recovery pointer is scoped to the LOCAL checkout
+/// (per-worktree HEAD), exactly like the undo/redo history it recovers
+/// (`op_scope`), NOT to the shared ref root. In objectstore-pointer worktrees
+/// `Repository::open` builds refs as
+/// `RefManager::new(&shared_galeed_dir).with_local_head(<worktree>/.heddle/HEAD)` —
+/// the ref root is shared across sibling checkouts but `local_head` is unique.
+/// A `heddle undo` in checkout B must NOT overwrite checkout A's recovery
+/// pointer; otherwise `goto .undo-recovery` in A would restore B's pre-undo
+/// state — cross-checkout data corruption.
+#[test]
+fn undo_recovery_is_scoped_per_checkout_on_shared_ref_root() {
+    let temp = TempDir::new().unwrap();
+    let shared_root = temp.path().join("objectstore");
+    std::fs::create_dir_all(&shared_root).unwrap();
+
+    // Two materialized checkouts sharing one object store / ref root, each
+    // with its own per-worktree HEAD (mirrors the `Repository::open` wiring).
+    let head_a = temp.path().join("wt-a").join(".heddle").join("HEAD");
+    let head_b = temp.path().join("wt-b").join(".heddle").join("HEAD");
+    std::fs::create_dir_all(head_a.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(head_b.parent().unwrap()).unwrap();
+
+    let refs_a = RefManager::new(&shared_root).with_local_head(head_a);
+    let refs_b = RefManager::new(&shared_root).with_local_head(head_b);
+
+    let state_a = ChangeId::generate();
+    let state_b = ChangeId::generate();
+    assert_ne!(state_a, state_b);
+
+    // Both checkouts run `heddle undo`, each recording its own pre-undo state.
+    refs_a.set_undo_recovery(&state_a).unwrap();
+    refs_b.set_undo_recovery(&state_b).unwrap();
+
+    // B's undo must not have clobbered A's recovery pointer (write side).
+    assert_eq!(
+        refs_a.get_undo_recovery().unwrap(),
+        Some(state_a),
+        "checkout A's recovery pointer must reflect A's own pre-undo state"
+    );
+    assert_eq!(
+        refs_b.get_undo_recovery().unwrap(),
+        Some(state_b),
+        "checkout B's recovery pointer must reflect B's own pre-undo state"
+    );
+
+    // The advertised reserved handle in each checkout resolves to THAT
+    // checkout's recovery pointer, not the sibling's (resolve side).
+    assert_eq!(refs_a.resolve(UNDO_RECOVERY_HANDLE).unwrap(), Some(state_a));
+    assert_eq!(refs_b.resolve(UNDO_RECOVERY_HANDLE).unwrap(), Some(state_b));
+}
