@@ -92,6 +92,48 @@ others don't. If your `.claude/` directory only carries local state
 (`scheduled_tasks.lock`, ephemeral chat history), uncomment the line
 in the suggested template or add the specific paths.
 
+## Hydrating an isolated checkout (`heddle start --hydrate`)
+
+Because heddle never captures ignored paths, an isolated checkout made
+with `heddle start <name> --path <dir>` is a faithful *source* tree with
+no dependency directories: a JS project's `node_modules`, a Python
+project's `.venv`, a Rust workspace's `target/`, and so on are all left
+out. That's correct for capture, but it means you can't run
+`tsc`/`eslint`/tests in the fresh checkout without reinstalling deps
+first.
+
+Pass `--hydrate` to make the checkout immediately buildable:
+
+```
+heddle start task/x --path /tmp/hv-x --hydrate
+```
+
+`--hydrate` **symlinks** each top-level ignored directory from the
+origin checkout into the new checkout. It uses symlinks (not copies) so
+the isolated thread stays cheap — a multi-gigabyte `node_modules` is
+linked in O(1) rather than duplicated per thread.
+
+What it links, and what it doesn't:
+
+- **Linked:** top-level directories at the origin root that match an
+  ignore rule (in Git-overlay repos that includes `.gitignore`; in
+  native repos, `.heddleignore`).
+- **Not linked:** the admin directories `.git` and `.heddle` (even
+  though they're ignored), plain files, and per-package dependency dirs
+  nested below the root (e.g. a monorepo's `packages/*/node_modules`).
+- **Never clobbered:** if the checkout already has an entry of that
+  name, hydrate leaves it alone.
+
+The links point back at the origin's directories and **stay ignored**,
+so the hydrated deps are never captured into heddle — the same ignore
+rule that hides `node_modules/` at the origin also hides the linked
+`node_modules` in the checkout. Because the directories are *shared*
+with the origin, treat hydrate as a read-mostly convenience: installing
+a new dependency through a hydrated link mutates the origin's copy too.
+
+`--hydrate` applies to bytes-on-disk threads (solid / materialized
+checkouts). It has no effect on virtualized (FUSE-mounted) threads.
+
 ## Editing
 
 `.heddleignore` is read fresh on every walk — no daemon restart, no
