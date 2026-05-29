@@ -945,7 +945,23 @@ requires widening the single-`ChangeId` request shape:
    in the **reserved `heddle/` namespace** that user `ThreadName`s structurally cannot
    occupy (Invariant C, §5.4 — name-validation rejects the reserved first-segment, so
    no user thread's `RefEntry` can ever share the synthetic name and confuse CLI
-   resolution). So `<thread>` **advances
+   resolution). **But that reservation only stays *fetchable* if the synthetic root
+   crosses the wire as a *type-distinct* entity, never coerced into a `ThreadName` at
+   the consume site.** A Heddle-aware client persists every advertised *thread*
+   `RefEntry` by coercing its name into a `ThreadName` —
+   `set_remote_thread(.., &ThreadName::new(&track_name), ..)`
+   (`crates/cli/src/cli/commands/fetch.rs:234,321`) — so a synthetic root advertised
+   *as a thread* would be funneled into `ThreadName::new("heddle/frontier/…")`, which
+   the §5.4 name-reservation now **rejects**, making the reserved root **non-fetchable
+   by the very plumbing meant to fetch it**. The `RefEntry` discriminator — today the
+   boolean `is_thread` (`crates/proto/src/message_refs.rs:92`), expressing only *thread*
+   vs *marker* — therefore widens to a **typed three-way `RefKind`** {`Thread`, `Marker`,
+   `SyntheticFrontierRoot`}: the server advertises each sibling-line root as
+   `RefKind::SyntheticFrontierRoot` (**never** `is_thread: true`), and the client matches
+   on `RefKind` and routes a synthetic root to a **dedicated synthetic-ref store path**
+   that never constructs a `ThreadName` (Invariant C end-to-end typed path, §5.4 — the
+   reservation protects the *name* precisely because the *type* carries fetchability).
+   So `<thread>` **advances
    forward** as its own line extends (`A → A2` once `A`'s descendants become
    served) and is **never frozen at a stale ancestor** just because a sibling line
    is also maximal; it is likewise **never assigned by topological or lexicographic
@@ -1354,8 +1370,10 @@ guarantees, each stated **once** here and never re-derived per mechanism. They a
 **orthogonal axes** — A fixes *when* a fact is bound, propagate-before-use fixes *that*
 a host waits for the propagated fact before acting, B fixes *how* genuinely-concurrent
 conflicting facts converge, and C fixes *where* synthetic/internal refs live — in a
-reserved namespace users cannot create or be published into — so addressing never
-collides — and every concrete mechanism (the tier promotion, the antichain
+reserved namespace users cannot create or be published into — **and that they travel as
+a type-distinct entity, never coerced into a `ThreadName` at any consume/store/mirror
+site** — so addressing never collides and the reservation never makes its own root
+unfetchable — and every concrete mechanism (the tier promotion, the antichain
 anchor, the synthetic ref, any future placement/visibility fact) routes to exactly one
 of them rather than restating its own rule:
 
@@ -1390,9 +1408,13 @@ of them rather than restating its own rule:
   initial-anchor rule, §5.3 rule 0) *and* conflict-free merge across concurrent anchor
   facts.
 
-- **Invariant C — collision-proof namespace (the *how-name*).** Every synthetic /
-  internal ref lives in a **reserved namespace users structurally cannot create or be
-  published into** — not merely under a *unique name*. A unique encoding is necessary
+- **Invariant C — collision-proof namespace, carried by a type-distinct path (the
+  *how-name*).** Every synthetic / internal ref lives in a **reserved namespace users
+  structurally cannot create or be published into** — not merely under a *unique name* —
+  **and it travels the whole pipeline (advertise → fetch → store → mirror → push) as a
+  *type-distinct* entity, never coerced into a `ThreadName` at any consume/store/mirror
+  site**, so the reservation that protects the name never turns around and makes the
+  named root unfetchable. A unique encoding is necessary
   but **not sufficient**: a name is collision-proof only if no user artifact can ever
   occupy it, and a `ThreadName` is just a string — `ThreadName::new` does **no
   validation** (`identifiers.rs:23-25,99-102`) and `validate_ref_name`
@@ -1407,7 +1429,9 @@ of them rather than restating its own rule:
   **reserves the `heddle/` first-segment** for itself — `refs/heddle/*` on the Git
   side (extending the convention by which Heddle already reserves its own name in the
   ref tree, e.g. `refs/notes/heddle`) and the `heddle/`-rooted name on the wire — and
-  enforces the reservation on **both** boundaries the artifact crosses:
+  enforces the reservation on the **two write-boundaries** the artifact crosses, and
+  recognizes the synthetic **type** on the **consume-boundary** so the reserved root
+  stays fetchable:
   1. **Name-validation boundary** (`name.rs:11-31`, enforced on the `ThreadName`
      creation path — which today bypasses the validator entirely, `identifiers.rs:23-25`):
      reject any user thread / marker name whose first `/`-segment is the reserved
@@ -1425,9 +1449,22 @@ of them rather than restating its own rule:
      `parse()`, `:143`; **never** the truncatable `short()` / `Display` form, `:137`,
      `:167-170`) supplies **uniqueness *within*** the reserved namespace; the
      reservation supplies **disjointness *from* user space**.
+  3. **Client consume / store / mirror boundary** (`crates/cli/src/cli/commands/fetch.rs:296-322`;
+     `crates/client/src/grpc_hosted/mod.rs:291,327`): the synthetic root crosses the wire
+     as a **type-distinct `RefKind::SyntheticFrontierRoot`** (widening `RefEntry`'s boolean
+     `is_thread`, `message_refs.rs:92`, into a three-way `RefKind`), and **every** consume
+     site matches on `RefKind` to route it to a **dedicated synthetic-ref store path** —
+     **never** `set_remote_thread(.., &ThreadName::new(name), ..)` (`fetch.rs:234,321`) and
+     **never** the `!is_thread` marker arm (`mod.rs:291,327`). This is not a *third
+     reservation* (the name is already reserved by 1+2) but the recognition step that lets
+     the reservation hold without self-defeating: absent it, the §5.4 rule that rejects a
+     `heddle/`-rooted `ThreadName` would reject the very root the client must persist to
+     fetch the antichain — leaving the reserved root **uncreateable by users *and*
+     unfetchable by Heddle**. Recognizing the synthetic **type** is what lets the reservation
+     protect the name without foreclosing its own fetch path.
 
-  **Both boundaries are required — neither alone suffices, because they protect
-  different namespaces.** *Name reservation without publish separation* still collides
+  **All three boundaries are required — none alone suffices, because they protect
+  different surfaces.** *Name reservation without publish separation* still collides
   on the **Git-ref** surface: `refs/heads/*` is writable by *raw Git*
   (`git branch` / `git update-ref`) and by *imported foreign branches* — neither passes
   through Heddle's validator — so a branch `refs/heads/main@hd-…` can exist that Heddle
@@ -1436,17 +1473,28 @@ of them rather than restating its own rule:
   CLI-resolution** surface: `ListRefs` names a synthetic root with a `ThreadName`-shaped
   `RefEntry.name`; if a user may create a real thread of that name, two `RefEntry`s
   share a name and heddle's CLI ref-resolution cannot disambiguate the user thread from
-  the synthetic root. The reserved `heddle/` sigil is the **single** principle applied
-  to both surfaces — the same lesson as the recovery-handle reservation: an internal
-  artifact must live in a reserved namespace, **never** share a user-writable one under
-  a merely-"unique" name.
+  the synthetic root. *Reservation + publish separation without a type-distinct consume
+  path* still breaks on the **client-store** surface: the client coerces every advertised
+  thread name into `ThreadName::new` when persisting a remote ref (`fetch.rs:234,321`) and
+  the mirror filters on `!is_thread` (`mod.rs:291,327`), so a `heddle/`-rooted root
+  advertised as a thread is **rejected by its own reservation at store time** — fetchable
+  only once the wire entity is *typed* and every consume site routes by type. The reserved
+  `heddle/` sigil is the **single** naming principle applied across both write-surfaces,
+  and the synthetic **`RefKind`** is the **single** type recognized across every
+  consume/store/mirror site — the same lesson as the recovery-handle reservation: an
+  internal artifact must live in a reserved namespace **and** travel as its own type,
+  **never** share a user-writable name and never be coerced back into a user type.
 
   *Namespace sweep — every internal/synthetic Git/wire surface routes through this one
   reservation (so the class is closed, not just this instance).* Auditing every
   artifact the design places on a Git ref or a wire name:
   - **Synthetic frontier roots** (sibling lines) — the artifact this finding named:
-    now `refs/heddle/frontier/<thread>/<full-changeid>` (Git) / `heddle/`-rooted
-    `RefEntry.name` (wire), reserved on **both** boundaries above. ✔ reserved.
+    now `refs/heddle/frontier/<thread>/<full-changeid>` (Git) / a **type-distinct
+    `RefKind::SyntheticFrontierRoot`** `RefEntry` (wire, `message_refs.rs:92`), reserved
+    on the two write-boundaries above **and recognized as a synthetic *type* on the
+    client consume/store/mirror boundary** (`fetch.rs:296-322`, `mod.rs:291,327`) so it
+    routes to the synthetic-ref store path, never `set_remote_thread(&ThreadName::new(…))`.
+    ✔ reserved + type-distinct end-to-end (advertise→fetch→store→mirror).
   - **The moving `<thread>` ref** (`refs/heads/<thread>`, and its wire `RefEntry`) — the
     **real** user thread, published 1:1; it *is* the user namespace, so it needs no
     reservation (it is never synthesized). ✔ user-owned by design.
@@ -1475,8 +1523,11 @@ of them rather than restating its own rule:
   never a ref or wire name), a user artifact published 1:1 with **withholding** rather
   than synthesis (the moving `<thread>` ref, markers→tags, `HEAD`), or already under the
   reserved `heddle` namespace (notes). Reserving the `heddle/` first-segment on both
-  boundaries therefore closes the **whole class** — no internal artifact anywhere in the
-  design can collide with a user-creatable or user-publishable name.
+  write-boundaries, **and carrying the one synthesized artifact (the frontier root) as a
+  type-distinct `RefKind` that every consume/store/mirror site routes by type rather than
+  coercing into a `ThreadName`**, therefore closes the **whole class** — no internal
+  artifact anywhere in the design can collide with a user-creatable or user-publishable
+  name, and the reservation never renders its own synthetic root unfetchable.
 
 - **Propagate-before-use — the persisted-fact principle (the *that-it-waits*).** A
   decision about **what** is served (a tier promotion) or **where** a moving ref sits
@@ -1945,15 +1996,20 @@ issues are checked against:
   state — issue #3); **B — deterministic conflict-free merge** (two genuinely-
   concurrent first-advertisement / placement facts with no superseding order converge
   by a content-intrinsic `min`-`ChangeId` merge, identical on every replica, **no
-  lease / single-writer** — issue #4); **C — collision-proof namespace** (every
-  synthetic/internal ref lives in the **reserved `heddle/` namespace** users
-  structurally cannot create or be published into — `refs/heddle/*` disjoint from user
-  `refs/heads/*`, and the `heddle/` first-segment reserved in `ThreadName`/`MarkerName`
-  validation — with the **full** `ChangeId` via `to_string_full()` supplying uniqueness
-  *within* that namespace; enforced on **both** the name-validation (`name.rs`) and
-  bridge-publish (`sync_track_to_branch`) boundaries, so no user thread, raw-Git branch,
-  or imported `refs/heads/*` ref can collide with or overwrite a frontier root — issues
-  #4/#5).
+  lease / single-writer** — issue #4); **C — collision-proof namespace, carried by a
+  type-distinct path** (every synthetic/internal ref lives in the **reserved `heddle/`
+  namespace** users structurally cannot create or be published into — `refs/heddle/*`
+  disjoint from user `refs/heads/*`, and the `heddle/` first-segment reserved in
+  `ThreadName`/`MarkerName` validation — with the **full** `ChangeId` via
+  `to_string_full()` supplying uniqueness *within* that namespace; enforced on **both**
+  the name-validation (`name.rs`) and bridge-publish (`sync_track_to_branch`)
+  write-boundaries, **and the synthetic root carried end-to-end as a type-distinct
+  `RefKind::SyntheticFrontierRoot`** (widening the boolean `is_thread`,
+  `message_refs.rs:92`) that **every client consume/store/mirror site routes by type**
+  (`fetch.rs:296-322`, `mod.rs:291,327`) rather than coercing into a `ThreadName`
+  (`set_remote_thread`, `fetch.rs:234,321`) — so no user thread, raw-Git branch, or
+  imported `refs/heads/*` ref can collide with or overwrite a frontier root, **and the
+  reservation never renders the root unfetchable** — issues #4/#5).
 
 1. **impl(objects/repo): `StateVisibility` object + per-state sidecar store.**
    Add `StateVisibility` / `StateVisibilityBlob` (objects), the `visibility/`
@@ -2008,12 +2064,26 @@ issues are checked against:
    can ever share a synthetic root's name (this issue MUST also **reserve the `heddle/`
    first-segment in `ThreadName`/`validate_ref_name`**, `name.rs:11-31` — which today
    allows `@` and the `heddle/` prefix — and enforce it on the `ThreadName` creation
-   path that currently bypasses the validator, `identifiers.rs:23-25`). `<thread>`
+   path that currently bypasses the validator, `identifiers.rs:23-25`). **The reservation
+   composes with a type-distinct wire entity (Invariant C end-to-end typed path, §5.4):
+   this issue MUST widen the `RefEntry` discriminator from the boolean `is_thread`
+   (`message_refs.rs:92`, today only *thread* vs *marker*) to a three-way `RefKind`
+   {`Thread`, `Marker`, `SyntheticFrontierRoot`}, advertise each sibling-line root as
+   `RefKind::SyntheticFrontierRoot` (never `is_thread: true`), and route it on the client
+   consume path by `RefKind` to a dedicated synthetic-ref store path** — the heddle fetch
+   loop (`fetch.rs:296-322`) must NOT funnel a synthetic root through
+   `set_remote_thread(.., &ThreadName::new(name), ..)` (`fetch.rs:234,321`), since the new
+   `heddle/`-reservation would reject that name at store time and make the antichain root
+   non-fetchable; the marker-mirror filters (`grpc_hosted/mod.rs:291,327`) likewise route
+   by `RefKind`, never coercing a synthetic root into the `!is_thread` marker arm. A
+   conformance test must assert no consume/store/mirror site constructs a `ThreadName` (or
+   `MarkerName`) from a `RefKind::SyntheticFrontierRoot` entry. `<thread>`
    itself is **never** chosen by topological/
    lexicographic order and **never** jumps to a sibling (that would move the main ref
    sideways to an incomparable sibling, §5.3 "antichain ref placement, the definitive
    statement"). A conformance test must assert two siblings sharing any `ChangeId`
-   prefix still receive distinct ref names and both remain fetchable. The client issues **one
+   prefix still receive distinct ref names and both remain fetchable **via the
+   synthetic-ref store path** (not as rejected `ThreadName`s). The client issues **one
    single-root `Pull` per root** (`PullRequest.target_state`, `message_pushpull.rs:91`)
    carrying prior states in `exclude_states` (`:95`) — so every visible side is
    discoverable and requestable without widening the single-`ChangeId` request
