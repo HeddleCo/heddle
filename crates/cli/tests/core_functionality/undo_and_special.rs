@@ -665,6 +665,60 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
     );
 }
 
+/// heddle#305 r3: the advertised recovery handle must be UNSHADOWABLE on the
+/// READ path too. Worst case: a user already owns a marker literally named
+/// `undo-recovery`. The advertised handle `undo` prints (`recovery_marker`)
+/// must resolve to the INTERNAL pre-undo state, never the user's ref. r2 fixed
+/// the write path (internal ref) but left the advertised handle a bare
+/// user-namespace name that `resolve_refspec` resolves to the user ref first —
+/// this conformance test closes that direction.
+#[test]
+fn test_recovery_handle_unshadowable_by_user_marker() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    let base_state = head_short(temp.path());
+
+    // The user owns a marker named `undo-recovery`, pinning the BASE state.
+    heddle_must_succeed(&["marker", "create", "undo-recovery"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "FRICTION\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
+    let friction_state = head_short(temp.path());
+    assert_ne!(base_state, friction_state);
+
+    let undo: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "undo"],
+        temp.path(),
+    ))
+    .unwrap();
+    let advertised = undo["recovery_marker"]
+        .as_str()
+        .expect("undo advertises a recovery handle");
+
+    // The advertised handle must resolve to the INTERNAL pre-undo (friction)
+    // state, NOT the user's same-named marker (which pins base).
+    heddle_must_succeed(&["goto", advertised], temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "FRICTION\n",
+        "advertised recovery handle must restore the internal pre-undo state, not the user's ref"
+    );
+
+    // The user's own `undo-recovery` marker is untouched and still pins base.
+    let repo = Repository::open(temp.path()).unwrap();
+    assert_eq!(
+        repo.refs()
+            .get_marker(&objects::object::MarkerName::new("undo-recovery"))
+            .unwrap()
+            .map(|id| id.short()),
+        Some(base_state),
+        "the user's own undo-recovery marker must remain intact and independent"
+    );
+}
+
 /// Fast-forward merge undo, full restoration: HEAD *and* the merged-into
 /// thread ref both rewind to the pre-merge tip. This pins the heddle#99 fix —
 /// before it landed, the FF merge recorded an `OpRecord::Goto` whose inverse
