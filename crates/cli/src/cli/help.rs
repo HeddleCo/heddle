@@ -234,8 +234,11 @@ pub fn print_capture_agent_help_for_raw(
     if !raw.iter().any(|arg| arg == "--help-agent") {
         return None;
     }
-    let verb = raw.iter().find(|token| !token.starts_with('-'))?;
-    let subcommand = find_subcommand_or_alias(cmd, verb)?;
+    // Run before clap parses, so skip any leading global options (and the
+    // values of valued ones, e.g. `-C <path>`, `--output <fmt>`) before
+    // reading the verb — otherwise a flag's value gets mistaken for the
+    // subcommand. Shares the valued-global skip with the `--help` path.
+    let subcommand = first_subcommand_after_globals(cmd, raw)?;
     if subcommand.get_name() != "capture" {
         return None;
     }
@@ -278,6 +281,54 @@ fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::C
     Some(help)
 }
 
+/// Whether `token` names an option on `command` (by its `--long` spelling)
+/// and, if so, whether the following token is that option's value. The
+/// single source of truth for the valued-global skip shared by the
+/// `--help` and `--help-agent` intercepts, so they can't drift on which
+/// globals (`-C <path>`, `--output <fmt>`, ...) consume a following value.
+fn global_option_takes_value(command: &clap::Command, token: &str) -> Option<bool> {
+    command
+        .get_arguments()
+        .find(|arg| {
+            arg.get_long()
+                .is_some_and(|long| token == format!("--{long}"))
+        })
+        .map(|arg| arg.get_action().takes_values())
+}
+
+/// Skip leading global options (and the values of valued ones) in `raw`,
+/// then return the first token that resolves to a subcommand. Used by the
+/// `--help-agent` intercept, which runs before clap parses and so must do
+/// its own global handling via [`global_option_takes_value`].
+fn first_subcommand_after_globals<'a>(
+    cmd: &'a clap::Command,
+    raw: &[String],
+) -> Option<&'a clap::Command> {
+    let mut skip_next = false;
+    for token in raw {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if token == "--help" || token == "-h" {
+            continue;
+        }
+        if let Some(takes_value) = global_option_takes_value(cmd, token) {
+            skip_next = takes_value;
+            continue;
+        }
+        if token.starts_with('-') {
+            continue;
+        }
+        if let Some(subcommand) = find_subcommand_or_alias(cmd, token) {
+            return Some(subcommand);
+        }
+        // A non-flag token that isn't a subcommand — e.g. the value after a
+        // short valued global like `-C <path>`. Keep scanning for the verb.
+    }
+    None
+}
+
 fn find_subcommand_or_alias<'a>(
     command: &'a clap::Command,
     name: &str,
@@ -311,14 +362,8 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
         if token == "--help" || token == "-h" {
             continue;
         }
-        if let Some(arg) = current.get_arguments().find(|arg| {
-            arg.get_long()
-                .is_some_and(|long| token == &format!("--{long}"))
-        }) {
-            skip_next = arg.get_action().takes_values();
-            continue;
-        }
-        if token.starts_with("--") {
+        if let Some(takes_value) = global_option_takes_value(current, token) {
+            skip_next = takes_value;
             continue;
         }
         if token.starts_with('-') {
@@ -946,6 +991,48 @@ mod tests {
         assert!(
             print_capture_agent_help_for_raw(&cmd, &owned(&["capture", "--help"])).is_none(),
             "plain --help should fall through to normal help"
+        );
+    }
+
+    /// heddle#278 r2 (cids 3327112975 / 3327131739). The `--help-agent`
+    /// intercept runs before clap parses, so a VALUED global flag preceding
+    /// the verb (`-C <path>`, `--output <fmt>`) must not be mistaken for the
+    /// subcommand. The skip reuses the same valued-global logic as the
+    /// `--help` path so the two can't drift.
+    #[test]
+    fn capture_help_agent_intercept_skips_valued_globals_before_verb() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let owned = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(
+            print_capture_agent_help_for_raw(
+                &cmd,
+                &owned(&["-C", "/tmp/repo", "capture", "--help-agent"])
+            )
+            .is_some(),
+            "`-C <path> capture --help-agent` should reveal the agent flags, \
+             not pick the path as the verb"
+        );
+        assert!(
+            print_capture_agent_help_for_raw(
+                &cmd,
+                &owned(&["--output", "text", "capture", "--help-agent"])
+            )
+            .is_some(),
+            "`--output text capture --help-agent` should reveal the agent flags, \
+             not pick `text` as the verb"
+        );
+        assert!(
+            print_capture_agent_help_for_raw(&cmd, &owned(&["capture", "--help-agent"])).is_some(),
+            "plain `capture --help-agent` should still be intercepted"
+        );
+        assert!(
+            print_capture_agent_help_for_raw(
+                &cmd,
+                &owned(&["--output", "text", "status", "--help-agent"])
+            )
+            .is_none(),
+            "a non-capture verb behind a valued global should still fall through"
         );
     }
 
