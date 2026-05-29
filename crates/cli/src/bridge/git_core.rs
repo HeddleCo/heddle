@@ -1213,18 +1213,47 @@ impl<'a> GitBridge<'a> {
             return Ok(());
         }
 
-        // `old_tree`: paths the checkout's index already tracks. Anything
-        // present here is not `??`, so it needs no intent-to-add entry.
+        // Reconcile the index's intent-to-add set against the captured
+        // state. Real (committed) entries are left untouched; the
+        // intent-to-add set must end up equal to the captured paths that
+        // are not yet real entries. So we both ADD newly-captured paths
+        // and PRUNE intent-to-add entries whose path left the captured
+        // set (deleted, or now committed) — otherwise a stale entry
+        // surfaces as a phantom ` D path` in `git status`.
         let mut index = checkout_repo.open_index().map_err(git_err)?;
-        let tracked: HashSet<String> = index
-            .entries_with_paths_by_filter_map(|path, _| Some(path.to_str_lossy().into_owned()))
-            .map(|(_, path)| path)
-            .collect();
 
+        // Partition existing entries: real tracked paths vs. the
+        // intent-to-add placeholders we manage here.
+        let mut real_tracked: HashSet<String> = HashSet::new();
+        let mut existing_ita: HashSet<String> = HashSet::new();
+        for entry in index.entries() {
+            let path = entry.path_in(index.path_backing()).to_str_lossy().into_owned();
+            if entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD) {
+                existing_ita.insert(path);
+            } else {
+                real_tracked.insert(path);
+            }
+        }
+
+        // Desired intent-to-add set: captured paths not backed by a real
+        // (committed) index entry.
+        let captured_paths: HashSet<&str> = captured.iter().map(|(p, _)| p.as_str()).collect();
+
+        // PRUNE: any intent-to-add entry whose path is no longer desired.
+        let mut changed = false;
+        index.remove_entries(|_, path, entry| {
+            let stale = entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD)
+                && !captured_paths.contains(path.to_str_lossy().as_ref());
+            if stale {
+                changed = true;
+            }
+            stale
+        });
+
+        // ADD: newly-captured paths not already tracked or marked.
         let empty_blob = checkout_repo.object_hash().empty_blob();
-        let mut added = false;
         for (path, mode) in &captured {
-            if tracked.contains(path) {
+            if real_tracked.contains(path) || existing_ita.contains(path) {
                 continue;
             }
             let entry_mode = match mode {
@@ -1239,9 +1268,10 @@ impl<'a> GitBridge<'a> {
                 entry_mode,
                 path.as_bytes().as_bstr(),
             );
-            added = true;
+            changed = true;
         }
-        if added {
+
+        if changed {
             // `dangerously_push_entry` appends without preserving sort
             // order; restore it so subsequent path lookups stay correct.
             index.sort_entries();
