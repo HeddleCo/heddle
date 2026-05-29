@@ -28,12 +28,106 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  # Path gate for the heavy Rust jobs. Mirrors `fuse-bench-gate`'s
+  # fail-closed contract (push ⇒ run everything; any fetch/diff error ⇒
+  # run everything) but emits a broader set of outputs so check-and-test,
+  # coverage, postgres-tests, and the two mount-smoke jobs can skip on PRs
+  # that can't affect them. Most of the CI bill on this repo is doc/spike
+  # PRs (often several Codex rounds) re-running the full matrix per round.
+  #
+  # Outputs:
+  #   docs_only — every changed path is doc-only (see below); skip all Rust.
+  #   rust      — !docs_only; gates check-and-test / coverage / postgres.
+  #   mount     — a mount-relevant path changed; gates fuse/projfs smoke.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.decide.outputs.rust }}
+      mount: ${{ steps.decide.outputs.mount }}
+      docs_only: ${{ steps.decide.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Two commits is enough for a PR diff; pushes run everything
+          # unconditionally so depth doesn't matter there.
+          fetch-depth: 2
+      - id: decide
+        run: |
+          # Fail-closed helper: on any uncertainty (push event, fetch or
+          # diff failure, empty diff) run the full matrix. The alternative
+          # — silently skipping because an errored/empty diff matched no
+          # path regex — is the "infrastructure failure removes coverage"
+          # pattern Codex hardened `fuse-bench-gate` against (heddle#89).
+          run_all() {
+            echo "$1; running full matrix fail-closed" >&2
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            echo "mount=true" >> "$GITHUB_OUTPUT"
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            run_all "non-PR event (${{ github.event_name }})"
+          fi
+          if ! git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"; then
+            run_all "fetch failed"
+          fi
+          set +e
+          diff_output=$(git diff --name-only "origin/${{ github.base_ref }}"...HEAD)
+          diff_rc=$?
+          set -e
+          if [ "$diff_rc" -ne 0 ]; then
+            run_all "git diff exited $diff_rc"
+          fi
+          # An empty diff means we can't prove the change is doc-only;
+          # fail-closed rather than skip the whole suite.
+          if [ -z "$(printf '%s' "$diff_output" | tr -d '[:space:]')" ]; then
+            run_all "empty diff"
+          fi
+
+          # docs_only: EVERY changed path is a non-build doc path that the
+          # Rust suite does not validate. The catch: `check-and-test` runs
+          # `doctor docs --all` (which natively walks the repo and scans
+          # EVERY `.md` except those under `docs/spikes/` — see
+          # IGNORE_PATTERNS in crates/cli/src/cli/commands/doctor_docs.rs)
+          # and `doctor schemas` (which parses `docs/json-schemas.md`). So
+          # top-level READMEs and any other `docs/*.md` DO feed those gates
+          # and are NOT doc-only — only `docs/spikes/**` is exempt there,
+          # making it the sole doc-only prefix. Fail-safe: any path outside
+          # it ⇒ not doc-only ⇒ rust=true (run the suite).
+          if printf '%s\n' "$diff_output" | grep -vE '^(docs/spikes/|[[:space:]]*$)' \
+              > /dev/null; then
+            docs_only=false
+            rust=true
+          else
+            docs_only=true
+            rust=false
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+
+          # mount: reuse the exact transitive mount-relevant path set
+          # `fuse-bench-gate` computes (mount → repo → {crypto, oplog,
+          # proto, objects, refs} → optional runtime-bridge, plus the
+          # compare script, the workflow, and shared workspace inputs).
+          # Keep this regex in sync with the one in `fuse-bench-gate`.
+          if printf '%s\n' "$diff_output" | grep -E \
+              '^(crates/(mount|objects|repo|refs|oplog|crypto|proto|runtime-bridge)/|scripts/fuse-bench-compare\.py|scripts/tests/|\.github/workflows/rust-tests\.yml|Cargo\.lock$|Cargo\.toml$)' \
+              > /dev/null; then
+            echo "mount=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mount=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Single sequential job: build once, then clippy + test + feature-checks
   # all reuse the same `target/` directory. Avoids the 4-jobs-each-doing-a-
   # cold-build pattern; total compute time drops ~70% at the cost of less
   # parallelism in wall-clock terms.
   check-and-test:
     name: Check & test
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 60
 
@@ -140,6 +234,8 @@ jobs:
   # additionally exercises the runtime bridge against a live server.
   postgres-tests:
     name: Postgres integration tests
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 30
     services:
@@ -207,6 +303,8 @@ jobs:
   # in explicitly with `-- --ignored`.
   fuse-smoke:
     name: FUSE mount smoke (Linux)
+    needs: changes
+    if: needs.changes.outputs.mount == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -296,6 +394,8 @@ jobs:
   # failed` from the test as the real regression signal.
   projfs-smoke:
     name: ProjFS mount smoke (Windows)
+    needs: changes
+    if: needs.changes.outputs.mount == 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -522,6 +622,8 @@ jobs:
   # with the regular profile, so it stays as its own job.
   coverage:
     name: Coverage
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 60
 
@@ -550,7 +652,13 @@ jobs:
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
 
+      # The HTML report + its artifact upload are a developer convenience
+      # for browsing line-level coverage on main; they add a second
+      # report pass and an artifact upload that PRs don't need (the
+      # codecov upload + the per-crate gate below carry the PR signal).
+      # Build/upload it only on push to main.
       - name: Generate HTML coverage report
+        if: github.event_name != 'pull_request'
         run: cargo llvm-cov report --html
 
       # Per-crate coverage gate. Keep the --gate thresholds in sync with
@@ -590,6 +698,7 @@ jobs:
           path: lcov.info
 
       - name: Upload HTML coverage report
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-html
