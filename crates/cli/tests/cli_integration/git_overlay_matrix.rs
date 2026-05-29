@@ -805,6 +805,60 @@ fn git_overlay_matrix_commit_without_any_identity_refuses_before_capture() {
 }
 
 #[test]
+fn git_overlay_matrix_commit_no_all_nothing_staged_refuses_before_identity_preflight() {
+    // `--no-all` with the index identical to HEAD has nothing to commit. That
+    // nothing-to-commit short-circuit must run BEFORE the identity / ref-update
+    // preflights: a repo with no configured identity must still get the
+    // nothing-to-commit outcome, not an identity-required refusal on a commit
+    // that was never going to write anything.
+    let temp = TempDir::new().unwrap();
+    let global_home = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    git(&["config", "--unset", "user.name"], temp.path());
+    git(&["config", "--unset", "user.email"], temp.path());
+
+    let before_head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    heddle_adopt(temp.path());
+
+    // Nothing genuinely staged (index == HEAD); only worktree edits + an
+    // untracked file make the worktree dirty.
+    std::fs::write(temp.path().join("base.txt"), "base\nworktree edit\n").unwrap();
+    std::fs::write(temp.path().join("scratch.txt"), "untracked\n").unwrap();
+
+    let output = heddle_output_with_env(
+        &["--output", "json", "commit", "--no-all", "-m", "index only"],
+        Some(temp.path()),
+        &[
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("HOME", global_home.path().to_str().unwrap()),
+            ("XDG_CONFIG_HOME", global_home.path().to_str().unwrap()),
+            ("HEDDLE_PRINCIPAL_NAME", ""),
+            ("HEDDLE_PRINCIPAL_EMAIL", ""),
+        ],
+    )
+    .expect("heddle commit --no-all should run");
+    assert!(
+        !output.status.success(),
+        "commit --no-all with nothing staged must refuse: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("refusal should emit JSON envelope");
+    assert_eq!(
+        envelope["kind"], "nothing_to_commit",
+        "--no-all with nothing staged must surface nothing-to-commit before the identity preflight, not an identity refusal: {stderr}"
+    );
+    assert_eq!(
+        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
+        before_head,
+        "--no-all must not create a commit when nothing is staged"
+    );
+}
+
+#[test]
 fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "trunk");
