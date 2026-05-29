@@ -2469,53 +2469,53 @@ fn git_overlay_commit_empty_index_sweeps_whole_worktree() {
 }
 
 #[test]
-fn git_overlay_commit_no_all_forces_index_only_with_empty_index() {
+fn git_overlay_commit_no_all_empty_index_refuses_nothing_to_commit() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
     heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
 
-    // Nothing staged: only worktree edits + an untracked file exist.
+    // Nothing genuinely staged: the index matches HEAD. Only worktree edits +
+    // an untracked file exist, so the worktree is dirty.
     std::fs::write(temp.path().join("file.txt"), "base\nworktree edit\n").unwrap();
     std::fs::write(temp.path().join("scratch.txt"), "untracked\n").unwrap();
 
-    // `--no-all` forces the index-only path even though nothing is staged, so
-    // the worktree sweep never happens.
+    let before = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
+
+    // `--no-all` is index-only. With the index identical to HEAD there is
+    // nothing staged, so it must refuse with nothing-to-commit rather than
+    // writing a spurious empty / index-identical Git checkpoint.
     let output = heddle_output(
         &["--output", "json", "commit", "--no-all", "-m", "index only"],
         Some(temp.path()),
     )
     .expect("commit --no-all should run");
     assert!(
-        output.status.success(),
-        "commit --no-all should succeed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        !output.status.success(),
+        "commit --no-all with an empty index must refuse, not create a commit: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
-    let commit: Value =
-        serde_json::from_slice(&output.stdout).expect("commit --no-all JSON should parse");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
     assert_eq!(
-        commit["git_index"]["commit_mode"], "staged_index",
-        "--no-all must report an index-only commit, not a worktree sweep: {commit}"
-    );
-    assert_eq!(
-        commit["git_index"]["will_commit"],
-        serde_json::json!([]),
-        "--no-all with an empty index must commit nothing from the worktree: {commit}"
-    );
-    assert_eq!(
-        commit["git_index"]["preserved_after_commit"],
-        serde_json::json!(["unstaged: file.txt", "untracked: scratch.txt"]),
-        "--no-all must preserve the unswept worktree paths: {commit}"
+        envelope["kind"], "nothing_to_commit",
+        "--no-all with no staged changes must surface nothing-to-commit: {envelope}"
     );
 
-    // The commit reflects only the (empty) index, so HEAD:file.txt keeps the
-    // base content and both the worktree edit and the untracked file remain.
+    // HEAD is unchanged: no spurious commit was created.
+    let after = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(
+        before, after,
+        "--no-all must not create a commit when nothing is staged"
+    );
     let head_file = git_stdout_for_json_contract(temp.path(), &["show", "HEAD:file.txt"]);
     assert_eq!(
         head_file, "base",
-        "--no-all must not sweep worktree edits into the commit"
+        "--no-all must not sweep worktree edits into a commit"
     );
+    // The worktree edits remain untouched.
     assert_eq!(
         std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
         "base\nworktree edit\n",
@@ -2524,6 +2524,64 @@ fn git_overlay_commit_no_all_forces_index_only_with_empty_index() {
     assert!(
         temp.path().join("scratch.txt").exists(),
         "the untracked file should remain after --no-all"
+    );
+}
+
+#[test]
+fn git_overlay_commit_no_all_with_real_staged_changes_commits_index_only() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+
+    // Genuinely stage a change, then add an unstaged edit + untracked file on
+    // top so the worktree is dirty beyond the index.
+    std::fs::write(temp.path().join("file.txt"), "staged\n").unwrap();
+    git_ok_for_json_contract(temp.path(), &["add", "file.txt"]);
+    std::fs::write(temp.path().join("file.txt"), "staged\nunstaged\n").unwrap();
+    std::fs::write(temp.path().join("scratch.txt"), "do not sweep\n").unwrap();
+
+    let before = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
+    let output = heddle_output(
+        &["--output", "json", "commit", "--no-all", "-m", "index only"],
+        Some(temp.path()),
+    )
+    .expect("commit --no-all should run");
+    assert!(
+        output.status.success(),
+        "commit --no-all with real staged changes should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commit: Value =
+        serde_json::from_slice(&output.stdout).expect("commit --no-all JSON should parse");
+    assert_eq!(
+        commit["git_index"]["commit_mode"], "staged_index",
+        "--no-all must report an index-only commit: {commit}"
+    );
+    assert_eq!(
+        commit["git_index"]["will_commit"],
+        serde_json::json!(["file.txt"]),
+        "--no-all must commit only the staged path: {commit}"
+    );
+    assert_eq!(
+        commit["git_index"]["preserved_after_commit"],
+        serde_json::json!(["unstaged: file.txt", "untracked: scratch.txt"]),
+        "--no-all must preserve the unstaged/untracked worktree paths: {commit}"
+    );
+
+    let after = git_stdout_for_json_contract(temp.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(before, after, "--no-all should write a Git commit");
+    // The commit reflects the staged index version only.
+    let head_file = git_stdout_for_json_contract(temp.path(), &["show", "HEAD:file.txt"]);
+    assert_eq!(
+        head_file, "staged",
+        "--no-all must commit the staged index content, not the worktree edit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
+        "staged\nunstaged\n",
+        "the unstaged edit should remain in the worktree"
     );
 }
 
