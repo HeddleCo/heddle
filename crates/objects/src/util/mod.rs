@@ -9,3 +9,7 @@ pub mod async_retry;
 
 #[cfg(feature = "s3")]
 pub use async_retry::{RetryDecision, RetryPolicy, classify_transient_io, retry_with};
+
+pub mod symlink;
+
+pub use symlink::symlink_target_bytes;

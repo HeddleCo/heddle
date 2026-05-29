@@ -229,7 +229,7 @@ fn compute_and_cache_symlink(
     index: &mut WorktreeIndex,
 ) -> Result<ContentHash> {
     let target = fs::read_link(path)?;
-    let hash = ContentHash::compute_typed("blob", target.to_string_lossy().as_bytes());
+    let hash = ContentHash::compute_typed("blob", &objects::util::symlink_target_bytes(&target));
     if let Some(cached) = build_cached_entry(hash, metadata, false, IndexEntryKind::Symlink) {
         index.insert(key.to_string(), cached);
     }

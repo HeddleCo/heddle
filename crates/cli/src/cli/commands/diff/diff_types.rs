@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Types used by diff command output.
 
-use objects::object::SemanticChange;
+use objects::object::{FileMode, SemanticChange};
 use serde::Serialize;
 
 use crate::cli::commands::semantic_change_output::{
@@ -23,6 +23,12 @@ pub struct DiffOutput {
     pub context: Option<Vec<FileContextEntry>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broader_guidance: Option<Vec<ContextSnippet>>,
+    /// Rendered unified-diff text, targeting a clean `git apply`
+    /// round-trip (`patch(1)` compatibility is best-effort). Populated
+    /// whenever line-level hunks exist regardless of the `--patch` flag,
+    /// so JSON consumers always see a parseable diff.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub patch: Option<String>,
 }
 
 impl DiffOutput {
@@ -66,6 +72,7 @@ impl DiffOutput {
             semantic_changes,
             context,
             broader_guidance,
+            patch: None,
         }
     }
 }
@@ -120,14 +127,47 @@ impl DiffStats {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct FileChange {
     pub path: String,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
+    /// Rename-detector score (0.0–1.0) for `kind == "renamed"` entries.
+    /// The patch renderer emits this as `similarity index N%` in the
+    /// extended diff header; without it `git apply` rejects rename
+    /// patches because there's no signal that `b/new` shouldn't already
+    /// exist on the target side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity_score: Option<f64>,
+    /// Git file mode of the content side, used by the patch renderer to
+    /// emit `new file mode <mode>` (adds) / `deleted file mode <mode>`
+    /// (deletes). `None` falls back to `100644` (a regular file). For an
+    /// executable the renderer emits `100755`; for a symlink `120000`
+    /// (and the hunk body is the link target, matching git's blob
+    /// representation of a symlink). For a `modified` change it is the
+    /// new (post-change) mode, paired with `old_mode`.
+    #[serde(skip)]
+    pub mode: Option<FileMode>,
+    /// Old (pre-change) git file mode for a `modified` change. When it
+    /// differs from `mode` the renderer emits `old mode`/`new mode`
+    /// extended headers so a chmod (e.g. exec-bit flip) round-trips
+    /// through `git apply` even when the file's content is unchanged.
+    #[serde(skip)]
+    pub old_mode: Option<FileMode>,
     #[serde(skip)]
     pub binary: bool,
+    /// Raw symlink target bytes for each side of a change that touches a
+    /// symlink. Git stores a symlink's blob as the raw bytes of its target,
+    /// which on Unix need not be valid UTF-8 — so they can never flow through
+    /// `content_str()`/`diff_blobs` (which require UTF-8) or be binary-marked
+    /// (a `120000` placeholder-binary stanza is rejected by `git apply`).
+    /// When `Some`, the patch renderer reconstructs a byte-exact target hunk
+    /// from these bytes — the single byte-preserving symlink path across every
+    /// surface (add/delete/edit/rename) and both backends. `None` means the
+    /// change does not involve a symlink and renders as ordinary text.
+    #[serde(skip)]
+    pub symlink: Option<SymlinkChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<Vec<LineDiff>>,
     /// Pre-computed line tally for paths where we counted before
@@ -136,6 +176,50 @@ pub struct FileChange {
     /// summary remains accurate without us retaining the hunks.
     #[serde(skip)]
     pub line_counts: Option<LineCounts>,
+    /// Trailing-newline state and total line counts per side. The
+    /// patch renderer uses these to emit the unified-diff
+    /// `\ No newline at end of file` marker; `diff_blobs` strips
+    /// line terminators before the renderer ever sees them, so the
+    /// state must be plumbed alongside the hunk vector. Defaults
+    /// (`true` / `0`) mean "no marker needed", which is what
+    /// status-only fast paths fall back to.
+    #[serde(skip)]
+    pub eol: FileEolState,
+}
+
+/// The raw symlink target bytes for each side of a symlink change. A
+/// symlink's git blob is exactly its target bytes (no trailing newline), so
+/// these are the authoritative content the patch renderer emits. `old` is
+/// `None` on an add, `new` is `None` on a delete, and both are `Some` on a
+/// target-edit or rename-with-edit. The bytes come from the same loaders the
+/// hunk path uses (`symlink_target_bytes` for the worktree, the stored blob
+/// for a tree side), so a non-UTF-8 target survives without lossy conversion.
+#[derive(Clone, Debug, Default)]
+pub struct SymlinkChange {
+    pub old: Option<Vec<u8>>,
+    pub new: Option<Vec<u8>>,
+}
+
+/// Trailing-newline state for both sides of a file change, plus the
+/// total line count per side. The patch renderer reads these to decide
+/// whether to emit `\ No newline at end of file` and where.
+#[derive(Clone, Copy, Debug)]
+pub struct FileEolState {
+    pub old_has_final_newline: bool,
+    pub new_has_final_newline: bool,
+    pub old_line_count: usize,
+    pub new_line_count: usize,
+}
+
+impl Default for FileEolState {
+    fn default() -> Self {
+        Self {
+            old_has_final_newline: true,
+            new_has_final_newline: true,
+            old_line_count: 0,
+            new_line_count: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
