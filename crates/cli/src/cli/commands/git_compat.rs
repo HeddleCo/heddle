@@ -249,6 +249,15 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     let index_intent = git_index_intent(&repo)?;
     let pending_capture = pending_capture_before_commit(&repo)?;
     if !args.all && (args.no_all || !index_intent.staged_paths.is_empty()) {
+        // `--no-all` is index-only. Reaching here with no staged paths means
+        // the index is identical to HEAD (empty index, or index == HEAD), so
+        // there is nothing genuinely staged. Refuse with the standard
+        // nothing-to-commit outcome instead of letting `commit_staged_index`
+        // write a spurious empty / index-identical Git checkpoint. (The
+        // non-`--no-all` disjunct can only be taken with staged paths present.)
+        if index_intent.staged_paths.is_empty() {
+            return Err(anyhow!(nothing_to_commit_advice()));
+        }
         commit_staged_index(
             cli,
             &repo,
