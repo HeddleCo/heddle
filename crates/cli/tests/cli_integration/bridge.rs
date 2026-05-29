@@ -2,6 +2,94 @@
 use super::*;
 use objects::object::ThreadName;
 
+/// Initialize a colocated (drop-in) Git repo on `main` with one
+/// committed file, mirroring the bootstrap the overlay tests use.
+fn init_colocated_git_repo(path: &std::path::Path) {
+    assert!(Command::new("git")
+        .arg("init")
+        .current_dir(path)
+        .status()
+        .unwrap()
+        .success());
+    for (k, v) in [
+        ("user.name", "Heddle Test"),
+        ("user.email", "heddle@example.com"),
+        ("init.defaultBranch", "main"),
+    ] {
+        Command::new("git")
+            .args(["config", k, v])
+            .current_dir(path)
+            .status()
+            .unwrap();
+    }
+    Command::new("git")
+        .args(["checkout", "-B", "main"])
+        .current_dir(path)
+        .status()
+        .unwrap();
+}
+
+fn git_commit_all_in(path: &std::path::Path, message: &str) {
+    assert!(Command::new("git")
+        .args(["add", "."])
+        .current_dir(path)
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(path)
+        .status()
+        .unwrap()
+        .success());
+}
+
+fn git_status_porcelain(path: &std::path::Path) -> String {
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git status --porcelain must succeed");
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// After `heddle capture` records a NEW file in a colocated checkout,
+/// `git status` should report it as `AM` (intent-to-add: Heddle knows
+/// about it, the blob isn't a real Git commit yet) rather than `??`
+/// (untracked, "Heddle knows nothing"). Already-tracked, unchanged files
+/// must NOT be touched.
+#[test]
+fn capture_marks_new_file_intent_to_add_in_colocated_index() {
+    let source = TempDir::new().unwrap();
+    init_colocated_git_repo(source.path());
+
+    std::fs::write(source.path().join("tracked.txt"), "already tracked\n").unwrap();
+    git_commit_all_in(source.path(), "initial");
+
+    heddle(&["adopt", "--ref", "main"], Some(source.path()))
+        .expect("adopt should import Git history into Heddle");
+
+    std::fs::write(source.path().join("new_file.txt"), "brand new content\n").unwrap();
+    heddle(&["capture", "-m", "add new file"], Some(source.path()))
+        .expect("capture should record the new file");
+
+    let status = git_status_porcelain(source.path());
+
+    assert!(
+        status.lines().any(|line| line == "AM new_file.txt"),
+        "new file should be intent-to-add (AM), not untracked. Status was:\n{status}"
+    );
+    assert!(
+        !status.contains("?? new_file.txt"),
+        "new file must no longer show as untracked (??). Status was:\n{status}"
+    );
+    assert!(
+        !status.lines().any(|line| line.ends_with("tracked.txt")),
+        "an already-tracked, unchanged file must not be marked. Status was:\n{status}"
+    );
+}
+
 #[test]
 fn test_cli_bridge_git_init() {
     let temp = TempDir::new().unwrap();
