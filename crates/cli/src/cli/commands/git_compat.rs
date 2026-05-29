@@ -149,6 +149,14 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             && !git_index_intent(&repo)?.staged_paths.is_empty();
         if status.is_clean() && !has_staged_index_intent {
             let trust = build_repository_verification_state(&repo);
+            // `--no-all` forces an index-only commit and must never auto-commit
+            // the captured worktree state. On this fast-path the worktree is
+            // clean and the index has no staged intent, so an index-only commit
+            // has nothing to commit — surface that instead of silently
+            // checkpointing the pending capture into Git.
+            if args.no_all {
+                return Err(anyhow!(nothing_to_commit_advice()));
+            }
             if trust.status == "needs_checkpoint" {
                 preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
                 let git_previous_commit = git_head_oid(repo.root());
@@ -235,12 +243,26 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         return Ok(());
     }
 
+    let index_intent = git_index_intent(&repo)?;
+    if args.no_all && !args.all && index_intent.staged_paths.is_empty() {
+        // `--no-all` is index-only. With no staged paths the index is identical
+        // to HEAD (empty index, or index == HEAD), so there is nothing genuinely
+        // staged. Surface the standard nothing-to-commit outcome BEFORE the
+        // commit preflights: identity config and ref-update availability are
+        // irrelevant for a commit that was never going to write anything, so an
+        // unconfigured identity or blocked ref update must not mask the
+        // nothing-to-commit result.
+        return Err(anyhow!(nothing_to_commit_advice()));
+    }
+
     preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
     preflight_git_checkpoint_ref_update(&repo, "commit")?;
     let git_previous_commit = git_head_oid(repo.root());
-    let index_intent = git_index_intent(&repo)?;
     let pending_capture = pending_capture_before_commit(&repo)?;
-    if !args.all && !index_intent.staged_paths.is_empty() {
+    if !args.all && (args.no_all || !index_intent.staged_paths.is_empty()) {
+        // The `--no-all` + empty-index case short-circuited above, so reaching
+        // here always has staged paths present (either via `--no-all` with real
+        // staged changes, or the non-`--no-all` disjunct that requires them).
         commit_staged_index(
             cli,
             &repo,
@@ -383,7 +405,7 @@ fn commit_staged_index(
         git_previous_commit,
         summary: staged_commit_summary(&record.summary, &intent),
         confidence: captured_state.confidence,
-        git_index: Some(GitIndexPlan::from_intent(&intent, false)),
+        git_index: Some(GitIndexPlan::index_only(&intent)),
         included_pending_capture: pending_capture.map(|state| state.short()),
         principal: captured_state.attribution.principal.into(),
         agent: captured_state
@@ -514,6 +536,22 @@ impl GitIndexPlan {
             untracked_paths,
             will_commit,
             preserved_after_commit,
+        }
+    }
+
+    /// Plan for an index-only commit: checkpoint exactly the staged index (which
+    /// may be empty, as on the `--no-all` path) and preserve every unstaged or
+    /// untracked worktree path. Never sweeps the worktree.
+    pub(crate) fn index_only(intent: &GitIndexIntent) -> Self {
+        let (unstaged_paths, untracked_paths) = split_extra_paths(&intent.extra_paths);
+        Self {
+            commit_mode: "staged_index",
+            has_staged_changes: !intent.staged_paths.is_empty(),
+            staged_paths: intent.staged_paths.clone(),
+            unstaged_paths,
+            untracked_paths,
+            will_commit: intent.staged_paths.clone(),
+            preserved_after_commit: intent.extra_paths.clone(),
         }
     }
 }
