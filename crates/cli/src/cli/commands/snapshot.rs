@@ -32,6 +32,7 @@ use super::{
     thread_cmd::current_thread,
 };
 use crate::{
+    bridge::GitBridge,
     cli::{Cli, should_output_json, style},
     config::UserConfig,
 };
@@ -171,6 +172,26 @@ pub async fn cmd_snapshot(
 
     let as_json = should_output_json(cli, Some(repo.config()));
     let git_overlay = repo.capability() == repo::RepositoryCapability::GitOverlay;
+
+    // In a colocated checkout, mark newly-captured files as intent-to-add
+    // in the real `.git/index` so `git status` shows `AM` ("Heddle knows
+    // about it") instead of `??` ("untracked"). Best-effort: the state is
+    // already durably captured, so a presentation-only index update must
+    // not fail the command. `capture` is a Heddle parent/state change —
+    // the call frequency jj's `update_intent_to_add` is designed for.
+    if git_overlay {
+        match repo.current_state() {
+            Ok(Some(state)) => {
+                let bridge = GitBridge::new(&repo);
+                if let Err(err) = bridge.update_intent_to_add(&state.change_id) {
+                    debug!("intent-to-add index update skipped: {err}");
+                }
+            }
+            Ok(None) => {}
+            Err(err) => debug!("intent-to-add index update skipped: {err}"),
+        }
+    }
+
     if as_json {
         println!("{}", serde_json::to_string(&output)?);
     } else {
