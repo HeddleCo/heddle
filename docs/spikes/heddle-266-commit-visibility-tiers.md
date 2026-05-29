@@ -467,7 +467,11 @@ serve-time predicate: it is an advisory *schedule* that the authoritative host
 converts into a persisted superseding record when it fires (§5.4); the effective
 tier is then read from that record, exactly like a manual `promote`. (This is what
 keeps the tier monotonic under clock skew and across multiple serve hosts — the
-durability rule in §5.4.)
+durability rule in §5.4.) The state's **initial** record is written **at capture**,
+not at first serve: the inherited-default chain (§8.1) resolves once at
+capture/visibility-record creation, and any resolution more restrictive than public is
+persisted then, binding the tier immutably so later default drift cannot expose an
+already-captured-but-not-yet-served state (Invariant A, §5.4).
 
 ### 5.2 Map the audiences against the *real* `visible()` table — do not reuse `Internal` for private
 
@@ -929,9 +933,14 @@ requires widening the single-`ChangeId` request shape:
    the unique maximal served descendant of its prior advertised tip — and **every
    *other*** maximal served state (every member on a *sibling* line, i.e. not a
    descendant of `<thread>`'s prior tip) gets its own `RefEntry` under a
-   **deterministic derived name** `<thread>@<changeid-prefix>`, the name a pure
+   **deterministic derived name** `<thread>@<full-changeid>`, the name a pure
    function of the served `ChangeId` (`RefEntry.change_id`, `:91`) so it is stable,
-   identity-bound, and never reused for a different state. So `<thread>` **advances
+   identity-bound, and never reused for a different state. The name carries the
+   **full** `ChangeId` — `ChangeId::to_string_full()` (`crates/objects/src/object/hash.rs:129`,
+   the `hd-`+base32 form that round-trips via `parse()`, `:143`) — **never** the
+   truncatable `short()`/`Display` form (`:137`, `:167-170`): two distinct sibling
+   `ChangeId`s must map to two distinct ref names or one frontier root would
+   overwrite the other (Invariant C, §5.4). So `<thread>` **advances
    forward** as its own line extends (`A → A2` once `A`'s descendants become
    served) and is **never frozen at a stale ancestor** just because a sibling line
    is also maximal; it is likewise **never assigned by topological or lexicographic
@@ -969,7 +978,7 @@ requires widening the single-`ChangeId` request shape:
    descendant and is accepted; a lateral jump to a sibling `B` or a regress to an
    ancestor is rejected. Each *other* incomparable maximal served
    state is published under a deterministic synthetic branch
-   `refs/heads/<thread>@<changeid-prefix>` so a plain `git clone` can still fetch
+   `refs/heads/<thread>@<full-changeid>` so a plain `git clone` can still fetch
    every visible side. Adding a synthetic ref is
    forward-only (it never rewinds `<thread>`); the names are pure functions of the
    served `ChangeId`, so re-runs are deterministic and no published ref is ever
@@ -1037,11 +1046,19 @@ ref's "own line" at the initial condition; rules 1–4 govern every move thereaf
      propagate-before-use half of §5.4); it does **not** bootstrap a second anchor from
      its local set. Only the first advertiser ever computes the anchor; every other
      host reads the propagated fact, and replication lag is governed by §5.4 (await the
-     fact / fail toward last-known-public, never re-hide), never by re-anchoring. (A
-     genuine *simultaneous* first advertisement on two hosts with divergent sets is the
-     same race as concurrent promotion records and resolves identically — the §5.4
-     monotonic superseding-record rule picks one persisted anchor; it is not re-derived
-     per host.)
+     fact / fail toward last-known-public, never re-hide), never by re-anchoring. A
+     genuine *simultaneous* first advertisement on two hosts with divergent sets — where
+     there is **no** single first advertiser, so each host legitimately mints an anchor
+     fact and **neither supersedes the other** (anchors carry no more-open ordering, so
+     the monotonic-superseding-record rule cannot pick a winner) — is resolved by
+     **Invariant B (§5.4)**: the two conflicting anchor facts are merged by the **same**
+     content-intrinsic key r15 fixed for initial selection — the anchor's `ChangeId`,
+     least by raw byte order (`hash.rs:98-99`). Every replica that holds both facts
+     deterministically adopts the byte-order-least anchor and the other anchor fact is
+     **superseded by that merge rule**; all replicas converge with **no lease and no
+     single-writer**. The key thus does double duty: `min`-selection within a single
+     host's antichain (the initial-anchor rule) *and* conflict-free merge across
+     concurrent anchor facts (Invariant B).
 
    Once the anchor exists it **is** the own line, and rules 1–4 take over verbatim;
    the anchor is never re-selected. **Behavior when the anchored line's visible tip
@@ -1062,7 +1079,7 @@ ref's "own line" at the initial condition; rules 1–4 govern every move thereaf
    *sibling* antichain member — a maximal served state that is **not** a descendant
    of its prior tip — even when that sibling is also maximal. Sibling lines are
    reached only through their own derived/synthetic names
-   (`<thread>@<changeid-prefix>`, pure functions of the served `ChangeId`), never by
+   (`<thread>@<full-changeid>`, pure functions of the served `ChangeId`), never by
    moving `<thread>` onto them. No ordering-based selection (topological,
    lexicographic) is ever used to *place* the moving ref; ordering is admissible
    only to mint the stable derived names for the non-moving siblings.
@@ -1083,7 +1100,8 @@ meanwhile a *sibling* line `B` is also maximal, behind a hidden merge `M` that i
 not served (so the antichain is `{A2, B}` and `A` is now **non-maximal**). Then
 `<thread>` advertises **`A2`** — its own-line maximal descendant — **never `A`**
 (freezing at a non-maximal ancestor violates rule 1) and **never `B`** (jumping to
-a sibling line violates rule 2). `B` is published only as `<thread>@<b-prefix>`.
+a sibling line violates rule 2). `B` is published only as `<thread>@<b-changeid>`
+(B's **full** `ChangeId`, not a truncatable prefix — Invariant C).
 When `M` later becomes served and reunifies the fork, `<thread>` advances FF to `M`
 (now a unique dominating descendant on the merged line) and the `B` synthetic ref
 retires, since its state is then reachable from `<thread>`.
@@ -1244,13 +1262,19 @@ that forecloses this:
 > public-vs-private from a mutable input (wall-clock, per-host config, a recomputed
 > predicate).**
 
-Inherited defaults (§8.1) are the one resolution that *is* recomputed — but only
-for a state's **initial** tier *before any serve*. The moment a state is first
-served to an audience, that served tier is pinned by a persisted record, so a later
-change to any input can neither lower it (re-embargo, forbidden above) nor silently
-raise it: a config default that drifts more-open does **not** retroactively promote
-already-captured states, because promotion is an **explicit, signed, audited
-record**, not a side effect of mutable state.
+Inherited defaults (§8.1) are evaluated **once, at capture** — **not** recomputed at
+first serve. Deferring the resolution to first serve would open a window in which a
+thread/`[namespace]`/repo default drifting **more-open** between capture and the first
+serve silently exposes an already-captured-but-not-yet-served private commit. **Invariant
+A (§5.4 — immutable-at-capture)** closes that window: the default-resolution chain runs
+at capture / visibility-record creation, and any resolution **more restrictive than
+public** is persisted *then* as the state's initial `StateVisibility` record (§5.1). The
+bound tier is **immutable** thereafter — a later change to any input can neither lower it
+(re-embargo, forbidden above) nor raise it; default drift governs only states captured
+*after* it. The "a config default that drifts more-open does **not** retroactively
+promote an already-captured state" guarantee is therefore a **corollary** of Invariant A:
+the only tier-raise is an explicit, signed, audited promotion record, and the only tier
+value a default ever supplies for a state is the one frozen at that state's capture.
 
 **Multi-host coordination — propagate promotion records *before* a host gates
 (impl requirement, closes cid 3326047819).** (This is the *multi-host* face of the
@@ -1304,35 +1328,83 @@ host, and confirm its presence there, before that host gates `S`**
 authoritative records fail toward last-known-public — so no lagging or clock-skewed
 host can serve a state at a stricter tier than the one already served elsewhere.
 
-**The persisted-fact principle (§5.4) — the single governing rule the cases above,
-the antichain anchor (§5.3 rule 0), and every future placement/visibility decision
-all instantiate.** State it once; do not restate it per mechanism:
+**The multi-host-consistency model — three invariants + propagate-before-use (§5.4).**
+Every multi-host hazard in this design is foreclosed by **exactly four** named
+guarantees, each stated **once** here and never re-derived per mechanism. They are
+**orthogonal axes** — A fixes *when* a fact is bound, propagate-before-use fixes *that*
+a host waits for the propagated fact before acting, B fixes *how* genuinely-concurrent
+conflicting facts converge, and C fixes *how* served states are named so addressing
+never collides — and every concrete mechanism (the tier promotion, the antichain
+anchor, the synthetic ref, any future placement/visibility fact) routes to exactly one
+of them rather than restating its own rule:
 
-> A decision about **what** is served (a tier promotion) or **where** a moving ref
-> sits (the antichain anchor, and any future placement fact) is **computed once, by
-> the authoritative writer** — the host that mints it — then persisted as a
-> **signed, monotonic fact** and **propagated before any host uses it**. Every other
-> host **reads** that fact and **never re-derives the decision from local state** —
-> neither from a *mutable input* (wall-clock, per-host config, a re-evaluated
-> predicate) nor from a *lagging or differently-synced fact set* (a partial
-> antichain, an un-received record). A host that cannot confirm it holds the fact
-> **defers, or fails toward the already-public / already-chosen direction** — it
-> withholds or serves last-known-public and never re-hides; it defers a first
-> advertisement rather than minting a second anchor — **never** toward a value that
-> could diverge from the authoritative writer's.
+- **Invariant A — immutable-at-capture (the *when*).** A state's resolved visibility
+  tier is **bound at capture** (visibility-record creation) and **immutable**
+  thereafter. The inherited-default chain (§8.1) runs once, at capture; any resolution
+  more restrictive than public is persisted then as the state's initial
+  `StateVisibility` record (§5.1). Later drift of any input — thread / `[namespace]` /
+  repo default — mutates **no existing state's tier**; it governs only states captured
+  *after* the drift. (A public resolution needs no record: absence ≡ public, and the
+  one-way constraint above forbids a later private-drift from re-embargoing it — so
+  binding at capture is load-bearing precisely for the *restrictive* resolutions,
+  which is where the exposure hazard lives.)
 
-The two cases above are its faces: the persisted-monotonic-fact invariant is the
-*single-host* face (no recompute from a **mutable input on one host**);
-propagate-before-gate is the *multi-host* face (no gating — and no anchoring — from an
-**un-propagated / lagging fact set across hosts**). The anchor (§5.3 rule 0) is the
-*placement* face. The **one** documented resolution that is computed rather than read
-is a decision's **initial** value *before it is first fixed-and-served* — inherited
-tier defaults (§8.1) — and that resolution is itself **frozen into a persisted fact
-the instant the state is first served**, after which only the fact is read; there is
-no fact to read *before* the first writer mints one, which is exactly why only the
-first writer ever computes. All faces converge on the same §5.4 guarantee — once any
-host has fixed and served a decision, no clock, config drift, or replica holding a
-different fact set can walk it back or fork it.
+- **Invariant B — deterministic conflict-free merge (the *how-converge*).** When
+  concurrency produces two conflicting facts for the same target with **no natural
+  superseding order** — two hosts each legitimately minting a *first* fact (a
+  thread/audience anchor, an own-line placement, any placement fact) before either has
+  synced the other, so neither supersedes the other — resolution is a **deterministic
+  merge on a content-intrinsic total order**, evaluated identically on every replica,
+  so all converge on the **same** winner **without coordination**. The order is the
+  **same key r15 fixed for initial anchor selection**: the candidate's `ChangeId`,
+  least by raw byte order (`ChangeId` is `[u8;16]` deriving `Ord`, `hash.rs:98-99`).
+  The losing fact is **superseded by this merge rule** — not by the monotonic-
+  superseding-record rule, which cannot order anchors (they carry no more-open
+  relation). This is heddle-native, CRDT-style convergence: a pure, idempotent
+  `min`-over-identity join that needs no external state. *(Rejected alternative: a
+  lease / single-writer lock on first advertisement. It converges too, but it demands
+  coordination infrastructure heddle has no substrate for plus a liveness dependency
+  on the lock holder; the intrinsic-key merge needs neither, so it is preferred.)* The
+  key thus does **double duty** — `min`-selection within one host's antichain (the
+  initial-anchor rule, §5.3 rule 0) *and* conflict-free merge across concurrent anchor
+  facts.
+
+- **Invariant C — collision-proof naming (the *how-name*).** Every synthetic name or
+  key that must **uniquely address** a served state uses a **collision-proof
+  encoding** — the **full** `ChangeId` (`ChangeId::to_string_full()`, `hash.rs:129`;
+  round-trips via `parse()`, `:143`), **never** the truncatable `short()` / `Display`
+  form (`:137`, `:167-170`) that two distinct `ChangeId`s could share. Synthetic refs
+  are `refs/heads/<thread>@<full-changeid>`, so two maximal served siblings with
+  distinct `ChangeId`s always map to distinct `RefEntry` / ref names; the multi-root
+  advertisement (§5.3) therefore guarantees every maximal served state is **uniquely
+  named *and* fetchable** — no frontier root is overwritten or made undiscoverable by
+  a prefix collision.
+
+- **Propagate-before-use — the persisted-fact principle (the *that-it-waits*).** A
+  decision about **what** is served (a tier promotion) or **where** a moving ref sits
+  (the antichain anchor, any future placement fact) is **computed once, by the
+  authoritative writer**, persisted as a **signed, monotonic fact**, and **propagated
+  before any host uses it**. Every other host **reads** that fact and **never
+  re-derives the decision from local state** — neither from a *mutable input*
+  (wall-clock, per-host config, a re-evaluated predicate) nor from a *lagging or
+  differently-synced fact set* (a partial antichain, an un-received record). A host
+  that cannot confirm it holds the fact **defers, or fails toward the already-public /
+  already-chosen direction** — it withholds or serves last-known-public and never
+  re-hides; it defers a first advertisement rather than minting a second anchor. (Its
+  *single-host* face is "no recompute from a mutable input"; its *multi-host* face is
+  propagate-before-gate, "no gating — and no anchoring — from an un-propagated /
+  lagging fact set." Invariant A supplies the binding moment this principle reads from;
+  Invariant B resolves the one case propagate-before-use leaves open — when two writers
+  genuinely race and there is no single writer to wait for.)
+
+The **one** value ever *computed* rather than *read* is a decision's initial value at
+the moment of its **capture** — the inherited tier default (§8.1), frozen by Invariant
+A into a persisted fact **at capture**, after which only the fact is read. There is no
+fact to read before the first writer mints one, which is exactly why only the writer
+computes; genuinely-concurrent writers converge by Invariant B. All four guarantees
+converge on the same §5.4 outcome — once a decision is bound, no clock, config drift,
+replica holding a different fact set, concurrent minter, or duplicate name can walk it
+back, fork it, or hide a served state behind a colliding name.
 
 ### 5.5 Oplog records (append at the tail — hard constraint)
 
@@ -1355,7 +1427,7 @@ mirroring the `Redact` / `Purge` audit-trail pattern (`oplog_types.rs:109,123`).
 | object store | per-state `visibility/` sidecar dir + read/write + `has_visibility_for_state` | mirrors redactions dir (`fs_paths.rs:46-50`, `repository_redaction.rs:490`) |
 | `oplog` | tail-append `StateVisibilitySet` / `StateVisibilityPromote` | tail-append rule (`oplog_types.rs:14-21`) |
 | `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); the **operator-local courtesy stub** is rendered at the **state walk** (where the `ChangeId` is in scope), never in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) — the public mirror emits absence, not a stub (§5.0/§5.3) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
-| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before *every* ref-publishing/state-emitting surface** via one shared `resolve_frontier` chokepoint (§5.3) — branch ref-sync (`:277-288`, lag `refs/heads/main` to the frontier, **not** the raw `get_thread` tip `:278`), marker→tag sync (`:290-296`, withhold `refs/tags/<marker>` unless served — conflict-not-FF, `git_sync.rs:163-170`), **state notes `refs/notes/heddle`** (write a note only for a served state — `git_export.rs:242-245,252-261`, `git_core.rs:1105-1109`; forced mirror `+refs/notes/*`, `git_core.rs:300`; note payload carries `change_id`/attribution/agent, `git_notes.rs:33-56`), and the **`HEAD` symref + bulk push** (`git_core.rs:2398-2407,751`); merge-frontier antichain ≥2 → `<thread>` advances along its own line to its prior tip's maximal served descendant; publish every *other* sibling line under deterministic `refs/heads/<thread>@<changeid-prefix>` synthetic refs; the frontier rule is categorical over all surfaces (§5.3), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2446`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2446`), notes (`git_notes.rs:29`) |
+| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before *every* ref-publishing/state-emitting surface** via one shared `resolve_frontier` chokepoint (§5.3) — branch ref-sync (`:277-288`, lag `refs/heads/main` to the frontier, **not** the raw `get_thread` tip `:278`), marker→tag sync (`:290-296`, withhold `refs/tags/<marker>` unless served — conflict-not-FF, `git_sync.rs:163-170`), **state notes `refs/notes/heddle`** (write a note only for a served state — `git_export.rs:242-245,252-261`, `git_core.rs:1105-1109`; forced mirror `+refs/notes/*`, `git_core.rs:300`; note payload carries `change_id`/attribution/agent, `git_notes.rs:33-56`), and the **`HEAD` symref + bulk push** (`git_core.rs:2398-2407,751`); merge-frontier antichain ≥2 → `<thread>` advances along its own line to its prior tip's maximal served descendant; publish every *other* sibling line under deterministic `refs/heads/<thread>@<full-changeid>` synthetic refs; the frontier rule is categorical over all surfaces (§5.3), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2446`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2446`), notes (`git_notes.rs:29`) |
 | `proto` / wire | new `ObjectType::Visibility` in the sync plan (mirroring `emit_redaction_plan`), itself gated — a record is served only when its state is served, so it never leaks an embargoed `ChangeId`/tier/date (§8.4); **new** tier-aware **downward-closed reachability gate** — resolve the visibility frontier as a pre-pass, then serve the forward closure of the ancestry-closed visible set rooted at that frontier (no `ObjectType::State` header for an embargoed commit); **multi-root merge frontier** — `ListRefs` advertises one `RefEntry` per maximal served state into the existing `Vec<RefEntry>` (`message_refs.rs:85`), client issues one single-root `Pull` per root (`message_pushpull.rs:91`) with `exclude_states` dedup (`:95`), so no widened request shape is needed. NOT a `collect_excluded` extension (root-exclusion over-withholds, §5.3) and no set difference is needed (a child of a hidden parent is never served, so nothing shared to subtract) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`); `Vec<RefEntry>` (`message_refs.rs:85`) |
 | weft (closed) | **authoritative** server-side downward-closed gate in `ListRefs`/`Pull` (above); grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
 | config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution *precedence pattern* (namespace → repo → fallback) — but `resolve_default_visibility` is typed to `AnnotationVisibility` (`namespace_policy.rs:68,75`), so it must be generalized over the tier enum (ties O4) and its `Internal` fallback replaced with the stricter `Private` (§8.1) | `resolve_default_visibility` (`namespace_policy.rs:68`) |
@@ -1541,6 +1613,16 @@ flag. The embargoed-fix case is the *only* time you reach for `visibility set`,
 to mark the one exceptional commit. This is the whole ergonomic argument: the
 common path has **zero** new flags; the rare path has one verb.
 
+This resolution runs **at capture**, not at first serve, and binds the tier
+**immutably** (Invariant A, §5.4): the chain above is evaluated once when the state is
+created, and a resolution more restrictive than public is persisted then as the
+state's initial `StateVisibility` record — so a default later drifting more-open never
+retroactively exposes an already-captured state. The "zero new flags" ergonomic is
+about the *CLI surface* (you never type `--visibility` per commit), not about deferring
+the decision: a public resolution still needs no stored record (absence ≡ public), but
+a restrictive one is pinned at capture, which is exactly where the exposure hazard
+would otherwise live.
+
 ### 8.2 The verb family (minimal, mirrors `redact`)
 
 ```
@@ -1643,7 +1725,7 @@ serve `S` — which §5.4 explicitly forecloses.
   `HEAD` symref, and the bulk export/push (§5.3 surfaces 4–6, §10 #5). And a
   hidden merge that leaves ≥2 incomparable maximal served states is
   handled by the multi-root path — `ListRefs` advertises the antichain as multiple
-  `RefEntry`s and the Git mirror publishes synthetic `<thread>@<changeid-prefix>`
+  `RefEntry`s and the Git mirror publishes synthetic `<thread>@<full-changeid>`
   refs (§5.3) — so no visible side is silently unreachable. The earlier "permanent
   stub commit" fallback is **dropped**: it would publish the descendant against a
   synthetic stub parent (a partial embargoed-commit view + a parent-edge rewrite),
@@ -1753,7 +1835,18 @@ issues are checked against:
   records replicate host-to-host (not behind the §8.4 client gate, which would be
   circular) and are confirmed present *before* the host gates, and a host missing
   the records **fails toward last-known-public, never re-hides** (§5.4 multi-host
-  rule).
+  rule); and the **three named multi-host-consistency invariants (§5.4)** the whole
+  section rests on, each with its own conformance check: **A — immutable-at-capture**
+  (the inherited-default chain resolves **once at capture**, persists any
+  restrictive resolution as the initial `StateVisibility` record, and is **never**
+  recomputed at first serve, so default drift cannot expose an already-captured
+  state — issue #3); **B — deterministic conflict-free merge** (two genuinely-
+  concurrent first-advertisement / placement facts with no superseding order converge
+  by a content-intrinsic `min`-`ChangeId` merge, identical on every replica, **no
+  lease / single-writer** — issue #4); **C — collision-proof naming** (every synthetic
+  ref/addressing name uses the **full** `ChangeId` via `to_string_full()`, **never** a
+  truncatable `short()`/prefix form, so two distinct siblings never collide and every
+  maximal served state is uniquely named *and* fetchable — issues #4/#5).
 
 1. **impl(objects/repo): `StateVisibility` object + per-state sidecar store.**
    Add `StateVisibility` / `StateVisibilityBlob` (objects), the `visibility/`
@@ -1771,8 +1864,17 @@ issues are checked against:
    *not* a public-mirror surface (§5.0/§5.3). Blocked by #1.
 3. **impl(oplog/cli): tier records + `heddle visibility` verb family.**
    Tail-append `StateVisibilitySet`/`StateVisibilityPromote`; implement `set` /
-   `promote` / `show` / `list`; wire the config-default resolution chain. Blocked
-   by #1.
+   `promote` / `show` / `list`; wire the config-default resolution chain
+   (`namespace_policy.rs:68`, generalized over the tier enum). **Invariant A
+   (immutable-at-capture, §5.4): resolve the inherited default *at capture*, not at
+   first serve** — run the chain once when the state is created and **persist any
+   resolution more restrictive than public** as the state's initial `StateVisibility`
+   record (a public resolution stays record-free: absence ≡ public). This binds the
+   tier immutably at capture so a `[namespace]`/repo default later drifting more-open
+   cannot retroactively expose an already-captured-but-not-yet-served state. A
+   conformance test must assert: capture a state under a restrictive default, drift
+   the default to public, and verify the captured state's effective tier is
+   **unchanged**. Blocked by #1.
 4. **impl(weft, cross-repo): authoritative serve-side downward-closed gate +
    multi-root advertisement.** Gate `ListRefs`/`Pull` by caller tier via the
    **tier-aware downward-closed reachability pass** (§5.3): resolve the visibility
@@ -1789,10 +1891,15 @@ issues are checked against:
    state** into the existing `Vec<RefEntry>` (`message_refs.rs:85`): `<thread>`
    **advances along its own line to the maximal served descendant of its prior
    tip** (never frozen at a non-maximal ancestor) and **only the *other* members**
-   (sibling lines) get deterministic `<thread>@<changeid-prefix>` names — `<thread>`
-   is **never** chosen by topological/lexicographic order and **never** jumps to a
-   sibling (that would move the main ref sideways to an incomparable sibling, §5.3
-   "antichain ref placement, the definitive statement"). The client issues **one
+   (sibling lines) get deterministic `<thread>@<full-changeid>` names — **Invariant C
+   (collision-proof naming, §5.4): the name carries the full `ChangeId` via
+   `ChangeId::to_string_full()` (`hash.rs:129`), never a truncatable `short()`/prefix
+   form (`:137`/`:167-170`)**, so two siblings with distinct `ChangeId`s never collide
+   onto one `RefEntry`. `<thread>` itself is **never** chosen by topological/
+   lexicographic order and **never** jumps to a sibling (that would move the main ref
+   sideways to an incomparable sibling, §5.3 "antichain ref placement, the definitive
+   statement"). A conformance test must assert two siblings sharing any `ChangeId`
+   prefix still receive distinct ref names and both remain fetchable. The client issues **one
    single-root `Pull` per root** (`PullRequest.target_state`, `message_pushpull.rs:91`)
    carrying prior states in `exclude_states` (`:95`) — so every visible side is
    discoverable and requestable without widening the single-`ChangeId` request
@@ -1803,12 +1910,21 @@ issues are checked against:
    incomparable sibling, and never regresses. **Initial anchor is deterministic +
    host-independent:** when the thread's first advertisement at an audience is already
    an antichain (no prior tip), the **first advertiser** computes `<thread>`'s own line
-   as the member with the **byte-order-least `ChangeId`** (`hash.rs:99`) **once**,
+   as the member with the **byte-order-least `ChangeId`** (`hash.rs:98-99`) **once**,
    writes it as a fact over the record-sync path (`sync.rs:268-302`), and every
    **other** host **reads** that fact — a host lacking it **defers** rather than
    recomputing from its own (possibly lagging) antichain — so every host adopts the
-   same member, never re-selected from a mutable/lagging antichain (the persisted-fact
-   principle, §5.4; §5.3 "definitive statement," rule 0). **Transmission
+   same member, never re-selected from a mutable/lagging antichain (propagate-before-use,
+   §5.4; §5.3 "definitive statement," rule 0). **Invariant B (deterministic conflict-
+   free merge, §5.4): two hosts that genuinely race the first advertisement** — each
+   legitimately minting an anchor fact over a different antichain, with no single first
+   advertiser to defer to and no superseding order between the two facts — converge by
+   merging the conflicting anchor facts on the **same** `min`-`ChangeId` key: every
+   replica holding both deterministically keeps the byte-order-least anchor and treats
+   the other as superseded, so all hosts agree **without a lease or single-writer
+   lock**. A conformance test must assert that two divergent concurrent anchor facts,
+   once both propagate, resolve to the **same** `<thread>` tip on every replica.
+   **Transmission
    must not leak:** no withheld-state count, gap, or placeholder; the
    `ObjectType::Visibility` record is itself gated so it is served only when its
    state is **to a client** (§8.4 client-facing gate).
@@ -1874,13 +1990,18 @@ issues are checked against:
    - **Multi-root merge frontier** (§5.3): when the antichain has ≥2 incomparable
      maximal served states, publish each antichain member **other than the one
      `<thread>` names** (every sibling line) under a deterministic
-     synthetic `refs/heads/<thread>@<changeid-prefix>` (append-only, retires once a
+     synthetic `refs/heads/<thread>@<full-changeid>` (append-only, retires once a
      served descendant reunifies the fork), so a plain `git clone` fetches every
-     visible side; `<thread>` itself only ever advances FF **along its own line** to
-     the maximal served descendant of its prior tip, else retains its prior tip —
-     **never moves sideways to a sibling member and never regresses** (antichain
-     ref-placement stability, §5.3; structurally enforced by
-     `ensure_commit_update_fast_forward`, `git_core.rs:2446`). A conformance test
+     visible side. **Invariant C (collision-proof naming, §5.4): the synthetic name
+     carries the full `ChangeId` via `ChangeId::to_string_full()` (`hash.rs:129`),
+     never a truncatable `short()`/prefix form (`:137`/`:167-170`)**, so two siblings
+     that share any prefix still map to distinct refs and neither frontier root is
+     overwritten or made undiscoverable; a conformance test must assert prefix-sharing
+     siblings get distinct, individually-fetchable refs. `<thread>` itself only ever
+     advances FF **along its own line** to the maximal served descendant of its prior
+     tip, else retains its prior tip — **never moves sideways to a sibling member and
+     never regresses** (antichain ref-placement stability, §5.3; structurally enforced
+     by `ensure_commit_update_fast_forward`, `git_core.rs:2446`). A conformance test
      must assert `refs/heads/<thread>` is forward-only across re-exports: it never
      names an incomparable antichain sibling and never regresses.
    Audience-aware minting skips under-tier states, but the **ref/tag/note tips are
