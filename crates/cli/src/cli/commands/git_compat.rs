@@ -240,7 +240,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     let git_previous_commit = git_head_oid(repo.root());
     let index_intent = git_index_intent(&repo)?;
     let pending_capture = pending_capture_before_commit(&repo)?;
-    if !args.all && !index_intent.staged_paths.is_empty() {
+    if !args.all && (args.no_all || !index_intent.staged_paths.is_empty()) {
         commit_staged_index(
             cli,
             &repo,
@@ -383,7 +383,7 @@ fn commit_staged_index(
         git_previous_commit,
         summary: staged_commit_summary(&record.summary, &intent),
         confidence: captured_state.confidence,
-        git_index: Some(GitIndexPlan::from_intent(&intent, false)),
+        git_index: Some(GitIndexPlan::index_only(&intent)),
         included_pending_capture: pending_capture.map(|state| state.short()),
         principal: captured_state.attribution.principal.into(),
         agent: captured_state
@@ -514,6 +514,22 @@ impl GitIndexPlan {
             untracked_paths,
             will_commit,
             preserved_after_commit,
+        }
+    }
+
+    /// Plan for an index-only commit: checkpoint exactly the staged index (which
+    /// may be empty, as on the `--no-all` path) and preserve every unstaged or
+    /// untracked worktree path. Never sweeps the worktree.
+    pub(crate) fn index_only(intent: &GitIndexIntent) -> Self {
+        let (unstaged_paths, untracked_paths) = split_extra_paths(&intent.extra_paths);
+        Self {
+            commit_mode: "staged_index",
+            has_staged_changes: !intent.staged_paths.is_empty(),
+            staged_paths: intent.staged_paths.clone(),
+            unstaged_paths,
+            untracked_paths,
+            will_commit: intent.staged_paths.clone(),
+            preserved_after_commit: intent.extra_paths.clone(),
         }
     }
 }
