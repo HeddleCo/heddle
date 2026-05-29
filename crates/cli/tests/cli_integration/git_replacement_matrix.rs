@@ -946,7 +946,7 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
             .all(|m| m["name"] != "undo-recovery"),
         "recovery bookkeeping must not appear as a user marker"
     );
-    assert_eq!(undo["recovery_marker"], "undo-recovery");
+    assert_eq!(undo["recovery_marker"], ".undo-recovery");
     assert_eq!(
         undo["recovery_state"], friction_state,
         "recovery handle must pin the pre-undo (friction) heddle state"

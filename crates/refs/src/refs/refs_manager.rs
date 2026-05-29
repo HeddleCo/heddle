@@ -16,12 +16,22 @@ use super::{
 use crate::fs_atomic::sync_directory;
 
 /// Well-known refspec that resolves the heddle-internal pre-undo recovery
-/// pointer (so `heddle goto undo-recovery` still works). It is NOT a user
-/// marker: it lives in a reserved internal namespace the marker CLI cannot
-/// create, delete, or enumerate. A user marker of the same literal name takes
-/// resolution precedence (their explicit ref wins); the internal pointer is the
-/// fallback, and is always preserved regardless of any same-named user marker.
-pub const UNDO_RECOVERY_HANDLE: &str = "undo-recovery";
+/// pointer (so `heddle goto .undo-recovery` works). It is UNSHADOWABLE by any
+/// user marker or thread, in BOTH directions (heddle#305 r3):
+///
+/// - **Write side:** the leading `.` is rejected by [`validate_ref_name`], so a
+///   user can never `marker create` / `thread` a ref with this name. The
+///   recovery state therefore lives in a reserved namespace no user ref can
+///   occupy.
+/// - **Resolve side:** [`resolve_refspec`] routes this handle to the internal
+///   recovery pointer BEFORE consulting user threads/markers, so no user ref
+///   can intercept the advertised handle.
+///
+/// Invariant: an advertised handle for an internal ref must use a reserved form
+/// that user-namespace names cannot take — never a bare user-namespace name.
+///
+/// [`validate_ref_name`]: super::name::validate_ref_name
+pub const UNDO_RECOVERY_HANDLE: &str = ".undo-recovery";
 
 /// Manager for references (threads, markers, HEAD).
 pub struct RefManager {
@@ -315,25 +325,13 @@ impl RefManager {
     }
 
     pub fn resolve(&self, refspec: &str) -> Result<Option<ChangeId>> {
-        if let Some(id) = resolve_refspec(
+        resolve_refspec(
             refspec,
             || self.read_head(),
             |name| self.get_thread(&ThreadName::new(name)),
             |name| self.get_marker(&MarkerName::new(name)),
-        )? {
-            return Ok(Some(id));
-        }
-        // Fallback: the heddle-internal recovery handle. Reached only when
-        // nothing else matched (no thread/marker of this name, and it is not a
-        // bare change-id), so an explicit same-named user marker always wins
-        // while `heddle goto undo-recovery` still resolves the preserved
-        // pre-undo state.
-        if refspec == UNDO_RECOVERY_HANDLE
-            && let Some(id) = self.get_undo_recovery()?
-        {
-            return Ok(Some(id));
-        }
-        Ok(None)
+            || self.get_undo_recovery(),
+        )
     }
 
     pub fn pack_refs(&self) -> Result<()> {

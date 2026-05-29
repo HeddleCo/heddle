@@ -583,7 +583,7 @@ fn test_undo_recovery_marker_survives_divergent_capture() {
     assert_eq!(recovery.short(), friction_state);
 
     // Recover the pre-undo content via the well-known handle.
-    heddle_must_succeed(&["goto", "undo-recovery"], temp.path());
+    heddle_must_succeed(&["goto", ".undo-recovery"], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION ONE\nFRICTION TWO\n",
@@ -642,9 +642,9 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
         "internal recovery ref must pin the pre-undo (friction) state"
     );
 
-    // (c) the recovery UX is preserved: `goto undo-recovery` resolves the
+    // (c) the recovery UX is preserved: `goto .undo-recovery` resolves the
     // internal ref and restores the pre-undo content.
-    heddle_must_succeed(&["goto", "undo-recovery"], temp.path());
+    heddle_must_succeed(&["goto", ".undo-recovery"], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION\n",

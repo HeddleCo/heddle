@@ -32,8 +32,10 @@ use crate::cli::{Cli, should_output_json, style};
 /// `refs/threads/`, `refs/remotes/`): doing so coupled recovery to a
 /// user-writable name and let the `MarkerDelete` undo inverse collide with it.
 /// `apply_undo_batch` replays only user-marker/thread inverses, so it can never
-/// see or clobber this internal pointer. `heddle goto undo-recovery` resolves
-/// it via the [`refs::UNDO_RECOVERY_HANDLE`] fallback in `RefManager::resolve`.
+/// see or clobber this internal pointer. `heddle goto .undo-recovery` resolves
+/// it via the reserved [`refs::UNDO_RECOVERY_HANDLE`], which `resolve_refspec`
+/// routes to the internal pointer BEFORE any user ref — and whose leading `.`
+/// makes it uncreatable as a user ref, so it is unshadowable in both directions.
 const UNDO_RECOVERY_MARKER: &str = UNDO_RECOVERY_HANDLE;
 
 #[derive(Serialize)]
