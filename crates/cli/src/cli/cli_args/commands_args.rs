@@ -1393,6 +1393,12 @@ pub struct ActorSpawnArgs {
     #[arg(long)]
     pub thread: Option<String>,
 
+    /// Attach the actor to the current thread instead of minting a new
+    /// `actor/<session>` thread. Use this to record the detected agent
+    /// identity without leaving a stray thread behind.
+    #[arg(long, conflicts_with = "thread")]
+    pub no_thread: bool,
+
     /// AI provider name (e.g. `anthropic`).
     #[arg(long)]
     pub provider: Option<String>,

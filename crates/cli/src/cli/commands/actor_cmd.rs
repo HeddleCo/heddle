@@ -262,6 +262,7 @@ impl ActorOutput {
 pub async fn cmd_actor_spawn(
     cli: &Cli,
     thread: Option<String>,
+    no_thread: bool,
     provider: Option<String>,
     model: Option<String>,
 ) -> Result<()> {
@@ -272,6 +273,18 @@ pub async fn cmd_actor_spawn(
             "actor spawn"
         ))
     })?;
+
+    // `--no-thread` attaches the actor to the current thread rather than
+    // minting a fresh `actor/<session>` thread. Resolve it up front so a
+    // detached HEAD fails cleanly before we create any registry entry.
+    let attach_thread = if no_thread {
+        match repo.head_ref()? {
+            Head::Attached { thread } => Some(thread),
+            _ => return Err(anyhow!(actor_spawn_no_thread_detached_advice())),
+        }
+    } else {
+        None
+    };
 
     let explicit_identity = provider
         .as_ref()
@@ -304,11 +317,18 @@ pub async fn cmd_actor_spawn(
 
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = registry.create_generated_entry(|session_id| {
-        let thread_name = ThreadName::new(thread
-            .clone()
-            .unwrap_or_else(|| format!("actor/{session_id}")));
+        let thread_name = match &attach_thread {
+            Some(current) => current.clone(),
+            None => ThreadName::new(
+                thread
+                    .clone()
+                    .unwrap_or_else(|| format!("actor/{session_id}")),
+            ),
+        };
 
-        if repo.refs().get_thread(&thread_name)?.is_none() {
+        // In `--no-thread` mode we attach to the existing current thread
+        // and never create a ref, so no stray thread is left behind.
+        if attach_thread.is_none() && repo.refs().get_thread(&thread_name)?.is_none() {
             repo.refs().set_thread(&thread_name, &base_state)?;
         }
 
@@ -338,11 +358,25 @@ pub async fn cmd_actor_spawn(
             usage_summary: AgentUsageSummary::default(),
             last_progress_at: None,
             report_flush_state: None,
-            attach_reason: Some(format!(
-                "actor {session_id} was spawned explicitly on thread {thread_name}"
-            )),
-            attach_precedence: vec!["explicit-actor-spawn".to_string()],
-            winning_attach_rule: Some("explicit-actor-spawn".to_string()),
+            attach_reason: Some(if attach_thread.is_some() {
+                format!(
+                    "actor {session_id} was attached to the current thread {thread_name} without minting a new thread"
+                )
+            } else {
+                format!("actor {session_id} was spawned explicitly on thread {thread_name}")
+            }),
+            attach_precedence: vec![
+                if attach_thread.is_some() {
+                    "no-thread-attach".to_string()
+                } else {
+                    "explicit-actor-spawn".to_string()
+                },
+            ],
+            winning_attach_rule: Some(if attach_thread.is_some() {
+                "no-thread-attach".to_string()
+            } else {
+                "explicit-actor-spawn".to_string()
+            }),
             probe_source: probe_source.clone(),
             probe_confidence,
             status: AgentStatus::Active,
@@ -706,8 +740,10 @@ fn actor_identity_env_signals() -> Vec<String> {
 
 fn detected_actor_next_action(provider: Option<&str>, model: Option<&str>) -> Option<String> {
     match (provider, model) {
+        // Recommend `--no-thread` so the detected identity is attached to
+        // the current thread without leaving a stray `actor/<session>`.
         (Some(provider), Some(model)) => Some(format!(
-            "heddle actor spawn --provider {provider} --model {model}"
+            "heddle actor spawn --no-thread --provider {provider} --model {model}"
         )),
         _ => None,
     }
@@ -749,6 +785,23 @@ fn is_no_active_actor_error(err: &anyhow::Error) -> bool {
     err.chain()
         .filter_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
         .any(|advice| advice.kind == "no_active_actor")
+}
+
+fn actor_spawn_no_thread_detached_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "actor_spawn_no_thread_detached",
+        "Cannot attach to the current thread",
+        "`--no-thread` attaches the actor to the thread HEAD points at. Check out a thread first (`heddle thread switch <name>`), or run `heddle actor spawn` without `--no-thread` to mint a dedicated thread.",
+        "HEAD is not attached to a thread, so there is no current thread to attach the actor to",
+        "minting a thread implicitly would create exactly the stray thread `--no-thread` is meant to avoid",
+        "no actor registry entries, refs, repository objects, or worktree files were changed",
+        "heddle thread switch <name>",
+        vec![
+            "heddle thread list".to_string(),
+            "heddle thread switch <name>".to_string(),
+            "heddle actor spawn".to_string(),
+        ],
+    )
 }
 
 fn no_active_actor_advice() -> RecoveryAdvice {

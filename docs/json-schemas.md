@@ -2960,10 +2960,15 @@ outside clean verification coverage.
 {"output_kind": "bisect_start", "status": "started"}
 ```
 
-`heddle blame --output json` emits:
+`heddle blame --output json` emits structured attribution that mirrors
+`log` / `show`: each line (and each entry in `origins`) carries a
+`principal` object (`name`, `email`) and an `agent` field that is either
+a structured object (`provider`, `model`, optional `session_id` /
+`policy_id`) or `null` for human-only changes — no string-parsing
+required:
 
 ```json
-{"file": "src/lib.rs", "context": [], "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "author": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "author": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}]}]}
+{"file": "src/lib.rs", "context": [], "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
 ```
 
 `heddle bridge git ingest|reason --output json` emit:

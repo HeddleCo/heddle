@@ -812,6 +812,7 @@ async fn async_main() -> Result<()> {
                 cmd_actor_spawn(
                     &cli,
                     args.thread.clone(),
+                    args.no_thread,
                     args.provider.clone(),
                     args.model.clone(),
                 )
