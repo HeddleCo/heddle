@@ -562,23 +562,60 @@ pass — not two mechanisms**.
 Serve exactly the **forward closure** (trees, blobs, sidecars) of that set;
 everything else is absent. The two surfaces are the same gate projected:
 
-- **Wire serve (weft, authoritative).** `ListRefs` omits any thread whose tip is
-  not in the caller's served set. `Pull`'s planner walks from the tip and
-  **halts at the first under-tier state**: it emits neither that state's
-  `ObjectType::State` object — so no `intent`/`attribution`/`signature` header
-  ever leaves the host, closing cid 3324616942 — nor anything reachable only
-  through it. Because the walk stops at the embargo boundary, the under-tier
-  state's **descendants are never reached either**: the downward-closure is
-  enforced structurally, not by a second filter.
+- **Wire serve (weft, authoritative) — visibility is a PRE-PASS, computed before
+  any object is emitted, and `ListRefs` lags rather than drops.** The closure
+  planner cannot be gated by "walk from the tip and halt when the walk *later*
+  reaches an under-tier ancestor": that gate fires too late.
+  `enumerate_state_closure_with_options` (`crates/proto/src/object_graph.rs:59`)
+  seeds its queue with the *requested tip* (`:70`) and, on the very first pop,
+  pushes that state's `ObjectType::State` object into `out` (`:85-90`) and then
+  its whole tree closure (`:98-104`) **before** it enqueues the parents
+  (`:92-96`) — so an ancestor's visibility is not consulted until a later
+  iteration, by which point the descendant tip's `State` (carrying
+  `intent`/`attribution`/`signature`) and its contents have already been emitted.
+  (The plan-only variant `enumerate_state_closure_plan_with_options` has the
+  identical order: state pushed at `:160-163`, parents enqueued at `:165-169`,
+  tree at `:171-177`.) The gate must therefore run as a **pre-pass that resolves
+  the served frontier before any emission**: walk the requested tip's ancestry,
+  find the **last visible ancestor** — the deepest state all of whose
+  ancestors-and-self are visible to `A` — and root the closure emission at *that*
+  frontier, not at the requested tip. The planner then only ever emits states
+  known-visible up front; an under-tier state's `ObjectType::State` object (hence
+  its `intent`/`attribution`/`signature` header) never leaves the host, closing
+  cid 3324616942, and because emission is rooted at the visible frontier the
+  under-tier state's **descendants are never enumerated either** — downward-closure
+  is enforced at planning time, structurally, not discovered mid-walk.
+
+  **`ListRefs` lags the ref at that frontier; it never drops an already-public
+  ref.** A `RefEntry` (`crates/proto/src/message_refs.rs:89`) carries the ref's
+  tip as `change_id` (`:91`) and `RefsList.refs` (`:82`, `:85`) is the served
+  advertisement. When the real thread tip is a public commit descended from an
+  embargoed ancestor, dropping the whole `RefEntry` would **temporarily remove an
+  already-public branch** — a non-forward-only, unstable change, the opposite of
+  the r4/r5 forward-only guarantee (§5.0, §7.1). Instead `ListRefs` rewrites the
+  ref's `change_id` to the served frontier the pre-pass computed (lag `main` at
+  the last all-public ancestor `N-1`), and `head_state` (`:84`) lags to that same
+  frontier. The ref stays stable and forward-only — it advances only as ancestors
+  disclose (§5.4). A ref is **absent** only when *no* ancestor is visible (a
+  wholly-embargoed thread with no public ancestor — e.g. a pre-review
+  `private:<author>` feature thread, §7.2), because then there is no
+  last-visible-ancestor to lag to.
 - **Git-bridge export (heddle OSS).** `export_state` (`git_export.rs:28`) already
   loads the `State` (hence its `ChangeId`) but currently passes only
   `&state.tree` to `export_tree` (`git_export.rs:41`) and takes no audience (its
   `--audience` is planned — inline note at `git_export.rs:44-47`). Add an
   `AudienceTier` parameter and **halt the public-audience export walk at the
-  first under-tier state**. `refs/heads/main` fast-forwards only through the last
-  all-public ancestor; the embargoed commit and its descendants are simply not
-  exported. This is the Git-mirror projection of the very same gate — the public
-  mirror only ever holds the visible, ancestry-closed closure.
+  first under-tier state**. Unlike the wire planner, this surface needs no
+  separate pre-pass: the export loop walks `sort_states_topologically(&states)`
+  (`git_export.rs:201`) **ancestor-first** (`:213`), so an under-tier ancestor is
+  always visited — and the halt fires — *before* any of its descendants is minted;
+  the descendants are simply never reached in topological order. (The served set
+  is still the pre-pass's frontier; topological order just makes the halt
+  order-sound here where the tip-first, emit-on-pop wire planner above is not.)
+  `refs/heads/main` fast-forwards only through the last all-public ancestor; the
+  embargoed commit and its descendants are simply not exported. This is the
+  Git-mirror projection of the very same gate — the public mirror only ever holds
+  the visible, ancestry-closed closure.
 
 **Why this is a plain forward-closure, not a set difference (this supersedes the
 r3 framing).** r3 correctly rejected reusing `collect_excluded`
@@ -680,16 +717,18 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
    `restricted:security` (§5.2) — including the otherwise all-seeing `Internal`
    audience. `N+1` keeps the thread default (`public`).
 2. **Public pull (hard) — the embargoed commit and its descendants are absent.**
-   A reader with public tier calls `Pull`. The weft serve planner walks from the
-   thread tip and **halts at `N`** (the first under-tier state): it emits neither
-   `N`'s `ObjectType::State` object — so none of `N`'s `intent` / `attribution` /
-   `signature` / timestamp metadata travels, because there is no header-only form
-   to serve (§5.0, closing cid 3324616942) — nor anything reachable only through
-   `N`. Because `N+1` has `N` as an ancestor, `N+1` is **also** absent
-   (downward-closure, §5.0/§5.3); the public `ListRefs` shows the thread tip
-   lagged to the last all-public ancestor `N-1`. The public clone learns nothing
-   of `N` or `N+1` — not their content, not their metadata, only that the public
-   tip is `N-1`.
+   A reader with public tier calls `Pull`. The weft serve **pre-pass** resolves
+   the served frontier for this audience (§5.3) — the last visible ancestor
+   `N-1` — *before* any object is emitted, so the closure emission is rooted at
+   `N-1` and `N` is never enumerated: it emits neither `N`'s `ObjectType::State`
+   object — so none of `N`'s `intent` / `attribution` / `signature` / timestamp
+   metadata travels, because there is no header-only form to serve (§5.0, closing
+   cid 3324616942) — nor anything reachable only through `N`. Because `N+1` has
+   `N` as an ancestor, `N+1` is **also** absent (downward-closure, §5.0/§5.3);
+   the public `ListRefs` **lags** the thread ref to the last all-public ancestor
+   `N-1` (it rewrites the ref's tip, never dropping the already-public ref —
+   §5.3). The public clone learns nothing of `N` or `N+1` — not their content,
+   not their metadata, only that the public tip is `N-1`.
 
    **Honest scope note.** A fix that *descends from* an embargoed commit therefore
    cannot reach the public mirror ahead of disclosure. The §1 goal — "ship `N+1`
