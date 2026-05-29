@@ -640,6 +640,27 @@ this list. **Six** surfaces, each the same frontier projected:
    never iterate the raw mapping. Like a tag, a note names a *specific* commit and
    cannot lag to an ancestor — withhold it entirely until its state discloses,
    then publish forward.
+   **But for this ref, filtering the current write/tree is *not* sufficient,
+   because the notes ref is *history-bearing*.** `write_note` reads the prior
+   notes head and **parents each new notes commit on it** (`read_notes_head` →
+   `git_notes.rs:180`; `new_commit_as(sig, sig, msg, tree, parents=[prev_head])`
+   → `git_notes.rs:195-204`), so `refs/notes/heddle` is its **own accreting commit
+   chain**: every note ever written — including one minted for a state that was
+   public-then-embargoed, or written before the audience gate existed — stays
+   reachable through the ref's **parent chain** even if the *current* (HEAD) notes
+   tree omits it. The forced `+refs/notes/*` mirror (`git_core.rs:300`) transfers
+   the **whole chain**, so publishing the ref still ships the embargoed note's
+   blob/tree out-of-band and leaks its `change_id`/attribution/agent/signal
+   metadata. Filtering only the tip tree is the notes analogue of the unsound
+   "swap the published stub" fix (§5.0.1) — it changes what the *current* object
+   says while leaving the hidden object reachable. The sound rule is therefore to
+   **REBUILD the published notes ref**: before public export/push, reconstruct the
+   notes commit chain (squash/rewrite) so that **no embargoed-state note object is
+   reachable through the published ref's history** — a notes commit (or chain)
+   whose every reachable tree maps only served states. This is the §5.0/r4–r5
+   content-addressing principle (*you cannot hide an object that is still reachable
+   from a published ref*) applied to an **auxiliary, history-bearing ref**, and it
+   generalizes immediately below.
 6. **Symref / bulk-publication surfaces — `HEAD` and the whole-mirror
    export/push.** `HEAD` is written as a symref to a branch
    (`ref: refs/heads/<branch>`, `git_core.rs:2398-2407`); it is sound **iff** its
@@ -653,6 +674,59 @@ this list. **Six** surfaces, each the same frontier projected:
    soundness entirely from surfaces 3–5 having already lagged/withheld each ref
    *before* the bulk copy runs. Listed so the implementer treats "copy the whole
    mirror" as gated-by-construction, never as a separate bypass.
+
+**History-reachability — classify every surface as single-target vs
+history-bearing.** The notes leak above is not a notes-specific quirk; it is the
+§5.0/r4–r5 principle (*an object stays exposed as long as it is reachable from a
+published ref, regardless of what the ref's tip currently names*) applied to a
+ref that maintains **its own commit chain**. So the surface class splits in two,
+by *what is reachable from the published ref*:
+
+- **Single-target / frontier-governed surfaces** — the published ref names one
+  commit and everything reachable from it is the **project state-DAG**, which the
+  downward-closed frontier invariant (§5.0/§5.3) already holds served. Lagging the
+  tip (branch ref, surface 3; `HEAD` symref, surface 6) or withholding it
+  (marker→tag, surface 4) is sufficient, because the history reachable from the
+  published target is served *by construction of the frontier*. The set-emitting /
+  per-call surfaces (wire closure planner, surface 1; `ListRefs`, surface 2)
+  likewise recompute from the frontier per request and accrete no history.
+  **Filter / lag / withhold suffices.**
+- **History-bearing auxiliary surfaces** — the published ref maintains a commit
+  chain **distinct from** the project state-DAG, where each update is a new commit
+  *on top of* the prior head, so its reachable history accretes every past write
+  regardless of the current tip's tree. The frontier does **not** govern this
+  chain (there is no all-public ancestor notes commit to lag to — served and
+  embargoed notes interleave in write order). **Filtering current content is never
+  sufficient; the ref MUST be rebuilt on withhold** so no embargoed object is
+  reachable through its published history. Today the lone such surface is **state
+  notes** (surface 5, `refs/notes/heddle`), and because the mirror refspec is
+  `+refs/notes/*` (`git_core.rs:300`) **any** future `refs/notes/<x>` falls in
+  this bucket automatically.
+
+**General rule (stated so a reviewer cannot find a second leaking history-bearing
+surface):** *any published ref that accretes its own commit history — notes refs
+today; any future history-bearing auxiliary ref (another `refs/notes/*`, a
+replace-ref, a synthetic metadata ref) — MUST be rebuilt so embargoed objects are
+unreachable through that ref's published history; filtering the current content is
+never sufficient for a history-bearing ref.* The `resolve_frontier` chokepoint
+below therefore returns, for a history-bearing ref, **not a lagged tip but a
+rebuilt ref** (a reconstructed chain excluding every embargoed-state note object);
+single-target refs get a lagged/withheld tip as before.
+
+**The rebuild stays forward-only (r4/r5-consistent).** Rebuilding the notes ref
+for publication is forward-only *from the public consumer's view*: a note for an
+already-served state, once published, keeps stable content (a note is
+identity-stable like the served commit it annotates), and because tiers are
+one-way (§5.4 — a served state never re-embargoes) the set of published notes only
+**grows**. The rebuild never rewrites or drops a note that was already public for a
+served state; it only excludes embargoed-state note objects from reachability and
+appends the newly-served state's note forward on disclosure. (The notes ref's
+*commit OIDs* may churn under rebuild — acceptable because it is an out-of-band
+auxiliary ref carried by the forced `+refs/notes/*` mirror, not project history
+under the FF guard; the forward-only guarantee is on the **observable note
+content**, never on the notes-commit OIDs. This is the one sanctioned ref rewrite,
+and only because it removes never-should-have-been-public objects — it does **not**
+license the §5.0.1-forbidden rewrite of already-published *public* history.)
 
 **Close the class structurally, not by extending this list.** The recurring leak
 across r6 (closure planner), r7 (`ListRefs` + the git_export branch sync), r8
@@ -1271,8 +1345,10 @@ withheld `S` leaves. A public puller therefore sees neither the embargoed state
   This is the Git-mirror projection of the one downward-closed gate (§5.3) — no
   separate strategy. The same pre-pass governs **all** Git ref-publishing
   surfaces, not just the branch ref: the marker→tag sync, the `refs/notes/heddle`
-  note writes, the `HEAD` symref, and the bulk export/push (§5.3 surfaces 4–6,
-  §10 #5). And a hidden merge that leaves ≥2 incomparable maximal served states is
+  note writes (a **history-bearing** auxiliary ref — **rebuilt on withhold**, not
+  merely tip-filtered, since its parent chain accretes every past note, §5.3), the
+  `HEAD` symref, and the bulk export/push (§5.3 surfaces 4–6, §10 #5). And a
+  hidden merge that leaves ≥2 incomparable maximal served states is
   handled by the multi-root path — `ListRefs` advertises the antichain as multiple
   `RefEntry`s and the Git mirror publishes synthetic `<thread>@<changeid-prefix>`
   refs (§5.3) — so no visible side is silently unreachable. The earlier "permanent
@@ -1334,9 +1410,11 @@ issues are checked against:
   including the **multi-root antichain advertisement** via the `Vec<RefEntry>`
   (`message_refs.rs:85`); (3) Git-bridge branch ref-sync (`git_export.rs:277-288`);
   (4) Git-bridge marker→tag sync (`git_export.rs:290-296`, `git_sync.rs:157`); (5)
-  Git-bridge state notes `refs/notes/heddle` (`git_notes.rs:29`; writes at
-  `git_export.rs:242-245,252-261` + `git_core.rs:1105-1109`; forced mirror
-  `+refs/notes/*`, `git_core.rs:300`); (6) the `HEAD` symref (`git_core.rs:2398-2407`)
+  Git-bridge state notes `refs/notes/heddle` — the lone **history-bearing** surface,
+  **rebuilt on withhold** (not just tip-filtered) (`git_notes.rs:29`; writes at
+  `git_export.rs:242-245,252-261` + `git_core.rs:1105-1109`; `write_note` parents on
+  prior head `git_notes.rs:180,195-204`; forced mirror `+refs/notes/*`,
+  `git_core.rs:300`); (6) the `HEAD` symref (`git_core.rs:2398-2407`)
   + bulk `export_to_path`/`push` (`git_core.rs:751,678-689`). Plus the structural
   close-the-class fix: one shared `resolve_frontier` chokepoint + a conformance
   test that no ref-publishing or note-writing call site takes a raw
@@ -1347,8 +1425,13 @@ issues are checked against:
   topological pass) and **transmission** without leaking (absence ≡ non-existence);
   the **multi-root protocol path** (advertise antichain, N single-root pulls,
   synthetic Git refs); **cross-path disclosure ordering** (forward-only under every
-  interleaving); **transitive promotion** up all parent paths; and the **one-way
-  tier constraint** — no re-embargo of a served state.
+  interleaving); **transitive promotion** up all parent paths; the **one-way
+  tier constraint** — no re-embargo of a served state; and **ref
+  history-reachability** — single-target/frontier-governed refs (branch, tag,
+  `HEAD`, wire surfaces: filter/lag/withhold suffices) vs **history-bearing
+  auxiliary refs** (state notes `refs/notes/heddle`, and any `+refs/notes/*`) that
+  must be **rebuilt on withhold** so no embargoed object is reachable through the
+  published ref's history (§5.3).
 
 1. **impl(objects/repo): `StateVisibility` object + per-state sidecar store.**
    Add `StateVisibility` / `StateVisibilityBlob` (objects), the `visibility/`
@@ -1416,6 +1499,22 @@ issues are checked against:
      `change_id`/attribution/agent/signals (`git_notes.rs:33-56`), the Git-mirror
      analogue of the State-header leak; the whole-mapping backfill loop must filter
      by the served set, never iterate the raw mapping.
+   - **Notes-ref rebuild on withhold (history-bearing surface).** Filtering the
+     current write/tree is **not** sufficient here: the notes ref is history-bearing
+     — `write_note` parents each notes commit on the prior head (`read_notes_head`
+     `git_notes.rs:180`; `new_commit_as(..., parents=[prev_head])`
+     `git_notes.rs:195-204`), so an embargoed-state note written in a *past* notes
+     commit stays reachable through the ref's parent chain and the forced
+     `+refs/notes/*` mirror ships the whole chain. This issue MUST **rebuild the
+     published notes ref on withhold** — reconstruct (squash/rewrite) its commit
+     chain so **no embargoed-state note object is reachable through the published
+     history**, not merely filter the tip tree — forward-only on the *observable note
+     content* (served-state notes never drop/rewrite; one-way tiers § 5.4 make the
+     published set grow-only), §5.3 history-bearing-ref rule. `resolve_frontier`
+     returns a *rebuilt ref* for history-bearing refs (vs a lagged/withheld tip for
+     single-target refs); the conformance test must additionally assert the
+     published notes ref's **reachable history** contains no note object for an
+     unserved state — not just that the current tip tree omits it.
    - **`HEAD` symref + bulk export/push** (`git_core.rs:2398-2407,751,678-689`):
      `HEAD` resolves to a served branch (never a wholly-embargoed one); the bulk
      copy inherits soundness from the per-ref gating above.
