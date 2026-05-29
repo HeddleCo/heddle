@@ -1491,7 +1491,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
             );
             assert!(
                 source.contains("recommended_action_template")
-                    && source.contains("recommended_action_argv"),
+                    && source.contains("argv_template"),
                 "{} should execute structured verify actions and fill display-only templates",
                 script.display()
             );
