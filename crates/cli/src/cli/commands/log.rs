@@ -716,4 +716,37 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains('\x1b'), "expected ANSI in oneline: {s:?}");
     }
+
+    /// The default full text view must lead with log data, not the
+    /// `Repository:` mode preamble — that line is noise on every read
+    /// (heddle#275). `-v` keeps it for diagnostic context.
+    #[test]
+    #[serial(color_state)]
+    fn write_full_gates_repository_preamble_on_verbose() {
+        style::force_for_test(false);
+        let output = LogOutput {
+            output_kind: "log",
+            status: "completed",
+            repository_capability: "git-overlay".to_string(),
+            storage_model: "git+heddle-sidecar".to_string(),
+            git_overlay_import_hint: None,
+            states: vec![sample_entry()],
+        };
+
+        let mut buf = Vec::new();
+        write_full(&mut buf, &output, false).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            !s.contains("Repository:"),
+            "default full log leaked the mode preamble: {s:?}"
+        );
+
+        let mut buf = Vec::new();
+        write_full(&mut buf, &output, true).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("Repository:"),
+            "verbose full log should retain the mode preamble: {s:?}"
+        );
+    }
 }
