@@ -350,6 +350,60 @@ pub(crate) struct ThreadCaptureSummary {
     pub total: usize,
 }
 
+/// Undo a partially-materialized `start` when a later step fails — today
+/// the only such step is `--hydrate` directory-symlinking, which can fail
+/// on a host/FS that rejects directory symlinks. Removes the freshly
+/// materialized worktree (its dep symlinks are removed with it, since
+/// `remove_dir_all` unlinks symlinks without following them, so the
+/// origin's deps are never touched) and, for a thread this invocation
+/// created, deletes the ref + records the compensating delete + sweeps
+/// any manifest — leaving the repo as if `start` never ran.
+///
+/// Best-effort: rollback sub-failures are warned, not propagated, so the
+/// original hydrate error still surfaces to the user.
+fn rollback_started_thread(
+    repo: &Repository,
+    thread_name: &ThreadName,
+    worktree: &Path,
+    base_state: &ChangeId,
+    thread_was_created: bool,
+    is_materialized: bool,
+) {
+    if let Err(err) = std::fs::remove_dir_all(worktree)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            error = %err, path = %worktree.display(),
+            "hydrate rollback: failed to remove partial checkout"
+        );
+    }
+    if is_materialized
+        && let Err(err) =
+            repo::thread_manifest::remove_thread_manifest_dir(repo.heddle_dir(), thread_name.as_str())
+    {
+        tracing::warn!(error = %err, "hydrate rollback: failed to remove thread manifest");
+    }
+    if thread_was_created {
+        match repo.refs().delete_thread(thread_name) {
+            Ok(_) => {
+                if let Err(err) = repo.oplog().record_thread_delete(
+                    thread_name,
+                    base_state,
+                    Some(&repo.op_scope()),
+                ) {
+                    tracing::warn!(
+                        error = %err,
+                        "hydrate rollback: failed to record compensating delete"
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "hydrate rollback: failed to delete thread ref");
+            }
+        }
+    }
+}
+
 pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     if args.path.is_some() {
@@ -1784,15 +1838,48 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             // new checkout so it's immediately buildable. The links stay
             // ignored — they're never captured into heddle.
             if args.hydrate {
-                let sources = hydrate::hydratable_ignored_dirs(repo)?;
-                let linked = hydrate::hydrate_checkout(&abs_path, &sources)?;
-                // Preserve the origin's effective ignore rule for the
-                // linked deps in the checkout's own (native) ignore
-                // source. The isolated checkout has no `.git`, so it
-                // can't fall back on the origin's `.gitignore` — without
-                // this the symlinks would read as added paths and
-                // capture would choke on the out-of-checkout link target.
-                hydrate::preserve_hydrated_ignores(&abs_path, &linked)?;
+                // Hydrate is the LAST fallible step before the thread is
+                // committed (the ThreadManager record below). It can fail
+                // on a host/filesystem that rejects directory symlinks
+                // (Windows without the privilege, an FS without dir-symlink
+                // support). Treat it as a transaction: if any symlink (or
+                // the ignore-preservation that follows) fails, roll back
+                // everything this `start` materialized so NO half-started
+                // thread or checkout is left behind.
+                let hydrate_result = (|| -> Result<Vec<String>> {
+                    let sources = hydrate::hydratable_ignored_dirs(repo)?;
+                    let linked = hydrate::hydrate_checkout(&abs_path, &sources)?;
+                    // Preserve the origin's effective ignore rule for the
+                    // linked deps in the checkout's own (native) ignore
+                    // source. The isolated checkout has no `.git`, so it
+                    // can't fall back on the origin's `.gitignore` — without
+                    // this the symlinks would read as added paths and
+                    // capture would choke on the out-of-checkout link target.
+                    hydrate::preserve_hydrated_ignores(&abs_path, &linked)?;
+                    Ok(linked)
+                })();
+                let linked = match hydrate_result {
+                    Ok(linked) => linked,
+                    Err(err) => {
+                        rollback_started_thread(
+                            repo,
+                            &thread_name,
+                            &abs_path,
+                            &base_state,
+                            existing_thread_state.is_none(),
+                            matches!(thread_mode, ThreadMode::Materialized),
+                        );
+                        return Err(err.context(
+                            "--hydrate could not create a directory symlink in the new \
+                             checkout. This host or filesystem appears to reject directory \
+                             symlinks (e.g. Windows without Developer Mode / the \
+                             SeCreateSymbolicLink privilege, or a filesystem that doesn't \
+                             support them). The partially-created thread has been rolled back \
+                             — re-run `heddle start` without --hydrate, or enable \
+                             directory-symlink support on this host and retry.",
+                        ));
+                    }
+                };
                 if linked.is_empty() {
                     eprintln!(
                         "{}: --hydrate found no ignored dependency directories at the origin \

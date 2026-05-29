@@ -182,6 +182,63 @@ fn hydrate_symlinks_ignored_dep_dirs_into_checkout() {
 }
 
 #[test]
+fn hydrate_symlink_failure_leaves_no_partial_thread() {
+    // P2 (cid 3327247262): on a host/filesystem that REJECTS directory
+    // symlinks (Windows without the privilege, or an FS that doesn't
+    // support dir symlinks), the symlink step fails AFTER the thread
+    // ref + checkout were created — leaving a half-started thread.
+    // `start --hydrate` must be atomic: either it fully succeeds, or it
+    // fails cleanly with NO partial thread/checkout left behind.
+    //
+    // We simulate the unsupported-symlink host with the
+    // `hydrate_symlink_dir` fault checkpoint so the contract is
+    // exercised even on a platform that natively supports dir symlinks.
+    let temp = TempDir::new().unwrap();
+    init_deps_in_ignored_dir_project(temp.path());
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
+
+    let thread_path = temp.path().join("iso");
+    let output = heddle_output_with_env(
+        &[
+            "start",
+            "iso",
+            "--path",
+            thread_path.to_str().unwrap(),
+            "--hydrate",
+        ],
+        Some(temp.path()),
+        &[("HEDDLE_FAULT_INJECT", "hydrate_symlink_dir")],
+    )
+    .expect("the heddle binary should run");
+
+    // (a) The command fails cleanly...
+    assert!(
+        !output.status.success(),
+        "start --hydrate must fail when directory symlinks are rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("directory symlink"),
+        "error must name the platform/FS limitation (directory symlinks); got:\n{stderr}"
+    );
+
+    // (b) ...and leaves NO half-started thread or checkout — the repo is
+    // as if `start` never ran.
+    assert!(
+        std::fs::symlink_metadata(&thread_path).is_err(),
+        "a hydrate failure must not leave the partially-materialized checkout at {}",
+        thread_path.display()
+    );
+    let list = heddle(&["thread", "list"], Some(temp.path()))
+        .expect("thread list should run after the rolled-back start");
+    assert!(
+        !list.contains("iso"),
+        "a hydrate failure must not leave a dangling thread ref; got:\n{list}"
+    );
+}
+
+#[test]
 fn hydrate_does_not_link_admin_dirs() {
     let temp = TempDir::new().unwrap();
     init_deps_in_ignored_dir_project(temp.path());

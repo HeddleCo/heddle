@@ -198,11 +198,17 @@ pub(crate) fn preserve_hydrated_ignores(checkout: &Path, linked: &[String]) -> R
 
 #[cfg(unix)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    // Test seam: lets integration tests simulate a host/FS that rejects
+    // directory symlinks (Windows without the privilege, exotic FS) so
+    // the hydrate rollback contract is exercised on a platform that
+    // *does* support them. No-op in production (env var unset).
+    objects::fault_inject::maybe_fail_at("hydrate_symlink_dir")?;
     std::os::unix::fs::symlink(target, link)
 }
 
 #[cfg(not(unix))]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    objects::fault_inject::maybe_fail_at("hydrate_symlink_dir")?;
     std::os::windows::fs::symlink_dir(target, link)
 }
 
