@@ -243,21 +243,26 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         return Ok(());
     }
 
+    let index_intent = git_index_intent(&repo)?;
+    if args.no_all && !args.all && index_intent.staged_paths.is_empty() {
+        // `--no-all` is index-only. With no staged paths the index is identical
+        // to HEAD (empty index, or index == HEAD), so there is nothing genuinely
+        // staged. Surface the standard nothing-to-commit outcome BEFORE the
+        // commit preflights: identity config and ref-update availability are
+        // irrelevant for a commit that was never going to write anything, so an
+        // unconfigured identity or blocked ref update must not mask the
+        // nothing-to-commit result.
+        return Err(anyhow!(nothing_to_commit_advice()));
+    }
+
     preflight_git_checkpoint_identity(&repo, &user_config, "commit")?;
     preflight_git_checkpoint_ref_update(&repo, "commit")?;
     let git_previous_commit = git_head_oid(repo.root());
-    let index_intent = git_index_intent(&repo)?;
     let pending_capture = pending_capture_before_commit(&repo)?;
     if !args.all && (args.no_all || !index_intent.staged_paths.is_empty()) {
-        // `--no-all` is index-only. Reaching here with no staged paths means
-        // the index is identical to HEAD (empty index, or index == HEAD), so
-        // there is nothing genuinely staged. Refuse with the standard
-        // nothing-to-commit outcome instead of letting `commit_staged_index`
-        // write a spurious empty / index-identical Git checkpoint. (The
-        // non-`--no-all` disjunct can only be taken with staged paths present.)
-        if index_intent.staged_paths.is_empty() {
-            return Err(anyhow!(nothing_to_commit_advice()));
-        }
+        // The `--no-all` + empty-index case short-circuited above, so reaching
+        // here always has staged paths present (either via `--no-all` with real
+        // staged changes, or the non-`--no-all` disjunct that requires them).
         commit_staged_index(
             cli,
             &repo,
