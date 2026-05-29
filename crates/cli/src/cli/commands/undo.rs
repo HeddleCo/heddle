@@ -3,8 +3,9 @@
 
 use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
-use objects::object::{ChangeId, ContentHash};
+use objects::object::{ChangeId, ContentHash, MarkerName};
 use oplog::{OpBatch, OpRecord};
+use refs::RefExpectation;
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
 
@@ -19,6 +20,12 @@ use super::{
     worktree_safety::ensure_worktree_clean,
 };
 use crate::cli::{Cli, should_output_json, style};
+
+/// Marker that `undo` points at the pre-undo state before resetting, so the
+/// worktree content the undone batch absorbed stays a first-class, addressable
+/// recovery point in heddle's thread history. A single rolling marker
+/// (ORIG_HEAD-style): each undo overwrites it with its own pre-undo tip.
+const UNDO_RECOVERY_MARKER: &str = "undo-recovery";
 
 #[derive(Serialize)]
 struct OpListOutput {
@@ -54,6 +61,13 @@ struct UndoRedoOutput {
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
     recommended_action_template: Option<ActionTemplate>,
+    /// heddle#305: the pre-undo state preserved for recovery, and the marker
+    /// pointing at it. Present only on a completed `undo`; omitted from the
+    /// wire when absent (preview / redo).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_marker: Option<String>,
     #[serde(skip_serializing)]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "verification")]
@@ -128,6 +142,8 @@ pub fn cmd_undo(
             next_action_template: None,
             recommended_action: None,
             recommended_action_template: None,
+            recovery_state: None,
+            recovery_marker: None,
             trust: None,
         };
 
@@ -146,6 +162,24 @@ pub fn cmd_undo(
         }
 
         return Ok(());
+    }
+
+    // heddle#305: capture the pre-undo state into thread history BEFORE the
+    // reset, so the worktree content the undone batch(es) absorbed is never
+    // silently discarded. The reset below hard-resets the Git mirror and
+    // rewinds the heddle thread; recording the current tip as the
+    // `undo-recovery` marker keeps it a first-class, addressable recovery
+    // point — durable even if a later divergent capture/commit strands the
+    // redo path. The preflights above guarantee the worktree is clean, so the
+    // tip's tree *is* the pre-undo worktree. Durability lives in heddle's
+    // immutable store + refs; undo never records itself as Git history.
+    let recovery_state = repo.head()?;
+    if let Some(state) = recovery_state {
+        repo.refs().set_marker_cas(
+            &MarkerName::new(UNDO_RECOVERY_MARKER),
+            RefExpectation::Any,
+            &state,
+        )?;
     }
 
     let mut updated_batches = Vec::with_capacity(batches.len());
@@ -171,6 +205,8 @@ pub fn cmd_undo(
         next_action_template: recommended_action.template.clone(),
         recommended_action: recommended_action.action,
         recommended_action_template: recommended_action.template,
+        recovery_state: recovery_state.map(|state| state.short()),
+        recovery_marker: recovery_state.map(|_| UNDO_RECOVERY_MARKER.to_string()),
         trust: Some(post_undo_trust),
     };
 
@@ -187,6 +223,14 @@ pub fn cmd_undo(
             print_human_history(&output.batches);
         }
         print_head(&post_undo_repo)?;
+        if let Some(state) = &output.recovery_state {
+            println!(
+                "Preserved pre-undo state {} as marker `{}` (recover with `heddle goto {}`)",
+                style::change_id(state),
+                UNDO_RECOVERY_MARKER,
+                UNDO_RECOVERY_MARKER,
+            );
+        }
         if let Some(trust) = &output.trust {
             print_post_undo_trust(trust);
         }
@@ -227,6 +271,8 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
             next_action_template: None,
             recommended_action: None,
             recommended_action_template: None,
+            recovery_state: None,
+            recovery_marker: None,
             trust: None,
         };
 
@@ -272,6 +318,8 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
         next_action_template: recommended_action.template.clone(),
         recommended_action: recommended_action.action,
         recommended_action_template: recommended_action.template,
+        recovery_state: None,
+        recovery_marker: None,
         trust: Some(post_redo_trust),
     };
 
