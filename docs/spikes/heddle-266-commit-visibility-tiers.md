@@ -562,15 +562,26 @@ pass — not two mechanisms**.
 Serve exactly the **forward closure** (trees, blobs, sidecars) of that set;
 everything else is absent.
 
-**Frontier-before-emit — the one rule, applied to every surface, with no
-carve-out.** The gate is *not* "walk from the tip and stop when you hit an
-under-tier state." It is a **pre-pass**: *before* anything is emitted or any ref
-is moved, resolve the per-audience **visibility frontier** — the *last visible
-ancestor*, the deepest state all of whose ancestors-and-self are visible to `A` —
-and root every surface's output at that frontier. This rule binds **every surface
-that emits or syncs visible state**, uniformly; none halts-the-walk-only, and
-none emits or syncs from the raw thread tip. There are exactly three such
-surfaces, and each is the same frontier projected:
+**Frontier-before-emit — one categorical invariant over the whole class of
+ref-publishing surfaces, with no carve-out.** The gate is *not* "walk from the
+tip and stop when you hit an under-tier state." It is a **pre-pass**: *before*
+anything is emitted or any ref is moved, resolve the per-audience **visibility
+frontier** — in a linear thread the *last visible ancestor* (the deepest state
+all of whose ancestors-and-self are visible to `A`); in a merge DAG the
+**antichain of maximal served states** (the cut across the DAG, defined under
+"Merge DAGs" below) — and root every surface's output at that frontier.
+
+State the rule **categorically**, as a property of the *surface class* rather
+than a checklist of names: **every surface that publishes or syncs a ref, or
+emits served state — branch refs, `ListRefs`, the Git-bridge branch sync, the
+Git-bridge marker→tag sync, *and any surface added later* — MUST resolve the
+visibility frontier before it publishes, and MUST NOT publish or sync from the
+raw thread tip / raw mapped state.** A surface that skips the pre-pass is a bug
+*in that surface*, not a gap in a list here; the invariant — not the enumeration
+— is the gate, so a not-yet-listed surface is never a silent soundness hole. The
+known ref-publishing surfaces **today** (non-exhaustive — see
+`crates/cli/src/bridge/git_export.rs` and the weft serve path for the
+authoritative set) are four, each the same frontier projected:
 
 1. **Wire closure planner** — `enumerate_state_closure_with_options`
    (`crates/proto/src/object_graph.rs:59`) roots its closure emission at the
@@ -579,15 +590,46 @@ surfaces, and each is the same frontier projected:
    `crates/proto/src/message_refs.rs:82-91`) lags the advertised ref's
    `change_id` / `head_state` to the frontier, never dropping an already-public
    ref.
-3. **Git-bridge ref-sync** — the `export_scoped` ref loop
+3. **Git-bridge branch ref-sync** — the `export_scoped` thread loop
    (`crates/cli/src/bridge/git_export.rs:277-288`) advances `refs/heads/main` to
    the **frontier's** mapped commit, *not* to the real `get_thread` tip
    (`git_export.rs:278`).
+4. **Git-bridge marker→tag sync** — the *same* `export_scoped` run, on a
+   whole-repo export (`thread.is_none()`), loops over markers and publishes each
+   as a Git tag: `list_markers` → `get_marker` → `mapping.get_git` →
+   `sync_marker_to_tag` (`crates/cli/src/bridge/git_export.rs:290-296`;
+   `sync_marker_to_tag` at `crates/cli/src/bridge/git_sync.rs:157`). This loop
+   reads the marker's mapped state OID **directly** (`:293-294`), decoupled from
+   the branch frontier — so a marker pointing at an embargoed (but
+   already-mapped) state would publish the hidden commit as `refs/tags/<marker>`
+   even while `refs/heads/main` correctly lags. A tag names a **specific** state,
+   not a moving tip, so it cannot lag to an ancestor; the frontier rule for a tag
+   is therefore **withhold the tag entirely until its marked state is itself
+   served** (the marked state and all its ancestors visible to `A`), then publish
+   it forward on disclosure. (`sync_marker_to_tag` is conflict-on-mismatch, not
+   fast-forward — `git_sync.rs:163-170` — so a tag once published at the hidden
+   OID cannot even be silently corrected later; gating before the publish is the
+   only sound path.)
+
+**Close the class structurally, not by extending this list.** The recurring leak
+across r6 (closure planner), r7 (`ListRefs` + the git_export branch sync), and r8
+(marker→tag) is the *same* bug class — a surface syncing from the raw tip/state —
+re-appearing at a new surface. The durable fix is a single shared chokepoint:
+every ref-publishing surface routes its target through one
+`resolve_frontier(audience, raw_target) -> served_target` helper (returning a
+lagged ref for a moving tip, or *absent* for a tag/ref whose marked state is not
+served), so a new surface that wires a raw OID into `sync_track_to_branch` /
+`sync_marker_to_tag` / the closure root **without** passing through the helper is
+the bug, and the helper — not vigilance over a list — is what makes the class
+impossible. (Follow-up impl issue, not filed: extract the frontier resolver +
+route all four surfaces through it; a conformance test asserts no ref-publishing
+call site takes a raw `get_thread`/`get_marker` OID.)
 
 A topological walk-halt that skips *minting* under-tier states is at most an
 optimization layered on top of this rule — it is **never** the gate, because the
-ref-sync (surface 3) reads the real thread tip independently of which states the
-walk happened to mint. Each host below realizes the rule for its surface(s):
+ref-sync surfaces (3, 4) read the raw tip / raw marked state independently of
+which states the walk happened to mint. Each host below realizes the rule for its
+surface(s):
 
 - **Wire serve (weft, authoritative) — visibility is a PRE-PASS, computed before
   any object is emitted, and `ListRefs` lags rather than drops.** The closure
@@ -655,7 +697,44 @@ walk happened to mint. Each host below realizes the rule for its surface(s):
   (`ensure_commit_update_fast_forward`, §5.0), the embargoed commit and its
   descendants are absent from the mirror, and the ref advances only as ancestors
   disclose. This is the Git-mirror projection of the very same gate — the public
-  mirror only ever holds the visible, ancestry-closed closure.
+  mirror only ever holds the visible, ancestry-closed closure. The **marker→tag
+  loop in the same run** (`git_export.rs:290-296`, surface 4 above) carries the
+  identical obligation: a marker whose marked state is not served must yield
+  **no** `refs/tags/<marker>`, not a tag at the raw mapped OID.
+
+**Merge DAGs — the frontier is a cut, not a point.** A `State` carries
+`parents: Vec<ChangeId>` (`crates/objects/src/object/state_core.rs:207`; merges
+are minted via `new_merge`, `:276`), so a thread is a DAG, not a line, and a
+single hidden merge can leave **several** maximal visible ancestors on different
+parent paths. The served-set definition already handles this without amendment: a
+state `S` is served iff `S` **and every ancestor of `S` on every parent path** are
+visible to `A` (the gate above is defined over the full ancestor set — `parents`
+is a vector, not a single edge). So the *served set* is always unambiguous: the
+maximal ancestry-closed visible set. What generalizes from a point to a set is the
+**frontier** itself = the **antichain of maximal served states** (the served
+states having no served descendant — the cut across the DAG). The two surface
+kinds consume that antichain differently:
+
+- **Set-emitting surfaces** (the wire closure planner, surface 1) root emission at
+  **all** maximal served states and emit the forward closure of the *whole*
+  ancestry-closed visible set — both visible sides of a pre-merge fork. The
+  antichain loses nothing: no visible commit is ever silently omitted.
+- **Single-tip ref surfaces** (the Git branch ref, surface 3; the marker tag,
+  surface 4; `ListRefs`' single-`change_id` advertisement, surface 2) can name
+  only **one** commit. They advance the ref only to a **unique served descendant**
+  of the currently-advertised tip — the one served state that dominates the rest.
+  When the maximal served set is **not** a single dominating state (a hidden merge
+  split visibility into ≥2 incomparable maximal ancestors), there is no commit
+  that both stays forward-only and captures the whole served set, so the surface
+  **retains the previously-advertised ref unchanged** rather than picking an
+  arbitrary side — picking one side would both omit the other visible side from
+  the ref and risk a non-fast-forward move (§5.0). The ref advances again only
+  once disclosure (or new commits) yields a unique served descendant of the prior
+  tip. Crucially the full visible set on **both** sides stays *fetchable* via the
+  set-emitting surface; only the single-pointer advertisement lags — consistent
+  with "never drop an already-public ref" and FF-only. (This is exactly the
+  "retain the previously advertised ref unless it can advance to a unique visible
+  descendant" policy.)
 
 **Why this is a plain forward-closure, not a set difference (this supersedes the
 r3 framing).** r3 correctly rejected reusing `collect_excluded`
@@ -710,6 +789,24 @@ mutation of the state or the prior record. Two triggers:
   `Public` once wall-clock passes it, without needing a write. (The trust model
   for clock-based auto-reveal is open question O5.)
 
+**Tier-raising is transitive over ancestry (the dual of downward-closure).**
+Because the gate (§5.3) serves a state only when **every ancestor** is visible to
+the audience, raising one state to a more-open tier `T` has **no observable
+effect** unless every ancestor not already visible to `T` is raised to at least
+`T` as well — the just-raised state stays withheld behind its still-hidden
+ancestors. So any tier-raise — manual `promote`, the scheduled `embargo_until`
+lapse, or an open-for-review `set` — must be applied **transitively up the
+ancestry**, back to the nearest ancestor already visible to `T` (e.g. the public
+merge-base), appending one `StateVisibility` record (§5.5) per raised state. This
+is the mirror image of §5.3: downward-closure withholds the **descendants** of a
+hidden state; sound promotion must raise the **ancestors** of a revealed one. The
+embargoed-fix case (§7.1) satisfies it for free — promoting `N` to `public` while
+`N`'s ancestors are already public needs no ancestor raise — but the reviewer-PR
+case (§7.2), whose ancestors start `private:<author>`, does **not**, and must
+raise the whole thread ancestry to the reviewer tier (see §7.2 step 1). For a
+merge-DAG ancestry the raise covers **all** parent paths, matching the
+"every-ancestor-on-every-path" served-set rule (§5.3).
+
 ### 5.5 Oplog records (append at the tail — hard constraint)
 
 `OpRecord` is encoded by discriminant index and **new variants must append at the
@@ -731,7 +828,7 @@ mirroring the `Redact` / `Purge` audit-trail pattern (`oplog_types.rs:109,123`).
 | object store | per-state `visibility/` sidecar dir + read/write + `has_visibility_for_state` | mirrors redactions dir (`fs_paths.rs:46-50`, `repository_redaction.rs:490`) |
 | `oplog` | tail-append `StateVisibilitySet` / `StateVisibilityPromote` | tail-append rule (`oplog_types.rs:14-21`) |
 | `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); the **operator-local courtesy stub** is rendered at the **state walk** (where the `ChangeId` is in scope), never in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) — the public mirror emits absence, not a stub (§5.0/§5.3) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
-| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before the ref-sync** (`:277-288`) and lag `refs/heads/main` to the last all-public ancestor (the frontier), **not** the raw `get_thread` tip (`:278`), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2271`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2271`) |
+| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before *every* ref-publishing surface** — the branch ref-sync (`:277-288`, lag `refs/heads/main` to the frontier, **not** the raw `get_thread` tip `:278`) **and** the marker→tag sync (`:290-296`, withhold `refs/tags/<marker>` unless the marked state is served — `sync_marker_to_tag` is conflict-not-FF, `git_sync.rs:163-170`); the frontier rule is categorical over all ref-publishing surfaces (§5.3), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2271`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2271`) |
 | `proto` / wire | new `ObjectType::Visibility` in the sync plan (mirroring `emit_redaction_plan`), itself gated — a record is served only when its state is served, so it never leaks an embargoed `ChangeId`/tier/date (§8.4); **new** tier-aware **downward-closed reachability gate** — resolve the visibility frontier as a pre-pass, then serve the forward closure of the ancestry-closed visible set rooted at that frontier (no `ObjectType::State` header for an embargoed commit). NOT a `collect_excluded` extension (root-exclusion over-withholds, §5.3) and no set difference is needed (a child of a hidden parent is never served, so nothing shared to subtract) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`) |
 | weft (closed) | **authoritative** server-side downward-closed gate in `ListRefs`/`Pull` (above); grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
 | config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution *precedence pattern* (namespace → repo → fallback) — but `resolve_default_visibility` is typed to `AnnotationVisibility` (`namespace_policy.rs:68,75`), so it must be generalized over the tier enum (ties O4) and its `Internal` fallback replaced with the stricter `Private` (§8.1) | `resolve_default_visibility` (`namespace_policy.rs:68`) |
@@ -844,11 +941,32 @@ Setup: a feature thread `feat/x`. Its default tier is `private:<author-scope>` �
 withheld from every audience but the author until they open it for review; nothing
 reaches a public puller before merge.
 
-1. **Open for review.** `heddle visibility set @ --tier reviewers:secteam` on the
-   tip (`reviewers:secteam` → `Restricted { scope_label: "secteam" }`, which —
-   unlike `private:` — is also visible to the internal trusted set so CI/tooling
-   can read the proposed commit, §5.2). A `StateVisibility` record lands on the
-   tip state.
+1. **Open for review — raise the *whole ancestry*, not just the tip.** Because the
+   thread default is `private:<author-scope>` and the downward-closed gate (§5.3)
+   serves a state only when **every ancestor** is visible to the same audience,
+   raising only the tip to `reviewers:secteam` leaves the multi-commit thread
+   **unfetchable** — the still-`private` ancestors keep the reviewer-facing tip
+   withheld, so the reviewer's `Pull` returns nothing. The open-for-review step
+   must therefore raise **every state in the thread's ancestry** (back to the
+   nearest ancestor already visible to `secteam` — e.g. the public merge-base) to
+   at least `reviewers:secteam`, per the ancestry-transitive promotion rule
+   (§5.4). Two routes:
+   - **Set the default before capture** (cleanest): set the thread's default tier
+     to `reviewers:secteam` *before* the commits land — precedence layer 2 of the
+     inherited-default resolution (§8.1) — so every commit is born at the reviewer
+     tier and the ancestry is uniformly visible with no later raise.
+   - **Promote an already-captured thread transitively:** apply
+     `heddle visibility set @ --tier reviewers:secteam --all-states` (§8.2). The
+     `--all-states` flag is carried from `redact` (`commands_redact.rs:101`),
+     where it walks `reachable_states()` (`redact.rs:132-134`); for PR promotion
+     it must scope to the tip's ancestry (the reviewer needs the ancestors of `@`,
+     not every reachable state in the repo).
+
+   `reviewers:secteam` → `Restricted { scope_label: "secteam" }`, which — unlike
+   `private:` — is also visible to the internal trusted set so CI/tooling can read
+   the proposed commits (§5.2). One `StateVisibility` record lands per raised
+   state. (A single-commit thread is the degenerate case where "the tip" and "the
+   whole ancestry" coincide — but the design must not assume it; §5.4.)
 2. **Reviewer fetch.** A reviewer holding the `secteam` audience (mapped from a
    per-thread grant → `AudienceTier::Restricted("secteam")`, §2.6) calls
    `ListRefs`/`Pull`; the tier predicate admits the thread and its states. They
