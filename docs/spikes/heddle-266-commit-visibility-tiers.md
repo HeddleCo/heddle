@@ -26,8 +26,13 @@ mirrored to a public Git branch via the bridge. What it lacks is a
 
 1. **Embargoed security fix.** A public thread (mirrored to `refs/heads/main`)
    has commit `N` describing an exploit and commit `N+1` fixing it. Today both
-   publish together or both stay private. Needed: `N+1` lands publicly while `N`
-   stays embargoed until a disclosure date.
+   publish together or both stay private. Needed: ship the fix publicly while the
+   exploit detail stays embargoed until a disclosure date. (Soundness constrains
+   the topology: a fix can be published ahead of disclosure only when the
+   embargoed detail is **not an ancestor** of it — the public mirror is
+   downward-closed under ancestry, §5.0. When the exploit commit precedes the fix
+   on one line, both wait for disclosure on the public mirror while authorized
+   pullers get the fix immediately; worked through in §7.1.)
 
 2. **In-flight PR / draft review.** A reviewer can see a proposed commit; the
    public cannot. Today a PR is either a fully private thread (invisible without
@@ -66,9 +71,13 @@ A true embargoed security fix demands **hard** enforcement: if the exploit
 commit's tree reaches a public clone, the embargo is already broken, no matter
 what any record says. An in-flight-PR hide is comfortable with **soft**
 enforcement on infrastructure you control, but wants **hard** on a public host.
-The recommended design (§5) therefore treats the **serve-side withhold as the
-source of truth** and reuses the redaction render-stub as a second, in-depth
-layer for the local-checkout and Git-bridge chokepoints.
+The recommended design (§5) therefore makes the **serve-side withhold the source
+of truth for every public-tier projection**: both the wire serve and the
+Git-bridge export emit *absence*, never a partial view of an embargoed commit
+(the governing invariant, §5.0). The redaction render-stub is reused **only on
+the operator's own local checkout** — where the holder already possesses the
+bytes and the stub is a working-tree courtesy, not a security boundary — and
+never as a public-mirror exposure path.
 
 ---
 
@@ -298,17 +307,20 @@ Add `audience: StateAudience` to the `State` tail (`state_core.rs:215`).
   the state's `content_hash`, which either violates the immutability invariant
   (`state_core.rs:185-200`) and invalidates `signature`, or forces minting a new
   state object on every visibility change — history churn for a metadata edit.
-  And the field-in-the-object gives no way to serve a state's *header* (so the
-  DAG stays walkable) while withholding its *content*: the field is inside the
-  very object you're trying to withhold. Rejected.
+  And the tier cannot gate withholding from *outside* the object at all: it lives
+  inside the very state you would need to withhold, which (per §5.0) is served
+  whole or not served. Rejected.
 
 ### Design B — state-keyed sidecar (mirror `Redaction`) + serve filter — **recommended**
 
 A `StateVisibility` record keyed by `ChangeId`, stored in a per-state sidecar
-`StateVisibilityBlob`, enforced (a) hard at the wire serve layer and (b) soft as
-a render-stub at the materialize + git-export chokepoints. Promotion is an
-additive superseding record (or an `embargo_until` lapse), never a state
-mutation. Detailed in §5–§8.
+`StateVisibilityBlob`, enforced by **one downward-closed reachability gate** (§5.0,
+§5.3) — the same hard withhold on every public-tier projection (the wire serve
+*and* the Git-bridge export both emit *absence*, never a partial view). A
+render-stub appears only on the operator's own local checkout, as a courtesy on
+already-held bytes — never a public-mirror surface. Promotion is an additive
+superseding record (or an `embargo_until` lapse), never a state mutation. Detailed
+in §5–§8.
 
 - **Pros:** preserves `State` immutability and signatures (the sidecar is
   outside the hashed bytes, exactly like `Redaction`, `review_signatures`,
@@ -316,8 +328,9 @@ mutation. Detailed in §5–§8.
   substrate — `AudienceTier`, the `visible()` predicate (extended with a `Private`
   arm, §5.2), the namespace-default resolution *pattern* (generalized over the
   tier enum, §8.1), and the signed / supersede / fail-closed-trust patterns; and
-  reuses the redaction *stub renderer* for the cooperative layer. The serve-side
-  filter is a genuine hard boundary.
+  reuses the redaction *stub renderer* for the operator-local checkout courtesy
+  (§5.3). The serve-side gate is a genuine hard boundary — every public-tier
+  projection emits absence (§5.0), never a partial view.
 - **Caveat on integration points:** visibility does **not** drop in at the exact
   chokepoints redaction guards. Redaction's chokepoints are blob-keyed; a
   state-keyed tier predicate has to move one level up to the state walk (§5.3),
@@ -325,9 +338,9 @@ mutation. Detailed in §5–§8.
   `collect_excluded` (§5.3). The patterns are reused; the precise call sites are
   not the same.
 - **Cons:** a two-layer mental model (state + visibility sidecar); the *hard*
-  serve filter must be implemented in the closed weft serve path (this OSS spike
-  can specify the object, the records, the wire-plan exclusion, and the
-  cooperative render, but the authoritative withhold lands in weft); time-based
+  serve gate must be implemented in the closed weft serve path (this OSS spike
+  can specify the object, the records, the wire-plan reachability gate, and the
+  operator-local stub, but the authoritative withhold lands in weft); time-based
   auto-promotion introduces a wall-clock trust question (§9, O5).
 
 ### Design C — tier-per-ref (separate threads)
@@ -340,14 +353,85 @@ repo/namespace grant model.
   filter degenerates to "can you see this ref."
 - **Cons (disqualifying for the core case):** this is exactly the status quo the
   issue calls out as the gap — "today this requires splitting into a separate
-  private thread." It cannot express the embargoed-fix case, where `N` (hidden)
-  and `N+1` (visible) sit on the *same line of history*: they would have to live
-  on divergent refs that then need reconciliation. Rejected as the primary
-  design; retained as the fallback that already works for coarse cases.
+  private thread." It forces an embargoed commit `N` and its descendant fix `N+1`
+  onto *divergent refs* that then need reconciliation, instead of keeping them on
+  one thread with per-commit tiers. (The public-mirror outcome is the same
+  truncation either way — per the invariant §5.0 the public mirror stops at the
+  embargo boundary regardless — but Design B keeps a single coherent line that the
+  authorized audience sees whole and that discloses forward, whereas Design C
+  permanently forks history.) Rejected as the primary design; retained as the
+  fallback that already works for coarse cases.
 
 ---
 
 ## 5. Recommended design (Design B), in detail
+
+### 5.0 The governing invariant — the public mirror is downward-closed under ancestry
+
+Everything below is subordinate to one rule. It is not a preference; it is the
+**residue left after eliminating every partial-exposure alternative** (the
+"ruled-out traps" table below). It is what makes an embargo sound *by
+construction* rather than by a chokepoint that has to filter correctly on every
+request:
+
+> **Each audience's view of the mirror is downward-closed under ancestry: it
+> contains a commit only when that commit *and its entire ancestry* are visible
+> to that audience.** For the public tier specifically, an embargoed commit is
+> **entirely absent** from the public mirror — no stub, no header, no partial
+> `State`, no tree, no blobs — and so are *all of its descendants*, until the
+> embargoed ancestor discloses. Disclosure is **forward-only** (r4): when the
+> ancestor becomes public, it and its now-eligible descendants are published
+> with their **true parent edges and OIDs intact**; nothing already-published is
+> ever rewritten.
+
+Three properties of the *real* machinery force this all-or-nothing shape — there
+is simply no sound *partial* embargoed-commit view to serve:
+
+1. **The wire serializes the whole `State`.** The sync planner emits an
+   `ObjectType::State` object whose payload is `rmp_serde::to_vec_named(&state)`
+   over the *entire* `State` (`crates/proto/src/object_graph.rs:84-90`; the
+   plan-only variant keys the same object by `ChangeId` at `:160-163`, and the
+   wire object-id for a state is its `ChangeId`,
+   `crates/client/src/grpc_hosted/helpers.rs:109`). `State` carries `intent`,
+   `attribution`, `confidence`, `created_at`, `verification`, and `signature`
+   (`crates/objects/src/object/state_core.rs:202-214`) — not just
+   id/parents/tree. There is **no header-only `State` form** on the wire, so
+   "serve `N`'s header so the DAG stays walkable" leaks exactly the
+   exploit-describing metadata the embargo exists to hide.
+2. **Content-addressed OIDs.** A Git commit's OID is a pure function of its tree
+   + parent OIDs (`export_state` → `new_commit_as(..., git_tree_oid,
+   parent_oids)` → `commit.id`, `crates/cli/src/bridge/git_export.rs:84-93`), so
+   no published commit's identity can change after the fact, and no parent edge
+   can be re-pointed without changing the descendant's own OID.
+3. **The public mirror is fast-forward-only.** `sync_track_to_branch` guards
+   every branch update with `ensure_commit_update_fast_forward`
+   (`crates/cli/src/bridge/git_sync.rs:134`, `git_core.rs:2271-2291`), which
+   rejects any non-descendant tip (`NonFastForwardRef`) — there is no force path.
+   So any "rewrite on disclosure" is *forbidden*, not merely discouraged.
+
+The chokepoint cannot filter an embargoed object per-field per-audience (1), the
+OID cannot change on disclosure (2), and the mirror cannot be rewritten (3). The
+only design that survives all three is: **never put an embargoed commit, in any
+form, into the public mirror until it discloses** — and, since a descendant's
+identity depends on its ancestors' OIDs, hold its descendants too until it does.
+
+#### 5.0.1 Ruled-out traps (the invariant is what remains after eliminating these)
+
+Each row was proposed across review rounds r2–r5 and is unsound. Documenting them
+is itself spike output: the invariant is precisely the residue after the
+alternatives fall.
+
+| Trap | What it proposed | Why it is unsound | Root cause |
+|---|---|---|---|
+| **Audience-scoped partial serialization** | the serve chokepoint hands a public puller a *filtered/sanitized* `State` (id/parents/tree only) | the wire emits one opaque `rmp_serde` blob of the whole `State` (`object_graph.rs:84`); the chokepoint serves it whole or not at all — it cannot strip `intent`/`attribution`/etc. per audience | all-or-nothing `State` serialization |
+| **Header-only** | serve `N`'s "header" (id + parents + tree pointer) so a child's DAG edge resolves, withhold only the tree/blobs | there is no header-only `State`; the `ObjectType::State` payload **is** the full `State` incl. `intent`/`signature`/timestamps (`state_core.rs:202-214`) — the header *is* the leak (finding cid 3324616942) | all-or-nothing `State` serialization |
+| **Stub-swap** | publish a stub-tree commit at `N`'s slot now, replace it with the real tree at disclosure | swapping the tree changes `N`'s OID → cascades a new OID to every descendant → a non-fast-forward rewrite of the published mirror, which the FF guard forbids (and the mapping-skip means the swap silently never happens anyway) | content-addressed OIDs + FF-only mirror |
+| **Parent-edge rewrite** | re-parent the published descendant `N+1` onto `N-1` to "skip" embargoed `N` | `N+1`'s parent OID is an input to `N+1`'s own OID; re-pointing it changes `N+1`'s OID → if `N+1` was already published, a non-FF rewrite (violates r4 identity-stability) | content-addressed OIDs + FF-only mirror |
+
+The sound replacement for the last two is **delayed publication**, not rewriting:
+gate the descendant out of the public mirror until its embargoed ancestor
+discloses (the invariant), then publish forward with true edges. r4 and r5 are
+therefore coherent — neither ever changes a published OID.
 
 ### 5.1 Data model (new — all `planned`)
 
@@ -463,76 +547,79 @@ operates as `--audience restricted:<embargo-label>`, reusing the already-shipped
 `AudienceTier` string grammar (`internal | public | team:NAME | restricted:LABEL`,
 `visibility.rs:60-87`).
 
-### 5.3 Enforcement — hard at serve, soft in depth
+### 5.3 Enforcement — one downward-closed reachability gate (hard); an operator-local stub is only a courtesy
 
-- **Hard (authoritative), wire serve — weft.** `ListRefs` omits any thread whose
-  tip is above the caller's tier; `Pull`'s object planner withholds states — and
-  the objects reachable *only* through them — above the caller's tier, keyed off
-  the visibility sidecar and the caller's `AudienceTier` (derived from the auth
-  context + per-thread grant, §2.6). Under-tier bytes never leave the host.
+There is exactly **one** enforcement mechanism for the public mirror, and it is
+the same computation on the wire serve and on the Git-bridge export: the
+**tier-aware, downward-closed reachability gate**. This is the r3 tier-aware
+reachability gate and the r5 descendant-withholding rule **unified into a single
+pass — not two mechanisms**.
 
-  **This needs a new tier-aware reachability pass, not an extension of the
-  existing `collect_excluded` (`object_graph.rs:360`).** `collect_excluded` is the
-  shallow/exclude *negotiation* pass: given refs the puller already has, it
-  blanket-marks **every** tree/blob reachable from each excluded state *and its
-  ancestors* (via `collect_tree_hashes`, `object_graph.rs:402`) as omittable —
-  sound there only because anything dropped is something the recipient already
-  possesses. Tier filtering inverts that precondition: the under-tier puller must
-  *not* receive hidden `N`'s exclusive content but *must* still receive visible
-  child `N+1`'s full tree. Because states are content-addressed snapshots, `N+1`
-  shares most of `N`'s blobs and subtrees (it changed one file); blanket-excluding
-  `N`'s closure would drop those shared objects too, and the public `N+1` could no
-  longer be checked out — the opposite of what §7.1 promises. The correct
-  computation is a **set difference**: withhold only the *hidden-exclusive*
-  closure — objects reachable from the hidden states **minus** the union of the
-  closures of every visible state served in the same response — and serve (or
-  explicitly stub) everything else. That visible-closure-minus-hidden-exclusive
-  pass is the real impl hard-part; `collect_excluded`'s root-exclusion algorithm
-  cannot express it and reusing it as-is would over-withhold.
-- **Soft (defense in depth), local + bridge — heddle OSS.** A **state-tier**
-  predicate cannot be evaluated at the redaction chokepoints as they stand. Both
-  are *blob/tree-keyed* and receive neither the `ChangeId` nor the caller's
-  `AudienceTier`:
-  - `materialize_blob` (`repository_materialization.rs:575`) takes only
-    `(dest, hash, executable, context)` — `hash` is a **blob** hash and
-    `MaterializationContext` (`repository_materialization.rs:57`) carries only
-    reflink/copy counters. Its public entry `materialize_tree`
-    (`repository_materialization.rs:299`) takes a `&Tree`, not a `State`.
-  - `export_tree` (`git_export.rs:97`) takes only `(heddle_repo, repo, tree_hash)`.
+**The gate.** For audience `A`, the served set of states is the maximal
+**ancestry-closed** set all of whose members are visible to `A` — i.e. a state
+`S` is served iff `S` **and every ancestor of `S`** are visible to `A`
+(visibility resolved from the sidecar + the caller's `AudienceTier`, §2.6).
+Serve exactly the **forward closure** (trees, blobs, sidecars) of that set;
+everything else is absent. The two surfaces are the same gate projected:
 
-  Redaction works at these points because it is **blob-keyed**
-  (`redaction_stub_for_blob(blob)`, `repository_redaction.rs:509`) — the blob hash
-  is all it needs. A visibility tier is **state-keyed** (per `ChangeId`), so the
-  predicate must be evaluated one level up, at the **state walk**, where the
-  `ChangeId` is already in scope, with the `AudienceTier` threaded in from the
-  entry point (neither path carries an audience today):
-  - **Bridge:** `export_state` (`git_export.rs:28`) already loads the `State`
-    (hence its `ChangeId`) but currently passes only `&state.tree` to `export_tree`
-    (`git_export.rs:41`) and takes no audience (its `--audience` is planned — see
-    the inline note at `git_export.rs:44-47`). Add an `AudienceTier` parameter and
-    evaluate the tier predicate here. For the **public/untrusted mirror** the sound
-    action is **forward-only**: halt the export walk at the under-tier state
-    (Option A, §7.1 step 3) so the public branch fast-forwards only through its last
-    all-public ancestor — never publish an OID that disclosure would have to change.
-    A **permanent** stub commit (minted here in place of recursing into
-    `export_tree` on the real tree) is the density fallback (Option B), and even
-    then disclosure appends forward — it never swaps the stub (§7.1 step 5).
-  - **Local checkout:** the `ChangeId` is resolved at the `goto`/checkout entry
-    that turns a thread tip into a `State` → `Tree`, *above* `materialize_tree`.
-    Thread the resolved tier + `AudienceTier` in there and short-circuit an
-    under-tier checkout to a **stub tree** before materialization — not per-blob
-    inside `materialize_blob`, which never learns which state it is serving.
+- **Wire serve (weft, authoritative).** `ListRefs` omits any thread whose tip is
+  not in the caller's served set. `Pull`'s planner walks from the tip and
+  **halts at the first under-tier state**: it emits neither that state's
+  `ObjectType::State` object — so no `intent`/`attribution`/`signature` header
+  ever leaves the host, closing cid 3324616942 — nor anything reachable only
+  through it. Because the walk stops at the embargo boundary, the under-tier
+  state's **descendants are never reached either**: the downward-closure is
+  enforced structurally, not by a second filter.
+- **Git-bridge export (heddle OSS).** `export_state` (`git_export.rs:28`) already
+  loads the `State` (hence its `ChangeId`) but currently passes only
+  `&state.tree` to `export_tree` (`git_export.rs:41`) and takes no audience (its
+  `--audience` is planned — inline note at `git_export.rs:44-47`). Add an
+  `AudienceTier` parameter and **halt the public-audience export walk at the
+  first under-tier state**. `refs/heads/main` fast-forwards only through the last
+  all-public ancestor; the embargoed commit and its descendants are simply not
+  exported. This is the Git-mirror projection of the very same gate — the public
+  mirror only ever holds the visible, ancestry-closed closure.
 
-  Each stub is a short notice naming the tier and the promotion date, like the
-  redaction stub renderer (`stub_text`, `redaction.rs:106`). The per-blob/per-tree
-  chokepoints remain the right home for **blob-keyed** redaction; **state-keyed**
-  visibility belongs at the state walk with the audience plumbed through. This
-  protects a self-hosted Git mirror and a shared local checkout even where the hard
-  wire filter doesn't apply.
+**Why this is a plain forward-closure, not a set difference (this supersedes the
+r3 framing).** r3 correctly rejected reusing `collect_excluded`
+(`object_graph.rs:360`): its root-exclusion blanket-drops **every** tree/blob
+reachable from an excluded state and its ancestors (`collect_tree_hashes`,
+`object_graph.rs:402`), which would over-withhold blobs a visible child shares
+with a hidden parent. r3's proposed fix was a *set difference* — serve a visible
+child `N+1` while subtracting hidden parent `N`'s exclusive closure. **The
+invariant removes the need for that subtraction entirely:** under downward-closure
+a child of a hidden parent is **never in the served set**, so the "visible child
+shares a blob with a hidden parent" case never arises in what we serve. The
+served set is just `closure(ancestry-closed visible states)`; a blob travels iff
+it is reachable from at least one served state — plain forward reachability, no
+subtraction, and it never over-withholds (a blob shared by served `Q` and hidden
+`P` is reachable from `Q`, so it travels on `Q`'s account). The hard part r3
+named dissolves; what remains is an ancestry-closed visibility walk that halts at
+the embargo boundary. (r3's conclusion stands — do **not** reuse
+`collect_excluded`'s root-exclusion — but the replacement is simpler than the
+set difference r3 proposed.)
 
-The two layers compose exactly as redaction's two chokepoints do; the wire filter
-is the boundary you can rely on against an adversarial puller, the stub is the
-cooperative belt-and-suspenders.
+**The operator-local stub is a courtesy, never a public-mirror surface.** The
+*only* place a stub ever appears is the **operator's own checkout** — the
+authorized holder who already possesses the bytes and the embargo records. There,
+an under-tier state's working-tree files may render as a short placeholder
+(naming the tier + promotion date, like the redaction stub renderer `stub_text`,
+`redaction.rs:106`), evaluated at the `goto`/checkout entry that resolves a thread
+tip to a `State` → `Tree`, *above* `materialize_tree`
+(`repository_materialization.rs:299`), where the `ChangeId` is in scope. It is
+rendered from content the holder already has; it is **not** an exposure path, it
+never travels to an under-tier consumer, and the public mirror emits **absence**
+(the invariant, §5.0) — never a stub.
+
+This predicate is **state-keyed** (per `ChangeId`), so even the courtesy stub
+cannot live at the blob-keyed redaction chokepoints: `materialize_blob`
+(`repository_materialization.rs:575`) receives only a blob `hash` + a
+counter-only `MaterializationContext` (`:57`), and `export_tree`
+(`git_export.rs:97`) receives only a `tree_hash` — neither carries the `ChangeId`
+or the audience. Redaction works there because it is blob-keyed
+(`redaction_stub_for_blob(blob)`, `repository_redaction.rs:509`); state-keyed
+visibility is evaluated one level up, at the state walk. The per-blob chokepoints
+remain the right home for **blob-keyed** redaction.
 
 ### 5.4 Promotion is additive
 
@@ -566,10 +653,10 @@ mirroring the `Redact` / `Purge` audit-trail pattern (`oplog_types.rs:109,123`).
 | `repo` filter | extend `visible()` with the `Private` arm **above** the all-seeing-`Internal` arm | `visible()` (`visibility.rs:148,153`) |
 | object store | per-state `visibility/` sidecar dir + read/write + `has_visibility_for_state` | mirrors redactions dir (`fs_paths.rs:46-50`, `repository_redaction.rs:490`) |
 | `oplog` | tail-append `StateVisibilitySet` / `StateVisibilityPromote` | tail-append rule (`oplog_types.rs:14-21`) |
-| `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); state-tier stub at the **state walk**, not in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
-| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`); for the public mirror **halt the export walk** at under-tier states (forward-only; tip lags, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2100`; mapping-skip `git_export.rs:218-223`); permanent stub-commit is the density fallback — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2091`) |
-| `proto` / wire | new `ObjectType::Visibility` in the sync plan (propagate soft records, mirroring `emit_redaction_plan`); **new** tier-aware reachability pass = visible-closure **minus** hidden-exclusive closure (NOT a `collect_excluded` extension — that root-exclusion pass over-withholds blobs a visible child shares with a hidden parent, §5.3) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`) |
-| weft (closed) | **authoritative** server-side tier filter in `ListRefs`/`Pull`; grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
+| `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); the **operator-local courtesy stub** is rendered at the **state walk** (where the `ChangeId` is in scope), never in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) — the public mirror emits absence, not a stub (§5.0/§5.3) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
+| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`); for the public mirror **halt the export walk** at the first under-tier state so the embargoed commit *and its descendants* are absent (forward-only; tip lags to the last all-public ancestor, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2271`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2271`) |
+| `proto` / wire | new `ObjectType::Visibility` in the sync plan (mirroring `emit_redaction_plan`), itself gated — a record is served only when its state is served, so it never leaks an embargoed `ChangeId`/tier/date (§8.4); **new** tier-aware **downward-closed reachability gate** — serve the forward closure of the ancestry-closed visible set, halting the walk at the first under-tier state (no `ObjectType::State` header for an embargoed commit). NOT a `collect_excluded` extension (root-exclusion over-withholds, §5.3) and no set difference is needed (a child of a hidden parent is never served, so nothing shared to subtract) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`) |
+| weft (closed) | **authoritative** server-side downward-closed gate in `ListRefs`/`Pull` (above); grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
 | config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution *precedence pattern* (namespace → repo → fallback) — but `resolve_default_visibility` is typed to `AnnotationVisibility` (`namespace_policy.rs:68,75`), so it must be generalized over the tier enum (ties O4) and its `Internal` fallback replaced with the stricter `Private` (§8.1) | `resolve_default_visibility` (`namespace_policy.rs:68`) |
 
 No change to `State` itself — its tail-append invariant and signatures are
@@ -592,48 +679,42 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
    The `Private` tier is withheld from every audience except a reader holding
    `restricted:security` (§5.2) — including the otherwise all-seeing `Internal`
    audience. `N+1` keeps the thread default (`public`).
-2. **Public pull (hard).** A reader with public tier calls `Pull`. The weft
-   serve planner withholds `N`'s tree and only the blobs/subtrees reachable
-   *exclusively* through `N` — the hidden-exclusive closure, i.e. `N`'s closure
-   **minus** everything `N+1` (served in the same response) also reaches, per the
-   set-difference pass in §5.3. Objects `N+1` shares with `N` still travel, so the
-   fix stays checkout-able; only the exploit-exclusive content is held back. `N`'s
-   state *header* may still travel so the DAG is walkable. `N+1` serves in full.
-   The public clone can check out the fix; it cannot reconstruct the exploit.
-3. **Public Git mirror (DAG integrity) — forward-only, identity-stable.** The Git
-   mirror cannot do what the wire pull does in step 2. The wire/heddle clone can
-   serve `N+1` while withholding `N`'s content — an `N` *header* travels so the DAG
-   stays walkable (§5.3, O7) — because a heddle `State` supports a
-   header-without-content form. A **Git commit cannot**: its OID is the hash of its
-   tree + parent OIDs + metadata, so it must reference a *resolvable real tree and
-   real parents*, and `export_state` resolves each parent OID out of the persisted
-   mapping (`mapping.get_git(parent_id)`,
-   `crates/cli/src/bridge/git_export.rs:62-70`) — an unmapped parent is a hard
-   `StateNotFound`, not a header. So the Git mirror's DAG-integrity requirement is
-   strictly stricter than the wire's.
+2. **Public pull (hard) — the embargoed commit and its descendants are absent.**
+   A reader with public tier calls `Pull`. The weft serve planner walks from the
+   thread tip and **halts at `N`** (the first under-tier state): it emits neither
+   `N`'s `ObjectType::State` object — so none of `N`'s `intent` / `attribution` /
+   `signature` / timestamp metadata travels, because there is no header-only form
+   to serve (§5.0, closing cid 3324616942) — nor anything reachable only through
+   `N`. Because `N+1` has `N` as an ancestor, `N+1` is **also** absent
+   (downward-closure, §5.0/§5.3); the public `ListRefs` shows the thread tip
+   lagged to the last all-public ancestor `N-1`. The public clone learns nothing
+   of `N` or `N+1` — not their content, not their metadata, only that the public
+   tip is `N-1`.
 
-   **Recommended (Option A — don't publish embargoed states to the public mirror).**
-   The bridge's public-audience export walk halts at the embargo boundary: `N`
-   (under-tier) is not exported, and because every descendant needs `N`'s OID as a
-   real parent input, `N+1`… are not exported either. The public branch
-   `refs/heads/main` simply stays at the last all-public ancestor (`N-1`). This is
-   the Git-mirror projection of the same tier-aware reachability that gates the wire
-   serve (§5.3): the public mirror only ever holds the visible closure. Cost
-   (documented honestly): the public **Git** tip lags the private thread tip while
-   the embargo holds — heddle-native pullers already get `N+1` over the wire
-   (step 2), but the Git mirror does not ship it until `N` discloses.
-
-   **Fallback (Option B — a *permanent* stub commit), only if the public chain must
-   stay dense** (e.g. to ship fix `N+1` on the Git mirror before the exploit `N`
-   discloses): `export_state` mints `N` with a *stub tree* ("embargoed until
-   2026-07-01") and `N+1` is exported with that stub commit as its parent. The stub
-   is **permanent** — disclosure never rewrites it (step 5). Trade-off: the Git
-   mirror's history shows a stub at `N`'s position forever, and `N`'s real content,
-   if it is ever placed on the Git mirror, arrives as a later forward commit, not in
-   `N`'s original slot.
-
-   (The third alternative — re-parenting `N+1` onto `N-1` — is a history rewrite
-   that breaks change-id stability and signatures, and is rejected; see O3.)
+   **Honest scope note.** A fix that *descends from* an embargoed commit therefore
+   cannot reach the public mirror ahead of disclosure. The §1 goal — "ship `N+1`
+   publicly while `N` stays embargoed" — holds **only when the embargoed material
+   is not an ancestor of the published fix** (e.g. the exploit write-up/PoC is a
+   *descendant* of the fix, or sits on a side branch); then the fix publishes and
+   the write-up stays embargoed under the same gate. When the exploit commit
+   genuinely precedes the fix on one line of history, both wait for disclosure on
+   the public mirror, while authorized pullers (step 4) get the fix immediately
+   over the wire. Trading this narrow capability away is the price of a sound
+   embargo — the approaches that would preserve it (header-only, audience-scoped
+   partial serialization) are the ruled-out traps of §5.0.1.
+3. **Public Git mirror — the same gate, no stub.** The Git mirror is just the
+   Git-projection of the step-2 gate: the bridge's public-audience export walk
+   halts at `N`, so `N` and its descendants `N+1…` are not exported and
+   `refs/heads/main` stays at the last all-public ancestor `N-1`. There is no way
+   to do otherwise, because a Git commit's OID is the hash of its tree + parent
+   OIDs (`export_state` → `new_commit_as(..., git_tree_oid, parent_oids)` →
+   `commit.id`, `crates/cli/src/bridge/git_export.rs:84-93`; parent OIDs resolved
+   from the persisted mapping `mapping.get_git(parent_id)`, `:62-70`) — publishing
+   a descendant requires a *real* parent commit, and no stub stands in for `N`
+   (stub-swap and parent-reparent are ruled out, §5.0.1). Cost (documented
+   honestly): the public **Git** tip lags the private thread tip while the embargo
+   holds; authorized pullers get `N`/`N+1` over the wire (step 4), the Git mirror
+   gets them at disclosure (step 5).
 4. **Reviewer/maintainer pull.** A caller whose grant maps to
    `AudienceTier::Restricted("security")` — the authorized embargo scope (§2.6) —
    pulls and sees `N` in full: same objects, no stub. No other tier, including
@@ -641,20 +722,20 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
 5. **Disclosure — forward-only, never a swap.** On 2026-07-01 the `embargo_until`
    lapses (or someone runs `heddle visibility promote N`, appending a superseding
    `public` `StateVisibility` record + `OpRecord::StateVisibilityPromote`, §5.4).
-   Disclosure is the **first** public export of `N`, not an edit of a published one.
-   Under Option A the next bridge run exports `N` from its **real** tree for the
-   first time and fast-forwards `refs/heads/main` to `… → N-1 → N → N+1`: each
-   commit is minted exactly once from real content (`export_state` skips any state
-   already in the mapping — `git_export.rs:218-223` — so a commit is never
-   re-minted), and the new tip is a descendant of the old public tip, so the FF
-   guard passes (`ensure_commit_update_fast_forward` → `commit_is_descendant_of`,
-   `crates/cli/src/bridge/git_core.rs:2100-2101`). No published OID changes; no
-   force push. Under Option B the permanent stub stays put and disclosure of `N`'s
-   content on the Git mirror, if wanted, is a new forward commit appended at the tip
-   — again FF-safe, again no rewrite.
+   `N` becomes visible to the public tier, so `N` **and** its now-eligible
+   descendants `N+1…` enter the public served set together (the downward-closure
+   gate is simply re-evaluated, §5.3). Disclosure is the **first** public export
+   of `N`, not an edit of a published one: the next bridge run exports `N` from
+   its **real** tree for the first time and fast-forwards `refs/heads/main` to
+   `… → N-1 → N → N+1`. Each commit is minted exactly once from real content
+   (`export_state` skips any state already in the mapping — `git_export.rs:218-223`
+   — so a commit is never re-minted), and the new tip is a descendant of the old
+   public tip `N-1`, so the FF guard passes (`ensure_commit_update_fast_forward` →
+   `commit_is_descendant_of`, `crates/cli/src/bridge/git_core.rs:2280,2293`). No
+   published OID changes; no force push.
 
    **Why the naïve "swap the stub for the real tree" is rejected — the two hard
-   constraints.**
+   constraints (the basis of the §5.0.1 ruled-out traps).**
    - **(a) A commit's OID is a pure function of its content + parents.**
      `export_state` mints the commit via `repo.new_commit_as(sig, sig, message,
      git_tree_oid, parent_oids)` and returns `commit.id`
@@ -667,7 +748,7 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
      every branch update with `ensure_commit_update_fast_forward`
      (`crates/cli/src/bridge/git_sync.rs:134`), which rejects any new tip that is
      not a descendant of the published tip (`NonFastForwardRef`,
-     `crates/cli/src/bridge/git_core.rs:2100-2106`) — there is no force path in this
+     `crates/cli/src/bridge/git_core.rs:2271-2291`) — there is no force path in this
      code. A re-minted chain is not a descendant of the published chain, so the swap
      could only land as a non-fast-forward *rewrite* of a published mirror
      (unacceptable). And even attempting it is moot: the mapping-skip
@@ -773,12 +854,20 @@ it sees every tier except `Private`, which is admitted only by the matching
 
 ### 8.4 Wire-trust reuse
 
-Soft visibility records that propagate over the wire are governed by the same
+Visibility records that propagate over the wire are governed by the same
 **fail-closed trust list** model as signed redactions (`RedactTrustCommands`,
 `commands_redact.rs:41`): a peer's signed visibility record is honored only if
 its key is trusted, so a malicious peer cannot *forge* a more-open tier. (The
 *hard* boundary does not depend on this — it's the server withholding bytes; the
-trust list governs the cooperative records that ride alongside.)
+trust list governs the records that ride alongside.)
+
+**The record is gated by the same downward-closure as its state (so it is not a
+back-door leak).** A `StateVisibility` record names the state's `ChangeId`, tier,
+`embargo_until`, and declarer — metadata that itself would betray the existence of
+an embargoed commit. So a visibility record for state `S` is served to audience
+`A` **only when `S` is served to `A`** (the §5.3 gate), never alongside the gap a
+withheld `S` leaves. A public puller therefore sees neither the embargoed state
+*nor* the record announcing it — closing the obvious sibling of the header leak.
 
 ---
 
@@ -795,19 +884,21 @@ trust list governs the cooperative records that ride alongside.)
   (applied with a thread as the target resource) rather than a global role.
   Is "reviewers" a role, a per-thread grant, or a named `Restricted { label }`
   audience? Recommendation: per-thread grant carrying an audience label.
-- **O3 — bridge DAG strategy (resolved: forward-only).** The public Git mirror is
-  fast-forward-only (`ensure_commit_update_fast_forward`, `git_core.rs:2100`) and a
-  commit's OID is fixed by its tree + parents (`export_state`,
-  `git_export.rs:84-93`), so a published commit's identity can never change.
-  Recommended: **don't publish embargoed states** to the public mirror (Option A,
-  §7.1 step 3) — the tip lags to the last public ancestor and disclosure FF-appends
-  the real commits. A **permanent** stub commit (Option B) is the fallback when the
-  public chain must stay dense; it is never swapped. Stub-*swap* (replacing the
-  published stub's tree at disclosure) is rejected — it changes the OID and cascades
-  to a non-FF rewrite. Graft-reparent `N+1` onto `N-1` is also rejected (rewrites
-  history, breaks change-id stability + signatures). Remaining sub-question: pick A
-  vs B per repo policy (tip-lag vs. permanent-stub-in-history), and the exact
-  stub-tree shape if B.
+- **O3 — bridge DAG strategy (RESOLVED: downward-closed non-publication).** The
+  public Git mirror is fast-forward-only (`ensure_commit_update_fast_forward`,
+  `git_core.rs:2271`) and a commit's OID is fixed by its tree + parents
+  (`export_state`, `git_export.rs:84-93`), so a published commit's identity can
+  never change. **Resolution:** the public-audience export walk halts at the
+  first under-tier state, so the embargoed commit **and its descendants** are not
+  published; `refs/heads/main` lags to the last all-public ancestor, and
+  disclosure FF-appends the real commits with true OIDs (§5.0/§7.1 step 3/step 5).
+  This is the Git-mirror projection of the one downward-closed gate (§5.3) — no
+  separate strategy. The earlier "permanent stub commit" fallback is **dropped**:
+  it would publish the descendant against a synthetic stub parent (a partial
+  embargoed-commit view + a parent-edge rewrite), which §5.0.1 rules out. Stub-swap
+  and graft-reparent `N+1` onto `N-1` are likewise rejected (both change a
+  published OID → non-FF rewrite; break change-id stability + signatures). No
+  remaining sub-question — there is one strategy, not an A-vs-B choice.
 - **O4 — enum unification + new tier.** Promote `AnnotationVisibility` → a shared
   `VisibilityTier` across annotations/discussions/states (recommended; already
   reused by two consumers) and add the strictest `Private { scope_label }` variant
@@ -824,12 +915,16 @@ trust list governs the cooperative records that ride alongside.)
   visibility sidecar is outside that, so an embargo declaration needs its **own**
   signed payload (mirror `Redaction::canonical_signing_payload`,
   `redaction.rs:67`). Confirm the canonical payload fields for `StateVisibility`.
-- **O7 — header-visible vs fully-withheld.** Should an under-tier state's
-  *header* (id + parents, so the DAG is walkable) travel while its content is
-  withheld, or should the whole state be withheld and the child served with a
-  synthetic parent pointer? §7.1 assumes header-visible (simpler, DAG stays
-  intact); confirm this doesn't itself leak sensitive metadata (commit message,
-  author, timestamp) — those may need stubbing too.
+- **O7 — header-visible vs fully-withheld (RESOLVED: fully-withheld).** An
+  under-tier state is withheld **whole**; no "header" travels. There is no
+  header-only `State` form to serve: the wire emits one `ObjectType::State` object
+  whose payload is `rmp_serde::to_vec_named(&state)` over the entire `State`
+  (`object_graph.rs:84-90`), which carries `intent`/`attribution`/timestamps/
+  `verification`/`signature` (`state_core.rs:202-214`) — so a "header" *is* the
+  metadata leak (finding cid 3324616942). Because the child of a withheld state is
+  itself withheld (downward-closure, §5.0), no consumer ever needs the embargoed
+  parent's header to resolve a served child's DAG edge — the served set is
+  ancestry-closed, so every served state's parents are also served.
 - **O8 — fail-closed default's authorized scope.** The strictest `Private` tier
   carries a `scope_label`, but the last-resort fallback (§8.1 step 5) fires when no
   default is configured — so there is no label to fall back to. Options: require the
@@ -849,33 +944,39 @@ before filing.
    Add `StateVisibility` / `StateVisibilityBlob` (objects), the `visibility/`
    sidecar dir + read/write + `has_visibility_for_state` (repo/store), modeled on
    `Redaction`/`RedactionsBlob`. Blocked by this spike.
-2. **impl(repo/bridge): cooperative state-tier stub + audience plumbing.** Extend
+2. **impl(repo/bridge): audience plumbing + operator-local courtesy stub.** Extend
    `visible()` with the strictest `Private` arm (above the all-seeing-`Internal`
    arm); thread an `AudienceTier` through the checkout entry (above
    `materialize_tree`) and through `export_state` (which already holds the
-   `ChangeId`); stub under-tier states at the **state-walk level** — *not* the
-   blob-keyed `materialize_blob`/`export_tree`, which receive neither the
-   `ChangeId` nor the audience. Blocked by #1.
+   `ChangeId`). The bridge enforces the public mirror by **halting the export walk**
+   at the first under-tier state (issue #5), emitting absence. The render-stub is
+   only the **operator-local checkout courtesy** at the **state-walk level** — *not*
+   the blob-keyed `materialize_blob`/`export_tree` (no `ChangeId`/audience), and
+   *not* a public-mirror surface (§5.0/§5.3). Blocked by #1.
 3. **impl(oplog/cli): tier records + `heddle visibility` verb family.**
    Tail-append `StateVisibilitySet`/`StateVisibilityPromote`; implement `set` /
    `promote` / `show` / `list`; wire the config-default resolution chain. Blocked
    by #1.
-4. **impl(weft, cross-repo): authoritative serve-side tier filter.** Filter
-   `ListRefs`/`Pull` by caller tier via a **new tier-aware reachability pass**
-   (visible-closure **minus** hidden-exclusive closure, §5.3) — *not* an extension
-   of the root-exclusion `collect_excluded`, which would over-withhold blobs a
-   visible child shares with a hidden parent; define the grant-role →
-   `AudienceTier` mapping (resolves O2); optional `PromoteVisibility` RPC. Blocked
-   by #1; `Scope: multi` (heddle proto + weft).
+4. **impl(weft, cross-repo): authoritative serve-side downward-closed gate.** Gate
+   `ListRefs`/`Pull` by caller tier via the **tier-aware downward-closed
+   reachability pass** (§5.3): serve the forward closure of the ancestry-closed
+   visible set, halting the walk at the first under-tier state so no
+   `ObjectType::State` header for an embargoed commit (or any descendant) is
+   emitted. *Not* an extension of the root-exclusion `collect_excluded` (which
+   over-withholds blobs a visible child shares with a hidden parent), and no set
+   difference is needed — a child of a hidden parent is never served, so there is
+   nothing shared to subtract. Define the grant-role → `AudienceTier` mapping
+   (resolves O2); optional `PromoteVisibility` RPC. Blocked by #1; `Scope: multi`
+   (heddle proto + weft).
 5. **impl(bridge): embargo DAG integrity + scheduled promotion.** Forward-only
-   disclosure for the Git mirror: gate under-tier states **and their descendants**
-   out of the public-audience export walk (Option A, §7.1), so `refs/heads/main`
-   lags to the last all-public ancestor; disclosure FF-appends the real commits,
-   each minted once (`export_state` mapping-skip, `git_export.rs:218-223`). Never
-   re-mint or force-push a published commit — the FF guard
-   (`ensure_commit_update_fast_forward`, `git_core.rs:2100`) forbids it. A permanent
-   stub commit (Option B) is the optional density fallback; stub-*swap* is out
-   (resolves O3). `embargo_until` auto-promotion at serve (resolves O5). Blocked by
+   disclosure for the Git mirror: halt the public-audience export walk at the first
+   under-tier state so it **and its descendants** are not published, so
+   `refs/heads/main` lags to the last all-public ancestor; disclosure FF-appends
+   the real commits, each minted once (`export_state` mapping-skip,
+   `git_export.rs:218-223`). Never re-mint or force-push a published commit — the
+   FF guard (`ensure_commit_update_fast_forward`, `git_core.rs:2271`) forbids it.
+   **No stub commit** — stub-swap and parent-reparent are ruled out (§5.0.1,
+   resolves O3). `embargo_until` auto-promotion at serve (resolves O5). Blocked by
    #2.
 6. **decision/spike: unify `AnnotationVisibility` into a shared `VisibilityTier`**
    across annotations/discussions/states (resolves O4). Small; can fold into #1
