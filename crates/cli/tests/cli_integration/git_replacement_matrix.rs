@@ -871,6 +871,97 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
     );
 }
 
+/// heddle#305 (git-overlay): `commit` then `undo` hard-resets the Git mirror
+/// to the parent — no revert commit recorded as Git history — while preserving
+/// the pre-undo state in heddle's thread history via the `undo-recovery`
+/// marker, so the absorbed worktree edits are never silently discarded. The
+/// durability lives in heddle's store, not in Git history.
+#[test]
+fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
+    let temp = TempDir::new().unwrap();
+    let origin = temp.path().join("origin.git");
+    let work = temp.path().join("work");
+    seed_bare_git_repo(&origin);
+
+    heddle_without_git(
+        &[
+            "clone",
+            origin.to_str().expect("origin path should be utf8"),
+            work.to_str().expect("work path should be utf8"),
+        ],
+        temp.path(),
+    )
+    .unwrap();
+    configure_repo_local_git_identity(&work);
+
+    let base = git_head_oid(&work);
+
+    // An edit that lived only in the worktree, then absorbed by `commit`.
+    std::fs::write(work.join("story.txt"), "FRICTION ONE\nFRICTION TWO\n").unwrap();
+    let commit = assert_clean_json_without_git(
+        &["--output", "json", "commit", "-m", "friction"],
+        &work,
+    );
+    assert_eq!(commit["output_kind"], "commit");
+    let friction_state = commit["change_id"]
+        .as_str()
+        .expect("commit emits the absorbed heddle change-id")
+        .to_string();
+    let friction_commit = git_head_oid(&work);
+    assert_ne!(friction_commit, base, "commit advances the checkout Git ref");
+
+    let undo = assert_clean_json_without_git(&["--output", "json", "undo"], &work);
+    assert_eq!(undo["action"], "undo");
+
+    // Git mirror is hard-reset to the parent — not a revert commit on top.
+    assert_eq!(
+        git_head_oid(&work),
+        base,
+        "undo must hard-reset the visible Git checkout to the parent"
+    );
+    let log = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["log", "--oneline"])
+            .current_dir(&work)
+            .output()
+            .expect("git log")
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        !log.contains("friction"),
+        "undo must not record itself as Git history (no revert/friction commit remains): {log}"
+    );
+
+    // The pre-undo state is preserved in heddle's thread history via the
+    // recovery marker, even though Git was hard-reset.
+    let markers = assert_clean_json_without_git(&["--output", "json", "marker", "list"], &work);
+    let recovery = markers["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "undo-recovery")
+        .expect("undo must record an `undo-recovery` marker for the pre-undo state");
+    assert_eq!(
+        recovery["change_id"], friction_state,
+        "recovery marker must point at the pre-undo (friction) heddle state"
+    );
+
+    // And `redo` round-trips the absorbed content back into the worktree.
+    let redo = assert_clean_json_without_git(&["--output", "json", "redo"], &work);
+    assert_eq!(redo["action"], "redo");
+    assert_eq!(
+        std::fs::read_to_string(work.join("story.txt")).unwrap(),
+        "FRICTION ONE\nFRICTION TWO\n",
+        "redo must restore the absorbed worktree edits"
+    );
+    assert_eq!(
+        git_head_oid(&work),
+        friction_commit,
+        "redo must restore the Git checkpoint together with the heddle state"
+    );
+}
+
 #[test]
 fn git_replacement_matrix_commit_staged_index_without_git_on_path() {
     let temp = TempDir::new().unwrap();

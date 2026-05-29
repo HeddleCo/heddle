@@ -495,6 +495,109 @@ fn test_undo_capture_restores_head_to_parent() {
     );
 }
 
+/// heddle#305: `undo` must not silently discard the worktree edits a prior
+/// `capture`/`commit` absorbed. Before the reset, undo records the pre-undo
+/// state into a durable `undo-recovery` marker in heddle's thread history, so
+/// the absorbed content is preserved as a first-class, addressable recovery
+/// point — not merely buried in an undone oplog batch — while `redo` still
+/// round-trips the content. Pre-fix there was no recovery marker: the pre-undo
+/// state was recoverable only via `redo` (fragile) or by knowing the buried
+/// change-id, matching the dogfood report that the edits were "not obviously
+/// recoverable".
+#[test]
+fn test_undo_captures_pre_undo_state_into_recovery_marker() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+
+    // An edit that lived only in the worktree, then captured ("committed").
+    std::fs::write(temp.path().join("notes.md"), "FRICTION ONE\nFRICTION TWO\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
+    let friction_state = head_short(temp.path());
+
+    heddle_must_succeed(&["undo"], temp.path());
+
+    // The reset happened: worktree reverted to the parent state.
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "base\n",
+        "undo must reset the worktree to the parent state"
+    );
+
+    // (a) The pre-undo worktree content is captured into thread history: undo
+    // records a recovery marker pointing at the pre-undo state.
+    let markers: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "marker", "list"],
+        temp.path(),
+    ))
+    .unwrap();
+    let recovery = markers["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "undo-recovery")
+        .expect("undo must record an `undo-recovery` marker for the pre-undo state");
+    assert_eq!(
+        recovery["change_id"], friction_state,
+        "the recovery marker must point at the pre-undo (friction) state, not the reset target"
+    );
+
+    // (b) `redo` restores the captured content (round-trips the worktree).
+    heddle_must_succeed(&["redo"], temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "FRICTION ONE\nFRICTION TWO\n",
+        "redo must restore the friction content to the worktree"
+    );
+}
+
+/// The recovery marker makes the pre-undo content recoverable by name,
+/// independent of the (fragile) redo stack: after undo, `heddle goto
+/// undo-recovery` restores the pre-undo worktree even once a divergent capture
+/// has been layered on top of the reverted state. This is the data-safety
+/// guarantee — nothing absorbed by the undone capture is lost.
+#[test]
+fn test_undo_recovery_marker_survives_divergent_capture() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+
+    std::fs::write(temp.path().join("notes.md"), "base\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "base"], temp.path());
+    std::fs::write(temp.path().join("notes.md"), "FRICTION ONE\nFRICTION TWO\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
+    let friction_state = head_short(temp.path());
+
+    heddle_must_succeed(&["undo"], temp.path());
+
+    // Diverge: a fresh capture layered onto the reverted worktree.
+    std::fs::write(temp.path().join("notes.md"), "different direction\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "diverge"], temp.path());
+
+    // The durable recovery marker still pins the pre-undo (friction) state.
+    let markers: Value = serde_json::from_str(&heddle_must_succeed(
+        &["--output", "json", "marker", "list"],
+        temp.path(),
+    ))
+    .unwrap();
+    let recovery = markers["markers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["name"] == "undo-recovery")
+        .expect("recovery marker must survive a divergent capture");
+    assert_eq!(recovery["change_id"], friction_state);
+
+    // Recover the pre-undo content by name.
+    heddle_must_succeed(&["goto", "undo-recovery"], temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
+        "FRICTION ONE\nFRICTION TWO\n",
+        "the pre-undo content must be recoverable via the durable recovery marker"
+    );
+}
+
 /// Fast-forward merge undo, full restoration: HEAD *and* the merged-into
 /// thread ref both rewind to the pre-merge tip. This pins the heddle#99 fix —
 /// before it landed, the FF merge recorded an `OpRecord::Goto` whose inverse
