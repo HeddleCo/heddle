@@ -4,6 +4,7 @@
 //! window. The actual signal *computation* lands in R3 (`crates/state_review`);
 //! this service exposes whatever's already on disk.
 
+use objects::store::ObjectStore;
 use std::{collections::HashMap, pin::Pin};
 
 use futures::Stream;

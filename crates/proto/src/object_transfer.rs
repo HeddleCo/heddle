@@ -37,7 +37,7 @@ pub fn chunk_offset(chunk_index: usize, chunk_size: usize) -> Option<usize> {
     chunk_index.checked_mul(chunk_size)
 }
 
-pub fn load_requested_object(store: &dyn ObjectStore, req: &ObjectRequest) -> Result<ObjectData> {
+pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> Result<ObjectData> {
     // Note on Redaction objects: a redaction sidecar is content-addressed by
     // the *redacted blob's* hash, which also identifies a real blob in the
     // store. `load_requested_object` resolves blob-vs-tree by content
@@ -71,7 +71,7 @@ pub fn load_requested_object(store: &dyn ObjectStore, req: &ObjectRequest) -> Re
 }
 
 pub fn load_object_data(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     id: &ObjectId,
     obj_type: ObjectType,
 ) -> Result<ObjectData> {
@@ -111,7 +111,7 @@ pub fn load_object_data(
     })
 }
 
-pub fn store_received_object(store: &dyn ObjectStore, data: &ObjectData) -> Result<()> {
+pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Result<()> {
     match (&data.id, data.obj_type) {
         (ObjectId::Hash(hash), ObjectType::Blob) => {
             store.put_blob_bytes_with_hash(&data.data, *hash)?;

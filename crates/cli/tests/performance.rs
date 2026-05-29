@@ -2,6 +2,7 @@
 //!
 //! Tests for verifying system behavior with large repositories and files.
 
+use objects::store::ObjectStore;
 use std::{
     path::Path,
     process::Command,

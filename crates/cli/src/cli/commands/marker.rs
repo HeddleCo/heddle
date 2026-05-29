@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Marker commands.
 
+use objects::store::ObjectStore;
 use anyhow::{anyhow, Result};
 use objects::object::MarkerName;
 use repo::Repository;

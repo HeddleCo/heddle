@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread command implementation.
 
+use objects::store::ObjectStore;
 use std::{
     fs,
     path::{Path, PathBuf},

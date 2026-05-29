@@ -150,6 +150,163 @@ impl ObjectStore for SharedStore {
     }
 }
 
+/// Static-dispatch enum over the concrete object stores Heddle ships.
+///
+/// This is the default `S` for [`Repository`](crate) so the store backend
+/// can be chosen at *runtime* (from `[storage.s3]` config in
+/// `Repository::build_store`) while remaining a compile-time-monomorphized
+/// type — no vtable. Each [`ObjectStore`] method `match`-dispatches to the
+/// inner variant, so the compiler inlines through the enum to the concrete
+/// backend's implementation (including its overridden default methods).
+///
+/// Sealed by construction: only the variants enumerated here are valid
+/// stores. Heddle is the sole implementer (heddle#259 / #283) — `AnyStore`
+/// is not a public extension point.
+pub enum AnyStore {
+    Fs(FsStore),
+    #[cfg(feature = "s3")]
+    S3(S3Store),
+}
+
+/// Forward an [`ObjectStore`] call to the active [`AnyStore`] variant.
+///
+/// Every arm calls the *same* method on the inner concrete store, so a
+/// backend's override of a defaulted trait method (e.g. `FsStore::blob_size`)
+/// is preserved rather than falling back to the trait default.
+macro_rules! any_store_dispatch {
+    ($self:ident, $method:ident ( $($arg:expr),* )) => {
+        match $self {
+            AnyStore::Fs(inner) => inner.$method($($arg),*),
+            #[cfg(feature = "s3")]
+            AnyStore::S3(inner) => inner.$method($($arg),*),
+        }
+    };
+}
+
+impl ObjectStore for AnyStore {
+    fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
+        any_store_dispatch!(self, get_blob(hash))
+    }
+    fn put_blob(&self, blob: &Blob) -> Result<ContentHash> {
+        any_store_dispatch!(self, put_blob(blob))
+    }
+    fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
+        any_store_dispatch!(self, get_blob_bytes(hash))
+    }
+    fn blob_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
+        any_store_dispatch!(self, blob_size(hash))
+    }
+    fn loose_blob_path(&self, hash: &ContentHash) -> Option<PathBuf> {
+        any_store_dispatch!(self, loose_blob_path(hash))
+    }
+    fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
+        any_store_dispatch!(self, promote_to_loose_uncompressed(hash))
+    }
+    fn clear_recent_caches(&self) {
+        any_store_dispatch!(self, clear_recent_caches())
+    }
+    fn put_blob_with_hash(&self, blob: &Blob, hash: ContentHash) -> Result<ContentHash> {
+        any_store_dispatch!(self, put_blob_with_hash(blob, hash))
+    }
+    fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
+        any_store_dispatch!(self, has_blob(hash))
+    }
+    fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
+        any_store_dispatch!(self, get_tree(hash))
+    }
+    fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
+        any_store_dispatch!(self, put_tree(tree))
+    }
+    fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
+        any_store_dispatch!(self, has_tree(hash))
+    }
+    fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
+        any_store_dispatch!(self, get_state(id))
+    }
+    fn put_state(&self, state: &State) -> Result<()> {
+        any_store_dispatch!(self, put_state(state))
+    }
+    fn has_state(&self, id: &ChangeId) -> Result<bool> {
+        any_store_dispatch!(self, has_state(id))
+    }
+    fn list_states(&self) -> Result<Vec<ChangeId>> {
+        any_store_dispatch!(self, list_states())
+    }
+    fn get_action(&self, id: &ActionId) -> Result<Option<Action>> {
+        any_store_dispatch!(self, get_action(id))
+    }
+    fn put_action(&self, action: &mut Action) -> Result<ActionId> {
+        any_store_dispatch!(self, put_action(action))
+    }
+    fn list_actions(&self) -> Result<Vec<ActionId>> {
+        any_store_dispatch!(self, list_actions())
+    }
+    fn list_blobs(&self) -> Result<Vec<ContentHash>> {
+        any_store_dispatch!(self, list_blobs())
+    }
+    fn list_trees(&self) -> Result<Vec<ContentHash>> {
+        any_store_dispatch!(self, list_trees())
+    }
+    fn put_blob_bytes_with_hash(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
+        any_store_dispatch!(self, put_blob_bytes_with_hash(data, hash))
+    }
+    fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
+        any_store_dispatch!(self, put_tree_serialized(data, hash))
+    }
+    fn put_state_serialized(&self, data: &[u8], id: ChangeId) -> Result<()> {
+        any_store_dispatch!(self, put_state_serialized(data, id))
+    }
+    fn put_action_serialized(&self, data: &[u8], id: ActionId) -> Result<()> {
+        any_store_dispatch!(self, put_action_serialized(data, id))
+    }
+    fn get_pack_object(
+        &self,
+        id: &pack::PackObjectId,
+    ) -> Result<Option<(pack::ObjectType, Vec<u8>)>> {
+        any_store_dispatch!(self, get_pack_object(id))
+    }
+    fn put_blobs_packed(&self, blobs: Vec<(ContentHash, Vec<u8>)>) -> Result<()> {
+        any_store_dispatch!(self, put_blobs_packed(blobs))
+    }
+    fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
+        any_store_dispatch!(self, install_pack(pack_data, index_data))
+    }
+    fn install_pack_streaming(
+        &self,
+        pack_path: &std::path::Path,
+        index_path: &std::path::Path,
+    ) -> Result<()> {
+        any_store_dispatch!(self, install_pack_streaming(pack_path, index_path))
+    }
+    fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
+        any_store_dispatch!(self, pack_objects(aggressive))
+    }
+    fn prune_loose_objects(&self) -> Result<(u64, u64)> {
+        any_store_dispatch!(self, prune_loose_objects())
+    }
+    fn begin_snapshot_write_batch(&self) -> Result<()> {
+        any_store_dispatch!(self, begin_snapshot_write_batch())
+    }
+    fn flush_snapshot_write_batch(&self) -> Result<()> {
+        any_store_dispatch!(self, flush_snapshot_write_batch())
+    }
+    fn abort_snapshot_write_batch(&self) {
+        any_store_dispatch!(self, abort_snapshot_write_batch())
+    }
+    fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
+        any_store_dispatch!(self, has_redactions_for_blob(blob))
+    }
+    fn get_redactions_bytes_for_blob(&self, blob: &ContentHash) -> Result<Option<Vec<u8>>> {
+        any_store_dispatch!(self, get_redactions_bytes_for_blob(blob))
+    }
+    fn put_redactions_bytes_for_blob(&self, blob: &ContentHash, bytes: &[u8]) -> Result<()> {
+        any_store_dispatch!(self, put_redactions_bytes_for_blob(blob, bytes))
+    }
+    fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
+        any_store_dispatch!(self, list_blobs_with_redactions())
+    }
+}
+
 /// Trait for object storage backends.
 pub trait ObjectStore: Send + Sync {
     fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>>;

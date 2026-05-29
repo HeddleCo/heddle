@@ -7,6 +7,7 @@
 //! merge introduced. The default (`--git-commit` not set) is preserved
 //! — heddle state advances and git is unaware.
 
+use objects::store::ObjectStore;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use objects::store::ObjectStore;
 use std::fs;
 
 use objects::object::{ChangeId, ThreadName};
@@ -1167,6 +1168,8 @@ mod blob_hydrator_callback {
         object::{Blob, ContentHash},
     };
 
+    use objects::store::ObjectStore;
+
     use super::create_test_repo;
     use crate::{BlobHydrator, HeddleError, Repository};
 
@@ -1458,6 +1461,7 @@ mod require_tree_callback {
     //! cover the on-disk wiring.
 
     use objects::object::{ContentHash, Tree};
+    use objects::store::ObjectStore;
 
     use super::create_test_repo;
     use crate::{HeddleError, Repository};

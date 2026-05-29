@@ -25,7 +25,7 @@ pub(super) struct MergeRenameMap {
 }
 
 pub(super) fn detect_merge_renames(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     base_tree: &Tree,
     our_tree: &Tree,
     their_tree: &Tree,

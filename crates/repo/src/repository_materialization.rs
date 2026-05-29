@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tree materialization helpers.
 
+use objects::store::ObjectStore;
 use std::{
     collections::BTreeSet,
     fs,
@@ -806,6 +807,7 @@ fn requested_materialization_threads() -> Option<NonZeroUsize> {
 mod tests {
     use std::{num::NonZeroUsize, path::PathBuf};
 
+    use objects::store::ObjectStore;
     use objects::{fs_clone::filesystem_supports_reflink, object::Blob};
     use tempfile::TempDir;
 

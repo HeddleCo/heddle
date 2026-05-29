@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fork command: create exploration branch.
 
+use objects::store::ObjectStore;
 use anyhow::Result;
 use objects::object::{State, ThreadName};
 use refs::{Head, RefExpectation, RefUpdate};

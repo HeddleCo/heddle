@@ -66,14 +66,15 @@ pub struct ImportStats {
 
 /// Orchestrates one import pass.
 ///
-/// Generic over the ref and oplog backends. The object store stays
-/// `&dyn ObjectStore` (it has no `async` methods — see heddle#259). `O`
-/// defaults to `OpLog` so [`Importer::new`] (which starts without an oplog
-/// backend) has a concrete type; [`Importer::with_oplog`] rebinds `O` to
-/// whatever backend the caller attaches.
-pub struct Importer<'a, R: RefBackend, O: OpLogBackend = OpLog> {
+/// Generic over the ref, object-store, and oplog backends — the store `S`
+/// is threaded as a borrowed concrete type so writes statically dispatch
+/// through the heddle#283 enum rather than a vtable. `O` defaults to `OpLog`
+/// so [`Importer::new`] (which starts without an oplog backend) has a
+/// concrete type; [`Importer::with_oplog`] rebinds `O` to whatever backend
+/// the caller attaches.
+pub struct Importer<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend = OpLog> {
     git: &'a GitSource,
-    store: &'a dyn ObjectStore,
+    store: &'a S,
     refs: &'a R,
     map: &'a mut ShaMap,
     oplog: Option<&'a O>,
@@ -87,10 +88,10 @@ pub struct Importer<'a, R: RefBackend, O: OpLogBackend = OpLog> {
     pack_staging_dir: Option<PathBuf>,
 }
 
-impl<'a, R: RefBackend> Importer<'a, R, OpLog> {
+impl<'a, R: RefBackend, S: ObjectStore> Importer<'a, R, S, OpLog> {
     pub fn new(
         git: &'a GitSource,
-        store: &'a dyn ObjectStore,
+        store: &'a S,
         refs: &'a R,
         map: &'a mut ShaMap,
     ) -> Self {
@@ -105,14 +106,14 @@ impl<'a, R: RefBackend> Importer<'a, R, OpLog> {
     }
 }
 
-impl<'a, R: RefBackend, O: OpLogBackend> Importer<'a, R, O> {
+impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
     /// Attach an oplog backend so the importer also translates reflog
     /// entries into `OpRecord`s. Without one the import still produces a
     /// valid Heddle repo — you just don't get `heddle undo` reach past the
     /// import boundary.
     ///
     /// Rebinds the oplog type parameter to the attached backend's type.
-    pub fn with_oplog<O2: OpLogBackend>(self, oplog: &'a O2) -> Importer<'a, R, O2> {
+    pub fn with_oplog<O2: OpLogBackend>(self, oplog: &'a O2) -> Importer<'a, R, S, O2> {
         Importer {
             git: self.git,
             store: self.store,

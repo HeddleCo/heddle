@@ -12,6 +12,7 @@
 //! to match main's `pub use checkpoint::run as cmd_checkpoint;`
 //! convention.
 
+use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use objects::object::ThreadName;
 use oplog::OpRecord;

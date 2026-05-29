@@ -44,6 +44,7 @@
 //! (`session:{session_id}`), so operators can traverse from an
 //! annotation back to the transcript on disk.
 
+use objects::store::ObjectStore;
 use std::collections::HashMap;
 
 use chrono::Utc;

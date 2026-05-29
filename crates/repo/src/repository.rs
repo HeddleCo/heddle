@@ -73,7 +73,7 @@ use objects::{
     fs_atomic::write_file_atomic,
     lock::{RepoLock, RepositoryLockExt},
     object::{Attribution, ChangeId, ContentHash, MarkerName, Principal, State, ThreadName, Tree},
-    store::{FsStore, ObjectStore, ShallowInfo},
+    store::{AnyStore, FsStore, ObjectStore, ShallowInfo},
     worktree::{WorktreeStatus, should_ignore as should_ignore_path},
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
@@ -258,25 +258,28 @@ pub trait BlobHydrator: Send + Sync {
 
 /// A Heddle repository.
 ///
-/// Generic over its reference and operation-log backends. The CLI uses the
-/// defaults — `Repository<RefManager, OpLog>` (the on-disk local
-/// backends) — so the bare name `Repository` resolves to the local flavor
-/// everywhere. The hosted server instantiates
-/// `Repository<PgRefBackend, PgOpLogBackend>` via [`Repository::from_parts`].
+/// Generic over its reference, operation-log, and object-store backends.
+/// The CLI uses the defaults — `Repository<RefManager, OpLog, AnyStore>`
+/// (the on-disk local backends) — so the bare name `Repository` resolves to
+/// the local flavor everywhere. The hosted server instantiates
+/// `Repository<PgRefBackend, PgOpLogBackend, …>` via [`Repository::from_parts`].
 ///
-/// The object store stays `Box<dyn ObjectStore>` because [`Repository::open`]
-/// selects `FsStore` vs `S3Store` at *runtime* from config — a choice that
-/// can't be a compile-time type parameter without re-introducing dynamic
-/// dispatch via an enum. See heddle#259 for the Phase-2 follow-up.
-pub struct Repository<R = RefManager, O = OpLog>
+/// The object store is the [`AnyStore`] enum by default: [`Repository::open`]
+/// selects `FsStore` vs `S3Store` at *runtime* from config (`build_store`),
+/// but the choice is a concrete enum variant rather than a `Box<dyn>`, so
+/// every object access is static-dispatched through the enum to the inner
+/// store — no vtable (heddle#283). `S` goes last so existing
+/// `Repository<R, O>` references keep resolving with `S = AnyStore`.
+pub struct Repository<R = RefManager, O = OpLog, S = AnyStore>
 where
     R: RefBackend,
     O: OpLogBackend,
+    S: ObjectStore,
 {
     root: PathBuf,
     heddle_dir: PathBuf,
     capability: RepositoryCapability,
-    store: Box<dyn ObjectStore>,
+    store: S,
     refs: R,
     oplog: O,
     config: RepoConfig,
@@ -284,7 +287,7 @@ where
     blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
 }
 
-impl<R: RefBackend, O: OpLogBackend> RepositoryLockExt for Repository<R, O> {
+impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repository<R, O, S> {
     fn locker(&self) -> RepoLock {
         let lock_root = self.heddle_dir.parent().expect(
             "heddle_dir has no parent component; cannot determine lock root. This indicates a misconfigured repository.",
@@ -293,7 +296,7 @@ impl<R: RefBackend, O: OpLogBackend> RepositoryLockExt for Repository<R, O> {
     }
 }
 
-impl<R: RefBackend, O: OpLogBackend> Repository<R, O> {
+impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
     /// Expert-only constructor for callers that already own the repository's
     /// component backends and invariant state.
     ///
@@ -305,7 +308,7 @@ impl<R: RefBackend, O: OpLogBackend> Repository<R, O> {
     pub fn from_parts(
         root: PathBuf,
         heddle_dir: PathBuf,
-        store: Box<dyn ObjectStore>,
+        store: S,
         refs: R,
         oplog: O,
         config: RepoConfig,
@@ -326,8 +329,8 @@ impl<R: RefBackend, O: OpLogBackend> Repository<R, O> {
     }
 
     /// The object store backing this repository.
-    pub fn store(&self) -> &dyn ObjectStore {
-        self.store.as_ref()
+    pub fn store(&self) -> &S {
+        &self.store
     }
 
     /// The reference backend (threads, markers, HEAD).
@@ -341,11 +344,18 @@ impl<R: RefBackend, O: OpLogBackend> Repository<R, O> {
     }
 }
 
-impl Repository {
+/// Local-flavor opens generic over the object store `S`.
+///
+/// `open_raw` assembles a repository from already-resolved pieces and runs
+/// none of the local-only open hooks (migrations, hydrator reconstruction) —
+/// those are bound to the default `AnyStore` flavor and live in
+/// [`Repository::run_open_hooks`], which the config-driven [`Repository::open`]
+/// invokes after `open_raw`.
+impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
     fn open_raw(
         root: PathBuf,
         heddle_dir: PathBuf,
-        store: Box<dyn ObjectStore>,
+        store: S,
         config: RepoConfig,
         refs: RefManager,
     ) -> Result<Self> {
@@ -356,20 +366,46 @@ impl Repository {
             .unwrap_or_else(|| objects::object::Principal::new("<unknown>", ""));
         let oplog = OpLog::new(&heddle_dir, actor);
         let shallow = ShallowInfo::load(&heddle_dir)?;
-        let repo = Self::from_parts(
-            root,
-            heddle_dir,
-            store,
-            refs,
-            oplog,
-            config,
-            shallow,
-        );
+        Ok(Self::from_parts(
+            root, heddle_dir, store, refs, oplog, config, shallow,
+        ))
+    }
+
+    /// Open an existing Heddle repository using a custom object store backend.
+    ///
+    /// Expert/test injection point: takes the store by value (any
+    /// [`ObjectStore`]) and skips the local-only open hooks (declarative
+    /// migrations, lazy-clone hydrator reconstruction) that [`Repository::open`]
+    /// runs for the default `AnyStore` flavor.
+    pub fn open_with_store(heddle_dir: impl AsRef<Path>, store: S) -> Result<Self> {
+        let heddle_dir = heddle_dir.as_ref().to_path_buf();
+        let root = heddle_dir
+            .parent()
+            .ok_or_else(|| {
+                HeddleError::Config(format!(
+                    "heddle_dir '{}' has no parent directory",
+                    heddle_dir.display()
+                ))
+            })?
+            .to_path_buf();
+        let config = RepoConfig::load(&heddle_dir.join("config.toml"))?;
+        let refs = RefManager::new(&heddle_dir);
+        Self::open_raw(root, heddle_dir, store, config, refs)
+    }
+}
+
+impl Repository {
+    /// Run the local-only hooks that follow a config-driven [`Repository::open`]:
+    /// declarative migrations + lazy-clone hydrator reconstruction. Both are
+    /// bound to the default `AnyStore` flavor (`apply_pending` and
+    /// `BlobHydrator` operate on the bare `Repository`), so they live here
+    /// rather than in the generic `open_raw`.
+    fn run_open_hooks(&self) {
         // Run any pending declarative migrations. Idempotent:
         // re-opening a repo a second time is a no-op for the migration pass.
         // Failures here are logged but non-fatal; surfacing migration errors
         // through `open` is worse than letting the repo open and warning later.
-        if let Err(err) = crate::migration::apply_pending(&repo) {
+        if let Err(err) = crate::migration::apply_pending(self) {
             tracing::warn!("declarative migrations failed during repo open: {err}");
         }
         // Reconstruct any persisted lazy-clone blob hydrator. When
@@ -379,8 +415,8 @@ impl Repository {
         // missing-blob marker can fetch transparently — without this
         // reconstruction, lazy clones would only work inside the single
         // `cmd_clone` process. See `lazy_hydrator.rs` for the shape.
-        match crate::lazy_hydrator::try_reconstruct(repo.root(), repo.heddle_dir()) {
-            Ok(Some(hydrator)) => repo.set_blob_hydrator(hydrator),
+        match crate::lazy_hydrator::try_reconstruct(self.root(), self.heddle_dir()) {
+            Ok(Some(hydrator)) => self.set_blob_hydrator(hydrator),
             Ok(None) => {}
             Err(err) => {
                 // Hydrator construction failed (factory error or
@@ -392,14 +428,14 @@ impl Repository {
                 tracing::warn!("lazy hydrator reconstruction failed during open: {err}");
             }
         }
-        Ok(repo)
     }
 
     /// Build an object store from the repository configuration.
     ///
     /// Returns an [`S3Store`] when `[storage.s3]` is configured and the `s3`
-    /// feature is enabled, otherwise falls back to [`FsStore`].
-    fn build_store(config: &RepoConfig, heddle_dir: &Path) -> Result<Box<dyn ObjectStore>> {
+    /// feature is enabled, otherwise falls back to [`FsStore`] — wrapped in
+    /// the [`AnyStore`] enum so the runtime choice stays statically dispatched.
+    fn build_store(config: &RepoConfig, heddle_dir: &Path) -> Result<AnyStore> {
         #[cfg(feature = "s3")]
         {
             if let Some(s3) = &config.storage.s3 {
@@ -407,12 +443,12 @@ impl Repository {
             }
         }
         let _ = config; // suppress unused warning when s3 feature is off
-        Ok(Box::new(FsStore::new(heddle_dir)))
+        Ok(AnyStore::Fs(FsStore::new(heddle_dir)))
     }
 
     /// Construct an [`S3Store`] from the repository's S3 storage configuration.
     #[cfg(feature = "s3")]
-    fn build_s3_store(s3: &repo_config::S3StorageConfig) -> Result<Box<dyn ObjectStore>> {
+    fn build_s3_store(s3: &repo_config::S3StorageConfig) -> Result<AnyStore> {
         use objects::store::S3StoreBuilder;
 
         let mut builder = S3StoreBuilder::new().bucket(&s3.bucket);
@@ -450,7 +486,7 @@ impl Repository {
         let store = builder
             .build_blocking()
             .map_err(|e| HeddleError::Config(format!("S3 store initialization failed: {e}")))?;
-        Ok(Box::new(store))
+        Ok(AnyStore::S3(store))
     }
 
     /// Initialize a new bare repository at the given path.
@@ -496,7 +532,7 @@ impl Repository {
             root,
             heddle_dir: heddle_dir.clone(),
             capability,
-            store: Box::new(store),
+            store: AnyStore::Fs(store),
             refs,
             oplog,
             config,
@@ -542,26 +578,6 @@ impl Repository {
     /// artifacts must be covered by `.gitignore` or `.heddleignore`.
     pub fn ensure_git_overlay_local_excludes(path: impl AsRef<Path>) -> Result<()> {
         ensure_git_overlay_exclude(path.as_ref())
-    }
-
-    /// Open an existing Heddle repository using a custom object store backend.
-    pub fn open_with_store(
-        heddle_dir: impl AsRef<Path>,
-        store: Box<dyn ObjectStore>,
-    ) -> Result<Self> {
-        let heddle_dir = heddle_dir.as_ref().to_path_buf();
-        let root = heddle_dir
-            .parent()
-            .ok_or_else(|| {
-                HeddleError::Config(format!(
-                    "heddle_dir '{}' has no parent directory",
-                    heddle_dir.display()
-                ))
-            })?
-            .to_path_buf();
-        let config = RepoConfig::load(&heddle_dir.join("config.toml"))?;
-        let refs = RefManager::new(&heddle_dir);
-        Self::open_raw(root, heddle_dir, store, config, refs)
     }
 
     /// Open an existing repository.
@@ -638,29 +654,28 @@ impl Repository {
                     }
 
                     let config = RepoConfig::load(&shared_galeed_dir.join("config.toml"))?;
-                    let store: Box<dyn ObjectStore> =
-                        Self::build_store(&config, &shared_galeed_dir)?;
+                    let store = Self::build_store(&config, &shared_galeed_dir)?;
                     let local_head_path = heddle_path.join("HEAD");
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
-                    return Self::open_raw(
-                        dir.to_path_buf(),
-                        shared_galeed_dir,
-                        store,
-                        config,
-                        refs,
-                    );
+                    let repo =
+                        Self::open_raw(dir.to_path_buf(), shared_galeed_dir, store, config, refs)?;
+                    repo.run_open_hooks();
+                    return Ok(repo);
                 }
 
                 if objects_dir.is_dir() {
                     // Main repo mode.
                     let config = RepoConfig::load(&heddle_path.join("config.toml"))?;
-                    let store: Box<dyn ObjectStore> = Self::build_store(&config, &heddle_path)?;
+                    let store = Self::build_store(&config, &heddle_path)?;
                     let refs = RefManager::new(&heddle_path);
                     let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
+                    repo.run_open_hooks();
                     if repo.capability() == RepositoryCapability::GitOverlay {
                         match detect_git_head_state(dir) {
                             Ok(Some(GitHeadState::Attached(thread))) => {
-                                let git_head = Head::Attached { thread: ThreadName::from(thread) };
+                                let git_head = Head::Attached {
+                                    thread: ThreadName::from(thread),
+                                };
                                 // Avoid the disk write when our HEAD already matches
                                 // git's. Reading the existing head is a small file
                                 // read; the write that follows hits atomic-rename

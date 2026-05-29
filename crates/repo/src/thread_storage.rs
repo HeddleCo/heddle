@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread storage and lifecycle management.
 
+use objects::store::ObjectStore;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};

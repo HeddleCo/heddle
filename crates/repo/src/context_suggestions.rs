@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Context rewrite scoring and low-noise suggestion heuristics.
 
+use objects::store::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
 use objects::object::{ContextTarget, State};

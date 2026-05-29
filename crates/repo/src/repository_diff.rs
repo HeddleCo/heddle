@@ -11,7 +11,7 @@ use super::{Repository, Result};
 impl Repository {
     /// Get the difference between two trees.
     pub fn diff_trees(&self, from: &ContentHash, to: &ContentHash) -> Result<FileChangeSet> {
-        diff_trees(self.store.as_ref(), from, to)
+        diff_trees(&self.store, from, to)
             .map_err(|error| HeddleError::InvalidObject(format!("tree diff failed: {error}")))
     }
 }

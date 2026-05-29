@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared history traversal and filtering primitives.
 
+use objects::store::ObjectStore;
 use std::path::{Component, Path};
 
 use objects::object::{ChangeId, State, Tree};

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+use objects::store::ObjectStore;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{

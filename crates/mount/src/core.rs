@@ -70,9 +70,10 @@ use objects::{
     object::{
         Attribution, Blob, ChangeId, ContentHash, EntryType, FileMode, State, Tree, TreeEntry,
     },
-    store::ObjectStore,
+    store::{AnyStore, ObjectStore},
 };
-use refs::Head;
+use oplog::OpLog;
+use refs::{Head, RefManager};
 use repo::Repository;
 use tracing::{debug, instrument, warn};
 
@@ -644,8 +645,8 @@ impl<'brand> Pending<'brand> {
 /// Writes never modify the immutable state; they accumulate in
 /// [`Pending`] until [`ContentAddressedMount::capture`] folds them
 /// into a fresh state.
-pub struct ContentAddressedMount {
-    inner: Arc<MountInner>,
+pub struct ContentAddressedMount<S: ObjectStore + 'static = AnyStore> {
+    inner: Arc<MountInner<S>>,
     /// Background safety-sweep worker. Held in an `Option` so the
     /// `Drop` impl can `take()` it, signal shutdown, and join cleanly
     /// without needing to borrow `&mut self`.
@@ -691,8 +692,8 @@ pub struct ContentAddressedMount {
 /// templates — search for `state.write` / `state.read` and trace
 /// the subsequent `pending.lock()` / `inodes.lock()` to see the
 /// pattern in action.
-pub(crate) struct MountInner {
-    repo: Repository,
+pub(crate) struct MountInner<S: ObjectStore> {
+    repo: Repository<RefManager, OpLog, S>,
     thread: String,
     state: RwLock<MountState>,
     inodes: Mutex<Inodes>,
@@ -839,7 +840,7 @@ pub struct PrewarmHandle {
 }
 
 impl PrewarmHandle {
-    fn start(weak: Weak<MountInner>) -> Self {
+    fn start<S: ObjectStore + 'static>(weak: Weak<MountInner<S>>) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_worker = Arc::clone(&cancel);
         let join = std::thread::Builder::new()
@@ -886,7 +887,10 @@ impl Drop for PrewarmHandle {
 /// Coordinator thread body: walk the tree to collect blob hashes,
 /// then fan the hashes out across [`PREWARM_WORKERS`] worker
 /// threads. Returns aggregate stats.
-fn prewarm_run(weak: Weak<MountInner>, cancel: Arc<AtomicBool>) -> PrewarmStats {
+fn prewarm_run<S: ObjectStore + 'static>(
+    weak: Weak<MountInner<S>>,
+    cancel: Arc<AtomicBool>,
+) -> PrewarmStats {
     let Some(inner) = weak.upgrade() else {
         return PrewarmStats::default();
     };
@@ -1010,7 +1014,7 @@ fn prewarm_run(weak: Weak<MountInner>, cancel: Arc<AtomicBool>) -> PrewarmStats 
     stats
 }
 
-impl Drop for ContentAddressedMount {
+impl<S: ObjectStore + 'static> Drop for ContentAddressedMount<S> {
     fn drop(&mut self) {
         // Signal the worker before dropping the Arc<MountInner> so
         // it observes the shutdown promptly rather than waiting for
@@ -1041,7 +1045,7 @@ pub struct MountOptions {
     pub blob_cache: Option<Arc<BlobCachePool>>,
 }
 
-impl ContentAddressedMount {
+impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// Open a writable mount of `thread` against `repo`.
     ///
     /// Resolves the thread once, up front, so every subsequent
@@ -1053,7 +1057,7 @@ impl ContentAddressedMount {
     /// a fresh per-mount blob cache. Daemon callers that want
     /// cross-mount cache reuse should construct an
     /// [`Arc<BlobCachePool>`] once and use `with_options` instead.
-    pub fn new(repo: Repository, thread: impl Into<String>) -> Result<Self> {
+    pub fn new(repo: Repository<RefManager, OpLog, S>, thread: impl Into<String>) -> Result<Self> {
         Self::with_options(repo, thread, MountOptions::default())
     }
 
@@ -1061,7 +1065,7 @@ impl ContentAddressedMount {
     /// a blob cache across mounts in the same process — see
     /// [`MountOptions::blob_cache`].
     pub fn with_options(
-        repo: Repository,
+        repo: Repository<RefManager, OpLog, S>,
         thread: impl Into<String>,
         options: MountOptions,
     ) -> Result<Self> {
@@ -1134,7 +1138,7 @@ impl ContentAddressedMount {
         self.inner.state.read().expect("mount state lock").change_id
     }
 
-    fn store(&self) -> &dyn ObjectStore {
+    fn store(&self) -> &S {
         self.inner.repo.store()
     }
 
@@ -2825,7 +2829,7 @@ enum PendingChildKind {
     Dir,
 }
 
-impl MountInner {
+impl<S: ObjectStore> MountInner<S> {
     /// Drain any hot buffer whose `last_touched` is older than
     /// `idle_after`. Mirrors `ContentAddressedMount::promote_idle_buffers`
     /// but is callable from the worker thread which only holds a
@@ -2985,7 +2989,9 @@ impl MountInner {
 /// weak handle and drains any hot buffer that's been idle longer
 /// than `idle_after`. A `None` `sweep_interval` returns `None`,
 /// meaning event-driven promotion only.
-fn spawn_sweep_worker(inner: &Arc<MountInner>) -> Option<SweepHandle> {
+fn spawn_sweep_worker<S: ObjectStore + 'static>(
+    inner: &Arc<MountInner<S>>,
+) -> Option<SweepHandle> {
     let interval = inner
         .promotion
         .read()
@@ -3008,8 +3014,8 @@ fn spawn_sweep_worker(inner: &Arc<MountInner>) -> Option<SweepHandle> {
 /// condvar until either the timer interval elapses (run a sweep) or
 /// `signal_and_join` wakes us (exit). Also exits when the weak
 /// `MountInner` reference can no longer be upgraded.
-fn sweep_worker_loop(
-    inner: std::sync::Weak<MountInner>,
+fn sweep_worker_loop<S: ObjectStore + 'static>(
+    inner: std::sync::Weak<MountInner<S>>,
     state: Arc<SweepShutdown>,
     interval: Duration,
 ) {
@@ -3031,7 +3037,10 @@ fn sweep_worker_loop(
     }
 }
 
-fn resolve_thread(repo: &Repository, thread: &str) -> Result<MountState> {
+fn resolve_thread<S: ObjectStore>(
+    repo: &Repository<RefManager, OpLog, S>,
+    thread: &str,
+) -> Result<MountState> {
     let thread_name = objects::object::ThreadName::from(thread);
     let change_id = repo
         .refs()
@@ -3047,7 +3056,7 @@ fn resolve_thread(repo: &Repository, thread: &str) -> Result<MountState> {
     })
 }
 
-impl PlatformShell for ContentAddressedMount {
+impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
     fn lookup(&self, parent: NodeId, name: &OsStr) -> Result<Option<Entry>> {
         let record = self.record_for(parent)?;
         let parent_path = match self.dir_path_of(&record) {
@@ -3868,6 +3877,11 @@ impl PlatformShell for ContentAddressedMount {
 
 // --- Capture --------------------------------------------------------------
 
+// The capture/snapshot write path drives the repository's snapshot,
+// attribution, and oplog-recording methods, which live on the default
+// local flavor (`Repository<RefManager, OpLog, AnyStore>`). Mounts are only
+// ever captured against that flavor, so this block stays concrete rather
+// than threading `S` through the snapshot surface.
 impl ContentAddressedMount {
     /// Drain the pending tier into a fresh heddle state and update
     /// the thread to point at it.
@@ -4050,7 +4064,7 @@ impl ContentAddressedMount {
 /// Returns the root tree's content hash. The caller writes this to
 /// the new state.
 fn apply_pending_to_tree(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     parent: &Tree,
     pending: &Pending,
     inodes: &Inodes,
@@ -4229,7 +4243,7 @@ fn apply_pending_to_tree(
     fn materialize(
         v: &VDir,
         captured: &Tree,
-        store: &dyn ObjectStore,
+        store: &impl ObjectStore,
     ) -> Result<Option<ContentHash>> {
         let mut entries: BTreeMap<String, TreeEntry> = captured
             .entries()
@@ -4328,7 +4342,7 @@ fn apply_pending_to_tree(
     Ok(hash)
 }
 
-impl ContentAddressedMount {
+impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     /// Test-only accessor for the warm tier so unit tests can verify
     /// promotions landed without going through `read`. Returns paths
     /// resolved via the inode registry (warm is NodeId-keyed under
@@ -4390,7 +4404,7 @@ impl ContentAddressedMount {
 
     /// Test-only accessor for the wrapped repository.
     #[cfg(test)]
-    pub(crate) fn repo_handle(&self) -> &Repository {
+    pub(crate) fn repo_handle(&self) -> &Repository<RefManager, OpLog, S> {
         &self.inner.repo
     }
 

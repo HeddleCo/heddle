@@ -45,13 +45,13 @@ use crate::{
 
 /// Writes Heddle [`State`]s from [`CommitEntry`] inputs. Holds short-lived
 /// borrows — construct one per commit or per batch, not a long-lived field.
-pub struct StateWriter<'a> {
-    store: &'a dyn ObjectStore,
+pub struct StateWriter<'a, S: ObjectStore> {
+    store: &'a S,
     map: &'a mut ShaMap,
 }
 
-impl<'a> StateWriter<'a> {
-    pub fn new(store: &'a dyn ObjectStore, map: &'a mut ShaMap) -> Self {
+impl<'a, S: ObjectStore> StateWriter<'a, S> {
+    pub fn new(store: &'a S, map: &'a mut ShaMap) -> Self {
         Self { store, map }
     }
 

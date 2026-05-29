@@ -15,6 +15,7 @@
 //! path) so a leaked secret is scrubbed everywhere it appears — across
 //! renames, copies, and parallel branches.
 
+use objects::store::ObjectStore;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};

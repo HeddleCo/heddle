@@ -248,6 +248,7 @@ mod tests {
     };
 
     use objects::object::{Blob, ContentHash};
+    use objects::store::ObjectStore;
     use tempfile::TempDir;
 
     use super::*;

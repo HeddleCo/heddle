@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Undo and redo commands.
 
+use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ContentHash};
 use oplog::{OpBatch, OpRecord};

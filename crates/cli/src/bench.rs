@@ -25,7 +25,7 @@ pub fn three_way_merge_for_bench(
 }
 
 pub fn detect_renames_for_bench(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     base_tree: &Tree,
     branch_tree: &Tree,
 ) -> anyhow::Result<(usize, usize, usize)> {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Blame command - show line-by-line attribution for files.
 
+use objects::store::ObjectStore;
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{Result, anyhow};

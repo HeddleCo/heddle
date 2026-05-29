@@ -22,7 +22,7 @@ fn lcs_preserves_existing_line_matches() {
 /// return the resulting state. Each call invents a fresh principal so
 /// the per-state attribution differs across the chain.
 fn put_state_with_file(
-    store: &dyn ObjectStore,
+    store: &impl ObjectStore,
     file: &str,
     content: &[u8],
     parents: Vec<ChangeId>,

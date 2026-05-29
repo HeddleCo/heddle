@@ -6,6 +6,7 @@ mod hydration;
 mod sync;
 mod user;
 
+use objects::store::ObjectStore;
 use cli_shared::ClientConfig;
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::v1::{

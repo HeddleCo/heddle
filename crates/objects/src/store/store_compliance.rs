@@ -19,7 +19,7 @@ fn attribution() -> Attribution {
 /// Panics on the first assertion failure. Designed to be called from unit or
 /// integration tests — including from `spawn_blocking` when testing async
 /// backends like [`S3Store`].
-pub fn run_compliance_tests(store: &dyn ObjectStore) {
+pub fn run_compliance_tests<S: ObjectStore>(store: &S) {
     blob_round_trip(store);
     blob_missing_returns_none(store);
     blob_has(store);
@@ -33,7 +33,7 @@ pub fn run_compliance_tests(store: &dyn ObjectStore) {
 
 // ── Blob ─────────────────────────────────────────────────────────────────────
 
-fn blob_round_trip(store: &dyn ObjectStore) {
+fn blob_round_trip<S: ObjectStore>(store: &S) {
     let blob = Blob::from("compliance: blob round-trip");
     let hash = store.put_blob(&blob).expect("put_blob failed");
     let got = store
@@ -47,7 +47,7 @@ fn blob_round_trip(store: &dyn ObjectStore) {
     );
 }
 
-fn blob_missing_returns_none(store: &dyn ObjectStore) {
+fn blob_missing_returns_none<S: ObjectStore>(store: &S) {
     let hash = ContentHash::compute(b"compliance-nonexistent-blob");
     let result = store
         .get_blob(&hash)
@@ -58,7 +58,7 @@ fn blob_missing_returns_none(store: &dyn ObjectStore) {
     );
 }
 
-fn blob_has(store: &dyn ObjectStore) {
+fn blob_has<S: ObjectStore>(store: &S) {
     let blob = Blob::from("compliance: has_blob");
     let hash = store.put_blob(&blob).expect("put_blob failed");
     assert!(
@@ -67,7 +67,7 @@ fn blob_has(store: &dyn ObjectStore) {
     );
 }
 
-fn blob_list(store: &dyn ObjectStore) {
+fn blob_list<S: ObjectStore>(store: &S) {
     let blob = Blob::from("compliance: list_blobs");
     let hash = store.put_blob(&blob).expect("put_blob failed");
     let list = store.list_blobs().expect("list_blobs failed");
@@ -79,7 +79,7 @@ fn blob_list(store: &dyn ObjectStore) {
 
 // ── Tree ──────────────────────────────────────────────────────────────────────
 
-fn tree_round_trip(store: &dyn ObjectStore) {
+fn tree_round_trip<S: ObjectStore>(store: &S) {
     let tree = Tree::new();
     let hash = store.put_tree(&tree).expect("put_tree failed");
     let got = store
@@ -89,7 +89,7 @@ fn tree_round_trip(store: &dyn ObjectStore) {
     assert_eq!(got.hash(), hash, "tree hash changed after round-trip");
 }
 
-fn tree_missing_returns_none(store: &dyn ObjectStore) {
+fn tree_missing_returns_none<S: ObjectStore>(store: &S) {
     let hash = ContentHash::compute(b"compliance-nonexistent-tree");
     let result = store
         .get_tree(&hash)
@@ -102,7 +102,7 @@ fn tree_missing_returns_none(store: &dyn ObjectStore) {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-fn state_round_trip(store: &dyn ObjectStore) {
+fn state_round_trip<S: ObjectStore>(store: &S) {
     let tree = Tree::new();
     let tree_hash = store
         .put_tree(&tree)
@@ -121,7 +121,7 @@ fn state_round_trip(store: &dyn ObjectStore) {
     assert_eq!(got.tree, tree_hash, "tree hash changed after round-trip");
 }
 
-fn state_has(store: &dyn ObjectStore) {
+fn state_has<S: ObjectStore>(store: &S) {
     let tree = Tree::new();
     let tree_hash = store
         .put_tree(&tree)
@@ -135,7 +135,7 @@ fn state_has(store: &dyn ObjectStore) {
     );
 }
 
-fn state_list(store: &dyn ObjectStore) {
+fn state_list<S: ObjectStore>(store: &S) {
     let tree = Tree::new();
     let tree_hash = store
         .put_tree(&tree)

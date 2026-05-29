@@ -17,6 +17,7 @@
 //! intentionally biases toward "what happened in this turn" rather than
 //! a long backlog, because retros surface most often at end-of-turn.
 
+use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};

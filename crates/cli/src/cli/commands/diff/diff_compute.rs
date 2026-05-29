@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Core diff command logic.
 
+use objects::store::ObjectStore;
 use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow};

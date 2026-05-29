@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stash worktree helper operations.
 
+use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Result, anyhow};

@@ -23,6 +23,7 @@
 //! All handlers are best-effort. Errors are logged via `tracing` and
 //! swallowed so a transient failure cannot block the harness.
 
+use objects::store::ObjectStore;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;

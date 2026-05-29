@@ -3,6 +3,7 @@
 
 use crypto::{Signer, StateSigningExt, load_signer, verify_state_signature_bytes};
 use objects::object::{ChangeId, SignatureStatus, StateSignature};
+use objects::store::ObjectStore;
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};

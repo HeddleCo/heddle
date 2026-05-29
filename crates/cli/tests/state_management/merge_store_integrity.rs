@@ -11,6 +11,7 @@
 //! than committing data loss. The second one exercises a legitimate
 //! "tree doesn't exist at this path" case (a directory rename) and
 //! asserts the new error path doesn't false-positive.
+use objects::store::ObjectStore;
 use std::{fs, path::Path};
 
 use objects::object::ThreadName;

@@ -2,6 +2,8 @@
 //! Fetch command - download objects and refs from remote.
 
 #[cfg(feature = "client")]
+use objects::store::ObjectStore;
+#[cfg(feature = "client")]
 use std::collections::HashSet;
 
 #[cfg(feature = "client")]

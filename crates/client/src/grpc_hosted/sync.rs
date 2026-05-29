@@ -1,3 +1,4 @@
+use objects::store::ObjectStore;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
