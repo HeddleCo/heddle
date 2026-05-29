@@ -1043,6 +1043,24 @@ impl RecoveryAdvice {
         )
     }
 
+    pub(crate) fn git_remote_in_included_config(name: &str, path: &std::path::Path) -> Self {
+        let path = path.display();
+        Self::safety_refusal(
+            "git_remote_in_included_config",
+            format!(
+                "Remote '{name}' is defined in an included Git config that heddle won't edit: {path}"
+            ),
+            "Edit the included config file directly, or move the `[remote]` section into the repository's own `.git/config`.",
+            format!(
+                "remote '{name}' resolves to a `[remote]` section in '{path}', reached through an include.path/includeIf directive outside the repository's Git directory"
+            ),
+            "editing that file would mutate config the user pulled in via an include directive rather than the repository's own config",
+            "remote configuration, refs, objects, and worktree files were left unchanged",
+            "heddle remote list",
+            vec!["heddle remote list".to_string()],
+        )
+    }
+
     pub(crate) fn remote_name_required_for_fetch() -> Self {
         Self::safety_refusal(
             "remote_name_required",

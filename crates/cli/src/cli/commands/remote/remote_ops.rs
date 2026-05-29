@@ -1385,7 +1385,7 @@ mod tests {
         .unwrap();
 
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        for path in ctx.remove_layers_for("origin") {
+        for path in ctx.remove_files_for("origin").unwrap() {
             remove_git_remote_config(&path, "origin").unwrap();
         }
 
@@ -1411,8 +1411,12 @@ mod tests {
         .unwrap();
 
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
-        upsert_git_remote_config(&ctx.write_layer_for("origin"), "origin", "https://example.com/new")
-            .unwrap();
+        upsert_git_remote_config(
+            &ctx.write_file_for("origin").unwrap(),
+            "origin",
+            "https://example.com/new",
+        )
+        .unwrap();
 
         // The upsert must hit the per-worktree layer (where the remote
         // lives and wins on read); writing to common would leave the
@@ -1421,6 +1425,79 @@ mod tests {
             plain_git_remote_items(tmp.path()).get("origin").map(String::as_str),
             Some("https://example.com/new"),
         );
+    }
+
+    #[test]
+    fn remove_clears_remote_defined_via_include_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("extra.config"),
+            "[remote \"upstream\"]\n\turl = https://example.com/upstream\n",
+        )
+        .unwrap();
+        fs::write(git_dir.join("config"), "[include]\n\tpath = extra.config\n").unwrap();
+
+        // The reader follows the include, so the remote is visible...
+        assert!(plain_git_remote_items(tmp.path()).contains_key("upstream"));
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        for path in ctx.remove_files_for("upstream").unwrap() {
+            remove_git_remote_config(&path, "upstream").unwrap();
+        }
+
+        // ...and a remove must clear the section from the *included* file
+        // it actually lives in, not no-op against the including config.
+        assert!(!plain_git_remote_items(tmp.path()).contains_key("upstream"));
+    }
+
+    #[test]
+    fn write_to_included_remote_targets_the_defining_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("extra.config"),
+            "[remote \"origin\"]\n\turl = https://example.com/old\n",
+        )
+        .unwrap();
+        fs::write(git_dir.join("config"), "[include]\n\tpath = extra.config\n").unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        let target = ctx.write_file_for("origin").unwrap();
+        assert_eq!(target, git_dir.join("extra.config"));
+        upsert_git_remote_config(&target, "origin", "https://example.com/new").unwrap();
+
+        assert_eq!(
+            plain_git_remote_items(tmp.path())
+                .get("origin")
+                .map(String::as_str),
+            Some("https://example.com/new"),
+        );
+    }
+
+    #[test]
+    fn write_to_remote_in_external_include_errors_rather_than_no_ops() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        // An included config that lives *outside* the repository's Git tree.
+        let external = tmp.path().join("external.config");
+        fs::write(
+            &external,
+            "[remote \"origin\"]\n\turl = https://example.com/external\n",
+        )
+        .unwrap();
+        fs::write(
+            git_dir.join("config"),
+            format!("[include]\n\tpath = {}\n", external.display()),
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        assert!(ctx.write_file_for("origin").is_err());
+        assert!(ctx.remove_files_for("origin").is_err());
     }
 
     #[test]
@@ -1437,9 +1514,13 @@ mod tests {
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         // A brand-new remote (no layer defines it yet) follows git's
         // default: the common config.
-        assert_eq!(ctx.write_layer_for("origin"), git_dir.join("config"));
-        upsert_git_remote_config(&ctx.write_layer_for("origin"), "origin", "https://example.com/new")
-            .unwrap();
+        assert_eq!(ctx.write_file_for("origin").unwrap(), git_dir.join("config"));
+        upsert_git_remote_config(
+            &ctx.write_file_for("origin").unwrap(),
+            "origin",
+            "https://example.com/new",
+        )
+        .unwrap();
         assert_eq!(
             plain_git_remote_items(tmp.path()).get("origin").map(String::as_str),
             Some("https://example.com/new"),
