@@ -972,6 +972,10 @@ pub struct DiffSchema {
     pub semantic_changes: Option<Vec<Value>>,
     pub context: Option<Vec<Value>>,
     pub broader_guidance: Option<Vec<Value>>,
+    /// Rendered unified-diff text, suitable for `patch(1)` / `git apply`.
+    /// Present whenever line-level hunks exist, regardless of the
+    /// `--patch` CLI flag — JSON consumers always get a parseable diff.
+    pub patch: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

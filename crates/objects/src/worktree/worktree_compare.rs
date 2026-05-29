@@ -60,7 +60,7 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
 
             if path.is_symlink() {
                 let target = fs::read_link(&path)?;
-                let blob = Blob::new(target.to_string_lossy().as_bytes().to_vec());
+                let blob = Blob::new(crate::util::symlink_target_bytes(&target));
                 let hash = blob.hash();
                 match tree_entries.get(&name) {
                     Some(tree_entry) if tree_entry.entry_type == EntryType::Symlink => {

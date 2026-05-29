@@ -476,6 +476,7 @@ async fn async_main() -> Result<()> {
             name_only,
             unified,
             context,
+            patch,
         }) => cmd_diff(
             &cli,
             from.clone(),
@@ -485,6 +486,7 @@ async fn async_main() -> Result<()> {
             *name_only,
             *unified,
             *context,
+            *patch,
         ),
 
         Commands::Branch(args) => cmd_branch_compat(&cli, args.clone()).await,
