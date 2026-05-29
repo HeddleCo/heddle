@@ -574,14 +574,22 @@ all of whose ancestors-and-self are visible to `A`); in a merge DAG the
 State the rule **categorically**, as a property of the *surface class* rather
 than a checklist of names: **every surface that publishes or syncs a ref, or
 emits served state — branch refs, `ListRefs`, the Git-bridge branch sync, the
-Git-bridge marker→tag sync, *and any surface added later* — MUST resolve the
-visibility frontier before it publishes, and MUST NOT publish or sync from the
-raw thread tip / raw mapped state.** A surface that skips the pre-pass is a bug
-*in that surface*, not a gap in a list here; the invariant — not the enumeration
-— is the gate, so a not-yet-listed surface is never a silent soundness hole. The
-known ref-publishing surfaces **today** (non-exhaustive — see
-`crates/cli/src/bridge/git_export.rs` and the weft serve path for the
-authoritative set) are four, each the same frontier projected:
+Git-bridge marker→tag sync, the Git-bridge state-note write
+(`refs/notes/heddle`), the `HEAD` symref, the bulk export/push, *and any surface
+added later* — MUST resolve the visibility frontier before it publishes, and
+MUST NOT publish or sync from the raw thread tip / raw mapped state.**
+**Categorical backstop:** any surface that publishes a ref or emits state
+computes the frontier first — *no exceptions*. A surface that skips the pre-pass
+is a bug *in that surface*, not a gap in a list here; the invariant — not the
+enumeration — is the gate, so a not-yet-listed surface is never a silent
+soundness hole.
+
+The ref-publishing / state-emitting surfaces are enumerated below **exhaustively
+as of this audit** — grepped across the bridge
+(`crates/cli/src/bridge/{git_export,git_sync,git_notes,git_core}.rs`) and the
+wire (`crates/proto/src/{message_refs,message_pushpull,object_graph}.rs`); the
+authoritative weft serve path is gated by this same categorical rule, not by
+this list. **Six** surfaces, each the same frontier projected:
 
 1. **Wire closure planner** — `enumerate_state_closure_with_options`
    (`crates/proto/src/object_graph.rs:59`) roots its closure emission at the
@@ -610,26 +618,65 @@ authoritative set) are four, each the same frontier projected:
    fast-forward — `git_sync.rs:163-170` — so a tag once published at the hidden
    OID cannot even be silently corrected later; gating before the publish is the
    only sound path.)
+5. **Git-bridge state notes (`refs/notes/heddle`)** — the export loop attaches a
+   per-commit `HeddleNote` carrying the state's `change_id`, `agent`
+   (provider/model), `confidence`, `status`, `attribution` (principal
+   name/email), and risk `signal_counts` (`HeddleNote` /
+   `HeddleNote::from_state`, `crates/cli/src/bridge/git_notes.rs:33-56,100-118`;
+   ref constant `NOTES_REF = "refs/notes/heddle"`, `:29`). Notes are written at
+   **three** frontier-decoupled sites: the mint loop (`git_export.rs:242-245`),
+   the post-mint backfill that iterates **every** entry of `bridge.mapping`
+   (`git_export.rs:252-261`), and the mirror-build path (`git_core.rs:1105-1109`)
+   — none consults audience or the frontier. The notes ref then mirrors
+   **forced** (`+refs/notes/*:refs/notes/*`, `git_core.rs:300`), so a plain
+   `git clone` / mirror of the public remote picks up the whole notes tree
+   out-of-band of the branch tip. A note is precisely the **Git-mirror analogue
+   of the wire `ObjectType::State` header leak** (cid 3324616942): it republishes
+   an embargoed commit's `change_id` + attribution + agent + signal metadata even
+   when the commit's tree/blobs are withheld. The frontier rule for notes is
+   therefore the **same gate as the State header** — a note for state `S` is
+   written and published **only when `S` is itself served** (`S` and all its
+   ancestors visible to `A`); the backfill loops must filter by the served set,
+   never iterate the raw mapping. Like a tag, a note names a *specific* commit and
+   cannot lag to an ancestor — withhold it entirely until its state discloses,
+   then publish forward.
+6. **Symref / bulk-publication surfaces — `HEAD` and the whole-mirror
+   export/push.** `HEAD` is written as a symref to a branch
+   (`ref: refs/heads/<branch>`, `git_core.rs:2398-2407`); it is sound **iff** its
+   target branch is itself frontier-lagged (surface 3) — a symref resolves
+   *through* the branch, so a lagged `main` keeps `HEAD` lagged too — but `HEAD`
+   must never be pointed at a wholly-embargoed branch that surface 3 left absent
+   (resolve `HEAD` to a served branch, else omit it). The bulk paths —
+   `export_to_path` (`git_core.rs:751`) and `push` / `push_with_scope`
+   (`git_core.rs:678-689`) — publish **all** of `refs/heads/*` + `refs/notes/*`
+   in one shot and carry no per-surface logic of their own; they inherit
+   soundness entirely from surfaces 3–5 having already lagged/withheld each ref
+   *before* the bulk copy runs. Listed so the implementer treats "copy the whole
+   mirror" as gated-by-construction, never as a separate bypass.
 
 **Close the class structurally, not by extending this list.** The recurring leak
-across r6 (closure planner), r7 (`ListRefs` + the git_export branch sync), and r8
-(marker→tag) is the *same* bug class — a surface syncing from the raw tip/state —
-re-appearing at a new surface. The durable fix is a single shared chokepoint:
-every ref-publishing surface routes its target through one
-`resolve_frontier(audience, raw_target) -> served_target` helper (returning a
-lagged ref for a moving tip, or *absent* for a tag/ref whose marked state is not
-served), so a new surface that wires a raw OID into `sync_track_to_branch` /
-`sync_marker_to_tag` / the closure root **without** passing through the helper is
-the bug, and the helper — not vigilance over a list — is what makes the class
-impossible. (Follow-up impl issue, not filed: extract the frontier resolver +
-route all four surfaces through it; a conformance test asserts no ref-publishing
-call site takes a raw `get_thread`/`get_marker` OID.)
+across r6 (closure planner), r7 (`ListRefs` + the git_export branch sync), r8
+(marker→tag), and — anticipated this round — r9+ (state notes, the symref, the
+bulk push) is the *same* bug class: a surface syncing from the raw tip/state /
+publishing per-state metadata, re-appearing at a new surface. The durable fix is
+a single shared chokepoint: every ref-publishing **and** state-emitting surface
+routes its target through one `resolve_frontier(audience, raw_target) ->
+served_target` helper (returning a lagged ref for a moving tip, or *absent* for a
+tag / note / ref whose marked state is not served), so a new surface that wires a
+raw OID into `sync_track_to_branch` / `sync_marker_to_tag` / `write_note` / the
+closure root **without** passing through the helper is the bug, and the helper —
+not vigilance over a list — is what makes the class impossible. (Follow-up impl
+issue, §10 #4/#5: extract the frontier resolver + route **all six** surfaces
+through it; a conformance test asserts no ref-publishing or note-writing call
+site takes a raw `get_thread` / `get_marker` / `mapping`-iterated OID.)
 
 A topological walk-halt that skips *minting* under-tier states is at most an
 optimization layered on top of this rule — it is **never** the gate, because the
-ref-sync surfaces (3, 4) read the raw tip / raw marked state independently of
-which states the walk happened to mint. Each host below realizes the rule for its
-surface(s):
+ref-sync and note-write surfaces (3, 4, 5) read the raw tip / raw marked state /
+raw mapping independently of which states the walk happened to mint (the note
+backfill at `git_export.rs:252-261` iterates the *whole* mapping, so it writes a
+note for an already-mapped embargoed state the mint-halt never touched). Each
+host below realizes the rule for its surface(s):
 
 - **Wire serve (weft, authoritative) — visibility is a PRE-PASS, computed before
   any object is emitted, and `ListRefs` lags rather than drops.** The closure
@@ -700,7 +747,13 @@ surface(s):
   mirror only ever holds the visible, ancestry-closed closure. The **marker→tag
   loop in the same run** (`git_export.rs:290-296`, surface 4 above) carries the
   identical obligation: a marker whose marked state is not served must yield
-  **no** `refs/tags/<marker>`, not a tag at the raw mapped OID.
+  **no** `refs/tags/<marker>`, not a tag at the raw mapped OID. The **state-note
+  writes in the same run** (surface 5: `git_export.rs:242-245` mint loop,
+  `:252-261` whole-mapping backfill, and `git_core.rs:1105-1109`) carry it too:
+  no `HeddleNote` is written or pushed for a state that is not served — otherwise
+  the forced `+refs/notes/*` mirror (`git_core.rs:300`) republishes the embargoed
+  commit's `change_id` / attribution / agent out-of-band even with
+  `refs/heads/main` correctly lagged.
 
 **Merge DAGs — the frontier is a cut, not a point.** A `State` carries
 `parents: Vec<ChangeId>` (`crates/objects/src/object/state_core.rs:207`; merges
@@ -712,29 +765,121 @@ visible to `A` (the gate above is defined over the full ancestor set — `parent
 is a vector, not a single edge). So the *served set* is always unambiguous: the
 maximal ancestry-closed visible set. What generalizes from a point to a set is the
 **frontier** itself = the **antichain of maximal served states** (the served
-states having no served descendant — the cut across the DAG). The two surface
-kinds consume that antichain differently:
+states having no served descendant — the cut across the DAG).
+
+**The full merge tail — octopus, criss-cross, and how the antichain has no
+special cases.** Two DAG shapes that look like edge cases are handled by the same
+gate without amendment, *because the gate never computes a merge base — it is
+defined purely by per-state transitive ancestor visibility*:
+
+- **Octopus merges (>2 parents).** `parents: Vec<ChangeId>` is unbounded, so a
+  merge may have `k > 2` parents and a hidden octopus merge can leave up to `k`
+  incomparable maximal visible ancestors. The antichain is simply larger; the
+  multi-root advertisement (below) carries `k` roots exactly as it carries two.
+- **Multiple / criss-cross merge bases.** When two lines were cross-merged there
+  are several merge bases. Merge-base *count* is irrelevant here: the served-set
+  gate selects no base and walks no base — it asks only "is every transitive
+  ancestor of `S`, on every path, visible to `A`?" So criss-cross history is not
+  a special case; a state is served iff its whole transitive ancestor set is
+  visible, full stop, and the frontier is still the maximal served states.
+
+**How the frontier is computed.** A per-audience pre-pass over the requested
+tip's reverse-reachable ancestor DAG: resolve each state's tier (sidecar +
+`A`, §2.6) to visible/hidden, then a single topological pass marks a state
+*served* iff it is visible **and every parent is served** (served-ness is the
+least fixed point of "visible ∧ all-parents-served"). The frontier is the
+antichain of served states with no served child. Cost is `O(states + edges)`
+over the ancestry — no merge-base computation, no per-request filtering that could
+misfire.
+
+**How the frontier is transmitted without leaking.** The puller receives exactly
+(a) the forward closure of the served set and (b) the antichain advertised as
+refs (below) — *nothing else*. It is never told how many states were withheld,
+where the gaps are, or that a merge ancestor exists beyond the frontier: a
+withheld state contributes no object, no count, no placeholder, and its
+visibility record is itself gated (§8.4). Because the served set is
+ancestry-closed, every served state's parents are also served — the puller never
+sees a parent edge dangling into the embargo. Absence is indistinguishable from
+non-existence: the puller cannot tell "this thread ends at the frontier" from
+"there are hidden merge ancestors past it." That indistinguishability *is* the
+transmission guarantee.
+
+The two surface kinds consume the antichain differently:
 
 - **Set-emitting surfaces** (the wire closure planner, surface 1) root emission at
   **all** maximal served states and emit the forward closure of the *whole*
-  ancestry-closed visible set — both visible sides of a pre-merge fork. The
+  ancestry-closed visible set — every visible side of a pre-merge fork. The
   antichain loses nothing: no visible commit is ever silently omitted.
 - **Single-tip ref surfaces** (the Git branch ref, surface 3; the marker tag,
-  surface 4; `ListRefs`' single-`change_id` advertisement, surface 2) can name
-  only **one** commit. They advance the ref only to a **unique served descendant**
-  of the currently-advertised tip — the one served state that dominates the rest.
-  When the maximal served set is **not** a single dominating state (a hidden merge
-  split visibility into ≥2 incomparable maximal ancestors), there is no commit
-  that both stays forward-only and captures the whole served set, so the surface
-  **retains the previously-advertised ref unchanged** rather than picking an
-  arbitrary side — picking one side would both omit the other visible side from
-  the ref and risk a non-fast-forward move (§5.0). The ref advances again only
-  once disclosure (or new commits) yields a unique served descendant of the prior
-  tip. Crucially the full visible set on **both** sides stays *fetchable* via the
-  set-emitting surface; only the single-pointer advertisement lags — consistent
-  with "never drop an already-public ref" and FF-only. (This is exactly the
-  "retain the previously advertised ref unless it can advance to a unique visible
-  descendant" policy.)
+  surface 4; the state note, surface 5; each individual `RefEntry`'s
+  single-`change_id`, surface 2) can name only **one** commit apiece. The *moving*
+  ref `<thread>` advances only to a **unique served descendant** of its currently
+  advertised tip — the one served state that dominates the rest — and otherwise
+  **retains the previously-advertised tip unchanged** rather than picking an
+  arbitrary side (picking one side would both omit the other visible side and risk
+  a non-fast-forward move, §5.0). This is the "retain the previously advertised
+  ref unless it can advance to a unique visible descendant" policy — but on its
+  own it leaves the *other* maximal served states with no ref naming them. That
+  gap is closed by the multi-root advertisement path next.
+
+**The protocol path for all merge-frontier roots (closes cid 3325554155).** "The
+full visible set stays fetchable" is only true if every maximal served state is
+both *discoverable* and *requestable*. The single moving ref cannot do that for an
+antichain of size ≥2, so each surface gets an explicit multi-root path, and none
+requires widening the single-`ChangeId` request shape:
+
+1. **Wire advertisement — multi-root, no new wire field.** `RefsList.refs` is
+   already a `Vec<RefEntry>` (`crates/proto/src/message_refs.rs:85`), so `ListRefs`
+   advertises **one `RefEntry` per maximal served state** in the antichain. The
+   moving ref `<thread>` is the entry for the unique dominating served state when
+   one exists; when the antichain has ≥2 incomparable maximal served states, each
+   *additional* maximal state gets its own `RefEntry` under a **deterministic
+   derived name** — `<thread>` for the topologically/lexicographically-first,
+   `<thread>@<changeid-prefix>` for each other maximal state, the name a pure
+   function of the served `ChangeId` (`RefEntry.change_id`, `:91`) so it is stable,
+   identity-bound, and never reused for a different state. The antichain is thereby
+   **discoverable**: the client reads every served root out of the one `Vec`.
+2. **Wire request — single-root pull, issued per root.** Each `Pull` carries one
+   `PullRequest.target_state` (`crates/proto/src/message_pushpull.rs:91`) and each
+   `PullReady.remote_state` echoes one served root (`:118`), so the client issues
+   **one pull per advertised root**, passing the states already received in
+   `exclude_states` (`:95`) so blobs/states shared across the sides are not re-sent
+   (content-addressing dedups the overlap). The union of the per-root closures is
+   the whole served set — so the antichain is **requestable** with the *existing*
+   single-root request shape; the multiplicity lives in the advertisement and in
+   issuing N pulls, not in a widened `target_state`.
+3. **Git mirror — deterministic synthetic refs.** `refs/heads/<thread>` (one
+   FF-only ref) advances only to a unique dominating served state, else retains its
+   tip. Each *other* incomparable maximal served state is published under a
+   deterministic synthetic branch `refs/heads/<thread>@<changeid-prefix>` so a
+   plain `git clone` can still fetch every visible side. Adding a synthetic ref is
+   forward-only (it never rewinds `<thread>`); the names are pure functions of the
+   served `ChangeId`, so re-runs are deterministic and no published ref is ever
+   rewritten (r4 identity-stability). A synthetic ref retires **only** once a
+   served descendant has reunified the fork and `<thread>` has advanced past its
+   state — at which point the state is reachable from `<thread>`, so removing the
+   redundant pointer loses no reachability (it is not "dropping an already-public
+   ref": access to the commit survives via `<thread>`).
+
+**Cross-path disclosure ordering — forward-only regardless of order.** When a
+merge `M` has embargoed ancestors on ≥2 different parent paths that disclose at
+*different* times, the gate is simply re-evaluated at each disclosure:
+
+- `M` becomes served only when the **last** of its embargoed ancestors across
+  **every** parent path discloses (the gate requires *all* ancestors visible). A
+  path that discloses earlier advances *its own* frontier forward-only and
+  independently — that side's maximal served state moves up — but `M` stays
+  withheld until the other side also fully discloses.
+- Each disclosure is a fast-forward append on its own path; the order in which the
+  two paths disclose changes nothing about identity. `M`'s OID is content-addressed
+  and minted exactly once, when it finally becomes served (§7.1 step 5), so no
+  published OID changes and nothing is re-ordered or rewritten — identity-stable
+  per r4/r5 under every interleaving.
+- The antichain shrinks **monotonically**: two incomparable maximal served states
+  collapse to the single now-served `M` once both their sides are public, and the
+  synthetic ref for the later-disclosing side retires at that point (its state is
+  now reachable from the advanced `<thread>`). The advertisement therefore only
+  ever loses redundant roots, never a still-needed one.
 
 **Why this is a plain forward-closure, not a set difference (this supersedes the
 r3 framing).** r3 correctly rejected reusing `collect_excluded`
@@ -807,6 +952,35 @@ raise the whole thread ancestry to the reviewer tier (see §7.2 step 1). For a
 merge-DAG ancestry the raise covers **all** parent paths, matching the
 "every-ancestor-on-every-path" served-set rule (§5.3).
 
+**Tier transitions are one-way: a served commit can never be re-embargoed (hard
+constraint).** Promotion relaxes the gate for a state; the inverse — *demoting* an
+already-served state back to a stricter tier — is **unsound and must be rejected**,
+for two grounded reasons that are the exact duals of the §5.0 disclosure
+constraints:
+
+- **You cannot un-send bytes.** Once a state's `ObjectType::State` and tree/blobs
+  have been served to any under-tier puller (or its real-tree commit published to
+  the public Git mirror), the recipient holds the bytes; a later restrictive
+  `StateVisibility` record has **no retroactive reach** over distributed content.
+  Re-embargo would be soft-hiding at best (§1.1) — security theatre, not an
+  embargo.
+- **FF-only forbids un-publishing on the mirror.** Removing an already-published
+  commit from `refs/heads/main` is a non-fast-forward rewind, which the FF guard
+  rejects (`ensure_commit_update_fast_forward`, §5.0); and the commit's OID is
+  fixed by content-addressing, so it cannot be "replaced" by a stricter stub
+  either (the §5.0.1 stub-swap trap, in reverse).
+
+So disclosure is **monotonic / forward-only in tier as well as in topology**: a
+state's effective tier may only ever move *more open* over time. An implementation
+must reject (or at most warn-and-no-op) a `StateVisibility` record that would lower
+the tier of a state already served to a broader audience — the sidecar can *record*
+the intent for audit, but it has no power to recall distributed bytes. (Genuine
+removal of already-distributed content is the separate, heavyweight `purge` path —
+`OpRecord::Purge`, §2.3 — which is destructive and out of scope for a visibility
+tier.) This makes the reviewer→public and embargo→public transitions safe and the
+public→embargo transition structurally impossible, closing the "can a tier round-trip?"
+question before it is asked.
+
 ### 5.5 Oplog records (append at the tail — hard constraint)
 
 `OpRecord` is encoded by discriminant index and **new variants must append at the
@@ -828,8 +1002,8 @@ mirroring the `Redact` / `Purge` audit-trail pattern (`oplog_types.rs:109,123`).
 | object store | per-state `visibility/` sidecar dir + read/write + `has_visibility_for_state` | mirrors redactions dir (`fs_paths.rs:46-50`, `repository_redaction.rs:490`) |
 | `oplog` | tail-append `StateVisibilitySet` / `StateVisibilityPromote` | tail-append rule (`oplog_types.rs:14-21`) |
 | `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); the **operator-local courtesy stub** is rendered at the **state walk** (where the `ChangeId` is in scope), never in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) — the public mirror emits absence, not a stub (§5.0/§5.3) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
-| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before *every* ref-publishing surface** — the branch ref-sync (`:277-288`, lag `refs/heads/main` to the frontier, **not** the raw `get_thread` tip `:278`) **and** the marker→tag sync (`:290-296`, withhold `refs/tags/<marker>` unless the marked state is served — `sync_marker_to_tag` is conflict-not-FF, `git_sync.rs:163-170`); the frontier rule is categorical over all ref-publishing surfaces (§5.3), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2271`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2271`) |
-| `proto` / wire | new `ObjectType::Visibility` in the sync plan (mirroring `emit_redaction_plan`), itself gated — a record is served only when its state is served, so it never leaks an embargoed `ChangeId`/tier/date (§8.4); **new** tier-aware **downward-closed reachability gate** — resolve the visibility frontier as a pre-pass, then serve the forward closure of the ancestry-closed visible set rooted at that frontier (no `ObjectType::State` header for an embargoed commit). NOT a `collect_excluded` extension (root-exclusion over-withholds, §5.3) and no set difference is needed (a child of a hidden parent is never served, so nothing shared to subtract) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`) |
+| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before *every* ref-publishing/state-emitting surface** via one shared `resolve_frontier` chokepoint (§5.3) — branch ref-sync (`:277-288`, lag `refs/heads/main` to the frontier, **not** the raw `get_thread` tip `:278`), marker→tag sync (`:290-296`, withhold `refs/tags/<marker>` unless served — conflict-not-FF, `git_sync.rs:163-170`), **state notes `refs/notes/heddle`** (write a note only for a served state — `git_export.rs:242-245,252-261`, `git_core.rs:1105-1109`; forced mirror `+refs/notes/*`, `git_core.rs:300`; note payload carries `change_id`/attribution/agent, `git_notes.rs:33-56`), and the **`HEAD` symref + bulk push** (`git_core.rs:2398-2407,751`); merge-frontier antichain ≥2 → publish non-dominating sides under deterministic `refs/heads/<thread>@<changeid-prefix>` synthetic refs; the frontier rule is categorical over all surfaces (§5.3), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2271`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2271`), notes (`git_notes.rs:29`) |
+| `proto` / wire | new `ObjectType::Visibility` in the sync plan (mirroring `emit_redaction_plan`), itself gated — a record is served only when its state is served, so it never leaks an embargoed `ChangeId`/tier/date (§8.4); **new** tier-aware **downward-closed reachability gate** — resolve the visibility frontier as a pre-pass, then serve the forward closure of the ancestry-closed visible set rooted at that frontier (no `ObjectType::State` header for an embargoed commit); **multi-root merge frontier** — `ListRefs` advertises one `RefEntry` per maximal served state into the existing `Vec<RefEntry>` (`message_refs.rs:85`), client issues one single-root `Pull` per root (`message_pushpull.rs:91`) with `exclude_states` dedup (`:95`), so no widened request shape is needed. NOT a `collect_excluded` extension (root-exclusion over-withholds, §5.3) and no set difference is needed (a child of a hidden parent is never served, so nothing shared to subtract) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`); `Vec<RefEntry>` (`message_refs.rs:85`) |
 | weft (closed) | **authoritative** server-side downward-closed gate in `ListRefs`/`Pull` (above); grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
 | config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution *precedence pattern* (namespace → repo → fallback) — but `resolve_default_visibility` is typed to `AnnotationVisibility` (`namespace_policy.rs:68,75`), so it must be generalized over the tier enum (ties O4) and its `Internal` fallback replaced with the stricter `Private` (§8.1) | `resolve_default_visibility` (`namespace_policy.rs:68`) |
 
@@ -1095,12 +1269,19 @@ withheld `S` leaves. A public puller therefore sees neither the embargoed state
   descendants** are absent. Disclosure FF-appends the real commits with true OIDs
   (§5.0/§7.1 step 3/step 5).
   This is the Git-mirror projection of the one downward-closed gate (§5.3) — no
-  separate strategy. The earlier "permanent stub commit" fallback is **dropped**:
-  it would publish the descendant against a synthetic stub parent (a partial
-  embargoed-commit view + a parent-edge rewrite), which §5.0.1 rules out. Stub-swap
-  and graft-reparent `N+1` onto `N-1` are likewise rejected (both change a
-  published OID → non-FF rewrite; break change-id stability + signatures). No
-  remaining sub-question — there is one strategy, not an A-vs-B choice.
+  separate strategy. The same pre-pass governs **all** Git ref-publishing
+  surfaces, not just the branch ref: the marker→tag sync, the `refs/notes/heddle`
+  note writes, the `HEAD` symref, and the bulk export/push (§5.3 surfaces 4–6,
+  §10 #5). And a hidden merge that leaves ≥2 incomparable maximal served states is
+  handled by the multi-root path — `ListRefs` advertises the antichain as multiple
+  `RefEntry`s and the Git mirror publishes synthetic `<thread>@<changeid-prefix>`
+  refs (§5.3) — so no visible side is silently unreachable. The earlier "permanent
+  stub commit" fallback is **dropped**: it would publish the descendant against a
+  synthetic stub parent (a partial embargoed-commit view + a parent-edge rewrite),
+  which §5.0.1 rules out. Stub-swap and graft-reparent `N+1` onto `N-1` are
+  likewise rejected (both change a published OID → non-FF rewrite; break change-id
+  stability + signatures). No remaining sub-question — there is one strategy, not
+  an A-vs-B choice.
 - **O4 — enum unification + new tier.** Promote `AnnotationVisibility` → a shared
   `VisibilityTier` across annotations/discussions/states (recommended; already
   reused by two consumers) and add the strictest `Private { scope_label }` variant
@@ -1142,6 +1323,33 @@ withheld `S` leaves. A public puller therefore sees neither the embargoed state
 Per spike discipline, these are proposed only; the orchestrator confirms scope
 before filing.
 
+**Coverage contract (so nothing is left uncaptured for the implementer).** The
+issues below are the maintainer-facing work list, so they must enumerate *every*
+surface and *every* structural dimension surfaced across review rounds r2–r9 — a
+reviewer must not be able to say "X isn't captured." The complete inventory the
+issues are checked against:
+
+- **Ref-publishing / state-emitting surfaces (six, §5.3, exhaustive as of this
+  audit):** (1) wire closure planner (`object_graph.rs:59`); (2) `ListRefs` —
+  including the **multi-root antichain advertisement** via the `Vec<RefEntry>`
+  (`message_refs.rs:85`); (3) Git-bridge branch ref-sync (`git_export.rs:277-288`);
+  (4) Git-bridge marker→tag sync (`git_export.rs:290-296`, `git_sync.rs:157`); (5)
+  Git-bridge state notes `refs/notes/heddle` (`git_notes.rs:29`; writes at
+  `git_export.rs:242-245,252-261` + `git_core.rs:1105-1109`; forced mirror
+  `+refs/notes/*`, `git_core.rs:300`); (6) the `HEAD` symref (`git_core.rs:2398-2407`)
+  + bulk `export_to_path`/`push` (`git_core.rs:751,678-689`). Plus the structural
+  close-the-class fix: one shared `resolve_frontier` chokepoint + a conformance
+  test that no ref-publishing or note-writing call site takes a raw
+  `get_thread`/`get_marker`/`mapping`-iterated OID.
+- **Structural dimensions (§5.3/§5.4):** linear frontier; merge-DAG frontier as an
+  antichain/cut; **octopus** merges (>2 parents); **criss-cross / multiple merge
+  bases** (gate selects no base); frontier **computation** (least-fixed-point
+  topological pass) and **transmission** without leaking (absence ≡ non-existence);
+  the **multi-root protocol path** (advertise antichain, N single-root pulls,
+  synthetic Git refs); **cross-path disclosure ordering** (forward-only under every
+  interleaving); **transitive promotion** up all parent paths; and the **one-way
+  tier constraint** — no re-embargo of a served state.
+
 1. **impl(objects/repo): `StateVisibility` object + per-state sidecar store.**
    Add `StateVisibility` / `StateVisibilityBlob` (objects), the `visibility/`
    sidecar dir + read/write + `has_visibility_for_state` (repo/store), modeled on
@@ -1160,30 +1368,72 @@ before filing.
    Tail-append `StateVisibilitySet`/`StateVisibilityPromote`; implement `set` /
    `promote` / `show` / `list`; wire the config-default resolution chain. Blocked
    by #1.
-4. **impl(weft, cross-repo): authoritative serve-side downward-closed gate.** Gate
-   `ListRefs`/`Pull` by caller tier via the **tier-aware downward-closed
-   reachability pass** (§5.3): resolve the visibility frontier as a pre-pass, then
-   serve the forward closure of the ancestry-closed visible set rooted at that
+4. **impl(weft, cross-repo): authoritative serve-side downward-closed gate +
+   multi-root advertisement.** Gate `ListRefs`/`Pull` by caller tier via the
+   **tier-aware downward-closed reachability pass** (§5.3): resolve the visibility
+   frontier as a pre-pass (the least-fixed-point topological computation, §5.3),
+   then serve the forward closure of the ancestry-closed visible set rooted at that
    frontier, so no `ObjectType::State` header for an embargoed commit (or any
    descendant) is emitted. *Not* an extension of the root-exclusion `collect_excluded` (which
    over-withholds blobs a visible child shares with a hidden parent), and no set
    difference is needed — a child of a hidden parent is never served, so there is
-   nothing shared to subtract. Define the grant-role → `AudienceTier` mapping
-   (resolves O2); optional `PromoteVisibility` RPC. Blocked by #1; `Scope: multi`
-   (heddle proto + weft).
-5. **impl(bridge): embargo DAG integrity + scheduled promotion.** Forward-only
-   disclosure for the Git mirror: compute the visibility frontier **before the
-   ref-sync** (`git_export.rs:277-288`) and lag `refs/heads/main` to the last
-   all-public ancestor (the frontier) rather than the raw `get_thread` tip
-   (`:278`) — audience-aware minting skips under-tier states, but the ref tip is
-   decided by the frontier, so the embargoed commit **and its descendants** are
-   absent. Disclosure FF-appends
-   the real commits, each minted once (`export_state` mapping-skip,
-   `git_export.rs:218-223`). Never re-mint or force-push a published commit — the
-   FF guard (`ensure_commit_update_fast_forward`, `git_core.rs:2271`) forbids it.
-   **No stub commit** — stub-swap and parent-reparent are ruled out (§5.0.1,
-   resolves O3). `embargo_until` auto-promotion at serve (resolves O5). Blocked by
-   #2.
+   nothing shared to subtract. **Merge-DAG handling is in scope:** the frontier is
+   an antichain (handles octopus >2-parent merges and criss-cross/multiple merge
+   bases — the gate selects no merge base); when the antichain has ≥2 incomparable
+   maximal served states, **`ListRefs` advertises one `RefEntry` per maximal served
+   state** into the existing `Vec<RefEntry>` (`message_refs.rs:85`) under
+   deterministic `<thread>@<changeid-prefix>` names, and the client issues **one
+   single-root `Pull` per root** (`PullRequest.target_state`, `message_pushpull.rs:91`)
+   carrying prior states in `exclude_states` (`:95`) — so every visible side is
+   discoverable and requestable without widening the single-`ChangeId` request
+   (§5.3 "protocol path for all merge-frontier roots"). **Transmission must not
+   leak:** no withheld-state count, gap, or placeholder; the `ObjectType::Visibility`
+   record is itself gated so it is served only when its state is (§8.4).
+   **Cross-path disclosure ordering** is forward-only under every interleaving, and
+   a served state is **never re-embargoed** (one-way tier constraint, §5.4) — reject
+   a `StateVisibility` that would lower an already-served state's tier. Define the
+   grant-role → `AudienceTier` mapping (resolves O2); optional `PromoteVisibility`
+   RPC. Blocked by #1; `Scope: multi` (heddle proto + weft).
+5. **impl(bridge): embargo DAG integrity across ALL Git ref-publishing surfaces +
+   scheduled promotion.** Forward-only disclosure for the Git mirror, applied to
+   **every** Git-side surface — not just the branch ref. Route all of them through
+   one shared `resolve_frontier(audience, raw_target) -> served_target` chokepoint
+   (the close-the-class structural fix, §5.3) and add a conformance test asserting
+   no surface wires a raw `get_thread`/`get_marker`/`mapping`-iterated OID into a
+   publish call. The surfaces this issue MUST cover:
+   - **Branch ref-sync** (`git_export.rs:277-288`): lag `refs/heads/main` to the
+     frontier (last all-public ancestor), not the raw `get_thread` tip (`:278`);
+     FF-only (`ensure_commit_update_fast_forward`, `git_core.rs:2271`).
+   - **Marker→tag sync** (`git_export.rs:290-296`, `sync_marker_to_tag`,
+     `git_sync.rs:157`): **withhold `refs/tags/<marker>` entirely until the marked
+     state is served** — a tag names a specific state and cannot lag; it is
+     conflict-on-mismatch, not FF (`git_sync.rs:163-170`), so it cannot be silently
+     corrected once published at a hidden OID (this is the cid 3325554161 item —
+     explicitly in the work list, not only in the spike body).
+   - **State notes `refs/notes/heddle`** (writes at `git_export.rs:242-245,252-261`
+     and `git_core.rs:1105-1109`; forced mirror `+refs/notes/*`, `git_core.rs:300`):
+     write/publish a `HeddleNote` only for a **served** state — the note carries
+     `change_id`/attribution/agent/signals (`git_notes.rs:33-56`), the Git-mirror
+     analogue of the State-header leak; the whole-mapping backfill loop must filter
+     by the served set, never iterate the raw mapping.
+   - **`HEAD` symref + bulk export/push** (`git_core.rs:2398-2407,751,678-689`):
+     `HEAD` resolves to a served branch (never a wholly-embargoed one); the bulk
+     copy inherits soundness from the per-ref gating above.
+   - **Multi-root merge frontier** (§5.3): when the antichain has ≥2 incomparable
+     maximal served states, publish each non-dominating side under a deterministic
+     synthetic `refs/heads/<thread>@<changeid-prefix>` (append-only, retires once a
+     served descendant reunifies the fork), so a plain `git clone` fetches every
+     visible side; `<thread>` itself only ever advances FF to a dominator or
+     retains its tip.
+   Audience-aware minting skips under-tier states, but the **ref/tag/note tips are
+   decided by the frontier, never the raw mapped state**, so embargoed commits *and
+   their descendants* are absent. Disclosure FF-appends the real commits, each
+   minted once (`export_state` mapping-skip, `git_export.rs:218-223`); never re-mint
+   or force-push a published commit (FF guard forbids it). **No stub commit** —
+   stub-swap and parent-reparent are ruled out (§5.0.1, resolves O3). Cross-path
+   disclosure ordering is forward-only under every interleaving (§5.3); a served
+   commit is never re-embargoed (§5.4). `embargo_until` auto-promotion at serve
+   (resolves O5). Blocked by #2.
 6. **decision/spike: unify `AnnotationVisibility` into a shared `VisibilityTier`**
    across annotations/discussions/states (resolves O4). Small; can fold into #1
    if the maintainer approves the unification up front.
