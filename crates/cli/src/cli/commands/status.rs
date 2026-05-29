@@ -958,11 +958,10 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         } else {
             output.coordination_status
         },
-        thread_state: if blocked_by_trust && !needs_checkpoint && output.thread_state.is_some() {
-            Some(ThreadState::Blocked)
-        } else {
-            output.thread_state
-        },
+        // `thread_state` is lifecycle-only and must match `thread list` for the
+        // same thread/instant (heddle#306). The verification/dirty-worktree
+        // blocker is a health signal, surfaced via `coordination_status` above.
+        thread_state: output.thread_state,
         changed_path_count: if trust.verified {
             changed_path_count(thread_summary.as_ref(), &output.changes)
         } else {
@@ -1410,10 +1409,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
             println!("{}", style::dim("Worktree"));
             emitted = true;
         }
-        println!(
-            "Lifecycle: {}",
-            style::thread_state(&human_thread_state(output, state))
-        );
+        println!("Lifecycle: {}", style::thread_state(&state.to_string()));
     }
     if let Some(freshness) = &output.freshness
         && *freshness != ThreadFreshness::Unknown
@@ -1990,14 +1986,6 @@ fn human_coordination_status(output: &StatusOutput) -> String {
         "work in progress".to_string()
     } else {
         output.coordination_status.to_string()
-    }
-}
-
-fn human_thread_state(output: &StatusOutput, state: &ThreadState) -> String {
-    if local_work_in_progress(output) && matches!(state, ThreadState::Blocked) {
-        "active".to_string()
-    } else {
-        state.to_string()
     }
 }
 
