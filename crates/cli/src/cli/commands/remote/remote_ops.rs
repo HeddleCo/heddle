@@ -1582,4 +1582,108 @@ mod tests {
             Some("https://example.com/new"),
         );
     }
+
+    #[test]
+    fn remove_clears_comment_suffixed_remote_header() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        // A valid Git header gix accepts but the hand-rolled writer didn't:
+        // an inline comment trails the `[remote "origin"]` header.
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"] # primary mirror\n\turl = https://example.com/repo\n",
+        )
+        .unwrap();
+
+        // The reader resolves it, so it shows up in `remote list`...
+        assert!(plain_git_remote_items(tmp.path()).contains_key("origin"));
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        for path in ctx.remove_files_for("origin").unwrap() {
+            remove_git_remote_config(&path, "origin").unwrap();
+        }
+
+        // ...so a remove must actually clear it, not silently no-op against a
+        // header form the writer can't parse.
+        assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
+    }
+
+    #[test]
+    fn remove_clears_dotted_remote_header() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        // The legacy dotted subsection form, equally valid to gix.
+        fs::write(
+            git_dir.join("config"),
+            "[remote.origin]\n\turl = https://example.com/repo\n",
+        )
+        .unwrap();
+
+        assert!(plain_git_remote_items(tmp.path()).contains_key("origin"));
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        for path in ctx.remove_files_for("origin").unwrap() {
+            remove_git_remote_config(&path, "origin").unwrap();
+        }
+
+        assert!(!plain_git_remote_items(tmp.path()).contains_key("origin"));
+    }
+
+    #[test]
+    fn upsert_replaces_comment_suffixed_remote_header_without_duplicating() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[remote \"origin\"] # primary mirror\n\turl = https://example.com/old\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        upsert_git_remote_config(
+            &ctx.write_file_for("origin").unwrap(),
+            "origin",
+            "https://example.com/new",
+        )
+        .unwrap();
+
+        // The upsert must update the existing section, not append a second
+        // `[remote "origin"]` the first-seen (stale) section wins over on read.
+        assert_eq!(
+            plain_git_remote_items(tmp.path())
+                .get("origin")
+                .map(String::as_str),
+            Some("https://example.com/new"),
+        );
+    }
+
+    #[test]
+    fn upsert_replaces_dotted_remote_header() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        init_git(tmp.path());
+        let git_dir = tmp.path().join(".git");
+        fs::write(
+            git_dir.join("config"),
+            "[remote.origin]\n\turl = https://example.com/old\n",
+        )
+        .unwrap();
+
+        let ctx = GitConfigContext::discover(tmp.path()).unwrap();
+        upsert_git_remote_config(
+            &ctx.write_file_for("origin").unwrap(),
+            "origin",
+            "https://example.com/new",
+        )
+        .unwrap();
+
+        assert_eq!(
+            plain_git_remote_items(tmp.path())
+                .get("origin")
+                .map(String::as_str),
+            Some("https://example.com/new"),
+        );
+    }
 }
