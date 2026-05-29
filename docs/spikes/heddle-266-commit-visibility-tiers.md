@@ -560,7 +560,34 @@ pass — not two mechanisms**.
 `S` is served iff `S` **and every ancestor of `S`** are visible to `A`
 (visibility resolved from the sidecar + the caller's `AudienceTier`, §2.6).
 Serve exactly the **forward closure** (trees, blobs, sidecars) of that set;
-everything else is absent. The two surfaces are the same gate projected:
+everything else is absent.
+
+**Frontier-before-emit — the one rule, applied to every surface, with no
+carve-out.** The gate is *not* "walk from the tip and stop when you hit an
+under-tier state." It is a **pre-pass**: *before* anything is emitted or any ref
+is moved, resolve the per-audience **visibility frontier** — the *last visible
+ancestor*, the deepest state all of whose ancestors-and-self are visible to `A` —
+and root every surface's output at that frontier. This rule binds **every surface
+that emits or syncs visible state**, uniformly; none halts-the-walk-only, and
+none emits or syncs from the raw thread tip. There are exactly three such
+surfaces, and each is the same frontier projected:
+
+1. **Wire closure planner** — `enumerate_state_closure_with_options`
+   (`crates/proto/src/object_graph.rs:59`) roots its closure emission at the
+   frontier, never at the requested tip.
+2. **`ListRefs`** — (`RefEntry` / `RefsList`,
+   `crates/proto/src/message_refs.rs:82-91`) lags the advertised ref's
+   `change_id` / `head_state` to the frontier, never dropping an already-public
+   ref.
+3. **Git-bridge ref-sync** — the `export_scoped` ref loop
+   (`crates/cli/src/bridge/git_export.rs:277-288`) advances `refs/heads/main` to
+   the **frontier's** mapped commit, *not* to the real `get_thread` tip
+   (`git_export.rs:278`).
+
+A topological walk-halt that skips *minting* under-tier states is at most an
+optimization layered on top of this rule — it is **never** the gate, because the
+ref-sync (surface 3) reads the real thread tip independently of which states the
+walk happened to mint. Each host below realizes the rule for its surface(s):
 
 - **Wire serve (weft, authoritative) — visibility is a PRE-PASS, computed before
   any object is emitted, and `ListRefs` lags rather than drops.** The closure
@@ -600,22 +627,35 @@ everything else is absent. The two surfaces are the same gate projected:
   wholly-embargoed thread with no public ancestor — e.g. a pre-review
   `private:<author>` feature thread, §7.2), because then there is no
   last-visible-ancestor to lag to.
-- **Git-bridge export (heddle OSS).** `export_state` (`git_export.rs:28`) already
-  loads the `State` (hence its `ChangeId`) but currently passes only
-  `&state.tree` to `export_tree` (`git_export.rs:41`) and takes no audience (its
-  `--audience` is planned — inline note at `git_export.rs:44-47`). Add an
-  `AudienceTier` parameter and **halt the public-audience export walk at the
-  first under-tier state**. Unlike the wire planner, this surface needs no
-  separate pre-pass: the export loop walks `sort_states_topologically(&states)`
-  (`git_export.rs:201`) **ancestor-first** (`:213`), so an under-tier ancestor is
-  always visited — and the halt fires — *before* any of its descendants is minted;
-  the descendants are simply never reached in topological order. (The served set
-  is still the pre-pass's frontier; topological order just makes the halt
-  order-sound here where the tip-first, emit-on-pop wire planner above is not.)
-  `refs/heads/main` fast-forwards only through the last all-public ancestor; the
-  embargoed commit and its descendants are simply not exported. This is the
-  Git-mirror projection of the very same gate — the public mirror only ever holds
-  the visible, ancestry-closed closure.
+- **Git-bridge export (heddle OSS) — the ref-sync is a frontier pre-pass too, not
+  a walk-halt.** `export_state` (`git_export.rs:28`) already loads the `State`
+  (hence its `ChangeId`) but currently passes only `&state.tree` to `export_tree`
+  (`git_export.rs:41`) and takes no audience (its `--audience` is planned — inline
+  note at `git_export.rs:44-47`); add an `AudienceTier` parameter so minting is
+  audience-aware. **But minting is not where the mirror's tip is decided — the
+  ref-sync is, and it must run the same pre-pass.** After the mint loop, the
+  `export_scoped` ref-sync loop reads the **real thread tip** via `get_thread`
+  (`git_export.rs:278`), maps it through `mapping.get_git` (`:279`), and advances
+  the branch to that commit with `sync_track_to_branch` (`:281`) — a step
+  **decoupled from the mint walk**: it points `refs/heads/main` at wherever the
+  *raw* tip maps, regardless of which states the walk minted. (The mapping is also
+  pre-seeded from existing mirror objects — `build_existing_mapping` at `:198`,
+  `retain_git_objects` at `:203` — so a tip can map to a commit the current run
+  never touched.) A topological mint-halt is therefore **necessary but not
+  sufficient**: even if `sort_states_topologically(&states)` (`git_export.rs:201`)
+  is walked ancestor-first (`:213`) so under-tier descendants are never *minted*,
+  the ref-sync at `:278-281` would still try to advance `main` from the raw tip —
+  leaving it either stuck at a stale prior tip (failing to lag forward to the new
+  frontier) or, if the tip already maps to a commit, advancing past the embargo
+  boundary. The bridge must therefore compute the **same visibility frontier as
+  surfaces 1–2 before the ref-sync at `:277-288`** and pass the **frontier's**
+  mapped commit (the last all-public ancestor) to `sync_track_to_branch`, exactly
+  as `ListRefs` lags `change_id` to that frontier — never the `get_thread` tip's.
+  With the ref pinned at the frontier and `refs/heads/main` fast-forward-only
+  (`ensure_commit_update_fast_forward`, §5.0), the embargoed commit and its
+  descendants are absent from the mirror, and the ref advances only as ancestors
+  disclose. This is the Git-mirror projection of the very same gate — the public
+  mirror only ever holds the visible, ancestry-closed closure.
 
 **Why this is a plain forward-closure, not a set difference (this supersedes the
 r3 framing).** r3 correctly rejected reusing `collect_excluded`
@@ -631,8 +671,8 @@ served set is just `closure(ancestry-closed visible states)`; a blob travels iff
 it is reachable from at least one served state — plain forward reachability, no
 subtraction, and it never over-withholds (a blob shared by served `Q` and hidden
 `P` is reachable from `Q`, so it travels on `Q`'s account). The hard part r3
-named dissolves; what remains is an ancestry-closed visibility walk that halts at
-the embargo boundary. (r3's conclusion stands — do **not** reuse
+named dissolves; what remains is an ancestry-closed visibility walk rooted at the
+visible frontier and bounded by the embargo boundary. (r3's conclusion stands — do **not** reuse
 `collect_excluded`'s root-exclusion — but the replacement is simpler than the
 set difference r3 proposed.)
 
@@ -691,8 +731,8 @@ mirroring the `Redact` / `Purge` audit-trail pattern (`oplog_types.rs:109,123`).
 | object store | per-state `visibility/` sidecar dir + read/write + `has_visibility_for_state` | mirrors redactions dir (`fs_paths.rs:46-50`, `repository_redaction.rs:490`) |
 | `oplog` | tail-append `StateVisibilitySet` / `StateVisibilityPromote` | tail-append rule (`oplog_types.rs:14-21`) |
 | `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); the **operator-local courtesy stub** is rendered at the **state walk** (where the `ChangeId` is in scope), never in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) — the public mirror emits absence, not a stub (§5.0/§5.3) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
-| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`); for the public mirror **halt the export walk** at the first under-tier state so the embargoed commit *and its descendants* are absent (forward-only; tip lags to the last all-public ancestor, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2271`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2271`) |
-| `proto` / wire | new `ObjectType::Visibility` in the sync plan (mirroring `emit_redaction_plan`), itself gated — a record is served only when its state is served, so it never leaks an embargoed `ChangeId`/tier/date (§8.4); **new** tier-aware **downward-closed reachability gate** — serve the forward closure of the ancestry-closed visible set, halting the walk at the first under-tier state (no `ObjectType::State` header for an embargoed commit). NOT a `collect_excluded` extension (root-exclusion over-withholds, §5.3) and no set difference is needed (a child of a hidden parent is never served, so nothing shared to subtract) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`) |
+| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before the ref-sync** (`:277-288`) and lag `refs/heads/main` to the last all-public ancestor (the frontier), **not** the raw `get_thread` tip (`:278`), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2271`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2271`) |
+| `proto` / wire | new `ObjectType::Visibility` in the sync plan (mirroring `emit_redaction_plan`), itself gated — a record is served only when its state is served, so it never leaks an embargoed `ChangeId`/tier/date (§8.4); **new** tier-aware **downward-closed reachability gate** — resolve the visibility frontier as a pre-pass, then serve the forward closure of the ancestry-closed visible set rooted at that frontier (no `ObjectType::State` header for an embargoed commit). NOT a `collect_excluded` extension (root-exclusion over-withholds, §5.3) and no set difference is needed (a child of a hidden parent is never served, so nothing shared to subtract) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`) |
 | weft (closed) | **authoritative** server-side downward-closed gate in `ListRefs`/`Pull` (above); grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
 | config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution *precedence pattern* (namespace → repo → fallback) — but `resolve_default_visibility` is typed to `AnnotationVisibility` (`namespace_policy.rs:68,75`), so it must be generalized over the tier enum (ties O4) and its `Internal` fallback replaced with the stricter `Private` (§8.1) | `resolve_default_visibility` (`namespace_policy.rs:68`) |
 
@@ -742,9 +782,11 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
    embargo — the approaches that would preserve it (header-only, audience-scoped
    partial serialization) are the ruled-out traps of §5.0.1.
 3. **Public Git mirror — the same gate, no stub.** The Git mirror is just the
-   Git-projection of the step-2 gate: the bridge's public-audience export walk
-   halts at `N`, so `N` and its descendants `N+1…` are not exported and
-   `refs/heads/main` stays at the last all-public ancestor `N-1`. There is no way
+   Git-projection of the step-2 gate: the bridge runs the same frontier pre-pass
+   (§5.3) **before its ref-sync** (`git_export.rs:277-288`), finds the last
+   all-public ancestor `N-1`, and points `refs/heads/main` at `N-1` — not at the
+   raw `get_thread` tip (`git_export.rs:278`) — so `N` and its descendants `N+1…`
+   are absent from the mirror. There is no way
    to do otherwise, because a Git commit's OID is the hash of its tree + parent
    OIDs (`export_state` → `new_commit_as(..., git_tree_oid, parent_oids)` →
    `commit.id`, `crates/cli/src/bridge/git_export.rs:84-93`; parent OIDs resolved
@@ -927,10 +969,13 @@ withheld `S` leaves. A public puller therefore sees neither the embargoed state
   public Git mirror is fast-forward-only (`ensure_commit_update_fast_forward`,
   `git_core.rs:2271`) and a commit's OID is fixed by its tree + parents
   (`export_state`, `git_export.rs:84-93`), so a published commit's identity can
-  never change. **Resolution:** the public-audience export walk halts at the
-  first under-tier state, so the embargoed commit **and its descendants** are not
-  published; `refs/heads/main` lags to the last all-public ancestor, and
-  disclosure FF-appends the real commits with true OIDs (§5.0/§7.1 step 3/step 5).
+  never change. **Resolution:** the bridge runs the same frontier pre-pass as the
+  wire surfaces **before its ref-sync** (`git_export.rs:277-288`, §5.3) and lags
+  `refs/heads/main` to the last all-public ancestor (the frontier) rather than the
+  raw `get_thread` tip (`:278`); minting is audience-aware too, but the ref tip is
+  decided by the frontier, never the raw tip, so the embargoed commit **and its
+  descendants** are absent. Disclosure FF-appends the real commits with true OIDs
+  (§5.0/§7.1 step 3/step 5).
   This is the Git-mirror projection of the one downward-closed gate (§5.3) — no
   separate strategy. The earlier "permanent stub commit" fallback is **dropped**:
   it would publish the descendant against a synthetic stub parent (a partial
@@ -987,8 +1032,9 @@ before filing.
    `visible()` with the strictest `Private` arm (above the all-seeing-`Internal`
    arm); thread an `AudienceTier` through the checkout entry (above
    `materialize_tree`) and through `export_state` (which already holds the
-   `ChangeId`). The bridge enforces the public mirror by **halting the export walk**
-   at the first under-tier state (issue #5), emitting absence. The render-stub is
+   `ChangeId`). The bridge enforces the public mirror by **computing the visibility
+   frontier before its ref-sync** and lagging `refs/heads/main` to that frontier
+   (issue #5), emitting absence. The render-stub is
    only the **operator-local checkout courtesy** at the **state-walk level** — *not*
    the blob-keyed `materialize_blob`/`export_tree` (no `ChangeId`/audience), and
    *not* a public-mirror surface (§5.0/§5.3). Blocked by #1.
@@ -998,19 +1044,22 @@ before filing.
    by #1.
 4. **impl(weft, cross-repo): authoritative serve-side downward-closed gate.** Gate
    `ListRefs`/`Pull` by caller tier via the **tier-aware downward-closed
-   reachability pass** (§5.3): serve the forward closure of the ancestry-closed
-   visible set, halting the walk at the first under-tier state so no
-   `ObjectType::State` header for an embargoed commit (or any descendant) is
-   emitted. *Not* an extension of the root-exclusion `collect_excluded` (which
+   reachability pass** (§5.3): resolve the visibility frontier as a pre-pass, then
+   serve the forward closure of the ancestry-closed visible set rooted at that
+   frontier, so no `ObjectType::State` header for an embargoed commit (or any
+   descendant) is emitted. *Not* an extension of the root-exclusion `collect_excluded` (which
    over-withholds blobs a visible child shares with a hidden parent), and no set
    difference is needed — a child of a hidden parent is never served, so there is
    nothing shared to subtract. Define the grant-role → `AudienceTier` mapping
    (resolves O2); optional `PromoteVisibility` RPC. Blocked by #1; `Scope: multi`
    (heddle proto + weft).
 5. **impl(bridge): embargo DAG integrity + scheduled promotion.** Forward-only
-   disclosure for the Git mirror: halt the public-audience export walk at the first
-   under-tier state so it **and its descendants** are not published, so
-   `refs/heads/main` lags to the last all-public ancestor; disclosure FF-appends
+   disclosure for the Git mirror: compute the visibility frontier **before the
+   ref-sync** (`git_export.rs:277-288`) and lag `refs/heads/main` to the last
+   all-public ancestor (the frontier) rather than the raw `get_thread` tip
+   (`:278`) — audience-aware minting skips under-tier states, but the ref tip is
+   decided by the frontier, so the embargoed commit **and its descendants** are
+   absent. Disclosure FF-appends
    the real commits, each minted once (`export_state` mapping-skip,
    `git_export.rs:218-223`). Never re-mint or force-push a published commit — the
    FF guard (`ensure_commit_update_fast_forward`, `git_core.rs:2271`) forbids it.
