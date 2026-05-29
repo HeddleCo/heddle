@@ -542,14 +542,21 @@ fn write_full<W: std::io::Write>(
     output: &LogOutput,
     verbose: bool,
 ) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "Repository: {}",
-        crate::cli::render::repository_mode_label(
-            &output.repository_capability,
-            &output.storage_model
-        )
-    )?;
+    // The mode preamble is diagnostic noise on the common read path
+    // (heddle#275); `heddle status` already exposes it. Keep it under
+    // `-v` for troubleshooting.
+    let mut wrote_header = false;
+    if verbose {
+        writeln!(
+            out,
+            "Repository: {}",
+            crate::cli::render::repository_mode_label(
+                &output.repository_capability,
+                &output.storage_model
+            )
+        )?;
+        wrote_header = true;
+    }
     if let Some(hint) = &output.git_overlay_import_hint {
         writeln!(
             out,
@@ -562,8 +569,13 @@ fn write_full<W: std::io::Write>(
         if let Some(line) = format_next_step_dim(&hint.recommended_command, 0) {
             writeln!(out, "{line}")?;
         }
+        wrote_header = true;
     }
-    writeln!(out)?;
+    // Only emit the spacer when a header preceded it; otherwise it would be
+    // an orphaned leading blank line (heddle#275 r2).
+    if wrote_header {
+        writeln!(out)?;
+    }
     for (i, entry) in output.states.iter().enumerate() {
         if i > 0 {
             writeln!(out)?;
@@ -715,5 +727,51 @@ mod tests {
         write_oneline(&mut buf, &output, true).unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains('\x1b'), "expected ANSI in oneline: {s:?}");
+    }
+
+    /// The default full text view must lead with log data, not the
+    /// `Repository:` mode preamble — that line is noise on every read
+    /// (heddle#275). `-v` keeps it for diagnostic context.
+    #[test]
+    #[serial(color_state)]
+    fn write_full_gates_repository_preamble_on_verbose() {
+        style::force_for_test(false);
+        let output = LogOutput {
+            output_kind: "log",
+            status: "completed",
+            repository_capability: "git-overlay".to_string(),
+            storage_model: "git+heddle-sidecar".to_string(),
+            git_overlay_import_hint: None,
+            states: vec![sample_entry()],
+        };
+
+        let mut buf = Vec::new();
+        write_full(&mut buf, &output, false).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            !s.contains("Repository:"),
+            "default full log leaked the mode preamble: {s:?}"
+        );
+        // Dropping the preamble must also drop the spacer that followed it;
+        // the default view must lead with log data, not a blank line
+        // (heddle#275 r2).
+        assert!(
+            !s.starts_with('\n'),
+            "default full log starts with an orphaned blank line: {s:?}"
+        );
+
+        let mut buf = Vec::new();
+        write_full(&mut buf, &output, true).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("Repository:"),
+            "verbose full log should retain the mode preamble: {s:?}"
+        );
+        // With the preamble present, the spacer separating it from the log
+        // entries is still expected.
+        assert!(
+            s.contains("\n\n"),
+            "verbose full log should keep the spacer after the preamble: {s:?}"
+        );
     }
 }

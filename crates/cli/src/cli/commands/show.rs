@@ -190,13 +190,19 @@ fn render_plain_git_show(
 }
 
 fn render_state(output: &ShowOutput, verbose: bool) {
-    println!(
-        "Repository: {}",
-        crate::cli::render::repository_mode_label(
-            &output.repository_capability,
-            &output.storage_model
-        )
-    );
+    // Mode preamble is read-path noise (heddle#275); show it only under
+    // `-v`. `heddle status` covers it for the common case.
+    let mut wrote_header = false;
+    if verbose {
+        println!(
+            "Repository: {}",
+            crate::cli::render::repository_mode_label(
+                &output.repository_capability,
+                &output.storage_model
+            )
+        );
+        wrote_header = true;
+    }
     if let Some(hint) = &output.git_overlay_import_hint {
         println!(
             "{}",
@@ -206,8 +212,13 @@ fn render_state(output: &ShowOutput, verbose: bool) {
             )
         );
         print_next_step_dim(&hint.recommended_command);
+        wrote_header = true;
     }
-    println!();
+    // Only emit the spacer when a header preceded it; otherwise it would be
+    // an orphaned leading blank line (heddle#275 r2).
+    if wrote_header {
+        println!();
+    }
     // Identifiers are dimmed: structurally important but not the
     // editorial focus.
     println!(

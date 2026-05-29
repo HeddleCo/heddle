@@ -7147,10 +7147,12 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
         vec!["--quiet", "--output", "text", "workspace", "show"],
         &["Workspace", "main"],
     );
+    // The `Repository:` mode preamble is dropped from the default read
+    // view (heddle#275); the everyday surface leads with bridge state.
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "bridge", "git", "status"],
-        &["Repository", "Git import"],
+        &["Git import"],
     );
     assert_text_surface(
         temp.path(),
@@ -11556,4 +11558,77 @@ fn exit_codes_surface_in_json_catalog() {
         bridge_import.exit_codes.iter().any(|c| c.code == 65),
         "bridge git import must surface DataErr (65) for malformed repos"
     );
+}
+
+/// `heddle log`, `show`, and `bridge git status` default text views must
+/// lead with command data — not the `Repository:` mode preamble, which is
+/// noise on every read (heddle#275). `-v` keeps the preamble for
+/// diagnostics, and `--output json` is untouched.
+#[test]
+fn read_commands_gate_repository_preamble_on_verbose() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("tracked.txt"), "tracked changed\n").unwrap();
+    heddle(&["commit", "-m", "checkpoint"], Some(temp.path())).unwrap();
+
+    for (label, default_args, verbose_args) in [
+        (
+            "log",
+            vec!["log", "--output", "text"],
+            vec!["-v", "log", "--output", "text"],
+        ),
+        (
+            "show",
+            vec!["show", "HEAD", "--output", "text"],
+            vec!["-v", "show", "HEAD", "--output", "text"],
+        ),
+        (
+            "bridge git status",
+            vec!["bridge", "git", "status", "--output", "text"],
+            vec!["-v", "bridge", "git", "status", "--output", "text"],
+        ),
+    ] {
+        let default_text = heddle(&default_args, Some(temp.path()))
+            .unwrap_or_else(|e| panic!("{label} default text should render: {e}"));
+        assert!(
+            !default_text.contains("Repository:"),
+            "{label} default text leaked the mode preamble: {default_text}"
+        );
+        // Suppressing the preamble must not leave the spacer that used to
+        // follow it dangling as a leading blank line (heddle#275 r2).
+        assert!(
+            !default_text.starts_with('\n'),
+            "{label} default text starts with an orphaned blank line: {default_text:?}"
+        );
+
+        let verbose_text = heddle(&verbose_args, Some(temp.path()))
+            .unwrap_or_else(|e| panic!("{label} verbose text should render: {e}"));
+        assert!(
+            verbose_text.contains("Repository:"),
+            "{label} -v text should retain the mode preamble: {verbose_text}"
+        );
+
+        let json = heddle(
+            &default_args
+                .iter()
+                .map(|a| if *a == "text" { "json" } else { a })
+                .collect::<Vec<_>>(),
+            Some(temp.path()),
+        )
+        .unwrap_or_else(|e| panic!("{label} json should render: {e}"));
+        let parsed: Value =
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("{label} json should parse: {e}"));
+        assert!(
+            parsed["repository_capability"].is_string(),
+            "{label} json must keep repository_capability: {json}"
+        );
+    }
 }

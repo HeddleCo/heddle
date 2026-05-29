@@ -342,11 +342,15 @@ fn cmd_bridge_git_status(cli: &Cli, repo: &Repository) -> Result<()> {
         recovery_commands: trust.recovery_commands.clone(),
         trust,
     };
-    render_bridge_git_status(&output, should_output_json(cli, Some(repo.config())));
+    render_bridge_git_status(
+        &output,
+        should_output_json(cli, Some(repo.config())),
+        cli.verbose > 0,
+    );
     Ok(())
 }
 
-fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
+fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool, verbose: bool) {
     if json {
         println!(
             "{}",
@@ -354,13 +358,16 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool) {
         );
         return;
     }
-    println!(
-        "Repository: {}",
-        crate::cli::render::repository_mode_label(
-            &output.repository_capability,
-            &output.storage_model
-        )
-    );
+    // Mode preamble is read-path noise (heddle#275); keep it under `-v`.
+    if verbose {
+        println!(
+            "Repository: {}",
+            crate::cli::render::repository_mode_label(
+                &output.repository_capability,
+                &output.storage_model
+            )
+        );
+    }
     if output.mirror_initialized {
         println!(
             "Mirror: {} (initialized)",
@@ -587,7 +594,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 recovery_commands: probe.trust.recovery_commands.clone(),
                 trust: probe.trust,
             };
-            render_bridge_git_status(&output, should_output_json(cli, None));
+            render_bridge_git_status(&output, should_output_json(cli, None), cli.verbose > 0);
             return Ok(());
         }
     }
