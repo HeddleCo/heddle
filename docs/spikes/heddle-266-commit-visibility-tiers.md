@@ -371,27 +371,90 @@ a state is the latest non-superseded record (mirroring
 `RedactionsBlob::latest`, `redaction.rs:174`), with `embargo_until` evaluated
 against wall-clock at serve time.
 
-### 5.2 Reuse the tier enum — do not invent a parallel one
+### 5.2 Map the audiences against the *real* `visible()` table — do not reuse `Internal` for private
 
-The three audiences the issue names map directly onto the *existing* tier
-vocabulary, which is already shared across annotations and discussions:
+The reader-side filter `visible()` (`visibility.rs:148`) switches on two axes: the
+*content's* tier (`AnnotationVisibility`) and the *reader's* tier (`AudienceTier`).
+Grepping the actual arms (not the module doc-comment) surfaces two facts that
+disqualify the issue's first-instinct "private = `Internal`" mapping:
 
-| Issue audience  | Tier value (reuse `AnnotationVisibility`/`AudienceTier` shape)        |
-|-----------------|----------------------------------------------------------------------|
-| private         | `Internal` (and the namespace fallback) — most restrictive           |
-| reviewer-scoped | `Restricted { scope_label }` or `TeamScoped { team_id }` — a named reviewer audience |
-| public          | `Public` — universally visible                                       |
+1. **The `Internal` *audience* is all-seeing.** Arm `(_, AudienceTier::Internal)
+   => true` (`visibility.rs:153`) means a reader holding `AudienceTier::Internal`
+   sees **every** content tier. No content value is hidden from it.
+2. **`Internal` *content* is one of the *least*-restrictive values, not the most.**
+   `AnnotationVisibility::Internal` content is hidden only from the `Public` and
+   `Restricted` audiences (arm `visibility.rs:155-156`); it is **visible to every
+   `Team(_)` audience** (arm `visibility.rs:160`) and to the all-seeing `Internal`
+   audience (`:153`). Mapping the issue's `private` tier to `Internal` would make an
+   embargoed security-fix commit readable by **any** team-scoped *or* internal
+   caller — that is a soundness hole, not an embargo.
 
-The recommendation is to **promote `AnnotationVisibility` to a shared
-`VisibilityTier`** used by annotations, discussions, *and* states, rather than
-forking a third enum (it is already reused by two consumers; a third is natural).
-That unification is itself a small decision (§9, O4) — if the maintainer prefers
-isolation, a `StateAudience` enum with the same four variants is the fallback,
-at the cost of duplicating the `visible()` table.
+The strictest value the *current* table can express is `Restricted { scope_label }`:
+hidden from `Public`, from **all** `Team` audiences, and from every non-matching
+`Restricted` label (arms `visibility.rs:166-169`); visible only to a reader holding
+the exact matching `Restricted(label)` — **but still to the all-seeing `Internal`
+audience** (`:153`). `TeamScoped { team_id }` is equally strict, keyed on a team
+rather than a label. So the corrected mapping is:
 
-The **reader** side reuses `AudienceTier` and its existing string grammar
-(`internal | public | team:NAME | restricted:LABEL`, `visibility.rs:60`) so
-"clone/fetch/export as audience X" needs no new vocabulary.
+| Issue audience    | Content tier | Hidden from (per `visible()`) | Visible to |
+|-------------------|--------------|-------------------------------|------------|
+| public            | `Public` | (nobody) | every audience (`:151`) |
+| reviewer-scoped   | `Restricted { scope_label }` (or `TeamScoped { team_id }`) | `Public`; all non-matching `Team`/`Restricted` (`:166-169`) | the matching `Restricted(label)`/`Team(name)`, **and** the all-seeing `Internal` (`:153`) |
+| private (embargo) | **new strictest `Private { scope_label }` tier** (recommended; see below) | **every** audience, *including* `Internal`, except the one authorized scope | only the authorized `Restricted(label)` |
+
+**Why `private` needs a new tier, not a reused one.** Even `Restricted` content is
+visible to the all-seeing `Internal` audience (`:153`). An embargo whose soundness
+hinges on "the grant→tier mapping must never hand an untrusted puller
+`AudienceTier::Internal`" is fragile — that mapping lives in the **closed weft
+repo** (§2.6, §9 O1/O2) and cannot be audited from this workspace. The recommended
+design therefore adds one strictest content tier and **one explicit `visible()`
+arm**:
+
+```rust
+// planned — extend visible() in crates/repo/src/visibility.rs.
+// These arms MUST sit ABOVE the existing `(_, AudienceTier::Internal) => true`
+// arm (visibility.rs:153): match arms evaluate top-to-bottom, so a Private arm
+// placed below it would never be reached for an Internal audience, and the
+// embargo would silently leak to internal callers.
+(VisibilityTier::Private { scope_label }, AudienceTier::Restricted(viewer))
+    if scope_label == viewer => true,
+(VisibilityTier::Private { .. }, _) => false,
+```
+
+This makes the embargo hold **by construction**: `Private` content is withheld from
+`Public`, every `Team`, every non-matching `Restricted`, *and* the otherwise
+all-seeing `Internal` audience — visible only to the one authorized scope. (Adding
+these arms narrows the all-seeing property: `AudienceTier::Internal` becomes
+"sees everything *except* `Private`".) The security-fix worked example (§7.1) is
+sound under these semantics: a public/anon puller (`AudienceTier::Public`) and any
+internal or team caller are all denied `N`'s content; only a holder of the
+authorized embargo scope sees it. The distinction from `reviewer-scoped`
+(`Restricted`) is exactly the `:153` escape hatch — `Restricted` content is
+deliberately visible to the internal trusted set (so internal CI/tooling can read
+an in-flight PR), whereas `Private` is withheld even from it.
+
+**Enum shape.** Promote `AnnotationVisibility` to a shared `VisibilityTier`
+(annotations, discussions, *and* states) and add the `Private { scope_label }`
+variant + the `visible()` arm above. This is one decision with O4 (enum
+unification, §9). If the maintainer prefers isolation, a `StateAudience` enum with
+the same variants is the fallback, at the cost of duplicating the (now-extended)
+`visible()` table.
+
+**Alternative (no new `visible()` arm).** If the maintainer wants zero changes to
+the existing filter, map `private → Restricted { scope_label }` (the strictest
+*existing* value). This is sound **only** under an explicit, load-bearing
+precondition: the grant→`AudienceTier` mapping (weft, §2.6) must map every
+unauthorized puller to `AudienceTier::Public` — never `Internal` — and must never
+mint a `Restricted(label)` matching the embargo scope for an unauthorized caller.
+Because that precondition lives in closed code and defeats the embargo silently if
+violated (`Restricted` content is fully visible to `AudienceTier::Internal` via
+`:153`), it is the *fallback*, not the recommendation. The primary design removes
+the dependency on it.
+
+The **reader** side needs no new vocabulary either way: an authorized embargo holder
+operates as `--audience restricted:<embargo-label>`, reusing the already-shipped
+`AudienceTier` string grammar (`internal | public | team:NAME | restricted:LABEL`,
+`visibility.rs:60-87`).
 
 ### 5.3 Enforcement — hard at serve, soft in depth
 
@@ -402,13 +465,41 @@ The **reader** side reuses `AudienceTier` and its existing string grammar
   keyed off the visibility sidecar and the caller's `AudienceTier` (derived from
   the auth context + per-thread grant, §2.6). Under-tier bytes never leave the
   host.
-- **Soft (defense in depth), local + bridge — heddle OSS.** At `materialize_blob`
-  (`repository_materialization.rs:591`) and `export_tree`
-  (`git_export.rs:127`), an under-tier state renders a **visibility stub** (a
-  short notice naming the tier and the promotion date, like the redaction stub at
-  `redaction.rs:106`) instead of its content. This protects a self-hosted Git
-  mirror and a local checkout shared across audiences even where the hard wire
-  filter doesn't apply.
+- **Soft (defense in depth), local + bridge — heddle OSS.** A **state-tier**
+  predicate cannot be evaluated at the redaction chokepoints as they stand. Both
+  are *blob/tree-keyed* and receive neither the `ChangeId` nor the caller's
+  `AudienceTier`:
+  - `materialize_blob` (`repository_materialization.rs:575`) takes only
+    `(dest, hash, executable, context)` — `hash` is a **blob** hash and
+    `MaterializationContext` (`repository_materialization.rs:57`) carries only
+    reflink/copy counters. Its public entry `materialize_tree`
+    (`repository_materialization.rs:299`) takes a `&Tree`, not a `State`.
+  - `export_tree` (`git_export.rs:97`) takes only `(heddle_repo, repo, tree_hash)`.
+
+  Redaction works at these points because it is **blob-keyed**
+  (`redaction_stub_for_blob(blob)`, `repository_redaction.rs:509`) — the blob hash
+  is all it needs. A visibility tier is **state-keyed** (per `ChangeId`), so the
+  predicate must be evaluated one level up, at the **state walk**, where the
+  `ChangeId` is already in scope, with the `AudienceTier` threaded in from the
+  entry point (neither path carries an audience today):
+  - **Bridge:** `export_state` (`git_export.rs:28`) already loads the `State`
+    (hence its `ChangeId`) but currently passes only `&state.tree` to `export_tree`
+    (`git_export.rs:41`) and takes no audience (its `--audience` is planned — see
+    the inline note at `git_export.rs:44-47`). Add an `AudienceTier` parameter and
+    evaluate the tier predicate here: if the state is under-tier, mint the **stub
+    commit** (§7.1) instead of recursing into `export_tree` on the real tree.
+  - **Local checkout:** the `ChangeId` is resolved at the `goto`/checkout entry
+    that turns a thread tip into a `State` → `Tree`, *above* `materialize_tree`.
+    Thread the resolved tier + `AudienceTier` in there and short-circuit an
+    under-tier checkout to a **stub tree** before materialization — not per-blob
+    inside `materialize_blob`, which never learns which state it is serving.
+
+  Each stub is a short notice naming the tier and the promotion date, like the
+  redaction stub renderer (`stub_text`, `redaction.rs:106`). The per-blob/per-tree
+  chokepoints remain the right home for **blob-keyed** redaction; **state-keyed**
+  visibility belongs at the state walk with the audience plumbed through. This
+  protects a self-hosted Git mirror and a shared local checkout even where the hard
+  wire filter doesn't apply.
 
 The two layers compose exactly as redaction's two chokepoints do; the wire filter
 is the boundary you can rely on against an adversarial puller, the stub is the
@@ -442,11 +533,12 @@ mirroring the `Redact` / `Purge` audit-trail pattern (`oplog_types.rs:109,123`).
 
 | Layer | Change | Grounding / precedent |
 |---|---|---|
-| `objects` crate | new `StateVisibility` + `StateVisibilityBlob` objects; (preferred) rename `AnnotationVisibility` → shared `VisibilityTier` | mirrors `Redaction`/`RedactionsBlob` (`redaction.rs:29,133`) |
+| `objects` crate | new `StateVisibility` + `StateVisibilityBlob` objects; (preferred) rename `AnnotationVisibility` → shared `VisibilityTier` **+ strictest `Private { scope_label }` variant** | mirrors `Redaction`/`RedactionsBlob` (`redaction.rs:29,133`) |
+| `repo` filter | extend `visible()` with the `Private` arm **above** the all-seeing-`Internal` arm | `visible()` (`visibility.rs:148,153`) |
 | object store | per-state `visibility/` sidecar dir + read/write + `has_visibility_for_state` | mirrors redactions dir (`fs_paths.rs:46-50`, `repository_redaction.rs:490`) |
 | `oplog` | tail-append `StateVisibilitySet` / `StateVisibilityPromote` | tail-append rule (`oplog_types.rs:14-21`) |
-| `repo` resolve | visibility stub at `materialize_blob` and a state-tier predicate; reuse `visible()` | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
-| bridge | visibility stub at `export_tree`; **stub-commit** for embargoed states (§7.1) | redaction stub (`git_export.rs:127`), per-state mint (`git_export.rs:213-246`) |
+| `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); state-tier stub at the **state walk**, not in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
+| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`); state-tier check + **stub-commit** for under-tier states (§7.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | redaction stub (`git_export.rs:127`), per-state mint (`git_export.rs:213-246`) |
 | `proto` / wire | new `ObjectType::Visibility` in the sync plan (propagate soft records); tier predicate in `collect_excluded` | `emit_redaction_plan` / `collect_excluded` (`object_graph.rs:346,360`) |
 | weft (closed) | **authoritative** server-side tier filter in `ListRefs`/`Pull`; grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
 | config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution chain | `resolve_default_visibility` (`namespace_policy.rs:68`) |
@@ -464,11 +556,13 @@ Setup: public thread `main`, mirrored to `refs/heads/main`. The thread's default
 tier is `public` (resolved from config, §8). Commit `N` describes the exploit;
 commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`).
 
-1. **Declare the embargo.** `heddle visibility set N --tier private --until
+1. **Declare the embargo.** `heddle visibility set N --tier private:security --until
    2026-07-01T00:00:00Z --sign-with ops.pem`. This writes a `StateVisibility`
-   record (`tier = Internal`, `embargo_until = 2026-07-01`) into `N`'s sidecar
-   and an `OpRecord::StateVisibilitySet` (§5.5). `N+1` keeps the thread default
-   (`public`).
+   record (`tier = Private { scope_label: "security" }`, `embargo_until =
+   2026-07-01`) into `N`'s sidecar and an `OpRecord::StateVisibilitySet` (§5.5).
+   The `Private` tier is withheld from every audience except a reader holding
+   `restricted:security` (§5.2) — including the otherwise all-seeing `Internal`
+   audience. `N+1` keeps the thread default (`public`).
 2. **Public pull (hard).** A reader with public tier calls `Pull`. The weft
    serve planner excludes `N`'s tree and the blobs reachable *only* through `N`
    (extended `collect_excluded`, §5.3); `N`'s state *header* may still travel so
@@ -481,8 +575,10 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
    the commit chain stays intact, while no exploit content leaks. (The
    alternative — re-parenting `N+1` onto `N-1` — is a history rewrite that breaks
    change-id stability and is rejected; see O3.)
-4. **Reviewer/maintainer pull.** A caller whose effective tier ≥ private (via
-   grant) pulls and sees `N` in full — same objects, no stub.
+4. **Reviewer/maintainer pull.** A caller whose grant maps to
+   `AudienceTier::Restricted("security")` — the authorized embargo scope (§2.6) —
+   pulls and sees `N` in full: same objects, no stub. No other tier, including
+   `AudienceTier::Internal`, is admitted by the `Private` arm (§5.2).
 5. **Disclosure.** On 2026-07-01 the `embargo_until` lapses (or someone runs
    `heddle visibility promote N`, appending a superseding `public` record +
    `OpRecord::StateVisibilityPromote`). The next public `Pull` / bridge export
@@ -491,12 +587,15 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
 
 ### 7.2 In-flight PR with a reviewer audience
 
-Setup: a feature thread `feat/x`. Its default tier is `private` (nothing public
-until merge).
+Setup: a feature thread `feat/x`. Its default tier is `private:<author-scope>` —
+withheld from every audience but the author until they open it for review; nothing
+reaches a public puller before merge.
 
 1. **Open for review.** `heddle visibility set @ --tier reviewers:secteam` on the
-   tip (`reviewers:secteam` → `Restricted { scope_label: "secteam" }`). A
-   `StateVisibility` record lands on the tip state.
+   tip (`reviewers:secteam` → `Restricted { scope_label: "secteam" }`, which —
+   unlike `private:` — is also visible to the internal trusted set so CI/tooling
+   can read the proposed commit, §5.2). A `StateVisibility` record lands on the
+   tip state.
 2. **Reviewer fetch.** A reviewer holding the `secteam` audience (mapped from a
    per-thread grant → `AudienceTier::Restricted("secteam")`, §2.6) calls
    `ListRefs`/`Pull`; the tier predicate admits the thread and its states. They
@@ -524,8 +623,14 @@ of the worst kind (every commit asks "who can see this?"). Instead, tiers
 2. the thread's default tier,
 3. `[namespace.<name>] default_state_visibility` in config,
 4. repo-wide default,
-5. hard-coded fallback — **`private`** (the safe "don't know who should see this"
-   choice, mirroring the `Internal` fallback at `namespace_policy.rs:11`).
+5. hard-coded fallback — **fail-closed: the strictest tier, never public.** This
+   mirrors the *pattern* of the annotation resolver, which falls back to
+   `AnnotationVisibility::Internal` (`namespace_policy.rs:76`) as its "we don't
+   know who should see this" choice — but for commits the fallback must be
+   *stricter* than `Internal`, which leaks to team/internal audiences (§5.2).
+   Because the strictest `Private` tier carries an authorized scope label, the
+   repo-wide default must name that scope; resolving the label for a bare
+   fail-closed default is open question O8.
 
 So a normal public thread sets its default once; every commit is public without a
 flag. The embargoed-fix case is the *only* time you reach for `visibility set`,
@@ -535,7 +640,7 @@ common path has **zero** new flags; the rare path has one verb.
 ### 8.2 The verb family (minimal, mirrors `redact`)
 
 ```
-heddle visibility set <state> --tier <public|reviewers:LABEL|private> [--until RFC3339]
+heddle visibility set <state> --tier <public|reviewers:LABEL|private:LABEL> [--until RFC3339]
                               [--all-states] [--sign-with PEM] [--sign-algo A]
 heddle visibility promote <state>            # supersede with a more-open tier now (audited)
 heddle visibility show <state>               # the effective tier + record chain
@@ -546,8 +651,12 @@ Justification, verb by verb (none is "for completeness"):
 
 - **`set`** — the irreducible declaration. Someone must mark the exception; it
   cannot be defaulted away. `--tier` is a single enum value (not one flag per
-  tier). `--until` folds the scheduled-promotion case into `set` instead of a
-  separate "schedule" verb. `--all-states`, `--sign-with`, `--sign-algo` are
+  tier). `reviewers:LABEL` (→ `Restricted`) and `private:LABEL` (→ the strictest
+  `Private`) both name an authorized scope but differ in one arm: `reviewers:` is
+  also visible to the internal trusted set (`AudienceTier::Internal`), `private:`
+  is withheld even from it (§5.2) — pick `private:` for a hard embargo, `reviewers:`
+  for an in-flight PR that internal CI/tooling may read. `--until` folds the
+  scheduled-promotion case into `set` instead of a separate "schedule" verb. `--all-states`, `--sign-with`, `--sign-algo` are
   carried verbatim from `redact apply` (`commands_redact.rs:87-111`) for muscle
   memory and because the embargo declaration wants the same signing story.
 - **`promote`** — a *distinct* verb, not `set --tier public`, because opening an
@@ -563,7 +672,11 @@ Justification, verb by verb (none is "for completeness"):
 "Operate as audience X" (clone/fetch, and the planned `bridge git export
 --audience`) reuses the **already-shipped** `--audience
 internal|public|team:NAME|restricted:LABEL` grammar (`visibility.rs:60-87`)
-rather than minting a parallel selector. No new reader-side vocabulary.
+rather than minting a parallel selector. No new reader-side vocabulary: an
+authorized embargo/reviewer holder reads as `restricted:<label>`. Note that with
+the new `Private` arm (§5.2), `--audience internal` no longer sees *everything* —
+it sees every tier except `Private`, which is admitted only by the matching
+`restricted:<label>`.
 
 ### 8.4 Wire-trust reuse
 
@@ -593,10 +706,13 @@ trust list governs the cooperative records that ride alongside.)
   tree so `N+1`'s parent resolves) vs graft-reparent `N+1` onto `N-1` (rejected:
   rewrites history, breaks change-id stability + signatures). Confirm
   stub-commit; specify the exact stub-tree shape.
-- **O4 — enum unification.** Promote `AnnotationVisibility` → a shared
+- **O4 — enum unification + new tier.** Promote `AnnotationVisibility` → a shared
   `VisibilityTier` across annotations/discussions/states (recommended; already
-  reused by two consumers), vs a separate `StateAudience` (more isolation, more
-  duplication of the `visible()` table).
+  reused by two consumers) and add the strictest `Private { scope_label }` variant
+  + its `visible()` arm above the all-seeing-`Internal` arm (§5.2), vs a separate
+  `StateAudience` (more isolation, more duplication of the `visible()` table). The
+  `Private` arm changes `visible()` for *all* consumers (annotations/discussions
+  could use it too) — confirm that's acceptable, or scope the arm to states.
 - **O5 — clock trust for `embargo_until`.** Auto-promotion on wall-clock means a
   client/server with a skewed or rolled-back clock could reveal early or hold
   late. Whose clock is authoritative — only the weft serve host? Should
@@ -612,6 +728,13 @@ trust list governs the cooperative records that ride alongside.)
   synthetic parent pointer? §7.1 assumes header-visible (simpler, DAG stays
   intact); confirm this doesn't itself leak sensitive metadata (commit message,
   author, timestamp) — those may need stubbing too.
+- **O8 — fail-closed default's authorized scope.** The strictest `Private` tier
+  carries a `scope_label`, but the last-resort fallback (§8.1 step 5) fires when no
+  default is configured — so there is no label to fall back to. Options: require the
+  repo-wide default to name an owner/admin scope (so the fallback is
+  `Private { scope_label: <owner> }`), or have the fallback withhold from *every*
+  audience (a `Private` with no admitting arm) until an operator classifies the
+  state. Confirm which, since "withhold from everyone" can wedge a fresh repo.
 
 ---
 
@@ -624,9 +747,13 @@ before filing.
    Add `StateVisibility` / `StateVisibilityBlob` (objects), the `visibility/`
    sidecar dir + read/write + `has_visibility_for_state` (repo/store), modeled on
    `Redaction`/`RedactionsBlob`. Blocked by this spike.
-2. **impl(repo/bridge): resolve-layer visibility stub (cooperative tier).** Stub
-   under-tier states at `materialize_blob` and `export_tree`; reuse the
-   `visible()` filter for the state-tier predicate. Blocked by #1.
+2. **impl(repo/bridge): cooperative state-tier stub + audience plumbing.** Extend
+   `visible()` with the strictest `Private` arm (above the all-seeing-`Internal`
+   arm); thread an `AudienceTier` through the checkout entry (above
+   `materialize_tree`) and through `export_state` (which already holds the
+   `ChangeId`); stub under-tier states at the **state-walk level** — *not* the
+   blob-keyed `materialize_blob`/`export_tree`, which receive neither the
+   `ChangeId` nor the audience. Blocked by #1.
 3. **impl(oplog/cli): tier records + `heddle visibility` verb family.**
    Tail-append `StateVisibilitySet`/`StateVisibilityPromote`; implement `set` /
    `promote` / `show` / `list`; wire the config-default resolution chain. Blocked
