@@ -435,3 +435,106 @@ fn fit_author(s: &str, max_len: usize) -> String {
     }
     truncate(s, max_len)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objects::object::{Agent, Attribution, Principal, State};
+
+    fn human() -> Attribution {
+        Attribution::human(Principal::new("Ada Lovelace", "ada@example.com"))
+    }
+
+    fn agentic() -> Attribution {
+        Attribution::with_agent(
+            Principal::new("Ada Lovelace", "ada@example.com"),
+            Agent::new("anthropic", "claude-opus-4-7")
+                .with_session("sess-1", "seg-1")
+                .with_policy("pol-1"),
+        )
+    }
+
+    #[test]
+    fn attribution_parts_splits_principal_and_agent() {
+        let (principal, agent) = attribution_parts(&agentic());
+        assert_eq!(principal.name, "Ada Lovelace");
+        assert_eq!(principal.email, "ada@example.com");
+        let agent = agent.expect("agent attribution should be structured");
+        assert_eq!(agent.provider, "anthropic");
+        assert_eq!(agent.model, "claude-opus-4-7");
+        assert_eq!(agent.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(agent.policy_id.as_deref(), Some("pol-1"));
+    }
+
+    #[test]
+    fn attribution_parts_omits_agent_for_human_only() {
+        let (principal, agent) = attribution_parts(&human());
+        assert_eq!(principal.name, "Ada Lovelace");
+        assert!(agent.is_none(), "human-only attribution must not synthesize an agent");
+    }
+
+    #[test]
+    fn agent_info_skips_none_session_and_policy() {
+        // `session_id` / `policy_id` are `skip_serializing_if = None`, so a
+        // bare agent serializes to just provider + model — no null keys.
+        let (_, agent) = attribution_parts(&Attribution::with_agent(
+            Principal::new("Ada", "ada@example.com"),
+            Agent::new("openai", "gpt-5"),
+        ));
+        let json = serde_json::to_value(agent.unwrap()).unwrap();
+        assert_eq!(json["provider"], "openai");
+        assert_eq!(json["model"], "gpt-5");
+        assert!(json.get("session_id").is_none(), "absent session_id must be omitted, not null");
+        assert!(json.get("policy_id").is_none(), "absent policy_id must be omitted, not null");
+    }
+
+    #[test]
+    fn author_display_appends_extra_origin_count() {
+        let info = LineInfo {
+            change_id: ChangeId::generate(),
+            attribution: human(),
+            extra_origins: 2,
+            timestamp: "2026-01-01T00:00:00+00:00".to_string(),
+            origins: Vec::new(),
+        };
+        // Multi-origin lines render `Name <email> +N` in the human column.
+        assert_eq!(info.author_display(), "Ada Lovelace <ada@example.com> +2");
+    }
+
+    #[test]
+    fn author_display_single_origin_has_no_suffix() {
+        let info = LineInfo {
+            change_id: ChangeId::generate(),
+            attribution: human(),
+            extra_origins: 0,
+            timestamp: "2026-01-01T00:00:00+00:00".to_string(),
+            origins: Vec::new(),
+        };
+        assert_eq!(info.author_display(), "Ada Lovelace <ada@example.com>");
+    }
+
+    #[test]
+    fn state_fallback_line_info_attributes_whole_line_to_state() {
+        let state_id = ChangeId::generate();
+        let state = State::new(ContentHash::from_bytes([7u8; 32]), vec![], agentic());
+        let ts = "2026-02-03T04:05:06+00:00";
+
+        let info = state_fallback_line_info(state_id, &state, ts);
+
+        assert_eq!(info.change_id, state_id);
+        assert_eq!(info.extra_origins, 0);
+        assert_eq!(info.timestamp, ts);
+        assert_eq!(info.attribution, state.attribution);
+        // Exactly one synthesized origin mirroring the state, in the same
+        // structured shape the JSON renderer emits.
+        assert_eq!(info.origins.len(), 1);
+        let origin = &info.origins[0];
+        assert_eq!(origin.change_id, state_id.to_string());
+        assert_eq!(origin.timestamp, ts);
+        assert_eq!(origin.principal.name, "Ada Lovelace");
+        assert_eq!(
+            origin.agent.as_ref().map(|a| a.provider.as_str()),
+            Some("anthropic")
+        );
+    }
+}
