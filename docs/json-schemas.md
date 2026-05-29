@@ -292,7 +292,7 @@ in-progress operation.
 | `execution_path` | string \| null | required | Effective execution root. |
 | `actor` | object \| null | required | `{provider, model}`. `null` when no agent is attached. |
 | `thread_mode` | enum \| null | required | `lightweight` / `materialized` / `virtualized`. |
-| `thread_state` | enum \| null | required | `active` / `ready` / `merged` / `abandoned`. |
+| `thread_state` | enum \| null | required | Thread lifecycle: `active` / `ready` / `blocked` / `merged` / `abandoned` / `promoted`. Same values and meaning as `thread list`; repository-health/verification blockers surface via `coordination_status`, not here. |
 | `freshness` | enum \| null | required | `current` / `stale` / `unknown`. |
 | `child_threads` | array<string> | required | Names; empty array if none. |
 | `impact_categories` | array<enum> | required | Empty array if none. |
