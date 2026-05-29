@@ -193,6 +193,57 @@ pub fn print_direct_help_for_raw(
     })
 }
 
+/// Clap arg ids of the agent-automation flags on `capture` that are
+/// `hide = true` in the everyday surface. Kept in sync with
+/// `SnapshotArgs` (see `cli_args/commands_args.rs`); the
+/// `capture_agent_flags_hidden_by_default_revealed_on_demand` test fails
+/// if an id here no longer maps to a hidden `capture` arg.
+const CAPTURE_AGENT_FLAG_IDS: &[&str] = &[
+    "agent_provider",
+    "agent_model",
+    "agent_session",
+    "agent_segment",
+    "policy",
+    "no_policy",
+    "no_agent",
+    "split",
+    "into",
+    "paths",
+];
+
+/// Return a copy of `command` with the agent-automation flags un-hidden,
+/// so `print_long_help` renders them. Used by `capture --help-agent`.
+fn reveal_capture_agent_flags(command: clap::Command) -> clap::Command {
+    command.mut_args(|arg| {
+        if CAPTURE_AGENT_FLAG_IDS.contains(&arg.get_id().as_str()) {
+            arg.hide(false)
+        } else {
+            arg
+        }
+    })
+}
+
+/// Intercept `heddle capture --help-agent`: render `capture`'s
+/// clap-derived help with the hidden agent-automation flags revealed.
+/// Returns `None` when the request isn't a `capture --help-agent`
+/// invocation, so `main` falls through to normal parsing.
+pub fn print_capture_agent_help_for_raw(
+    cmd: &clap::Command,
+    raw: &[String],
+) -> Option<std::io::Result<()>> {
+    if !raw.iter().any(|arg| arg == "--help-agent") {
+        return None;
+    }
+    let verb = raw.iter().find(|token| !token.starts_with('-'))?;
+    let subcommand = find_subcommand_or_alias(cmd, verb)?;
+    if subcommand.get_name() != "capture" {
+        return None;
+    }
+    let bin_name = format!("{} {}", cmd.get_name(), subcommand.get_name());
+    let mut help = reveal_capture_agent_flags(subcommand.clone()).bin_name(bin_name);
+    Some(help.print_long_help())
+}
+
 fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::Command> {
     if path.is_empty() {
         return None;
@@ -286,6 +337,7 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
 pub fn topic_text(topic: &str) -> Option<&'static str> {
     Some(match topic {
         "advanced" => ADVANCED_HELP,
+        "agent-flags" => AGENT_FLAGS_TOPIC,
         "agent" | "daemon" => DAEMON_TOPIC,
         "git-overlay" => GIT_OVERLAY_TOPIC,
         "model" | "mental-model" | "concepts" => MODEL_TOPIC,
@@ -313,6 +365,36 @@ docs.\n\
 This is intentional. The everyday surface stays minimal so first-time users aren't\n\
 overwhelmed; agents and power users reach for the advanced affordances when they\n\
 need them.\n";
+
+const AGENT_FLAGS_TOPIC: &str = r#"Agent automation flags for `heddle capture`.
+
+These flags are hidden from the everyday `heddle capture --help` so it stays
+terse for human use. They let an automated caller override agent attribution
+and split captures across threads. Run `heddle capture --help-agent` to see
+them inline in capture's own help.
+
+Attribution overrides (each falls back to the matching env var, then config):
+
+  --agent-provider <NAME>   Override HEDDLE_AGENT_PROVIDER.
+  --agent-model <NAME>      Override HEDDLE_AGENT_MODEL.
+  --agent-session <ID>      Override the active agent session id (HEDDLE_SESSION_ID).
+  --agent-segment <ID>      Override the active session segment (HEDDLE_SESSION_SEGMENT).
+  --policy <ID>             Override HEDDLE_AGENT_POLICY.
+  --no-policy               Omit policy attribution.
+  --no-agent                Omit agent attribution.
+
+Path splitting (no env equivalent):
+
+  --split                   Split selected paths into another thread instead of
+                            capturing the whole worktree.
+  --into <THREAD>           Target thread when using --split.
+  --path <PATH>             Repository-relative path prefix to include with
+                            --split (repeatable).
+
+Attribution precedence (highest first): explicit flag, active thread actor,
+env var, harness probe, active session, user config, repo config. See
+`crates/cli/src/cli/commands/snapshot.rs` for the full cascade.
+"#;
 
 const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are not interchangeable.\n\
 \n\

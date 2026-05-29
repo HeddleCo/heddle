@@ -54,6 +54,8 @@ The three personas are NOT the only people who use heddle. They're chosen becaus
 
 **Friction NOT worth flagging:** text-rendering cosmetics that don't affect JSON shape.
 
+**Discovering hidden automation flags:** `heddle capture` carries agent-only flags (`--agent-provider`, `--agent-model`, `--agent-session`, `--agent-segment`, `--policy`, `--no-policy`, `--no-agent`, `--split`, `--into`, `--path`) that are `hide = true` so they don't clutter human `--help`. Agents reach them two ways: `heddle help agent-flags` (a topic page listing each flag with its `HEDDLE_AGENT_*` / `HEDDLE_SESSION_*` env equivalent) and `heddle capture --help-agent` (capture's own help with the hidden flags revealed inline). The default `heddle capture --help` stays terse but points at both. This progressive-disclosure pattern is the template for future hidden-flag discoverability.
+
 ## Mapping past findings to personas
 
 ### Round 3 (filed as #252-#258)

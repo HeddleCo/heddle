@@ -142,6 +142,18 @@ async fn async_main() -> Result<()> {
             }
             return Ok(());
         }
+        if let Some(result) =
+            cli::cli::help::print_capture_agent_help_for_raw(&Cli::command(), &raw)
+        {
+            result?;
+            if profile {
+                emit_profile(
+                    "help",
+                    &[ProfileField::duration("total_ms", total_start.elapsed())],
+                );
+            }
+            return Ok(());
+        }
         if let Some(result) = cli::cli::help::print_direct_help_for_raw(&Cli::command(), &raw) {
             result?;
             if profile {

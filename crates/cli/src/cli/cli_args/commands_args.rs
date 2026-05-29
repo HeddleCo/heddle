@@ -183,6 +183,9 @@ fn parse_confidence(s: &str) -> Result<f32, String> {
 Examples:
   heddle capture -m 'add login route'           # capture the worktree with intent
   heddle capture -m 'wip' --confidence 0.6      # honest confidence on a draft step
+
+Agent automation flags (provider/model/session/policy/split) are hidden here.
+Run `heddle help agent-flags`, or `heddle capture --help-agent` to list them inline.
 ")]
 pub struct SnapshotArgs {
     /// Natural language intent for this recoverable step.
