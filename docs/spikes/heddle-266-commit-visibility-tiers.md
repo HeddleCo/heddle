@@ -407,7 +407,7 @@ is simply no sound *partial* embargoed-commit view to serve:
    can be re-pointed without changing the descendant's own OID.
 3. **The public mirror is fast-forward-only.** `sync_track_to_branch` guards
    every branch update with `ensure_commit_update_fast_forward`
-   (`crates/cli/src/bridge/git_sync.rs:134`, `git_core.rs:2271-2291`), which
+   (`crates/cli/src/bridge/git_sync.rs:134`, `git_core.rs:2446-2466`), which
    rejects any non-descendant tip (`NonFastForwardRef`) — there is no force path.
    So any "rewrite on disclosure" is *forbidden*, not merely discouraged.
 
@@ -901,14 +901,20 @@ The two surface kinds consume the antichain differently:
 - **Single-tip ref surfaces** (the Git branch ref, surface 3; the marker tag,
   surface 4; the state note, surface 5; each individual `RefEntry`'s
   single-`change_id`, surface 2) can name only **one** commit apiece. The *moving*
-  ref `<thread>` advances only to a **unique served descendant** of its currently
-  advertised tip — the one served state that dominates the rest — and otherwise
-  **retains the previously-advertised tip unchanged** rather than picking an
-  arbitrary side (picking one side would both omit the other visible side and risk
-  a non-fast-forward move, §5.0). This is the "retain the previously advertised
-  ref unless it can advance to a unique visible descendant" policy — but on its
-  own it leaves the *other* maximal served states with no ref naming them. That
-  gap is closed by the multi-root advertisement path next.
+  ref `<thread>` advances **forward along its own line**: to the **unique maximal
+  served descendant of its currently advertised tip** — as far up its own
+  descendant chain as that chain stays unique — and it holds its prior tip *only*
+  when its own line has no unique forward successor (its prior tip is already a
+  frontier member, or its own served descendants themselves fork into ≥2
+  incomparable served states). It is **never** moved onto a *sibling* antichain
+  member (a maximal served state that is *not* a descendant of its prior tip): that
+  would be a lateral, non-fast-forward move (§5.0). Crucially, the advance is
+  decided over the prior tip's *own* descendants alone — a sibling line being
+  maximal elsewhere never freezes this ref short of its own-line maximum (e.g. it
+  advances `A → A2` even while a sibling `B` is also maximal). The complete
+  placement rule is stated under "General rule" below. On its own this still leaves
+  the *other* maximal served states (the sibling lines) with no ref naming them;
+  that gap is closed by the multi-root advertisement path next.
 
 **The protocol path for all merge-frontier roots (closes cid 3325554155).** "The
 full visible set stays fetchable" is only true if every maximal served state is
@@ -919,24 +925,25 @@ requires widening the single-`ChangeId` request shape:
 1. **Wire advertisement — multi-root, no new wire field.** `RefsList.refs` is
    already a `Vec<RefEntry>` (`crates/proto/src/message_refs.rs:85`), so `ListRefs`
    advertises **one `RefEntry` per maximal served state** in the antichain. The
-   moving ref `<thread>` is the entry for the unique dominating served state when
-   one exists; when the antichain has ≥2 incomparable maximal served states,
-   `<thread>` **stays on its prior advertised member** — the served state it was
-   already advertising, which is still one of the maximal members — and **every
-   *other*** maximal state gets its own `RefEntry` under a **deterministic derived
-   name** `<thread>@<changeid-prefix>`, the name a pure function of the served
-   `ChangeId` (`RefEntry.change_id`, `:91`) so it is stable, identity-bound, and
-   never reused for a different state. `<thread>` is **never** assigned by
-   topological or lexicographic order among the members: picking a side by ordering
-   could move the advertised main ref *sideways* to an incomparable sibling while
-   renaming the old tip to a synthetic ref, which a client would see as the main ref
-   jumping to an unrelated branch — a non-fast-forward, unstable change, the exact
-   opposite of the §5.0/§7.1 forward-only guarantee. (If `<thread>` has *no* prior
-   advertised member at this audience — the thread's very first advertisement
-   already forks into an antichain — the member it adopts is fixed **once** by the
-   deterministic rule and then held; chosen once, never re-chosen.) The antichain is
+   moving ref `<thread>` names the **maximal served descendant on its own line** —
+   the unique maximal served descendant of its prior advertised tip — and **every
+   *other*** maximal served state (every member on a *sibling* line, i.e. not a
+   descendant of `<thread>`'s prior tip) gets its own `RefEntry` under a
+   **deterministic derived name** `<thread>@<changeid-prefix>`, the name a pure
+   function of the served `ChangeId` (`RefEntry.change_id`, `:91`) so it is stable,
+   identity-bound, and never reused for a different state. So `<thread>` **advances
+   forward** as its own line extends (`A → A2` once `A`'s descendants become
+   served) and is **never frozen at a stale ancestor** just because a sibling line
+   is also maximal; it is likewise **never assigned by topological or lexicographic
+   order** among the members, since that could move it *sideways* to an incomparable
+   sibling — a non-fast-forward move a client cannot distinguish from a rewritten
+   ref, the exact opposite of the §5.0/§7.1 forward-only guarantee. (If `<thread>`
+   has *no* prior advertised member at this audience — the thread's very first
+   advertisement already forks into an antichain — the member it adopts is fixed
+   **once** by the deterministic rule and then held; chosen once, never re-chosen,
+   and thereafter advanced only forward along that chosen line.) The antichain is
    thereby **discoverable**: the client reads every served root out of the one
-   `Vec`, with `<thread>` stable on its own line.
+   `Vec`, with `<thread>` advancing forward on its own line.
 2. **Wire request — single-root pull, issued per root.** Each `Pull` carries one
    `PullRequest.target_state` (`crates/proto/src/message_pushpull.rs:91`) and each
    `PullReady.remote_state` echoes one served root (`:118`), so the client issues
@@ -947,10 +954,16 @@ requires widening the single-`ChangeId` request shape:
    single-root request shape; the multiplicity lives in the advertisement and in
    issuing N pulls, not in a widened `target_state`.
 3. **Git mirror — deterministic synthetic refs.** `refs/heads/<thread>` (one
-   FF-only ref) advances only to a unique dominating served state, else retains its
-   prior member — **never sideways to a sibling antichain member** (the FF guard
-   would reject the non-fast-forward move anyway, but the rule is stated so no
-   surface picks a sibling by ordering). Each *other* incomparable maximal served
+   FF-only ref) advances along its own line to the **maximal served descendant of
+   its prior tip**, else retains its prior tip — **never sideways to a sibling
+   antichain member, never backward**. This is not merely a stated rule: the
+   mirror enforces it structurally — `sync_track_to_branch`
+   (`crates/cli/src/bridge/git_sync.rs:124`) routes every move through
+   `ensure_commit_update_fast_forward` (`git_core.rs:2446`), which admits the new
+   tip *only* when `commit_is_descendant_of(new, old)` (`:2455`/`:2468`) and else
+   raises `NonFastForwardRef` (`:2457`). An own-line advance `A → A2` is a
+   descendant and is accepted; a lateral jump to a sibling `B` or a regress to an
+   ancestor is rejected. Each *other* incomparable maximal served
    state is published under a deterministic synthetic branch
    `refs/heads/<thread>@<changeid-prefix>` so a plain `git clone` can still fetch
    every visible side. Adding a synthetic ref is
@@ -962,21 +975,51 @@ requires widening the single-`ChangeId` request shape:
    redundant pointer loses no reachability (it is not "dropping an already-public
    ref": access to the commit survives via `<thread>`).
 
-**General rule — ref placement among antichain members is stable and forward-only
-(closes cid 3326047821).** A served *moving* ref (`<thread>` on the wire,
-`refs/heads/<thread>` on the mirror, and every single-tip ref) **never moves
-laterally to a sibling antichain member and never regresses.** It advances only
-forward along its own line — to a unique served *descendant* that dominates the
-rest — and otherwise holds its prior member; once `<thread>`'s member is decided it
-stays decided. The *other* maximal members are reached **only** through their own
-derived/synthetic names (`<thread>@<changeid-prefix>`), pure functions of the
-served `ChangeId`, so they never collide with or displace `<thread>`. Any
-ordering-based selection (topological, lexicographic) among incomparable members is
-**forbidden for the moving ref**: it would let the advertised tip jump between
-unrelated branches — an unstable, non-fast-forward move the public consumer cannot
-distinguish from a rewritten ref (§5.0/§7.1). Ordering is admissible *only* to mint
-the stable derived names for the non-moving siblings, never to choose which member
-`<thread>` itself names.
+**General rule — antichain ref placement, the definitive statement (closes cid
+3326047821; refined by cid 3326161852).** A served *moving* ref (`<thread>` on the
+wire, `refs/heads/<thread>` on the mirror, and every single-tip ref) obeys four
+rules, exhaustively:
+
+1. **Advance along its OWN line.** On each re-advertisement the ref moves forward to
+   the **maximal served descendant of its prior advertised tip** — the unique
+   maximal state in its prior tip's own served-descendant chain (e.g. `A → A2` as
+   `A`'s descendants become served). It does **not** freeze at a stale ancestor.
+2. **Never switch lines (no lateral move).** The ref is **never** reassigned to a
+   *sibling* antichain member — a maximal served state that is **not** a descendant
+   of its prior tip — even when that sibling is also maximal. Sibling lines are
+   reached only through their own derived/synthetic names
+   (`<thread>@<changeid-prefix>`, pure functions of the served `ChangeId`), never by
+   moving `<thread>` onto them. No ordering-based selection (topological,
+   lexicographic) is ever used to *place* the moving ref; ordering is admissible
+   only to mint the stable derived names for the non-moving siblings.
+3. **Never regress (forward-only).** Once advertised at `A2`, the ref never moves
+   back toward `A`. When its own line has no unique forward successor — the prior
+   tip is already a frontier member, or its own served descendants fork into ≥2
+   incomparable served states — the ref simply **holds its prior tip**; holding is
+   not a regress.
+4. **Name own-line maximal under a hidden merge.** When a hidden merge leaves
+   several incomparable maximal served states, the ref names the **maximal served
+   state of its OWN line** (advancing to it per rule 1, not freezing at an
+   ancestor); the *other* antichain members are simply **not advertised by THIS
+   ref** — they are reached through their own derived/synthetic refs.
+
+**Worked example.** `<thread>` last advertised `A`. Public descendants extend `A`'s
+own line so the served chain is `A → A1 → A2` with `A2` maximal on that line;
+meanwhile a *sibling* line `B` is also maximal, behind a hidden merge `M` that is
+not served (so the antichain is `{A2, B}` and `A` is now **non-maximal**). Then
+`<thread>` advertises **`A2`** — its own-line maximal descendant — **never `A`**
+(freezing at a non-maximal ancestor violates rule 1) and **never `B`** (jumping to
+a sibling line violates rule 2). `B` is published only as `<thread>@<b-prefix>`.
+When `M` later becomes served and reunifies the fork, `<thread>` advances FF to `M`
+(now a unique dominating descendant on the merged line) and the `B` synthetic ref
+retires, since its state is then reachable from `<thread>`.
+
+This is exactly the fast-forward discipline the Git mirror already enforces in
+code: `ensure_commit_update_fast_forward` (`crates/cli/src/bridge/git_core.rs:2446`)
+admits a ref move **only** when the new tip is a descendant of the old
+(`commit_is_descendant_of`, `:2455`/`:2468`), rejecting both lateral and backward
+moves with `NonFastForwardRef` (`:2457`); the wire ref `<thread>` mirrors that same
+own-line, forward-only discipline (§5.0/§7.1).
 
 **Cross-path disclosure ordering — forward-only regardless of order.** When a
 merge `M` has embargoed ancestors on ≥2 different parent paths that disclose at
@@ -1214,7 +1257,7 @@ mirroring the `Redact` / `Purge` audit-trail pattern (`oplog_types.rs:109,123`).
 | object store | per-state `visibility/` sidecar dir + read/write + `has_visibility_for_state` | mirrors redactions dir (`fs_paths.rs:46-50`, `repository_redaction.rs:490`) |
 | `oplog` | tail-append `StateVisibilitySet` / `StateVisibilityPromote` | tail-append rule (`oplog_types.rs:14-21`) |
 | `repo` resolve | thread `AudienceTier` through the checkout entry (above `materialize_tree`, `:299`); the **operator-local courtesy stub** is rendered at the **state walk** (where the `ChangeId` is in scope), never in blob-keyed `materialize_blob` (`:575`, no `ChangeId`/audience) — the public mirror emits absence, not a stub (§5.0/§5.3) | redaction stub (`repository_materialization.rs:591`), filter (`visibility.rs:148`) |
-| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before *every* ref-publishing/state-emitting surface** via one shared `resolve_frontier` chokepoint (§5.3) — branch ref-sync (`:277-288`, lag `refs/heads/main` to the frontier, **not** the raw `get_thread` tip `:278`), marker→tag sync (`:290-296`, withhold `refs/tags/<marker>` unless served — conflict-not-FF, `git_sync.rs:163-170`), **state notes `refs/notes/heddle`** (write a note only for a served state — `git_export.rs:242-245,252-261`, `git_core.rs:1105-1109`; forced mirror `+refs/notes/*`, `git_core.rs:300`; note payload carries `change_id`/attribution/agent, `git_notes.rs:33-56`), and the **`HEAD` symref + bulk push** (`git_core.rs:2398-2407,751`); merge-frontier antichain ≥2 → publish non-dominating sides under deterministic `refs/heads/<thread>@<changeid-prefix>` synthetic refs; the frontier rule is categorical over all surfaces (§5.3), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2271`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2271`), notes (`git_notes.rs:29`) |
+| bridge | add `AudienceTier` param to `export_state` (`:28`, holds the `ChangeId`) so minting is audience-aware; for the public mirror **compute the visibility frontier before *every* ref-publishing/state-emitting surface** via one shared `resolve_frontier` chokepoint (§5.3) — branch ref-sync (`:277-288`, lag `refs/heads/main` to the frontier, **not** the raw `get_thread` tip `:278`), marker→tag sync (`:290-296`, withhold `refs/tags/<marker>` unless served — conflict-not-FF, `git_sync.rs:163-170`), **state notes `refs/notes/heddle`** (write a note only for a served state — `git_export.rs:242-245,252-261`, `git_core.rs:1105-1109`; forced mirror `+refs/notes/*`, `git_core.rs:300`; note payload carries `change_id`/attribution/agent, `git_notes.rs:33-56`), and the **`HEAD` symref + bulk push** (`git_core.rs:2398-2407,751`); merge-frontier antichain ≥2 → `<thread>` advances along its own line to its prior tip's maximal served descendant; publish every *other* sibling line under deterministic `refs/heads/<thread>@<changeid-prefix>` synthetic refs; the frontier rule is categorical over all surfaces (§5.3), so the embargoed commit *and its descendants* are absent (forward-only, §7.1 step 3) — disclosure FF-appends, never re-mints/force-pushes (`ensure_commit_update_fast_forward`, `git_core.rs:2446`; mapping-skip `git_export.rs:218-223`); **no stub commit** (stub-swap/parent-reparent ruled out, §5.0.1) — not in `export_tree` (`:97`, tree-keyed, no audience) | per-state mint (`git_export.rs:84-93`), FF guard (`git_core.rs:2446`), notes (`git_notes.rs:29`) |
 | `proto` / wire | new `ObjectType::Visibility` in the sync plan (mirroring `emit_redaction_plan`), itself gated — a record is served only when its state is served, so it never leaks an embargoed `ChangeId`/tier/date (§8.4); **new** tier-aware **downward-closed reachability gate** — resolve the visibility frontier as a pre-pass, then serve the forward closure of the ancestry-closed visible set rooted at that frontier (no `ObjectType::State` header for an embargoed commit); **multi-root merge frontier** — `ListRefs` advertises one `RefEntry` per maximal served state into the existing `Vec<RefEntry>` (`message_refs.rs:85`), client issues one single-root `Pull` per root (`message_pushpull.rs:91`) with `exclude_states` dedup (`:95`), so no widened request shape is needed. NOT a `collect_excluded` extension (root-exclusion over-withholds, §5.3) and no set difference is needed (a child of a hidden parent is never served, so nothing shared to subtract) | `emit_redaction_plan` (`object_graph.rs:346`); contrast `collect_excluded` (`:360`); `Vec<RefEntry>` (`message_refs.rs:85`) |
 | weft (closed) | **authoritative** server-side downward-closed gate in `ListRefs`/`Pull` (above); grant-role → `AudienceTier` mapping; optional `PromoteVisibility` RPC + scheduler | `RepoSyncService` (`service.proto:8`); role substrate (`contribution-grant-flows.md` §1) |
 | config | `[namespace.<name>] default_state_visibility` + repo-wide default; reuse the resolution *precedence pattern* (namespace → repo → fallback) — but `resolve_default_visibility` is typed to `AnnotationVisibility` (`namespace_policy.rs:68,75`), so it must be generalized over the tier enum (ties O4) and its `Internal` fallback replaced with the stricter `Private` (§8.1) | `resolve_default_visibility` (`namespace_policy.rs:68`) |
@@ -1316,7 +1359,7 @@ commit `N+1` is the fix. `N+1.parents = [N]` (by `ChangeId`, `state_core.rs:207`
      every branch update with `ensure_commit_update_fast_forward`
      (`crates/cli/src/bridge/git_sync.rs:134`), which rejects any new tip that is
      not a descendant of the published tip (`NonFastForwardRef`,
-     `crates/cli/src/bridge/git_core.rs:2271-2291`) — there is no force path in this
+     `crates/cli/src/bridge/git_core.rs:2446-2466`) — there is no force path in this
      code. A re-minted chain is not a descendant of the published chain, so the swap
      could only land as a non-fast-forward *rewrite* of a published mirror
      (unacceptable). And even attempting it is moot: the mapping-skip
@@ -1485,7 +1528,7 @@ serve `S` — which §5.4 explicitly forecloses.
   audience? Recommendation: per-thread grant carrying an audience label.
 - **O3 — bridge DAG strategy (RESOLVED: downward-closed non-publication).** The
   public Git mirror is fast-forward-only (`ensure_commit_update_fast_forward`,
-  `git_core.rs:2271`) and a commit's OID is fixed by its tree + parents
+  `git_core.rs:2446`) and a commit's OID is fixed by its tree + parents
   (`export_state`, `git_export.rs:84-93`), so a published commit's identity can
   never change. **Resolution:** the bridge runs the same frontier pre-pass as the
   wire surfaces **before its ref-sync** (`git_export.rs:277-288`, §5.3) and lags
@@ -1589,9 +1632,10 @@ issues are checked against:
   the **multi-root protocol path** (advertise antichain, N single-root pulls,
   synthetic Git refs); **antichain ref-placement stability** — the moving ref
   (`<thread>` / `refs/heads/<thread>`) is stable + forward-only across antichain
-  members: it advances only to a dominating served descendant, else holds its prior
-  member, and **never moves laterally to a sibling member or regresses** (no
-  ordering-based selection of the moving ref, §5.3); **cross-path disclosure
+  members: it advances forward **along its own line** to the maximal served
+  descendant of its prior tip (e.g. `A → A2`, never frozen at a non-maximal
+  ancestor), else holds its prior tip, and **never moves laterally to a sibling
+  member or regresses** (no ordering-based selection of the moving ref, §5.3); **cross-path disclosure
   ordering** (forward-only under every interleaving); **transitive promotion** up
   all parent paths; the **one-way tier constraint** — no re-embargo of a served
   state; and **ref
@@ -1645,19 +1689,20 @@ issues are checked against:
    bases — the gate selects no merge base); when the antichain has ≥2 incomparable
    maximal served states, **`ListRefs` advertises one `RefEntry` per maximal served
    state** into the existing `Vec<RefEntry>` (`message_refs.rs:85`): `<thread>`
-   **stays on its prior advertised member** and **only the *other* members** get
-   deterministic `<thread>@<changeid-prefix>` names — `<thread>` is **never** chosen
-   by topological/lexicographic order (that would move the main ref sideways to an
-   incomparable sibling, §5.3 "ref placement among antichain members is stable and
-   forward-only"). The client issues **one
+   **advances along its own line to the maximal served descendant of its prior
+   tip** (never frozen at a non-maximal ancestor) and **only the *other* members**
+   (sibling lines) get deterministic `<thread>@<changeid-prefix>` names — `<thread>`
+   is **never** chosen by topological/lexicographic order and **never** jumps to a
+   sibling (that would move the main ref sideways to an incomparable sibling, §5.3
+   "antichain ref placement, the definitive statement"). The client issues **one
    single-root `Pull` per root** (`PullRequest.target_state`, `message_pushpull.rs:91`)
    carrying prior states in `exclude_states` (`:95`) — so every visible side is
    discoverable and requestable without widening the single-`ChangeId` request
    (§5.3 "protocol path for all merge-frontier roots"). **Antichain ref-placement
    stability is a conformance requirement:** assert the advertised `<thread>` tip is
    forward-only across re-advertisements — it advances only to a served descendant
-   that dominates the antichain, else holds its prior member, and never names a
-   different sibling member than the one it previously advertised. **Transmission
+   **of its own prior tip** (its own-line maximal descendant), never to an
+   incomparable sibling, and never regresses. **Transmission
    must not leak:** no withheld-state count, gap, or placeholder; the
    `ObjectType::Visibility` record is itself gated so it is served only when its
    state is **to a client** (§8.4 client-facing gate).
@@ -1688,7 +1733,7 @@ issues are checked against:
    publish call. The surfaces this issue MUST cover:
    - **Branch ref-sync** (`git_export.rs:277-288`): lag `refs/heads/main` to the
      frontier (last all-public ancestor), not the raw `get_thread` tip (`:278`);
-     FF-only (`ensure_commit_update_fast_forward`, `git_core.rs:2271`).
+     FF-only (`ensure_commit_update_fast_forward`, `git_core.rs:2446`).
    - **Marker→tag sync** (`git_export.rs:290-296`, `sync_marker_to_tag`,
      `git_sync.rs:157`): **withhold `refs/tags/<marker>` entirely until the marked
      state is served** — a tag names a specific state and cannot lag; it is
@@ -1721,14 +1766,17 @@ issues are checked against:
      `HEAD` resolves to a served branch (never a wholly-embargoed one); the bulk
      copy inherits soundness from the per-ref gating above.
    - **Multi-root merge frontier** (§5.3): when the antichain has ≥2 incomparable
-     maximal served states, publish each non-dominating side under a deterministic
+     maximal served states, publish each antichain member **other than the one
+     `<thread>` names** (every sibling line) under a deterministic
      synthetic `refs/heads/<thread>@<changeid-prefix>` (append-only, retires once a
      served descendant reunifies the fork), so a plain `git clone` fetches every
-     visible side; `<thread>` itself only ever advances FF to a dominator or
-     retains its prior member — **never moves sideways to a sibling member and never
-     regresses** (antichain ref-placement stability, §5.3). A conformance test must
-     assert `refs/heads/<thread>` is forward-only across re-exports: it never names a
-     different antichain sibling than the one it previously published.
+     visible side; `<thread>` itself only ever advances FF **along its own line** to
+     the maximal served descendant of its prior tip, else retains its prior tip —
+     **never moves sideways to a sibling member and never regresses** (antichain
+     ref-placement stability, §5.3; structurally enforced by
+     `ensure_commit_update_fast_forward`, `git_core.rs:2446`). A conformance test
+     must assert `refs/heads/<thread>` is forward-only across re-exports: it never
+     names an incomparable antichain sibling and never regresses.
    Audience-aware minting skips under-tier states, but the **ref/tag/note tips are
    decided by the frontier, never the raw mapped state**, so embargoed commits *and
    their descendants* are absent. Disclosure FF-appends the real commits, each
