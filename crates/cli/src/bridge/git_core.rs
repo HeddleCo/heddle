@@ -137,6 +137,15 @@ pub(crate) struct RefUpdate {
 /// be rejected when remotes are configured.
 pub const REMOTE_NAME_FOR_LOCAL_GIT_REPO: &str = "git";
 
+/// Whether `remote` collides with [`REMOTE_NAME_FOR_LOCAL_GIT_REPO`], the
+/// sentinel reserved for refs owned by the local repository. A user remote
+/// with this name cannot be represented unambiguously against local refs, so
+/// it must be rejected at every site that parses or accepts a remote name.
+/// Single source of truth for the reserved-namespace check.
+pub(crate) fn is_reserved_git_remote_name(remote: &str) -> bool {
+    remote == REMOTE_NAME_FOR_LOCAL_GIT_REPO
+}
+
 /// The kind of Git ref [`parse_git_ref`] recognizes. Ported from jj's
 /// `GitRefKind` (`lib/src/git.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,8 +187,12 @@ pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
     } else if let Some(remote_and_name) = ref_name.strip_prefix("refs/remotes/") {
         let (remote, name) = remote_and_name.split_once('/')?;
         // `refs/remotes/<remote>/HEAD` is the remote's symbolic default, not a
-        // real remote-tracking branch.
-        (name != "HEAD").then_some(ParsedGitRef {
+        // real remote-tracking branch. A remote literally named `git` collides
+        // with the local sentinel ([`REMOTE_NAME_FOR_LOCAL_GIT_REPO`]); aliasing
+        // it onto local refs would make remote-tracking branches
+        // indistinguishable from `refs/heads/*`, so it is rejected here —
+        // matching jj's parser and the sentinel ownership contract.
+        (name != "HEAD" && !is_reserved_git_remote_name(remote)).then_some(ParsedGitRef {
             kind: GitRefKind::Branch,
             name,
             remote,
@@ -2880,6 +2893,16 @@ mod tests {
         assert_eq!(parse_git_ref("HEAD"), None);
         // A remote ref with no branch component beneath the remote name.
         assert_eq!(parse_git_ref("refs/remotes/origin"), None);
+    }
+
+    #[test]
+    fn parse_git_ref_rejects_reserved_git_remote_namespace() {
+        // A user remote literally named `git` collides with the local sentinel;
+        // it must not be aliased onto local refs at the parse site.
+        assert_eq!(parse_git_ref("refs/remotes/git/main"), None);
+        assert_eq!(parse_git_ref("refs/remotes/git/feature/x"), None);
+        assert!(is_reserved_git_remote_name(REMOTE_NAME_FOR_LOCAL_GIT_REPO));
+        assert!(!is_reserved_git_remote_name("origin"));
     }
 
     #[test]
