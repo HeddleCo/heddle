@@ -1,8 +1,13 @@
 # Commit-level visibility tiers within a thread — design spike
 
-> **Status:** spike (doc-only). Design before impl. This document commits to a
-> *path*; the implementation lands as the follow-up issues listed in §10. It
-> does **not** implement the feature.
+> **Status:** spike (doc-only) — **settled design, ready to land.** Design before
+> impl. This document commits to a *path*; it does **not** implement the feature.
+> Every gate the design requires is **design-settled, pending impl** and is
+> enumerated in §10 "Implementation gates & follow-ups" — the maintainer-facing
+> hand-off. Note that one of those gates (the raw-Git `refs/heddle/*` receive-pack
+> guard) is **required but not yet implemented in this repo**, so the synthetic-ref
+> namespace is protected on heddle's own boundaries today but is not fully protected
+> against raw `git push` to a writable mirror until that gate ships (§5.4, §10).
 >
 > Tracks HeddleCo/heddle#266. External motivation: the "VCS for the agent era"
 > argument that *partial openness* — ship a security fix without publishing the
@@ -1469,8 +1474,9 @@ of them rather than restating its own rule:
      namespace. Boundaries 1–2 protect the artifact as **Heddle** writes it, but
      `refs/heddle/*` is, on the Git side, just a normal ref namespace: a raw `git push`
      / `git update-ref`, or an imported foreign branch, bypasses the `ThreadName`
-     validator entirely. This boundary has **two faces, both enforced**:
-     *(i) Heddle-side import chokepoint (live code path):* every git→Heddle import —
+     validator entirely. This boundary has **two faces — one enforced in heddle
+     today, one a required hosting-side impl gate that does not yet exist**:
+     *(i) Heddle-side import chokepoint (live code path — enforced today):* every git→Heddle import —
      `sync_branches` / `sync_tags` (`git_sync.rs:79,108,113`) and the ingest ref-emit
      path — funnels through `set_thread` / `set_marker` → `update_refs` →
      `validate_ref_name` (`name.rs:11-31`, called at the store write sites
@@ -1478,7 +1484,7 @@ of them rather than restating its own rule:
      enforced at the **store write-validator chokepoint** — not merely at a CLI-facing
      `ThreadName::new` the import actor never calls (`identifiers.rs:23-25`) — an
      imported `heddle/`-rooted branch or tag is rejected at store time.
-     *(ii) Hosted-mirror receive-pack (required impl gate):* Heddle the CLI is
+     *(ii) Hosted-mirror receive-pack (required impl gate — NOT YET IMPLEMENTED):* Heddle the CLI is
      **client-only** — there is no server-side receive-pack (the only
      `Service::ReceivePack`, `git_core.rs:2886`, is the *outbound* push handshake). Where
      the published mirror lives on a Git server that raw Git clients can push to, **that
@@ -1580,28 +1586,36 @@ of them rather than restating its own rule:
     synthetic-ref store path, never coercing them into a `ThreadName` (which (a) would
     then reject). **(r21.)** ✔ covered.
   - **(d) Raw-Git receive / import** — the write that does **not** originate from Heddle's
-    typed synthetic-ref writer. Two faces, both enforced: *(i) the Heddle-side import
-    chokepoint* — `sync_branches`/`sync_tags` (`git_sync.rs:79,108,113`) and the ingest
+    typed synthetic-ref writer. Two faces with **different status**: *(i) the Heddle-side import
+    chokepoint — enforced today* — `sync_branches`/`sync_tags` (`git_sync.rs:79,108,113`) and the ingest
     ref-emit path all write through `set_thread`/`set_marker` → `update_refs` →
     `validate_ref_name`, so (a)'s reservation, enforced at the store write-validator,
     rejects an imported `heddle/`-rooted ref at store time; *(ii) the hosted-mirror
-    receive-pack* — Heddle the CLI is client-only (no server-side receive-pack; the lone
-    `Service::ReceivePack`, `git_core.rs:2886`, is the outbound push), so where the
-    published mirror is hosted on a Git server raw clients can push to, that host's
-    receive path MUST reject raw writes to `refs/heddle/*`. **(this round; (ii) is a
-    required impl gate on the hosting side.)** ✔ covered (import) / ⊟ impl gate (receive).
+    receive-pack — a REQUIRED, NOT-YET-IMPLEMENTED impl gate* — Heddle the CLI is client-only (no server-side receive-pack; the lone
+    `Service::ReceivePack`, `git_core.rs:2886`, is the outbound push), so **this repo has no
+    receive path at all**. Where the published mirror is hosted on a Git server raw clients can push to,
+    `refs/heddle/*` stays **writable by a raw `git push`** until that host's
+    receive path is built to reject raw writes to it. This guard is **listed as an unimplemented
+    impl gate** (see "Implementation gates & follow-ups," §10), not a live code path.
+    ✔ enforced (import face) / ⊟ **unimplemented impl gate** (receive face).
 
   These four are the **complete** set of boundaries between Heddle's synthetic-ref
   namespace and any actor — Heddle-aware or raw-Git — that could create or overwrite a
-  ref. **"Structurally cannot create" holds because every one is enforced:** (a) and the
-  import face of (d) gate every write that funnels through the Heddle store validator; (b)
-  keeps the publisher from minting into the namespace; (c) lets the reserved root stay
-  fetchable without being coerced into a user type; and the receive face of (d) closes the
-  one surface that bypasses Heddle entirely — a raw `git push` against a hosted mirror.
-  This is the same **heddle-vs-git exclusivity** the CRDT respects: synthetic frontier
-  refs are a **Heddle-owned, heddle-exclusive** surface — Git sees only what Heddle
-  publishes (resolved output), never Heddle-internal machinery — and the raw-Git write
-  boundary enforces that no external Git actor can forge or overwrite them.
+  ref. **The namespace is *not* unconditionally closed today.** Three of the four
+  boundaries are **design-enforced in heddle's own code right now:** (a) name-validation
+  and the import face of (d) gate every write that funnels through the Heddle store
+  validator; (b) keeps the publisher from minting into the namespace; (c) lets the reserved
+  root stay fetchable without being coerced into a user type. The **fourth — the receive
+  face of (d), the raw-Git receive-pack guard — is a required impl gate that does NOT yet
+  exist in this repo.** Until it ships on any Git host that accepts raw `git push`,
+  `refs/heddle/*` on that mirror remains writable by a raw client bypassing Heddle
+  entirely. So: **the namespace is protected on the heddle-aware boundaries (a/b/c) today,
+  and full protection against raw-Git writes REQUIRES boundary (d)(ii) — a listed,
+  not-yet-implemented impl gate (§10). No raw-Git-writable mirror is fully protected until
+  (d)(ii) ships.** The intended invariant — the same **heddle-vs-git exclusivity** the CRDT
+  respects: synthetic frontier refs are a **Heddle-owned, heddle-exclusive** surface, Git
+  seeing only what Heddle publishes (resolved output), never Heddle-internal machinery — is
+  fully realized only once the receive-pack guard closes that last surface.
 
   *Fifth-path sweep — is there any other actor that could forge a synthetic ref?* Auditing
   every remaining path by which a ref could enter `refs/heddle/*` (or any Heddle-internal
@@ -1620,11 +1634,14 @@ of them rather than restating its own rule:
     ref-write path.
   - **Submodule import** — submodule gitlinks are *tree entries*, not refs, and never land
     in `refs/heddle/*`; Heddle has no submodule-ref import path. ✔ not a ref surface.
-  Conclusion: there is **no fifth path**. Every actor that can place a ref in the synthetic
-  namespace passes through one of the four boundaries; objects-only operations
-  (gc/repack/alternates) and tree-level constructs (submodules) cannot create refs at all.
-  The enumeration is exhaustive — no actor on any path can forge or overwrite a synthetic
-  ref.
+  Conclusion: there is **no fifth path** — the enumeration of *surfaces* is exhaustive.
+  Every actor that can place a ref in the synthetic namespace passes through one of the four
+  boundaries; objects-only operations (gc/repack/alternates) and tree-level constructs
+  (submodules) cannot create refs at all. **Exhaustive coverage of surfaces is not the same
+  as full enforcement today:** the raw-Git receive face (boundary (d)(ii)) is the one
+  surface whose guard is still a not-yet-implemented impl gate (§10), so on a mirror that
+  accepts raw `git push` a raw actor *can* still forge or overwrite a synthetic ref until
+  that guard ships. No surface is unaccounted for; one surface's guard remains to be built.
 
 - **Propagate-before-use — the persisted-fact principle (the *that-it-waits*).** A
   decision about **what** is served (a tier promotion) or **where** a moving ref sits
@@ -2033,6 +2050,60 @@ serve `S` — which §5.4 explicitly forecloses.
 
 Per spike discipline, these are proposed only; the orchestrator confirms scope
 before filing.
+
+### Implementation gates & follow-ups (design-settled, pending impl)
+
+The spike's hand-off list. **Each item below is design-settled in this doc and
+pending implementation** — none is enforced/shipped by this spike; each is sized to
+become its own impl issue. This list is the single place a maintainer can read off
+"what must be built." (The numbered issues that follow group these gates into
+dispatchable work units; the references in parentheses point at the design section
+each gate is settled in.)
+
+- **Raw-Git `refs/heddle/*` receive-pack guard (boundary (d)(ii)).** A hosting-side
+  receive-pack hook / `update-ref` guard that rejects raw-client writes to
+  `refs/heddle/*` on any mirror that accepts raw `git push`. **Required but
+  NOT-YET-IMPLEMENTED — no server-side receive-pack exists in this repo.** Until it
+  ships, the synthetic namespace is writable by a raw actor on a writable mirror
+  (§5.4 four-boundary enumeration). *Design-settled, pending impl.* → issue 5.
+- **Synthetic-ref type-distinct `RefKind` path, advertise→fetch→store→mirror.** Widen
+  the `RefEntry` discriminator from boolean `is_thread` to `RefKind` {`Thread`,
+  `Marker`, `SyntheticFrontierRoot`} (`message_refs.rs:92`) and route every client
+  consume/store/mirror site by `RefKind` (`fetch.rs:296-322`, `grpc_hosted/mod.rs:291,327`),
+  never coercing a synthetic root into a `ThreadName` (§5.4 Invariant C end-to-end).
+  *Design-settled, pending impl.* → issue 4.
+- **Anchor deterministic-merge (CRDT) + initial-anchor selection.** The `<thread>`
+  initial anchor is computed once by the first advertiser as the byte-order-least
+  `ChangeId`, written as a fact over the record-sync path and read by every other
+  host; two genuinely-racing anchor facts converge by a content-intrinsic
+  `min`-`ChangeId` merge with no lease/single-writer (§5.4 Invariants B; §5.3).
+  *Design-settled, pending impl.* → issue 4.
+- **Tier immutable-at-capture (Invariant A).** Resolve the inherited-default chain
+  **once at capture**, persist any restrictive resolution as the initial
+  `StateVisibility` record, never recompute at first serve (§5.4 Invariant A).
+  *Design-settled, pending impl.* → issue 3.
+- **Propagate-before-gate for promotion/visibility facts.** Promotion records
+  replicate host-to-host as authoritative facts (record-sync path, not behind the
+  §8.4 client gate); a host confirms it holds them before gating, and a host missing
+  them fails toward last-known-public and never re-hides (§5.4 multi-host rule).
+  *Design-settled, pending impl.* → issues 4, 5.
+- **`heddle/` first-segment name reservation (boundary (a)).** Reserve the `heddle/`
+  first segment in `ThreadName`/`MarkerName` validation (`name.rs:11-31`), enforced at
+  the store write-validator chokepoint (`refs_storage.rs:60,102,118,122,133`) and on
+  the creation path that bypasses it today (`identifiers.rs:23-25`) (§5.4 boundary a).
+  *Design-settled, pending impl.* → issue 4.
+- **Frontier resolution as a shared chokepoint across all ref-publishing surfaces.**
+  Route every Git-side publish (branch, marker→tag, notes incl. history-bearing
+  rebuild-on-withhold, `HEAD`, multi-root synthetic refs) through one
+  `resolve_frontier(audience, raw_target)` chokepoint with a conformance test that no
+  call site wires a raw mapped OID into a publish call (§5.3 close-the-class).
+  *Design-settled, pending impl.* → issue 5.
+- **`StateVisibility` object + sidecar store; audience plumbing; tier records + CLI
+  verbs; serve-side downward-closed gate + multi-root advertisement** — the core
+  data/serve substrate the gates above build on (§5.0–§5.3, §8). *Design-settled,
+  pending impl.* → issues 1, 2, 3, 4.
+- **`AnnotationVisibility` → shared `VisibilityTier` unification** (resolves O4).
+  *Design-settled, pending impl (small / decision).* → issue 6.
 
 **Coverage contract (so nothing is left uncaptured for the implementer).** The
 issues below are the maintainer-facing work list, so they must enumerate *every*
