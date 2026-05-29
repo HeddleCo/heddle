@@ -23,6 +23,8 @@ mod attempt;
 mod basics;
 #[path = "cli_integration/bridge.rs"]
 mod bridge;
+#[path = "cli_integration/cli_help_consistency.rs"]
+mod cli_help_consistency;
 #[path = "cli_integration/cli_premium_output.rs"]
 mod cli_premium_output;
 #[path = "cli_integration/context_recovery_advice.rs"]
