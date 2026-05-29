@@ -1016,17 +1016,32 @@ ref's "own line" at the initial condition; rules 1–4 govern every move thereaf
      **frozen** — never re-applied as members enter or leave the antichain. The
      prohibition is on ordering-based *re-placement*; the anchor is a one-time
      identity tiebreak, not a re-placement.
-   - **chosen once, persisted, never re-chosen.** The selected anchor is written as a
-     **persisted fact** (`<thread>`'s own-line record at `A`) and replicated
-     host-to-host over the same authoritative record-sync substrate as
+   - **computed once by the first advertiser, then read — never re-derived from a
+     local antichain.** The anchor is an instance of the **persisted-fact principle
+     (§5.4):** it is computed **exactly once, by the authoritative first advertiser** —
+     the single host that legitimately has no own-line record because it is *minting*
+     it — as `min`-`ChangeId` over *its* antichain at first advertisement, written as a
+     **persisted, signed, monotonic fact** (`<thread>`'s own-line record at `A`) and
+     replicated host-to-host over the same authoritative record-sync substrate as
      visibility/promotion records (`crates/client/src/grpc_hosted/sync.rs:268-302`,
-     §5.4). Every host thereafter **reads** the anchor; it never recomputes it from the
-     current (mutable) antichain. A host lacking the record — the genuine first
-     advertiser, or a fresh replica that has not yet synced it — recomputes the same
-     `min`-`ChangeId` member (identical because the antichain is itself a deterministic
-     function of synced facts, §5.4 "never recomputed from a mutable input," and the
-     key is a fixed per-state identity) and persists it; replication lag is governed by
-     §5.4 (fail toward last-known-public, never re-hide), never by re-anchoring.
+     §5.4). Every **other** host **reads** that fact; it **never** recomputes
+     `min`-`ChangeId` from its own current antichain. The hazard this forecloses is the
+     §5.4 *lagging-fact-set* one, not merely a mutable-input one: the byte-order-least
+     tiebreak is deterministic only *over a fixed set*, but a host's antichain is a
+     function of the facts **it** has synced, and under replication lag two hosts hold
+     **different** sets — so a replica that had already synced/promoted a sibling the
+     first advertiser had not (one with a lower `ChangeId`) would recompute a
+     **different** `min`-member and mint a conflicting anchor, breaking "chosen once,
+     frozen." Therefore a host that does **not** yet hold the persisted anchor record
+     **defers advertising `<thread>` until it has synced that record** (the
+     propagate-before-use half of §5.4); it does **not** bootstrap a second anchor from
+     its local set. Only the first advertiser ever computes the anchor; every other
+     host reads the propagated fact, and replication lag is governed by §5.4 (await the
+     fact / fail toward last-known-public, never re-hide), never by re-anchoring. (A
+     genuine *simultaneous* first advertisement on two hosts with divergent sets is the
+     same race as concurrent promotion records and resolves identically — the §5.4
+     monotonic superseding-record rule picks one persisted anchor; it is not re-derived
+     per host.)
 
    Once the anchor exists it **is** the own line, and rules 1–4 take over verbatim;
    the anchor is never re-selected. **Behavior when the anchored line's visible tip
@@ -1208,7 +1223,10 @@ public→embargo transition structurally impossible, closing the "can a tier rou
 question before it is asked.
 
 **Every promotion is a persisted monotonic fact, never a recomputed predicate —
-the durability mechanism that makes one-way hold across clocks and hosts.** The
+the durability mechanism that makes one-way hold across clocks and hosts.** (This is
+the *single-host* face of the **persisted-fact principle** stated at the close of
+this section, which the anchor (§5.3 rule 0) and any future placement/visibility fact
+also instantiate.) The
 one-way rule above is only as strong as the inputs the serve-time decision reads.
 If visibility were recomputed from a **mutable** input — wall-clock
 (`embargo_until`), per-host config, or any re-evaluated predicate — a clock skew, a
@@ -1235,7 +1253,9 @@ already-captured states, because promotion is an **explicit, signed, audited
 record**, not a side effect of mutable state.
 
 **Multi-host coordination — propagate promotion records *before* a host gates
-(impl requirement, closes cid 3326047819).** A promotion record is the authority
+(impl requirement, closes cid 3326047819).** (This is the *multi-host* face of the
+**persisted-fact principle** below: it forbids gating — and, identically, anchoring —
+from an un-propagated or lagging fact set.) A promotion record is the authority
 that makes `S` servable to a broader audience, so it must reach a secondary
 serve/export host **before** that host can correctly gate `S`. Shipping it via the
 §8.4 audience-gate would be **circular**: §8.4 withholds a record until *its own
@@ -1284,16 +1304,35 @@ host, and confirm its presence there, before that host gates `S`**
 authoritative records fail toward last-known-public — so no lagging or clock-skewed
 host can serve a state at a stricter tier than the one already served elsewhere.
 
-**General rule (propagate-before-gate).** Every host gates visibility **only** on
-promotion facts it has authoritatively received; **no host ever re-hides a state
-because it is missing or has a stale promotion record.** Gating is applied only
-after the authoritative record set is propagated and confirmed, and a host that
-cannot confirm it holds the records fails toward last-known-public, never toward
-re-embargo. This is the host-plane companion to the persisted-monotonic-fact
-invariant above: that invariant forbids recomputing visibility from a *mutable
-input on one host*; this rule forbids gating from an *un-propagated record set
-across hosts*. Both converge on the same §5.4 guarantee — once any host has served
-`S` to an audience, no host, clock, or config drift can walk that back.
+**The persisted-fact principle (§5.4) — the single governing rule the cases above,
+the antichain anchor (§5.3 rule 0), and every future placement/visibility decision
+all instantiate.** State it once; do not restate it per mechanism:
+
+> A decision about **what** is served (a tier promotion) or **where** a moving ref
+> sits (the antichain anchor, and any future placement fact) is **computed once, by
+> the authoritative writer** — the host that mints it — then persisted as a
+> **signed, monotonic fact** and **propagated before any host uses it**. Every other
+> host **reads** that fact and **never re-derives the decision from local state** —
+> neither from a *mutable input* (wall-clock, per-host config, a re-evaluated
+> predicate) nor from a *lagging or differently-synced fact set* (a partial
+> antichain, an un-received record). A host that cannot confirm it holds the fact
+> **defers, or fails toward the already-public / already-chosen direction** — it
+> withholds or serves last-known-public and never re-hides; it defers a first
+> advertisement rather than minting a second anchor — **never** toward a value that
+> could diverge from the authoritative writer's.
+
+The two cases above are its faces: the persisted-monotonic-fact invariant is the
+*single-host* face (no recompute from a **mutable input on one host**);
+propagate-before-gate is the *multi-host* face (no gating — and no anchoring — from an
+**un-propagated / lagging fact set across hosts**). The anchor (§5.3 rule 0) is the
+*placement* face. The **one** documented resolution that is computed rather than read
+is a decision's **initial** value *before it is first fixed-and-served* — inherited
+tier defaults (§8.1) — and that resolution is itself **frozen into a persisted fact
+the instant the state is first served**, after which only the fact is read; there is
+no fact to read *before* the first writer mints one, which is exactly why only the
+first writer ever computes. All faces converge on the same §5.4 guarantee — once any
+host has fixed and served a decision, no clock, config drift, or replica holding a
+different fact set can walk it back or fork it.
 
 ### 5.5 Oplog records (append at the tail — hard constraint)
 
@@ -1763,11 +1802,13 @@ issues are checked against:
    **of its own prior tip** (its own-line maximal descendant), never to an
    incomparable sibling, and never regresses. **Initial anchor is deterministic +
    host-independent:** when the thread's first advertisement at an audience is already
-   an antichain (no prior tip), persist `<thread>`'s own line as the member with the
-   **byte-order-least `ChangeId`** (`hash.rs:99`), written as a fact over the
-   record-sync path (`sync.rs:268-302`) and never re-selected from the mutable
-   antichain — so every host adopts the same member (§5.3 "definitive statement,"
-   rule 0). **Transmission
+   an antichain (no prior tip), the **first advertiser** computes `<thread>`'s own line
+   as the member with the **byte-order-least `ChangeId`** (`hash.rs:99`) **once**,
+   writes it as a fact over the record-sync path (`sync.rs:268-302`), and every
+   **other** host **reads** that fact — a host lacking it **defers** rather than
+   recomputing from its own (possibly lagging) antichain — so every host adopts the
+   same member, never re-selected from a mutable/lagging antichain (the persisted-fact
+   principle, §5.4; §5.3 "definitive statement," rule 0). **Transmission
    must not leak:** no withheld-state count, gap, or placeholder; the
    `ObjectType::Visibility` record is itself gated so it is served only when its
    state is **to a client** (§8.4 client-facing gate).
