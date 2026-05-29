@@ -144,18 +144,23 @@ impl<'a> GitBridge<'a> {
 /// than a parallel walk over current Heddle refs — guarantees the reported
 /// total equals what's copied, including a stale mirror ref left behind by
 /// a dropped thread (export does not prune mirror refs, so that commit
-/// still travels and is still counted). `states_exported` counts only the
-/// freshly-minted subset. They diverge whenever the destination is already
-/// populated: an overlay re-export reports `commits_total = N` and
-/// `states_exported = 0` — the signal that surfaces "already in sync"
-/// instead of a misleading bare "exported 0 states" (heddle#289, mirroring
-/// the import-side `commits_imported`/`states_created` split from
-/// heddle#147).
+/// still travels and is still counted). `states_exported` is the
+/// freshly-minted *subset of that same copied ref set* — both counts are
+/// partitions of one walk, so `states_exported + already == commits_total`
+/// holds by construction and a state minted into the mirror but reachable
+/// from no copied ref (an orphan dropped-thread history) inflates neither.
+/// They diverge whenever the destination is already populated: an overlay
+/// re-export reports `commits_total = N` and `states_exported = 0` — the
+/// signal that surfaces "already in sync" instead of a misleading bare
+/// "exported 0 states" (heddle#289, mirroring the import-side
+/// `commits_imported`/`states_created` split from heddle#147).
 #[derive(Debug, Default)]
 pub struct ExportStats {
-    /// Freshly-minted git commits (heddle-native states with no
-    /// preserved git_oid). Stays at 0 when every state was already
-    /// mapped to an existing commit.
+    /// Freshly-minted git commits that land in the destination — the
+    /// subset of the copied ref set's commits minted during this export
+    /// (no preserved git_oid). Stays at 0 when every copied commit was
+    /// already mapped to an existing commit. A minted commit reachable
+    /// from no copied ref is excluded (it never reaches the destination).
     pub states_exported: usize,
     /// Unique commits reachable from the branch/tag tips copied to the
     /// destination, including ones whose commit already existed and any

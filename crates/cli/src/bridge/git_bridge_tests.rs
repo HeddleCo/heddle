@@ -1907,6 +1907,125 @@ fn export_total_counts_stale_mirror_ref_left_by_dropped_thread() {
     );
 }
 
+/// heddle#289 r4: EVERY count in the export summary must be a partition of
+/// the single copied ref set, so a state minted into the mirror but
+/// reachable from no copied ref inflates none of them. r3 fixed
+/// `commits_total` but left `states_exported` ("newly") tallied inline over
+/// `list_states()`, so a Heddle-native thread created and dropped before
+/// export would still be minted and counted as newly-written even though it
+/// never lands in the destination — producing the impossible
+/// "1 total (2 newly written)" summary. This drives `states_exported` from
+/// the same walk as `commits_total`: the orphan is excluded from BOTH and
+/// `newly + already == total` holds by construction.
+#[test]
+fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
+    use objects::object::{Attribution, Principal, State};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let bridge = GitBridge::new(&repo);
+
+    let attribution =
+        || Attribution::human(Principal::new("Alice", "alice@example.com"));
+    let put_state = |parents: Vec<ChangeId>| -> State {
+        let store = bridge.heddle_repo.store();
+        let blob_hash = store.put_blob(&Blob::from_slice(b"contents")).expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(tree_hash, parents, attribution());
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // A native `main` thread with a two-commit history → both minted into
+    // the mirror and reachable from refs/heads/main, so both land in the
+    // destination.
+    let main_first = put_state(Vec::new());
+    let main_tip = put_state(vec![main_first.change_id]);
+    bridge
+        .heddle_repo
+        .refs()
+        .set_thread(&ThreadName::new("main"), &main_tip.change_id)
+        .expect("set main thread");
+
+    // A native `scratch` thread, dropped before export. Its state stays in
+    // the store (delete_thread only removes the ref), so the export walk
+    // over `list_states()` still mints it — but no copied ref points at it,
+    // so it reaches no destination and must inflate no count.
+    let orphan = put_state(Vec::new());
+    bridge
+        .heddle_repo
+        .refs()
+        .set_thread(&ThreadName::new("scratch"), &orphan.change_id)
+        .expect("set scratch thread");
+    bridge
+        .heddle_repo
+        .refs()
+        .delete_thread(&ThreadName::new("scratch"))
+        .expect("delete scratch thread");
+
+    // The orphan state is still present in the store — proving the walk
+    // would have minted (and, pre-r4, counted) it.
+    let mut bridge = bridge;
+    assert_eq!(
+        bridge.heddle_repo.store().list_states().expect("states").len(),
+        3,
+        "store holds main's two states plus the dropped scratch state"
+    );
+
+    let dest_temp = TempDir::new().expect("dest temp");
+    let dest_path = dest_temp.path().join("dest.git");
+    let stats = bridge.export_to_path(&dest_path).expect("export to path");
+
+    // Both summary counts are partitions of the copied ref set: total =
+    // main's two commits; newly = the same two (freshly minted this run).
+    // The orphan is in neither.
+    assert_eq!(
+        stats.commits_total, 2,
+        "total counts only the copied ref set (main's 2), not the orphan, got {}",
+        stats.commits_total
+    );
+    assert_eq!(
+        stats.states_exported, 2,
+        "newly counts only minted commits that landed (main's 2), not the orphan, got {}",
+        stats.states_exported
+    );
+
+    // The invariant the close-the-class fix guarantees: newly is a subset of
+    // total, so the "1 total (2 newly written)" impossibility cannot occur.
+    let already = stats.commits_total.saturating_sub(stats.states_exported);
+    assert!(
+        stats.states_exported <= stats.commits_total,
+        "newly ({}) must never exceed total ({})",
+        stats.states_exported,
+        stats.commits_total
+    );
+    assert_eq!(
+        stats.states_exported + already,
+        stats.commits_total,
+        "newly + already must equal total by construction"
+    );
+
+    // The orphan's commit reaches no ref in the destination.
+    let dest = gix::open(&dest_path).expect("open destination");
+    assert!(
+        dest.find_reference("refs/heads/main").is_ok(),
+        "destination must contain the main branch"
+    );
+    assert!(
+        dest.find_reference("refs/heads/scratch").is_err(),
+        "dropped scratch thread must not appear in the destination"
+    );
+    assert!(
+        !stats.branches.iter().any(|b| b.name == "scratch"),
+        "dropped scratch thread is not a synced branch: {:?}",
+        stats.branches
+    );
+}
+
 /// Phase A: `commits_imported` and `states_created` should both reflect new
 /// state writes for a fresh import.
 #[test]

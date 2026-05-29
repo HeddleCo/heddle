@@ -202,6 +202,13 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
 
+    // Git OIDs minted during this run. Used below to partition the copied
+    // ref set into newly-written vs already-mapped — so the "newly" count
+    // is a subset of the same walk that produces the total, never a
+    // parallel tally over `list_states()` that could include an orphan
+    // state reachable from no copied ref.
+    let mut newly_minted: HashSet<gix::hash::ObjectId> = HashSet::new();
+
     for state_id in sorted_states {
         // Skip states already mapped to a git object that exists in the
         // mirror — that's the common case for git-imported states whose
@@ -226,7 +233,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             message_override,
         )?;
         bridge.mapping.insert(state_id, git_oid);
-        stats.states_exported += 1;
+        newly_minted.insert(git_oid);
 
         // Attach a heddle note to the freshly-created commit so the
         // change_id survives a fresh `git clone` of the destination
@@ -295,14 +302,19 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         }
     }
 
-    // Total = unique commits reachable from the mirror's branch/tag tips —
-    // the exact ref set `copy_mirror_to_path` writes to the destination via
-    // `collect_ref_updates`. Deriving the count from the copy path (rather
-    // than a parallel walk over current Heddle refs) structurally
-    // guarantees "what we report" == "what we copy": a stale mirror ref
-    // left by a dropped thread is still copied to the destination, so its
-    // commits are still counted here.
-    stats.commits_total = count_exported_commits(&repo)?;
+    // Every count in the summary is a partition of the SINGLE copied ref
+    // set: `total` is unique commits reachable from the mirror's branch/tag
+    // tips (the exact ref set `copy_mirror_to_path` writes via
+    // `collect_ref_updates`), and `states_exported` ("newly") is the subset
+    // of THAT walk minted this run. Deriving both from one walk — rather
+    // than tallying `states_exported` inline over `list_states()` — makes
+    // `newly + already == total` hold by construction: a state minted into
+    // the mirror but reachable from no copied ref (e.g. a dropped thread's
+    // orphan history) is in neither count, so the impossible
+    // "1 total (2 newly written)" summary cannot occur.
+    let counts = count_exported_commits(&repo, &newly_minted)?;
+    stats.commits_total = counts.total;
+    stats.states_exported = counts.newly;
 
     bridge.save_mapping_to_disk()?;
 
