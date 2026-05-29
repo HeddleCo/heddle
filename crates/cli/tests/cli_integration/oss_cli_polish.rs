@@ -11602,6 +11602,12 @@ fn read_commands_gate_repository_preamble_on_verbose() {
             !default_text.contains("Repository:"),
             "{label} default text leaked the mode preamble: {default_text}"
         );
+        // Suppressing the preamble must not leave the spacer that used to
+        // follow it dangling as a leading blank line (heddle#275 r2).
+        assert!(
+            !default_text.starts_with('\n'),
+            "{label} default text starts with an orphaned blank line: {default_text:?}"
+        );
 
         let verbose_text = heddle(&verbose_args, Some(temp.path()))
             .unwrap_or_else(|e| panic!("{label} verbose text should render: {e}"));
