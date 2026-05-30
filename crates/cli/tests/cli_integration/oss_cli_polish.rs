@@ -4877,12 +4877,31 @@ fn branch_delete_current_refuses_with_typed_advice() {
             .is_some_and(|error| error.contains("Refusing to delete current thread")),
         "error should explain the unsafe branch delete: {envelope}"
     );
+    // The recovery is to switch/create a sibling thread first, never the
+    // circular `heddle thread list` that loops a junior (heddle#258).
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("heddle thread list")),
-        "hint should name the primary recovery command: {envelope}"
+            .is_some_and(|hint| hint.contains("heddle thread create <other>")),
+        "hint should name a non-circular recovery command: {envelope}"
     );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| !hint.contains("heddle thread list")),
+        "hint must not loop back to the circular `thread list`: {envelope}"
+    );
+    let templates = envelope["recovery_action_templates"]
+        .as_array()
+        .expect("recovery_action_templates should be an array");
+    let create = templates
+        .iter()
+        .find(|template| {
+            template["argv_template"]
+                == heddle_argv_json(["thread", "create", "<other>"])
+        })
+        .unwrap_or_else(|| panic!("create recovery template should be present: {envelope}"));
+    assert_eq!(create["agent_may_fill"], Value::Bool(true));
 }
 
 #[test]
@@ -6058,6 +6077,107 @@ fn thread_drop_current_checkout_refuses_instead_of_claiming_missing() {
         "current thread drop should refuse with the real reason: {stderr}"
     );
     assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
+}
+
+#[test]
+fn thread_drop_current_recovery_points_to_create_when_no_sibling() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &["--output", "json", "thread", "drop", "main"],
+        Some(temp.path()),
+    )
+    .expect("invoke current thread drop");
+    assert!(!output.status.success(), "current thread drop should fail");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("current thread drop should emit JSON envelope");
+    assert_eq!(envelope["kind"], "current_thread_not_droppable");
+
+    // The circular `heddle thread list` hint is gone: with no sibling
+    // thread to switch to, the recovery is to create one, switch to it,
+    // then retry the drop (heddle#258).
+    let hint = envelope["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("heddle thread create <other>"),
+        "hint should suggest creating a sibling thread: {stderr}"
+    );
+    assert!(
+        !hint.contains("heddle thread list"),
+        "hint must not loop back to the circular `thread list`: {stderr}"
+    );
+    assert_eq!(envelope["primary_command"], "heddle thread create <other>");
+
+    let templates = envelope["recovery_action_templates"]
+        .as_array()
+        .expect("recovery_action_templates should be an array");
+    let create = templates
+        .iter()
+        .find(|template| {
+            template["argv_template"]
+                == heddle_argv_json(["thread", "create", "<other>"])
+        })
+        .unwrap_or_else(|| panic!("create recovery template should be present: {stderr}"));
+    assert_eq!(create["agent_may_fill"], Value::Bool(true));
+    assert!(
+        create["argv_template"]
+            .as_array()
+            .is_some_and(|argv| argv.iter().any(|arg| arg == "<other>")),
+        "create template should mark <other> as a fillable slot: {stderr}"
+    );
+}
+
+#[test]
+fn thread_drop_current_recovery_points_to_switch_when_sibling_exists() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "feature"], Some(temp.path()))
+        .expect("create a sibling thread");
+
+    let output = heddle_output(
+        &["--output", "json", "thread", "drop", "main"],
+        Some(temp.path()),
+    )
+    .expect("invoke current thread drop");
+    assert!(!output.status.success(), "current thread drop should fail");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("current thread drop should emit JSON envelope");
+    assert_eq!(envelope["kind"], "current_thread_not_droppable");
+
+    // A sibling thread exists, so the recovery is to switch to it first
+    // (creating a fresh one stays available as a secondary path).
+    let hint = envelope["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("heddle thread switch <other>"),
+        "hint should suggest switching to a sibling thread first: {stderr}"
+    );
+    assert!(
+        !hint.contains("heddle thread list"),
+        "hint must not loop back to the circular `thread list`: {stderr}"
+    );
+    assert_eq!(envelope["primary_command"], "heddle thread switch <other>");
+
+    let templates = envelope["recovery_action_templates"]
+        .as_array()
+        .expect("recovery_action_templates should be an array");
+    let switch = templates
+        .iter()
+        .find(|template| {
+            template["argv_template"]
+                == heddle_argv_json(["thread", "switch", "<other>"])
+        })
+        .unwrap_or_else(|| panic!("switch recovery template should be present: {stderr}"));
+    assert_eq!(switch["agent_may_fill"], Value::Bool(true));
+    // Both recovery paths are exposed so machine callers can choose.
+    assert!(
+        templates.iter().any(|template| {
+            template["argv_template"]
+                == heddle_argv_json(["thread", "create", "<other>"])
+        }),
+        "create recovery template should also be present: {stderr}"
+    );
 }
 
 #[test]
