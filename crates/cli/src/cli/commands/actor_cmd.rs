@@ -9,7 +9,6 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::object::ThreadName;
 use objects::store::{ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary};
-use refs::Head;
 use repo::Repository;
 use serde::Serialize;
 
@@ -784,11 +783,20 @@ fn resolve_actor_entry(
             .ok_or_else(|| anyhow!("Actor not found for session: {}", session_id));
     }
 
-    if let Head::Attached { thread } = repo.head_ref()?
+    // Single git-overlay-aware oracle for "what lane is THIS checkout on?".
+    // `current_lane()` consults the git-overlay HEAD state, so a detached Git
+    // HEAD reports no lane even when `.heddle/HEAD` still names a stale attached
+    // thread. Deriving the implicit actor lookup from it — instead of
+    // `head_ref()` / `.heddle/HEAD` directly — keeps `actor explain`/`show`/`done`
+    // in agreement with `actor spawn --no-thread`, which rejects on the same
+    // no-lane predicate. There must be exactly one answer to "current lane?".
+    let current_lane = repo.current_lane()?;
+
+    if let Some(thread) = current_lane.as_deref()
         && let Some(entry) = registry
             .list()?
             .into_iter()
-            .filter(|entry| entry.status == AgentStatus::Active && thread == entry.thread)
+            .filter(|entry| entry.status == AgentStatus::Active && entry.thread == thread)
             .max_by_key(|entry| entry.started_at)
     {
         return Ok(entry);
@@ -798,11 +806,21 @@ fn resolve_actor_entry(
         return Ok(entry);
     }
 
-    registry
-        .list()?
-        .into_iter()
-        .find(|entry| entry.status == AgentStatus::Active)
-        .ok_or_else(|| anyhow!(no_active_actor_advice()))
+    // The "any active actor" fallback only applies when this checkout is on a
+    // lane. With no current lane (a detached Git HEAD whose `.heddle/HEAD` is
+    // stale, or a genuinely detached HEAD), resolving an arbitrary active actor
+    // would contradict `actor spawn --no-thread`'s rejection and re-introduce
+    // the recommend/execute split this oracle exists to prevent.
+    if current_lane.is_some()
+        && let Some(entry) = registry
+            .list()?
+            .into_iter()
+            .find(|entry| entry.status == AgentStatus::Active)
+    {
+        return Ok(entry);
+    }
+
+    Err(anyhow!(no_active_actor_advice()))
 }
 
 fn is_no_active_actor_error(err: &anyhow::Error) -> bool {

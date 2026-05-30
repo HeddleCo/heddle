@@ -8454,17 +8454,27 @@ fn git_overlay_matrix_continue_retry_loops_block_then_succeed_after_resolution()
 }
 
 // ---------------------------------------------------------------------------
-// `--no-thread` lane-existence conformance (heddle#307, Codex cid 3327525677).
+// `--no-thread` lane-existence conformance (heddle#307, Codex cid 3327525677
+// + cid 3327725478).
 //
-// The bug class: `actor explain` (recommend) and `actor spawn --no-thread`
-// (execute) decided "is there a current lane to attach to?" with *different*
-// predicates. In a git-overlay repo, Git HEAD can be detached while
-// `.heddle/HEAD` still names a stale attached thread; `head_ref()` then falls
-// back to that stale `Attached`, so the execute path attached the actor to a
-// dead branch and the recommend path advertised a `--no-thread` command that
-// cannot succeed. The fix routes BOTH paths through the single
-// git-overlay-aware predicate `Repository::current_lane()`. This harness pins
-// the invariant across the whole matrix: recommend and execute must agree.
+// The bug class: every actor-surface site that asks "is there a current lane /
+// active actor for THIS checkout?" must consult the single git-overlay-aware
+// oracle `Repository::current_lane()`. In a git-overlay repo, Git HEAD can be
+// detached while `.heddle/HEAD` still names a stale attached thread; any site
+// that reads `head_ref()` / `.heddle/HEAD` directly then falls back to that
+// stale `Attached`, so the execute path attached the actor to a dead branch and
+// the recommend path either advertised a `--no-thread` command that cannot
+// succeed or resolved a stale actor instead of recommending a mint.
+//
+// Round 2 routed `actor spawn --no-thread` (execute) and the recommend fallback
+// through `current_lane()`. Round 3 (cid 3327725478) closes the *upstream*
+// leak: `resolve_actor_entry` decided "is there an attached actor?" off
+// `head_ref()` and the unconditional "any active actor" fallback, so an active
+// actor on `main` plus a detached-unmapped HEAD resolved the stale `main` actor
+// and `actor explain` printed it — never reaching the mint recommendation —
+// while `actor spawn --no-thread` rejected. This harness pins the invariant
+// across the whole matrix: recommend and execute must agree, including when an
+// active actor exists.
 
 /// `actor explain` recommends `--no-thread` iff a current lane exists.
 fn explain_recommends_no_thread(path: &std::path::Path) -> bool {
@@ -8589,5 +8599,87 @@ fn git_overlay_no_thread_lane_predicate_recommend_and_execute_agree() {
     assert!(
         !execute,
         "detached-with-mapping: a detached HEAD has no attached lane, so --no-thread is rejected"
+    );
+
+    // (d) The leak round 2 missed (cid 3327725478): an *active actor* attached
+    // to `main`, then Git HEAD detached to an UNMAPPED commit so `.heddle/HEAD`
+    // still says `Attached(main)`. `resolve_actor_entry` used to resolve that
+    // stale `main` actor off `head_ref()` (and the unconditional "any active
+    // actor" fallback), so `actor explain` printed the stale actor — never
+    // reaching the mint recommendation — while `actor spawn --no-thread`
+    // rejected. The single `current_lane()` oracle reports no lane here, so
+    // explain must fall through to the minting recommendation and agree with
+    // execute's rejection.
+    let active_then_detached = TempDir::new().unwrap();
+    init_git_repo_with_branch(active_then_detached.path(), "main");
+    std::fs::write(active_then_detached.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(active_then_detached.path(), "base");
+    heddle_adopt(active_then_detached.path());
+    // Spawn an actor attached to the current lane (`main`). It records
+    // `path: None`, so it is reachable only via the lane oracle / the "any
+    // active actor" fallback — exactly the surfaces under test.
+    heddle(
+        &[
+            "actor",
+            "spawn",
+            "--no-thread",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.3-codex",
+        ],
+        Some(active_then_detached.path()),
+    )
+    .expect("spawn an active actor attached to `main`");
+    git(&["checkout", "--detach"], active_then_detached.path());
+    git(
+        &["commit", "--allow-empty", "-m", "unmapped detached commit"],
+        active_then_detached.path(),
+    );
+    assert_eq!(
+        Repository::open(active_then_detached.path())
+            .unwrap()
+            .current_lane()
+            .unwrap(),
+        None,
+        "active-actor-on-main + detached-unmapped HEAD must report no current lane"
+    );
+    // Recommend: `actor explain` must NOT resolve the stale `main` actor. It
+    // must report no active actor (`attached: false`) and recommend the minting
+    // spawn form, not `--no-thread`.
+    let explained = heddle_output_with_env(
+        &["actor", "explain", "--output", "json"],
+        Some(active_then_detached.path()),
+        &[
+            ("CODEX_THREAD_ID", "thread-cold-agent"),
+            ("CODEX_MODEL", "gpt-5.3-codex"),
+            ("CODEX_REASONING_EFFORT", "high"),
+        ],
+    )
+    .expect("actor explain should run");
+    assert!(
+        explained.status.success(),
+        "actor explain should succeed; stderr={}",
+        String::from_utf8_lossy(&explained.stderr)
+    );
+    let explained_json: Value = serde_json::from_slice(&explained.stdout)
+        .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}"));
+    assert_eq!(
+        explained_json["attached"], false,
+        "detached-unmapped HEAD with a stale `.heddle/HEAD` must not resolve the \
+         stale `main` actor: {explained_json}"
+    );
+    let recommended = explained_json["recommended_action"]
+        .as_str()
+        .unwrap_or_else(|| panic!("recommended_action should be present: {explained_json}"));
+    assert!(
+        recommended.contains("actor spawn") && !recommended.contains("--no-thread"),
+        "active-actor-on-main + detached-unmapped: explain must recommend the minting \
+         spawn form, not `--no-thread`: {explained_json}"
+    );
+    // Execute agrees: `--no-thread` is rejected because there is no current lane.
+    assert!(
+        !spawn_no_thread_succeeds(active_then_detached.path()),
+        "active-actor-on-main + detached-unmapped: spawn --no-thread must be rejected"
     );
 }
