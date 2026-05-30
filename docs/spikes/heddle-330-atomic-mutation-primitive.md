@@ -60,7 +60,11 @@ sketch.
   (`repository.rs:594`), the case an open-time pass structurally cannot reach
   (cid 3328112197). "Recover at open" is kept only as an **eager optimization**,
   not the guarantee; the hot path stays cheap via an O(1) oplog-generation
-  (`head_id`, `packed_oplog.rs:26`,`:55`) check, full reconcile only on the rare
+  (`head_id`, `packed_oplog.rs:26`,`:55`) check — a **watermark of *fully-
+  materialized* committed batches**, advanced only after a lagged read materializes
+  a crashed batch's *every* ref (batch-atomic, r8 cid 3328853451), never on a
+  partial single-ref reconcile, so the global gate cannot short-circuit a batch
+  sibling for any read shape (point, list, remote) — full reconcile only on the rare
   lag. **And the commit is deduplicated by an *unbounded, indexed*
   `transaction_id` lookup, not the window-bounded
   `record_batch_scoped_if_no_transaction` (which only scans a caller-supplied
@@ -457,18 +461,31 @@ by calling it:
 fn reconciled_load(&self, req: LoadRequest) -> Result<Loaded> {
     let raw = self.raw_load(req);                  // the request-scoped raw read
     let Some(rec) = &self.reconciler else { return Ok(raw) };   // bootstrap: plain cache
-    if rec.generation() == self.cached_generation.get() {        // r4 O(1) gate
-        return Ok(raw);                            // no commit since last reconcile ⇒ cache current
+    let tip = rec.generation();                    // current oplog head_id (O(1) header read)
+    if tip == self.cached_generation.get() {        // r4 O(1) watermark gate
+        return Ok(raw);                            // every batch ≤ watermark FULLY materialized ⇒ cache current
     }
-    Ok(rec.reconcile(raw, req, &self.op_scope()))  // r5 op_scope-filtered tail fold + lazy re-publish
+    // Watermark lagged ⇒ some committed batch ≤ tip is not yet fully materialized.
+    // Reconcile is BATCH-ATOMIC (r8): it materializes EVERY ref of EVERY lagged
+    // committed batch in this op_scope — not just `req`'s ref — then advances the
+    // watermark. Request shape (point/list) selects what is RETURNED, never how
+    // much of a lagged batch is MATERIALIZED, so the gate is never advanced on a
+    // partial single-ref reconcile that would leave a batch sibling stale-but-gated.
+    let loaded = rec.reconcile_batches(raw, req, tip, &self.op_scope())?;  // r5 op_scope filter
+    self.cached_generation.set(tip);               // advance ONLY after full-batch materialization
+    Ok(loaded)
 }
 ```
 
 `LoadRequest` discriminates which ref or set is wanted — `Head | Thread(name) |
 Marker(name) | UndoRecovery | RemoteThread(remote, thread) | ThreadList |
-MarkerList | RemoteList | RemoteThreadList(remote)` — so a *point* read still does a
-single-ref raw read + the generation gate (it does **not** materialize the whole
-set), and only the request-scoped raw-read sub-step branches; the reconcile body —
+MarkerList | RemoteList | RemoteThreadList(remote)` — so a *point* read's raw-read
+sub-step still reads a single ref (it does **not** scan the whole summary set on the
+hot path), and only that request-scoped raw-read sub-step branches on `LoadRequest`;
+when the gate lags the reconcile is **batch-atomic** (the r8 watermark, below): it
+materializes every ref of every lagged committed batch, never just `req`'s ref, so a
+point read of one batch member can never leave a sibling member of the same
+committed batch stale-but-gated. The reconcile body —
 generation gate (r4) + `Some(&op_scope())` filter (r5) + committed-tail fold — is
 **shared and unconditional**. The ten public readers become thin projections:
 
@@ -574,22 +591,108 @@ read reads the current `head_id` (an O(1) header read) and:
   canonical ref (or the cached summary set) is current ⇒ return it directly —
   **no tail scan, no write**;
 - only if it has **advanced** does the primitive scan the tail from `cached+1` for
-  committed `TransactionCommit` entries **in this `op_scope`** touching the
-  requested ref (point read) or any ref in the requested set (list read), fold the
-  newest committed target(s) / membership changes, and reconcile (lazily
-  re-publishing the lagging ref or summary). The scan applies the same
-  `Some(&op_scope())` exact-match filter
+  committed `TransactionCommit` entries **in this `op_scope`** and reconcile
+  **batch-atomically**: for every lagged committed batch it materializes **every**
+  ref that batch touched (newest-committed target / membership change per ref,
+  lazily re-publishing each lagging ref or summary) — *not only* the ref `req`
+  asked for — and **only then** advances the cached watermark to the scanned
+  `head_id`. Materializing the whole batch before the watermark moves is what makes
+  the gate safe for the *next* read of any sibling ref (the r8 watermark, below).
+  The scan applies the same `Some(&op_scope())` exact-match filter
   undo/redo use (`undo.rs:108-109`, `:131-132`), so a `head_id` advance driven
   purely by *another* worktree's commit in a shared oplog finds no entry for
   this lane and the reconcile is a no-op — the reader keeps returning its own
-  canonical ref.
+  canonical ref while still advancing its watermark (nothing in-scope lagged).
 
 So the steady-state hot path is one small header read plus an integer compare;
 the full reconcile runs only on the rare post-crash lag. (A per-ref committed
 index tightens this further — reconcile only when *this ref's* newest committed
 target advanced — but the single `head_id` generation gate is the simple floor.
-Exposing a cheap `OpLog::head_id()`/`tip()` header accessor is net-new impl work,
-§6 O7.)
+**If a per-ref index is adopted it must still be batch-atomic:** a reconcile
+advances the per-ref watermark for **every** ref the lagged batch materialized,
+not just the requested one — else it reintroduces exactly the sibling gap r8
+closes. Exposing a cheap `OpLog::head_id()`/`tip()` header accessor is net-new
+impl work, §6 O7.)
+
+**The generation is a watermark of *fully-materialized* batches, not of partial
+reconciles (r8, cid 3328853451).** The cheap gate above is a *global* `head_id`
+compare, so its meaning must be pinned precisely or it can short-circuit a sibling
+ref. Define the watermark exactly:
+
+> `cached_generation == N` means **every ref of every committed batch with
+> generation ≤ N (in this `op_scope`) has been materialized.** It is a watermark of
+> *fully-materialized* batches — it never names a batch that has been only partially
+> reconciled.
+
+*The bug a looser definition admits.* A single committed batch can update
+**multiple** refs (`a`, `b`, …) — `update_refs(&[RefUpdate])` applies a batch of
+thread/marker/head writes under one refs lock (`refs_manager.rs:319`, `types.rs:16`)
+— and a hard crash can leave the whole batch committed-in-oplog but **none** of its
+refs materialized. If a lagged `get_thread(a)` were to materialize **only** `a` and
+then advance the *global* gate to "current," a subsequent point read `get_thread(b)`
+of `a`'s batch sibling on the same handle would see `head_id` unchanged, take the
+O(1) fast path, and return **raw stale storage for `b`** — `committed ⇔ observed`
+broken for `b` while the gate falsely reads "current." This is **not** a reader
+bypassing the primitive (r7 closed that class — all ten readers funnel through
+`reconciled_load`); it is the gate *inside* the primitive advancing on a **partial**
+reconcile.
+
+*The fix — batch-atomic materialization, one rule.* A lagged read reconciles the
+**full** pending batch(es): it materializes **all** refs each lagged committed batch
+touched in this `op_scope`, **before** advancing the watermark. The watermark moves
+in lockstep with *whole batches*, never with individual refs, so it is "current" iff
+every ref of every batch ≤ it is materialized. The read stays lazy — it does real
+work *only* on the rare lag; the no-lag hot path is the unchanged O(1) header
+compare with no materialization — the change is solely that when it *does*
+reconcile, it completes the whole crashed batch, not just the one ref it was asked
+for.
+
+*Why this closes the class for **every** read shape — no sibling left (the
+structural test).* Because the watermark advances *only* on full-batch
+materialization, the very next read — of *any* ref, in *any* shape — is correct the
+instant the gate reads "current":
+
+- the flagged **point-read sibling** `get_thread(b)` after `get_thread(a)`: when
+  `a`'s read advanced the gate it materialized `b` (same batch) in the same pass, so
+  `b`'s fast path returns the materialized value, never stale storage;
+- the **list-read sibling** `list_threads` / `list_markers` / `list_remotes` /
+  `list_remote_threads` (which return **many** names at once): once the gate is
+  current, every name's create/delete in every batch ≤ the watermark is
+  materialized, so no list can report a committed-but-unmaterialized membership —
+  the stale-set hole cid 3328832780 flagged stays closed even under the *global*
+  gate;
+- the **remote / undo-recovery** readers (`get_remote_thread`, `get_undo_recovery`)
+  and **any future** `RefManager` read method: identical — they read through the
+  same gate, and "gate current" means "all refs of all batches ≤ watermark
+  materialized," independent of which ref or shape was requested.
+
+A *per-ref* gate (Codex's other option) also fixes the flagged point read, but it
+would need **separate** reasoning to show the list readers are safe (a list touches
+a whole name-set, not one ref). The full-batch **watermark** pre-empts the list-read
+*and* remote-read siblings *by construction* — one invariant covers point, list,
+remote, and future shapes — so r8 closes the class structurally instead of patching
+the single point-read cell Codex named.
+
+*The cost this accepts (the tradeoff).* A lagged read now pays to materialize the
+**entire** crashed batch, not just its one requested ref. Acceptable because: (a)
+lag occurs **only** after a *hard* crash (kill -9 / power loss) left a batch
+committed-but-unmaterialized — rare; an in-process crash is pre-commit by
+construction (§4 `Drop` backstop), and the `Repository::open` eager pass already
+repairs lag once up front on the common one-shot path; and (b) the **hot path is
+unchanged** — a no-lag read still does exactly one header read + one integer
+compare, materializing nothing. We trade a slightly heavier *rare* reconcile for a
+global O(1) gate correct across all read shapes.
+
+*The watermark stays `op_scope`-scoped (r5).* It is per-`op_scope`: the
+batch-materialization scan is the same `Some(&op_scope())` exact-match filter
+undo/redo apply (`undo.rs:108-109`, `:131-132`), so "every ref of every batch ≤ N"
+means every ref of every batch ≤ N **in this worktree's lane**. A `head_id` advance
+driven purely by a *co-tenant* worktree's commit in a shared oplog materializes
+nothing for this lane (no in-scope batch lagged) and still advances this lane's
+watermark — the cross-lane-publish hazard cid 3328776063 fixed stays fixed. The
+generation/commit-index identity from r4 (the gate *is* the oplog's monotonic
+`head_id`, `packed_oplog.rs:26`,`:55`) is unchanged; r8 only pins *when* the cached
+copy may advance — after a full-batch materialization, never a partial one.
 
 **"Recover at open" is demoted to an optimization, not the guarantee.** Keeping
 an eager materialization pass at `Repository::open` (`repository.rs:594`, hit by
@@ -746,7 +849,13 @@ invariant once, from a mechanism that sits in the path every reader shares.**
        the committed target within its own `op_scope`).
   Because the check is *in the read*, not *at the open*, and *scoped to the
   reader's own lane*, there is no reader, handle, timing, or co-tenant worktree
-  that escapes it. The matrix collapses to **"all reads reconcile, in scope, ∎"**
+  that escapes it. (The cheap O(1) gate that makes this affordable is a **watermark
+  of *fully-materialized* batches** — advanced only after a lagged read materializes
+  a crashed batch's *every* ref, never on a partial single-ref reconcile (§2.2 r8,
+  cid 3328853451) — so a point/list/remote read of a *batch sibling* cannot slip
+  past the gate onto stale storage: "gate current" *means* every ref of every batch
+  ≤ it is materialized, so the collapse below is not undermined by the optimization
+  that makes it cheap.) The matrix collapses to **"all reads reconcile, in scope, ∎"**
   — there are no cells left to enumerate, because the third axis (handle age) and
   fourth axis (shared-oplog topology) the per-cell frame missed are closed by the
   same mechanism as the first two.
@@ -1296,14 +1405,21 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
     on the oplog `head_id` (`packed_oplog.rs:26`, the file's leading field `:55`),
     so a read that finds `head_id` unchanged returns immediately with no tail scan
     and no write; full reconcile (and lazy re-publish) only on the rare advanced-
-    generation lag. This needs a cheap `OpLog::head_id()`/`tip()` header accessor
-    (net-new). The `Repository::open` (`repository.rs:594`) eager materialization
+    generation lag. The cached `head_id` is a **watermark of fully-materialized
+    batches**: a lagged read materializes **every** ref of every lagged committed
+    batch *before* advancing it (batch-atomic, cid 3328853451), so the global gate
+    reads "current" iff no ref of any batch ≤ it is stale — a partial single-ref
+    reconcile must never advance it, else a batch sibling (point *or* list read)
+    would observe stale storage behind a "current" gate. This needs a cheap
+    `OpLog::head_id()`/`tip()` header accessor (net-new). The `Repository::open` (`repository.rs:594`) eager materialization
     is kept as an *optional* prefetch — it repairs lag once at open so subsequent
     reads on that handle skip even the reconcile — but is **not** load-bearing and
     may be dropped; it must not itself need the recovery it provides (bootstrap
     ordering inside `open`). A per-ref committed index (vs the single `head_id`
     gate) is an optional refinement to avoid reconciling a read when a *different*
-    ref advanced.
+    ref advanced — but it must stay batch-atomic (advance the per-ref watermark for
+    **every** ref a reconcile materialized, not just the requested one), or it
+    reintroduces the sibling gap cid 3328853451.
   - **Unbounded indexed `transaction_id` map.** The exact-once commit needs a
     `transaction_id → committed-batch-id` index maintained under the oplog write
     lock and persisted atomically with the log (so it can never disagree). This
@@ -1415,7 +1531,11 @@ revision, only one migration is in flight, not five.
   construction and invoked inside the primitive — so reconciliation reaches every
   reader (and the daemon handler `transaction.rs:143-152`) with no call-site
   changes. Both the O(1) `head_id` generation gate (`packed_oplog.rs:26`,`:55`) and
-  the `op_scope` filter run inside the primitive. The tail scan reuses the
+  the `op_scope` filter run inside the primitive; the gate is a **watermark of
+  *fully-materialized* batches** — advanced only after a lagged read materializes a
+  crashed batch's *every* ref (batch-atomic, cid 3328853451), never on a partial
+  single-ref reconcile, so it cannot short-circuit a batch sibling for any read
+  shape (point, list, remote). The tail scan reuses the
   `Some(&op_scope())` exact-match filter undo/redo already apply (`undo.rs:108-109`,
   `:131-132`; `Repository::op_scope()` `repository.rs:1636`), so each worktree/lane
   resolves only its own committed entries. This holds for **every reader path,
