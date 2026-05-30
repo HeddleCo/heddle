@@ -355,22 +355,42 @@ before ph5" window would leave the daemon's already-open handle resolving the
 stale canonical ref indefinitely. The guarantee must therefore live one seam
 deeper — at the **read** itself:
 
-> **Universal rule: a ref read reconciles against the oplog at read time.** A
-> reader NEVER treats a canonical ref as authoritative-committed unless its
-> committing oplog entry exists; and if the committed oplog tail names a newer
-> target for that ref than the canonical value (a publication not yet
-> materialized), the read resolves the **authoritative value from the oplog**
-> (and MAY re-publish the canonical ref lazily). So the read never trusts a
-> *lagging* cache (oplog ahead of ref) and never trusts a *committed-looking* ref
-> with no backing entry (ref ahead of oplog — structurally impossible pre-commit
-> anyway).
+> **Universal rule: a ref read reconciles against the oplog at read time, within
+> the current worktree's `op_scope`.** A reader NEVER treats a canonical ref as
+> authoritative-committed unless its committing oplog entry exists **in this
+> repository's `op_scope`**; and if the committed oplog tail — *filtered to this
+> `op_scope`* — names a newer target for that ref than the canonical value (a
+> publication not yet materialized), the read resolves the **authoritative value
+> from the oplog** (and MAY re-publish the canonical ref lazily). So the read
+> never trusts a *lagging* cache (oplog ahead of ref) and never trusts a
+> *committed-looking* ref with no backing entry (ref ahead of oplog —
+> structurally impossible pre-commit anyway).
+>
+> The `op_scope` filter is load-bearing for **shared-oplog setups** (multiple
+> worktrees sharing one oplog backend via `.heddle/objectstore`). The local HEAD
+> pointer — and thus the canonical refs a read resolves — is *per worktree*, so
+> the reconciliation must resolve each lane against its own committed entries.
+> Without the filter, a long-lived checkout B reading next could reconcile its
+> local HEAD/thread refs to a *different* checkout A's newest committed target,
+> lazily publishing A's state into B's lane. The scope is exactly the worktree
+> discriminator `Repository::op_scope()` already exists to provide
+> (`repository.rs:1636-1654`: "unique per worktree even when several worktrees
+> share one oplog backend … `undo`/`redo`/`--list` filter by exact-match
+> scope"), reused unchanged — undo/redo already scope every oplog scan this way
+> (`undo.rs:108-109`, `:131-132`: `recent_batches_scoped`/`undo_batches_scoped`
+> with `Some(&scope)`; redo at `repository.rs:941-942`). Per-read reconciliation
+> reuses that same `Some(&op_scope())` filter on its tail scan; it does not
+> invent a new scoping mechanism.
 
-This single rule holds the invariant across **all three axes at once** — reader
+This single rule holds the invariant across **all four axes at once** — reader
 path (daemon RPC vs direct CLI), **handle age** (freshly opened vs a long-held
-`Arc<Repository>`), and crash timing (immediate vs delayed) — precisely because
-reconciliation happens *per read*, not *per open*: it re-reads the current oplog
-state from disk on every resolve, so a handle opened once at process start still
-reconciles on its ten-thousandth read. "Recover at open" structurally cannot do
+`Arc<Repository>`), crash timing (immediate vs delayed), and **oplog topology**
+(a private oplog vs a shared backend fronting multiple worktrees) — precisely
+because reconciliation happens *per read*, not *per open*, and *within the
+current `op_scope`*: it re-reads the current oplog state from disk on every
+resolve, filtered to this worktree's lane, so a handle opened once at process
+start still reconciles on its ten-thousandth read and never crosses into another
+lane's state. "Recover at open" structurally cannot do
 this; per-read reconciliation is what makes the daemon-handle cell hold, and it
 subsumes the daemon-vs-CLI and immediate-vs-delayed cells the prior rounds
 enumerated one at a time.
@@ -399,8 +419,13 @@ Reconciliation re-derives the committed target with no extra bookkeeping: every
 committed state `OpRecord` carries the ref identity + target — `Snapshot {
 new_state, thread }` (`oplog_types.rs:18-22`), `ThreadCreate/ThreadUpdate { name,
 … state }` (`:29`, `:33`), `Goto { target }` (`:24`) for HEAD — and the read
-takes the newest committed target in the tail (newest-wins, so two committed txns
-on one ref resolve to the same value a non-crashed run would produce).
+takes the newest committed target *within the current `op_scope`* in the tail
+(newest-wins, so two committed txns on one ref resolve to the same value a
+non-crashed run would produce). "Newest in the tail" always means newest among
+*this worktree's* entries — the scan is the `Some(&op_scope())`-filtered one
+undo/redo already run (`undo.rs:108-109`, `:131-132`), so in a shared-oplog
+setup a read in checkout B resolves B's lane only and never lifts checkout A's
+newest committed target.
 
 **Keeping it cheap (the cost the decision accepts).** Reconciling on *every* read
 must not become a full oplog scan per read. The hot-path check is a **generation
@@ -415,8 +440,13 @@ read reads the current `head_id` (an O(1) header read) and:
 - if it is **unchanged**, no commit has landed since the last reconcile ⇒ the
   canonical ref is current ⇒ return it directly — **no tail scan, no write**;
 - only if it has **advanced** does the reader scan the tail from `cached+1` for
-  committed `TransactionCommit` entries naming this ref, resolve the newest
-  target, and reconcile (lazily re-publishing the lagging ref).
+  committed `TransactionCommit` entries **in this `op_scope`** naming this ref,
+  resolve the newest target, and reconcile (lazily re-publishing the lagging
+  ref). The scan applies the same `Some(&op_scope())` exact-match filter
+  undo/redo use (`undo.rs:108-109`, `:131-132`), so a `head_id` advance driven
+  purely by *another* worktree's commit in a shared oplog finds no entry for
+  this lane and the reconcile is a no-op — the reader keeps returning its own
+  canonical ref.
 
 So the steady-state hot path is one small header read plus an integer compare;
 the full reconcile runs only on the rare post-crash lag. (A per-ref committed
@@ -533,8 +563,9 @@ txn log), `rewind` correctness is the load-bearing contract:
 
 ### 2.4 — Crash/retry coverage (the close-the-class proof)
 
-The invariant **`committed ⇔ oplog entry exists`** must hold for *every* reader
-and *every* retry timing. The prior rounds tried to prove this **cell by cell** —
+The invariant — stated precisely, **`committed ⇔ oplog entry exists` *within each
+`op_scope`*** (each worktree/lane is its own commit/recovery domain) — must hold
+for *every* reader and *every* retry timing. The prior rounds tried to prove this **cell by cell** —
 r1 fixed ordering, r2 added daemon recovery + a window dedup, r3 moved recovery to
 the `open` seam to cover the direct-CLI cell — and each round closed one cell only
 to have Codex surface its **sibling**: the daemon-only gap, then the windowed-dedup
@@ -553,19 +584,26 @@ invariant once, from a mechanism that sits in the path every reader shares.**
   reconciles against the committed oplog tail at read time (hooked at the
   `Repository` read accessors: `repo.head()` `repository.rs:1737`, and the
   reconciling `get_thread`/`get_marker` wrapper the daemon handler must use rather
-  than `repo.refs().get_thread` at `transaction.rs:150`). Therefore a reader on
+  than `repo.refs().get_thread` at `transaction.rs:150`). The reconciliation scans
+  **only this repository's `op_scope`** — the same `Some(&op_scope())` exact-match
+  filter undo/redo apply to every oplog scan (`undo.rs:108-109`, `:131-132`;
+  `Repository::op_scope()` `repository.rs:1636`), so each worktree/lane resolves
+  against its own committed entries. Therefore a reader on
   **any path** (daemon RPC or direct CLI), holding a handle of **any age**
   (freshly opened or a long-held `Arc<Repository>`), observing a crash at **any
-  time** (immediate or delayed):
+  time** (immediate or delayed), under **any oplog topology** (a private oplog or
+  a shared backend fronting multiple worktrees):
     1. never treats a canonical ref as committed without its backing oplog entry
-       (the read confirms the entry), and
-    2. never returns a stale canonical ref the oplog has already superseded (the
-       read resolves the committed target).
-  Because the check is *in the read*, not *at the open*, there is no reader,
-  handle, or timing that escapes it. The matrix collapses to **"all reads
-  reconcile, ∎"** — there are no cells left to enumerate, because the third axis
-  (handle age) that the per-cell frame missed is closed by the same mechanism as
-  the first two.
+       *in its own `op_scope`* (the read confirms the entry), and
+    2. never returns a stale canonical ref this lane's oplog has already
+       superseded, and **never lifts another lane's target** (the read resolves
+       the committed target within its own `op_scope`).
+  Because the check is *in the read*, not *at the open*, and *scoped to the
+  reader's own lane*, there is no reader, handle, timing, or co-tenant worktree
+  that escapes it. The matrix collapses to **"all reads reconcile, in scope, ∎"**
+  — there are no cells left to enumerate, because the third axis (handle age) and
+  fourth axis (shared-oplog topology) the per-cell frame missed are closed by the
+  same mechanism as the first two.
 
 - **Write side — unbounded indexed exact-once commit (§2.2 "Idempotency of the
   commit," retained from r3).** The phase-4 linearization point deduplicates on an
@@ -585,8 +623,11 @@ backing oplog entry — is structurally impossible regardless of reader/handle/t
 because nothing publishes a canonical ref before its phase-4 oplog entry is durable;
 and the only post-crash residue (a *lagging* OLD ref with the entry already present)
 is resolved at the read by reconciliation, on every path and handle age, not merely
-at the next `open`. That is the close-the-class result: not a covered matrix, but a
-single invariant enforced in the shared read path. The impl epic (§6 O1, O7) carries
+at the next `open` — and, because the reconcile is `op_scope`-filtered, a reader in
+a shared-oplog setup resolves only its own lane and never observes another
+worktree's uncommitted-to-its-own-refs state. That is the close-the-class result:
+not a covered matrix, but a single invariant — `committed ⇔ oplog entry exists`,
+*per `op_scope`* — enforced in the shared read path. The impl epic (§6 O1, O7) carries
 the two mechanisms — the per-read reconciliation hook and the unbounded index — as
 the concrete deliverables; the `open`-time materialization survives only as the
 eager fast-path that prefetches what the read would otherwise do lazily (§2.2),
@@ -1116,10 +1157,11 @@ primitives it composes (CAS batch + reverse rollback, a *window-bounded*
 idempotent oplog append, orphan-tolerant object store, atomic FS rename) already
 exist — the work is sequencing them under one ledger, not inventing durability.
 The two genuinely net-new pieces are the close-the-class mechanisms (O7):
-**per-read reconciliation at the `Repository` read accessors** (so the
-`committed ⇔ oplog entry exists` invariant holds for every reader path, *handle
-age*, and crash timing — including the daemon's long-held `Arc<Repository>` an
-open-time-only pass cannot reach) and an **unbounded indexed `transaction_id`
+**per-read reconciliation at the `Repository` read accessors, filtered to the
+current `op_scope`** (so the `committed ⇔ oplog entry exists` invariant holds
+per-lane for every reader path, *handle age*, crash timing, and oplog topology —
+including the daemon's long-held `Arc<Repository>` an open-time-only pass cannot
+reach, and shared-oplog worktrees that must not cross lanes) and an **unbounded indexed `transaction_id`
 commit dedup** (so exact-once holds at any retry timing, not just within a 64-batch
 window). The `Repository::open` eager materialization is kept only as an
 optimization on top of the read-side guarantee.
@@ -1167,21 +1209,27 @@ revision, only one migration is in flight, not five.
 - [x] **(2) Commit-point + ordering** — §2.2: the oplog append is the **sole**
   commit; refs are a post-commit materialized view; correctness rests on
   **per-read reconciliation** — every ref read reconciles against the oplog at
-  read time, hooked at the `Repository` read accessors (`repo.head()`
+  read time *within the current `op_scope`*, hooked at the `Repository` read
+  accessors (`repo.head()`
   `repository.rs:1737`; a reconciling `get_thread`/`get_marker` the daemon handler
   `transaction.rs:143-152` must use, since `refs` has no `oplog` dep but `repo`
   does, `crates/repo/Cargo.toml:22`,`:24`), with an O(1) `head_id` generation
-  fast-path (`packed_oplog.rs:26`,`:55`). This holds for **every reader path,
-  handle age, and crash timing** — including the daemon's long-held
+  fast-path (`packed_oplog.rs:26`,`:55`). The tail scan reuses the
+  `Some(&op_scope())` exact-match filter undo/redo already apply (`undo.rs:108-109`,
+  `:131-132`; `Repository::op_scope()` `repository.rs:1636`), so each worktree/lane
+  resolves only its own committed entries. This holds for **every reader path,
+  handle age, crash timing, and oplog topology** — including the daemon's long-held
   `Arc<Repository>` (`local_daemon.rs:330`) that never re-passes `Repository::open`
   (`repository.rs:594`), the cell cid 3328112197 exposed and an open-time pass
-  cannot reach. "Recover at open" is demoted to an **eager optimization**. Commit
+  cannot reach, and shared-oplog worktrees (cid 3328776063) that must resolve
+  their own lane, never a co-tenant's target. "Recover at open" is demoted to an **eager optimization**. Commit
   dedup is an **unbounded indexed `transaction_id` lookup**, *not* the
   window-bounded `record_batch_scoped_if_no_transaction` (`oplog_core.rs:281`, the
   rebase caller's 64-batch window, `rebase_ops.rs:192-202`). §2.4 collapses the
-  per-cell matrix into a **single universal proof** — all reads reconcile (read
-  side) + unbounded index (write side) ⇒ `committed ⇔ oplog entry exists` across
-  the whole {path × handle age × timing} space — against lock-free readers
+  per-cell matrix into a **single universal proof** — all reads reconcile in scope
+  (read side) + unbounded index (write side) ⇒ `committed ⇔ oplog entry exists`
+  *per `op_scope`* across the whole {path × handle age × timing × topology} space —
+  against lock-free readers
   (`refs_head.rs:22-41`, `refs_manager.rs:129-135`) + temp→rename apply
   (`refs_transactions.rs:230`). §2.3 idempotency.
 - [x] **(3) Nesting** — §3: enroll-into-outermost (savepoint) default, eager-
