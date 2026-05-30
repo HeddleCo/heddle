@@ -35,19 +35,27 @@ sketch.
   — so a crash between the two leaves a reader-visible ref with no undo record.
   The fix: a mutation is committed iff its `TransactionCommit` oplog entry is
   durable; ref publication (temp→rename, `refs_transactions.rs:230`) moves
-  **after** the commit as a deterministic, idempotent materialization that
-  recovery replays from the committed oplog tail. **That recovery is anchored at
-  the universal `Repository::open` seam (`repository.rs:594`) — every reader,
-  daemon RPC *and* direct CLI (`harness/mod.rs:127`), constructs its repo through
-  it — so the gate is explicitly NOT daemon-only** (today's
-  `replay_active_transactions` runs only from `local_daemon.rs:296`, the leak
-  this round closes). **And the commit is deduplicated by an *unbounded, indexed*
+  **after** the commit as a deterministic, idempotent materialization — the
+  canonical ref is a *cache* of the committed oplog. **Correctness rests on
+  per-read reconciliation, the universal rule: every ref read reconciles against
+  the oplog at read time** (hooked at the `Repository` read accessors — `repo.head()`
+  `repository.rs:1737` and a reconciling `get_thread`/`get_marker` the daemon
+  handler must use, `transaction.rs:143-152` — since `refs` does not depend on
+  `oplog` but `repo` does). This holds for **every reader path, every handle age,
+  every crash timing** — crucially the daemon's **long-held `Arc<Repository>`**
+  (`local_daemon.rs:330`) that **never re-passes `Repository::open`**
+  (`repository.rs:594`), the case an open-time pass structurally cannot reach
+  (cid 3328112197). "Recover at open" is kept only as an **eager optimization**,
+  not the guarantee; the hot path stays cheap via an O(1) oplog-generation
+  (`head_id`, `packed_oplog.rs:26`,`:55`) check, full reconcile only on the rare
+  lag. **And the commit is deduplicated by an *unbounded, indexed*
   `transaction_id` lookup, not the window-bounded
   `record_batch_scoped_if_no_transaction` (which only scans a caller-supplied
   window — the rebase caller passes `64` and documents that aging past it
   duplicates the batch, `rebase_ops.rs:192-202`)** — so a crash-retry at *any*
-  later time is exactly-once. This makes "committed" ⇔ "oplog entry exists" hold
-  for **every reader path × every retry timing**. See §2.2 + the §2.4
+  later time is exactly-once. Per-read reconciliation (read side) + the unbounded
+  index (write side) make "committed" ⇔ "oplog entry exists" hold universally —
+  across reader path, handle age, and retry timing. See §2.2 + the §2.4
   crash/retry-coverage proof — the single most load-bearing correction in the
   spike.
 - **Nesting = enroll-into-outermost (savepoint) by default; eager-commit only
@@ -297,9 +305,12 @@ at all:
 > deterministic, idempotent *post-commit* materialization** — the canonical ref
 > is a *cache / materialized view* of the committed oplog, never the source of
 > truth. A canonical ref is only ever renamed into place (a) by the executor
-> *after* the oplog commit, or (b) by recovery replaying the committed oplog
-> tail. It is **never** written pre-commit. Therefore "committed" ⇔ "oplog entry
-> exists," and a published (new-valued) ref always has a backing committed entry.
+> *after* the oplog commit, or (b) by **per-read reconciliation** (§2.2
+> "Reader model") lazily re-publishing the committed target. It is **never**
+> written pre-commit. Therefore "committed" ⇔ "oplog entry exists," and a
+> published (new-valued) ref always has a backing committed entry — and, because
+> every *read* reconciles the ref against the oplog before trusting it, a reader
+> never treats a lagging cache as authoritative either.
 
 Concretely the canonical order the executor enforces:
 
@@ -326,99 +337,145 @@ restores `committed ⇔ oplog entry exists`:**
 | during/after ph1 | orphan state blob; refs at OLD value; no oplog entry | **no** | `gc` reclaims the orphan; nothing else | holds (no entry ⇒ not committed; ref still OLD) |
 | during/after ph2–3 | temp files at `.tmp-*` paths; canonical refs at OLD value; no oplog entry | **no** | unreferenced temp files swept by gc / a startup tmp-sweep (the same orphan-`.tmp-` shape `transaction_replay` handles for the sentinel dir, `transaction_replay.rs` ¶3); canonical refs untouched | holds (no entry; no reader ever saw a temp path) |
 | during ph4 | oplog append is itself a `packed.save()` = write-temp+atomic-rename inside the oplog; the entry is either absent or fully present — never torn | atomic boundary | if absent ⇒ treat as ph3; if present ⇒ treat as ph5 | holds either way |
-| after ph4, before/during ph5 | oplog entry **present**; canonical ref still at OLD value (rename not yet done) | **yes** | startup recovery folds the committed oplog tail and idempotently re-publishes each ref to its committed target | holds (entry exists ⇒ committed; recovery materializes the lagging ref) |
-| after ph5 | oplog entry present; canonical ref at NEW value | **yes** | replay is a no-op (ref already at target) | holds |
+| after ph4, before/during ph5 | oplog entry **present**; canonical ref still at OLD value (rename not yet done) | **yes** | **the next reader reconciles** — its read folds the committed oplog tail, sees the committed target is newer than the lagging canonical value, and resolves the committed value (lazily re-publishing the ref). The `open`-time pass is an eager fast-path, not the guarantee | holds (entry exists ⇒ committed; the read never trusts the lagging cache) |
+| after ph5 | oplog entry present; canonical ref at NEW value | **yes** | reconciliation is a no-op (cheap generation check sees no lag; ref already at target) | holds |
 
-**Recovery (grounded) — one gate at the universal reader seam, NOT daemon-only.**
-The materialization replay must run before *any* reader resolves a ref, and the
-seam that every reader — daemon RPC *and* direct CLI — already funnels through is
-`Repository::open` (`repository.rs:594`): the daemon opens the repo before
-serving, and the CLI harness opens it once per invocation
-(`harness/mod.rs:127`). So the gate is a thin **`Repository::ensure_recovered`
-step invoked from `open`** (or a dedicated `open_for_read`/`open_for_mutation`
-that `open` delegates to), whose job is:
+**Reader model — per-read reconciliation (the universal correctness rule).**
+"Materialize at open" cannot be the guarantee, because **not every reader opens
+the repo per read.** The daemon builds its `Arc<Repository>` **once** at serve
+time (`local_daemon.rs:330`, wrapping the `repo` passed into `serve` at `:257`)
+and every handler reads refs off that **long-held** handle for the life of the
+process (`GrpcLocalService.repo`, `grpc_local_impl/mod.rs:38`, borrowed via
+`repo()` `:57-59`; e.g. `begin_transaction` reads `repo.head()` /
+`repo.refs().get_thread(..)` at `transaction.rs:143-152`). That handle **never
+re-passes `Repository::open`** (`repository.rs:594`), so an open-time materialize
+pass — however well placed — structurally cannot repair a ref that goes stale
+*after* the handle is already open: a concurrent CLI crash in the "after ph4,
+before ph5" window would leave the daemon's already-open handle resolving the
+stale canonical ref indefinitely. The guarantee must therefore live one seam
+deeper — at the **read** itself:
 
-> **Fold the committed oplog tail and re-publish any ref that lags its newest
-> committed target.** Fast-path: read the oplog head + the canonical value of
-> each ref the tail's uncommitted-materialization names; if every committed
-> `TransactionCommit` target is already the canonical value, return immediately
-> (the no-lag common case is a couple of reads, no writes). Otherwise, for each
-> lagging ref, temp→rename it to its committed target.
+> **Universal rule: a ref read reconciles against the oplog at read time.** A
+> reader NEVER treats a canonical ref as authoritative-committed unless its
+> committing oplog entry exists; and if the committed oplog tail names a newer
+> target for that ref than the canonical value (a publication not yet
+> materialized), the read resolves the **authoritative value from the oplog**
+> (and MAY re-publish the canonical ref lazily). So the read never trusts a
+> *lagging* cache (oplog ahead of ref) and never trusts a *committed-looking* ref
+> with no backing entry (ref ahead of oplog — structurally impossible pre-commit
+> anyway).
 
-Every committed state `OpRecord` carries the ref identity and target needed to
-re-derive the canonical value with no extra bookkeeping — `Snapshot { new_state,
-thread }` (`oplog_types.rs:18-22`), `ThreadCreate/ThreadUpdate { name, … state }`
-(`:29`, `:33`), `Goto { target }` (`:24`) for HEAD. Recovery computes, per ref,
-the newest committed target in the tail (newest-wins, so two committed txns on
-one ref resolve to the same final value a non-crashed run would produce) and
-writes it via the same temp→rename publish. Re-publishing a ref already at its
-target is a no-op, so the gate is idempotent and safe to run on every `open`.
+This single rule holds the invariant across **all three axes at once** — reader
+path (daemon RPC vs direct CLI), **handle age** (freshly opened vs a long-held
+`Arc<Repository>`), and crash timing (immediate vs delayed) — precisely because
+reconciliation happens *per read*, not *per open*: it re-reads the current oplog
+state from disk on every resolve, so a handle opened once at process start still
+reconciles on its ten-thousandth read. "Recover at open" structurally cannot do
+this; per-read reconciliation is what makes the daemon-handle cell hold, and it
+subsumes the daemon-vs-CLI and immediate-vs-delayed cells the prior rounds
+enumerated one at a time.
 
-Why anchor at `Repository::open` rather than the daemon pass.
-`replay_active_transactions(&repo)` (`daemon/src/transaction_replay.rs:205`) runs
-**only** from the daemon (`local_daemon.rs:296` is its sole production caller —
-every other call site is a test), and today only aborts stuck on-disk sentinels
-(`transaction_replay.rs:185-204`), never materializing refs. If ref recovery
-lived *there*, a **direct CLI invocation on a daemonless repo** (`heddle status`,
-`heddle log`, a fresh `heddle capture`) after a hard crash in the
-"after-commit/before-publish" window would read the **stale canonical ref** —
-the commit happened (oplog entry exists) but no daemon ever started to re-publish
-it. That is precisely the leak this round closes: `committed ⇔ oplog entry
-exists` would hold only for daemon-served readers. Moving the materialization to
-the `open` gate makes it hold for **all** readers. The daemon keeps its separate
-sentinel-abort recovery (`local_daemon.rs:296`); these are two distinct jobs —
-sentinel lifecycle (daemon-scoped) vs. ref materialization (reader-scoped, at
-`open`). The existing per-verb detection primitive `active_transactions`
-(`transaction_sentinel.rs:60`) is *not* a substitute: it is documented as a thing
-"every state-changing CLI verb *should* consult" (`transaction_sentinel.rs:4-8`)
-but is not actually wired into dispatch (its only non-test references are its own
-module, `transaction_sentinel.rs:92`), so relying on each verb to remember it
-would re-open the class one verb at a time. `open` is the single structural choke
-point; that is what closes the class.
+**Where the rule hooks (grounded).** The read seams are the lock-free ref
+readers — `RefManager::read_head` (`refs_manager.rs:114`) → `read_head_state`
+(`refs_head.rs:22-41`), and `get_thread`/`get_marker` (`refs_manager.rs:129-135`,
+`:185-191`). But `RefManager` lives in the `refs` crate, which **does not depend
+on `oplog`** (`crates/refs/Cargo.toml` declares no oplog dep), so reconciliation —
+which must consult *both* the ref and the committed oplog tail — cannot live
+inside `RefManager` without inverting the crate dependency. It hooks one layer up
+at the **`Repository` read accessors**, the only layer that sees both crates
+(`crates/repo/Cargo.toml:22` oplog, `:24` refs): `repo.head()`
+(`repository.rs:1737`) → `head_ref()` (`:1750`, today a bare
+`self.refs.read_head()`) becomes the reconciling HEAD read, and a sibling
+reconciling `repo`-level `get_thread`/`get_marker` accessor wraps the raw `refs`
+read for named refs. The `refs`-crate methods stay the plain cache reads; the
+*reconciliation* is the `repo`-level read. **The daemon handler at
+`transaction.rs:150` must therefore call the reconciling `repo`-level accessor,
+not `repo.refs().get_thread(..)` directly** — going straight to `refs()` bypasses
+the rule; `repo.head()` at `:152` already routes through the right layer. Auditing
+every reader onto the reconciling accessors (and forbidding raw `repo.refs()`
+reads on the hot resolve paths) is the concrete impl deliverable (§6 O7).
 
-**Alternative (lock-free reader reconciliation).** If hooking write-side repair
-into `open` is undesirable for read-only commands (it needs the refs write lock),
-the dual is to make readers self-correcting: a reader resolving a canonical ref
-also reads the committed oplog tail and, if the tail names a newer committed
-target for that ref than the canonical value, resolves to the *committed* target
-(optionally lazily re-publishing under the lock). The reader then **never trusts
-a canonical ref that lacks its backing commit record, and never trusts a stale
-ref the oplog has already superseded** — the same invariant, enforced at read
-time instead of open time, with no write privilege required. Either placement
-satisfies "recovery before any reader, daemon or CLI"; the repo-open gate is the
-simpler single-materialization-path default, the reader reconciliation the
-zero-write-on-read alternative. Decide in the impl epic (§6 O7).
+Reconciliation re-derives the committed target with no extra bookkeeping: every
+committed state `OpRecord` carries the ref identity + target — `Snapshot {
+new_state, thread }` (`oplog_types.rs:18-22`), `ThreadCreate/ThreadUpdate { name,
+… state }` (`:29`, `:33`), `Goto { target }` (`:24`) for HEAD — and the read
+takes the newest committed target in the tail (newest-wins, so two committed txns
+on one ref resolve to the same value a non-crashed run would produce).
 
-**Why a lock-free reader NEVER sees a committed-looking ref without its oplog
-record.** The canonical ref path is written *only* by the phase-5 rename or by
-recovery replay, both of which strictly follow the phase-4 oplog commit. A
-lock-free reader resolving a canonical ref therefore observes exactly one of:
+**Keeping it cheap (the cost the decision accepts).** Reconciling on *every* read
+must not become a full oplog scan per read. The hot-path check is a **generation
+/ commit-index** comparison against the oplog's monotonic head id. The packed
+oplog already carries `head_id: u64` (`packed_oplog.rs:26`) and writes it as the
+**leading field** of the packed file (`packed_oplog.rs:55`), so the current value
+is readable from the file header without parsing the log; every append advances it
+(`packed_oplog.rs:206-209`; `start_id = packed.head_id + 1`, `oplog_core.rs:249`,
+`:308`). A reader caches the `head_id` it last reconciled against, and on each
+read reads the current `head_id` (an O(1) header read) and:
 
-- the **OLD** value (phase-5 rename not yet applied). This can occur after a
-  crash in the "after ph4, before ph5" window: the commit *did* happen (oplog
-  entry exists) but the materialized ref lags. This is a **stale-but-consistent**
-  read, never a corrupt one, and it does **not** violate the invariant — the
-  entry exists, the ref is just a lagging cache. It is reconciled before any
-  reader can observe it **by the `Repository::open` recovery gate (`repository.rs:594`),
-  which runs for daemon RPC *and* direct CLI alike** — the daemon opens before
-  serving RPCs and the CLI harness opens once per invocation (`harness/mod.rs:127`),
-  so whichever reader runs next folds the committed tail and re-publishes the
-  lagging ref before it resolves anything. (An *in-process* crash never produces
-  this lag at all: it is pre-commit by construction via the `Drop` backstop, §4.
-  Only a *hard* crash — kill -9 / power loss — leaves the on-disk lag, and the
-  very next `open` on *any* path repairs it.) Crucially this is no longer
-  daemon-only: a direct CLI reader on a daemonless repo repairs the lag itself
-  through the same gate, so it never observes a stale ref as committed.
-- the **NEW** value (phase-5 rename applied) — which can only have happened
-  *after* the phase-4 commit. A backing committed oplog entry is therefore
-  guaranteed.
+- if it is **unchanged**, no commit has landed since the last reconcile ⇒ the
+  canonical ref is current ⇒ return it directly — **no tail scan, no write**;
+- only if it has **advanced** does the reader scan the tail from `cached+1` for
+  committed `TransactionCommit` entries naming this ref, resolve the newest
+  target, and reconcile (lazily re-publishing the lagging ref).
+
+So the steady-state hot path is one small header read plus an integer compare;
+the full reconcile runs only on the rare post-crash lag. (A per-ref committed
+index tightens this further — reconcile only when *this ref's* newest committed
+target advanced — but the single `head_id` generation gate is the simple floor.
+Exposing a cheap `OpLog::head_id()`/`tip()` header accessor is net-new impl work,
+§6 O7.)
+
+**"Recover at open" is demoted to an optimization, not the guarantee.** Keeping
+an eager materialization pass at `Repository::open` (`repository.rs:594`, hit by
+the daemon pre-serve and by the CLI harness per invocation `harness/mod.rs:127`)
+is still *useful*: it converts any lagging ref to its committed value **once**,
+eagerly, so the subsequent reads on that freshly-opened handle hit the cheap-check
+fast path with nothing to reconcile (and a one-shot `heddle status`/`log`/`capture`
+that opens, reads, and exits is repaired up front). But it is **not load-bearing**:
+correctness comes from the per-read rule, which holds even for the daemon handle
+that never re-opens. The open-time pass is an *eager prefetch* of work the read
+would otherwise do lazily — drop it and the invariant still holds; keep it and the
+common path is faster. The daemon keeps its separate sentinel-abort recovery
+(`replay_active_transactions`, `local_daemon.rs:296`, its sole production caller;
+`transaction_replay.rs:185-204` only aborts stuck on-disk sentinels, never
+materializes refs) — a distinct job (sentinel lifecycle, daemon-scoped) from ref
+reconciliation (reader-scoped, per read). The per-verb detection primitive
+`active_transactions` (`transaction_sentinel.rs:60`) is *not* a substitute: it is
+documented as something "every state-changing CLI verb *should* consult"
+(`transaction_sentinel.rs:4-8`) but is not wired into dispatch (its only non-test
+references are its own module, `:92`), so relying on each verb to remember it would
+re-open the class one verb at a time. The read seam is the single structural choke
+point every resolve already funnels through; that is what closes the class.
+
+**Why a reader NEVER sees a committed-looking ref without its oplog record.** The
+canonical ref path is written *only* by the phase-5 rename or by a reconciling
+read's lazy re-publish, both of which strictly follow the phase-4 oplog commit. A
+reader resolving a ref through the reconciling accessor therefore observes exactly
+one of:
+
+- the **OLD** value with the oplog tail naming a **newer committed** target (the
+  "after ph4, before ph5" lag, or a delayed hard crash): the cheap check sees
+  `head_id` advanced, the reconcile resolves the **committed** target and returns
+  *that*, never the stale cache. The invariant holds — the entry exists, the read
+  does not trust the lagging ref — and it holds **on every path and handle age**:
+  the daemon's long-held handle reconciles on its next handler read just as a
+  fresh CLI open does. (An *in-process* crash never even produces this lag — it is
+  pre-commit by construction via the `Drop` backstop, §4; only a *hard* crash,
+  kill -9 / power loss, leaves the on-disk lag, and the very next *read* on any
+  handle resolves it.)
+- the **OLD** value with **no** newer committed target in the tail (a pre-commit
+  crash, ph1–3): not committed, ref correctly still OLD. Holds.
+- the **NEW** value (phase-5 rename, or a prior reconcile already re-published) —
+  which can only have happened *after* the phase-4 commit. A backing committed
+  oplog entry is therefore guaranteed. Holds.
 
 The one direction the invariant forbids — a NEW, committed-*looking* ref with
-**no** oplog entry — is now structurally impossible, because nothing publishes
-the canonical ref before the oplog entry is durable. Today's capture violates
-exactly this (it renames the ref at `repository_snapshot.rs:241-250` *before* the
-append at `:252`); the migration (§5.3) closes the window by moving the publish
-to phase 5.
+**no** oplog entry — is structurally impossible, because nothing publishes the
+canonical ref before the oplog entry is durable. Today's capture violates exactly
+this (it renames the ref at `repository_snapshot.rs:241-250` *before* the append
+at `:252`); the migration (§5.3) moves the publish to phase 5, and per-read
+reconciliation closes the residual lag for *every* reader and handle regardless of
+when the publish lands.
 
 **Idempotency of the commit — unbounded indexed `transaction_id`, NOT the
 window-bounded helper.** The phase-4 linearization point must be exact-once at
@@ -477,54 +534,63 @@ txn log), `rewind` correctness is the load-bearing contract:
 ### 2.4 — Crash/retry coverage (the close-the-class proof)
 
 The invariant **`committed ⇔ oplog entry exists`** must hold for *every* reader
-entry path and *every* retry timing — not just the daemon, and not just an
-immediate retry. The two prior rounds each patched one cell (r1: ordering;
-r2: oplog-as-commit + daemon recovery + window dedup); this matrix is the
-artifact that proves the *whole* product space is covered, so the class is closed
-rather than drip-fixed. The two axes are exactly the ones the r2 design left a
-gap on:
+and *every* retry timing. The prior rounds tried to prove this **cell by cell** —
+r1 fixed ordering, r2 added daemon recovery + a window dedup, r3 moved recovery to
+the `open` seam to cover the direct-CLI cell — and each round closed one cell only
+to have Codex surface its **sibling**: the daemon-only gap, then the windowed-dedup
+gap, then (cid 3328112197) the **already-open daemon handle** that no open-time
+pass can reach. That drip is the symptom of the wrong frame: a 2-axis
+{reader path} × {retry timing} matrix silently assumed a third axis — **handle
+age** — was fixed at "freshly opened," which is exactly the assumption the
+long-held `Arc<Repository>` (`local_daemon.rs:330`) violates. Enumerating cells
+will always miss the next axis. **So this round stops enumerating and proves the
+invariant once, from a mechanism that sits in the path every reader shares.**
 
-- **Reader entry path** — how a reader resolves a ref: **daemon RPC** (resolves
-  via the running daemon) vs. **direct CLI** (a `heddle` process that opens the
-  repo itself, possibly with no daemon present — `harness/mod.rs:127`).
-- **Retry timing** — when a crashed `execute` is re-run: **immediate** (≤ any
-  window, e.g. a `rebase --continue` seconds later) vs. **delayed** (after >`N`
-  intervening committed batches, past *any* fixed window).
+**The collapse.** Two orthogonal mechanisms — one on the *read* side, one on the
+*write* side — make the entire product space hold, with no per-cell case analysis:
 
-Two independent mechanisms make every cell hold; each axis is closed by the one
-that generalizes it:
+- **Read side — per-read reconciliation (§2.2 "Reader model").** Every ref read
+  reconciles against the committed oplog tail at read time (hooked at the
+  `Repository` read accessors: `repo.head()` `repository.rs:1737`, and the
+  reconciling `get_thread`/`get_marker` wrapper the daemon handler must use rather
+  than `repo.refs().get_thread` at `transaction.rs:150`). Therefore a reader on
+  **any path** (daemon RPC or direct CLI), holding a handle of **any age**
+  (freshly opened or a long-held `Arc<Repository>`), observing a crash at **any
+  time** (immediate or delayed):
+    1. never treats a canonical ref as committed without its backing oplog entry
+       (the read confirms the entry), and
+    2. never returns a stale canonical ref the oplog has already superseded (the
+       read resolves the committed target).
+  Because the check is *in the read*, not *at the open*, there is no reader,
+  handle, or timing that escapes it. The matrix collapses to **"all reads
+  reconcile, ∎"** — there are no cells left to enumerate, because the third axis
+  (handle age) that the per-cell frame missed is closed by the same mechanism as
+  the first two.
 
-| | **Daemon RPC reader** | **Direct CLI reader (daemonless ok)** |
-|---|---|---|
-| **No stale ref read as committed** | `open` recovery gate runs before RPCs (`repository.rs:594` → daemon opens pre-serve) → lagging ref re-published before any RPC resolves it | **same `open` gate** runs per CLI invocation (`harness/mod.rs:127`) → the CLI reader repairs the lag itself; **not daemon-dependent** |
-| **Immediate retry exact-once** | indexed `transaction_id` lookup under the oplog write lock → 2nd append refused | identical — same lock, same index, process-independent |
-| **Delayed retry (past any window) exact-once** | **unbounded** index lookup (not a windowed scan) → prior commit still found after >N batches → no 2nd append | identical — the index domain is the whole history, so timing is irrelevant |
+- **Write side — unbounded indexed exact-once commit (§2.2 "Idempotency of the
+  commit," retained from r3).** The phase-4 linearization point deduplicates on an
+  **unbounded, indexed `transaction_id` → committed-batch-id** lookup under the
+  oplog write lock — *not* the window-bounded `record_batch_scoped_if_no_transaction`
+  (`oplog_core.rs:281`). A crashed `execute` re-run at any timing — immediate, or
+  delayed past *any* fixed window `N` — finds the prior `TransactionCommit` and
+  refuses the second append. Window size stops being a correctness parameter.
 
-Reading the matrix by failure mode:
-
-- **The r2 daemon-only recovery gap (Finding 1) is closed by the *placement* of
-  the gate**, not by adding a second daemon job: because materialization is
-  anchored at `Repository::open` (`repository.rs:594`) — the seam *both* the
-  daemon and every direct CLI invocation pass through — the "after-commit,
-  before-publish" stale-ref window is repaired before the *next reader on any
-  path* observes it. The daemonless `heddle status`/`capture`/`log` case that r2
-  left reading a stale canonical ref now self-repairs. There is no reader path
-  that skips the gate.
-- **The r2 window-bounded dedup gap (Finding 2) is closed by the *domain* of the
-  dedup**, not by enlarging the window: the indexed `transaction_id` lookup spans
-  the entire committed history, so a retry that ages past *any* fixed `N` still
-  finds the prior `TransactionCommit` and refuses the second append. Window size
-  stops being a correctness parameter at all.
+These two are **independent**: reconciliation governs *reading* a commit, the
+indexed dedup governs *writing* one. Together — every read reconciles, every
+commit appends at most once — they hold `committed ⇔ oplog entry exists`
+universally.
 
 The one forbidden state — a NEW, committed-*looking* canonical ref with **no**
-backing oplog entry — remains structurally impossible on every cell, because
-nothing publishes a canonical ref before its phase-4 oplog entry is durable, and
-the only post-crash residue (a *lagging* OLD ref with the entry already present)
-is reconciled by the `open` gate before any reader resolves it. Every cell of
-{daemon, CLI} × {immediate, delayed} preserves `committed ⇔ oplog entry exists`;
-that is the close-the-class result, and the impl epic (§6 O1, O7) carries the two
-mechanisms — the universal `open` gate and the unbounded index — as the concrete
-deliverables that make this matrix true in code.
+backing oplog entry — is structurally impossible regardless of reader/handle/timing,
+because nothing publishes a canonical ref before its phase-4 oplog entry is durable;
+and the only post-crash residue (a *lagging* OLD ref with the entry already present)
+is resolved at the read by reconciliation, on every path and handle age, not merely
+at the next `open`. That is the close-the-class result: not a covered matrix, but a
+single invariant enforced in the shared read path. The impl epic (§6 O1, O7) carries
+the two mechanisms — the per-read reconciliation hook and the unbounded index — as
+the concrete deliverables; the `open`-time materialization survives only as the
+eager fast-path that prefetches what the read would otherwise do lazily (§2.2),
+never as the guarantee.
 
 ---
 
@@ -889,15 +955,21 @@ ref publish to **after** it as a post-commit materialization (§2.2 phases 4→5
    path + `sync_directory`, publishing it to lock-free readers.
 
 A crash before the append publishes nothing (canonical ref untouched, temp file
-swept). A crash after the append but before the rename is repaired by the
-**`Repository::open` recovery gate** (`repository.rs:594`, §2.2 recovery) — which
-runs for the daemon *and* for the next direct CLI invocation alike, so even a
-daemonless `heddle capture`/`status` self-repairs — folding the committed
-`OpRecord::Snapshot { new_state, thread }` (`oplog_types.rs:18-22`) from the oplog
-tail and re-publishing the ref. This **closes** the ref-moved-but-not-recorded
-window for every reader path rather than merely shrinking it (or covering only
-daemon readers) — there is no longer any ordering in which a published ref lacks
-a backing committed entry. This is the cleanest demonstration that the
+swept). A crash after the append but before the rename is repaired by **per-read
+reconciliation** (§2.2 "Reader model"): the next read of that ref — through the
+`repo`-level reconciling accessor, on *any* path and *any* handle age, including
+the daemon's long-held `Arc<Repository>` (`local_daemon.rs:330`,
+`transaction.rs:143-152`) that never re-opens — sees the oplog generation has
+advanced, folds the committed `OpRecord::Snapshot { new_state, thread }`
+(`oplog_types.rs:18-22`) from the tail, and resolves the committed target (lazily
+re-publishing the ref). The `Repository::open` (`repository.rs:594`) eager pass is
+an optimization on top, not the guarantee — even a daemonless `heddle
+capture`/`status` is correct without it, and a long-lived daemon stays correct
+*because* the guarantee is in the read, not the open. This **closes** the
+ref-moved-but-not-recorded window for every reader, handle, and timing rather than
+merely shrinking it (or covering only freshly-opened readers) — there is no longer
+any ordering in which a reader trusts a published-but-unrecorded or
+committed-but-lagging ref. This is the cleanest demonstration that the
 primitive *strengthens* an existing contract rather than just refactoring it.
 Nests: no. Eager: no.
 
@@ -955,19 +1027,21 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
 
 ## §6 — Open questions / risks (carry into the impl epic)
 
-- **O1 — Reordering capture + adding recovery-side ref materialization is a
-  behavior change.** Making the oplog append the sole commit and moving the ref
-  publish *after* it (§2.2 phases 4→5) changes the crash window the R7 test
+- **O1 — Reordering capture + adding per-read reconciliation is a behavior
+  change.** Making the oplog append the sole commit and moving the ref publish
+  *after* it (§2.2 phases 4→5) changes the crash window the R7 test
   (`fault_injection.rs:157`) pins. The impl must (a) add a new fault checkpoint
   `*_after_oplog_before_ref_publish`, (b) test that a crash there leaves the ref
-  at its OLD value with the oplog entry present, and (c) test that the
-  `Repository::open` recovery gate (§2.2, O7) re-publishes the ref to its
-  committed target — i.e. the `committed ⇒ ref eventually materializes` half —
-  **and test it on the direct-CLI path with no daemon running**, not only via the
-  daemon's `replay_active_transactions`, so the daemonless reader is covered. The
+  at its OLD value with the oplog entry present, and (c) test that the **next read
+  reconciles** to the committed target — i.e. the `committed ⇒ read resolves the
+  committed value` half — **on three reader shapes**: a direct-CLI invocation with
+  **no daemon running**, a **freshly-opened** handle, and crucially a
+  **long-held `Arc<Repository>`** handle that opened *before* the crash and reads
+  *after* it (the daemon shape, `local_daemon.rs:330` / `transaction.rs:143-152`)
+  — the last is the cell an open-time-only pass would miss (cid 3328112197). The
   pre-commit half (crash before the append publishes nothing; temp file swept) is
-  the cheaper test. Strictly strengthens the contract, but the recovery gate is
-  real new code, not just a reorder.
+  the cheaper test. Strictly strengthens the contract, but the reconciling read
+  accessors are real new code, not just a reorder.
 - **O2 — Lock ordering / deadlock.** The root `Tx` holds the refs lock and the
   oplog write lock simultaneously. Any *other* path that takes both must take
   them in the same order. The impl must audit for the reverse order (a grep for
@@ -998,18 +1072,29 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
 - **O7 — The two close-the-class mechanisms are net-new code, with real cost
   trade-offs (§2.2, §2.4).** Neither exists today; both must be built and both
   carry a decision:
-  - **Universal `open` recovery gate.** Hooking ref materialization into
-    `Repository::open` (`repository.rs:594`) means *every* repo open — including
-    hot read-only commands (`heddle log`, `heddle status`) on a daemonless repo —
-    pays a fast-path check (oplog head read + the canonical value of each ref the
-    uncommitted tail names). The common no-lag case must be near-free (a couple of
-    reads, no writes, no lock) or it taxes every CLI invocation. If even that is
-    too much for pure reads, fall back to the **lock-free reader reconciliation**
-    dual (§2.2 alternative): readers resolve against the oplog tail and never need
-    the write lock. Decide which placement; both close the daemon-only gap, they
-    differ only in *where* the reconciliation runs. Care needed so the gate does
-    not itself need the very recovery it provides (bootstrap ordering inside
-    `open`).
+  - **Per-read reconciliation hook (the guarantee) + open-time eager pass
+    (optimization).** Correctness lives in the read: every ref resolve reconciles
+    against the committed oplog tail (§2.2 "Reader model"). The hook lands at the
+    `Repository` read accessors — `repo.head()` (`repository.rs:1737`) /
+    `head_ref()` (`:1750`) and a new reconciling `get_thread`/`get_marker` wrapper
+    — **not** inside `RefManager`, because `refs` does not depend on `oplog`
+    (`crates/refs/Cargo.toml`) while `repo` sees both (`crates/repo/Cargo.toml:22`,
+    `:24`). Impl work: route every reader (audit `repo.refs().get_thread`/
+    `read_head` call sites, especially the daemon handler `transaction.rs:150`)
+    onto the reconciling accessor, and forbid raw `repo.refs()` reads on hot
+    resolve paths. **Cost:** the hot path must be near-free or it taxes every read
+    (daemon RPC and `heddle log`/`status` alike) — hence the O(1) generation check
+    on the oplog `head_id` (`packed_oplog.rs:26`, the file's leading field `:55`),
+    so a read that finds `head_id` unchanged returns immediately with no tail scan
+    and no write; full reconcile (and lazy re-publish) only on the rare advanced-
+    generation lag. This needs a cheap `OpLog::head_id()`/`tip()` header accessor
+    (net-new). The `Repository::open` (`repository.rs:594`) eager materialization
+    is kept as an *optional* prefetch — it repairs lag once at open so subsequent
+    reads on that handle skip even the reconcile — but is **not** load-bearing and
+    may be dropped; it must not itself need the recovery it provides (bootstrap
+    ordering inside `open`). A per-ref committed index (vs the single `head_id`
+    gate) is an optional refinement to avoid reconciling a read when a *different*
+    ref advanced.
   - **Unbounded indexed `transaction_id` map.** The exact-once commit needs a
     `transaction_id → committed-batch-id` index maintained under the oplog write
     lock and persisted atomically with the log (so it can never disagree). This
@@ -1030,11 +1115,14 @@ executor-enforces-once shape fits heddle's existing type-state idioms; and most
 primitives it composes (CAS batch + reverse rollback, a *window-bounded*
 idempotent oplog append, orphan-tolerant object store, atomic FS rename) already
 exist — the work is sequencing them under one ledger, not inventing durability.
-The two genuinely net-new pieces are the close-the-class mechanisms (O7): a
-**universal `Repository::open` recovery gate** (so materialization covers daemon
-*and* direct-CLI readers, not just daemon) and an **unbounded indexed
-`transaction_id` commit dedup** (so exact-once holds at any retry timing, not just
-within a 64-batch window).
+The two genuinely net-new pieces are the close-the-class mechanisms (O7):
+**per-read reconciliation at the `Repository` read accessors** (so the
+`committed ⇔ oplog entry exists` invariant holds for every reader path, *handle
+age*, and crash timing — including the daemon's long-held `Arc<Repository>` an
+open-time-only pass cannot reach) and an **unbounded indexed `transaction_id`
+commit dedup** (so exact-once holds at any retry timing, not just within a 64-batch
+window). The `Repository::open` eager materialization is kept only as an
+optimization on top of the read-side guarantee.
 
 ### Proposed impl epic shape (blocked by this spike — confirm before filing)
 
@@ -1044,12 +1132,16 @@ within a 64-batch window).
 1. **#330-impl-a — land the primitive (no migrations).** `AtomicMutation`,
    `EagerMutation`, `Tx`, `execute`, the rewind ledger, `Drop` backstop, the
    **unbounded indexed `transaction_id` commit dedup** (O7 — *not* a reuse of the
-   window-bounded `record_batch_scoped_if_no_transaction`), and the **universal
-   `Repository::open` recovery gate** (O7 — covers daemon and direct CLI). Unit
-   tests mirroring `refs_transactions.rs:341-377` (reverse-order rewind) + a
-   panic-unwind test + a delayed-retry exact-once test (retry past the old window)
-   + a daemonless-CLI recovery test (§2.4 matrix). Effort: **xhigh** (intricate
-   state machine + locks + panic-safety). No call site changes yet.
+   window-bounded `record_batch_scoped_if_no_transaction`), and **per-read
+   reconciliation at the `Repository` read accessors** (O7 — the read-side
+   guarantee; the `Repository::open` eager pass is an optional optimization on
+   top). Unit tests mirroring `refs_transactions.rs:341-377` (reverse-order
+   rewind) + a panic-unwind test + a delayed-retry exact-once test (retry past the
+   old window) + reconciliation tests on all three reader shapes — daemonless CLI,
+   freshly-opened handle, and a **long-held `Arc<Repository>`** that opened before
+   the crash and reads after it (§2.4 proof; the cell cid 3328112197 exposed).
+   Effort: **xhigh** (intricate state machine + locks + panic-safety). No call site
+   changes yet.
 2. **#330-impl-b — migrate `undo`/`redo` (#305).** First real user; proves the
    nesting path. Effort: xhigh. Blocked by a.
 3. **#330-impl-c — migrate `thread start` (#302), with the precise dir rewind.**
@@ -1073,17 +1165,25 @@ revision, only one migration is in flight, not five.
 - [x] **(1) Trait API** — §2.1, `dyn`-free justified (§0, §3.1 note), trait +
   generic `execute<M>` chosen, fits type-state idiom.
 - [x] **(2) Commit-point + ordering** — §2.2: the oplog append is the **sole**
-  commit; refs are a post-commit materialized view; recovery is a **universal
-  `Repository::open` gate** (`repository.rs:594`, hit by daemon *and* direct CLI
-  `harness/mod.rs:127`) — **not daemon-only** (today's `replay_active_transactions`
-  runs solely from `local_daemon.rs:296`); commit dedup is an **unbounded indexed
-  `transaction_id` lookup**, *not* the window-bounded
-  `record_batch_scoped_if_no_transaction` (`oplog_core.rs:281`, the rebase caller's
-  64-batch window, `rebase_ops.rs:192-202`). §2.4 crash/retry-coverage matrix
-  proves `committed ⇔ oplog entry exists` across **{daemon, direct CLI} ×
-  {immediate, delayed} retry** against lock-free readers (`refs_head.rs:22-41`,
-  `refs_manager.rs:129-135`) + temp→rename apply (`refs_transactions.rs:230`).
-  §2.3 idempotency.
+  commit; refs are a post-commit materialized view; correctness rests on
+  **per-read reconciliation** — every ref read reconciles against the oplog at
+  read time, hooked at the `Repository` read accessors (`repo.head()`
+  `repository.rs:1737`; a reconciling `get_thread`/`get_marker` the daemon handler
+  `transaction.rs:143-152` must use, since `refs` has no `oplog` dep but `repo`
+  does, `crates/repo/Cargo.toml:22`,`:24`), with an O(1) `head_id` generation
+  fast-path (`packed_oplog.rs:26`,`:55`). This holds for **every reader path,
+  handle age, and crash timing** — including the daemon's long-held
+  `Arc<Repository>` (`local_daemon.rs:330`) that never re-passes `Repository::open`
+  (`repository.rs:594`), the cell cid 3328112197 exposed and an open-time pass
+  cannot reach. "Recover at open" is demoted to an **eager optimization**. Commit
+  dedup is an **unbounded indexed `transaction_id` lookup**, *not* the
+  window-bounded `record_batch_scoped_if_no_transaction` (`oplog_core.rs:281`, the
+  rebase caller's 64-batch window, `rebase_ops.rs:192-202`). §2.4 collapses the
+  per-cell matrix into a **single universal proof** — all reads reconcile (read
+  side) + unbounded index (write side) ⇒ `committed ⇔ oplog entry exists` across
+  the whole {path × handle age × timing} space — against lock-free readers
+  (`refs_head.rs:22-41`, `refs_manager.rs:129-135`) + temp→rename apply
+  (`refs_transactions.rs:230`). §2.3 idempotency.
 - [x] **(3) Nesting** — §3: enroll-into-outermost (savepoint) default, eager-
   commit exception **rule pinned** (§3.2), **type-level** compensator
   enforcement (§3.3: `SavepointMutation`/`EagerMutation` bound split on
