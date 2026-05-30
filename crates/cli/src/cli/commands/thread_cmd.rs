@@ -811,8 +811,11 @@ fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice
 }
 
 fn current_thread_drop_advice(repo: &Repository, thread_id: &str) -> RecoveryAdvice {
-    let (primary, recovery, hint) =
-        super::thread::current_thread_drop_recovery(repo, thread_id);
+    let (primary, recovery, hint) = super::thread::current_thread_drop_recovery(
+        repo,
+        thread_id,
+        super::thread::DropMode::Drop,
+    );
     RecoveryAdvice::safety_refusal(
         "current_thread_not_droppable",
         format!("Thread '{thread_id}' is the current checkout thread and cannot be dropped"),
