@@ -6,7 +6,8 @@ use std::{collections::HashMap, path::Path};
 
 use anyhow::{Result, anyhow};
 use objects::object::{
-    AnnotationStatus, ChangeId, ContentHash, ContextTarget, FileProvenance, ProvenanceError, Tree,
+    AnnotationStatus, Attribution, ChangeId, ContentHash, ContextTarget, FileProvenance,
+    ProvenanceError, Tree,
 };
 use repo::Repository;
 use serde::Serialize;
@@ -21,12 +22,46 @@ use crate::{
     config::UserConfig,
 };
 
+#[derive(Clone, Serialize)]
+struct PrincipalInfo {
+    name: String,
+    email: String,
+}
+
+#[derive(Clone, Serialize)]
+struct AgentInfo {
+    provider: String,
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_id: Option<String>,
+}
+
+/// Split an `Attribution` into the structured `principal` / `agent`
+/// shape used by `log` and `show`, so `blame --output json` consumers
+/// never have to string-parse `"Name <email> (via provider/model)"`.
+fn attribution_parts(attribution: &Attribution) -> (PrincipalInfo, Option<AgentInfo>) {
+    let principal = PrincipalInfo {
+        name: attribution.principal.name.clone(),
+        email: attribution.principal.email.clone(),
+    };
+    let agent = attribution.agent.as_ref().map(|a| AgentInfo {
+        provider: a.provider.clone(),
+        model: a.model.clone(),
+        session_id: a.session_id.clone(),
+        policy_id: a.policy_id.clone(),
+    });
+    (principal, agent)
+}
+
 #[derive(Serialize)]
 struct BlameLine {
     line_number: usize,
     content: String,
     change_id: String,
-    author: String,
+    principal: PrincipalInfo,
+    agent: Option<AgentInfo>,
     timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     origins: Option<Vec<BlameOrigin>>,
@@ -45,7 +80,8 @@ struct BlameOutput {
 #[derive(Clone, Serialize)]
 struct BlameOrigin {
     change_id: String,
-    author: String,
+    principal: PrincipalInfo,
+    agent: Option<AgentInfo>,
     timestamp: String,
 }
 
@@ -60,9 +96,25 @@ struct ContextSnippet {
 #[derive(Clone)]
 struct LineInfo {
     change_id: ChangeId,
-    author: String,
+    attribution: Attribution,
+    /// Count of additional origins beyond the primary, used only to
+    /// render the `+N` suffix in the human-readable author column.
+    extra_origins: usize,
     timestamp: String,
     origins: Vec<BlameOrigin>,
+}
+
+impl LineInfo {
+    /// Author string for the human-readable (non-JSON) renderer. JSON
+    /// consumers use the structured `principal` / `agent` fields and
+    /// never see this.
+    fn author_display(&self) -> String {
+        if self.extra_origins == 0 {
+            self.attribution.to_string()
+        } else {
+            format!("{} +{}", self.attribution, self.extra_origins)
+        }
+    }
 }
 
 pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: bool) -> Result<()> {
@@ -132,21 +184,16 @@ pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: b
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let info = line_infos.get(&i).cloned().unwrap_or_else(|| LineInfo {
-                    change_id: target_state_id,
-                    author: state_obj.attribution.to_string(),
-                    timestamp: state_display_ts.clone(),
-                    origins: vec![BlameOrigin {
-                        change_id: target_state_id.to_string(),
-                        author: state_obj.attribution.to_string(),
-                        timestamp: state_display_ts.clone(),
-                    }],
+                let info = line_infos.get(&i).cloned().unwrap_or_else(|| {
+                    state_fallback_line_info(target_state_id, &state_obj, &state_display_ts)
                 });
+                let (principal, agent) = attribution_parts(&info.attribution);
                 BlameLine {
                     line_number: i + 1,
                     content: line.to_string(),
                     change_id: info.change_id.to_string(),
-                    author: info.author,
+                    principal,
+                    agent,
                     timestamp: info.timestamp,
                     origins: (!info.origins.is_empty()).then_some(info.origins),
                 }
@@ -182,26 +229,42 @@ pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: b
             println!();
         }
         for (i, line) in lines.iter().enumerate() {
-            let info = line_infos.get(&i).cloned().unwrap_or_else(|| LineInfo {
-                change_id: target_state_id,
-                author: state_obj.attribution.to_string(),
-                timestamp: state_display_ts.clone(),
-                origins: vec![BlameOrigin {
-                    change_id: target_state_id.to_string(),
-                    author: state_obj.attribution.to_string(),
-                    timestamp: state_display_ts.clone(),
-                }],
+            let info = line_infos.get(&i).cloned().unwrap_or_else(|| {
+                state_fallback_line_info(target_state_id, &state_obj, &state_display_ts)
             });
             println!(
                 "{:12} {:20} {}",
                 info.change_id.short(),
-                fit_author(&info.author, 20),
+                fit_author(&info.author_display(), 20),
                 line
             );
         }
     }
 
     Ok(())
+}
+
+/// Per-line attribution fallback when provenance has no origin set for
+/// a line (e.g. freshly bootstrapped git-overlay): attribute the whole
+/// line to the selected state.
+fn state_fallback_line_info(
+    state_id: ChangeId,
+    state: &objects::object::State,
+    display_ts: &str,
+) -> LineInfo {
+    let (principal, agent) = attribution_parts(&state.attribution);
+    LineInfo {
+        change_id: state_id,
+        attribution: state.attribution.clone(),
+        extra_origins: 0,
+        timestamp: display_ts.to_string(),
+        origins: vec![BlameOrigin {
+            change_id: state_id.to_string(),
+            principal,
+            agent,
+            timestamp: display_ts.to_string(),
+        }],
+    }
 }
 
 fn collect_file_context(
@@ -302,9 +365,11 @@ fn compute_blame_from_provenance(provenance: &FileProvenance) -> Result<HashMap<
             .iter()
             .map(|origin_index| {
                 let origin = &provenance.origins[*origin_index as usize];
+                let (principal, agent) = attribution_parts(&origin.attribution);
                 BlameOrigin {
                     change_id: origin.state_id.to_string(),
-                    author: origin.attribution.to_string(),
+                    principal,
+                    agent,
                     // Prefer the authoring time when we have it
                     // (imported git history) — matches git blame's
                     // default. Falls back to `created_at` (committer
@@ -322,11 +387,8 @@ fn compute_blame_from_provenance(provenance: &FileProvenance) -> Result<HashMap<
             index,
             LineInfo {
                 change_id: primary.state_id,
-                author: if origins.len() == 1 {
-                    primary.attribution.to_string()
-                } else {
-                    format!("{} +{}", primary.attribution, origins.len() - 1)
-                },
+                attribution: primary.attribution.clone(),
+                extra_origins: origins.len().saturating_sub(1),
                 // Same author-vs-committer preference as the per-
                 // origin timestamp above: prefer authored_at when we
                 // have it (imported git history), fall back to
@@ -372,4 +434,107 @@ fn fit_author(s: &str, max_len: usize) -> String {
         }
     }
     truncate(s, max_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objects::object::{Agent, Attribution, Principal, State};
+
+    fn human() -> Attribution {
+        Attribution::human(Principal::new("Ada Lovelace", "ada@example.com"))
+    }
+
+    fn agentic() -> Attribution {
+        Attribution::with_agent(
+            Principal::new("Ada Lovelace", "ada@example.com"),
+            Agent::new("anthropic", "claude-opus-4-7")
+                .with_session("sess-1", "seg-1")
+                .with_policy("pol-1"),
+        )
+    }
+
+    #[test]
+    fn attribution_parts_splits_principal_and_agent() {
+        let (principal, agent) = attribution_parts(&agentic());
+        assert_eq!(principal.name, "Ada Lovelace");
+        assert_eq!(principal.email, "ada@example.com");
+        let agent = agent.expect("agent attribution should be structured");
+        assert_eq!(agent.provider, "anthropic");
+        assert_eq!(agent.model, "claude-opus-4-7");
+        assert_eq!(agent.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(agent.policy_id.as_deref(), Some("pol-1"));
+    }
+
+    #[test]
+    fn attribution_parts_omits_agent_for_human_only() {
+        let (principal, agent) = attribution_parts(&human());
+        assert_eq!(principal.name, "Ada Lovelace");
+        assert!(agent.is_none(), "human-only attribution must not synthesize an agent");
+    }
+
+    #[test]
+    fn agent_info_skips_none_session_and_policy() {
+        // `session_id` / `policy_id` are `skip_serializing_if = None`, so a
+        // bare agent serializes to just provider + model — no null keys.
+        let (_, agent) = attribution_parts(&Attribution::with_agent(
+            Principal::new("Ada", "ada@example.com"),
+            Agent::new("openai", "gpt-5"),
+        ));
+        let json = serde_json::to_value(agent.unwrap()).unwrap();
+        assert_eq!(json["provider"], "openai");
+        assert_eq!(json["model"], "gpt-5");
+        assert!(json.get("session_id").is_none(), "absent session_id must be omitted, not null");
+        assert!(json.get("policy_id").is_none(), "absent policy_id must be omitted, not null");
+    }
+
+    #[test]
+    fn author_display_appends_extra_origin_count() {
+        let info = LineInfo {
+            change_id: ChangeId::generate(),
+            attribution: human(),
+            extra_origins: 2,
+            timestamp: "2026-01-01T00:00:00+00:00".to_string(),
+            origins: Vec::new(),
+        };
+        // Multi-origin lines render `Name <email> +N` in the human column.
+        assert_eq!(info.author_display(), "Ada Lovelace <ada@example.com> +2");
+    }
+
+    #[test]
+    fn author_display_single_origin_has_no_suffix() {
+        let info = LineInfo {
+            change_id: ChangeId::generate(),
+            attribution: human(),
+            extra_origins: 0,
+            timestamp: "2026-01-01T00:00:00+00:00".to_string(),
+            origins: Vec::new(),
+        };
+        assert_eq!(info.author_display(), "Ada Lovelace <ada@example.com>");
+    }
+
+    #[test]
+    fn state_fallback_line_info_attributes_whole_line_to_state() {
+        let state_id = ChangeId::generate();
+        let state = State::new(ContentHash::from_bytes([7u8; 32]), vec![], agentic());
+        let ts = "2026-02-03T04:05:06+00:00";
+
+        let info = state_fallback_line_info(state_id, &state, ts);
+
+        assert_eq!(info.change_id, state_id);
+        assert_eq!(info.extra_origins, 0);
+        assert_eq!(info.timestamp, ts);
+        assert_eq!(info.attribution, state.attribution);
+        // Exactly one synthesized origin mirroring the state, in the same
+        // structured shape the JSON renderer emits.
+        assert_eq!(info.origins.len(), 1);
+        let origin = &info.origins[0];
+        assert_eq!(origin.change_id, state_id.to_string());
+        assert_eq!(origin.timestamp, ts);
+        assert_eq!(origin.principal.name, "Ada Lovelace");
+        assert_eq!(
+            origin.agent.as_ref().map(|a| a.provider.as_str()),
+            Some("anthropic")
+        );
+    }
 }
