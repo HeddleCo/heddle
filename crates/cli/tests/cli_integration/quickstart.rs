@@ -546,6 +546,266 @@ fn quickstart_rejects_git_sentinel_identity_before_writes() {
     );
 }
 
+/// Codex r5 (cid 3329078130): the `Unknown <unknown@example.com>` sentinel
+/// passed via `--principal-*` flags is what `build_attribution` rejects. The
+/// preflight must reject it the SAME way — fail BEFORE any `.heddle`/
+/// `QUICKSTART.md` write, not persist the sentinel and then have the capture
+/// refuse mid-write.
+#[test]
+fn quickstart_rejects_sentinel_principal_flags_before_writes() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "Unknown",
+            "--principal-email",
+            "unknown@example.com",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "sentinel principal flags must be rejected: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_identity_required"),
+        "must fail with the quickstart_identity_required advice: stderr={stderr}"
+    );
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: a sentinel identity must leave NO partial .heddle/"
+    );
+    assert!(
+        !dir.join("QUICKSTART.md").exists(),
+        "fail-before-writes: no QUICKSTART.md placeholder may be written"
+    );
+}
+
+/// Codex r5 (cid 3329078132): a higher-precedence sentinel must SHADOW a
+/// lower valid source, exactly as `resolve_principal` would. A repo-level
+/// `[principal]` pinning the sentinel outranks a valid Git identity, so
+/// `resolve_principal` stops at the sentinel and the capture is rejected —
+/// the preflight must mirror that STOP-at-first-present precedence and fail
+/// before writing the placeholder, NOT fall through to the valid Git source.
+#[test]
+fn quickstart_higher_precedence_sentinel_shadows_valid_lower_source() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir);
+    // A VALID lower-precedence Git identity. The old fall-through preflight
+    // would have accepted this and let the capture proceed, only for
+    // `resolve_principal` (stopping at the repo-config sentinel) to reject it
+    // after `.heddle` writes.
+    git_hermetic(&["config", "user.name", "Git Valid"], dir);
+    git_hermetic(&["config", "user.email", "valid@example.com"], dir);
+
+    let isolate: &[(&str, &str)] = &[
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_SYSTEM", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("HEDDLE_PRINCIPAL_NAME", ""),
+        ("HEDDLE_PRINCIPAL_EMAIL", ""),
+    ];
+
+    // Plain init to create `.heddle`, then pin a sentinel repo-level
+    // principal that OUTRANKS the valid Git identity.
+    heddle_output_with_env(&["init", "--no-harness-install"], Some(dir), isolate).unwrap();
+    let cfg_path = dir.join(".heddle").join("config.toml");
+    let mut cfg = repo::RepoConfig::load(&cfg_path).unwrap_or_default();
+    cfg.set_principal("Unknown", "unknown@example.com");
+    cfg.save(&cfg_path).unwrap();
+
+    let out = heddle_output_with_env(
+        &[
+            "init",
+            "--quickstart",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+        isolate,
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a higher-precedence sentinel must shadow the valid lower source and fail: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_identity_required"),
+        "must fail with the quickstart_identity_required advice: stderr={stderr}"
+    );
+    assert!(
+        !dir.join("QUICKSTART.md").exists(),
+        "fail-before-writes: no QUICKSTART.md placeholder may be written"
+    );
+}
+
+/// Genuine identity still proceeds: with no flags, no repo principal, and
+/// no user config, a valid Git `user.*` identity (the lowest-precedence
+/// source that the preflight's mirror of `resolve_principal` consults)
+/// satisfies the preflight and attributes the capture.
+#[test]
+fn quickstart_resolves_genuine_git_identity_without_flags() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir);
+    git_hermetic(&["config", "user.name", "Git Valid"], dir);
+    git_hermetic(&["config", "user.email", "valid@example.com"], dir);
+
+    let out = heddle_output_with_env(
+        &["init", "--quickstart", "--no-harness-install", "--yes"],
+        Some(dir),
+        &[
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_SYSTEM", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("HEDDLE_PRINCIPAL_NAME", ""),
+            ("HEDDLE_PRINCIPAL_EMAIL", ""),
+        ],
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "a valid Git identity must satisfy the preflight: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let log: Value =
+        serde_json::from_str(&heddle(&["log", "--output", "json"], Some(dir)).unwrap()).unwrap();
+    let states = log["states"].as_array().expect("log emits a states array");
+    assert_eq!(
+        states[0]["principal"].as_str(),
+        Some("Git Valid <valid@example.com>"),
+        "capture is attributed to the genuine Git identity: {log}"
+    );
+}
+
+/// Codex r5 (cid 3329078133): an invalid `--quickstart-thread` (a name the
+/// ref machinery would reject, e.g. `a..b`) must fail in the preflight,
+/// BEFORE init/bootstrap/import write any `.heddle` data — not leave a
+/// half-initialized repo for a pure argument error.
+#[test]
+fn quickstart_rejects_invalid_thread_name_before_writes() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--quickstart-thread",
+            "a..b",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "an invalid thread name must be rejected: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_thread_name_invalid"),
+        "must fail with the quickstart_thread_name_invalid advice: stderr={stderr}"
+    );
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: an invalid thread name must leave NO partial .heddle/"
+    );
+    assert!(
+        !dir.join("QUICKSTART.md").exists(),
+        "fail-before-writes: no QUICKSTART.md placeholder may be written"
+    );
+}
+
+/// Codex r5 (cid 3329078135): re-running `--quickstart --yes` after switching
+/// away from an existing quickstart thread must repoint that thread to the
+/// CURRENT state before attaching, so the new capture's parent is the current
+/// worktree's state — not the thread's stale tip. Previously the code skipped
+/// repointing an existing thread and attached HEAD to the stale tip, recording
+/// the wrong parent and corrupting history.
+#[test]
+fn quickstart_rerun_repoints_existing_noncurrent_thread() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+
+    // First quickstart on the default "quickstart" thread → state A (root).
+    heddle(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    // Move to a different thread and advance it to a new state B, so the
+    // quickstart thread is no longer current and its tip A is stale.
+    heddle(&["thread", "create", "work"], Some(dir)).unwrap();
+    heddle(&["thread", "switch", "work"], Some(dir)).unwrap();
+    std::fs::write(dir.join("work.txt"), "work\n").unwrap();
+    heddle(&["capture", "-m", "work state"], Some(dir)).unwrap();
+    let b_id = state_chain_ids(dir, 1)[0].clone();
+
+    // Re-run quickstart while attached to `work`, with a fresh change so the
+    // capture is a real new state C.
+    std::fs::write(dir.join("more.txt"), "more\n").unwrap();
+    let out = heddle_output(
+        &["init", "--quickstart", "--no-harness-install", "--yes"],
+        Some(dir),
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "rerun quickstart should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // HEAD is now the new quickstart capture C; its parent must be B (the
+    // state we were on), NOT the stale quickstart tip A.
+    let chain = state_chain_ids(dir, 2);
+    assert_eq!(chain.len(), 2, "the new capture has a parent: {chain:?}");
+    assert_eq!(
+        chain[1], b_id,
+        "new capture's parent is the current state B, not the stale quickstart tip: chain={chain:?} b={b_id}"
+    );
+}
+
 /// Non-interactive `--install-harnesses` installs the named harness as a
 /// post-write step (the decision is resolved up front, the install runs
 /// after the repo exists).

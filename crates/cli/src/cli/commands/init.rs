@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Result, bail};
 use objects::object::{Principal, ThreadName, Tree};
-use refs::Head;
+use refs::{Head, validate_ref_name};
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 use tracing::{debug, info};
@@ -421,12 +421,26 @@ fn quickstart_preflight(
 ) -> Result<QuickstartPreflight> {
     let json = should_output_json(cli, None);
 
+    // Validate the requested thread name BEFORE any write, using the same
+    // ref-name rules the thread machinery enforces when the ref is actually
+    // created. A bad name (`.bad`, `a..b`, …) must fail here rather than
+    // after init/bootstrap/import have already written `.heddle/` data,
+    // leaving a half-initialized repo for a pure argument error.
+    let thread = args.quickstart_thread.as_deref().unwrap_or("quickstart");
+    if validate_ref_name(thread).is_err() {
+        bail!(RecoveryAdvice::invalid_usage(
+            "quickstart_thread_name_invalid",
+            format!("'{thread}' is not a valid thread name"),
+            "Choose a thread name without '..', a leading '.', a trailing '/' or '.lock', backslashes, or control characters.",
+            "heddle init --quickstart --quickstart-thread <name>",
+        ));
+    }
+
     // Confirmation gate before touching a directory that already holds
     // work. Truly fresh directories skip straight through.
     let heddle_exists = path.join(".heddle").exists();
     let git_nonempty = has_git && git_has_commits(path);
     if (heddle_exists || git_nonempty) && !args.yes {
-        let thread = args.quickstart_thread.as_deref().unwrap_or("quickstart");
         if !json {
             println!(
                 "{}",
@@ -476,12 +490,21 @@ fn quickstart_preflight(
 }
 
 /// Resolve the principal for `--quickstart`. Priority: explicit
-/// `--principal-*` flags → an already-resolvable identity (env, user
-/// config, or Git config) → an interactive prompt. Returns the
-/// `(name, email)` to persist when it came from flags or the prompt, or
-/// `None` when an identity is already available without writing. Fails
-/// fast (no placeholder) when nothing is resolvable and there is no TTY
-/// to prompt.
+/// `--principal-*` flags → an already-resolvable identity (env, repo
+/// config, Git config, or user config) → an interactive prompt. Returns
+/// the `(name, email)` to persist when it came from flags or the prompt,
+/// or `None` when an identity is already available without writing. Fails
+/// fast (no placeholder) when nothing usable is resolvable and there is no
+/// TTY to prompt.
+///
+/// Every path that yields an identity is checked against the SAME sentinel
+/// predicate (`principal_is_unconfigured`) the real capture uses, over the
+/// SAME precedence `resolve_principal` walks — see
+/// [`resolve_quickstart_principal`]. This is the single source of truth:
+/// flags, prompt, repo config, user config, and Git config (and a
+/// higher-precedence sentinel shadowing a lower valid source) are all
+/// caught HERE, before any write, instead of by `build_attribution` after
+/// `.heddle/` already exists.
 fn resolve_quickstart_identity(
     cli: &Cli,
     args: &InitArgs,
@@ -489,8 +512,13 @@ fn resolve_quickstart_identity(
     has_git: bool,
     json: bool,
 ) -> Result<Option<(String, String)>> {
-    match (args.principal_name.clone(), args.principal_email.clone()) {
-        (Some(name), Some(email)) => return Ok(Some((name, email))),
+    // Explicit flags become the repo-level `[principal]` — the highest
+    // precedence source after env in `resolve_principal`. Validate them
+    // against the sentinel here so `--principal-name Unknown
+    // --principal-email unknown@example.com` fails before any write rather
+    // than being persisted and then rejected by `build_attribution`.
+    let flag_principal = match (args.principal_name.clone(), args.principal_email.clone()) {
+        (Some(name), Some(email)) => Some((name, email)),
         (Some(_), None) => {
             bail!(RecoveryAdvice::init_principal_field_required(
                 "--principal-email"
@@ -501,17 +529,33 @@ fn resolve_quickstart_identity(
                 "--principal-name"
             ))
         }
-        (None, None) => {}
+        (None, None) => None,
+    };
+    if let Some((name, email)) = flag_principal {
+        if principal_is_unconfigured(&Principal::new(&name, &email)) {
+            bail!(quickstart_identity_required_advice());
+        }
+        return Ok(Some((name, email)));
     }
 
-    if quickstart_identity_available(path, has_git) {
+    // No flags: ask the REAL resolution (mirroring `resolve_principal`'s
+    // stop-at-first-present precedence) what the capture would be
+    // attributed to. A usable identity → proceed without writing one. A
+    // sentinel result — including a higher-precedence sentinel that shadows
+    // a lower valid source — means the capture would be rejected, so we
+    // must prompt (if interactive) or fail before any write.
+    let resolved = resolve_quickstart_principal(path, has_git);
+    if !principal_is_unconfigured(&resolved) {
         return Ok(None);
     }
 
     if is_tty() && !cli.quiet && !json {
         let name = prompt_line("Your name: ")?;
         let email = prompt_line("Your email: ")?;
-        if name.is_empty() || email.is_empty() {
+        // Validate the collected identity with the same sentinel predicate
+        // so a prompted `Unknown / unknown@example.com` is rejected before
+        // any write, exactly like the flag path.
+        if principal_is_unconfigured(&Principal::new(&name, &email)) {
             bail!(quickstart_identity_required_advice());
         }
         return Ok(Some((name, email)));
@@ -520,39 +564,59 @@ fn resolve_quickstart_identity(
     bail!(quickstart_identity_required_advice())
 }
 
-/// Whether a real (non-placeholder) principal is already resolvable
-/// without writing one. Mirrors `resolve_principal`'s precedence so the
-/// preflight never refuses a repo whose capture would in fact be
-/// attributable: environment, then the repo-level
-/// `.heddle/config.toml` `[principal]` (which outranks user and Git
-/// config in `resolve_principal`), then the user config, then — in a Git
-/// repo — Git's own `user.name`/`user.email`.
-fn quickstart_identity_available(path: &Path, has_git: bool) -> bool {
-    if let Some(principal) = Principal::from_env()
-        && !principal_is_unconfigured(&principal)
-    {
-        return true;
+/// Resolve the ambient principal the quickstart capture WOULD be attributed
+/// to (with no `--principal-*` flags), at preflight time, before the repo
+/// exists. This is the single source of truth for "is there a usable
+/// identity?": it mirrors `resolve_principal` (snapshot.rs) EXACTLY — same
+/// sources, same order, and crucially the same STOP-at-first-present
+/// semantics — so the preflight can never diverge from the real resolution
+/// the way a fall-through check can. (Flag/prompt identities are validated
+/// separately at their source in `resolve_quickstart_identity`, since they
+/// occupy the repo-config slot by being written there before the capture.)
+///
+/// Precedence (identical to `resolve_principal`): env → repo
+/// `.heddle/config.toml` `[principal]` → Git config (only when it isn't the
+/// sentinel, matching `resolve_principal`'s fall-through) → user config →
+/// the `Unknown` sentinel.
+///
+/// Returns the resolved principal (possibly the sentinel); callers apply
+/// `principal_is_unconfigured` to decide whether to fail. STOP semantics are
+/// the whole point: a higher-precedence sentinel (e.g. a repo config pinning
+/// `Unknown <unknown@example.com>`) shadows a lower valid source here just as
+/// it would in `resolve_principal`, so the preflight rejects what the capture
+/// would reject.
+fn resolve_quickstart_principal(path: &Path, has_git: bool) -> Principal {
+    // env wins outright — `resolve_principal` returns it unconditionally
+    // (even when it is the sentinel), so mirror that: stop here.
+    if let Some(principal) = Principal::from_env() {
+        return principal;
     }
+    // Repo-level config slot: stop at the on-disk repo `[principal]` if
+    // present, even the sentinel — `resolve_principal` does. (This is the
+    // "already has .heddle/" quickstart path.)
     let repo_config_path = path.join(".heddle").join("config.toml");
     if let Ok(repo_config) = repo::RepoConfig::load(&repo_config_path)
         && let Some(config) = &repo_config.principal
-        && !principal_is_unconfigured(&Principal::new(&config.name, &config.email))
     {
-        return true;
+        return Principal::new(&config.name, &config.email);
+    }
+    // Git config: `resolve_principal` falls through to user config when
+    // Git's identity is the sentinel, so only a non-sentinel Git identity
+    // stops here.
+    if has_git
+        && let Ok(Some(identity)) = git_config_identity_with_global_fallback(path)
+    {
+        let principal = Principal::new(&identity.name, &identity.email);
+        if !principal_is_unconfigured(&principal) {
+            return principal;
+        }
     }
     if let Ok(user_config) = UserConfig::load_default()
         && let Some(config) = &user_config.principal
-        && !principal_is_unconfigured(&Principal::new(&config.name, &config.email))
     {
-        return true;
+        return Principal::new(&config.name, &config.email);
     }
-    if has_git
-        && let Ok(Some(identity)) = git_config_identity_with_global_fallback(path)
-        && !principal_is_unconfigured(&Principal::new(&identity.name, &identity.email))
-    {
-        return true;
-    }
-    false
+    Principal::new("Unknown", "unknown@example.com")
 }
 
 fn prompt_line(label: &str) -> Result<String> {
@@ -631,26 +695,40 @@ fn run_quickstart_actions(repo: &Repository, args: &InitArgs) -> Result<Quicksta
     })
 }
 
-/// Create the named quickstart thread and attach HEAD to it. Idempotent:
-/// a re-run that is already on the thread is a no-op.
+/// Create (or repoint) the named quickstart thread and attach HEAD to it.
+/// Idempotent: a re-run that is already on the thread is a no-op.
 ///
-/// When a current state already exists (a freshly-seeded native repo, or
-/// a Git overlay whose history we just imported) the thread is pointed at
-/// it. An unborn Git overlay has NO current state yet: we must NOT
-/// fabricate a bootstrap snapshot here, or the quickstart would land an
-/// extra empty parent commit before `QUICKSTART.md` is even written —
-/// breaking the promised single initial capture/checkpoint. Instead we
-/// just attach HEAD to the thread; the subsequent quickstart capture
-/// creates the thread's first (root) state and advances the ref.
+/// When a current state exists (a freshly-seeded native repo, a Git overlay
+/// whose history we just imported, or simply another thread the user is
+/// currently on) the quickstart thread is pointed AT that current state, so
+/// the subsequent capture's parent is the current worktree's state. This
+/// covers two cases that must behave identically:
+///   - the thread does not exist yet → create it at the current state;
+///   - the thread already exists but is NOT the one we're attached to →
+///     repoint it to the current state. Otherwise `write_head` would attach
+///     to the thread's STALE tip without checking out its tree, and the
+///     capture would record the current worktree as a child of that stale
+///     tip — the wrong parent (corrupting history when `--quickstart --yes`
+///     is rerun after switching away from an existing quickstart thread).
+///
+/// When already attached to the thread, its tip already IS the current
+/// state, so it is left untouched (the idempotent no-op rerun).
+///
+/// An unborn Git overlay has NO current state yet: we must NOT fabricate a
+/// bootstrap snapshot here, or the quickstart would land an extra empty
+/// parent commit before `QUICKSTART.md` is even written — breaking the
+/// promised single initial capture/checkpoint. In that case we just attach
+/// HEAD to the thread; the subsequent quickstart capture creates the
+/// thread's first (root) state and advances the ref.
 fn ensure_quickstart_thread(repo: &Repository, name: &str) -> Result<()> {
     let target = ThreadName::new(name);
-    if let Some(state) = repo.current_state()?
-        && repo.refs().get_thread(&target)?.is_none()
+    let already_attached =
+        matches!(repo.head_ref()?, Head::Attached { thread } if thread == target);
+    if !already_attached
+        && let Some(state) = repo.current_state()?
     {
         repo.refs().set_thread(&target, &state.change_id)?;
     }
-    let already_attached =
-        matches!(repo.head_ref()?, Head::Attached { thread } if thread == target);
     if !already_attached {
         repo.refs().write_head(&Head::Attached { thread: target })?;
     }
