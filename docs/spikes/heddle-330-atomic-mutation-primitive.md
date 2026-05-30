@@ -28,19 +28,25 @@ sketch.
   `transaction_sentinel.rs:48`) stores verb *strings*, not trait objects, and
   re-dispatches through the CLI — it does not need `dyn AtomicMutation`. Keep
   it `dyn`-free.
-- **The linearization point is NOT simply "the oplog append" — correct that
-  framing.** In the real workhorse (`capture`), the **ref write** is the
-  externally-visible commit and the oplog append happens *after* it
-  (`repository_snapshot.rs:243` then `:252`). The primitive must define the
-  commit point as **the last durable write that publishes the new state**, and
-  reorder so the oplog append is genuinely last (the "it happened + it's
-  undoable" record). See §2 — this is the single most load-bearing correction
-  in the spike.
+- **The oplog append is the SOLE commit point; the canonical ref is a
+  materialized view, not the commit.** Today's `capture` publishes the ref
+  *before* the oplog append (`repository_snapshot.rs:241-250` then `:252`), and
+  ref readers are **lock-free** (`refs_head.rs:22-41`, `refs_manager.rs:129-135`)
+  — so a crash between the two leaves a reader-visible ref with no undo record.
+  The fix: a mutation is committed iff its `TransactionCommit` oplog entry is
+  durable; ref publication (temp→rename, `refs_transactions.rs:230`) moves
+  **after** the commit as a deterministic, idempotent materialization that
+  recovery replays from the committed oplog tail. This makes
+  "committed" ⇔ "oplog entry exists" actually hold against lock-free readers.
+  See §2.2 — the single most load-bearing correction in the spike.
 - **Nesting = enroll-into-outermost (savepoint) by default; eager-commit only
   when an effect must be visible to another process before the outer commit**
-  (the #251 reserve). The trait encodes this as an associated `const`/type that
-  the executor checks: an eager sub-op inside a txn that does not supply a
-  compensator is a **compile error**. See §3.
+  (the #251 reserve). This is a **type-level split**, not a runtime const:
+  savepoint ops implement `SavepointMutation` (opt-in, no blanket impl), eager
+  ops implement `EagerMutation` whose only method *returns* the compensator;
+  `Tx::enroll` is bounded to the former and `Tx::enroll_eager` to the latter, so
+  enrolling an eager op without a compensator is a **compile error** — no
+  `COMMIT_KIND` const, no release-build-eliding `debug_assert!`. See §3.3.
 - **Panic-safety: explicit `Result` plumbing for the rewind ledger, `Drop` as a
   backstop that aborts (never half-commits).** See §4.
 - **Migrate in priority order:** undo (§5.1), hydrate/thread-start (§5.2),
@@ -167,30 +173,33 @@ pub trait AtomicMutation {
     /// The value produced on a committed run (e.g. the new `ChangeId`).
     type Output;
 
-    /// Whether this op, when run as a *sub-op* of a larger transaction,
-    /// must commit its externally-observable effect BEFORE the outer
-    /// commit (`Eager`) or may defer to the outermost commit
-    /// (`Savepoint`, the default). See §3. The executor reads this to
-    /// decide enrollment; an `Eager` op MUST override `compensate`
-    /// (enforced at compile time via the `EagerMutation` marker, §3.3).
-    const COMMIT_KIND: CommitKind = CommitKind::Savepoint;
-
-    /// Forward, staged, fallible side effects: object-store puts, ref
-    /// CAS *stages* (recorded as planned inverses), FS temp writes.
-    /// MUST NOT perform the oplog append — that is the executor's single
-    /// commit step. Every effect performed here MUST be paired with a
-    /// rewind recorded into `tx` (see `Tx::on_rewind`).
+    /// Forward, staged, fallible side effects that are NOT yet visible to
+    /// any other reader: object-store puts (orphan until referenced), FS
+    /// temp writes, and ref temp writes — `write_string_temp`
+    /// (`refs_transactions.rs:219-224`) WITHOUT the canonical temp→rename
+    /// publish (`refs_transactions.rs:230`). MUST NOT rename a ref into its
+    /// canonical path and MUST NOT append to the oplog — both happen at/after
+    /// the executor's single commit step (§2.2). Every effect performed here
+    /// MUST be paired with a rewind recorded into `tx` (see `Tx::on_rewind`).
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>>;
 
-    /// Undo whatever THIS op's `apply` did, given the ledger captured at
+    /// Undo whatever THIS op's `apply` staged, given the ledger captured at
     /// apply time. Called in reverse order on any pre-commit failure or
     /// panic-unwind. MUST be idempotent (may be invoked after a partial
     /// apply) and MUST undo ONLY what this invocation created — never
-    /// pre-existing user state (the #302 r4 lesson, §5.2).
+    /// pre-existing user state (the #302 r4 lesson, §5.2). Because `apply`
+    /// only writes temp files (never publishes a canonical ref), the rewind
+    /// is "unlink the temp files I wrote" — it never has to roll back a
+    /// reader-visible ref, because no reader-visible ref was ever written
+    /// pre-commit.
     fn rewind(&mut self, ledger: &RewindLedger) -> Result<()>;
 }
 
-pub enum CommitKind { Savepoint, Eager }
+// NOTE: there is deliberately no `COMMIT_KIND` associated const. Savepoint
+// vs. eager is a *type-level* split (`SavepointMutation` vs `EagerMutation`,
+// §3.3), not a runtime value the executor branches on — a runtime const that
+// only a `debug_assert!` guards would vanish in release builds and let an
+// eager op be enrolled through the savepoint path with no compensator.
 
 /// What `apply` returns: the value to surface plus the oplog record(s)
 /// the executor will append AT the commit point. The op never appends
@@ -222,51 +231,132 @@ Monomorphized per `M`; zero vtable. The bound `M: AtomicMutation` makes
 type-state/witness-gated idiom heddle already uses (e.g. the trust/verification
 witnesses).
 
-### 2.2 — The commit point: correct the issue's framing
+### 2.2 — The commit point: oplog append is the SOLE commit; refs are a materialized view
 
 The issue says "commit at the oplog-append linearization point." The real
-workhorse disagrees, and the spike must reconcile it. In
-`snapshot_with_attribution_profiled` (`repository_snapshot.rs:52`) the order is:
+workhorse capture today does the *opposite* — it publishes the ref **before**
+the oplog append. In `snapshot_with_attribution_profiled`
+(`repository_snapshot.rs:52`) the order is:
 
 1. `put_state` + `flush_snapshot_write_batch` — `:224-225` (reversible: orphan).
 2. fault-injection checkpoint `snapshot_after_state_before_ref` — `:233`.
 3. **ref write** `set_thread` / `write_head` — `:241-250`.
 4. **oplog** `record_snapshot` — `:252`.
 
-The externally-visible "it happened" moment is **step 3, the ref write** — that
-is what the R7 SIGKILL test asserts (`cli/tests/cli_integration/fault_injection.rs:157-244`:
-the invariant is the *ref* didn't advance). The oplog append is step 4, *after*
-the publish, and today a crash between 3 and 4 yields a captured+visible state
-that is **not undoable** — a real (if benign) partial state the current code
-tolerates.
+Step 3 (`set_thread`/`write_head` → `update_refs` → `update_refs_with_lock`,
+`refs_transactions.rs:103`) **publishes** the ref by `std::fs::rename`-ing a
+temp file onto the canonical path + `sync_directory` (`refs_transactions.rs:230`,
+`:235`). The crucial fact that breaks the issue's framing: **ref readers are
+lock-free.** `read_head` → `read_head_state` reads the HEAD file directly with
+no `lock_refs()` (`refs_head.rs:22-41`); `get_thread`/`get_marker` read the ref
+file directly and fall back to `PackedRefs::load`, also un-locked
+(`refs_manager.rs:129-135`, `:185-191`). So the instant the rename at
+`refs_transactions.rs:230` lands, *any* concurrent process resolving that ref
+sees the new value — there is no lock a reader is blocked on.
 
-So the primitive defines the commit point precisely:
+That makes the naive fixes both wrong:
 
-> **The commit point is the last durable write that publishes the new state to
-> any other reader. The executor orders the oplog append to BE that last write,
-> and makes it idempotent, so "committed" ⇔ "oplog entry exists."**
+- **"Publish the ref, then append the oplog" (today's capture order).** A crash
+  between step 3 and step 4 leaves a **reader-visible ref with no oplog entry** —
+  committed-looking state that is *not undoable*. This is exactly the window the
+  R7 SIGKILL test pins (`cli/tests/cli_integration/fault_injection.rs:157-244`:
+  the invariant is the *ref* didn't advance). It directly violates
+  `committed ⇔ oplog entry exists`.
+- **"Append the oplog, then publish the ref, both inside `apply`."** A crash
+  after the append but before the rename leaves an oplog entry with no published
+  ref. Without a recovery rule that re-publishes, the ref is permanently behind
+  the committed log — the inverse violation.
 
-Concretely the canonical order the executor enforces is:
+Neither ordering, on its own, holds the invariant against lock-free readers +
+temp→rename apply. The fix is to stop treating the canonical ref as the commit
+at all:
 
-| Phase | Domain | Reversibility | Who owns rewind |
-|---|---|---|---|
-| 1. stage object(s) | object store | orphan, gc reclaims | no-op rewind |
-| 2. stage FS | filesystem | temp files, unlinked on rewind | executor (temp ledger) |
-| 3. stage refs (CAS) | refs | inverse-CAS recorded | executor (prev-value ledger, cf. §1.1) |
-| 4. **commit** | **oplog** | **the linearization point** | n/a — past here it happened |
+> **The oplog append is the SOLE commit point.** A mutation is committed iff its
+> `TransactionCommit` marker is durable in the oplog. **Ref publication is a
+> deterministic, idempotent *post-commit* materialization** — the canonical ref
+> is a *cache / materialized view* of the committed oplog, never the source of
+> truth. A canonical ref is only ever renamed into place (a) by the executor
+> *after* the oplog commit, or (b) by recovery replaying the committed oplog
+> tail. It is **never** written pre-commit. Therefore "committed" ⇔ "oplog entry
+> exists," and a published (new-valued) ref always has a backing committed entry.
 
-Steps 1–3 are *staged* and individually reversible; only step 4 makes it real.
-This **inverts** capture's current ref-then-oplog order. The migration (§5.3)
-therefore changes capture's ordering so the oplog append is genuinely last, and
-registers a ref inverse-CAS so a (now near-impossible) post-stage failure rolls
-the ref back. This closes the ref-moved-but-not-recorded window that exists
-today.
+Concretely the canonical order the executor enforces:
+
+| Phase | Domain | What is written | Reader-visible? | Rewind / recovery |
+|---|---|---|---|---|
+| 1. stage object(s) | object store | state blob (`put_state`, `repository_snapshot.rs:224`) | no (orphan until a ref points at it) | no-op rewind; `gc` reclaims |
+| 2. stage FS | filesystem | temp files only | no (temp paths) | executor unlinks temp files |
+| 3. stage refs | refs | **temp files only** (`write_string_temp`, `refs_transactions.rs:219-224`); NO canonical rename | **no** (canonical path untouched) | executor unlinks temp files |
+| **4. COMMIT** | **oplog** | `TransactionCommit` + the state `OpRecord`s, idempotent (`record_batch_scoped_if_no_transaction`, `oplog_core.rs:281`) | the commit itself | none past here — it happened |
+| 5. publish refs | refs | temp→**rename**+`sync_directory` (`refs_transactions.rs:230`,`:235`) | **yes** | idempotent; re-derivable from phase-4 records |
+
+This **splits** the existing `update_refs_with_lock` (`refs_transactions.rs:103`)
+into its plan-validate-and-stage half (`:111-224`, which only writes temp files)
+and its publish half (the rename loop, `:228-256`). Phase 3 runs the first half;
+phase 5 runs the second. The CAS *validation* (`matches_expectation`, `:127`,
+`:167`, `:199`) still happens in phase 3 against the on-disk value, so a stale
+expectation fails before commit; the rename it gates is simply deferred to phase 5.
+
+**Crash table — what is on disk at a crash in each phase, and how recovery
+restores `committed ⇔ oplog entry exists`:**
+
+| Crash point | On disk | Committed? | Recovery action | Invariant |
+|---|---|---|---|---|
+| during/after ph1 | orphan state blob; refs at OLD value; no oplog entry | **no** | `gc` reclaims the orphan; nothing else | holds (no entry ⇒ not committed; ref still OLD) |
+| during/after ph2–3 | temp files at `.tmp-*` paths; canonical refs at OLD value; no oplog entry | **no** | unreferenced temp files swept by gc / a startup tmp-sweep (the same orphan-`.tmp-` shape `transaction_replay` handles for the sentinel dir, `transaction_replay.rs` ¶3); canonical refs untouched | holds (no entry; no reader ever saw a temp path) |
+| during ph4 | oplog append is itself a `packed.save()` = write-temp+atomic-rename inside the oplog; the entry is either absent or fully present — never torn | atomic boundary | if absent ⇒ treat as ph3; if present ⇒ treat as ph5 | holds either way |
+| after ph4, before/during ph5 | oplog entry **present**; canonical ref still at OLD value (rename not yet done) | **yes** | startup recovery folds the committed oplog tail and idempotently re-publishes each ref to its committed target | holds (entry exists ⇒ committed; recovery materializes the lagging ref) |
+| after ph5 | oplog entry present; canonical ref at NEW value | **yes** | replay is a no-op (ref already at target) | holds |
+
+**Recovery (grounded).** The materialization replay extends the existing
+startup crash-recovery pass. `replay_active_transactions(&repo)`
+(`daemon/src/transaction_replay.rs:205`) already runs at daemon start **"before
+any service starts handling RPCs"** (`daemon/src/local_daemon.rs:281-283`), today
+only to abort stuck on-disk sentinels. The primitive adds a second job to that
+same pre-serving pass: **fold the committed oplog tail and re-publish refs.**
+Every committed state `OpRecord` carries the ref identity and target needed to
+re-derive the canonical value with no extra bookkeeping — `Snapshot { new_state,
+thread }` (`oplog_types.rs:18-22`), `ThreadCreate/ThreadUpdate { name, … state }`
+(`:29`, `:33`), `Goto { target }` (`:24`) for HEAD. Recovery computes, per ref,
+the newest committed target in the tail (newest-wins, so two committed txns on
+one ref resolve to the same final value a non-crashed run would produce) and
+writes it via the same temp→rename publish. Re-publishing a ref already at its
+target is a no-op, so the pass is idempotent and safe to run on every startup.
+
+**Why a lock-free reader NEVER sees a committed-looking ref without its oplog
+record.** The canonical ref path is written *only* by the phase-5 rename or by
+recovery replay, both of which strictly follow the phase-4 oplog commit. A
+lock-free reader resolving a canonical ref therefore observes exactly one of:
+
+- the **OLD** value (phase-5 rename not yet applied). This can occur after a
+  crash in the "after ph4, before ph5" window: the commit *did* happen (oplog
+  entry exists) but the materialized ref lags. This is a **stale-but-consistent**
+  read, never a corrupt one, and it does **not** violate the invariant — the
+  entry exists, the ref is just a lagging cache. It is reconciled before any
+  reader can observe it: in the daemon, recovery runs before RPCs are served
+  (`local_daemon.rs:281-283`); in the direct-CLI path the executor completes
+  phase 5 in-process before returning, and an in-process crash is pre-commit by
+  construction (the `Drop` backstop, §4), so the only way to observe the lag is a
+  *hard* crash (kill -9 / power loss), which the next startup pass repairs before
+  serving.
+- the **NEW** value (phase-5 rename applied) — which can only have happened
+  *after* the phase-4 commit. A backing committed oplog entry is therefore
+  guaranteed.
+
+The one direction the invariant forbids — a NEW, committed-*looking* ref with
+**no** oplog entry — is now structurally impossible, because nothing publishes
+the canonical ref before the oplog entry is durable. Today's capture violates
+exactly this (it renames the ref at `repository_snapshot.rs:241-250` *before* the
+append at `:252`); the migration (§5.3) closes the window by moving the publish
+to phase 5.
 
 **Idempotency of the commit.** Reuse `record_batch_scoped_if_no_transaction`
-(`oplog_core.rs:281`) keyed on the op's `transaction_id`: a crash-retry that
-re-runs `execute` re-stages (cheap, reversible) and the commit is a no-op if the
-`TransactionCommit` marker already exists. This is the existing #198 mechanism,
-not a new one.
+(`oplog_core.rs:281`) keyed on the op's `transaction_id`: it holds the oplog
+write lock across the scan-for-marker + append (`:292-318`), so a crash-retry
+that re-runs `execute` re-stages (cheap, reversible) and the commit is a no-op if
+the `TransactionCommit { transaction_id }` marker already exists. This is the
+existing #198 r4 mechanism, not a new one, and it is what makes phase 4 a true
+single linearization point even under concurrent retriers.
 
 ### 2.3 — Idempotency requirements on `rewind`
 
@@ -355,12 +445,12 @@ execute — defeating the purpose.
 
 **The rule (decision):**
 
-> A sub-op must be `CommitKind::Eager` **iff its forward effect is durable state
-> that a different process or a different repo handle can read, and the
-> correctness of *that other reader* depends on seeing the effect before the
-> outer transaction commits.** Everything else is `Savepoint`.
+> A sub-op must be an **`EagerMutation`** (§3.3) **iff its forward effect is
+> durable state that a different process or a different repo handle can read, and
+> the correctness of *that other reader* depends on seeing the effect before the
+> outer transaction commits.** Everything else is a `SavepointMutation`.
 
-Operationally, a sub-op is `Eager` iff **both**:
+Operationally, a sub-op is eager (implements `EagerMutation`) iff **both**:
 1. its effect lands in a **cross-process-visible** store (a file other processes
    stat/read under a shared lock — the dedup store
    `operation_dedup.rs:216`/`acquire_file_lock`, a ref another process
@@ -369,13 +459,16 @@ Operationally, a sub-op is `Eager` iff **both**:
    (the racing process backing off; a child process the op spawns and waits on —
    `operation_id.rs:145-162`).
 
-A `Savepoint` op's effects are only read by *this* transaction until commit
-(staged object, staged FS, a ref no other process resolves until we publish), so
-deferring is safe.
+A savepoint op's effects are only read by *this* transaction until commit
+(staged object, staged FS, a ref temp file no other process resolves until phase 5
+publishes it), so deferring is safe.
 
 **How an eager sub-op participates in outer rollback.** It commits eagerly inside
-`apply` (e.g. `store.reserve` returns `Reserved`) and **registers a
-compensator** with the outer `Tx` (`RewindEntry::Compensator`). If the outer
+`EagerMutation::commit_eager` — NOT inside `apply` (e.g. `store.reserve` returns
+`Reserved`) — and `commit_eager` *returns* the compensator, which `enroll_eager`
+**registers** with the outer `Tx` (`RewindEntry::Compensator`). Tying the eager
+effect and the compensator into one method's body+return value is what makes a
+leaked reservation unrepresentable (§3.3). If the outer
 transaction later fails, `rewind_all` runs that compensator — for the reserve,
 the compensator is `store.cancel(op_id, verb)` (`operation_id.rs:152`,
 `operation_dedup.rs:288`), which releases the reservation so a retry isn't
@@ -384,36 +477,87 @@ leg: the effect was really visible for a while, and the compensator makes the
 *net* outcome correct. Eager legs commit in apply-order; their compensators run
 in reverse with everything else.
 
-### 3.3 — The compile-time enforcement
+### 3.3 — The compile-time enforcement (a type-level split, not a runtime const)
 
-An `Eager` op without a real compensator is a silent disaster (a leaked
-reservation). Make it impossible to express:
+An eager op without a real compensator is a silent disaster (a leaked
+reservation). The enforcement must be a **compile error**, not a
+`debug_assert!` — a `debug_assert!(M::COMMIT_KIND == Eager)` vanishes in release
+builds, so an op whose effect is genuinely eager could be enrolled through the
+savepoint path with no compensator wired, in exactly the production builds that
+matter. The earlier `COMMIT_KIND` associated-const sketch had this hole: a single
+`enroll<M: AtomicMutation>` accepted *every* mutation, and the const-vs-kind
+agreement was checked only at runtime.
+
+Make the wrong combination unrepresentable by splitting the commit discipline at
+the **type** level — two distinct sub-traits, each gating its own enroll path:
 
 ```rust
-/// Marker the executor requires before it will enroll an Eager sub-op.
-/// `enroll_eager` is bounded `M: AtomicMutation + EagerMutation`, so an
-/// op declaring COMMIT_KIND = Eager that does not implement EagerMutation
-/// (whose `compensate` is the only way to satisfy the bound) fails to
-/// compile at the enroll site.
+/// Opt-in marker for a savepoint-enrollable op: its staged effects are
+/// invisible to other readers until the outer commit publishes them, so it
+/// may defer to the outermost commit (§3.1). There is deliberately NO
+/// blanket `impl<M: AtomicMutation> SavepointMutation for M` — an op opts in
+/// by implementing this explicitly, so an op that is ONLY `EagerMutation`
+/// does NOT satisfy the `enroll` bound and cannot be enrolled as a savepoint.
+pub trait SavepointMutation: AtomicMutation {}
+
+/// An eager op: its forward effect is cross-process-visible the instant it
+/// runs (§3.2), so it must commit eagerly AND hand back a compensator. The
+/// eager effect lives HERE, never in `apply` — `commit_eager` performs it and
+/// *returns* the `Compensator`, so "perform the eager effect" and "produce the
+/// compensator" are the same call. The method is required, so an eager op with
+/// no compensator cannot implement the trait at all.
 pub trait EagerMutation: AtomicMutation {
-    /// Runs eagerly inside `apply`; returns the compensator the outer Tx
-    /// stores. Separate from `rewind` because an eager leg's undo is a
-    /// *forward* compensating action (cancel/release), not a staged-state
-    /// rollback.
+    /// Runs the eager, cross-process-visible effect (e.g. `store.reserve`) and
+    /// returns the compensator the outer `Tx` stores. Separate from `rewind`
+    /// because an eager leg's undo is a *forward* compensating action
+    /// (cancel/release), not a staged-state rollback.
     fn commit_eager(&mut self, tx: &mut Tx<'_>) -> Result<Compensator>;
 }
 
 impl<'a> Tx<'a> {
-    pub fn enroll<M: AtomicMutation>(&mut self, m: M) -> Result<StagedCommit<M::Output>> { … }
-    pub fn enroll_eager<M: AtomicMutation + EagerMutation>(&mut self, m: M) -> Result<M::Output> { … }
+    /// Savepoint enroll — bounded to `SavepointMutation`. Runs only `apply`
+    /// (staged, reversible). An `EagerMutation`-only op fails this bound.
+    pub fn enroll<M: SavepointMutation>(&mut self, m: M) -> Result<StagedCommit<M::Output>> { … }
+
+    /// Eager enroll — bounded to `EagerMutation`. Stages via `apply`, then runs
+    /// `commit_eager` and registers the returned `Compensator` into the ledger
+    /// atomically. The compensator is guaranteed to exist because the bound
+    /// requires the method that produces it.
+    pub fn enroll_eager<M: EagerMutation>(&mut self, m: M) -> Result<M::Output> { … }
 }
 ```
 
-The discipline: `enroll` (savepoint) is the only path for a `Savepoint` op;
-`enroll_eager` is the only path for an `Eager` op and it *requires*
-`EagerMutation`. A `debug_assert!(M::COMMIT_KIND == Eager)` inside `enroll_eager`
-(and the inverse in `enroll`) catches a mislabeled `const`. The result: you
-cannot enroll an eager sub-op without handing the executor a compensator.
+Why this closes the hole the `COMMIT_KIND` sketch left open:
+
+- **`enroll` is bounded to `SavepointMutation`.** Passing an op that implements
+  only `EagerMutation` is a hard **compile error** (`the trait bound
+  ReserveOpId: SavepointMutation is not satisfied`) — not a release-eliding
+  assert. There is no blanket `SavepointMutation` impl, so eager ops do not
+  silently acquire savepoint-enrollability.
+- **`enroll_eager` is bounded to `EagerMutation`, whose sole method *returns*
+  the `Compensator`.** An op that declares itself eager but supplies no
+  compensator cannot implement `EagerMutation` (the method is required) and so
+  cannot be passed to `enroll_eager` — again a compile error.
+- **The eager effect lives only in `commit_eager`, never in `apply`.** This is
+  the load-bearing structural rule: even if an op were (wrongly) given *both*
+  marker impls, enrolling it via `enroll` runs only `apply`, which by contract
+  performs no eager, reader-visible effect — so the reservation is never made
+  eagerly and there is nothing to leak. The compensator can only fail to be
+  registered if the eager effect was never performed.
+
+The result: **you cannot enroll an eager sub-op without handing the executor a
+compensator, and you cannot do it in a release build that a `debug_assert!`
+would have skipped — it simply does not compile.** No `COMMIT_KIND` const, no
+runtime kind-check.
+
+> Note on mutual exclusivity. Stable Rust has no negative bounds, so the type
+> system cannot *forbid* an op from implementing both `SavepointMutation` and
+> `EagerMutation`. The structural rule above ("eager effect only in
+> `commit_eager`") makes a double-impl harmless rather than dangerous; sealing
+> the two traits behind a single `CommitDiscipline` associated type to make them
+> mutually exclusive is a belt-and-suspenders option carried to the impl epic
+> (§6 O6) — it is not required for the compile-error guarantee, which the bound
+> split already delivers.
 
 ### 3.4 — Re-entrancy, locks, and the on-disk sentinel
 
@@ -510,7 +654,8 @@ struct Undo { batches: Vec<OpBatch>, head: Option<ChangeId> }
 impl AtomicMutation for Undo {
     type Output = UndoSummary;
     fn apply(&mut self, tx: &mut Tx) -> Result<StagedCommit<UndoSummary>> {
-        // savepoint sub-op: stage the recovery ref (inverse-CAS recorded)
+        // savepoint sub-op: stage the recovery ref (temp file; published
+        // post-commit in phase 5, rewind = unlink the temp)
         tx.enroll(SetUndoRecovery::new(self.head))?;
         for batch in &self.batches {
             // savepoint sub-op per batch: stage worktree rewrite + the
@@ -570,19 +715,35 @@ and the user's pre-existing `--path` directory survives. Nests: yes. Eager: no.
 
 ### 5.3 — `capture` / `snapshot`  (#198-adjacent) — **third priority**
 
-**Today** (`repo/src/repository_snapshot.rs:52`): object → ref → oplog (§2.2),
-with `abort_snapshot_write_batch` (`:314`) covering only the object batch and a
-fault checkpoint at `:233`.
+**Today** (`repo/src/repository_snapshot.rs:52`): object → **ref publish** →
+oplog (§2.2), with `abort_snapshot_write_batch` (`:314`) covering only the object
+batch and a fault checkpoint at `:233`. The ref is renamed onto its canonical
+path (`refs_transactions.rs:230`) *before* the oplog append (`:252`), so a crash
+in between leaves a reader-visible ref with no undo record.
 
 **As an `AtomicMutation` (leaf, no nest, no eager leg):** the migration's
-*behavioral* change is **reordering the oplog append to be last** and registering
-a ref inverse-CAS so a post-stage failure rolls the ref back (closing the
-ref-moved-but-not-recorded window). The object-store leg uses the cheap no-op
-rewind (orphan + gc, §1.3); the ref leg records inverse-CAS
-(`set_thread`/`write_head` ←→ prior value via `RefExpectation::Value`); the
-commit is the idempotent oplog append (`record_batch_scoped_if_no_transaction`,
-§2.2). This is the cleanest demonstration that the primitive *strengthens* an
-existing contract rather than just refactoring it. Nests: no. Eager: no.
+*behavioral* change is to make the oplog append the **sole commit** and move the
+ref publish to **after** it as a post-commit materialization (§2.2 phases 4→5):
+
+1. object-store leg uses the cheap no-op rewind (orphan + gc, §1.3);
+2. ref leg *stages* the new value into a temp file (`write_string_temp`,
+   `refs_transactions.rs:219-224`) under phase 3 — CAS-validated against the
+   on-disk value but **not** renamed; its rewind is "unlink the temp file," since
+   no canonical ref was published pre-commit;
+3. the commit is the idempotent oplog append
+   (`record_batch_scoped_if_no_transaction`, `oplog_core.rs:281`);
+4. only then (phase 5) does the executor rename the ref temp onto the canonical
+   path + `sync_directory`, publishing it to lock-free readers.
+
+A crash before the append publishes nothing (canonical ref untouched, temp file
+swept). A crash after the append but before the rename is repaired by startup
+recovery, which folds the committed `OpRecord::Snapshot { new_state, thread }`
+(`oplog_types.rs:18-22`) from the oplog tail and re-publishes the ref (§2.2
+recovery). This **closes** the ref-moved-but-not-recorded window rather than
+merely shrinking it — there is no longer any ordering in which a published ref
+lacks a backing committed entry. This is the cleanest demonstration that the
+primitive *strengthens* an existing contract rather than just refactoring it.
+Nests: no. Eager: no.
 
 ### 5.4 — op-id reserve  (#251) — **the eager-commit exemplar, fourth priority**
 
@@ -593,7 +754,8 @@ existing contract rather than just refactoring it. Nests: no. Eager: no.
 (`:162`) or `store.cancel` on spawn failure (`:152`).
 
 **As an `EagerMutation` sub-op:** when an op-id-bearing command is itself wrapped
-in a transaction, the reserve is the canonical `Eager` leg:
+in a transaction, the reserve is the canonical eager leg — enrolled via
+`enroll_eager` (bounded `M: EagerMutation`, §3.3), never `enroll`:
 ```rust
 impl EagerMutation for ReserveOpId {
     fn commit_eager(&mut self, tx: &mut Tx) -> Result<Compensator> {
@@ -612,7 +774,8 @@ The reservation is visible to other processes the instant `reserve` returns
 outer commit (§3.2 rule, both conditions met: cross-process store + racing
 process branches on it). On outer rollback the compensator runs `store.cancel`
 (`operation_dedup.rs:288`) so a retry isn't wedged on a stale `InFlight`.
-Eager: **yes** — this is the whole reason `CommitKind::Eager` exists.
+Eager: **yes** — this is the whole reason `EagerMutation` + the `enroll_eager`
+path exist.
 
 ### 5.5 — ref-write paths (already in-domain-atomic)
 
@@ -628,7 +791,7 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
 |---|---|---|---|---|---|
 | undo/redo | `undo.rs:93` | yes | no | 1 | mid-apply leaves repo half-rewound |
 | thread start | `thread.rs` `cmd_start` (`:1709`+) | yes | no | 2 | half-started thread; precise dir rewind (#302 r4) |
-| capture | `repository_snapshot.rs:52` | no | no | 3 | ref-moved-but-not-recorded window; oplog-last ordering |
+| capture | `repository_snapshot.rs:52` | no | no | 3 | ref-moved-but-not-recorded window; ref publish becomes a post-commit materialized view |
 | op-id reserve | `operation_id.rs:115` | as sub-op | **yes** | 4 | eager-commit exemplar; stale `InFlight` on rollback |
 | ref writes | `refs_manager.rs:319` | n/a | no | — | already in-domain atomic; becomes the "stage refs" leg |
 
@@ -636,12 +799,18 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
 
 ## §6 — Open questions / risks (carry into the impl epic)
 
-- **O1 — Reordering capture is a behavior change.** Moving the oplog append after
-  the ref write to *being the commit* changes the crash window the R7 test
-  (`fault_injection.rs:157`) pins. The impl must add a new fault checkpoint
-  (`*_after_ref_before_oplog`) and a test that the ref rewinds when the oplog
-  append fails. Low risk (strictly strengthens the contract) but must be done
-  deliberately.
+- **O1 — Reordering capture + adding recovery-side ref materialization is a
+  behavior change.** Making the oplog append the sole commit and moving the ref
+  publish *after* it (§2.2 phases 4→5) changes the crash window the R7 test
+  (`fault_injection.rs:157`) pins. The impl must (a) add a new fault checkpoint
+  `*_after_oplog_before_ref_publish`, (b) test that a crash there leaves the ref
+  at its OLD value with the oplog entry present, and (c) test that startup
+  recovery (`replay_active_transactions`, extended to fold the committed oplog
+  tail) re-publishes the ref to its committed target — i.e. the
+  `committed ⇒ ref eventually materializes` half. The pre-commit half (crash
+  before the append publishes nothing; temp file swept) is the cheaper test.
+  Strictly strengthens the contract, but the recovery extension is real new code,
+  not just a reorder.
 - **O2 — Lock ordering / deadlock.** The root `Tx` holds the refs lock and the
   oplog write lock simultaneously. Any *other* path that takes both must take
   them in the same order. The impl must audit for the reverse order (a grep for
@@ -660,6 +829,15 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
   sync; the CLI mutation paths are sync today, but the trait may need an
   `async fn apply` variant if a migrated op touches an async backend. Decide per
   migrated op; start with the sync paths (undo/thread/capture are sync).
+- **O6 — Sealing `SavepointMutation` ⊻ `EagerMutation` (belt-and-suspenders).**
+  §3.3's compile-error guarantee does not require the two markers to be mutually
+  exclusive — the "eager effect only in `commit_eager`" structural rule makes a
+  double-impl harmless. If the impl wants the type system to also *forbid* a
+  double-impl, seal both behind one `CommitDiscipline` associated type (an op
+  declares exactly one discipline; the markers become blanket impls keyed on it).
+  Stable Rust has no negative bounds, so this is the only way to make "both" a
+  compile error. Decide in impl; not needed for the no-leaked-compensator
+  guarantee.
 
 ---
 
@@ -705,12 +883,18 @@ revision, only one migration is in flight, not five.
 
 - [x] **(1) Trait API** — §2.1, `dyn`-free justified (§0, §3.1 note), trait +
   generic `execute<M>` chosen, fits type-state idiom.
-- [x] **(2) Commit-point + ordering** — §2.2 (corrects the oplog-as-commit
-  framing against `repository_snapshot.rs:243`/`:252`), §2.3 idempotency.
+- [x] **(2) Commit-point + ordering** — §2.2: the oplog append is the **sole**
+  commit; refs are a post-commit materialized view; crash table + recovery
+  (`replay_active_transactions`, `transaction_replay.rs:205`) provably hold
+  `committed ⇔ oplog entry exists` against lock-free readers (`refs_head.rs:22-41`,
+  `refs_manager.rs:129-135`) + temp→rename apply (`refs_transactions.rs:230`).
+  §2.3 idempotency.
 - [x] **(3) Nesting** — §3: enroll-into-outermost (savepoint) default, eager-
-  commit exception **rule pinned** (§3.2), compile-time compensator requirement
-  (§3.3), `Tx` context + depth/reverse-order tracking (§3.1), op_scope tie-in
-  + sentinel bridge (§3.4).
+  commit exception **rule pinned** (§3.2), **type-level** compensator
+  enforcement (§3.3: `SavepointMutation`/`EagerMutation` bound split on
+  `enroll`/`enroll_eager` — a compile error, no `COMMIT_KIND` const or
+  `debug_assert!`), `Tx` context + depth/reverse-order tracking (§3.1), op_scope
+  tie-in + sentinel bridge (§3.4).
 - [x] **(4) Panic-safety** — §4: explicit `Result` primary, `Drop` abort-only
   backstop, op_scope interaction.
 - [x] **(5) Retrofit inventory** — §5: undo, thread/hydrate (with #302 r4
