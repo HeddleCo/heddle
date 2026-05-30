@@ -6109,6 +6109,13 @@ fn thread_drop_current_recovery_points_to_create_when_no_sibling() {
     );
     assert_eq!(envelope["primary_command"], "heddle thread create <other>");
 
+    // Plain `thread drop` keeps its plain retry — the destructive
+    // `--delete-thread` flag must NOT leak into the non-destructive mode.
+    assert!(
+        hint.contains("heddle thread drop main") && !hint.contains("--delete-thread"),
+        "plain drop recovery should suggest the plain retry, not the destructive form: {stderr}"
+    );
+
     let templates = envelope["recovery_action_templates"]
         .as_array()
         .expect("recovery_action_templates should be an array");
@@ -6125,6 +6132,106 @@ fn thread_drop_current_recovery_points_to_create_when_no_sibling() {
             .as_array()
             .is_some_and(|argv| argv.iter().any(|arg| arg == "<other>")),
         "create template should mark <other> as a fillable slot: {stderr}"
+    );
+}
+
+/// heddle#258 r2 (cid 3327829289): when the user asks for the destructive
+/// `thread drop --delete-thread` on the current (lightweight, no-record)
+/// ref, the recovery retry hint must PRESERVE `--delete-thread`. The r1
+/// hint hardcoded a bare `heddle thread drop {current}`, which on retry
+/// re-enters with `manager.load == None && delete_thread == false` and
+/// dead-ends at `thread_not_found` — the user's destructive intent is lost.
+#[test]
+fn thread_drop_delete_thread_current_recovery_preserves_delete_flag() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &["--output", "json", "thread", "drop", "main", "--delete-thread"],
+        Some(temp.path()),
+    )
+    .expect("invoke destructive current thread drop");
+    assert!(
+        !output.status.success(),
+        "destructive current thread drop should still refuse"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("destructive drop should emit JSON envelope");
+    assert_eq!(envelope["kind"], "branch_delete_current");
+
+    let hint = envelope["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("heddle thread drop main --delete-thread"),
+        "destructive drop recovery must preserve --delete-thread so a lightweight ref is removed on retry: {stderr}"
+    );
+    assert!(
+        !hint.contains("heddle thread list"),
+        "hint must not loop back to the circular `thread list`: {stderr}"
+    );
+}
+
+/// Same class via the `branch -d` entry point — it rewrites to a
+/// `--delete-thread` drop, so its recovery hint must also carry the
+/// destructive mode (close-the-class: both entries share one helper).
+#[test]
+fn branch_delete_current_recovery_preserves_delete_mode() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &["--output", "json", "branch", "-d", "main"],
+        Some(temp.path()),
+    )
+    .expect("invoke current branch delete");
+    assert!(!output.status.success(), "current branch delete should refuse");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("branch delete should emit JSON envelope");
+    assert_eq!(envelope["kind"], "branch_delete_current");
+
+    let hint = envelope["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("--delete-thread"),
+        "branch -d recovery must preserve the ref-deleting mode on retry: {stderr}"
+    );
+}
+
+/// End-to-end: after following the create+switch advice, the SUGGESTED
+/// destructive retry must actually remove the lightweight ref (not
+/// dead-end at `thread_not_found`).
+#[test]
+fn thread_drop_delete_thread_recovery_retry_actually_deletes_ref() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    // Refused while `main` is the current checkout.
+    let refused = heddle_output(
+        &["--output", "json", "thread", "drop", "main", "--delete-thread"],
+        Some(temp.path()),
+    )
+    .expect("invoke destructive current thread drop");
+    assert!(!refused.status.success());
+
+    // Follow the advice: create a sibling and switch to it.
+    heddle(&["thread", "create", "feature"], Some(temp.path()))
+        .expect("create a sibling thread");
+    heddle(&["thread", "switch", "feature"], Some(temp.path()))
+        .expect("switch to the sibling thread");
+
+    // The SUGGESTED retry (mode preserved) must now succeed.
+    heddle(
+        &["thread", "drop", "main", "--delete-thread"],
+        Some(temp.path()),
+    )
+    .expect("suggested destructive retry should delete the lightweight ref");
+
+    let listed = json_value(temp.path(), &["thread", "list", "--output", "json"]);
+    assert!(
+        listed["threads"]
+            .as_array()
+            .is_some_and(|threads| threads.iter().all(|thread| thread["name"] != "main")),
+        "the lightweight `main` ref should be gone after the suggested retry: {listed}"
     );
 }
 
