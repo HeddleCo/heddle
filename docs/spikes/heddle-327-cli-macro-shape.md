@@ -272,8 +272,11 @@ the documented fallback.** Rationale, from the measurement:
     derives constraint as the example case). The actionable mechanism #205 should
     prescribe is author-written on the output struct: add
     `#[schemars(required)]` to each always-emitted `Option<T>` field so the
-    generated schema lists it under `required` (equivalently, a `#[serde(default)]`-
-    free newtype wrapper or a hand-written `JsonSchema` impl for the struct). This
+    generated schema lists the **key** under `required` while keeping the **value
+    nullable** — the schema must still accept `null` (these fields emit `null` when
+    `None`), so mark the key required, not the value non-nullable. Equivalently, a
+    `#[serde(default)]`-free newtype wrapper or a hand-written `JsonSchema` impl for
+    the struct. This
     is a real per-verb consideration to weigh, not an exact field-by-field budget
     the PoC pins — the count and identity of such fields are a property of each
     real output struct, surfaced during its migration, not fixed by this throwaway

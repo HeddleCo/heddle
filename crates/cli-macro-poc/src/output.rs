@@ -26,9 +26,10 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-/// `heddle init --output json` response — field set, field types, and serde
-/// attributes copied verbatim from the real private `InitOutput`
-/// (`crates/cli/src/cli/commands/init.rs:22-45`).
+/// `heddle init --output json` response — modeled illustratively on the real
+/// private `InitOutput` (`crates/cli/src/cli/commands/init.rs:22-45`): the
+/// serde-relevant shape and attributes, not a verbatim copy (see
+/// `RepositoryVerificationState` below for a deliberate divergence).
 ///
 /// Initialize Heddle metadata. In a plain Git repository this creates the
 /// `.heddle` sidecar and updates the local `.git/info/exclude` file for Heddle
