@@ -195,7 +195,15 @@ sketch.
   ref-write paths without a committed ref-carrying record" becomes **structural on
   BOTH sides** — write chokepoint (record before publish) + read chokepoint (reconcile
   on read). Today neither chokepoint exists; both are impl-epic deliverables (§6/§7).
-  See §2.2 "The write chokepoint" + §2.4.
+  **(r17) Two refinements make the write side airtight: (a) full-batch-record-coverage —
+  the record batch must back *every* ref in the published ref batch, the gap exposed by
+  attached-HEAD thread-rename, whose third `RefUpdate::Head` (`thread.rs:3090-3099`) has no
+  record because `record_thread_rename` emits only two (`oplog_records.rs:96-110`), cid
+  3329019021; and (b) the closure is *structural*, not a writer count — the raw publish is
+  private with `commit_and_publish` its sole caller, so the CAS/create wrappers
+  (`set_thread_cas`/`set_marker_cas`/`create_marker`) and every future writer are covered
+  by construction, the write-side mirror of r7's single-`reconciled_load` read closure, cid
+  3329019023.** See §2.2 "The write chokepoint" + §2.4.
 - **Nesting = enroll-into-outermost (savepoint) by default; eager-commit only
   when an effect must be visible to another process before the outer commit**
   (the #251 reserve). This is a **type-level split**, not a runtime const:
@@ -526,6 +534,41 @@ crash between the two publishes leaves the new thread visible and the old thread
 present). The chokepoint must therefore accept a **record batch** alongside the atomic
 ref batch (next).
 
+**But the batch *signature* is necessary, not sufficient — the records must *span* every
+published ref, and thread-rename's attached-HEAD case is where they do not (r17, cid
+3329019021).** When the renamed thread IS the current attached HEAD, `cmd_thread_rename`
+pushes a **third** update onto the vector — `RefUpdate::Head` re-attaching HEAD from the
+old thread name to the new (`thread.rs:3090-3099`) — so the published batch carries
+**three** refs: new-thread create, old-thread delete, **and** the HEAD move. But
+`record_thread_rename` (`oplog_records.rs:96-110`) appends only **two** records
+(`ThreadCreateV2` + `ThreadDelete`) in *every* case — there is **no record for the HEAD
+move**. So an attached rename routed through `commit_and_publish` would publish a HEAD ref
+whose backing record is absent: a crash after phase 4 (commit) and before phase 5
+(publish) leaves reconciliation with **no ref-carrying record for the HEAD move**, and the
+read side cannot re-materialize the HEAD re-attach the batch committed — the atomic batch
+it published cannot be fully materialized on replay, and `committed ⇔ a ref-carrying oplog
+record exists` fails for that one ref. The rule the chokepoint must enforce is therefore
+not merely "take a batch" but **full coverage**:
+
+> **Full-batch-record-coverage invariant (r17): the record batch handed to
+> `commit_and_publish(op_records, ref_updates)` must back EVERY ref in `ref_updates`** —
+> the set of refs named across `op_records` must equal the set of refs in `ref_updates`,
+> so no published ref lacks a replayable record. As a count: the number of distinct refs
+> published equals the number of distinct refs backed by a committed record. A
+> `commit_and_publish` whose `op_records` name *fewer* refs than `ref_updates` publishes
+> is a chokepoint *with a hole* — the very state the write side exists to forbid, merely
+> relocated from "no record at all" to "no record for *this* ref."
+
+For thread-rename this means the **attached-HEAD case must commit a three-record batch**:
+`record_thread_rename`, when HEAD was attached to the renamed thread, must append a
+**HEAD-move record** alongside the create + delete — either by adding a ref-carrying HEAD
+record (one that names HEAD's new attached target, the new thread) to the rename's record
+batch, or by **extending the rename record shape** to carry the attached-HEAD move it
+published. The detached / HEAD-unaffected case keeps its two-record batch (no HEAD ref
+published ⇒ no HEAD record owed). Either way the invariant is the same: per batch, record
+count tracks ref count, and the attached-HEAD `RefUpdate::Head` (`thread.rs:3090-3099`)
+gets its backing record.
+
 The fix mirrors r7 on the write side. Just as r7 made raw ref *loaders* unreachable
 from a logical read except through `reconciled_load`, r11 makes the raw ref *publish*
 (the temp→**rename**+`sync_directory`, `refs_transactions.rs:230`,`:235`) unreachable
@@ -534,7 +577,10 @@ first**:
 
 > **Write chokepoint (the invariant): no canonical ref is published except by a
 > primitive that has *first* appended a durable, ref-identifying oplog record — and an
-> atomic ref batch is published with its *full* backing record batch, never split.** The
+> atomic ref batch is published with its *full* backing record batch, never split, where
+> "full" means the records back EVERY ref in the batch (full-batch-record-coverage, r17,
+> cid 3329019021 — the attached-HEAD thread-rename above is the case that fails it without
+> the added HEAD-move record).** The
 > seam is **one commit-then-publish primitive** —
 > `commit_and_publish(op_records: &[OpRecord], ref_updates: &[RefUpdate])` — that appends
 > **all** of `op_records` (phase 4, the commit point) and *then* publishes the atomic
@@ -576,9 +622,13 @@ The callers split by whether they carry a high-level operation:
   `[OpRecord::Collapse { sources, result, <published-ref discriminant> }]` (thread name
   or detached-HEAD marker) and the matching `RefUpdate`. **`cmd_thread_rename` builds a
   *two*-element batch** `[ThreadCreateV2 { name: new, … }, ThreadDelete { name: old, … }]`
-  (its existing `record_thread_rename` records, `oplog_records.rs:96-110`) paired with
-  the atomic `update_refs` vector of two-or-three `RefUpdate`s it already constructs
-  (`thread.rs:3074-3100`). Each calls `commit_and_publish(op_records, ref_updates)`.
+  (its existing `record_thread_rename` records, `oplog_records.rs:96-110`) for the
+  detached / HEAD-unaffected case — **or a *three*-element batch** that adds a HEAD-move
+  record when HEAD was attached to the renamed thread and the published vector therefore
+  includes `RefUpdate::Head` (`thread.rs:3090-3099`), per the full-batch-record-coverage
+  invariant (r17) — paired with the atomic `update_refs` vector of two-or-three
+  `RefUpdate`s it already constructs (`thread.rs:3074-3100`), so the record count tracks
+  the ref count. Each calls `commit_and_publish(op_records, ref_updates)`.
 - **Plain ref edits (no high-level operation) pass a *one-element generic* ref-update
   record** — `[ThreadUpdate { name, state }]`, `[Goto { target }]`,
   `[MarkerCreate { name, state }]`, … — for which the ref identity + target *is* the
@@ -586,36 +636,90 @@ The callers split by whether they carry a high-level operation:
   build that generic record themselves and call `commit_and_publish` for the caller.
   These keep their existing call shape.
 
-**The 46-call-site audit is the structural proof (the write-side mirror of r7's
-ten-reader enumeration).** A grep for the four canonical-publishing write methods —
-`refs().{set_thread,write_head,update_refs,set_marker}` — returns **46** non-test
-call sites (verified 2026-05-30), spanning:
+**The closure is STRUCTURAL — `commit_and_publish` is the sole caller of a *private*
+raw publish — not a writer count (r17, cid 3329019023; the write-side mirror of r7's
+read closure).** An earlier draft proved this by *counting*: a grep for four
+canonical-publishing method names — `refs().{set_thread,write_head,update_refs,set_marker}`
+— returned 46 non-test call sites, and the argument was "all 46 route through the
+chokepoint." But a count over a hand-picked set of method *names* is exactly the wrong
+frame, for the same reason r6's enumerated reader hook was: it is incomplete, and
+silently so. Production publishes refs through **more** entry points than those four
+names — the public **CAS wrappers** `set_thread_cas` (`thread.rs:1647-1650`) and
+`set_marker_cas` (`grpc_hosted/mod.rs:334-338`), the **create/delete** wrappers
+`create_marker` (`grpc_hosted/mod.rs:339`) and `delete_marker`, the `delete_*_cas`
+siblings, and the r9 remote/undo setters — none of which the four-name grep counts.
+(The grep was worse than incomplete: `set_marker` is not even a `RefManager` method —
+markers publish via `set_marker_cas`/`create_marker`/`delete_marker` — so the audit
+spent one of its four names on a non-writer while missing the real marker writers.)
+Enumerating "…also CAS, also `create_marker`" just moves the hole: the *next* writer
+(`delete_marker`, `set_remote_thread`, a not-yet-written sibling) is missed again. This
+is r6's "the 3, then the 5, then the 7" reader drip, transposed to the write side — a
+longer writer list is not a closed class.
+
+The fix is the write-side mirror of r7. r7 did not enumerate readers; it made the raw
+loaders **unreachable** from a logical read except through one `reconciled_load`. The
+write side closes identically — and the code already hands us the convergence point.
+**Every** standard public writer already funnels through a single internal seam,
+`update_refs` (`refs_manager.rs:319`): `set_thread`/`set_thread_cas` (`:137-152`),
+`write_head`/`write_head_cas` (`:118-127`), `set_marker_cas`/`create_marker` (`:193-208`),
+and `delete_thread`/`delete_thread_cas`/`delete_marker`/`delete_marker_cas` (`:154-228`)
+each construct a `&[RefUpdate]` and call `update_refs`, which calls `update_refs_with_lock`
+(`refs_transactions.rs:103`, already `pub(super)`) whose temp→**rename** + `sync_directory`
+loop (`:228-256`) is **the one raw publish**. The CAS/create wrappers Codex flagged do
+**not** reach the raw publish independently — they reach it *via* `update_refs`. So the
+seam below all of them is a single function, exactly as the two raw loaders sat below the
+ten readers.
+
+> **Single-sole-writer invariant (r17): there is exactly one raw ref publish, and
+> `commit_and_publish` is its sole caller.** The low-level durable ref write — the
+> temp→rename + `sync_directory` half of `update_refs_with_lock`
+> (`refs_transactions.rs:228-256`) — is made **private/internal**, callable only from
+> inside `commit_and_publish`. Every public writer family delegates through
+> `commit_and_publish`, each constructing its own `OpRecord`(s) first: the plain
+> `set_thread`/`write_head`/`update_refs` edits, the CAS wrappers
+> `set_thread_cas`/`set_marker_cas`/`write_head_cas` (and the `delete_*_cas` siblings),
+> the create/delete wrappers `create_marker`/`delete_marker`, and — once r9 routes them
+> off their current direct `write_string`/`remove_file` path (`refs_manager.rs:242`,`:261`,
+> `:284`) — `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`. None reaches
+> the raw publish on its own.
+
+**Why this is a *proof* and not a longer list.** Because the raw publish is private and
+`commit_and_publish` is its only caller, *any* writer — the CAS/create entry points Codex
+named, the `delete_marker`/remote/undo siblings it did not, or one written next year —
+**must** go through the record-committing chokepoint to publish a ref at all: there is no
+raw publish to call around. The set of covered writers is therefore "all of them, present
+and future," with no enumeration to keep complete — the exact write-side equivalent of
+r7's "the 92nd reader is covered because raw storage has no other logical-read entry." A
+one-line conformance check (the analog of the read-side one) asserts the raw publish has
+no caller but the primitive, so a "47th writer" that tried to bypass it would have no
+publish to compile against. The 46-count survives only as an *illustration* that the
+known writers already converge — it is no longer load-bearing, because the bound is now
+the visibility boundary, not the count.
+
+The writers that route through the chokepoint, **illustratively** (this table is coverage
+illustration, not the proof — the proof is the visibility boundary above; the CAS/create
+entry points cid 3329019023 flagged are folded in):
 
 | File | Role of the ref write |
 |---|---|
 | `cli/.../commands/fork.rs` | thread+HEAD publish on fork (the ordering bug above) |
 | `cli/.../commands/collapse.rs` | thread/HEAD publish on collapse (the ordering bug above) |
-| `cli/.../commands/thread.rs`, `thread_cmd.rs` | thread create/start, rename, HEAD moves |
+| `cli/.../commands/thread.rs`, `thread_cmd.rs` | thread create/start (incl. `set_thread_cas` `:1647-1650`), rename (incl. attached-HEAD move), HEAD moves |
 | `cli/.../commands/clone.rs`, `actor_cmd.rs`, `attempt.rs`, `context/mod.rs`, `bridge.rs`, `undo_apply.rs`, `git_overlay_health.rs` | HEAD / thread / marker publishes |
 | `cli/.../commands/remote/{mod,remote_ops}.rs` | remote-thread + HEAD publishes |
 | `cli/src/bridge/{git_core,git_sync}.rs` | git-overlay HEAD/thread sync |
-| `client/src/grpc_hosted/{hydration,sync,mod}.rs` | hosted-sync ref materialization |
+| `client/src/grpc_hosted/{hydration,sync,mod}.rs` | hosted-sync ref materialization (incl. `set_marker_cas`/`create_marker` `mod.rs:334-339`) |
 | `repo/src/repository_thread_materialize.rs` | thread-materialize HEAD/thread publish |
 
-Because publish is reachable **only** through `commit_and_publish`, all 46 sites — and
-any *future* writer — append a ref-carrying record before publishing **by
-construction**: there is no raw publish to call around it. The op-descriptor model
-(r15) cleanly **separates the two concerns**: the primitive guarantees the
-*structural* property — ordering (record before publish) and atomicity — *universally*,
-for every site; each site supplies the record's *content* (its own `OpRecord`). A
-semantic site (fork/collapse) hands in its rich variant; a plain ref edit hands in a
-generic ref-update record; **both** route through the one primitive, so the
-by-construction ordering claim holds without the primitive ever needing context it
-cannot see. This is the difference between an enumerated audit ("we fixed fork and
-collapse") and a closed class ("no path can publish without a record"). A "47th writer"
-added later inherits the ordering and atomicity automatically, with no reviewer
-vigilance — it need only pass the `OpRecord` that describes it — the same
-future-proofing the read chokepoint gives readers.
+The op-descriptor model (r15) cleanly **separates the two concerns**: the primitive
+guarantees the *structural* property — ordering (record before publish), atomicity, and
+full-coverage (every published ref backed by a record, r17) — *universally*, for every
+writer; each writer supplies the record's *content* (its own `OpRecord`). A semantic
+writer (fork/collapse) hands in its rich variant; a plain ref edit hands in a generic
+ref-update record; **both** route through the one primitive, so the by-construction
+guarantee holds without the primitive ever needing context it cannot see. This is the
+difference between an enumerated audit ("we fixed fork and collapse," "we also counted
+CAS") and a closed class ("no path can publish without a record").
 
 **Crate-dependency seam.** The primitive must append `OpRecord`s (an `oplog` type)
 *and* drive the canonical-ref publish (a `refs` operation), but `refs` does **not**
@@ -1466,9 +1570,16 @@ Together they hold the invariant for every writer, reader, and crash timing:
   thread-rename publishes new-thread + old-thread-delete (± HEAD) in one atomic ref vector
   (`thread.rs:3074-3100`) backed by a two-record batch (`ThreadCreateV2`+`ThreadDelete`,
   `oplog_records.rs:96-110`) — a single-`OpRecord` chokepoint would have dropped a backing
-  record or split that atomic batch. **Every published ref in the batch has a backing
-  record in the same atomic publish.** The **46** direct ref-write call sites (verified
-  2026-05-30) inherit the record-before-publish ordering by construction — including the two
+  record or split that atomic batch. **And the batch must back EVERY ref it publishes
+  (full-batch-record-coverage, r17, cid 3329019021):** when the renamed thread is the
+  current attached HEAD the vector gains a third `RefUpdate::Head` (`thread.rs:3090-3099`)
+  but `record_thread_rename` still emits only the two records, so that case must commit a
+  **three-record** batch (a HEAD-move record added), else the published HEAD ref has no
+  replay record and the atomic batch cannot be fully re-materialized on crash recovery.
+  **Every published ref in the batch has a backing record in the same atomic publish.** The
+  ref-write call sites (verified 2026-05-30) inherit the record-before-publish ordering by
+  construction, and — because the raw publish is private with `commit_and_publish` its sole
+  caller (r17, cid 3329019023) — so do the CAS/create wrappers and every future writer — including the two
   that had it backwards (`fork.rs:74-92`, `collapse.rs:99-108`, which published *before*
   recording, and whose `record_fork(from, new_state)` call (`oplog_records.rs:113`) also
   passed its arguments reversed, `fork.rs:94-95`, persisting the source as the result) — and
@@ -1980,9 +2091,12 @@ commit-then-publish primitive `commit_and_publish(op_records: &[OpRecord], ref_u
 4) before publishing the atomic ref batch (phase 5) without splitting it. It takes a
 **batch** rather than a single record (r16) so a multi-record atomic op — thread-rename's
 new-thread+old-thread-delete (± HEAD) ref vector (`thread.rs:3074-3100`) backed by a
-two-record `ThreadCreateV2`+`ThreadDelete` batch (`oplog_records.rs:96-110`) — commits
+two-record `ThreadCreateV2`+`ThreadDelete` batch (`oplog_records.rs:96-110`) — **three
+records when HEAD was attached to the renamed thread and the vector therefore carries a
+`RefUpdate::Head` (`thread.rs:3090-3099`), the HEAD-move record added per
+full-batch-record-coverage (r17, cid 3329019021)** — commits
 all its records then publishes its atomic ref batch as one unit, never dropping a record
-or splitting the batch. It
+or splitting the batch (and never leaving a published ref without a backing record). It
 *takes* the caller's `OpRecord`s rather than synthesizing them (r15): the generic write
 methods see only ref identity + target, not the `sources`/`from` the `Collapse`/`Fork`
 variants need, so the semantic callers build their full record and plain ref edits pass
@@ -2177,7 +2291,10 @@ chokepoint, exactly as readers were not migrated to `execute` but route through
   (r16, cid 3329003333)**, because some atomic ref batches back multiple records:
   thread-rename publishes create-new + delete-old (± HEAD) in one atomic `update_refs`
   vector (`thread.rs:3074-3100`) while `record_thread_rename` records a two-record batch
-  (`ThreadCreateV2`+`ThreadDelete`, `oplog_records.rs:96-110`). A single-`OpRecord`
+  (`ThreadCreateV2`+`ThreadDelete`, `oplog_records.rs:96-110`) — which, per r17 (cid
+  3329019021), must become a *three*-record batch in the attached-HEAD case so the
+  published `RefUpdate::Head` (`thread.rs:3090-3099`) has a backing record; see (e). A
+  single-`OpRecord`
   signature would force such a writer to drop a backing record or split the atomic batch
   into multiple publishes (breaking atomicity); the batch signature commits every record
   then publishes the whole atomic ref batch together. Single-record ops pass a one-element
@@ -2231,9 +2348,22 @@ chokepoint, exactly as readers were not migrated to `execute` but route through
   existing `record_thread_rename` records (`ThreadCreateV2`+`ThreadDelete`,
   `oplog_records.rs:96-110`) handed in as `&[create, delete]` alongside the atomic
   `update_refs` vector it already builds (`thread.rs:3074-3100`). This is the concrete
-  case that drives the batch signature in (a): the create + delete (± HEAD) ref batch and
-  its two backing records commit-then-publish as one atomic unit — no dropped record, no
-  split publish. The 46 sites are **not**
+  case that drives the batch signature in (a): the create + delete ref batch and its two
+  backing records commit-then-publish as one atomic unit — no dropped record, no split
+  publish. **And it must satisfy full-batch-record-coverage (r17, cid 3329019021): when
+  HEAD was attached to the renamed thread the published vector gains a third
+  `RefUpdate::Head` (`thread.rs:3090-3099`), so `record_thread_rename` must, for that
+  case, emit a *third* HEAD-move record (or extend its record shape to carry the
+  attached-HEAD move) — handed in as `&[create, delete, head_move]` — else that published
+  HEAD ref has no replay record.** **(f)** Make the raw publish private so
+  `commit_and_publish` is its **sole** caller (r17, cid 3329019023): the public writers —
+  including the CAS wrappers `set_thread_cas`/`set_marker_cas` (`thread.rs:1647-1650`,
+  `grpc_hosted/mod.rs:334-338`), `create_marker`/`delete_marker`, and the `delete_*_cas`
+  siblings — already converge on `update_refs` (`refs_manager.rs:319`) whose
+  `update_refs_with_lock` temp→rename half (`refs_transactions.rs:228-256`, already
+  `pub(super)`) is that one publish, so routing them through `commit_and_publish` is the
+  structural closure, not a per-writer enumeration; the one-line write-side conformance
+  check in (b) enforces it. The ref-write sites are **not**
   migrated to `AtomicMutation` here — they keep their existing publishes and merely
   route through the chokepoint; full `execute` migration is the §7 epic's job.
 
@@ -2257,9 +2387,11 @@ publication routes through one commit-then-publish primitive
 publishing the atomic canonical-ref batch (phase 5) without splitting it. It takes a
 **batch** (r16) so multi-record atomic ops — thread-rename's create-new+delete-old
 (± HEAD) ref vector backed by a two-record `ThreadCreateV2`+`ThreadDelete` batch
-(`thread.rs:3074-3100`, `oplog_records.rs:96-110`) — are faithful: every published ref in
-the batch has a backing record committed in the same atomic publish; single-record ops
-pass a one-element batch. The
+(`thread.rs:3074-3100`, `oplog_records.rs:96-110`), or **three records** when HEAD was
+attached to the renamed thread so the published `RefUpdate::Head` (`thread.rs:3090-3099`)
+gets a backing HEAD-move record (full-batch-record-coverage, r17, cid 3329019021) — are
+faithful: every published ref in the batch has a backing record committed in the same
+atomic publish; single-record ops pass a one-element batch. The
 primitive **takes** the caller's operation descriptors rather than having the generic
 write methods synthesize them (they see only ref identity + target, not the
 `sources`/`from` the `Collapse`/`Fork` variants need): semantic callers (fork/collapse)
@@ -2352,10 +2484,16 @@ materialization is kept only as an optimization on top of the read-side guarante
    `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`
    (`refs_manager.rs:261`/`:284`/`:242`) plus `cmd_fork` (`fork.rs:74-92`),
    `cmd_collapse` (`collapse.rs:99-108`), and `cmd_thread_rename` (`thread.rs:3061-3116`,
-   passing its full two-record batch, r16) through `commit_and_publish` (oplog-commit
-   point + phase-5 publish), with `cmd_fork` also rebuilding its record with the
-   corrected, non-reversed `record_fork` arg order (`from = source_state`, r15), so no
-   ref class and no writer is a direct-write/wrong-order/reversed-arg exception and
+   passing its full record batch — two records, **or three when HEAD was attached to the
+   renamed thread** so the published `RefUpdate::Head` (`thread.rs:3090-3099`) gets a
+   backing HEAD-move record, full-batch-record-coverage r17) through `commit_and_publish`
+   (oplog-commit point + phase-5 publish), with `cmd_fork` also rebuilding its record with
+   the corrected, non-reversed `record_fork` arg order (`from = source_state`, r15). The
+   raw publish (`update_refs_with_lock`'s temp→rename half, `refs_transactions.rs:228-256`)
+   is made private so `commit_and_publish` is its **sole** caller (r17), and the public
+   CAS/create wrappers (`set_thread_cas`/`set_marker_cas`/`create_marker`) — which already
+   converge on `update_refs`, `refs_manager.rs:319` — delegate through it, so no
+   ref class and no writer is a direct-write/wrong-order/reversed-arg/uncovered exception and
    the ten-reader reconciliation is non-vacuous (the oplog-format change — new tail
    variants for the r9 remote/undo classes + in-place extension of `Fork`/`Collapse`,
    no migration shim — is part of this issue).
@@ -2477,7 +2615,8 @@ revision, only one migration is in flight, not five.
   format-stability-sensitive (§6 O8).
 - [x] **(2b) The write side is a structural chokepoint too (r11, cid 3328926767; the
   op-descriptor refinement + fork arg-order fix are r15, cid 3328979498 / 3328979497; the
-  record-batch refinement is r16, cid 3329003333)** —
+  record-batch refinement is r16, cid 3329003333; the full-batch-record-coverage invariant
+  + the single-sole-writer structural closure are r17, cid 3329019021 / 3329019023)** —
   §2.2 "The write chokepoint": r9 closed the writers that recorded *nothing*; r11
   closes the writers that recorded the *wrong order* or a *ref-blind* shape. `cmd_fork`
   (`fork.rs:74-92`) and `cmd_collapse` (`collapse.rs:99-108`) published the thread/HEAD
@@ -2500,7 +2639,11 @@ revision, only one migration is in flight, not five.
   — a single-`OpRecord` chokepoint would drop a backing record or split the atomic batch;
   the batch signature commits every record then publishes the whole ref batch together
   (single-record ops pass a one-element batch), so **every published ref in a batch has a
-  backing record in the same atomic publish**.
+  backing record in the same atomic publish** — including the attached-HEAD thread-rename,
+  whose third `RefUpdate::Head` (`thread.rs:3090-3099`) requires `record_thread_rename`
+  (which today emits only `ThreadCreateV2`+`ThreadDelete`, `oplog_records.rs:96-110`) to
+  add a third HEAD-move record, so the count of refs backed by a record equals the count
+  of refs published (full-batch-record-coverage, r17, cid 3329019021).
   The primitive **takes** the caller's records rather than synthesizing them (r15): the
   generic write methods see only ref identity + target, not the `sources`/`from` the
   `Collapse`/`Fork` variants need, so semantic callers (fork/collapse) build their full
@@ -2511,9 +2654,18 @@ revision, only one migration is in flight, not five.
   readers; `fork.rs`, `collapse.rs`, `thread.rs`/`thread_cmd.rs`, `clone.rs`,
   `actor_cmd.rs`, `attempt.rs`, `remote/*`, `git_core.rs`/`git_sync.rs`,
   `grpc_hosted/{hydration,sync,mod}.rs`, `repository_thread_materialize.rs`, …) inherit
-  correct ordering + atomicity **by construction**, and any future writer does too —
-  there is no raw publish to call around the primitive (a one-line write-side
-  conformance check, the analog of the read-side one). `cmd_fork` rebuilds
+  correct ordering + atomicity **by construction** — but the *proof* is not that count
+  (r17, cid 3329019023): the raw publish (`update_refs_with_lock`'s temp→rename half,
+  `refs_transactions.rs:228-256`) is made **private**, with `commit_and_publish` its
+  **sole** caller, and every public writer family delegates through it — the plain edits,
+  the CAS wrappers `set_thread_cas`/`set_marker_cas` (`thread.rs:1647-1650`,
+  `grpc_hosted/mod.rs:334-338`), `create_marker`/`delete_marker` (`grpc_hosted/mod.rs:339`),
+  the `delete_*_cas` siblings, and the r9 remote/undo setters — all already converging on
+  `update_refs` (`refs_manager.rs:319`). So any future writer is covered too: there is no
+  raw publish to call around the primitive (a one-line write-side conformance check, the
+  analog of the read-side one, enforces the sole-caller boundary). This is the write-side
+  mirror of r7's single-`reconciled_load` read closure — a single-sole-writer invariant,
+  not a writer count. `cmd_fork` rebuilds
   `OpRecord::Fork { from: source_state, new_state, thread, head }` with the corrected
   arg order, and the published thread name + HEAD are carried by
   **extending the existing `Fork`/`Collapse` variants in place** — extra fields on the
