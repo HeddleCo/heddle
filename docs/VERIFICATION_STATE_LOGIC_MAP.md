@@ -13,9 +13,10 @@ Target rows describe the next model and must not be cited as shipped behavior.
 
 - `RepositoryVerificationState` is the canonical proof surface. `heddle verify
   --output json` emits it directly when clean; `status`, `diagnose`,
-  `workspace show`, `thread list/show`, `bridge git status`, `bridge git
-  import`, `bridge git reconcile`, many post-operation envelopes, and mutating
-  command preflights embed or defer to the same shape.
+  `workspace show`, `thread list/show`, `bridge git status`, many
+  post-operation envelopes, and mutating command preflights embed or defer to
+  the same shape. `bridge git import` and `bridge git reconcile` post-operation
+  JSON do not yet embed this proof; embedding it there is target behavior.
 - Repository capability terms are `plain-git`, `git-overlay`, and
   `native-heddle`. Human labels such as `Git + Heddle` or `Git + Heddle
   isolated checkout` describe the operator context; they are not new state
@@ -108,7 +109,7 @@ flowchart TD
 | Undo | `undo --preview` and real `undo` share safety refusals. Both refuse dirty worktree and active-operation states before moving refs or worktree bytes. Post-undo text must report the current verification state and next action instead of claiming clean by default. |
 | Remote push/pull | Transfer commands refresh tracking and return post-transfer verification. `remote_ahead` and `remote_untracked` are verified clean publish guidance and recommend `push`; behind and diverged states are blockers. If upstream still points at the exact Git checkpoint just undone locally, verification reports `remote_contains_undone_checkpoint` and recommends `heddle push --force` with `heddle redo` as the restore-work option, never `heddle pull` as the primary action. A command may not claim synced while blocking remote drift remains. |
 | Integrated remote divergence | If a diverged upstream has been fetched, imported, and merged into the current Heddle state, `needs_checkpoint` becomes the primary blocker even while Git tracking still reports divergence. `checkpoint` is allowed in exactly that integrated state because it is the operation that writes the Git merge checkpoint and turns the remaining state into ordinary `heddle push` work. |
-| Bridge import/reconcile JSON | `bridge git import` and `bridge git reconcile` success JSON embed the post-operation `RepositoryVerificationState`, recommended action metadata, and recovery command metadata. Agents do not need a follow-up `verify` call to know whether the operation left the repository verified or still blocked. |
+| Bridge import/reconcile JSON (**Target**) | `bridge git import` and `bridge git reconcile` success JSON do not yet embed the post-operation `RepositoryVerificationState` — the `trust` field is `#[serde(skip_serializing)]`, so it is omitted from `--output json`. Agents still need a follow-up `verify` call to know whether the operation left the repository verified or still blocked. Embedding the proof inline (alongside recommended action and recovery command metadata) is target behavior. |
 | Generated artifact safety | `status`, `capture`, `commit`, and `merge` must respect explicit ignore rules, keep explicitly ignored changes from becoming fake work, and surface unignored generated/vendor/dist/build paths as ordinary dirty work or heavy-impact work when captured. Git-overlay mode prefers `.gitignore` for shared ignore policy so raw `git status --short` and Heddle agree by construction; `.heddleignore` remains available for Heddle-only excludes. Heddle must not install or assume default generated-noise patterns beyond `.heddle/`. Large captures and deletions require explicit force. |
 | JSON and op-id | Runtime command surfaces, command catalog output, schemas, JSON envelopes, and op-id support are derived from the command contract table. No current command advertises generated-resume op-id persistence; agents that need replay must supply an explicit id only to commands with `supports_op_id: true`. |
 | Persona-driven UX | Human text answers what happened, current state, and next step. Agent/script JSON keeps stdout parseable, stderr reserved for error envelopes, and action metadata executable or explicitly templated. Support/maintainer diagnostics live in `doctor`, `diagnose`, and verbose/version surfaces. |
