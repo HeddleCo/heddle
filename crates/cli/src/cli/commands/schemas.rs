@@ -992,7 +992,12 @@ pub struct DiffSchema {
     pub to_state: Option<String>,
     pub changed_path_count: usize,
     pub stats: DiffStatsSchema,
-    pub changes: Vec<Value>,
+    /// Worktree-mode diff (`heddle diff` with no revision args) groups the
+    /// per-file changes into `{modified, added, deleted}` category arrays,
+    /// mirroring the `status` command's `changes` shape so a UI can derive
+    /// add/modify/delete badges from `diff` alone. A state-to-state diff
+    /// (`heddle diff <a> <b>`) instead emits a flat `array<object>` here.
+    pub changes: DiffChangesSchema,
     pub semantic_changes: Option<Vec<Value>>,
     pub context: Option<Vec<Value>>,
     pub broader_guidance: Option<Vec<Value>>,
@@ -1000,6 +1005,18 @@ pub struct DiffSchema {
     /// Present whenever line-level hunks exist, regardless of the
     /// `--patch` CLI flag — JSON consumers always get a parseable diff.
     pub patch: Option<String>,
+}
+
+/// Worktree-mode `changes`: per-file diff entries bucketed by category,
+/// mirroring the `status` command's `{modified, added, deleted}` field
+/// names. Each entry carries its path plus the per-file diff fields
+/// (`kind`, `old_path`, `lines`, …). A `renamed` entry buckets under
+/// `modified` (its `kind`/`old_path` identify the rename).
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiffChangesSchema {
+    pub modified: Vec<Value>,
+    pub added: Vec<Value>,
+    pub deleted: Vec<Value>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
