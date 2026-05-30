@@ -30,8 +30,8 @@ that renders one real verb (`heddle init`) both ways and measures the result.
 > is **proposed** — the `#[heddle_verb]` / `HeddleVerbOutput` macro names, the
 > `inventory`-style auto-registration, and the deletion of the
 > `schema_registry!` table do **not** exist yet; they are #205's work. The PoC
-> crate proves the *measurable* claims by asserting them against types that
-> mirror the **real** `init.rs` (both emitters cover the documented keys;
+> crate proves the *measurable* claims by asserting them against types
+> modeled on the **shape** of the real `init.rs` (both emitters cover the documented keys;
 > schemars lifts doc comments; the discriminator-const gap is real; schemars
 > re-exposes the skip-serialized `verification` field; the typed example
 > diverges from the curated doc sample); it does **not** implement the
@@ -86,16 +86,17 @@ share a verb key.
 
 ## 2. The PoC — one verb, both ways
 
-`crates/cli-macro-poc/` reproduces `init` faithfully against the **real**
-`init.rs` types, not the simplified mirror: the args struct is modelled as the
-real `clap::Args` `InitArgs` wired through a `Subcommand` enum
-(`crates/cli-macro-poc/src/args.rs`), and the output struct replicates the real
-private `InitOutput` field-for-field — INCLUDING the `#[serde(skip_serializing)]
-#[serde(rename = "verification")] trust` field
-(`crates/cli-macro-poc/src/output.rs`). (The real `InitOutput` is a crate-private
-`struct`, so a throwaway crate can't import it; it replicates the exact field
-types and serde/schemars attributes instead.) It emits the output schema two
-ways:
+`crates/cli-macro-poc/` models `init`'s **shape** — the serde/schemars-relevant
+attributes that drive the tradeoff — illustratively, not field-for-field exact:
+the args struct is modelled as the real `clap::Args` `InitArgs` wired through a
+`Subcommand` enum (`crates/cli-macro-poc/src/args.rs`), and the output struct
+mirrors the directionally-relevant features of the real private `InitOutput` —
+including the `#[serde(skip_serializing)] #[serde(rename = "verification")] trust`
+field (`crates/cli-macro-poc/src/output.rs`). (The real `InitOutput` is a
+crate-private `struct`, so a throwaway crate can't import it; the PoC reconstructs
+the schema-relevant attributes — skip-serialized fields, always-present `Option`s,
+the discriminator field — representatively, not as a byte-exact replica of the
+real field set.) It emits the output schema two ways:
 
 - **Path A — schemars** (`schemars_path::schema()`): `#[derive(JsonSchema)]` on
   the output struct + `schema_for!`. This is what heddle registers **today**.
@@ -192,8 +193,10 @@ comment driving both would be a module-level macro that maps one declaration to
 both types (option (a) in Q3) — the two-derive shape we recommend keeps them
 separate, by design.
 
-**Examples: a sibling `#[heddle_verb(example = …)]` key the macro lowers to a
-typed example function — NOT inline literals, NOT prose blocks.** schemars'
+**Examples: schemars' own `#[schemars(example = "init_example")]` attribute on
+the output struct, naming a typed example function — NOT inline literals, NOT
+prose blocks, and NOT auto-forwarded by the `HeddleVerbOutput` derive (see the
+recommendation below for why the two-derive shape can't forward it).** schemars'
 native form is `#[schemars(example = "init_example")]`, where the value names a
 free function returning a `Serialize` value; it lands in the schema's `examples`
 array (PoC test `schemars_carries_the_example_payload`). The awkwardness worth
@@ -203,12 +206,25 @@ designing around:
   has no inline-example attribute.
 - It's one example function per type.
 
-Recommendation: the `#[heddle_verb]` macro exposes `example = path::to::fn` and
-forwards it to schemars on the schema side. The win over today's prose samples
-in `docs/json-schemas.md`: the example is a **real typed value of the output
-struct**, so it cannot drift from the struct's shape — it stops compiling if a
-field is renamed. That is strictly better than the current literal-JSON blocks
-that `doctor schemas` has to police after the fact.
+Recommendation: in the two-derive shape we recommend (Q3 option (b)), the example
+is wired with schemars' **own** `#[schemars(example = "path::to::fn")]` attribute
+written directly on the output struct — **not** synthesized-and-forwarded by the
+`HeddleVerbOutput` derive. This is a hard constraint, not a stylistic choice: the
+`HeddleVerbOutput` derive and the co-located `#[derive(JsonSchema)]` run as two
+**independent** derives over the same struct, and a derive cannot inject an
+attribute that a *sibling* derive observes (derives only append items; they don't
+rewrite the annotated item's attribute list — same constraint as Q3). So
+`HeddleVerbOutput` cannot make schemars "see" a synthesized `#[schemars(example)]`.
+The author provides the example through one of: (i) an explicit
+`#[schemars(example = "path::to::fn")]` on the output struct that the co-derived
+`JsonSchema` reads natively (the recommended form), or (ii) a hand-written
+`JsonSchema` impl. (The only way to get the `HeddleVerbOutput` derive itself to
+own example emission would be to make it an *attribute* macro that rewrites the
+struct before schemars expands — Q3 option (a) — which we did not pick.) The win
+over today's prose samples in `docs/json-schemas.md` is unchanged: the example is
+a **real typed value of the output struct**, so it cannot drift from the struct's
+shape — it stops compiling if a field is renamed. That is strictly better than
+the current literal-JSON blocks that `doctor schemas` has to police after the fact.
 
 **Concretely, the prose sample has *already* drifted, and the PoC illustrates
 the mechanism.** The PoC's `init_example()` is an illustrative typed value;
@@ -250,10 +266,18 @@ the documented fallback.** Rationale, from the measurement:
     `Option<T>` fields that lack `skip_serializing_if` on every response (as
     `null` when `None`), but schemars' derive treats `Option<T>` as nullable and
     *not* required. So a naive derive under-describes keys the wire always
-    carries unless the macro overrides requiredness. This is a real per-verb
-    consideration to weigh, not an exact field-by-field budget the PoC pins —
-    the count and identity of such fields are a property of each real output
-    struct, surfaced during its migration, not fixed by this throwaway crate.
+    carries (e.g. `InitOutput.principal_source` / `principal`). The two-derive
+    path **cannot fix this from the `HeddleVerbOutput` side** — it can't reach
+    into the sibling `JsonSchema` derive to flip requiredness (same independent-
+    derives constraint as the example case). The actionable mechanism #205 should
+    prescribe is author-written on the output struct: add
+    `#[schemars(required)]` to each always-emitted `Option<T>` field so the
+    generated schema lists it under `required` (equivalently, a `#[serde(default)]`-
+    free newtype wrapper or a hand-written `JsonSchema` impl for the struct). This
+    is a real per-verb consideration to weigh, not an exact field-by-field budget
+    the PoC pins — the count and identity of such fields are a property of each
+    real output struct, surfaced during its migration, not fixed by this throwaway
+    crate.
 
   File these as #205 work, not blockers.
 
@@ -357,10 +381,14 @@ a hand-maintained `if $verbs.contains(&verb)` chain.
    this. Each migrated struct must add `#[schemars(skip)]` to such fields, or it
    ships a schema that describes properties the command never emits (and
    `doctor schemas`, which only checks documented keys *appear*, won't catch it).
-   Separately, output structs that embed foreign workspace types may need
-   `JsonSchema` impls/bounds; the mirror existed precisely to dodge both
-   (schemas.rs:6–13), and the macro re-confronts them. Each migration batch
-   should enumerate the skip-serialized and foreign-typed fields its verbs touch.
+   Separately, any `Option<T>` field serde always emits (no `skip_serializing_if`,
+   e.g. `InitOutput.principal_source`/`principal`) must carry
+   `#[schemars(required)]` (author-written — the derive can't force it), else the
+   schema marks an always-present key optional (§2 / Q2). And output structs that
+   embed foreign workspace types may need `JsonSchema` impls/bounds; the mirror
+   existed precisely to dodge these (schemas.rs:6–13), and the macro re-confronts
+   them. Each migration batch should enumerate the skip-serialized, always-emitted-
+   `Option`, and foreign-typed fields its verbs touch.
 6. **Then** the verb-by-verb migration batches (~30 verbs, the registered set in
    `schema_registry!`), one issue each, as #205 already scopes.
 
@@ -371,7 +399,7 @@ a hand-maintained `if $verbs.contains(&verb)` chain.
 | Question | Decision | Confidence |
 |---|---|---|
 | Descriptions | `#[doc]` `///`, single source *per surface* — but args and output are separate types, so it's two doc sources, not "one comment, both surfaces" | high — proven in PoC |
-| Examples | `#[heddle_verb(example = fn)]` → typed example fn → schemars `examples`; #205 rebaselines the prose `docs/json-schemas.md` sample (already drifted) from it | high — proven in PoC |
+| Examples | schemars-native `#[schemars(example = "fn")]` on the output struct (author-written, **not** forwarded by the `HeddleVerbOutput` derive) → typed example fn → schemars `examples`; #205 rebaselines the prose `docs/json-schemas.md` sample (already drifted) from it | high — proven in PoC |
 | schemars vs custom | **schemars** for v1; *not* zero-touch — per-verb `#[schemars(skip)]` for skip-serialized fields + a const helper. Custom emitter is the documented fallback | high — recommendation holds; "zero re-baseline" evidence corrected |
 | Discriminator const | schemars gap (measured + asserted); fix with a small `output_kind` `JsonSchema` helper, not the custom emitter | medium — helper not yet built |
 | `skip_serializing` drift | schemars re-exposes skip-serialized fields as required `writeOnly` props (measured + asserted); fix per-verb with `#[schemars(skip)]` | high — measured in PoC |
