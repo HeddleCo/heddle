@@ -36,9 +36,20 @@ sketch.
   The fix: a mutation is committed iff its `TransactionCommit` oplog entry is
   durable; ref publication (temp→rename, `refs_transactions.rs:230`) moves
   **after** the commit as a deterministic, idempotent materialization that
-  recovery replays from the committed oplog tail. This makes
-  "committed" ⇔ "oplog entry exists" actually hold against lock-free readers.
-  See §2.2 — the single most load-bearing correction in the spike.
+  recovery replays from the committed oplog tail. **That recovery is anchored at
+  the universal `Repository::open` seam (`repository.rs:594`) — every reader,
+  daemon RPC *and* direct CLI (`harness/mod.rs:127`), constructs its repo through
+  it — so the gate is explicitly NOT daemon-only** (today's
+  `replay_active_transactions` runs only from `local_daemon.rs:296`, the leak
+  this round closes). **And the commit is deduplicated by an *unbounded, indexed*
+  `transaction_id` lookup, not the window-bounded
+  `record_batch_scoped_if_no_transaction` (which only scans a caller-supplied
+  window — the rebase caller passes `64` and documents that aging past it
+  duplicates the batch, `rebase_ops.rs:192-202`)** — so a crash-retry at *any*
+  later time is exactly-once. This makes "committed" ⇔ "oplog entry exists" hold
+  for **every reader path × every retry timing**. See §2.2 + the §2.4
+  crash/retry-coverage proof — the single most load-bearing correction in the
+  spike.
 - **Nesting = enroll-into-outermost (savepoint) by default; eager-commit only
   when an effect must be visible to another process before the outer commit**
   (the #251 reserve). This is a **type-level split**, not a runtime const:
@@ -95,21 +106,31 @@ the executor's rewind discipline — but scoped to one domain. The gap the
 primitive fills is that **refs, oplog, object store, and FS each have their own
 lock and their own rollback, with nothing tying them together.**
 
-### 1.2 — Oplog: the append, and an existing idempotent commit
+### 1.2 — Oplog: the append, and a *window-bounded* idempotent append
 
 - `OpLog::record_batch_scoped(ops, scope)` — `oplog/src/oplog/oplog_core.rs:236`
   — takes the oplog `write_lock()` (`:66`, `:245`), reloads fresh from disk
   (`:247`, to catch other processes), `packed.append(new_entries)` (`:256`),
   `packed.save()?` (`:257`). **`packed.save()` is the durable append.**
 - `OpLog::record_batch_scoped_if_no_transaction(ops, scope, transaction_id,
-  recent_window)` — `oplog_core.rs:281` — is an **already-shipped idempotent
-  commit**: it scans the recent window for an
-  `OpRecord::TransactionCommit { transaction_id, op_count }`
-  (`oplog_types.rs:84`) matching `transaction_id` and returns `Ok(None)` without
-  writing if found, all under the same held write lock (the heddle#198 r4 fix —
-  see the comment at `oplog_core.rs:263-280`). This is the model for "commit
-  exactly once even under crash-retry," and the primitive's commit step should
-  reuse it rather than invent a new idempotency key.
+  recent_window)` — `oplog_core.rs:281` — is a **window-bounded** atomic dedup:
+  under the held write lock (`:292`) it scans **only the most recent
+  `recent_window` batches** — `collect_batches_scoped(recent_window, …)`
+  (`:295`) — for an `OpRecord::TransactionCommit { transaction_id, op_count }`
+  (`oplog_types.rs:84`) matching `transaction_id`, returns `Ok(None)` if found,
+  else appends (the heddle#198 r4 fix — comment at `oplog_core.rs:263-280`). It
+  is exactly-once **only inside that window**: the sole production caller,
+  `flush_rebase_batch` (`rebase_ops.rs:197-202`), passes `64` and its own comment
+  concedes "ageing past it is acceptable because the worst-case outcome is a
+  duplicate batch" (`rebase_ops.rs:192-196`). **So this helper is the right
+  primitive for the immediate-retry race it was built for, but it is NOT the
+  primitive's linearization point** — a delayed crash-retry after >`recent_window`
+  intervening batches would scan past the prior `TransactionCommit` and append a
+  *second* one for the same transaction. The primitive's exact-once commit
+  therefore needs an **unbounded, indexed `transaction_id` → committed-index
+  lookup** (§2.2 "Idempotency of the commit"), not a windowed scan. The existing
+  helper remains useful for the bounded rebase path; the primitive does not
+  inherit its window.
 
 ### 1.3 — Object store: reversible-until-referenced + an abort batch
 
@@ -287,7 +308,7 @@ Concretely the canonical order the executor enforces:
 | 1. stage object(s) | object store | state blob (`put_state`, `repository_snapshot.rs:224`) | no (orphan until a ref points at it) | no-op rewind; `gc` reclaims |
 | 2. stage FS | filesystem | temp files only | no (temp paths) | executor unlinks temp files |
 | 3. stage refs | refs | **temp files only** (`write_string_temp`, `refs_transactions.rs:219-224`); NO canonical rename | **no** (canonical path untouched) | executor unlinks temp files |
-| **4. COMMIT** | **oplog** | `TransactionCommit` + the state `OpRecord`s, idempotent (`record_batch_scoped_if_no_transaction`, `oplog_core.rs:281`) | the commit itself | none past here — it happened |
+| **4. COMMIT** | **oplog** | `TransactionCommit` + the state `OpRecord`s, deduplicated by an **unbounded indexed `transaction_id` lookup** (§2.2 "Idempotency of the commit" — *not* the window-bounded `record_batch_scoped_if_no_transaction`) | the commit itself | none past here — it happened |
 | 5. publish refs | refs | temp→**rename**+`sync_directory` (`refs_transactions.rs:230`,`:235`) | **yes** | idempotent; re-derivable from phase-4 records |
 
 This **splits** the existing `update_refs_with_lock` (`refs_transactions.rs:103`)
@@ -308,12 +329,22 @@ restores `committed ⇔ oplog entry exists`:**
 | after ph4, before/during ph5 | oplog entry **present**; canonical ref still at OLD value (rename not yet done) | **yes** | startup recovery folds the committed oplog tail and idempotently re-publishes each ref to its committed target | holds (entry exists ⇒ committed; recovery materializes the lagging ref) |
 | after ph5 | oplog entry present; canonical ref at NEW value | **yes** | replay is a no-op (ref already at target) | holds |
 
-**Recovery (grounded).** The materialization replay extends the existing
-startup crash-recovery pass. `replay_active_transactions(&repo)`
-(`daemon/src/transaction_replay.rs:205`) already runs at daemon start **"before
-any service starts handling RPCs"** (`daemon/src/local_daemon.rs:281-283`), today
-only to abort stuck on-disk sentinels. The primitive adds a second job to that
-same pre-serving pass: **fold the committed oplog tail and re-publish refs.**
+**Recovery (grounded) — one gate at the universal reader seam, NOT daemon-only.**
+The materialization replay must run before *any* reader resolves a ref, and the
+seam that every reader — daemon RPC *and* direct CLI — already funnels through is
+`Repository::open` (`repository.rs:594`): the daemon opens the repo before
+serving, and the CLI harness opens it once per invocation
+(`harness/mod.rs:127`). So the gate is a thin **`Repository::ensure_recovered`
+step invoked from `open`** (or a dedicated `open_for_read`/`open_for_mutation`
+that `open` delegates to), whose job is:
+
+> **Fold the committed oplog tail and re-publish any ref that lags its newest
+> committed target.** Fast-path: read the oplog head + the canonical value of
+> each ref the tail's uncommitted-materialization names; if every committed
+> `TransactionCommit` target is already the canonical value, return immediately
+> (the no-lag common case is a couple of reads, no writes). Otherwise, for each
+> lagging ref, temp→rename it to its committed target.
+
 Every committed state `OpRecord` carries the ref identity and target needed to
 re-derive the canonical value with no extra bookkeeping — `Snapshot { new_state,
 thread }` (`oplog_types.rs:18-22`), `ThreadCreate/ThreadUpdate { name, … state }`
@@ -321,7 +352,42 @@ thread }` (`oplog_types.rs:18-22`), `ThreadCreate/ThreadUpdate { name, … state
 the newest committed target in the tail (newest-wins, so two committed txns on
 one ref resolve to the same final value a non-crashed run would produce) and
 writes it via the same temp→rename publish. Re-publishing a ref already at its
-target is a no-op, so the pass is idempotent and safe to run on every startup.
+target is a no-op, so the gate is idempotent and safe to run on every `open`.
+
+Why anchor at `Repository::open` rather than the daemon pass.
+`replay_active_transactions(&repo)` (`daemon/src/transaction_replay.rs:205`) runs
+**only** from the daemon (`local_daemon.rs:296` is its sole production caller —
+every other call site is a test), and today only aborts stuck on-disk sentinels
+(`transaction_replay.rs:185-204`), never materializing refs. If ref recovery
+lived *there*, a **direct CLI invocation on a daemonless repo** (`heddle status`,
+`heddle log`, a fresh `heddle capture`) after a hard crash in the
+"after-commit/before-publish" window would read the **stale canonical ref** —
+the commit happened (oplog entry exists) but no daemon ever started to re-publish
+it. That is precisely the leak this round closes: `committed ⇔ oplog entry
+exists` would hold only for daemon-served readers. Moving the materialization to
+the `open` gate makes it hold for **all** readers. The daemon keeps its separate
+sentinel-abort recovery (`local_daemon.rs:296`); these are two distinct jobs —
+sentinel lifecycle (daemon-scoped) vs. ref materialization (reader-scoped, at
+`open`). The existing per-verb detection primitive `active_transactions`
+(`transaction_sentinel.rs:60`) is *not* a substitute: it is documented as a thing
+"every state-changing CLI verb *should* consult" (`transaction_sentinel.rs:4-8`)
+but is not actually wired into dispatch (its only non-test references are its own
+module, `transaction_sentinel.rs:92`), so relying on each verb to remember it
+would re-open the class one verb at a time. `open` is the single structural choke
+point; that is what closes the class.
+
+**Alternative (lock-free reader reconciliation).** If hooking write-side repair
+into `open` is undesirable for read-only commands (it needs the refs write lock),
+the dual is to make readers self-correcting: a reader resolving a canonical ref
+also reads the committed oplog tail and, if the tail names a newer committed
+target for that ref than the canonical value, resolves to the *committed* target
+(optionally lazily re-publishing under the lock). The reader then **never trusts
+a canonical ref that lacks its backing commit record, and never trusts a stale
+ref the oplog has already superseded** — the same invariant, enforced at read
+time instead of open time, with no write privilege required. Either placement
+satisfies "recovery before any reader, daemon or CLI"; the repo-open gate is the
+simpler single-materialization-path default, the reader reconciliation the
+zero-write-on-read alternative. Decide in the impl epic (§6 O7).
 
 **Why a lock-free reader NEVER sees a committed-looking ref without its oplog
 record.** The canonical ref path is written *only* by the phase-5 rename or by
@@ -333,12 +399,16 @@ lock-free reader resolving a canonical ref therefore observes exactly one of:
   entry exists) but the materialized ref lags. This is a **stale-but-consistent**
   read, never a corrupt one, and it does **not** violate the invariant — the
   entry exists, the ref is just a lagging cache. It is reconciled before any
-  reader can observe it: in the daemon, recovery runs before RPCs are served
-  (`local_daemon.rs:281-283`); in the direct-CLI path the executor completes
-  phase 5 in-process before returning, and an in-process crash is pre-commit by
-  construction (the `Drop` backstop, §4), so the only way to observe the lag is a
-  *hard* crash (kill -9 / power loss), which the next startup pass repairs before
-  serving.
+  reader can observe it **by the `Repository::open` recovery gate (`repository.rs:594`),
+  which runs for daemon RPC *and* direct CLI alike** — the daemon opens before
+  serving RPCs and the CLI harness opens once per invocation (`harness/mod.rs:127`),
+  so whichever reader runs next folds the committed tail and re-publishes the
+  lagging ref before it resolves anything. (An *in-process* crash never produces
+  this lag at all: it is pre-commit by construction via the `Drop` backstop, §4.
+  Only a *hard* crash — kill -9 / power loss — leaves the on-disk lag, and the
+  very next `open` on *any* path repairs it.) Crucially this is no longer
+  daemon-only: a direct CLI reader on a daemonless repo repairs the lag itself
+  through the same gate, so it never observes a stale ref as committed.
 - the **NEW** value (phase-5 rename applied) — which can only have happened
   *after* the phase-4 commit. A backing committed oplog entry is therefore
   guaranteed.
@@ -350,13 +420,42 @@ exactly this (it renames the ref at `repository_snapshot.rs:241-250` *before* th
 append at `:252`); the migration (§5.3) closes the window by moving the publish
 to phase 5.
 
-**Idempotency of the commit.** Reuse `record_batch_scoped_if_no_transaction`
-(`oplog_core.rs:281`) keyed on the op's `transaction_id`: it holds the oplog
-write lock across the scan-for-marker + append (`:292-318`), so a crash-retry
-that re-runs `execute` re-stages (cheap, reversible) and the commit is a no-op if
-the `TransactionCommit { transaction_id }` marker already exists. This is the
-existing #198 r4 mechanism, not a new one, and it is what makes phase 4 a true
-single linearization point even under concurrent retriers.
+**Idempotency of the commit — unbounded indexed `transaction_id`, NOT the
+window-bounded helper.** The phase-4 linearization point must be exact-once at
+*any* retry timing, including a delayed crash-retry that re-runs `execute` after
+an arbitrary number of intervening commits. The existing
+`record_batch_scoped_if_no_transaction` (`oplog_core.rs:281`) is **not** that
+point: under the write lock it scans only the most recent `recent_window` batches
+(`collect_batches_scoped(recent_window, …)`, `oplog_core.rs:295`), so a retry
+after >`recent_window` intervening batches scans *past* the prior
+`TransactionCommit` and appends a **second** one for the same transaction. Its
+sole production caller passes `64` and explicitly accepts that "ageing past it"
+duplicates the batch (`rebase_ops.rs:192-202`) — fine for the immediate-retry
+race it was built for, wrong as a general commit point.
+
+The primitive's commit therefore deduplicates on an **unbounded, indexed
+`transaction_id` → committed-batch-id map**, maintained **under the same oplog
+write lock** as the append and updated atomically with it (so the index can never
+disagree with the log). The commit step:
+
+1. take the oplog write lock (`oplog_core.rs:66`);
+2. look up `transaction_id` in the index — an O(1) hash lookup over the *entire*
+   committed history, not a windowed scan. If present ⇒ the transaction already
+   committed (a prior, possibly long-ago, retry) ⇒ no-op, return the recorded
+   ids;
+3. else append the batch (`packed.append` + `packed.save()`, `oplog_core.rs:315-316`)
+   **and** insert `transaction_id → start_id` into the index in the same locked
+   section, then release.
+
+Because the lookup domain is unbounded, a retry at **any** later time finds the
+existing commit and refuses to double-append; because the index update is inside
+the same critical section as the append, two concurrent retriers serialize on the
+lock and exactly one wins (the heddle#198 r4 *atomicity* guarantee carried
+forward — only the *window* is removed). The correctness floor, if the impl
+prefers no sidecar, is a full-tail scan for the marker (O(n) but unbounded); the
+indexed map is the performant form. Either way the defining property is
+**unbounded domain** — the window-bounded helper is explicitly *not* the
+linearization point. Building this index is net-new impl work (§6 O7).
 
 ### 2.3 — Idempotency requirements on `rewind`
 
@@ -374,6 +473,58 @@ txn log), `rewind` correctness is the load-bearing contract:
 - **CAS-guarded.** A ref rewind uses inverse `*_cas` with
   `RefExpectation::Value(what_we_wrote)` so it refuses to clobber a concurrent
   writer that moved the ref after us — it fails loud rather than overwriting.
+
+### 2.4 — Crash/retry coverage (the close-the-class proof)
+
+The invariant **`committed ⇔ oplog entry exists`** must hold for *every* reader
+entry path and *every* retry timing — not just the daemon, and not just an
+immediate retry. The two prior rounds each patched one cell (r1: ordering;
+r2: oplog-as-commit + daemon recovery + window dedup); this matrix is the
+artifact that proves the *whole* product space is covered, so the class is closed
+rather than drip-fixed. The two axes are exactly the ones the r2 design left a
+gap on:
+
+- **Reader entry path** — how a reader resolves a ref: **daemon RPC** (resolves
+  via the running daemon) vs. **direct CLI** (a `heddle` process that opens the
+  repo itself, possibly with no daemon present — `harness/mod.rs:127`).
+- **Retry timing** — when a crashed `execute` is re-run: **immediate** (≤ any
+  window, e.g. a `rebase --continue` seconds later) vs. **delayed** (after >`N`
+  intervening committed batches, past *any* fixed window).
+
+Two independent mechanisms make every cell hold; each axis is closed by the one
+that generalizes it:
+
+| | **Daemon RPC reader** | **Direct CLI reader (daemonless ok)** |
+|---|---|---|
+| **No stale ref read as committed** | `open` recovery gate runs before RPCs (`repository.rs:594` → daemon opens pre-serve) → lagging ref re-published before any RPC resolves it | **same `open` gate** runs per CLI invocation (`harness/mod.rs:127`) → the CLI reader repairs the lag itself; **not daemon-dependent** |
+| **Immediate retry exact-once** | indexed `transaction_id` lookup under the oplog write lock → 2nd append refused | identical — same lock, same index, process-independent |
+| **Delayed retry (past any window) exact-once** | **unbounded** index lookup (not a windowed scan) → prior commit still found after >N batches → no 2nd append | identical — the index domain is the whole history, so timing is irrelevant |
+
+Reading the matrix by failure mode:
+
+- **The r2 daemon-only recovery gap (Finding 1) is closed by the *placement* of
+  the gate**, not by adding a second daemon job: because materialization is
+  anchored at `Repository::open` (`repository.rs:594`) — the seam *both* the
+  daemon and every direct CLI invocation pass through — the "after-commit,
+  before-publish" stale-ref window is repaired before the *next reader on any
+  path* observes it. The daemonless `heddle status`/`capture`/`log` case that r2
+  left reading a stale canonical ref now self-repairs. There is no reader path
+  that skips the gate.
+- **The r2 window-bounded dedup gap (Finding 2) is closed by the *domain* of the
+  dedup**, not by enlarging the window: the indexed `transaction_id` lookup spans
+  the entire committed history, so a retry that ages past *any* fixed `N` still
+  finds the prior `TransactionCommit` and refuses the second append. Window size
+  stops being a correctness parameter at all.
+
+The one forbidden state — a NEW, committed-*looking* canonical ref with **no**
+backing oplog entry — remains structurally impossible on every cell, because
+nothing publishes a canonical ref before its phase-4 oplog entry is durable, and
+the only post-crash residue (a *lagging* OLD ref with the entry already present)
+is reconciled by the `open` gate before any reader resolves it. Every cell of
+{daemon, CLI} × {immediate, delayed} preserves `committed ⇔ oplog entry exists`;
+that is the close-the-class result, and the impl epic (§6 O1, O7) carries the two
+mechanisms — the universal `open` gate and the unbounded index — as the concrete
+deliverables that make this matrix true in code.
 
 ---
 
@@ -730,18 +881,23 @@ ref publish to **after** it as a post-commit materialization (§2.2 phases 4→5
    `refs_transactions.rs:219-224`) under phase 3 — CAS-validated against the
    on-disk value but **not** renamed; its rewind is "unlink the temp file," since
    no canonical ref was published pre-commit;
-3. the commit is the idempotent oplog append
-   (`record_batch_scoped_if_no_transaction`, `oplog_core.rs:281`);
+3. the commit is the oplog append deduplicated by the **unbounded indexed
+   `transaction_id` lookup** (§2.2 "Idempotency of the commit") — *not* the
+   window-bounded `record_batch_scoped_if_no_transaction` (`oplog_core.rs:281`),
+   so a delayed crash-retry stays exact-once;
 4. only then (phase 5) does the executor rename the ref temp onto the canonical
    path + `sync_directory`, publishing it to lock-free readers.
 
 A crash before the append publishes nothing (canonical ref untouched, temp file
-swept). A crash after the append but before the rename is repaired by startup
-recovery, which folds the committed `OpRecord::Snapshot { new_state, thread }`
-(`oplog_types.rs:18-22`) from the oplog tail and re-publishes the ref (§2.2
-recovery). This **closes** the ref-moved-but-not-recorded window rather than
-merely shrinking it — there is no longer any ordering in which a published ref
-lacks a backing committed entry. This is the cleanest demonstration that the
+swept). A crash after the append but before the rename is repaired by the
+**`Repository::open` recovery gate** (`repository.rs:594`, §2.2 recovery) — which
+runs for the daemon *and* for the next direct CLI invocation alike, so even a
+daemonless `heddle capture`/`status` self-repairs — folding the committed
+`OpRecord::Snapshot { new_state, thread }` (`oplog_types.rs:18-22`) from the oplog
+tail and re-publishing the ref. This **closes** the ref-moved-but-not-recorded
+window for every reader path rather than merely shrinking it (or covering only
+daemon readers) — there is no longer any ordering in which a published ref lacks
+a backing committed entry. This is the cleanest demonstration that the
 primitive *strengthens* an existing contract rather than just refactoring it.
 Nests: no. Eager: no.
 
@@ -804,13 +960,14 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
   publish *after* it (§2.2 phases 4→5) changes the crash window the R7 test
   (`fault_injection.rs:157`) pins. The impl must (a) add a new fault checkpoint
   `*_after_oplog_before_ref_publish`, (b) test that a crash there leaves the ref
-  at its OLD value with the oplog entry present, and (c) test that startup
-  recovery (`replay_active_transactions`, extended to fold the committed oplog
-  tail) re-publishes the ref to its committed target — i.e. the
-  `committed ⇒ ref eventually materializes` half. The pre-commit half (crash
-  before the append publishes nothing; temp file swept) is the cheaper test.
-  Strictly strengthens the contract, but the recovery extension is real new code,
-  not just a reorder.
+  at its OLD value with the oplog entry present, and (c) test that the
+  `Repository::open` recovery gate (§2.2, O7) re-publishes the ref to its
+  committed target — i.e. the `committed ⇒ ref eventually materializes` half —
+  **and test it on the direct-CLI path with no daemon running**, not only via the
+  daemon's `replay_active_transactions`, so the daemonless reader is covered. The
+  pre-commit half (crash before the append publishes nothing; temp file swept) is
+  the cheaper test. Strictly strengthens the contract, but the recovery gate is
+  real new code, not just a reorder.
 - **O2 — Lock ordering / deadlock.** The root `Tx` holds the refs lock and the
   oplog write lock simultaneously. Any *other* path that takes both must take
   them in the same order. The impl must audit for the reverse order (a grep for
@@ -838,6 +995,30 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
   Stable Rust has no negative bounds, so this is the only way to make "both" a
   compile error. Decide in impl; not needed for the no-leaked-compensator
   guarantee.
+- **O7 — The two close-the-class mechanisms are net-new code, with real cost
+  trade-offs (§2.2, §2.4).** Neither exists today; both must be built and both
+  carry a decision:
+  - **Universal `open` recovery gate.** Hooking ref materialization into
+    `Repository::open` (`repository.rs:594`) means *every* repo open — including
+    hot read-only commands (`heddle log`, `heddle status`) on a daemonless repo —
+    pays a fast-path check (oplog head read + the canonical value of each ref the
+    uncommitted tail names). The common no-lag case must be near-free (a couple of
+    reads, no writes, no lock) or it taxes every CLI invocation. If even that is
+    too much for pure reads, fall back to the **lock-free reader reconciliation**
+    dual (§2.2 alternative): readers resolve against the oplog tail and never need
+    the write lock. Decide which placement; both close the daemon-only gap, they
+    differ only in *where* the reconciliation runs. Care needed so the gate does
+    not itself need the very recovery it provides (bootstrap ordering inside
+    `open`).
+  - **Unbounded indexed `transaction_id` map.** The exact-once commit needs a
+    `transaction_id → committed-batch-id` index maintained under the oplog write
+    lock and persisted atomically with the log (so it can never disagree). This
+    replaces the window-bounded `record_batch_scoped_if_no_transaction`
+    (`oplog_core.rs:281`) *as the linearization point* — that helper stays for the
+    bounded rebase path. Open sub-questions: index persistence format (sidecar vs.
+    derived-on-load from a full scan), and whether to GC the index for very long
+    histories (it grows with distinct transaction ids). The full-tail-scan
+    fallback is the zero-new-state correctness floor if a sidecar is undesirable.
 
 ---
 
@@ -845,10 +1026,15 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
 
 **Recommendation: build the primitive, `dyn`-free, and migrate in the priority
 order above.** The bug class is real, recurring, and structurally closable; the
-executor-enforces-once shape fits heddle's existing type-state idioms; and the
-primitives it composes (CAS batch + reverse rollback, idempotent oplog commit,
-orphan-tolerant object store, atomic FS rename) already exist — the work is
-sequencing them under one ledger, not inventing durability.
+executor-enforces-once shape fits heddle's existing type-state idioms; and most
+primitives it composes (CAS batch + reverse rollback, a *window-bounded*
+idempotent oplog append, orphan-tolerant object store, atomic FS rename) already
+exist — the work is sequencing them under one ledger, not inventing durability.
+The two genuinely net-new pieces are the close-the-class mechanisms (O7): a
+**universal `Repository::open` recovery gate** (so materialization covers daemon
+*and* direct-CLI readers, not just daemon) and an **unbounded indexed
+`transaction_id` commit dedup** (so exact-once holds at any retry timing, not just
+within a 64-batch window).
 
 ### Proposed impl epic shape (blocked by this spike — confirm before filing)
 
@@ -856,11 +1042,14 @@ sequencing them under one ledger, not inventing durability.
 > recurring multi-step mutations.** Blocked by #330.
 
 1. **#330-impl-a — land the primitive (no migrations).** `AtomicMutation`,
-   `EagerMutation`, `Tx`, `execute`, the rewind ledger, `Drop` backstop, and the
-   reuse of `record_batch_scoped_if_no_transaction` for the idempotent commit.
-   Unit tests mirroring `refs_transactions.rs:341-377` (reverse-order rewind) +
-   a panic-unwind test. Effort: **xhigh** (intricate state machine + locks +
-   panic-safety). No call site changes yet.
+   `EagerMutation`, `Tx`, `execute`, the rewind ledger, `Drop` backstop, the
+   **unbounded indexed `transaction_id` commit dedup** (O7 — *not* a reuse of the
+   window-bounded `record_batch_scoped_if_no_transaction`), and the **universal
+   `Repository::open` recovery gate** (O7 — covers daemon and direct CLI). Unit
+   tests mirroring `refs_transactions.rs:341-377` (reverse-order rewind) + a
+   panic-unwind test + a delayed-retry exact-once test (retry past the old window)
+   + a daemonless-CLI recovery test (§2.4 matrix). Effort: **xhigh** (intricate
+   state machine + locks + panic-safety). No call site changes yet.
 2. **#330-impl-b — migrate `undo`/`redo` (#305).** First real user; proves the
    nesting path. Effort: xhigh. Blocked by a.
 3. **#330-impl-c — migrate `thread start` (#302), with the precise dir rewind.**
@@ -884,9 +1073,15 @@ revision, only one migration is in flight, not five.
 - [x] **(1) Trait API** — §2.1, `dyn`-free justified (§0, §3.1 note), trait +
   generic `execute<M>` chosen, fits type-state idiom.
 - [x] **(2) Commit-point + ordering** — §2.2: the oplog append is the **sole**
-  commit; refs are a post-commit materialized view; crash table + recovery
-  (`replay_active_transactions`, `transaction_replay.rs:205`) provably hold
-  `committed ⇔ oplog entry exists` against lock-free readers (`refs_head.rs:22-41`,
+  commit; refs are a post-commit materialized view; recovery is a **universal
+  `Repository::open` gate** (`repository.rs:594`, hit by daemon *and* direct CLI
+  `harness/mod.rs:127`) — **not daemon-only** (today's `replay_active_transactions`
+  runs solely from `local_daemon.rs:296`); commit dedup is an **unbounded indexed
+  `transaction_id` lookup**, *not* the window-bounded
+  `record_batch_scoped_if_no_transaction` (`oplog_core.rs:281`, the rebase caller's
+  64-batch window, `rebase_ops.rs:192-202`). §2.4 crash/retry-coverage matrix
+  proves `committed ⇔ oplog entry exists` across **{daemon, direct CLI} ×
+  {immediate, delayed} retry** against lock-free readers (`refs_head.rs:22-41`,
   `refs_manager.rs:129-135`) + temp→rename apply (`refs_transactions.rs:230`).
   §2.3 idempotency.
 - [x] **(3) Nesting** — §3: enroll-into-outermost (savepoint) default, eager-
