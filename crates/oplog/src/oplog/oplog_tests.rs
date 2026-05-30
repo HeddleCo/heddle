@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use objects::object::ChangeId;
+use objects::object::{ChangeId, ContentHash};
 use tempfile::TempDir;
 
 use super::oplog_backend::OpLogBackend;
@@ -303,6 +303,369 @@ fn record_batch_exactly_once_dedups_past_any_window() {
         )
         .unwrap();
     assert!(other.is_some(), "a different transaction id must commit");
+}
+
+/// rmp-serde round-trips every `OpRecord` variant — the on-disk encoding
+/// the oplog actually uses. Asserts the variant survives encode→decode
+/// unchanged (catches a reordered/inserted discriminant) and that
+/// `description()` produces a non-empty line for each. The new heddle#330
+/// tail variants (`RemoteThreadUpdate` / `RemoteThreadDelete` /
+/// `UndoRecoveryUpdate`) and the Fork/Collapse published-ref retrofit are
+/// the load-bearing cases.
+#[test]
+fn op_record_variants_roundtrip_and_describe() {
+    let st = ChangeId::from_bytes([3u8; 16]);
+    let st2 = ChangeId::from_bytes([5u8; 16]);
+    let blob = ContentHash::from_bytes([7u8; 32]);
+    let redaction = ContentHash::from_bytes([9u8; 32]);
+
+    let records = vec![
+        OpRecord::Snapshot {
+            new_state: st,
+            prev_head: Some(st2),
+            thread: Some("main".into()),
+        },
+        OpRecord::Snapshot {
+            new_state: st,
+            prev_head: None,
+            thread: None,
+        },
+        OpRecord::Goto {
+            target: st,
+            prev_head: Some(st2),
+        },
+        OpRecord::ThreadCreate {
+            name: "feat".into(),
+            state: st,
+        },
+        OpRecord::ThreadDelete {
+            name: "feat".into(),
+            state: st,
+        },
+        OpRecord::ThreadUpdate {
+            name: "feat".into(),
+            old_state: st2,
+            new_state: st,
+        },
+        // Fork retrofit: both published-ref shapes (attached thread / detached head).
+        OpRecord::Fork {
+            from: st2,
+            new_state: st,
+            thread: Some("topic".into()),
+            head: None,
+        },
+        OpRecord::Fork {
+            from: st2,
+            new_state: st,
+            thread: None,
+            head: Some(st),
+        },
+        // Collapse retrofit: published thread ref / detached head.
+        OpRecord::Collapse {
+            sources: vec![st, st2],
+            result: st,
+            thread: Some("trunk".into()),
+        },
+        OpRecord::Collapse {
+            sources: vec![st],
+            result: st2,
+            thread: None,
+        },
+        OpRecord::MarkerCreate {
+            name: "v1".into(),
+            state: st,
+        },
+        OpRecord::MarkerDelete {
+            name: "v1".into(),
+            state: st,
+        },
+        OpRecord::Checkpoint {
+            parent: Some(st2),
+            state: st,
+            thread: Some("agent".into()),
+        },
+        OpRecord::Checkpoint {
+            parent: None,
+            state: st,
+            thread: None,
+        },
+        OpRecord::TransactionAbort {
+            transaction_id: "tx".into(),
+            reason: "conflict".into(),
+        },
+        OpRecord::EphemeralThreadCollapse {
+            thread: "scratch".into(),
+            final_state: st,
+        },
+        OpRecord::ConflictResolved {
+            conflict_id: "c1".into(),
+            resolution: "ours".into(),
+        },
+        OpRecord::TransactionCommit {
+            transaction_id: "tx".into(),
+            op_count: 3,
+        },
+        OpRecord::Redact {
+            redaction_id: redaction,
+            blob,
+            state: st,
+            path: "secret.txt".into(),
+        },
+        OpRecord::Purge {
+            redaction_id: redaction,
+            blob,
+        },
+        OpRecord::FastForward {
+            source_thread: "topic".into(),
+            target_thread: "main".into(),
+            pre_target_id: st2,
+        },
+        OpRecord::FastForwardV2 {
+            source_thread: "topic".into(),
+            target_thread: "main".into(),
+            pre_target_id: st2,
+            post_target_id: st,
+        },
+        OpRecord::ThreadCreateV2 {
+            name: "feat".into(),
+            state: st,
+            manager_snapshot: Some(vec![1, 2, 3]),
+        },
+        OpRecord::GitCheckpoint {
+            branch: "main".into(),
+            state: st,
+            previous_git_oid: Some("abc".into()),
+            new_git_oid: "def".into(),
+        },
+        OpRecord::GitCheckpoint {
+            branch: "main".into(),
+            state: st,
+            previous_git_oid: None,
+            new_git_oid: "def".into(),
+        },
+        // heddle#330 r9 tail variants.
+        OpRecord::RemoteThreadUpdate {
+            remote: "origin".into(),
+            thread: "main".into(),
+            state: st,
+        },
+        OpRecord::RemoteThreadDelete {
+            remote: "origin".into(),
+            thread: "main".into(),
+            state: st,
+        },
+        OpRecord::UndoRecoveryUpdate { state: st },
+    ];
+
+    for rec in &records {
+        assert!(
+            !rec.description().is_empty(),
+            "description must be non-empty for {rec:?}"
+        );
+        let bytes = rmp_serde::to_vec(rec).expect("encode");
+        let back: OpRecord = rmp_serde::from_slice(&bytes).expect("decode");
+        // Re-encode the decoded value; identical bytes ⇒ structural round-trip.
+        let bytes2 = rmp_serde::to_vec(&back).expect("re-encode");
+        assert_eq!(bytes, bytes2, "round-trip mismatch for {rec:?}");
+        assert_eq!(back.description(), rec.description());
+    }
+}
+
+/// The Fork/Collapse published-ref fields default to `None` when absent —
+/// pre-retrofit records (encoded without `thread`/`head`) must still
+/// deserialize via `#[serde(default)]`. Round-trip the retrofit fields and
+/// assert they survive.
+#[test]
+fn fork_collapse_published_ref_fields_roundtrip() {
+    let from = ChangeId::from_bytes([1u8; 16]);
+    let new_state = ChangeId::from_bytes([2u8; 16]);
+
+    let fork = OpRecord::Fork {
+        from,
+        new_state,
+        thread: Some("published".into()),
+        head: Some(new_state),
+    };
+    let back: OpRecord = rmp_serde::from_slice(&rmp_serde::to_vec(&fork).unwrap()).unwrap();
+    match back {
+        OpRecord::Fork {
+            from: f,
+            new_state: n,
+            thread,
+            head,
+        } => {
+            assert_eq!(f, from);
+            assert_eq!(n, new_state);
+            assert_eq!(thread.as_deref(), Some("published"));
+            assert_eq!(head, Some(new_state));
+        }
+        other => panic!("expected Fork, got {other:?}"),
+    }
+
+    let collapse = OpRecord::Collapse {
+        sources: vec![from, new_state],
+        result: new_state,
+        thread: Some("trunk".into()),
+    };
+    let back: OpRecord = rmp_serde::from_slice(&rmp_serde::to_vec(&collapse).unwrap()).unwrap();
+    match back {
+        OpRecord::Collapse {
+            sources,
+            result,
+            thread,
+        } => {
+            assert_eq!(sources, vec![from, new_state]);
+            assert_eq!(result, new_state);
+            assert_eq!(thread.as_deref(), Some("trunk"));
+        }
+        other => panic!("expected Collapse, got {other:?}"),
+    }
+}
+
+/// Exercises every recording method on `OpLog` (the `oplog_records.rs`
+/// surface) and reads the persisted variant back. Confirms `record_fork`
+/// writes its args in the documented order (`from = source`) and that the
+/// published-ref fields land on the stored record.
+#[test]
+fn record_methods_persist_expected_variants() {
+    let (_temp, oplog) = create_oplog();
+    let from = ChangeId::generate();
+    let result = ChangeId::generate();
+    let blob = ContentHash::from_bytes([7u8; 32]);
+    let redaction = ContentHash::from_bytes([9u8; 32]);
+
+    oplog.record_goto(&result, Some(&from), Some("lane")).unwrap();
+    oplog
+        .record_thread_create("feat", &result, Some(vec![9, 8, 7]), Some("lane"))
+        .unwrap();
+    oplog.record_thread_delete("legacy", &result, None).unwrap();
+    let rename_ids = oplog
+        .record_thread_rename("old", "new", &result, Some("lane"))
+        .unwrap();
+    assert_eq!(rename_ids.len(), 2);
+    oplog
+        .record_fork(&from, &result, Some("topic"), None)
+        .unwrap();
+    oplog
+        .record_collapse(&[from, result], &result, Some("trunk"))
+        .unwrap();
+    oplog.record_marker_create("v1", &result).unwrap();
+    oplog.record_marker_delete("v1", &result).unwrap();
+    oplog
+        .record_redact(&redaction, &blob, &result, "secret.txt", Some("lane"))
+        .unwrap();
+    oplog.record_purge(&redaction, &blob, Some("lane")).unwrap();
+    oplog
+        .record_fast_forward("topic", "main", &from, &result, Some("lane"))
+        .unwrap();
+
+    // record_fork must store `from` as the source state, not the result.
+    let entries = oplog.recent(64).unwrap();
+    let fork = entries
+        .iter()
+        .find_map(|e| match &e.operation {
+            OpRecord::Fork {
+                from: f,
+                new_state,
+                thread,
+                head,
+            } => Some((*f, *new_state, thread.clone(), *head)),
+            _ => None,
+        })
+        .expect("a Fork record was written");
+    assert_eq!(fork.0, from, "record_fork's `from` must be the source state");
+    assert_eq!(fork.1, result);
+    assert_eq!(fork.2.as_deref(), Some("topic"));
+    assert_eq!(fork.3, None);
+
+    // A ThreadCreate is always emitted as the V2 variant with the snapshot.
+    let created = entries.iter().find_map(|e| match &e.operation {
+        OpRecord::ThreadCreateV2 {
+            name,
+            manager_snapshot,
+            ..
+        } if name == "feat" => Some(manager_snapshot.clone()),
+        _ => None,
+    });
+    assert_eq!(created, Some(Some(vec![9u8, 8, 7])));
+
+    // The fast-forward always lands as the V2 variant carrying post_target_id.
+    assert!(entries.iter().any(|e| matches!(
+        &e.operation,
+        OpRecord::FastForwardV2 { post_target_id, .. } if *post_target_id == result
+    )));
+}
+
+/// `head_id()` reads the fixed-size header generation gate: 0 before any
+/// write (and for a not-yet-created log), then the last appended id.
+#[test]
+fn head_id_tracks_generation() {
+    let temp = TempDir::new().unwrap();
+    let heddle_dir = temp.path().join(".heddle");
+    std::fs::create_dir_all(&heddle_dir).unwrap();
+    let oplog = OpLog::new_unattributed(&heddle_dir);
+
+    // Not-yet-initialized oplog reads as generation 0.
+    assert_eq!(oplog.head_id().unwrap(), 0);
+
+    oplog.init().unwrap();
+    assert_eq!(oplog.head_id().unwrap(), 0);
+
+    oplog
+        .record_snapshot(&ChangeId::generate(), None, None, Some("lane"))
+        .unwrap();
+    assert_eq!(oplog.head_id().unwrap(), 1);
+
+    let ids = oplog
+        .record_batch(vec![
+            OpRecord::MarkerCreate {
+                name: "v1".into(),
+                state: ChangeId::generate(),
+            },
+            OpRecord::MarkerDelete {
+                name: "v1".into(),
+                state: ChangeId::generate(),
+            },
+        ])
+        .unwrap();
+    assert_eq!(oplog.head_id().unwrap(), *ids.last().unwrap());
+}
+
+/// `record_batch_exactly_once` returns `Ok(Some(empty))` for an empty op
+/// list without writing, and commits two *distinct* transaction ids
+/// independently (the no-collision path).
+#[test]
+fn record_batch_exactly_once_empty_and_distinct_ids() {
+    let (_temp, oplog) = create_oplog();
+
+    let empty = oplog
+        .record_batch_exactly_once(Vec::new(), Some("lane"), "tx-empty")
+        .unwrap();
+    assert_eq!(empty, Some(Vec::new()));
+    assert_eq!(oplog.head_id().unwrap(), 0, "empty commit writes nothing");
+
+    let a = oplog
+        .record_batch_exactly_once(
+            vec![OpRecord::TransactionCommit {
+                transaction_id: "tx-a".into(),
+                op_count: 1,
+            }],
+            Some("lane"),
+            "tx-a",
+        )
+        .unwrap();
+    let b = oplog
+        .record_batch_exactly_once(
+            vec![OpRecord::TransactionCommit {
+                transaction_id: "tx-b".into(),
+                op_count: 1,
+            }],
+            Some("lane"),
+            "tx-b",
+        )
+        .unwrap();
+    assert!(a.is_some() && b.is_some());
+    assert_ne!(a, b, "distinct transaction ids commit independently");
 }
 
 /// Covers the **default** (non-atomic) `record_batch_scoped_if_no_transaction`
