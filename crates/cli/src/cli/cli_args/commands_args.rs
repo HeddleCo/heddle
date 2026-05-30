@@ -192,7 +192,11 @@ pub struct SnapshotArgs {
     /// A first-class clap flag so the whole command line (including global
     /// options in any spelling clap accepts) is parsed by clap; the dispatch
     /// arm inspects the parsed result rather than scanning raw tokens.
-    #[arg(long, hide = true)]
+    /// Visible (not `hide`d): it is documented publicly and the command
+    /// catalog that `doctor docs`/`doctor schemas` validate against only
+    /// enumerates non-hidden args — a documented-but-hidden flag would
+    /// drift the machine contract.
+    #[arg(long)]
     pub help_agent: bool,
 
     /// Natural language intent for this recoverable step.
