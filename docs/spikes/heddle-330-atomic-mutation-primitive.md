@@ -162,10 +162,14 @@ sketch.
   canonical ref (phase 5), so the **46 direct ref-write call sites** (verified
   2026-05-30; the same enumeration r7 did for readers) inherit correct ordering **by
   construction**, and no production path publishes a ref without a preceding,
-  replayable, ref-identifying record. `Fork`/`Collapse` gain the published thread
-  name + HEAD fields (additive tail change, pre-1.0, no migration shim — `FastForwardV2`
-  `oplog_types.rs:169` is the existing precedent of a record that carries *both* the
-  published ref identity and its target). So **after the proposed work lands**, "zero
+  replayable, ref-identifying record. The published thread name + HEAD ride on **new
+  tail variants** `ForkV2`/`CollapseV2` (the old ref-blind `Fork`/`Collapse` are kept,
+  unmodified, so pre-existing oplog entries still deserialize) — additive at the enum
+  tail, pre-1.0, no migration shim, exactly as `FastForward`→`FastForwardV2`
+  (`oplog_types.rs:139`,`:169`) evolved that record. Mutating the existing `Fork`/`Collapse`
+  bodies in place would change their msgpack payload shape under an unchanged
+  discriminant index and break old-log reads — so the identity is added as new
+  discriminants, not new fields on the old ones. So **after the proposed work lands**, "zero
   ref-write paths without a committed ref-carrying record" becomes **structural on
   BOTH sides** — write chokepoint (record before publish) + read chokepoint (reconcile
   on read). Today neither chokepoint exists; both are impl-epic deliverables (§6/§7).
@@ -564,22 +568,29 @@ confirms the proposed variant names appear only in this doc):
 | `Checkpoint { parent, state, thread }` (`:53`) | EXISTING | thread + HEAD | ✅ `thread` + `state` | none — already correct |
 | `FastForwardV2 { source_thread, target_thread, pre_target_id, post_target_id }` (`:169`) | EXISTING | `target_thread` ref | ✅ `target_thread` + `post_target_id` — **the precedent**: heddle#99 r2 added `post_target_id` *specifically* so replay names the published ref *and* its target | none — already correct |
 | `RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate` | **PROPOSED (r9)** — **do NOT exist** in the tree; enum tail ends at `GitCheckpoint` (`oplog_types.rs:223`); the corresponding writes (`set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`, `refs_manager.rs:261`,`:284`,`:242`) currently write the ref **directly with no `OpRecord`** | remote-thread / undo-recovery | (designed to) ✅ remote+thread / recovery target | **BUILD** → add these three tail variants + route the three direct setters through the oplog-commit path so their reconciliation is non-vacuous |
-| **`Fork { from, new_state }`** (`:39`) | **EXISTING, ref-blind → PROPOSED retrofit** | thread + HEAD (`fork.rs:85`,`:88`) | ❌ **no** published thread name, **no** HEAD | **BUILD** → add `thread: Option<String>` (the published thread name, `None` for detached) + the HEAD it set |
-| **`Collapse { sources, result }`** (`:41-44`) | **EXISTING, ref-blind → PROPOSED retrofit** | thread *or* detached HEAD (`collapse.rs:101`,`:104`) | ❌ carries `result` target but **not** which ref it published | **BUILD** → add the published-ref discriminant (the thread name, or detached-HEAD marker) |
+| **`Fork { from, new_state }`** (`:39`) | **EXISTING, ref-blind → KEPT; new tail `ForkV2` PROPOSED** | thread + HEAD (`fork.rs:85`,`:88`) | ❌ **no** published thread name, **no** HEAD | **BUILD** → add a new tail variant `ForkV2 { from, new_state, thread: Option<String>, head }` (published thread name, `None` for detached, + the HEAD it set); keep `Fork` ref-blind for old logs |
+| **`Collapse { sources, result }`** (`:41-44`) | **EXISTING, ref-blind → KEPT; new tail `CollapseV2` PROPOSED** | thread *or* detached HEAD (`collapse.rs:101`,`:104`) | ❌ carries `result` target but **not** which ref it published | **BUILD** → add a new tail variant `CollapseV2 { sources, result, <published-ref discriminant> }` (thread name or detached-HEAD marker); keep `Collapse` ref-blind for old logs |
 
 So among the variants **in the tree today**, only **`Fork` and `Collapse`** lack ref
 identity (every other *existing* publishing variant — including `FastForwardV2`, the
 *model* — already carries it); and the **remote-thread / undo-recovery** publishing
 variants **do not exist at all yet** — they are net-new spike-proposed work, not
-"covered." The retrofit adds
-the missing field(s) **at the enum tail** (or, where a variant body must change shape,
-as a tail `…V2` variant, exactly as `FastForwardV2` and `ThreadCreateV2` did) so
-existing on-disk discriminants are unperturbed (`oplog_types.rs:12-14`: rmp-serde
-encodes variants by index; append-only, no reorder). Per the pre-1.0 no-backcompat
-stance this is a **straight additive** oplog-format change — **no migration shim**; old
-logs simply never contain the retrofitted field and continue to read. Like r9's
-variants this is **format-stability-sensitive** and reviewed as such (§6 O9). Once
-`Fork`/`Collapse` carry the published ref, the chokepoint's phase-4 record is
+"covered." The retrofit adds the ref identity as **new tail variants**
+`ForkV2`/`CollapseV2` — *not* by adding fields to the existing `Fork`/`Collapse`, which
+keep their `from,new_state` / `sources,result` bodies untouched so old logs read. This
+is the same shape-change escape `FastForwardV2` and `ThreadCreateV2` already took: when
+a variant's body must change, you append a `…V2` discriminant rather than mutate the V1
+body (`oplog_types.rs:12-14`: rmp-serde encodes variants by index; append-only, no
+reorder). The "no-shim additive" property holds **only** for new tail discriminants —
+the r9 remote/undo variants and these `…V2` variants — because old entries keep matching
+their original variants byte-for-byte. **Mutating** an existing variant's payload (e.g.
+adding a field to `Fork`) would change that variant's msgpack shape under an unchanged
+discriminant index, so pre-existing oplog entries deserialize wrong or fail — that path
+is **not** taken. Per the pre-1.0 no-backcompat stance the new variants are a **straight
+additive** oplog-format change — **no migration shim**; old logs simply never contain the
+V2 discriminants and continue to read. Like r9's variants this is
+**format-stability-sensitive** and reviewed as such (§6 O9). Once `ForkV2`/`CollapseV2`
+carry the published ref, the chokepoint's phase-4 record is
 replayable for *every* writer, and the §2.4 universal proof spans the write side too.
 
 **Reader model — per-read reconciliation (the universal correctness rule).**
@@ -1327,8 +1338,8 @@ Together they hold the invariant for every writer, reader, and crash timing:
   `collapse.rs:99-108`, which published *before* recording) — and any future writer
   does too, because there is no raw publish to call around the chokepoint. Combined
   with the variant audit (every publishing `OpRecord` now names the ref it publishes —
-  `Fork`/`Collapse` retrofitted to carry the published thread+HEAD, the rest already
-  do), this guarantees the forbidden state — a NEW, committed-*looking* canonical ref
+  new tail variants `ForkV2`/`CollapseV2` carry the published thread+HEAD, the rest
+  already do), this guarantees the forbidden state — a NEW, committed-*looking* canonical ref
   with **no backing ref-carrying record** — is **unreachable on the write path**, for
   *any* writer, not merely for capture. This is the structural dual of the read
   chokepoint: r7 made every *read* reconcile; r11 makes every *write* record-first.
@@ -1827,8 +1838,10 @@ call sites (the drip pattern at the writer level), r11 routes **all** ref public
 through the single **write chokepoint** — the `RefManager` write methods, which append
 the ref-carrying record (phase 4) before publishing (phase 5) — so the **46** direct
 ref-write call sites (§2.2 "The write chokepoint") inherit correct ordering by
-construction, and `Fork`/`Collapse` are retrofitted to carry the published thread name
-+ HEAD (additive tail change, no shim — `FastForwardV2` `:169` is the precedent). After
+construction, and the published thread name + HEAD are carried on **new tail variants**
+`ForkV2`/`CollapseV2` (the old ref-blind `Fork`/`Collapse` retained for old-log reads;
+additive new discriminants, no shim — `FastForward`→`FastForwardV2` `:139`,`:169` is the
+precedent, since mutating the existing bodies would change their msgpack shape). After
 r11 there are **zero** ref-write paths that publish without a *preceding, ref-carrying*
 record — the write-side mirror of r7's read chokepoint. (The 46 sites are not migrated
 to `AtomicMutation` here; they simply route their existing publishes through the
@@ -1845,8 +1858,8 @@ chokepoint, exactly as readers were not migrated to `execute` but route through
 | op-id reserve | `operation_id.rs:115` | as sub-op | **yes** | 4 | eager-commit exemplar; stale `InFlight` on rollback |
 | ref writes | `refs_manager.rs:319` | n/a | no | — | already in-domain atomic; becomes the "stage refs" leg |
 | remote/undo refs | `refs_manager.rs:242`,`:261`,`:284` | n/a | no | — | were direct-write, no `OpRecord` (cid 3328869364); r9 routes through oplog-commit + new variants so reconciliation is non-vacuous |
-| fork | `fork.rs:74-92` | no | no | — | published thread+HEAD *before* `record_fork` (`:94`) and `OpRecord::Fork` was ref-blind (cid 3328926767); r11 chokepoint records-first + `Fork` carries published thread+HEAD |
-| collapse | `collapse.rs:99-108` | no | no | — | published thread/HEAD *before* `record_collapse` (`:112`) and `OpRecord::Collapse` was ref-blind (cid 3328926767); r11 chokepoint records-first + `Collapse` carries published ref |
+| fork | `fork.rs:74-92` | no | no | — | published thread+HEAD *before* `record_fork` (`:94`) and `OpRecord::Fork` was ref-blind (cid 3328926767); r11 chokepoint records-first + new tail `ForkV2` carries published thread+HEAD (old `Fork` kept for old-log reads) |
+| collapse | `collapse.rs:99-108` | no | no | — | published thread/HEAD *before* `record_collapse` (`:112`) and `OpRecord::Collapse` was ref-blind (cid 3328926767); r11 chokepoint records-first + new tail `CollapseV2` carries published ref (old `Collapse` kept for old-log reads) |
 
 ---
 
@@ -2010,16 +2023,23 @@ chokepoint, exactly as readers were not migrated to `execute` but route through
   `repo`/`oplog`, since `refs` has no `oplog` dep). **(b)** Add a one-line conformance
   check (the write-side analog of O7's read-side check) asserting the raw publish has
   no caller but the chokepoint — so the 46 sites and any future writer cannot publish
-  around it. **(c)** Retrofit `OpRecord::Fork` (`oplog_types.rs:38`) to carry the
-  published thread name (`Option<String>`, `None` for detached) + HEAD, and `Collapse`
-  (`:40`) to carry the published-ref discriminant (thread name or detached-HEAD marker)
-  — additive at the enum tail (or a `…V2` variant where the body must change shape,
-  per `FastForwardV2`/`ThreadCreateV2`), and add their replay/reconcile arms (materialize
-  the named thread/HEAD from the record). **(d)** Fix `cmd_fork` (`fork.rs:74-92`) and
-  `cmd_collapse` (`collapse.rs:99-108`) to publish via the chokepoint, eliminating the
-  current publish-before-record order. **Format implication:** retrofitting `Fork`/`Collapse`
-  changes the persisted record set — a **straight additive** pre-1.0 change, **no
-  migration shim** (old logs carry the un-retrofitted shape and read fine), and
+  around it. **(c)** Add **new tail variants** `ForkV2 { from, new_state, thread:
+  Option<String>, head }` (published thread name, `None` for detached, + HEAD) and
+  `CollapseV2 { sources, result, <published-ref discriminant> }` (thread name or
+  detached-HEAD marker) after `GitCheckpoint` (`oplog_types.rs:222-228`); **keep** the
+  existing `Fork` (`:38`) / `Collapse` (`:40`) ref-blind so pre-existing oplog entries
+  still deserialize. This is the `FastForward`→`FastForwardV2` / `ThreadCreate`→
+  `ThreadCreateV2` escape: when a variant body must change shape you append a `…V2`
+  discriminant, never mutate the V1 body (mutating it would change that variant's msgpack
+  payload under an unchanged discriminant index and break old-log reads). Add replay/
+  reconcile arms for both V2 variants (materialize the named thread/HEAD from the record),
+  and keep the old `Fork`/`Collapse` arms as best-effort/ref-blind for legacy entries.
+  **(d)** Fix `cmd_fork` (`fork.rs:74-92`) and `cmd_collapse` (`collapse.rs:99-108`) to
+  emit the V2 variants and publish via the chokepoint, eliminating the current
+  publish-before-record order. **Format implication:** adding `ForkV2`/`CollapseV2`
+  extends the persisted record set with **new tail discriminants** — a **straight
+  additive** pre-1.0 change, **no migration shim** (old logs only ever hold the V1
+  variants and read fine; nothing mutates an existing variant's shape), and
   **format-stability-sensitive**, reviewed as such (cf. O8). The 46 sites are **not**
   migrated to `AtomicMutation` here — they keep their existing publishes and merely
   route through the chokepoint; full `execute` migration is the §7 epic's job.
@@ -2042,8 +2062,10 @@ canonical ref (phase 5), so the **46** direct ref-write call sites — including
 `cmd_fork` (`fork.rs:74-92`) and `cmd_collapse` (`collapse.rs:99-108`), which today
 publish *before* recording — inherit correct ordering by construction, and the two
 ref-blind variants (`OpRecord::Fork`/`Collapse`, `oplog_types.rs:38`,`:40`) are
-retrofitted to carry the published thread name + HEAD (`FastForwardV2` `:169` is the
-precedent). On the **read** side,
+superseded by new tail variants `ForkV2`/`CollapseV2` carrying the published thread name
++ HEAD — the old variants kept for old-log reads (`FastForward`→`FastForwardV2` `:169` is
+the precedent for evolving a variant's shape via a `…V2` tail, not by mutating its body).
+On the **read** side,
 **per-read reconciliation inside _one internal `reconciled_load` primitive_** —
 the sole path for **logical reads** to touch raw ref storage (the maintenance path
 `pack_refs` touches the loaders directly to compact storage but serves no logical
@@ -2103,14 +2125,16 @@ materialization is kept only as an optimization on top of the read-side guarante
    the recorder injected by the same dependency inversion as the `RefReconciler`. It
    lands the three r9 `OpRecord` variants
    (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, O8) **and** the
-   `Fork`/`Collapse` ref-carrying retrofit (O9 — `Fork` gains the published thread name
-   + HEAD, `Collapse` the published-ref discriminant), and routes
+   `Fork`/`Collapse` ref-carrying retrofit (O9 — new tail variants `ForkV2` carrying the
+   published thread name + HEAD and `CollapseV2` the published-ref discriminant, old
+   ref-blind variants kept for old-log reads), and routes
    `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`
    (`refs_manager.rs:261`/`:284`/`:242`) plus `cmd_fork` (`fork.rs:74-92`) and
    `cmd_collapse` (`collapse.rs:99-108`) through the oplog-commit point + phase-5
    publish, so no ref class and no writer is a direct-write/wrong-order exception and
    the ten-reader reconciliation is non-vacuous (the additive oplog-format bump for the
-   r9 variants + the `Fork`/`Collapse` fields, no migration shim, is part of this issue).
+   r9 variants + the new `ForkV2`/`CollapseV2` tail variants, no migration shim, is part
+   of this issue).
    Unit tests mirroring `refs_transactions.rs:341-377` (reverse-order
    rewind) + a panic-unwind test + a delayed-retry exact-once test (retry past the
    old window) + reconciliation tests on **all ten read methods** (a conformance
@@ -2245,10 +2269,12 @@ revision, only one migration is in flight, not five.
   `grpc_hosted/{hydration,sync,mod}.rs`, `repository_thread_materialize.rs`, …) inherit
   correct ordering **by construction**, and any future writer does too — there is no raw
   publish to call around the chokepoint (a one-line write-side conformance check, the
-  analog of the read-side one). `Fork`/`Collapse` are retrofitted to carry the published
-  thread name + HEAD (additive tail change, no migration shim — `FastForwardV2`
-  `oplog_types.rs:169` is the precedent of a record that carries the published ref + its
-  target; every other publishing variant already does). The recorder is injected by the
+  analog of the read-side one). The published thread name + HEAD are carried on **new tail
+  variants** `ForkV2`/`CollapseV2` — the old ref-blind `Fork`/`Collapse` are kept
+  untouched so pre-existing oplog entries still deserialize (additive new discriminants,
+  no migration shim — `FastForward`→`FastForwardV2` `oplog_types.rs:139`,`:169` is the
+  precedent of evolving a publishing variant's shape via a `…V2` tail rather than mutating
+  the V1 body; every other publishing variant already carries its ref). The recorder is injected by the
   **same dependency inversion** as the `RefReconciler` (a trait in `refs`, concrete impl
   from `repo`/`oplog`, since `refs` has no `oplog` dep). After r11, "zero ref-write paths
   without a *preceding, ref-carrying* committed record" is **structural on both sides**.
