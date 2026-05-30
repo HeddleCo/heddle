@@ -8452,3 +8452,142 @@ fn git_overlay_matrix_continue_retry_loops_block_then_succeed_after_resolution()
     );
     assert_operator_json_contract(&continued_git, "merge");
 }
+
+// ---------------------------------------------------------------------------
+// `--no-thread` lane-existence conformance (heddle#307, Codex cid 3327525677).
+//
+// The bug class: `actor explain` (recommend) and `actor spawn --no-thread`
+// (execute) decided "is there a current lane to attach to?" with *different*
+// predicates. In a git-overlay repo, Git HEAD can be detached while
+// `.heddle/HEAD` still names a stale attached thread; `head_ref()` then falls
+// back to that stale `Attached`, so the execute path attached the actor to a
+// dead branch and the recommend path advertised a `--no-thread` command that
+// cannot succeed. The fix routes BOTH paths through the single
+// git-overlay-aware predicate `Repository::current_lane()`. This harness pins
+// the invariant across the whole matrix: recommend and execute must agree.
+
+/// `actor explain` recommends `--no-thread` iff a current lane exists.
+fn explain_recommends_no_thread(path: &std::path::Path) -> bool {
+    let output = heddle_output_with_env(
+        &["actor", "explain", "--output", "json"],
+        Some(path),
+        &[
+            ("CODEX_THREAD_ID", "thread-cold-agent"),
+            ("CODEX_MODEL", "gpt-5.3-codex"),
+            ("CODEX_REASONING_EFFORT", "high"),
+        ],
+    )
+    .expect("actor explain should run");
+    assert!(
+        output.status.success(),
+        "actor explain should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
+    parsed["recommended_action"]
+        .as_str()
+        .expect("recommended_action should be a string")
+        .contains("--no-thread")
+}
+
+/// `actor spawn --no-thread` succeeds iff a current lane exists.
+fn spawn_no_thread_succeeds(path: &std::path::Path) -> bool {
+    heddle(
+        &[
+            "actor",
+            "spawn",
+            "--no-thread",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.3-codex",
+        ],
+        Some(path),
+    )
+    .is_ok()
+}
+
+#[test]
+fn git_overlay_no_thread_lane_predicate_recommend_and_execute_agree() {
+    // (c) On-lane: adopted git-overlay repo sits attached to `main`. A lane
+    // exists, so recommend and execute both accept `--no-thread`.
+    let on_lane = TempDir::new().unwrap();
+    init_git_repo_with_branch(on_lane.path(), "main");
+    std::fs::write(on_lane.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(on_lane.path(), "base");
+    heddle_adopt(on_lane.path());
+    assert_eq!(
+        Repository::open(on_lane.path())
+            .unwrap()
+            .current_lane()
+            .unwrap(),
+        Some("main".to_string()),
+        "adopted git-overlay repo should report `main` as the current lane"
+    );
+    assert!(
+        explain_recommends_no_thread(on_lane.path()),
+        "on-lane: explain should recommend --no-thread"
+    );
+    assert!(
+        spawn_no_thread_succeeds(on_lane.path()),
+        "on-lane: spawn --no-thread should succeed"
+    );
+
+    // (a) Detached Git HEAD whose commit has NO Heddle mapping. We adopt, then
+    // detach and make a *fresh* Git commit directly (bypassing heddle) so the
+    // detached commit is provably unmapped. `read_head_state` defaults to
+    // `Attached{main}` when `.heddle/HEAD` is absent, so the old `head_ref()`
+    // fell back to that stale `main` thread — but there is no lane to attach to.
+    let detached_no_mapping = TempDir::new().unwrap();
+    init_git_repo_with_branch(detached_no_mapping.path(), "main");
+    std::fs::write(detached_no_mapping.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(detached_no_mapping.path(), "base");
+    heddle_adopt(detached_no_mapping.path());
+    git(&["checkout", "--detach"], detached_no_mapping.path());
+    git(
+        &["commit", "--allow-empty", "-m", "unmapped detached commit"],
+        detached_no_mapping.path(),
+    );
+    assert_eq!(
+        Repository::open(detached_no_mapping.path())
+            .unwrap()
+            .current_lane()
+            .unwrap(),
+        None,
+        "detached Git HEAD with no Heddle mapping must report no current lane, \
+         not the stale `.heddle/HEAD` thread"
+    );
+    assert!(
+        !explain_recommends_no_thread(detached_no_mapping.path()),
+        "detached-no-mapping: explain must NOT recommend --no-thread (mint instead)"
+    );
+    assert!(
+        !spawn_no_thread_succeeds(detached_no_mapping.path()),
+        "detached-no-mapping: spawn --no-thread must be rejected, not attached to a stale branch"
+    );
+
+    // (b) Detached Git HEAD whose commit DOES map to a Heddle change (the
+    // adopted tip). It is still detached — no attached lane — so recommend and
+    // execute must agree on rejecting `--no-thread`.
+    let detached_mapped = TempDir::new().unwrap();
+    init_git_repo_with_branch(detached_mapped.path(), "main");
+    std::fs::write(detached_mapped.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(detached_mapped.path(), "base");
+    std::fs::write(detached_mapped.path().join("next.txt"), "next\n").unwrap();
+    git_commit_all(detached_mapped.path(), "next");
+    heddle_adopt(detached_mapped.path());
+    let mapped_tip = git_stdout(detached_mapped.path(), &["rev-parse", "HEAD"]);
+    git(&["checkout", &mapped_tip], detached_mapped.path());
+    let recommend = explain_recommends_no_thread(detached_mapped.path());
+    let execute = spawn_no_thread_succeeds(detached_mapped.path());
+    assert_eq!(
+        recommend, execute,
+        "detached-with-mapping: recommend and execute must agree on --no-thread"
+    );
+    assert!(
+        !execute,
+        "detached-with-mapping: a detached HEAD has no attached lane, so --no-thread is rejected"
+    );
+}

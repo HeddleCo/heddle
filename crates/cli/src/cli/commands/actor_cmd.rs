@@ -274,13 +274,17 @@ pub async fn cmd_actor_spawn(
         ))
     })?;
 
-    // `--no-thread` attaches the actor to the current thread rather than
-    // minting a fresh `actor/<session>` thread. Resolve it up front so a
-    // detached HEAD fails cleanly before we create any registry entry.
+    // `--no-thread` attaches the actor to the current lane rather than minting
+    // a fresh `actor/<session>` thread. `current_lane()` is the single source
+    // of truth for "is there a lane to attach to?": it consults the git-overlay
+    // HEAD state, so a detached Git HEAD reports no lane even when `.heddle/HEAD`
+    // still names a stale attached thread. Resolve it up front so we fail
+    // cleanly before creating any registry entry. The same predicate drives the
+    // `actor explain` recommendation, so recommend and execute never disagree.
     let attach_thread = if no_thread {
-        match repo.head_ref()? {
-            Head::Attached { thread } => Some(thread),
-            _ => return Err(anyhow!(actor_spawn_no_thread_detached_advice())),
+        match repo.current_lane()? {
+            Some(lane) => Some(ThreadName::new(lane)),
+            None => return Err(anyhow!(actor_spawn_no_thread_detached_advice())),
         }
     } else {
         None
@@ -645,11 +649,15 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
         std::env::var("HEDDLE_AGENT_POLICY").ok(),
     )?;
     let env_signals = actor_identity_env_signals();
-    let head_detached = matches!(repo.head_ref()?, Head::Detached { .. });
+    // Route through the same "is there a current lane?" predicate that
+    // `actor spawn --no-thread` uses, so the recommendation is always runnable
+    // in this context. `current_lane()` is git-overlay-aware: a detached Git
+    // HEAD reports no lane even when `.heddle/HEAD` still names a stale thread.
+    let no_current_lane = repo.current_lane()?.is_none();
     let next_action = detected_actor_next_action(
         probe.provider.as_deref(),
         probe.model.as_deref(),
-        head_detached,
+        no_current_lane,
     );
     let next_action_template = next_action.as_deref().and_then(action_template);
 
@@ -746,16 +754,16 @@ fn actor_identity_env_signals() -> Vec<String> {
 fn detected_actor_next_action(
     provider: Option<&str>,
     model: Option<&str>,
-    head_detached: bool,
+    no_current_lane: bool,
 ) -> Option<String> {
     match (provider, model) {
         // The recommendation must be runnable as-is from the current context.
-        // On a detached HEAD there is no current thread to attach to, so
-        // `--no-thread` would fail (`actor_spawn_no_thread_detached`); mint a
-        // dedicated thread instead. On a thread, `--no-thread` attaches the
-        // detected identity to the current thread without leaving a stray
-        // `actor/<session>`.
-        (Some(provider), Some(model)) if head_detached => Some(format!(
+        // With no current lane (e.g. a detached HEAD) there is no thread to
+        // attach to, so `--no-thread` would fail
+        // (`actor_spawn_no_thread_detached`); mint a dedicated thread instead.
+        // On a lane, `--no-thread` attaches the detected identity to the current
+        // thread without leaving a stray `actor/<session>`.
+        (Some(provider), Some(model)) if no_current_lane => Some(format!(
             "heddle actor spawn --provider {provider} --model {model}"
         )),
         (Some(provider), Some(model)) => Some(format!(
