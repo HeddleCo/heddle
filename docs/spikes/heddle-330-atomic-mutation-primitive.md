@@ -38,13 +38,24 @@ sketch.
   **after** the commit as a deterministic, idempotent materialization — the
   canonical ref is a *cache* of the committed oplog. **Correctness rests on
   per-read reconciliation, the universal rule: every ref read reconciles against
-  the oplog at read time** (hooked **inside `RefManager::{read_head, get_thread,
-  get_marker}`** — `refs_manager.rs:114`/`:129`/`:185`, the sole read chokepoint
-  below all **91** direct `repo.refs()` readers — reached via a `RefReconciler`
-  trait defined in `refs` and injected from `repo`, so `refs` keeps no `oplog`
-  dep; placing it at the `Repository` accessors instead would be bypassed by those
-  91 readers). This holds for **every reader path, every handle age,
-  every crash timing** — crucially the daemon's **long-held `Arc<Repository>`**
+  the oplog at read time** — funnelled through **one internal `reconciled_load`
+  primitive that is the sole code in `RefManager` permitted to touch raw ref
+  storage**, so all **ten** public read methods (`read_head` `:114`, `get_thread`
+  `:129`, `get_marker` `:185`, `get_undo_recovery` `:252`, `get_remote_thread`
+  `:256`, `list_threads` `:178`, `list_markers` `:230`, `list_remotes` `:305`,
+  `list_remote_threads` `:312`, `resolve` `:327`, all in `refs_manager.rs`) obtain
+  ref data **only** by calling it, and the reconciliation (op_scope filter + cheap
+  generation gate) lives *inside* it — reached via a `RefReconciler` trait defined
+  in `refs` and injected from `repo`, so `refs` keeps no `oplog` dep. Because the
+  raw-storage loaders are reachable **only** from inside the primitive, every
+  present reader **and any future `RefManager` read method** reconciles
+  automatically — there is no reader enumeration to keep complete. (Placing the
+  hook at the bypassable `Repository` accessors, or enumerating a *subset* of read
+  methods as r6 did — it covered only `read_head`/`get_thread`/`get_marker` and
+  left the four `list_*`, both remote, undo-recovery, and `resolve` readers
+  observing stale state, cid 3328832780 — leaves the invariant with holes.) This
+  holds for **every reader path, every handle age, every crash timing** —
+  crucially the daemon's **long-held `Arc<Repository>`**
   (`local_daemon.rs:330`) that **never re-passes `Repository::open`**
   (`repository.rs:594`), the case an open-time pass structurally cannot reach
   (cid 3328112197). "Recover at open" is kept only as an **eager optimization**,
@@ -397,61 +408,138 @@ this; per-read reconciliation is what makes the daemon-handle cell hold, and it
 subsumes the daemon-vs-CLI and immediate-vs-delayed cells the prior rounds
 enumerated one at a time.
 
-**Where the rule hooks (grounded) — the single read chokepoint, `RefManager`.**
-The seam must be the one place EVERY ref read funnels through, or a reader that
-reaches around it observes a committed-looking canonical ref without the
-`op_scope`-filtered oplog reconciliation, and the invariant has a hole. That
-chokepoint is `RefManager`'s three lock-free read methods — `read_head`
-(`refs_manager.rs:114`) → `read_head_state` (`refs_head.rs:22-41`), `get_thread`
-(`refs_manager.rs:129`), and `get_marker` (`refs_manager.rs:185`). **The
-reconciliation lives *inside* these methods**, below the `Repository` accessor
-layer — not at the accessors.
+**Where the rule hooks (grounded) — ONE internal load primitive, not a set of
+enumerated read methods.** The seam must be the single place every read funnels
+through *structurally* — not a hand-picked list of entry points. This is exactly
+where r6 fell short: it placed reconciliation "inside `RefManager`" but treated the
+seam as three enumerated methods (`read_head`/`get_thread`/`get_marker`).
+`RefManager` actually exposes **ten** public read methods, over **two distinct
+raw-storage loaders**, and the other seven bypass a three-method hook (verified
+2026-05-30):
 
-*Why not the `Repository` read accessors — the bypass that placement leaves open.*
-An accessor-layer hook (`repo.head()` `repository.rs:1737` plus a reconciling
-`repo`-level `get_thread`/`get_marker` wrapper) is **bypassable, and the readers
-that matter bypass it.** **91 production call-sites read
-`repo.refs().{read_head,get_thread,get_marker}` directly on `RefManager`**, going
-straight around any `Repository` accessor
-(`rg "refs\(\)\.(get_thread|get_marker|read_head)"` → 91 non-test hits across 38
-files, verified 2026-05-30). Three sit on critical resolve paths:
-`repo.refs().get_thread(..)` in `heddle status`
-(`cli/src/cli/commands/status.rs:1795`), `repo.refs().read_head()` in `collapse`
-(`cli/src/cli/commands/collapse.rs:99`), and `repo.refs().get_thread(..)` in
-hosted sync (`client/src/grpc_hosted/sync.rs:588`). A shared-oplog or post-crash
-lagging-ref reader on ANY of these 91 would trust the canonical ref **without**
-reconciliation — so accessor-layer placement leaves the "universal" invariant with
-91 holes. Routing each reader onto a reconciling accessor only "fixes" the class
-one call-site at a time (the exact drip §2.4 indicts), and a 92nd raw
-`repo.refs()` read added later silently re-opens it. Enforcement at a layer
-callers can skip is not enforcement.
+| # | Public read method | `refs_manager.rs` | Raw loader it touches today |
+|---|---|---|---|
+| 1 | `read_head` | `:114` | `read_head_state` (`refs_head.rs:22`) |
+| 2 | `get_thread` | `:129` | `read_change_id_at` (`refs_head.rs:43`) + `PackedRefs::load` (`:134`) |
+| 3 | `get_marker` | `:185` | `read_change_id_at` + `PackedRefs::load` (`:190`) |
+| 4 | `get_undo_recovery` | `:252` | `read_change_id_at` |
+| 5 | `get_remote_thread` | `:256` | `read_change_id_at` |
+| 6 | `list_threads` | `:178` | `try_read_ref_summary_index` (`ref_summary_index.rs:378`) / `list_threads_from_storage` (`:330`) |
+| 7 | `list_markers` | `:230` | `try_read_ref_summary_index` / `list_markers_from_storage` (`:343`) |
+| 8 | `list_remotes` | `:305` | `try_read_ref_summary_index` / `list_remotes_from_storage` (`:356`) |
+| 9 | `list_remote_threads` | `:312` | `try_read_ref_summary_index` / `list_remote_threads_from_storage` (`:374`) |
+| 10 | `resolve` | `:327` | composite — delegates to #1/#2/#3/#4 (`:330-333`) |
 
-*The crate-dependency objection, and how the chokepoint clears it.* The reason an
-earlier framing reached one layer up is that reconciliation must consult the
-committed oplog tail, yet `RefManager` lives in the `refs` crate, which **does not
-depend on `oplog`** (`crates/refs/Cargo.toml` declares no oplog dep — verified
-2026-05-30), so the seam appears to need the only layer that sees both crates
-(`crates/repo/Cargo.toml:22` oplog, `:24` refs). The resolution is **dependency
-inversion, not relocating the seam**: define a narrow `RefReconciler` trait *in
-the `refs` crate*, over types `refs` already owns (`Head`, `ChangeId`, the ref
+r6 hooked #1–#3 (the point readers on the `read_change_id_at`/`read_head_state`
+loader). The four **list** readers (#6–#9) read a *different* substrate — the
+`RefSummaryIndex` sidecar via `try_read_ref_summary_index` (`ref_summary_index.rs:378`)
+— so they bypassed the hook entirely, and they are live on production paths:
+`thread list` → `collect_thread_summaries` (`cli/src/cli/commands/thread.rs:507`),
+`marker list` → `cmd_marker_list` (`cli/src/cli/commands/marker.rs:64`), and
+hosted-sync freshness (`client/src/grpc_hosted/sync.rs:1001`). The **remote** (#5,
+#8, #9) and **undo-recovery** (#4) readers likewise bypassed it. After an
+oplog-committed create/delete in the "after ph4, before ph5" window, every one of
+#4–#9 would observe a *stale* name set — the "every read reconciles" invariant had
+seven holes (cid 3328832780). Enumerating "the 3," then "the 5," then "the 7" is
+the drip pattern at the method level: a longer list is not a closed class.
+
+**The structural fix — one load primitive, the sole toucher of raw storage.**
+Reconciliation does not live in the ten read methods; it lives in **one internal
+primitive `reconciled_load`** that is the *only* code in `RefManager` permitted to
+touch raw ref storage. Every public read method obtains its ref data exclusively
+by calling it:
+
+```rust
+// The ONE place ref data is loaded. The raw-storage loaders
+// (read_change_id_at, read_head_state, try_read_ref_summary_index,
+// *_from_storage, PackedRefs::load) are PRIVATE sub-steps invoked from here
+// and NOWHERE else — no public read method may call them directly.
+fn reconciled_load(&self, req: LoadRequest) -> Result<Loaded> {
+    let raw = self.raw_load(req);                  // the request-scoped raw read
+    let Some(rec) = &self.reconciler else { return Ok(raw) };   // bootstrap: plain cache
+    if rec.generation() == self.cached_generation.get() {        // r4 O(1) gate
+        return Ok(raw);                            // no commit since last reconcile ⇒ cache current
+    }
+    Ok(rec.reconcile(raw, req, &self.op_scope()))  // r5 op_scope-filtered tail fold + lazy re-publish
+}
+```
+
+`LoadRequest` discriminates which ref or set is wanted — `Head | Thread(name) |
+Marker(name) | UndoRecovery | RemoteThread(remote, thread) | ThreadList |
+MarkerList | RemoteList | RemoteThreadList(remote)` — so a *point* read still does a
+single-ref raw read + the generation gate (it does **not** materialize the whole
+set), and only the request-scoped raw-read sub-step branches; the reconcile body —
+generation gate (r4) + `Some(&op_scope())` filter (r5) + committed-tail fold — is
+**shared and unconditional**. The ten public readers become thin projections:
+
+| Public read | Becomes |
+|---|---|
+| `read_head` / `get_thread` / `get_marker` / `get_undo_recovery` / `get_remote_thread` | `reconciled_load(Head / Thread / Marker / UndoRecovery / RemoteThread)` |
+| `list_threads` / `list_markers` / `list_remotes` / `list_remote_threads` | `reconciled_load(ThreadList / MarkerList / RemoteList / RemoteThreadList)` |
+| `resolve` (`:327`) | composes over the four point readers (`:330-333`) — transitively reconciled, touches no raw storage of its own |
+
+**The five methods Codex did *not* flag are covered by the same primitive — that
+is the test of closure.** Codex (cid 3328832780) named only `list_threads` and
+`list_markers`. But `get_remote_thread` (#5), `list_remotes` (#8),
+`list_remote_threads` (#9), `get_undo_recovery` (#4), and `resolve` (#10) are
+**not** special-cased either: each gets its data from `reconciled_load` (`resolve`
+transitively, via the four point readers it already delegates to at `:330-333`). A
+fix that only added `list_threads`/`list_markers` to a three-method hook would
+still leave these five bypassing — i.e. it would have added two cells, not closed
+the class. The primitive covers all ten *by construction*, because there is no
+other way to obtain ref data.
+
+**Structural impossibility of bypass (the future-proofing).** The raw loaders
+(`read_change_id_at`, `read_head_state`, `try_read_ref_summary_index`, the
+`*_from_storage` scanners, and `PackedRefs::load`) are made reachable **only** from
+inside `reconciled_load` — a module-visibility boundary enforced by a one-line
+conformance check (a test/lint asserting each raw loader has exactly one caller,
+`reconciled_load`). Because a public reader can reach ref data *only* through
+`reconciled_load`, and `reconciled_load` *always* reconciles:
+
+- every one of the ten present readers reconciles, and
+- **any read method added to `RefManager` in the future reconciles automatically**
+  — it has no raw storage to read except via the primitive; a "method #11" that
+  tried to skip reconciliation would have no data source to compile against. The
+  "92nd reader" / "next axis" hole that broke every prior round is closed at the
+  type/visibility level, not by vigilance.
+
+That is the difference between r6 and r7: r6 enumerated entry points (and the
+enumeration was incomplete); r7 makes raw storage *unreachable* except through the
+one reconciling primitive, so the set of covered readers is "all of them, present
+and future," with no list to keep complete.
+
+*Why an accessor-layer hook still fails (unchanged from r6, now at the primitive
+level).* Placing reconciliation on the `Repository` accessors (`repo.head()`
+`repository.rs:1737`, etc.) is bypassable: **~124 production call-sites read
+`repo.refs().<read>(…)` directly on `RefManager`** across the ten methods
+(`rg "refs\(\)\.(read_head|get_thread|get_marker|list_threads|list_markers|get_undo_recovery|get_remote_thread|list_remotes|list_remote_threads|resolve)"`
+→ 124 non-test hits, verified 2026-05-30), going straight around any `Repository`
+accessor — e.g. `status` (`cli/src/cli/commands/status.rs:1795`), `collapse`
+(`cli/src/cli/commands/collapse.rs:99`), hosted sync
+(`client/src/grpc_hosted/sync.rs:588`, `:1001`), `thread list` (`thread.rs:507`),
+`marker list` (`marker.rs:64`). Enforcement at a layer callers skip is not
+enforcement. The primitive sits *below* every `RefManager` read method, so all
+~124 direct readers — plus every `Repository` accessor and the daemon handler
+(`transaction.rs:143-152`) — inherit reconciliation with zero call-site changes,
+and there is no lower-level raw read a caller can reach around it.
+
+*The crate-dependency objection, and how the primitive clears it (retained from
+r6).* Reconciliation must consult the committed oplog tail, yet `RefManager` lives
+in the `refs` crate, which **does not depend on `oplog`** (`crates/refs/Cargo.toml`
+declares no oplog dep — verified 2026-05-30). The resolution is **dependency
+inversion, kept exactly as r6 designed it**: define a narrow `RefReconciler` trait
+*in the `refs` crate*, over types `refs` already owns (`Head`, `ChangeId`, the ref
 name, and the cached `head_id: u64` generation); have `RefManager` hold an
 `Option<Arc<dyn RefReconciler>>` set by a `with_reconciler(..)` builder — the same
-shape as the existing `with_local_head` builder (`refs_manager.rs:50`) — and
-inject the concrete oplog-backed implementation from the `repo`/`oplog` layer at
-`Repository` construction (the layer that sees both crates). The trait *is* the
-seam; the `refs` crate gains **no** oplog dependency — it depends only on an
-abstraction it defines, which the higher layer implements. `RefManager::{read_head,
-get_thread, get_marker}` invoke `self.reconciler` (when present) before returning;
-the reconciler runs the O(1) `head_id` generation gate (the cheap path — no tail
-scan when the generation is unchanged; see "Keeping it cheap" below) and, only on
-a generation advance, the `Some(&op_scope())`-filtered tail scan — so **both the
-cheap generation gate (r4) and the `op_scope` scoping (r5) live inside the
-`RefManager` read methods**. A bootstrap `RefManager::new` with no reconciler
-keeps today's plain-cache behavior. Because the hook sits below the accessor
-layer, **ALL 91 direct `repo.refs()` readers — plus every `Repository` accessor,
-plus the daemon handler at `transaction.rs:143-152` — inherit reconciliation with
-zero call-site changes**: there is no lower-level raw ref read a caller can reach
-around `RefManager`, so no bypass exists.
+shape as the existing `with_local_head` builder (`refs_manager.rs:50`) — and inject
+the concrete oplog-backed implementation from the `repo`/`oplog` layer at
+`Repository` construction (`crates/repo/Cargo.toml:22` oplog, `:24` refs — the
+layer that sees both crates). The trait is invoked **inside `reconciled_load`** (not
+in each read method), so the `refs` crate gains **no** oplog dependency and the
+reconcile logic exists in exactly one place. Both the O(1) `head_id` generation
+gate (r4) and the `Some(&op_scope())` filter (r5) run inside the primitive. A
+bootstrap `RefManager::new` with no reconciler keeps today's plain-cache behavior.
 
 Reconciliation re-derives the committed target with no extra bookkeeping: every
 committed state `OpRecord` carries the ref identity + target — `Snapshot {
@@ -459,11 +547,18 @@ new_state, thread }` (`oplog_types.rs:18-22`), `ThreadCreate/ThreadUpdate { name
 … state }` (`:29`, `:33`), `Goto { target }` (`:24`) for HEAD — and the read
 takes the newest committed target *within the current `op_scope`* in the tail
 (newest-wins, so two committed txns on one ref resolve to the same value a
-non-crashed run would produce). "Newest in the tail" always means newest among
-*this worktree's* entries — the scan is the `Some(&op_scope())`-filtered one
-undo/redo already run (`undo.rs:108-109`, `:131-132`), so in a shared-oplog
-setup a read in checkout B resolves B's lane only and never lifts checkout A's
-newest committed target.
+non-crashed run would produce). **For a set-valued (list) request the same records
+drive membership, not just a single target:** a committed `ThreadCreate` /
+`MarkerCreate` (and the corresponding delete) in the tail adds or removes the name
+from the reconciled set the primitive returns, so `list_threads`/`list_markers`/
+`list_remotes`/`list_remote_threads` never report a name whose create/delete is
+committed-but-not-yet-materialized — exactly the stale-list hole cid 3328832780
+flagged. (Remote and undo-recovery refs reconcile identically: their committed
+records name the remote-thread / recovery target, folded the same way.) "Newest in
+the tail" always means newest among *this worktree's* entries — the scan is the
+`Some(&op_scope())`-filtered one undo/redo already run (`undo.rs:108-109`,
+`:131-132`), so in a shared-oplog setup a read in checkout B resolves B's lane only
+and never lifts checkout A's newest committed target.
 
 **Keeping it cheap (the cost the decision accepts).** Reconciling on *every* read
 must not become a full oplog scan per read. The hot-path check is a **generation
@@ -476,11 +571,14 @@ is readable from the file header without parsing the log; every append advances 
 read reads the current `head_id` (an O(1) header read) and:
 
 - if it is **unchanged**, no commit has landed since the last reconcile ⇒ the
-  canonical ref is current ⇒ return it directly — **no tail scan, no write**;
-- only if it has **advanced** does the reader scan the tail from `cached+1` for
-  committed `TransactionCommit` entries **in this `op_scope`** naming this ref,
-  resolve the newest target, and reconcile (lazily re-publishing the lagging
-  ref). The scan applies the same `Some(&op_scope())` exact-match filter
+  canonical ref (or the cached summary set) is current ⇒ return it directly —
+  **no tail scan, no write**;
+- only if it has **advanced** does the primitive scan the tail from `cached+1` for
+  committed `TransactionCommit` entries **in this `op_scope`** touching the
+  requested ref (point read) or any ref in the requested set (list read), fold the
+  newest committed target(s) / membership changes, and reconcile (lazily
+  re-publishing the lagging ref or summary). The scan applies the same
+  `Some(&op_scope())` exact-match filter
   undo/redo use (`undo.rs:108-109`, `:131-132`), so a `head_id` advance driven
   purely by *another* worktree's commit in a shared oplog finds no entry for
   this lane and the reconcile is a no-op — the reader keeps returning its own
@@ -512,10 +610,11 @@ reconciliation (reader-scoped, per read). The per-verb detection primitive
 documented as something "every state-changing CLI verb *should* consult"
 (`transaction_sentinel.rs:4-8`) but is not wired into dispatch (its only non-test
 references are its own module, `:92`), so relying on each verb to remember it would
-re-open the class one verb at a time. `RefManager`'s read methods are the single
-structural choke point every resolve already funnels through — including all 91
-direct `repo.refs()` readers — so enforcing reconciliation there (not at the
-bypassable accessor layer) is what closes the class.
+re-open the class one verb at a time. The single `reconciled_load` primitive is
+the structural choke point every read funnels through — all ~124 direct
+`repo.refs()` readers across the ten read methods reach ref data only through it —
+so enforcing reconciliation *inside the primitive* (not at the bypassable accessor
+layer, and not by enumerating read methods) is what closes the class.
 
 **Why a reader NEVER sees a committed-looking ref without its oplog record.** The
 canonical ref path is written *only* by the phase-5 rename or by a reconciling
@@ -621,13 +720,18 @@ invariant once, from a mechanism that sits in the path every reader shares.**
 *write* side — make the entire product space hold, with no per-cell case analysis:
 
 - **Read side — per-read reconciliation (§2.2 "Reader model").** Every ref read
-  reconciles against the committed oplog tail at read time, hooked **inside
-  `RefManager::{read_head, get_thread, get_marker}`** (`refs_manager.rs:114`/`:129`/`:185`)
-  — the sole read chokepoint all 91 direct `repo.refs()` readers (and every
-  `Repository` accessor, and the daemon handler `transaction.rs:143-152`) funnel
-  through, reached via a `refs`-crate `RefReconciler` trait the `repo`/`oplog`
-  layer injects (dependency inversion — no `refs`→`oplog` crate dep). The
-  reconciliation scans **only this repository's `op_scope`** — the same `Some(&op_scope())` exact-match
+  reconciles against the committed oplog tail at read time, because all **ten**
+  public `RefManager` read methods (point, list, remote, undo-recovery, and
+  `resolve` — `refs_manager.rs:114`–`:327`) obtain ref data through **one internal
+  `reconciled_load` primitive**, the sole code permitted to touch raw ref storage
+  (§2.2 "Where the rule hooks"). The reconciliation lives *inside* that primitive,
+  so every present reader — and any future `RefManager` read method, since raw
+  storage is unreachable except through the primitive — reconciles automatically;
+  the ~124 direct `repo.refs()` readers (and every `Repository` accessor, and the
+  daemon handler `transaction.rs:143-152`) inherit it with no call-site changes,
+  reached via a `refs`-crate `RefReconciler` trait the `repo`/`oplog` layer injects
+  (dependency inversion — no `refs`→`oplog` crate dep). The reconciliation scans
+  **only this repository's `op_scope`** — the same `Some(&op_scope())` exact-match
   filter undo/redo apply to every oplog scan (`undo.rs:108-109`, `:131-132`;
   `Repository::op_scope()` `repository.rs:1636`), so each worktree/lane resolves
   against its own committed entries. Therefore a reader on
@@ -1039,9 +1143,10 @@ ref publish to **after** it as a post-commit materialization (§2.2 phases 4→5
 
 A crash before the append publishes nothing (canonical ref untouched, temp file
 swept). A crash after the append but before the rename is repaired by **per-read
-reconciliation** (§2.2 "Reader model"): the next read of that ref — through
-`RefManager`'s reconciling read methods (the chokepoint below all 91 direct
-`repo.refs()` readers), on *any* path and *any* handle age, including
+reconciliation** (§2.2 "Reader model"): the next read of that ref — through the
+single `reconciled_load` primitive every `RefManager` read funnels through (the
+chokepoint below all ~124 direct `repo.refs()` readers), on *any* path and *any*
+handle age, including
 the daemon's long-held `Arc<Repository>` (`local_daemon.rs:330`,
 `transaction.rs:143-152`) that never re-opens — sees the oplog generation has
 advanced, folds the committed `OpRecord::Snapshot { new_state, thread }`
@@ -1157,26 +1262,36 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
 - **O7 — The two close-the-class mechanisms are net-new code, with real cost
   trade-offs (§2.2, §2.4).** Neither exists today; both must be built and both
   carry a decision:
-  - **Per-read reconciliation hook (the guarantee) + open-time eager pass
-    (optimization).** Correctness lives in the read: every ref resolve reconciles
-    against the committed oplog tail (§2.2 "Reader model"). The hook lands
-    **inside `RefManager::{read_head, get_thread, get_marker}`**
-    (`refs_manager.rs:114`/`:129`/`:185`) — the sole chokepoint **below** the
-    `Repository` accessor layer that all 91 direct `repo.refs()` readers funnel
-    through — **not** at the `Repository` accessors, because an accessor-layer hook
-    is bypassed by those 91 readers (`cli/src/cli/commands/status.rs:1795`,
+  - **Per-read reconciliation via the single load primitive (the guarantee) +
+    open-time eager pass (optimization).** Correctness lives in the read: every ref
+    resolve reconciles against the committed oplog tail (§2.2 "Reader model"). The
+    reconciliation lands **inside one internal `reconciled_load` primitive** that is
+    the sole code in `RefManager` permitted to touch raw ref storage; all **ten**
+    public read methods (point, list, remote, undo-recovery, `resolve` —
+    `refs_manager.rs:114`–`:327`) obtain ref data only through it, and the raw
+    loaders (`read_change_id_at`, `read_head_state`, `try_read_ref_summary_index`,
+    `*_from_storage`, `PackedRefs::load`) are reachable **only** from inside it
+    (enforced by a one-line conformance check). This is **not** at the `Repository`
+    accessors, because an accessor-layer hook is bypassed by the ~124 direct
+    `repo.refs()` readers (`cli/src/cli/commands/status.rs:1795`,
     `cli/src/cli/commands/collapse.rs:99`, `client/src/grpc_hosted/sync.rs:588`,
-    …). `RefManager` lives in the `refs` crate, which does not depend on `oplog`
-    (`crates/refs/Cargo.toml`); the seam clears that via **dependency inversion** —
-    a `RefReconciler` trait defined *in* `refs` (over `Head`/`ChangeId`/ref-name/
-    `head_id`), held as `Option<Arc<dyn RefReconciler>>` via a `with_reconciler(..)`
-    builder (cf. `with_local_head` `refs_manager.rs:50`), with the concrete
-    oplog-backed impl injected from the `repo`/`oplog` layer at `Repository`
-    construction (`crates/repo/Cargo.toml:22` oplog, `:24` refs). Impl work:
-    implement the trait + injection + the in-method reconcile call —
-    **no per-call-site routing**: precisely *because* the chokepoint is below all
-    91 readers, every reader (and every `Repository` accessor, and the daemon
-    handler `transaction.rs:143-152`) inherits reconciliation unchanged. **Cost:** the hot path must be near-free or it taxes every read
+    `:1001`, `thread.rs:507`, `marker.rs:64`, …); and it is **not** a hand-picked
+    subset of read methods (r6's three-method hook left the four `list_*`, both
+    remote, undo-recovery, and `resolve` readers bypassing — cid 3328832780). Any
+    *future* `RefManager` read method is covered automatically, since it has no raw
+    storage to read except through the primitive. `RefManager` lives in the `refs`
+    crate, which does not depend on `oplog` (`crates/refs/Cargo.toml`); the seam
+    clears that via **dependency inversion** — a `RefReconciler` trait defined *in*
+    `refs` (over `Head`/`ChangeId`/ref-name/`head_id`), held as
+    `Option<Arc<dyn RefReconciler>>` via a `with_reconciler(..)` builder (cf.
+    `with_local_head` `refs_manager.rs:50`), with the concrete oplog-backed impl
+    injected from the `repo`/`oplog` layer at `Repository` construction
+    (`crates/repo/Cargo.toml:22` oplog, `:24` refs) and invoked inside
+    `reconciled_load`. Impl work: implement the trait + injection + the in-primitive
+    reconcile call — **no per-call-site routing**: precisely *because* the primitive
+    is below all ~124 readers, every reader (and every `Repository` accessor, and
+    the daemon handler `transaction.rs:143-152`) inherits reconciliation unchanged.
+    **Cost:** the hot path must be near-free or it taxes every read
     (daemon RPC and `heddle log`/`status` alike) — hence the O(1) generation check
     on the oplog `head_id` (`packed_oplog.rs:26`, the file's leading field `:55`),
     so a read that finds `head_id` unchanged returns immediately with no tail scan
@@ -1210,11 +1325,15 @@ primitives it composes (CAS batch + reverse rollback, a *window-bounded*
 idempotent oplog append, orphan-tolerant object store, atomic FS rename) already
 exist — the work is sequencing them under one ledger, not inventing durability.
 The two genuinely net-new pieces are the close-the-class mechanisms (O7):
-**per-read reconciliation hooked _inside_ `RefManager::{read_head, get_thread,
-get_marker}`** — the sole read chokepoint below all 91 direct `repo.refs()`
-readers, reached via a `refs`-crate `RefReconciler` trait injected from `repo`
-(dependency inversion, so `refs` keeps no `oplog` dep), and **filtered to the
-current `op_scope`** (so the `committed ⇔ oplog entry exists` invariant holds
+**per-read reconciliation inside _one internal `reconciled_load` primitive_** —
+the sole code permitted to touch raw ref storage, which all **ten** public
+`RefManager` read methods (point, list, remote, undo-recovery, `resolve`) funnel
+through, so reconciliation cannot be bypassed by any present reader, the ~124
+direct `repo.refs()` readers, **or any read method added later** (raw storage is
+unreachable except through the primitive) — reached via a `refs`-crate
+`RefReconciler` trait injected from `repo` (dependency inversion, so `refs` keeps
+no `oplog` dep), and **filtered to the current `op_scope`** (so the
+`committed ⇔ oplog entry exists` invariant holds
 per-lane for every reader path, *handle age*, crash timing, and oplog topology —
 including the daemon's long-held `Arc<Repository>` an open-time-only pass cannot
 reach, and shared-oplog worktrees that must not cross lanes) and an **unbounded indexed `transaction_id`
@@ -1231,15 +1350,21 @@ optimization on top of the read-side guarantee.
    `EagerMutation`, `Tx`, `execute`, the rewind ledger, `Drop` backstop, the
    **unbounded indexed `transaction_id` commit dedup** (O7 — *not* a reuse of the
    window-bounded `record_batch_scoped_if_no_transaction`), and **per-read
-   reconciliation implemented *inside* `RefManager::{read_head, get_thread,
-   get_marker}`** via a `refs`-crate `RefReconciler` trait injected from `repo`
-   (O7 — the read-side guarantee; the chokepoint below all 91 `repo.refs()`
-   readers, so **no per-call-site edits**; the `Repository::open` eager pass is an
-   optional optimization on top). Unit tests mirroring `refs_transactions.rs:341-377` (reverse-order
+   reconciliation implemented *inside* one internal `reconciled_load` primitive**
+   that all ten public `RefManager` read methods funnel through (point, list,
+   remote, undo-recovery, `resolve`), via a `refs`-crate `RefReconciler` trait
+   injected from `repo` (O7 — the read-side guarantee; the primitive is the sole
+   toucher of raw ref storage, below all ~124 `repo.refs()` readers, so **no
+   per-call-site edits** and any future read method is covered automatically; add
+   the one-line conformance check that the raw loaders have no caller but the
+   primitive; the `Repository::open` eager pass is an optional optimization on top).
+   Unit tests mirroring `refs_transactions.rs:341-377` (reverse-order
    rewind) + a panic-unwind test + a delayed-retry exact-once test (retry past the
-   old window) + reconciliation tests on all three reader shapes — daemonless CLI,
-   freshly-opened handle, and a **long-held `Arc<Repository>`** that opened before
-   the crash and reads after it (§2.4 proof; the cell cid 3328112197 exposed).
+   old window) + reconciliation tests on **all ten read methods** (a conformance
+   test asserting each routes through the primitive) and on all three reader shapes
+   — daemonless CLI, freshly-opened handle, and a **long-held `Arc<Repository>`**
+   that opened before the crash and reads after it (§2.4 proof; the cell cid
+   3328112197 exposed).
    Effort: **xhigh** (intricate state machine + locks + panic-safety). No call site
    changes yet.
 2. **#330-impl-b — migrate `undo`/`redo` (#305).** First real user; proves the
@@ -1267,19 +1392,30 @@ revision, only one migration is in flight, not five.
 - [x] **(2) Commit-point + ordering** — §2.2: the oplog append is the **sole**
   commit; refs are a post-commit materialized view; correctness rests on
   **per-read reconciliation** — every ref read reconciles against the oplog at
-  read time *within the current `op_scope`*, hooked **inside `RefManager::{read_head,
-  get_thread, get_marker}`** (`refs_manager.rs:114`/`:129`/`:185`) — the sole read
-  chokepoint **below** the `Repository` accessor layer, through which all **91**
-  direct `repo.refs()` readers funnel (an accessor-layer hook would be bypassed by
-  those 91 — e.g. `cli/src/cli/commands/status.rs:1795`,
-  `cli/src/cli/commands/collapse.rs:99`, `client/src/grpc_hosted/sync.rs:588`). The
+  read time *within the current `op_scope`*, hooked **inside one internal
+  `reconciled_load` primitive** that is the sole code in `RefManager` permitted to
+  touch raw ref storage and through which all **ten** public read methods funnel —
+  point (`read_head` `:114`, `get_thread` `:129`, `get_marker` `:185`,
+  `get_undo_recovery` `:252`, `get_remote_thread` `:256`), list (`list_threads`
+  `:178`, `list_markers` `:230`, `list_remotes` `:305`, `list_remote_threads`
+  `:312`), and `resolve` `:327` (all `refs_manager.rs`). The raw loaders
+  (`read_change_id_at`/`read_head_state`/`try_read_ref_summary_index`/`*_from_storage`/`PackedRefs::load`)
+  are reachable only from inside the primitive (one-line conformance check), so the
+  closure is **structural, not an enumeration**: r6's three-method hook
+  (`read_head`/`get_thread`/`get_marker`) left the four `list_*`, both remote,
+  undo-recovery, and `resolve` readers bypassing (cid 3328832780), whereas every
+  present reader **and any future read method** now reconciles because raw storage
+  has no other entry. An accessor-layer hook would be bypassed by the **~124**
+  direct `repo.refs()` readers (e.g. `cli/src/cli/commands/status.rs:1795`,
+  `cli/src/cli/commands/collapse.rs:99`, `client/src/grpc_hosted/sync.rs:588`,
+  `:1001`, `thread.rs:507`, `marker.rs:64`). The
   `refs` crate has no `oplog` dep (`crates/refs/Cargo.toml`); the seam clears that
   by **dependency inversion** — a `RefReconciler` trait defined in `refs`, injected
   from the `repo`/`oplog` layer (`crates/repo/Cargo.toml:22`,`:24`) at `Repository`
-  construction — so reconciliation reaches every reader (and the daemon handler
-  `transaction.rs:143-152`) with no call-site changes. Both the O(1) `head_id`
-  generation gate (`packed_oplog.rs:26`,`:55`) and the `op_scope` filter run inside
-  those `RefManager` methods. The tail scan reuses the
+  construction and invoked inside the primitive — so reconciliation reaches every
+  reader (and the daemon handler `transaction.rs:143-152`) with no call-site
+  changes. Both the O(1) `head_id` generation gate (`packed_oplog.rs:26`,`:55`) and
+  the `op_scope` filter run inside the primitive. The tail scan reuses the
   `Some(&op_scope())` exact-match filter undo/redo already apply (`undo.rs:108-109`,
   `:131-132`; `Repository::op_scope()` `repository.rs:1636`), so each worktree/lane
   resolves only its own committed entries. This holds for **every reader path,
