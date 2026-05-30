@@ -173,6 +173,24 @@ async fn async_main() -> Result<()> {
             std::process::exit(HeddleExitCode::from_clap(&err).into());
         }
     };
+    // `heddle capture --help-agent`: clap has now parsed the entire command
+    // line — every global spelling it accepts (`-C <path>`, `--output <fmt>`,
+    // clustered `-vC <path>`, attached forms, any position) was handled by
+    // clap, not a hand-rolled token scan. Inspect the parsed result and render
+    // the reveal help before running capture. This is help, not diagnostics,
+    // so it exits before config/logging init.
+    if let Commands::Capture(args) = &cli.command
+        && args.help_agent
+    {
+        cli::cli::help::print_capture_agent_help(&Cli::command())?;
+        if profile {
+            emit_profile(
+                "help",
+                &[ProfileField::duration("total_ms", total_start.elapsed())],
+            );
+        }
+        return Ok(());
+    }
     // Resolve color decision once, before any rendering site fires.
     // The helpers in `cli::style` consult a process-wide OnceLock —
     // doing this inside each render path would re-query the env on

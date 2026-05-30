@@ -183,8 +183,23 @@ fn parse_confidence(s: &str) -> Result<f32, String> {
 Examples:
   heddle capture -m 'add login route'           # capture the worktree with intent
   heddle capture -m 'wip' --confidence 0.6      # honest confidence on a draft step
+
+Agent automation flags (provider/model/session/policy/split) are hidden here.
+Run `heddle help agent-flags`, or `heddle capture --help-agent` to list them inline.
 ")]
 pub struct SnapshotArgs {
+    /// Reveal the hidden agent-automation flags inline instead of capturing.
+    /// A first-class clap flag so the whole command line (including global
+    /// options in any spelling clap accepts) is parsed by clap; the dispatch
+    /// arm inspects the parsed result rather than scanning raw tokens.
+    /// `hide`d to keep everyday `capture --help` terse (the after-help
+    /// pointer is the discovery route). It is still a registered clap arg,
+    /// so `doctor docs` recognizes `heddle capture --help-agent` via the
+    /// registered-but-hidden flag seam — the machine contract stays in sync
+    /// without cluttering human help.
+    #[arg(long, hide = true)]
+    pub help_agent: bool,
+
     /// Natural language intent for this recoverable step.
     #[arg(short = 'm', long, visible_alias = "message")]
     pub intent: Option<String>,
