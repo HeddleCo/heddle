@@ -11,7 +11,7 @@
 //! docs --all --output json` into CI on every PR to catch doc drift.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -587,6 +587,11 @@ fn check_invocation(
     // Now walk remaining tokens for `--flag` / `--flag=value` shapes.
     let mut i = tokens_used;
     let catalog_options = collect_catalog_options(catalog, &path_segments);
+    // The everyday catalog drops `hide = true` args, but they are still part
+    // of the registered CLI contract (e.g. `capture --help-agent`). Recognize
+    // them so docs that reference a hidden-but-real flag don't false-positive
+    // as drift. Closes the class for every hidden flag, not just one.
+    let hidden_long_flags = collect_hidden_long_flags(resolved_cmd);
     while i < inv.tokens.len() {
         let tok = &inv.tokens[i];
         if let Some(flag_body) = tok.strip_prefix("--") {
@@ -602,18 +607,20 @@ fn check_invocation(
             // Many docs use `--flag-name>` accidentally; guard.
             let flag_name = flag_name.trim_end_matches('>').to_string();
             if !catalog_options.contains_key(&flag_name) {
-                out.push(DocsIssue {
-                    file: file.to_string(),
-                    line: inv.line,
-                    invocation: inv.raw.clone(),
-                    kind: IssueKind::UnknownFlag,
-                    detail: format!(
-                        "`--{}` is not a flag on `heddle {}`",
-                        flag_name,
-                        path_segments.join(" "),
-                    ),
-                    suggestion: None,
-                });
+                if !hidden_long_flags.contains(&flag_name) {
+                    out.push(DocsIssue {
+                        file: file.to_string(),
+                        line: inv.line,
+                        invocation: inv.raw.clone(),
+                        kind: IssueKind::UnknownFlag,
+                        detail: format!(
+                            "`--{}` is not a flag on `heddle {}`",
+                            flag_name,
+                            path_segments.join(" "),
+                        ),
+                        suggestion: None,
+                    });
+                }
             } else {
                 // Check known-enum flags. Pull value from inline or
                 // next token (if not a flag/placeholder).
@@ -676,6 +683,34 @@ fn collect_catalog_options<'a>(
                 .iter()
                 .chain(option.aliases.iter())
                 .map(move |name| (name.clone(), option))
+        })
+        .collect()
+}
+
+/// Long flag names (and aliases) of the `hide = true` args on a resolved
+/// command. These are dropped from the everyday command catalog but remain
+/// part of the registered CLI surface, so `doctor docs` must still treat
+/// them as valid flags.
+fn collect_hidden_long_flags(command: &ClapCommand) -> BTreeSet<String> {
+    command
+        .get_arguments()
+        .filter(|arg| arg.is_hide_set())
+        .flat_map(|arg| {
+            arg.get_long()
+                .map(str::to_string)
+                .into_iter()
+                .chain(
+                    arg.get_all_aliases()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(str::to_string),
+                )
+                .chain(
+                    arg.get_visible_aliases()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(str::to_string),
+                )
         })
         .collect()
 }
@@ -866,6 +901,28 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i.kind, IssueKind::UnknownFlag)),
             "expected at least one UnknownFlag issue, got: {:?}",
+            issues
+        );
+    }
+
+    #[test]
+    fn hidden_but_registered_flag_is_not_drift() {
+        // heddle#278 r6 (cid 3327633095): `--help-agent` is `hide = true`,
+        // so it's dropped from the everyday catalog — but it's still a
+        // registered clap arg. Docs that reference `heddle capture
+        // --help-agent` (e.g. personas.md) must NOT be flagged as drift.
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "Run `heddle capture --help-agent` to reveal the agent flags.",
+            &cli(),
+            &mut issues,
+        );
+        assert!(
+            !issues
+                .iter()
+                .any(|i| matches!(i.kind, IssueKind::UnknownFlag)),
+            "hidden-but-registered `--help-agent` must not be drift, got: {:?}",
             issues
         );
     }

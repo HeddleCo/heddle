@@ -192,11 +192,12 @@ pub struct SnapshotArgs {
     /// A first-class clap flag so the whole command line (including global
     /// options in any spelling clap accepts) is parsed by clap; the dispatch
     /// arm inspects the parsed result rather than scanning raw tokens.
-    /// Visible (not `hide`d): it is documented publicly and the command
-    /// catalog that `doctor docs`/`doctor schemas` validate against only
-    /// enumerates non-hidden args — a documented-but-hidden flag would
-    /// drift the machine contract.
-    #[arg(long)]
+    /// `hide`d to keep everyday `capture --help` terse (the after-help
+    /// pointer is the discovery route). It is still a registered clap arg,
+    /// so `doctor docs` recognizes `heddle capture --help-agent` via the
+    /// registered-but-hidden flag seam — the machine contract stays in sync
+    /// without cluttering human help.
+    #[arg(long, hide = true)]
     pub help_agent: bool,
 
     /// Natural language intent for this recoverable step.
