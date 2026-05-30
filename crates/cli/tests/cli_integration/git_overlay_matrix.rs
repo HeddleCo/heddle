@@ -4371,7 +4371,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     );
     assert_eq!(status["verification"]["workflow_status"], "not_checked");
     assert_eq!(status["verification"]["worktree_state"], "not_checked");
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains(
             "Verification: Git branch 'feature/drop-in' advanced outside Heddle; import the new Git tip to restore the mapping"
@@ -4556,7 +4556,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
                 && summary.contains("Heddle thread state")),
         "status should describe Git/Heddle disagreement: {status}"
     );
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains("Git/Heddle mismatch")
             && status_text.contains("Health: Git/Heddle mismatch")
@@ -6930,7 +6930,7 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         );
     }
 
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains("Health: clean")
             && !status_text.contains("Setup needed")
