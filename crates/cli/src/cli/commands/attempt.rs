@@ -41,6 +41,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use objects::worktree::should_ignore;
 use repo::Repository;
 use serde::Serialize;
 
@@ -676,9 +677,11 @@ fn diff_file_count(repo: &Repository, parent_head: &str, thread_tip: &str) -> Re
 /// without standing up a full state-to-state diff.
 fn count_unignored_paths<'a>(
     paths: impl Iterator<Item = &'a str>,
-    _ignore_patterns: &[String],
+    ignore_patterns: &[String],
 ) -> usize {
-    paths.count()
+    paths
+        .filter(|path| !should_ignore(Path::new(path), ignore_patterns))
+        .count()
 }
 
 /// Sort key for ranking. Lower values rank earlier.
