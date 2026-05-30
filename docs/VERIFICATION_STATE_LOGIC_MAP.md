@@ -13,10 +13,9 @@ Target rows describe the next model and must not be cited as shipped behavior.
 
 - `RepositoryVerificationState` is the canonical proof surface. `heddle verify
   --output json` emits it directly when clean; `status`, `diagnose`,
-  `workspace show`, `thread list/show`, `bridge git status`, many
-  post-operation envelopes, and mutating command preflights embed or defer to
-  the same shape. `bridge git import` and `bridge git reconcile` post-operation
-  JSON do not yet embed this proof; embedding it there is target behavior.
+  `workspace show`, `thread list/show`, `bridge git status`, `bridge git
+  import`, `bridge git reconcile`, many post-operation envelopes, and mutating
+  command preflights embed or defer to the same shape.
 - Repository capability terms are `plain-git`, `git-overlay`, and
   `native-heddle`. Human labels such as `Git + Heddle` or `Git + Heddle
   isolated checkout` describe the operator context; they are not new state
@@ -136,7 +135,7 @@ the new behavior.
 | Native uncaptured work is not reported as clean | `status_reports_uncaptured_for_freshly_initialized_repo`; `checkpoint_refuses_uncaptured_worktree_with_shared_advice`; `merge_preview_blocks_uncaptured_isolated_source_checkout` |
 | Commit and undo are one user-visible logical loop | `git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe`; `git_overlay_matrix_unsafe_commit_undo_reports_git_oid_and_preserves_heddle`; `git_overlay_matrix_undo_text_reports_non_clean_post_verify_next_action` |
 | Pushed undo keeps intent explicit | `git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull` |
-| Remote drift closes after push/pull | `git_overlay_matrix_bridge_push_pull_report_verification_state`; `git_overlay_matrix_top_level_push_closes_remote_verification_loop`; `git_overlay_matrix_remote_without_upstream_is_not_verified_until_push_sets_tracking`; `git_overlay_matrix_commit_refuses_remote_divergence_before_capture`; `git_overlay_matrix_checkpoint_closes_imported_remote_divergence_after_merge` |
+| Remote drift closes after push/pull | `git_overlay_matrix_bridge_push_pull_report_verification_state`; `git_overlay_matrix_top_level_push_closes_remote_verification_loop`; `git_overlay_matrix_commit_refuses_remote_divergence_before_capture`; `git_overlay_matrix_checkpoint_closes_imported_remote_divergence_after_merge` |
 | Bridge import/reconcile return proof | `git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_path`; `target/debug/heddle doctor schemas --output json` |
 | Remote publish state is guidance, not disverification | `git_overlay_matrix_top_level_push_closes_remote_verification_loop`; `git_overlay_matrix_local_only_branch_is_clean_until_push_sets_tracking`; `git_overlay_matrix_remote_add_configures_default_push_remote` |
 | Remote undone checkpoint remains explicit | `git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull` |
@@ -145,7 +144,7 @@ the new behavior.
 | Stale integration metadata blocks workflow verification | `git_overlay_matrix_ship_undo_restores_git_and_heddle_together` |
 | Ready/preview/ship/resolve/undo workflow is explicit | `start_merge_undo_json_workflow_keeps_machine_streams_clean`; `ready_text_names_ready_and_already_ready_noop_states`; `resolve_without_merge_emits_actionable_json_error`; `git_overlay_matrix_undo_preview_refuses_active_operation_like_real_undo` |
 | Generated and ignored artifacts are safe | `git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop`; `git_overlay_matrix_commit_requires_explicit_ignore_for_python_generated_noise`; `git_overlay_matrix_init_excludes_only_heddle_metadata`; `test_cli_capture_blocks_large_git_overlay_deletion_without_force`; `.heddleignore` file-operation tests |
-| Persona/output contracts stay coherent | `default_auto_output_is_json_when_stdout_is_piped_and_text_when_forced`; `tty_auto_mode_renders_text_and_explicit_json_stays_json`; `quiet_no_color_and_narrow_text_outputs_preserve_global_contract`; `narrow_no_color_text_outputs_cover_everyday_read_surfaces` |
+| Persona/output contracts stay coherent | `piped_status_with_no_output_flag_renders_text`; `output_auto_flag_errors_at_parse_with_helpful_message`; `tty_auto_mode_renders_text_and_explicit_json_stays_json`; `quiet_no_color_and_narrow_text_outputs_preserve_global_contract`; `narrow_no_color_text_outputs_cover_everyday_read_surfaces` |
 | Machine contracts stay single-sourced | `op_id_coverage`; `doctor_schemas_reports_runtime_and_documented_coverage`; `public_command_paths_have_command_contract_metadata`; `target/debug/heddle doctor schemas --output json`; `target/debug/heddle doctor docs --all --output json` |
 
 ## Useful Invariants
