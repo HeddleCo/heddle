@@ -11,7 +11,12 @@ the concrete migration shape.
 version-compat check out of the embedded Python and into a `heddle-devtools`
 subcommand (the same shape #103 already used to retire the
 `check-no-silent-default-tree-load` regex asserter). Option B (`cargo metadata`)
-does **not** address the asserter's actual need and is rejected — rationale in §3.
+*would* catch the heddle#63 mismatch (whole-graph resolution validates a path
+dep's local version against its declared `version` req), but it is the wrong
+abstraction: a blunt all-or-nothing resolution pass, not the per-pair
+requirement-vs-version *matcher* the asserter (and its caret-only policy guard)
+needs — plus a cargo-subprocess dependency. Rejected on abstraction-fit + weight,
+not on blindness — rationale in §3.
 
 ---
 
@@ -133,23 +138,37 @@ hand-maintained caret arithmetic, no `None`-as-error sentinel threading.
 per-package `version`, and per-dependency `req` (the requirement string) plus a
 fully **resolved** graph under `resolve`.
 
-### Why it's the wrong tool here
+### It *can* catch the bug — but it's the wrong abstraction
 
-The asserter is guarding against *exactly the thing `cargo metadata`'s resolution
-hides*. The heddle#63 bug (`:338-351`) is that **in-workspace, path deps satisfy
-the build regardless of the version requirement**. `cargo metadata`'s `resolve`
-graph is produced by that same local resolver — it will report the path dep as
-satisfied even when the declared `version` req is incompatible with what would be
-published. So the resolved graph would be *green on the very mismatch we exist to
-catch.* It cannot replace the check.
+First, correct a tempting-but-false claim: `cargo metadata` is **not** blind to the
+heddle#63 mismatch. Cargo validates a `path` dependency's *local* package version
+against the declared `version` requirement during resolution — the Cargo reference
+"Specifying dependencies → Multiple locations" section states the `version` key is
+checked against the local copy. Verified directly: a throwaway workspace with
+`dep = { path = "../dep", version = "0.2" }` over a `dep` whose `Cargo.toml` says
+`version = "0.3.0"` makes `cargo metadata --format-version 1` **fail** (exit 101,
+`candidate versions found which didn't match: 0.3.0`). So the earlier intuition in
+#81's body — "delegating the spec to cargo means drift is impossible" — is *not*
+wrong for this check; `cargo metadata` would surface exactly the heddle#63 case.
 
-`cargo metadata` *does* expose the raw `req` and `version` strings (in the
-unresolved `packages[].dependencies[]` array) — but those are the same strings the
-script already reads straight from `Cargo.toml`. To decide satisfaction you must
-**still** evaluate `req.matches(version)` yourself — i.e. you still need a semver
-matcher. So `cargo metadata` could at most replace the `glob`+`tomllib` Cargo.toml
-enumeration (~30 lines that already work), while leaving the actual hard part —
-the caret evaluation — unsolved.
+So why still reject B? Two reasons, neither being "it can't catch it":
+
+1. **It's a resolver, not a matcher API.** The asserter's need is to evaluate, for
+   an *arbitrary* `(requirement R, version V)` pair, whether `V` satisfies `R` under
+   Cargo caret rules — a per-pair predicate. `cargo metadata` exposes the resolved
+   graph plus the raw `req`/`version` strings (in `packages[].dependencies[]`), but
+   there is no "does `0.2` satisfy `^0.3.0`?" query: its only satisfaction signal is
+   a single all-or-nothing *whole-workspace* resolution outcome ("the graph resolved
+   / it didn't"). The asserter wants per-consumer granularity (which consumer, which
+   dep, a tailored failure message) and the §4 caret-only policy guard — neither is
+   expressible through a resolution pass. To get a per-pair answer from the raw
+   strings you'd **still** call `req.matches(version)` yourself — i.e. still need a
+   semver matcher. So B could at most replace the `glob`+`tomllib` Cargo.toml
+   enumeration (~30 lines that already work), while leaving the hard part — the caret
+   evaluation behind the policy guard — unsolved.
+2. **Subprocess weight.** Invoking cargo at asserter time adds a `cargo`-on-PATH and
+   clean-workspace failure mode plus a full-workspace metadata computation, versus an
+   in-process parse + match — against the issue's `<1s` budget (see Cost below).
 
 ### Cost
 
@@ -157,12 +176,13 @@ Subprocess spawn + full-workspace metadata computation + JSON parse, versus the
 current in-process TOML read. Adds a `cargo`-on-PATH and clean-workspace failure
 mode for no benefit, against the issue's `<1s` asserter budget.
 
-**Verdict:** B addresses dep-graph *resolution*; the asserter needs version-string
-*satisfaction*. Different problem. Rejected. (Note: #81's body mused that B is
-"more robust… delegating the spec to cargo means drift is impossible" — that
-intuition holds for resolution questions, but the path-dep override makes
-`cargo metadata` resolution blind to *this specific* check. `semver` — literally
-Cargo's own matcher — delivers the "no drift" property without the blindness.)
+**Verdict:** B *can* detect the heddle#63 mismatch (its resolution validates the
+path dep's local version against the declared req), so #81's "no drift" intuition is
+sound. But B delivers that signal as a coarse whole-workspace resolution outcome,
+not as the per-pair *satisfaction* matcher the asserter and its caret-only policy
+guard require — and it costs a cargo subprocess. `semver` — literally Cargo's own
+matcher — delivers the same "no drift" property as a typed, per-pair, in-process API
+with none of the subprocess weight. Rejected on abstraction-fit + weight.
 
 ---
 
@@ -200,10 +220,30 @@ self-tests live as real unit tests.
 4. **Caret-only policy guard (decide explicitly).** The hand-rolled parser
    *rejects* `*`, `>`, `<`, `~`, multi-clause. `semver` *evaluates* them. If the
    "workspace uses caret only" convention is still wanted, keep it as an explicit
-   one-line lint *separate from* satisfaction: inspect `VersionReq.comparators`
-   and fail any `Op` that isn't `Caret`/`Exact` (or whatever the convention
-   permits). Per the no-backcompat / cleanest-replacement stance, **do not** port
-   the `None` sentinel — make the policy its own check with its own message.
+   lint *separate from* satisfaction. **Do not** write the guard as "iterate
+   `VersionReq.comparators` and fail any `Op` that isn't `Caret`/`Exact`" — that
+   formulation **vacuously admits a bare `*`**. `VersionReq::parse("*")` is
+   `VersionReq::STAR`, whose `comparators` vector is **empty** (verified: `comparators.len() == 0`),
+   so an iterate-and-reject loop never sees a rejectable `Op` and the requirement
+   passes. The guard must reject the empty / wildcard case explicitly. Concrete
+   predicate for #81:
+
+   ```rust
+   // Reject unless the requirement is exactly one Caret or Exact comparator.
+   fn is_caret_only(req: &semver::VersionReq) -> bool {
+       !req.comparators.is_empty()                 // rejects bare `*` (STAR: empty comparators)
+           && req.comparators.iter().all(|c| {
+               matches!(c.op, semver::Op::Caret | semver::Op::Exact)
+           })                                       // rejects `1.2.*` (Op::Wildcard), `>`, `<`, `~`, etc.
+   }
+   ```
+
+   The `comparators.is_empty()` check is load-bearing: without it `*` slips through.
+   `1.2.*` is caught by the `all(...)` clause because it parses to a single
+   `Op::Wildcard` comparator (verified). Multi-clause (`,`) requirements are caught
+   too — any comparator with a non-`Caret`/`Exact` op fails the `all`. Per the
+   no-backcompat / cleanest-replacement stance, **do not** port the `None` sentinel —
+   make the policy its own check with its own message.
 5. **Tests #81 must add** — port all 7 self-test bundles (`:589-654`) as
    `#[test]` cases, **with two deliberate changes** that record this spike's
    findings:
@@ -274,7 +314,7 @@ and is not part of this PR.
 
 | | `semver` crate (A) | `cargo metadata` (B) |
 |---|---|---|
-| Addresses the actual need (string satisfaction) | **Yes** — it's Cargo's own matcher | **No** — resolves the graph; path deps mask the mismatch |
+| Addresses the actual need (per-pair string satisfaction) | **Yes** — it's Cargo's own matcher | **Partial** — whole-graph resolution catches the mismatch, but it's not a per-pair matcher and can't host the policy guard |
 | Correctness vs hand-rolled | 28/31 identical, 3× *more* correct | n/a (doesn't do matching) |
 | New dependency weight | zero (already in lockfile) | none, but adds subprocess + cargo-on-PATH failure modes |
 | Still need a semver evaluator? | no | **yes** — so B can't stand alone |
