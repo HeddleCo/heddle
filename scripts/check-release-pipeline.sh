@@ -84,13 +84,14 @@ else
   err "validate-tag must refuse stable tags (vX.Y.Z) from workflow_dispatch; see RELEASING.md and release.yml comment on softprops update-if-exists"
 fi
 
-# All five target triples.
+# All six target triples.
 targets=(
   "aarch64-apple-darwin"
   "x86_64-apple-darwin"
   "aarch64-unknown-linux-gnu"
   "x86_64-unknown-linux-gnu"
   "x86_64-pc-windows-msvc"
+  "aarch64-pc-windows-msvc"
 )
 for t in "${targets[@]}"; do
   if grep -F "$t" "$WF" >/dev/null; then
