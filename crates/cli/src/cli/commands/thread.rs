@@ -2950,19 +2950,58 @@ pub(crate) fn show_thread_summary(
     Ok(())
 }
 
+/// Recovery advice for refusing to drop or delete the *current*
+/// checkout thread. The original advice pointed users at
+/// `heddle thread list`, which loops a junior who sees only the current
+/// thread (heddle#258): the real fix is to switch to a sibling thread
+/// first, or create one when none exists, then retry the drop. Returns
+/// `(primary_command, recovery_commands, hint)`; both the switch and
+/// create paths are exposed as `<other>` templates so JSON callers can
+/// fill in a real thread name.
+pub(crate) fn current_thread_drop_recovery(
+    repo: &Repository,
+    current: &str,
+) -> (String, Vec<String>, String) {
+    const SWITCH: &str = "heddle thread switch <other>";
+    const CREATE: &str = "heddle thread create <other>";
+    let has_other = repo
+        .refs()
+        .list_threads()
+        .map(|threads| threads.iter().any(|name| name.as_str() != current))
+        .unwrap_or(false);
+    if has_other {
+        (
+            SWITCH.to_string(),
+            vec![SWITCH.to_string(), CREATE.to_string()],
+            format!(
+                "Switch to another thread with `{SWITCH}` (or start one with `{CREATE}`), then retry `heddle thread drop {current}`."
+            ),
+        )
+    } else {
+        (
+            CREATE.to_string(),
+            vec![CREATE.to_string(), SWITCH.to_string()],
+            format!(
+                "No other thread exists yet. Create one with `{CREATE}`, switch to it, then retry `heddle thread drop {current}`."
+            ),
+        )
+    }
+}
+
 pub(crate) fn cmd_thread_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     if let Head::Attached { thread } = repo.head_ref()?
         && thread == name
     {
+        let (primary, recovery, hint) = current_thread_drop_recovery(repo, &name);
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "branch_delete_current",
             format!("Refusing to delete current thread '{name}'"),
-            "Inspect available threads with `heddle thread list`, switch to another thread, then retry.",
+            hint,
             format!("HEAD is attached to '{name}'"),
             "deleting the attached thread would strand the current checkout without its branch ref",
             "no refs were moved or deleted",
-            "heddle thread list",
-            vec!["heddle thread list".to_string()],
+            primary,
+            recovery,
         )));
     }
 

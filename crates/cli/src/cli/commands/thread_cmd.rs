@@ -810,16 +810,18 @@ fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice
     )
 }
 
-fn current_thread_drop_advice(thread_id: &str) -> RecoveryAdvice {
+fn current_thread_drop_advice(repo: &Repository, thread_id: &str) -> RecoveryAdvice {
+    let (primary, recovery, hint) =
+        super::thread::current_thread_drop_recovery(repo, thread_id);
     RecoveryAdvice::safety_refusal(
         "current_thread_not_droppable",
         format!("Thread '{thread_id}' is the current checkout thread and cannot be dropped"),
-        "Use `heddle thread list` to inspect isolated threads that can be dropped.",
+        hint,
         format!("drop thread was requested for the attached checkout thread '{thread_id}'"),
         "dropping the current checkout would remove the thread that owns this working tree",
         "no thread refs, checkout directories, mounts, or agent reservations were changed",
-        "heddle thread list",
-        vec!["heddle thread list".to_string()],
+        primary,
+        recovery,
     )
 }
 
@@ -1196,7 +1198,7 @@ pub(crate) fn drop_thread_silent(
     let manager = thread_manager(repo);
     let Some(mut thread) = manager.load(thread_id)? else {
         if !delete_thread && repo.current_lane()?.as_deref() == Some(thread_id) {
-            return Err(anyhow!(current_thread_drop_advice(thread_id)));
+            return Err(anyhow!(current_thread_drop_advice(repo, thread_id)));
         }
         if delete_thread {
             return Ok(DropOutcome::Deleted);
