@@ -547,10 +547,8 @@ fn quickstart_identity_available(path: &Path, has_git: bool) -> bool {
         return true;
     }
     if has_git
-        && git_config_identity_with_global_fallback(path)
-            .ok()
-            .flatten()
-            .is_some()
+        && let Ok(Some(identity)) = git_config_identity_with_global_fallback(path)
+        && !principal_is_unconfigured(&Principal::new(&identity.name, &identity.email))
     {
         return true;
     }

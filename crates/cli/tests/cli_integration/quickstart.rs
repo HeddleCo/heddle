@@ -490,6 +490,62 @@ fn quickstart_preflight_honors_repo_level_principal() {
     );
 }
 
+/// Codex r4 (cid 3329024451): Git's sentinel-default identity
+/// (`user.name=Unknown` / `user.email=unknown@example.com`) is what
+/// `resolve_principal`/`build_attribution` treat as UNCONFIGURED and
+/// reject. The preflight must filter it the SAME way — a repo whose only
+/// Git identity is the sentinel must fail BEFORE any `.heddle` write, not
+/// pass the preflight and then have the capture refuse mid-write.
+#[test]
+fn quickstart_rejects_git_sentinel_identity_before_writes() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir);
+    // Persist the sentinel "unconfigured" identity into the repo's local
+    // Git config (the `-c` flags `git_hermetic` passes do NOT persist).
+    git_hermetic(&["config", "user.name", "Unknown"], dir);
+    git_hermetic(&["config", "user.email", "unknown@example.com"], dir);
+
+    let out = heddle_output_with_env(
+        &[
+            "init",
+            "--quickstart",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+        &[
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_SYSTEM", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+            ("HEDDLE_PRINCIPAL_NAME", ""),
+            ("HEDDLE_PRINCIPAL_EMAIL", ""),
+        ],
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "sentinel-only Git identity must not satisfy the preflight: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_identity_required"),
+        "must fail with the quickstart_identity_required advice: stderr={stderr}"
+    );
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: a sentinel-only identity must leave NO partial .heddle/"
+    );
+    assert!(
+        !dir.join("QUICKSTART.md").exists(),
+        "fail-before-writes: no QUICKSTART.md placeholder may be written"
+    );
+}
+
 /// Non-interactive `--install-harnesses` installs the named harness as a
 /// post-write step (the decision is resolved up front, the install runs
 /// after the repo exists).
