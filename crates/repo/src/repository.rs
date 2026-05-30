@@ -78,7 +78,7 @@ use objects::{
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
-use refs::{Head, RefBackend, RefManager};
+use refs::{Head, RefBackend, RefManager, RefUpdate};
 
 use crate::git_worktree_status::GitWorktreeEntryState;
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
@@ -351,6 +351,16 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
 /// those are bound to the default `AnyStore` flavor and live in
 /// [`Repository::run_open_hooks`], which the config-driven [`Repository::open`]
 /// invokes after `open_raw`.
+/// The per-worktree checkout lane (heddle#330 §1.5). Free function so the
+/// reconciler can be wired at construction (before a `Repository` exists)
+/// using the same computation as [`Repository::op_scope`].
+pub(crate) fn compute_op_scope(root: &Path) -> String {
+    let local_head = root.join(".heddle").join("HEAD");
+    let canonical = local_head.canonicalize().unwrap_or(local_head);
+    let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
+    format!("wt-{}", &digest.to_hex().as_str()[..16])
+}
+
 impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
     fn open_raw(
         root: PathBuf,
@@ -364,8 +374,18 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
             .as_ref()
             .map(|p| objects::object::Principal::new(&p.name, &p.email))
             .unwrap_or_else(|| objects::object::Principal::new("<unknown>", ""));
-        let oplog = OpLog::new(&heddle_dir, actor);
+        let oplog = OpLog::new(&heddle_dir, actor.clone());
         let shallow = ShallowInfo::load(&heddle_dir)?;
+        // Inject the oplog-backed read + write chokepoints (heddle#330 §2.2):
+        // every logical read reconciles against the committed oplog tail, and
+        // `commit_and_publish` appends a ref-carrying record before publishing.
+        let reconciler = std::sync::Arc::new(crate::atomic::OplogRefReconciler::new(
+            &heddle_dir,
+            compute_op_scope(&root),
+        ));
+        let committer =
+            std::sync::Arc::new(crate::atomic::OplogRefCommitter::new(&heddle_dir, actor));
+        let refs = refs.with_reconciler(reconciler).with_committer(committer);
         Ok(Self::from_parts(
             root, heddle_dir, store, refs, oplog, config, shallow,
         ))
@@ -526,6 +546,19 @@ impl Repository {
         refs.write_head(&Head::Attached {
             thread: ThreadName::from("main"),
         })?;
+
+        // Inject the oplog-backed read + write chokepoints (heddle#330 §2.2) —
+        // same as `open_raw`, so a freshly-init'd handle reconciles and
+        // record-commits too.
+        let reconciler = std::sync::Arc::new(crate::atomic::OplogRefReconciler::new(
+            &heddle_dir,
+            compute_op_scope(&root),
+        ));
+        let committer = std::sync::Arc::new(crate::atomic::OplogRefCommitter::new(
+            &heddle_dir,
+            objects::object::Principal::new("<unknown>", ""),
+        ));
+        let refs = refs.with_reconciler(reconciler).with_committer(committer);
 
         let capability = repository_capability_for_root(&root);
         Ok(Self {
@@ -1647,10 +1680,30 @@ impl Repository {
         //     shared-oplog setups
         //   * opaque on disk — the user's home directory and username
         //     never end up serialized into oplog entries
-        let local_head = self.root.join(".heddle").join("HEAD");
-        let canonical = local_head.canonicalize().unwrap_or(local_head);
-        let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
-        format!("wt-{}", &digest.to_hex().as_str()[..16])
+        compute_op_scope(&self.root)
+    }
+
+    /// The write chokepoint (heddle#330 §2.2): commit the ref-carrying
+    /// `OpRecord` batch (phase 4) **before** publishing the atomic `ref_updates`
+    /// batch (phase 5), record-before-publish. Encodes the records opaquely and
+    /// routes through [`RefBackend::commit_and_publish`] so the backend's seam
+    /// enforces the ordering — the file backend appends-then-publishes, a
+    /// Postgres backend would co-commit in one SQL transaction. Replaces the
+    /// publish-then-record order that left a reader-visible ref with no undo
+    /// record (the fork/collapse bug).
+    pub fn commit_and_publish(
+        &self,
+        records: Vec<OpRecord>,
+        ref_updates: &[RefUpdate],
+    ) -> Result<()> {
+        let encoded = records
+            .iter()
+            .map(|record| {
+                rmp_serde::to_vec(record).map_err(|e| HeddleError::Serialization(e.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let scope = self.op_scope();
+        self.refs.commit_and_publish(&encoded, ref_updates, Some(&scope))
     }
 
     pub fn repo_config(&self) -> &RepoConfig {

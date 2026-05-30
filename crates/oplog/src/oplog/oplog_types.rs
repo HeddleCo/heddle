@@ -36,11 +36,32 @@ pub enum OpRecord {
         new_state: ChangeId,
     },
     /// Fork operation.
-    Fork { from: ChangeId, new_state: ChangeId },
-    /// Collapse operation.
+    ///
+    /// `from` is the source state forked from; `new_state` is the fork
+    /// result. `thread`/`head` name the ref the fork *published* so a
+    /// crash-replay (oplog committed, ref not yet materialized) can
+    /// re-derive which ref to publish (heddle#330 write chokepoint):
+    /// `thread = Some(name)` when the fork attached HEAD to a new thread,
+    /// `head = Some(state)` when it detached HEAD at the fork result.
+    /// These published-ref fields — not the `from`/`new_state` positional
+    /// pair — are the authoritative replay/materialization target.
+    Fork {
+        from: ChangeId,
+        new_state: ChangeId,
+        #[serde(default)]
+        thread: Option<String>,
+        #[serde(default)]
+        head: Option<ChangeId>,
+    },
+    /// Collapse operation. `thread` names the published ref: `Some(name)`
+    /// when the collapse published a thread ref, `None` when it published
+    /// a detached HEAD at `result` (heddle#330 write chokepoint — the
+    /// published-ref discriminant replay needs to materialize the ref).
     Collapse {
         sources: Vec<ChangeId>,
         result: ChangeId,
+        #[serde(default)]
+        thread: Option<String>,
     },
     /// Marker creation.
     MarkerCreate { name: String, state: ChangeId },
@@ -226,6 +247,30 @@ pub enum OpRecord {
         previous_git_oid: Option<String>,
         new_git_oid: String,
     },
+    /// A remote-thread ref was published (heddle#330 r9). Before this
+    /// variant `set_remote_thread` wrote the ref directly with no
+    /// committed record, so reconciliation of the remote-thread class
+    /// folded an empty tail. Recording the publish makes that
+    /// reconciliation non-vacuous and lets crash-replay re-materialize
+    /// the ref from its newest in-scope record.
+    RemoteThreadUpdate {
+        remote: String,
+        thread: String,
+        state: ChangeId,
+    },
+    /// A remote-thread ref was deleted (heddle#330 r9). Folded like a
+    /// `MarkerDelete`: drops the name from the reconciled remote-thread
+    /// set. `state` is the value at delete time (forensic context).
+    RemoteThreadDelete {
+        remote: String,
+        thread: String,
+        state: ChangeId,
+    },
+    /// The heddle-internal pre-undo recovery pointer was set (heddle#330
+    /// r9). A single rolling ORIG_HEAD-style pointer with no delete path,
+    /// so one update variant suffices. Local (per-checkout) ref —
+    /// reconciles within its own `op_scope`.
+    UndoRecoveryUpdate { state: ChangeId },
 }
 
 impl OpRecord {
@@ -345,6 +390,19 @@ impl OpRecord {
                     previous_git_oid.as_deref().unwrap_or("(none)"),
                     new_git_oid
                 )
+            }
+            OpRecord::RemoteThreadUpdate {
+                remote,
+                thread,
+                state,
+            } => {
+                format!("update remote thread {}/{} -> {}", remote, thread, state.short())
+            }
+            OpRecord::RemoteThreadDelete { remote, thread, .. } => {
+                format!("delete remote thread {}/{}", remote, thread)
+            }
+            OpRecord::UndoRecoveryUpdate { state } => {
+                format!("set undo-recovery -> {}", state.short())
             }
         }
     }

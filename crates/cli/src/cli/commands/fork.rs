@@ -4,6 +4,7 @@
 use objects::store::ObjectStore;
 use anyhow::Result;
 use objects::object::{State, ThreadName};
+use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::Repository;
 use serde::Serialize;
@@ -65,34 +66,54 @@ pub fn cmd_fork(cli: &Cli, name: Option<String>, from: Option<String>) -> Result
         new_state = new_state.with_intent(format!("Fork from {}", source_state.change_id.short()));
     }
 
-    // Store the new state
+    // Store the new state (orphan until a ref points at it).
     repo.store().put_state(&new_state)?;
 
-    // If a name was provided, create a new thread
-    if let Some(ref track_name) = name {
+    // Build the atomic ref batch + its matching `Fork` record, then publish
+    // record-first through the write chokepoint (heddle#330 §2.2): the oplog
+    // record is the commit point (phase 4) and the ref publish is a post-commit
+    // materialization (phase 5), so a crash between them leaves a re-derivable
+    // ref — never a reader-visible ref with no undo record (the prior
+    // publish-then-record order). The `Fork` record carries the published ref
+    // identity and the corrected `from = source_state` argument order (r15).
+    let (ref_updates, fork_record) = if let Some(ref track_name) = name {
         let tn = ThreadName::new(track_name.as_str());
-        let updates = vec![
-            RefUpdate::Thread {
-                name: tn.clone(),
-                expected: RefExpectation::Missing,
-                new: Some(new_state.change_id),
+        (
+            vec![
+                RefUpdate::Thread {
+                    name: tn.clone(),
+                    expected: RefExpectation::Missing,
+                    new: Some(new_state.change_id),
+                },
+                RefUpdate::Head {
+                    expected: RefExpectation::Any,
+                    new: Head::Attached { thread: tn },
+                },
+            ],
+            OpRecord::Fork {
+                from: source_state.change_id,
+                new_state: new_state.change_id,
+                thread: Some(track_name.clone()),
+                head: None,
             },
-            RefUpdate::Head {
-                expected: RefExpectation::Any,
-                new: Head::Attached { thread: tn },
-            },
-        ];
-        repo.refs().update_refs(&updates)?;
+        )
     } else {
-        // Detach HEAD to point to the new state
-        repo.refs().write_head(&Head::Detached {
-            state: new_state.change_id,
-        })?;
-    }
-
-    // Record in oplog
-    repo.oplog()
-        .record_fork(&new_state.change_id, &source_state.change_id)?;
+        (
+            vec![RefUpdate::Head {
+                expected: RefExpectation::Any,
+                new: Head::Detached {
+                    state: new_state.change_id,
+                },
+            }],
+            OpRecord::Fork {
+                from: source_state.change_id,
+                new_state: new_state.change_id,
+                thread: None,
+                head: Some(new_state.change_id),
+            },
+        )
+    };
+    repo.commit_and_publish(vec![fork_record], &ref_updates)?;
 
     let output = ForkOutput {
         output_kind: "fork",

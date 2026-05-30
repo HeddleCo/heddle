@@ -256,6 +256,55 @@ fn test_oplogbackend_trait_async_methods_dispatch() {
     assert!(dup.is_none());
 }
 
+/// The unbounded `record_batch_exactly_once` dedups a retry even after far
+/// more intervening commits than any fixed window — the property
+/// `record_batch_scoped_if_no_transaction`'s window cannot give
+/// (heddle#330 §2.2 "Idempotency of the commit").
+#[test]
+fn record_batch_exactly_once_dedups_past_any_window() {
+    let (_temp, oplog) = create_oplog();
+    let commit_ops = || {
+        vec![OpRecord::TransactionCommit {
+            transaction_id: "tx-delayed".to_string(),
+            op_count: 0,
+        }]
+    };
+
+    // First commit lands.
+    let first = oplog
+        .record_batch_exactly_once(commit_ops(), Some("lane"), "tx-delayed")
+        .unwrap();
+    assert!(first.is_some(), "first commit must append");
+
+    // Bury it under 200 unrelated batches — far past any plausible
+    // recent-window the bounded helper would scan.
+    for _ in 0..200 {
+        oplog
+            .record_snapshot(&ChangeId::generate(), None, None, Some("lane"))
+            .unwrap();
+    }
+
+    // A delayed retry still finds the original commit and refuses to
+    // double-append — exact-once regardless of how much aged out.
+    let retry = oplog
+        .record_batch_exactly_once(commit_ops(), Some("lane"), "tx-delayed")
+        .unwrap();
+    assert!(retry.is_none(), "delayed retry must dedup to None");
+
+    // A distinct transaction id still commits.
+    let other = oplog
+        .record_batch_exactly_once(
+            vec![OpRecord::TransactionCommit {
+                transaction_id: "tx-other".to_string(),
+                op_count: 0,
+            }],
+            Some("lane"),
+            "tx-other",
+        )
+        .unwrap();
+    assert!(other.is_some(), "a different transaction id must commit");
+}
+
 /// Covers the **default** (non-atomic) `record_batch_scoped_if_no_transaction`
 /// on the trait. `OpLog` overrides it, so a backend that keeps the default
 /// is the only way to exercise that fallback body.

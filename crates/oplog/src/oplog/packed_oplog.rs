@@ -41,6 +41,24 @@ impl PackedOpLog {
         Self::parse(&bytes, path.to_path_buf())
     }
 
+    /// Read only the `head_id` from the fixed-size header — the cheap O(1)
+    /// generation gate (heddle#330). Layout: MAGIC(8) + VERSION(4) +
+    /// entry_count(8) + head_id(8); `head_id` is at byte offset 20.
+    pub(crate) fn read_head_id(path: &Path) -> Result<u64> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let mut header = [0u8; 28];
+        file.read_exact(&mut header)?;
+        if &header[0..8] != MAGIC {
+            return Err(HeddleError::InvalidObject(
+                "invalid oplog magic".to_string(),
+            ));
+        }
+        let mut head_id_bytes = [0u8; 8];
+        head_id_bytes.copy_from_slice(&header[20..28]);
+        Ok(u64::from_le_bytes(head_id_bytes))
+    }
+
     pub(crate) fn save(&self) -> Result<()> {
         let bytes = self.serialize()?;
         write_file_atomic(&self.path, &bytes)?;

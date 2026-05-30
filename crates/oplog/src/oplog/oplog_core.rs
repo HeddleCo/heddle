@@ -319,6 +319,79 @@ impl OpLog {
         Ok(Some(ids))
     }
 
+    /// Append a transaction batch **exactly once**, deduplicated by an
+    /// **unbounded** scan over the entire committed history for a
+    /// matching `OpRecord::TransactionCommit { transaction_id }` marker —
+    /// the linearization point for the atomic-mutation primitive
+    /// (heddle#330 §2.2).
+    ///
+    /// Unlike [`OpLog::record_batch_scoped_if_no_transaction`], which scans
+    /// only a caller-supplied recent window and concedes that "ageing past
+    /// it duplicates the batch", this is exact-once at **any** retry timing
+    /// — including a delayed crash-retry after an arbitrary number of
+    /// intervening commits — because the lookup domain is the whole log.
+    /// The scan and the append are held under the same oplog write lock, so
+    /// two concurrent retriers serialize and exactly one wins.
+    ///
+    /// `operations` must already carry the `TransactionCommit` marker whose
+    /// `transaction_id` matches the `transaction_id` argument. Returns
+    /// `Ok(None)` when the transaction was already committed by a prior
+    /// (possibly long-ago) run.
+    pub fn record_batch_exactly_once(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+    ) -> Result<Option<Vec<u64>>> {
+        if operations.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let _lock = self.write_lock()?;
+        let mut packed = self.load_fresh()?;
+
+        // Unbounded scan over the ENTIRE committed history — not a window.
+        let already_committed = packed.entries.iter().any(|entry| {
+            matches!(
+                &entry.operation,
+                OpRecord::TransactionCommit { transaction_id: id, .. }
+                    if id == transaction_id
+            )
+        });
+        if already_committed {
+            return Ok(None);
+        }
+
+        let start_id = packed.head_id + 1;
+        let timestamp = Utc::now();
+        let scope_owned = scope.map(str::to_string);
+        let new_entries =
+            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
+
+        packed.append(new_entries);
+        packed.save()?;
+        *self.cached.lock().unwrap() = Some(packed);
+
+        Ok(Some(ids))
+    }
+
+    /// Current oplog generation — the monotonic `head_id`
+    /// (`packed_oplog.rs` leading field). Reads only the **fixed-size header**
+    /// from disk (not the whole log), so it is the cheap O(1) gate the per-read
+    /// reconciliation needs (heddle#330 §2.2): a long-held handle observes a
+    /// concurrent commit's advance, and the no-lag hot path is one header read +
+    /// one integer compare against a cached watermark — no tail scan. Returns 0
+    /// when the oplog file does not exist yet.
+    pub fn head_id(&self) -> Result<u64> {
+        match PackedOpLog::read_head_id(&self.oplog_path()) {
+            Ok(id) => Ok(id),
+            // Treat a not-yet-created oplog as generation 0.
+            Err(_) if !self.oplog_path().exists() => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
     pub(super) fn record_single_scoped(
         &self,
         operation: OpRecord,

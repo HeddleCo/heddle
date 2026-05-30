@@ -7,6 +7,7 @@ compile_error!(
      See crates/repo/Cargo.toml."
 );
 
+pub mod atomic;
 pub mod daemon;
 mod ephemeral_thread;
 mod fsmonitor;

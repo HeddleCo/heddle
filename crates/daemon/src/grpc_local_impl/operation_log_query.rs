@@ -225,6 +225,9 @@ fn verb_for(op: &OpRecord) -> &'static str {
         OpRecord::Purge { .. } => "purge",
         OpRecord::FastForward { .. } | OpRecord::FastForwardV2 { .. } => "fast_forward",
         OpRecord::GitCheckpoint { .. } => "git_checkpoint",
+        OpRecord::RemoteThreadUpdate { .. } => "remote_thread_update",
+        OpRecord::RemoteThreadDelete { .. } => "remote_thread_delete",
+        OpRecord::UndoRecoveryUpdate { .. } => "undo_recovery_update",
     }
 }
 
@@ -243,6 +246,8 @@ fn thread_for(op: &OpRecord) -> Option<String> {
         OpRecord::FastForward { target_thread, .. }
         | OpRecord::FastForwardV2 { target_thread, .. } => Some(target_thread.clone()),
         OpRecord::GitCheckpoint { branch, .. } => Some(branch.clone()),
+        OpRecord::RemoteThreadUpdate { thread, .. }
+        | OpRecord::RemoteThreadDelete { thread, .. } => Some(thread.clone()),
         OpRecord::Goto { .. }
         | OpRecord::Fork { .. }
         | OpRecord::Collapse { .. }
@@ -250,6 +255,7 @@ fn thread_for(op: &OpRecord) -> Option<String> {
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
         | OpRecord::Redact { .. }
+        | OpRecord::UndoRecoveryUpdate { .. }
         | OpRecord::Purge { .. } => None,
     }
 }
@@ -271,6 +277,9 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
         OpRecord::GitCheckpoint { state, .. } => Some(*state),
         OpRecord::EphemeralThreadCollapse { final_state, .. } => Some(*final_state),
         OpRecord::Redact { state, .. } => Some(*state),
+        OpRecord::RemoteThreadUpdate { state, .. }
+        | OpRecord::RemoteThreadDelete { state, .. } => Some(*state),
+        OpRecord::UndoRecoveryUpdate { state } => Some(*state),
         OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }

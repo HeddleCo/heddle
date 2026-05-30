@@ -109,19 +109,36 @@ impl OpLog {
         )
     }
 
-    /// Record a fork operation.
-    pub fn record_fork(&self, from: &ChangeId, new_state: &ChangeId) -> Result<u64> {
+    /// Record a fork operation. `from` is the source state, `new_state`
+    /// the fork result; `thread`/`head` name the published ref so
+    /// crash-replay can re-materialize it (heddle#330).
+    pub fn record_fork(
+        &self,
+        from: &ChangeId,
+        new_state: &ChangeId,
+        thread: Option<&str>,
+        head: Option<&ChangeId>,
+    ) -> Result<u64> {
         self.record_single(OpRecord::Fork {
             from: *from,
             new_state: *new_state,
+            thread: thread.map(str::to_string),
+            head: head.copied(),
         })
     }
 
-    /// Record a collapse operation.
-    pub fn record_collapse(&self, sources: &[ChangeId], result: &ChangeId) -> Result<u64> {
+    /// Record a collapse operation. `thread` names the published ref
+    /// (`Some` thread name, or `None` for a detached HEAD at `result`).
+    pub fn record_collapse(
+        &self,
+        sources: &[ChangeId],
+        result: &ChangeId,
+        thread: Option<&str>,
+    ) -> Result<u64> {
         self.record_single(OpRecord::Collapse {
             sources: sources.to_vec(),
             result: *result,
+            thread: thread.map(str::to_string),
         })
     }
 
