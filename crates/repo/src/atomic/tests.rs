@@ -432,3 +432,184 @@ fn write_chokepoint_records_before_publishing() {
         Some(state)
     );
 }
+
+/// The `Tx` accessors and the rewind ledger's error-handling paths: the
+/// getters, the first-error-wins/suppress-the-rest rewind, the committed
+/// early-return on a double commit, and the `Drop` backstop logging a rewind
+/// failure instead of panicking.
+#[test]
+fn tx_accessors_and_rewind_error_paths() {
+    let (_t, repo) = test_repo();
+
+    // Accessors.
+    let mut tx = Tx::root(&repo);
+    assert_eq!(tx.depth(), 0);
+    assert_eq!(tx.scope(), repo.op_scope());
+    assert!(!tx.transaction_id().is_empty());
+    let _ = tx.repo();
+    let ledger = tx.ledger_view();
+    assert_eq!(ledger.depth, 0);
+    assert_eq!(ledger.scope, repo.op_scope());
+
+    // Two failing inverses: LIFO order ⇒ the last-pushed runs first and its
+    // error is surfaced; the earlier one's error is attempted then suppressed.
+    tx.on_rewind(|| Err(HeddleError::Config("second".to_string())));
+    tx.on_rewind(|| Err(HeddleError::Config("first".to_string())));
+    let err = tx.rewind_all().unwrap_err();
+    assert!(
+        matches!(err, HeddleError::Config(m) if m == "first"),
+        "the first rewind error (LIFO) must be the one returned"
+    );
+
+    // A second commit after a successful one is a no-op (committed guard).
+    let mut tx2 = Tx::root(&repo);
+    tx2.commit(vec![OpRecord::Snapshot {
+        new_state: ChangeId::generate(),
+        prev_head: None,
+        thread: None,
+    }])
+    .unwrap();
+    tx2.commit(vec![OpRecord::Snapshot {
+        new_state: ChangeId::generate(),
+        prev_head: None,
+        thread: None,
+    }])
+    .unwrap();
+    // Only one TransactionCommit landed despite two commit calls.
+    let commits = repo
+        .oplog()
+        .recent(64)
+        .unwrap()
+        .into_iter()
+        .filter(|e| matches!(e.operation, OpRecord::TransactionCommit { .. }))
+        .count();
+    assert_eq!(commits, 1, "the committed guard suppresses the second commit");
+
+    // Drop backstop: an uncommitted Tx whose inverse fails logs (never panics).
+    {
+        let mut tx3 = Tx::root(&repo);
+        tx3.on_rewind(|| Err(HeddleError::Config("drop-time".to_string())));
+        // tx3 dropped here without commit ⇒ Drop runs rewind_all, gets Err, logs.
+    }
+}
+
+/// Drives the reconciler's fold over every published-ref-bearing `OpRecord`
+/// shape so each `Fold::apply` arm and each list/remote projection runs. The
+/// canonical refs are never published (only the records committed), so a read
+/// reconciles the folded value — exercising the read chokepoint end to end.
+#[test]
+fn reconcile_folds_every_record_shape() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let op = repo.oplog();
+
+    let v1 = ChangeId::generate();
+    let v1b = ChangeId::generate();
+    let v2 = ChangeId::generate();
+    let coll = ChangeId::generate();
+    let ckpt = ChangeId::generate();
+    let ff = ChangeId::generate();
+    let mk = ChangeId::generate();
+    let remote = ChangeId::generate();
+    let undo = ChangeId::generate();
+
+    // Legacy read-back-only variants (V1 create + update).
+    op.record_batch(vec![OpRecord::ThreadCreate {
+        name: "t_v1".to_string(),
+        state: v1,
+    }])
+    .unwrap();
+    op.record_batch(vec![OpRecord::ThreadUpdate {
+        name: "t_v1".to_string(),
+        old_state: v1,
+        new_state: v1b,
+    }])
+    .unwrap();
+    // V2 create + a delete (folds to None).
+    op.record_thread_create("t_v2", &v2, None, None).unwrap();
+    op.record_batch(vec![OpRecord::ThreadDelete {
+        name: "t_del".to_string(),
+        state: v2,
+    }])
+    .unwrap();
+    // Collapse with a thread, and one detaching HEAD (thread = None arm).
+    op.record_collapse(&[v1, v1b], &coll, Some("t_coll")).unwrap();
+    op.record_batch(vec![OpRecord::Collapse {
+        sources: vec![v1],
+        result: coll,
+        thread: None,
+    }])
+    .unwrap();
+    // Checkpoint with a thread, and one without (thread = None arm).
+    op.record_batch(vec![OpRecord::Checkpoint {
+        parent: Some(v1),
+        state: ckpt,
+        thread: Some("t_ckpt".to_string()),
+    }])
+    .unwrap();
+    op.record_batch(vec![OpRecord::Checkpoint {
+        parent: None,
+        state: ckpt,
+        thread: None,
+    }])
+    .unwrap();
+    // Fast-forward (V2) folds target_thread → post_target_id.
+    op.record_fast_forward("t_src", "t_ff", &v1, &ff, None).unwrap();
+    // Fork that publishes no ref (thread = None arm).
+    op.record_batch(vec![OpRecord::Fork {
+        from: v1,
+        new_state: v1b,
+        thread: None,
+        head: None,
+    }])
+    .unwrap();
+    // Ephemeral collapse retires its thread pointer (folds to None).
+    op.record_batch(vec![OpRecord::EphemeralThreadCollapse {
+        thread: "t_eph".to_string(),
+        final_state: v1,
+    }])
+    .unwrap();
+    // Marker create + delete; remote update + delete; undo-recovery (local).
+    op.record_marker_create("mk2", &mk).unwrap();
+    op.record_batch(vec![OpRecord::MarkerDelete {
+        name: "mk_del".to_string(),
+        state: mk,
+    }])
+    .unwrap();
+    op.record_remote_thread_update("origin", "rt2", &remote, None)
+        .unwrap();
+    op.record_remote_thread_delete("origin", "rt_del", &remote, None)
+        .unwrap();
+    op.record_undo_recovery_update(&undo, Some(&scope)).unwrap();
+
+    let refs = repo.refs();
+
+    // Point reads fold + fill the absent canonical (fill_point set arm).
+    assert_eq!(refs.get_thread(&ThreadName::new("t_coll")).unwrap(), Some(coll));
+    assert_eq!(refs.get_thread(&ThreadName::new("t_ckpt")).unwrap(), Some(ckpt));
+    assert_eq!(refs.get_thread(&ThreadName::new("t_ff")).unwrap(), Some(ff));
+    assert_eq!(refs.get_thread(&ThreadName::new("t_v1")).unwrap(), Some(v1b));
+    assert_eq!(refs.get_thread(&ThreadName::new("t_v2")).unwrap(), Some(v2));
+    assert_eq!(refs.get_marker(&MarkerName::new("mk2")).unwrap(), Some(mk));
+    assert_eq!(
+        refs.get_remote_thread("origin", &ThreadName::new("rt2")).unwrap(),
+        Some(remote)
+    );
+    assert_eq!(refs.get_undo_recovery().unwrap(), Some(undo));
+
+    // A deleted ref folds to None and is not filled.
+    assert_eq!(refs.get_thread(&ThreadName::new("t_del")).unwrap(), None);
+
+    // List reads exercise the ThreadList/MarkerList/RemoteList/RemoteThreadList
+    // projection arms (merge_list union + remote presence filter).
+    let threads = refs.list_threads().unwrap();
+    assert!(threads.contains(&ThreadName::new("t_coll")));
+    assert!(threads.contains(&ThreadName::new("t_ff")));
+    assert!(refs.list_markers().unwrap().contains(&MarkerName::new("mk2")));
+    let remotes = refs.list_remotes().unwrap();
+    assert!(remotes.contains(&"origin".to_string()));
+    let remote_threads = refs.list_remote_threads("origin").unwrap();
+    assert!(remote_threads.contains(&ThreadName::new("rt2")));
+    // The deleted remote thread is absent from the projection.
+    assert!(!remote_threads.contains(&ThreadName::new("rt_del")));
+}

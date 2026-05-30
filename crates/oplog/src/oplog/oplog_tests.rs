@@ -793,4 +793,103 @@ mod default_backend {
         .unwrap();
         assert!(second.is_none());
     }
+
+    /// The `record_*` convenience wrappers on `OpLogBackend` are *default*
+    /// trait methods. On `OpLog` they are shadowed by the inherent
+    /// `oplog_records.rs` methods, so a backend that does NOT redefine them
+    /// (the `MemOpLog` mock, like the Postgres backend) is the only way to
+    /// drive the default bodies. Calls each through the trait and asserts the
+    /// expected variant landed in a recorded batch.
+    #[test]
+    fn default_record_wrappers_emit_expected_variants() {
+        use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
+
+        let backend = MemOpLog::default();
+        let from = ChangeId::from_bytes([1u8; 16]);
+        let cid = ChangeId::from_bytes([2u8; 16]);
+        let blob = ContentHash::from_bytes([7u8; 32]);
+        let redaction = ContentHash::from_bytes([9u8; 32]);
+
+        // `record_batch` default delegates to `record_batch_scoped(_, None)`.
+        backend
+            .record_batch(vec![OpRecord::Goto {
+                target: cid,
+                prev_head: Some(from),
+            }])
+            .unwrap();
+
+        backend
+            .record_snapshot(&cid, Some(&from), Some("thread"), Some("s"))
+            .unwrap();
+        backend.record_goto(&cid, Some(&from), Some("s")).unwrap();
+        backend
+            .record_thread_create(&ThreadName::new("ft"), &cid, Some(vec![1, 2, 3]), Some("s"))
+            .unwrap();
+        backend
+            .record_thread_delete(&ThreadName::new("ft"), &cid, Some("s"))
+            .unwrap();
+        let rename_ids = backend
+            .record_thread_rename(&ThreadName::new("old"), &ThreadName::new("new"), &cid, Some("s"))
+            .unwrap();
+        assert_eq!(rename_ids.len(), 2, "rename emits create + delete");
+        backend
+            .record_fork(&from, &cid, Some("topic"), Some(&cid))
+            .unwrap();
+        backend
+            .record_collapse(&[from, cid], &cid, Some("trunk"))
+            .unwrap();
+        backend
+            .record_remote_thread_update("origin", "rt", &cid, Some("s"))
+            .unwrap();
+        backend
+            .record_remote_thread_delete("origin", "rt", &cid, Some("s"))
+            .unwrap();
+        backend.record_undo_recovery_update(&cid, Some("s")).unwrap();
+        backend
+            .record_marker_create(&MarkerName::new("v1"), &cid)
+            .unwrap();
+        backend
+            .record_marker_delete(&MarkerName::new("v1"), &cid)
+            .unwrap();
+        backend
+            .record_redact(&redaction, &blob, &cid, "secret.txt", Some("s"))
+            .unwrap();
+        backend.record_purge(&redaction, &blob, Some("s")).unwrap();
+        backend
+            .record_fast_forward(&ThreadName::new("topic"), &ThreadName::new("main"), &from, &cid, Some("s"))
+            .unwrap();
+
+        // `coalesce_batches` default is fail-closed.
+        assert!(
+            backend.coalesce_batches(1, 2).is_err(),
+            "default coalesce must refuse"
+        );
+
+        // Every wrapper appended through `record_batch_scoped`; spot-check the
+        // distinctive published-ref variants made it into the recorded batches.
+        let batches = pollster::block_on(backend.recent_batches(256)).unwrap();
+        let ops: Vec<&OpRecord> = batches
+            .iter()
+            .flat_map(|b| b.entries.iter().map(|e| &e.operation))
+            .collect();
+        assert!(ops.iter().any(|o| matches!(
+            o,
+            OpRecord::Fork { from: f, new_state, thread, head }
+                if *f == from && *new_state == cid && thread.as_deref() == Some("topic") && *head == Some(cid)
+        )));
+        assert!(ops.iter().any(|o| matches!(
+            o,
+            OpRecord::ThreadCreateV2 { name, manager_snapshot, .. }
+                if name == "ft" && manager_snapshot.as_deref() == Some(&[1u8, 2, 3][..])
+        )));
+        assert!(ops.iter().any(|o| matches!(
+            o,
+            OpRecord::RemoteThreadUpdate { remote, thread, .. } if remote == "origin" && thread == "rt"
+        )));
+        assert!(ops.iter().any(|o| matches!(o, OpRecord::UndoRecoveryUpdate { .. })));
+        assert!(ops.iter().any(|o| matches!(
+            o,
+            OpRecord::FastForwardV2 { post_target_id, .. } if *post_target_id == cid
+        )));
+    }
 }
