@@ -127,6 +127,7 @@ Targets (`<target>`):
 - `aarch64-unknown-linux-gnu` — Linux arm64 (glibc)
 - `x86_64-unknown-linux-gnu` — Linux x64 (glibc)
 - `x86_64-pc-windows-msvc` — Windows x64 (MSVC)
+- `aarch64-pc-windows-msvc` — Windows arm64 (MSVC)
 
 Each archive contains:
 
