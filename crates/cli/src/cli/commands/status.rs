@@ -241,7 +241,11 @@ fn quickstart_init_recommendation(
         return None;
     }
     let empty_log = current_state.map(is_synthetic_root).unwrap_or(true);
-    empty_log.then(|| "heddle init --quickstart".to_string())
+    // The repo already has `.heddle/` (it has been init'd to reach this
+    // branch), so a bare `heddle init --quickstart` hits the confirmation
+    // gate and is refused non-interactively. Recommend the runnable form —
+    // `--yes` clears the gate — so an agent/script can run it verbatim.
+    empty_log.then(|| "heddle init --quickstart --yes".to_string())
 }
 
 fn changes_from_status(status: &WorktreeStatus) -> ChangesInfo {

@@ -419,7 +419,22 @@ fn quickstart_preflight(
     path: &Path,
     has_git: bool,
 ) -> Result<QuickstartPreflight> {
-    let json = should_output_json(cli, None);
+    // Resolve the repo's on-disk config the way `Repository::open` does
+    // (following an objectstore pointer to the shared dir for a materialized
+    // checkout) so the confirmation prompt's format matches the final
+    // render. A repo whose `[output].format` is `json` must not get a text
+    // prompt before a JSON envelope.
+    let repo_config = resolve_existing_repo_config(path);
+    let json = should_output_json(cli, repo_config.as_ref());
+
+    // A detached Git HEAD has no branch for the checkpoint to advance.
+    // `create_git_checkpoint` refuses it, but only AFTER the import/capture
+    // have written `.heddle/` state — leaving a half-initialized repo.
+    // Refuse here, before any write, so a detached HEAD leaves the directory
+    // exactly as it was found.
+    if has_git && git_head_is_detached(path) {
+        bail!(quickstart_detached_head_advice());
+    }
 
     // Validate the requested thread name BEFORE any write, using the same
     // ref-name rules the thread machinery enforces when the ref is actually
@@ -432,6 +447,24 @@ fn quickstart_preflight(
             "quickstart_thread_name_invalid",
             format!("'{thread}' is not a valid thread name"),
             "Choose a thread name without '..', a leading '.', a trailing '/' or '.lock', backslashes, or control characters.",
+            "heddle init --quickstart --quickstart-thread <name>",
+        ));
+    }
+
+    // A Git-overlay quickstart creates a real `refs/heads/<name>`. Git's
+    // ref-name rules are stricter than Heddle's `validate_ref_name` (they
+    // reject a space, `~`, `^`, `:`, `?`, `*`, `[`, …), so a name Heddle
+    // accepts but Git rejects would pass preflight and then fail when the
+    // branch is created — after `create_snapshot` has written Heddle state.
+    // Validate against Git's rules here too so it fails before any write.
+    // Native (non-Git) quickstarts keep Heddle's rules only.
+    if has_git
+        && gix::refs::FullName::try_from(format!("refs/heads/{thread}").as_str()).is_err()
+    {
+        bail!(RecoveryAdvice::invalid_usage(
+            "quickstart_thread_name_invalid",
+            format!("'{thread}' is not a valid Git branch name"),
+            "Choose a thread name Git accepts as a branch: no spaces, '~', '^', ':', '?', '*', '[', backslashes, or control characters.",
             "heddle init --quickstart --quickstart-thread <name>",
         ));
     }
@@ -512,6 +545,20 @@ fn resolve_quickstart_identity(
     has_git: bool,
     json: bool,
 ) -> Result<Option<(String, String)>> {
+    // `resolve_principal` lets env win OUTRIGHT — it returns the env identity
+    // even when it is the sentinel, before considering repo config (where
+    // flags land), Git, or user config. So a sentinel env identity shadows a
+    // valid `--principal-*` flag: the capture would still be attributed to the
+    // env sentinel and rejected by `build_attribution`, but only AFTER init has
+    // written `.heddle/config.toml` (and quickstart may have written
+    // QUICKSTART.md). Reject the env sentinel here, before any write, instead
+    // of persisting lower-precedence flags that env will shadow.
+    if let Some(env_principal) = Principal::from_env()
+        && principal_is_unconfigured(&env_principal)
+    {
+        bail!(quickstart_identity_required_advice());
+    }
+
     // Explicit flags become the repo-level `[principal]` — the highest
     // precedence source after env in `resolve_principal`. Validate them
     // against the sentinel here so `--principal-name Unknown
@@ -593,9 +640,12 @@ fn resolve_quickstart_principal(path: &Path, has_git: bool) -> Principal {
     }
     // Repo-level config slot: stop at the on-disk repo `[principal]` if
     // present, even the sentinel — `resolve_principal` does. (This is the
-    // "already has .heddle/" quickstart path.)
-    let repo_config_path = path.join(".heddle").join("config.toml");
-    if let Ok(repo_config) = repo::RepoConfig::load(&repo_config_path)
+    // "already has .heddle/" quickstart path.) Resolve config the way
+    // `Repository::open` does: in a materialized checkout the local
+    // `.heddle/` is just an objectstore pointer and the real `[principal]`
+    // lives in the SHARED dir it points at, so a local-only probe would
+    // wrongly report "no identity" there.
+    if let Some(repo_config) = resolve_existing_repo_config(path)
         && let Some(config) = &repo_config.principal
     {
         return Principal::new(&config.name, &config.email);
@@ -627,13 +677,79 @@ fn prompt_line(label: &str) -> Result<String> {
     Ok(input.trim().to_string())
 }
 
-/// Whether the discovered Git repository at `path` already has at least
-/// one commit (a non-empty history). An unborn branch reads as empty.
+/// Whether the discovered Git repository at `path` has any commits on ANY
+/// local ref — not just the current HEAD. A repo with commits on another
+/// ref (e.g. after `git switch --orphan scratch`, where the current HEAD is
+/// unborn but `main` still carries history) must be treated as having
+/// existing history so the quickstart confirms AND imports rather than
+/// acting as if the repo were empty (which would leave partial/wrong state).
 fn git_has_commits(path: &Path) -> bool {
+    let Ok(repo) = gix::discover(path) else {
+        return false;
+    };
+    if repo.head_id().is_ok() {
+        return true;
+    }
+    let Ok(platform) = repo.references() else {
+        return false;
+    };
+    let Ok(refs) = platform.all() else {
+        return false;
+    };
+    for reference in refs.filter_map(Result::ok) {
+        let mut reference = reference;
+        if let Ok(id) = reference.peel_to_id()
+            && repo
+                .find_object(id.detach())
+                .map(|object| object.kind == gix::objs::Kind::Commit)
+                .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the discovered Git repository at `path` has a detached HEAD
+/// (HEAD points directly at a commit instead of an attached branch). An
+/// unborn HEAD reads as not-detached.
+fn git_head_is_detached(path: &Path) -> bool {
     gix::discover(path)
         .ok()
-        .map(|repo| repo.head_id().is_ok())
+        .and_then(|repo| repo.head().ok().map(|head| head.is_detached()))
         .unwrap_or(false)
+}
+
+/// Resolve the on-disk repo config the way `Repository::open` does: when the
+/// local `.heddle/` is a worktree pointer (`.heddle/objectstore`), the real
+/// config lives in the shared dir it points at; otherwise it is the local
+/// `.heddle/config.toml`. Returns `None` when there is no readable `.heddle`
+/// config yet (a fresh directory).
+fn resolve_existing_repo_config(path: &Path) -> Option<repo::RepoConfig> {
+    let heddle_dir = path.join(".heddle");
+    if !heddle_dir.is_dir() {
+        return None;
+    }
+    let pointer = heddle_dir.join("objectstore");
+    let config_path = if pointer.is_file() {
+        let content = std::fs::read_to_string(&pointer).ok()?;
+        let shared = parse_objectstore_pointer(&content)?;
+        shared.canonicalize().ok()?.join("config.toml")
+    } else {
+        heddle_dir.join("config.toml")
+    };
+    repo::RepoConfig::load(&config_path).ok()
+}
+
+/// Minimal mirror of the repo crate's objectstore pointer parse: the file
+/// holds a line of the form `objectstore: <absolute path>`.
+fn parse_objectstore_pointer(content: &str) -> Option<PathBuf> {
+    content.lines().find_map(|line| {
+        line.strip_prefix("objectstore:")
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+    })
 }
 
 /// The write batch of `--quickstart`: start the thread, make one
@@ -765,6 +881,22 @@ fn quickstart_needs_confirmation_advice() -> RecoveryAdvice {
         "no repository objects, refs, metadata, or worktree files were changed",
         "heddle init --quickstart --yes",
         vec!["heddle init --quickstart --yes".to_string()],
+    )
+}
+
+fn quickstart_detached_head_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "quickstart_detached_head",
+        "Refusing to run --quickstart on a detached Git HEAD",
+        "Attach a branch first with `git switch -c <branch>` (or `git switch <branch>`), then re-run `heddle init --quickstart`.",
+        "Git HEAD points directly at a commit instead of an attached branch",
+        "quickstart would import history and write a Git checkpoint through a branch, but a detached HEAD has no branch to advance and could reattach or move the wrong ref",
+        "no repository objects, refs, metadata, or worktree files were changed",
+        "git switch -c <branch>",
+        vec![
+            "git switch -c <branch>".to_string(),
+            "heddle init --quickstart".to_string(),
+        ],
     )
 }
 

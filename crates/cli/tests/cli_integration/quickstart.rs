@@ -110,8 +110,8 @@ fn status_recommends_quickstart_on_empty_native_repo() {
     let status = status_json(dir);
     assert_eq!(
         status["recommended_action"].as_str(),
-        Some("heddle init --quickstart"),
-        "fresh native repo recommends quickstart: {status}"
+        Some("heddle init --quickstart --yes"),
+        "fresh native repo recommends the runnable quickstart command: {status}"
     );
 
     // Once quickstart has produced a capture, the log is no longer empty
@@ -803,6 +803,329 @@ fn quickstart_rerun_repoints_existing_noncurrent_thread() {
     assert_eq!(
         chain[1], b_id,
         "new capture's parent is the current state B, not the stale quickstart tip: chain={chain:?} b={b_id}"
+    );
+}
+
+/// Codex r6 (cid 3329175134): a detached Git HEAD has no branch for the
+/// checkpoint to advance. The later `create_git_checkpoint` refuses it, but
+/// only AFTER the import/capture have written `.heddle/`. The preflight must
+/// refuse a detached HEAD BEFORE any write — leaving no partial `.heddle/`.
+#[test]
+fn quickstart_refuses_detached_git_head_before_writes() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir);
+    std::fs::write(dir.join("a.txt"), "hi\n").unwrap();
+    git_hermetic(&["add", "."], dir);
+    git_hermetic(&["commit", "-m", "initial"], dir);
+    git_hermetic(&["checkout", "--detach"], dir);
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a detached Git HEAD must be refused: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_detached_head"),
+        "must fail with the quickstart_detached_head advice: {stderr}"
+    );
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: a detached HEAD must leave NO partial .heddle/"
+    );
+    assert!(
+        !dir.join("QUICKSTART.md").exists(),
+        "fail-before-writes: no QUICKSTART.md placeholder may be written"
+    );
+}
+
+/// Codex r6 (cid 3329175135): a Git-overlay quickstart creates a real
+/// `refs/heads/<name>`. Git's ref-name rules reject names Heddle's
+/// `validate_ref_name` accepts (here a `~`), so such a name would pass
+/// preflight and then fail when the branch is created — after `create_snapshot`
+/// has written Heddle state. The preflight must validate against Git's rules
+/// too so it fails before any write.
+#[test]
+fn quickstart_rejects_git_invalid_thread_name_before_writes() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir);
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--quickstart-thread",
+            "bad~name",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a Git-invalid thread name must be rejected on a Git overlay: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_thread_name_invalid"),
+        "must fail with the quickstart_thread_name_invalid advice: {stderr}"
+    );
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: a Git-invalid thread name must leave NO partial .heddle/"
+    );
+}
+
+/// Codex r6 (cid 3329175137): in a materialized thread checkout the local
+/// `.heddle/` holds only an objectstore pointer; the real `[principal]` lives
+/// in the SHARED dir that `Repository::open` loads. The preflight must resolve
+/// identity by following the pointer — not probe the local `config.toml` only,
+/// which would wrongly report "no identity" and refuse a runnable quickstart.
+#[test]
+fn quickstart_resolves_principal_from_shared_dir_in_materialized_checkout() {
+    let main = TempDir::new().unwrap();
+    let checkout = TempDir::new().unwrap();
+    let empty_cfg = TempDir::new().unwrap();
+    let empty_cfg_path = empty_cfg.path().join("user.toml");
+    std::fs::write(&empty_cfg_path, "").unwrap();
+
+    // Native main repo with a capture, so a thread can be materialized.
+    heddle(&["init", "--no-harness-install"], Some(main.path())).unwrap();
+    std::fs::write(main.path().join("file.txt"), "v1\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(main.path())).unwrap();
+
+    // Pin the ONLY identity into the SHARED `.heddle/config.toml`.
+    let shared_cfg = main.path().join(".heddle").join("config.toml");
+    let mut cfg = repo::RepoConfig::load(&shared_cfg).unwrap_or_default();
+    cfg.set_principal("Shared Principal", "shared@example.invalid");
+    cfg.save(&shared_cfg).unwrap();
+
+    // Materialize a thread checkout whose `.heddle/` is an objectstore pointer.
+    heddle(
+        &[
+            "start",
+            "feature/mat",
+            "--workspace",
+            "materialized",
+            "--path",
+            checkout.path().to_str().unwrap(),
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+    assert!(
+        checkout.path().join(".heddle").join("objectstore").is_file(),
+        "checkout must be a materialized (objectstore-pointer) checkout"
+    );
+
+    // Quickstart in the checkout with NO other identity source: an empty user
+    // config + cleared env. The ONLY resolvable identity is the shared
+    // `[principal]`, reachable solely by following the objectstore pointer.
+    let out = heddle_output_with_env(
+        &["init", "--quickstart", "--no-harness-install", "--yes"],
+        Some(checkout.path()),
+        &[
+            ("HEDDLE_CONFIG", empty_cfg_path.to_str().unwrap()),
+            ("HEDDLE_PRINCIPAL_NAME", ""),
+            ("HEDDLE_PRINCIPAL_EMAIL", ""),
+        ],
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "a materialized checkout must resolve [principal] from the shared dir: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let log: Value =
+        serde_json::from_str(&heddle(&["log", "--output", "json"], Some(checkout.path())).unwrap())
+            .unwrap();
+    let states = log["states"].as_array().expect("log emits a states array");
+    assert_eq!(
+        states[0]["principal"].as_str(),
+        Some("Shared Principal <shared@example.invalid>"),
+        "capture is attributed to the shared-dir principal: {log}"
+    );
+}
+
+/// Codex r6 (cid 3329175136): when a repo's only `[output].format` is repo-level
+/// `json`, the preflight (which computed format from CLI/user config only) used
+/// to print a TEXT confirmation prompt before the final JSON render — mixing
+/// formats. The preflight must load the repo's `[output].format` so the
+/// confirmation output matches the final render.
+#[test]
+fn quickstart_confirmation_respects_repo_json_format() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+
+    // Existing native repo whose ONLY format setting is repo-level json.
+    heddle(&["init", "--no-harness-install"], Some(dir)).unwrap();
+    let cfg_path = dir.join(".heddle").join("config.toml");
+    let mut cfg = repo::RepoConfig::load(&cfg_path).unwrap_or_default();
+    cfg.output.format = Some(repo::OutputFormat::Json);
+    cfg.save(&cfg_path).unwrap();
+
+    // Re-run quickstart WITHOUT --yes: the confirmation gate fires. With the
+    // repo format honored, it must refuse with a clean JSON envelope and emit
+    // NO human-readable text prompt to stdout.
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "the confirmation gate must refuse without --yes"
+    );
+    // The fix: with the repo format honored as json, the preflight must NOT
+    // emit the human-readable text confirmation prompt (it would otherwise
+    // mix with the JSON final render). Before the fix this warning block was
+    // printed to stdout because the preflight computed format without the
+    // repo config.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("would act on a directory that already has work"),
+        "repo json format must suppress the text confirmation prompt on stdout: stdout={stdout}"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "no stray text output when the repo format is json: stdout={stdout}"
+    );
+}
+
+/// Codex r6 (cid 3329175139): a repo with commits on another ref but an unborn
+/// current HEAD (e.g. after `git switch --orphan scratch`) must be treated as
+/// having existing history — not history-free. History detection must key on
+/// ANY local ref, so the existing-history confirmation gate fires (and, with
+/// `--yes`, the history is imported) rather than skipping both.
+#[test]
+fn quickstart_treats_orphan_branch_repo_as_existing_history() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir);
+    std::fs::write(dir.join("a.txt"), "hi\n").unwrap();
+    git_hermetic(&["add", "."], dir);
+    git_hermetic(&["commit", "-m", "initial"], dir);
+    // Unborn current HEAD, but `main` still carries the commit.
+    git_hermetic(&["switch", "--orphan", "scratch"], dir);
+
+    // Without --yes: the existing-history confirmation gate must fire — proof
+    // the orphan repo is treated as having history, not as empty.
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "an orphan-branch repo must hit the existing-history confirmation gate: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_needs_confirmation"),
+        "must be the existing-history confirmation refusal, not a history-free skip: {stderr}"
+    );
+}
+
+/// Codex r6 (cid 3329175133): `resolve_principal` lets env win OUTRIGHT, so a
+/// sentinel env identity shadows even valid `--principal-*` flags — the capture
+/// would still be attributed to the env sentinel and rejected by
+/// `build_attribution`, but only AFTER init has written `.heddle/`. The
+/// preflight must reject the env sentinel BEFORE accepting lower-precedence
+/// flags, leaving no partial state.
+#[test]
+fn quickstart_rejects_env_sentinel_even_with_valid_flags_before_writes() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+
+    let out = heddle_output_with_env(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "Valid Name",
+            "--principal-email",
+            "valid@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+        &[
+            ("HEDDLE_PRINCIPAL_NAME", "Unknown"),
+            ("HEDDLE_PRINCIPAL_EMAIL", "unknown@example.com"),
+        ],
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a sentinel env identity must shadow valid flags and fail: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_identity_required"),
+        "must fail with the quickstart_identity_required advice: {stderr}"
+    );
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: an env sentinel must leave NO partial .heddle/"
+    );
+    assert!(
+        !dir.join("QUICKSTART.md").exists(),
+        "fail-before-writes: no QUICKSTART.md placeholder may be written"
     );
 }
 
