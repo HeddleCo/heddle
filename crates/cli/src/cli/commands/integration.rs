@@ -161,32 +161,43 @@ pub fn prompt_init_install_decision(
     args: &crate::cli::InitArgs,
     json: bool,
 ) -> Result<Vec<String>> {
-    if json || cli.quiet || !is_tty() || args.no_harness_install {
+    let harnesses = if json || cli.quiet || !is_tty() || args.no_harness_install {
         // Non-interactive: only an explicit `--install-harnesses`
         // selection installs anything; detection never auto-installs.
-        return match &args.install_harnesses {
-            Some(selection) => resolve_selection_for_root(root, selection),
-            None => Ok(Vec::new()),
-        };
-    }
-
-    let harnesses = if let Some(selection) = &args.install_harnesses {
-        resolve_selection_for_root(root, selection)?
+        match &args.install_harnesses {
+            Some(selection) => resolve_selection_for_root(root, selection)?,
+            None => Vec::new(),
+        }
     } else {
-        detect_harnesses_for_root(root)
+        let harnesses = if let Some(selection) = &args.install_harnesses {
+            resolve_selection_for_root(root, selection)?
+        } else {
+            detect_harnesses_for_root(root)
+        };
+        if harnesses.is_empty() {
+            Vec::new()
+        } else {
+            println!(
+                "Connect Heddle to detected harnesses for ambient actor tracking? [{}] [y/N]",
+                harnesses.join(", ")
+            );
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                harnesses
+            } else {
+                Vec::new()
+            }
+        }
     };
-    if harnesses.is_empty() {
-        return Ok(Vec::new());
-    }
 
-    println!(
-        "Connect Heddle to detected harnesses for ambient actor tracking? [{}] [y/N]",
-        harnesses.join(", ")
-    );
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        return Ok(Vec::new());
+    // Validate the install scope with the SAME parser the install path
+    // (`perform_init_install`) uses, in this pre-write decision phase, so an
+    // invalid `--harness-install-scope` fails before any repo is created
+    // instead of after — keeping the quickstart fail-before-writes contract.
+    // Only matters when something will actually be installed.
+    if !harnesses.is_empty() {
+        IntegrationScope::parse(&args.harness_install_scope)?;
     }
     Ok(harnesses)
 }

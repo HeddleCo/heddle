@@ -1192,3 +1192,246 @@ fn quickstart_install_none_installs_nothing() {
         "selecting `none` installs no harness integration"
     );
 }
+
+/// Codex r7 (cid 3329270261): the preflight used `gix::discover` to decide
+/// `has_git`, which walks to an ANCESTOR Git checkout — so a native Heddle
+/// repo nested inside an ancestor Git checkout was wrongly treated as a Git
+/// overlay and refused for the ancestor's detached HEAD, even though
+/// `Repository::open` keeps it native and runs no Git checkpoint. The preflight
+/// now derives capability from the opened repo, so the nested-native quickstart
+/// proceeds.
+#[test]
+fn quickstart_native_repo_nested_in_git_checkout_is_not_overlay_refused() {
+    let outer = TempDir::new().unwrap();
+    let inner = outer.path().join("project");
+    std::fs::create_dir(&inner).unwrap();
+
+    // Native Heddle repo created BEFORE any Git exists anywhere, so it is a
+    // genuine NativeHeddle repo (no `.git` at its own root).
+    heddle(&["init", "--no-harness-install"], Some(&inner)).unwrap();
+    assert!(inner.join(".heddle").is_dir());
+
+    // Now wrap it in an ancestor Git checkout with a DETACHED HEAD.
+    git_hermetic(&["init"], outer.path());
+    std::fs::write(outer.path().join("a.txt"), "hi\n").unwrap();
+    git_hermetic(&["add", "."], outer.path());
+    git_hermetic(&["commit", "-m", "initial"], outer.path());
+    git_hermetic(&["checkout", "--detach"], outer.path());
+
+    // The nested repo is native, so quickstart creates no Git checkpoint and
+    // the ancestor's detached HEAD is irrelevant. It must NOT be refused.
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(&inner),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "a native repo nested in a detached-HEAD Git checkout must proceed: stdout={stdout} stderr={stderr}",
+    );
+    assert!(
+        !stderr.contains("quickstart_detached_head"),
+        "must NOT refuse with the Git-overlay detached-HEAD advice: {stderr}"
+    );
+
+    // It is initialized NATIVE — capability comes from the opened repo, not the
+    // ancestor Git checkout — so no Git checkpoint is attempted.
+    let init: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        init["repository_mode"].as_str(),
+        Some("native-heddle"),
+        "the nested repo stays native, not a Git overlay: {init}"
+    );
+    assert!(inner.join(".heddle").is_dir(), "native .heddle/ was created");
+}
+
+/// Codex r7 (cid 3329270259): in a materialized checkout whose `.heddle/`
+/// objectstore points to a shared repo INSIDE a Git checkout, `resolve_principal`
+/// can attribute the capture through `Repository::get_principal` →
+/// `shared_checkout_parent_git_principal` (the shared dir's parent Git config).
+/// The preflight's hand-rolled probe missed that source, refusing a runnable
+/// quickstart. Delegating to the real `resolve_principal` over the opened repo
+/// fixes it.
+#[test]
+fn quickstart_resolves_shared_checkout_parent_git_identity() {
+    let main = TempDir::new().unwrap();
+    let checkout = TempDir::new().unwrap();
+    let empty_cfg = TempDir::new().unwrap();
+    let empty_cfg_path = empty_cfg.path().join("user.toml");
+    std::fs::write(&empty_cfg_path, "").unwrap();
+
+    // Native main repo with a capture, so a thread can be materialized. NO
+    // `[principal]` is written to the shared config — identity must come solely
+    // from the shared dir's PARENT Git config below.
+    heddle(&["init", "--no-harness-install"], Some(main.path())).unwrap();
+    std::fs::write(main.path().join("file.txt"), "v1\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(main.path())).unwrap();
+
+    heddle(
+        &[
+            "start",
+            "feature/mat",
+            "--workspace",
+            "materialized",
+            "--path",
+            checkout.path().to_str().unwrap(),
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+    assert!(
+        checkout.path().join(".heddle").join("objectstore").is_file(),
+        "checkout must be a materialized (objectstore-pointer) checkout"
+    );
+
+    // Make the shared repo's containing dir a Git checkout whose ONLY identity
+    // is its Git `user.*` — reachable from the checkout solely via
+    // `shared_checkout_parent_git_principal`.
+    git_hermetic(&["init"], main.path());
+    git_hermetic(&["config", "user.name", "Parent Git"], main.path());
+    git_hermetic(
+        &["config", "user.email", "parent@example.invalid"],
+        main.path(),
+    );
+
+    // Quickstart in the checkout with NO other identity source: empty user
+    // config + cleared principal env.
+    let out = heddle_output_with_env(
+        &["init", "--quickstart", "--no-harness-install", "--yes"],
+        Some(checkout.path()),
+        &[
+            ("HEDDLE_CONFIG", empty_cfg_path.to_str().unwrap()),
+            ("HEDDLE_PRINCIPAL_NAME", ""),
+            ("HEDDLE_PRINCIPAL_EMAIL", ""),
+        ],
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "preflight must resolve identity from the shared dir's parent Git config: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let log: Value =
+        serde_json::from_str(&heddle(&["log", "--output", "json"], Some(checkout.path())).unwrap())
+            .unwrap();
+    let states = log["states"].as_array().expect("log emits a states array");
+    assert_eq!(
+        states[0]["principal"].as_str(),
+        Some("Parent Git <parent@example.invalid>"),
+        "capture is attributed to the shared-checkout parent Git identity: {log}"
+    );
+}
+
+/// Codex r7 (cid 3329270260): `refs/heads/<thread>` can be a syntactically
+/// valid FULL ref even when `<thread>` is not a usable Git BRANCH name (e.g.
+/// the reserved `HEAD`, or a leading `-`). Validating only the full ref let
+/// such names pass preflight and fail at branch creation — after Heddle state
+/// was written. The preflight now validates the branch shorthand too.
+#[test]
+fn quickstart_rejects_git_branch_invalid_shorthand_before_writes() {
+    for bad in ["HEAD", "-leading"] {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        git_hermetic(&["init"], dir);
+
+        // `=` form so clap accepts a value that begins with `-`.
+        let thread_arg = format!("--quickstart-thread={bad}");
+        let out = heddle_output(
+            &[
+                "init",
+                "--quickstart",
+                &thread_arg,
+                "--principal-name",
+                "CI Sentinel",
+                "--principal-email",
+                "ci@example.invalid",
+                "--no-harness-install",
+                "--yes",
+                "--output",
+                "json",
+            ],
+            Some(dir),
+        )
+        .unwrap();
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "'{bad}' is not a usable Git branch name and must be rejected: stdout={} stderr={stderr}",
+            String::from_utf8_lossy(&out.stdout),
+        );
+        assert!(
+            stderr.contains("quickstart_thread_name_invalid"),
+            "'{bad}' must fail with the quickstart_thread_name_invalid advice: {stderr}"
+        );
+        assert!(
+            !dir.join(".heddle").exists(),
+            "fail-before-writes: '{bad}' must leave NO partial .heddle/"
+        );
+    }
+}
+
+/// Codex r7 (cid 3329270262): an invalid `--harness-install-scope` was not
+/// parsed until the post-init install step, so a pure argument error left a
+/// partially initialized repo. The pre-write decision now validates the scope
+/// with the same `IntegrationScope::parse` the install uses.
+#[test]
+fn quickstart_rejects_invalid_harness_scope_before_writes() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--install-harnesses",
+            "claude-code",
+            "--harness-install-scope",
+            "bogus",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "an invalid harness scope must be rejected before writes: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("integration_scope_invalid"),
+        "must fail with the integration_scope_invalid advice: {stderr}"
+    );
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: an invalid harness scope must leave NO partial .heddle/"
+    );
+    assert!(
+        !dir.join(".claude").exists(),
+        "no harness integration may be installed on a scope error"
+    );
+}

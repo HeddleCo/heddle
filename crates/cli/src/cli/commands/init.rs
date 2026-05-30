@@ -18,7 +18,7 @@ use super::{
     action_line::print_next,
     checkpoint::create_git_checkpoint,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{SnapshotAgentOverrides, create_snapshot, resolve_principal},
 };
 use crate::{
     bridge::{
@@ -419,20 +419,56 @@ fn quickstart_preflight(
     path: &Path,
     has_git: bool,
 ) -> Result<QuickstartPreflight> {
-    // Resolve the repo's on-disk config the way `Repository::open` does
-    // (following an objectstore pointer to the shared dir for a materialized
-    // checkout) so the confirmation prompt's format matches the final
-    // render. A repo whose `[output].format` is `json` must not get a text
-    // prompt before a JSON envelope.
-    let repo_config = resolve_existing_repo_config(path);
-    let json = should_output_json(cli, repo_config.as_ref());
+    // The quickstart preflight is a DRY-RUN of the real init/identity path:
+    // every viability decision below delegates to the SAME predicate the
+    // write path uses — repository capability via `Repository::open`, identity
+    // via `resolve_principal`, the thread name via the ref/branch validators,
+    // and the harness scope via the install path's `IntegrationScope::parse`
+    // — never a parallel hand-rolled re-implementation. A parallel copy
+    // inevitably diverges (a new repo-state, identity source, or argument case
+    // passes preflight then fails at write); delegating makes that impossible.
 
-    // A detached Git HEAD has no branch for the checkpoint to advance.
-    // `create_git_checkpoint` refuses it, but only AFTER the import/capture
-    // have written `.heddle/` state — leaving a half-initialized repo.
-    // Refuse here, before any write, so a detached HEAD leaves the directory
-    // exactly as it was found.
-    if has_git && git_head_is_detached(path) {
+    // Open the repository the write path will operate on, when it already
+    // exists, so capability + identity come from the real repo (following an
+    // objectstore pointer to the shared dir, honoring the on-disk config)
+    // rather than a `gix::discover` probe. `Repository::open` decides
+    // native-vs-Git-overlay from `.git` AT the repo root, so a native repo
+    // nested inside an ancestor Git checkout stays native here — exactly as
+    // the capture treats it (unlike `gix::discover`, which walks to the
+    // ancestor and reports Git). A fresh directory has no repo to open yet;
+    // the write path then picks a Git overlay iff `gix::discover` finds Git
+    // (the `has_git` flag), so mirror that single branch.
+    let existing_repo = if path.join(".heddle").is_dir() {
+        Some(Repository::open(path)?)
+    } else {
+        None
+    };
+    let is_git_overlay = match &existing_repo {
+        Some(repo) => repo.capability() == RepositoryCapability::GitOverlay,
+        None => has_git,
+    };
+
+    // Honor the repo's on-disk `[output].format` so a `json`-configured repo
+    // never gets a text confirmation prompt before a JSON envelope. Read it
+    // from the opened repo when present, else from disk for a fresh directory.
+    let fallback_config = if existing_repo.is_none() {
+        resolve_existing_repo_config(path)
+    } else {
+        None
+    };
+    let repo_config = existing_repo
+        .as_ref()
+        .map(|repo| repo.config())
+        .or(fallback_config.as_ref());
+    let json = should_output_json(cli, repo_config);
+
+    // A detached Git HEAD has no branch for the checkpoint to advance, and
+    // `create_git_checkpoint` refuses it only AFTER the import/capture have
+    // written `.heddle/` state. Refuse here, before any write — but ONLY when
+    // the repo will actually run as a Git overlay. A native repo nested inside
+    // an ancestor Git checkout creates no checkpoint, so it must not be refused
+    // for the ancestor's detached HEAD.
+    if is_git_overlay && git_head_is_detached(path) {
         bail!(quickstart_detached_head_advice());
     }
 
@@ -451,20 +487,18 @@ fn quickstart_preflight(
         ));
     }
 
-    // A Git-overlay quickstart creates a real `refs/heads/<name>`. Git's
-    // ref-name rules are stricter than Heddle's `validate_ref_name` (they
-    // reject a space, `~`, `^`, `:`, `?`, `*`, `[`, …), so a name Heddle
-    // accepts but Git rejects would pass preflight and then fail when the
-    // branch is created — after `create_snapshot` has written Heddle state.
-    // Validate against Git's rules here too so it fails before any write.
-    // Native (non-Git) quickstarts keep Heddle's rules only.
-    if has_git
-        && gix::refs::FullName::try_from(format!("refs/heads/{thread}").as_str()).is_err()
-    {
+    // A Git-overlay quickstart creates a real `refs/heads/<thread>`, so the
+    // name must additionally satisfy Git's BRANCH-shorthand rules. These are
+    // stricter than validating the assembled `refs/heads/<thread>` full ref:
+    // a full ref accepts names Git refuses as a branch (e.g. `HEAD`, a leading
+    // `-`). Validate the shorthand here so such a name fails before any write
+    // rather than after `create_snapshot` has written Heddle state. Native
+    // (non-Git) quickstarts keep Heddle's rules only.
+    if is_git_overlay && !git_branch_name_is_valid(thread) {
         bail!(RecoveryAdvice::invalid_usage(
             "quickstart_thread_name_invalid",
             format!("'{thread}' is not a valid Git branch name"),
-            "Choose a thread name Git accepts as a branch: no spaces, '~', '^', ':', '?', '*', '[', backslashes, or control characters.",
+            "Choose a thread name Git accepts as a branch: no spaces, '~', '^', ':', '?', '*', '[', backslashes, control characters, a leading '-', or the reserved name 'HEAD'.",
             "heddle init --quickstart --quickstart-thread <name>",
         ));
     }
@@ -472,7 +506,7 @@ fn quickstart_preflight(
     // Confirmation gate before touching a directory that already holds
     // work. Truly fresh directories skip straight through.
     let heddle_exists = path.join(".heddle").exists();
-    let git_nonempty = has_git && git_has_commits(path);
+    let git_nonempty = is_git_overlay && git_has_commits(path);
     if (heddle_exists || git_nonempty) && !args.yes {
         if !json {
             println!(
@@ -510,7 +544,8 @@ fn quickstart_preflight(
         }
     }
 
-    let persist_principal = resolve_quickstart_identity(cli, args, path, has_git, json)?;
+    let persist_principal =
+        resolve_quickstart_identity(cli, args, path, existing_repo.as_ref(), is_git_overlay, json)?;
     // The harness-install prompt is the LAST interactive gate, decided
     // here before any write so Ctrl-C at it leaves the directory
     // untouched. The install itself runs post-write in `cmd_init`.
@@ -542,7 +577,8 @@ fn resolve_quickstart_identity(
     cli: &Cli,
     args: &InitArgs,
     path: &Path,
-    has_git: bool,
+    existing_repo: Option<&Repository>,
+    is_git_overlay: bool,
     json: bool,
 ) -> Result<Option<(String, String)>> {
     // `resolve_principal` lets env win OUTRIGHT — it returns the env identity
@@ -585,13 +621,17 @@ fn resolve_quickstart_identity(
         return Ok(Some((name, email)));
     }
 
-    // No flags: ask the REAL resolution (mirroring `resolve_principal`'s
-    // stop-at-first-present precedence) what the capture would be
-    // attributed to. A usable identity → proceed without writing one. A
-    // sentinel result — including a higher-precedence sentinel that shadows
-    // a lower valid source — means the capture would be rejected, so we
-    // must prompt (if interactive) or fail before any write.
-    let resolved = resolve_quickstart_principal(path, has_git);
+    // No flags: ask what the capture would be attributed to. When the repo
+    // already exists, call the REAL `resolve_principal` over the opened repo
+    // — byte-identical to what the capture does, so a shared-dir `[principal]`
+    // or a shared-checkout parent's Git identity (reached only through
+    // `Repository::get_principal`) is honored here too. A fresh directory has
+    // no repo to open, and none of those repo-bound sources exist yet, so the
+    // pre-init mirror suffices for it.
+    let resolved = match existing_repo {
+        Some(repo) => resolve_principal(repo, &UserConfig::load_default().unwrap_or_default())?,
+        None => resolve_quickstart_principal(path, is_git_overlay),
+    };
     if !principal_is_unconfigured(&resolved) {
         return Ok(None);
     }
@@ -611,28 +651,26 @@ fn resolve_quickstart_identity(
     bail!(quickstart_identity_required_advice())
 }
 
-/// Resolve the ambient principal the quickstart capture WOULD be attributed
-/// to (with no `--principal-*` flags), at preflight time, before the repo
-/// exists. This is the single source of truth for "is there a usable
-/// identity?": it mirrors `resolve_principal` (snapshot.rs) EXACTLY — same
-/// sources, same order, and crucially the same STOP-at-first-present
-/// semantics — so the preflight can never diverge from the real resolution
-/// the way a fall-through check can. (Flag/prompt identities are validated
-/// separately at their source in `resolve_quickstart_identity`, since they
-/// occupy the repo-config slot by being written there before the capture.)
+/// Resolve the ambient principal a FRESH (not-yet-initialized) quickstart
+/// would be attributed to (with no `--principal-*` flags), before the repo
+/// exists on disk. When the repo ALREADY exists, the caller instead delegates
+/// to the real `resolve_principal` over the opened repo — so this pre-init
+/// mirror only runs for a fresh directory, where the repo-bound sources it
+/// cannot reach (a shared-checkout parent's Git identity via
+/// `Repository::get_principal`) do not exist yet anyway.
+///
+/// It mirrors `resolve_principal` (snapshot.rs) for the pre-init sources —
+/// same order, same STOP-at-first-present semantics — so even the fresh path
+/// cannot diverge from the real resolution. (Flag/prompt identities are
+/// validated separately at their source in `resolve_quickstart_identity`,
+/// since they occupy the repo-config slot by being written there before the
+/// capture.)
 ///
 /// Precedence (identical to `resolve_principal`): env → repo
 /// `.heddle/config.toml` `[principal]` → Git config (only when it isn't the
 /// sentinel, matching `resolve_principal`'s fall-through) → user config →
 /// the `Unknown` sentinel.
-///
-/// Returns the resolved principal (possibly the sentinel); callers apply
-/// `principal_is_unconfigured` to decide whether to fail. STOP semantics are
-/// the whole point: a higher-precedence sentinel (e.g. a repo config pinning
-/// `Unknown <unknown@example.com>`) shadows a lower valid source here just as
-/// it would in `resolve_principal`, so the preflight rejects what the capture
-/// would reject.
-fn resolve_quickstart_principal(path: &Path, has_git: bool) -> Principal {
+fn resolve_quickstart_principal(path: &Path, is_git_overlay: bool) -> Principal {
     // env wins outright — `resolve_principal` returns it unconditionally
     // (even when it is the sentinel), so mirror that: stop here.
     if let Some(principal) = Principal::from_env() {
@@ -653,7 +691,7 @@ fn resolve_quickstart_principal(path: &Path, has_git: bool) -> Principal {
     // Git config: `resolve_principal` falls through to user config when
     // Git's identity is the sentinel, so only a non-sentinel Git identity
     // stops here.
-    if has_git
+    if is_git_overlay
         && let Ok(Some(identity)) = git_config_identity_with_global_fallback(path)
     {
         let principal = Principal::new(&identity.name, &identity.email);
@@ -708,6 +746,23 @@ fn git_has_commits(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// Whether `name` is valid as a Git BRANCH — the shorthand written under
+/// `refs/heads/` — matching `git check-ref-format --branch`. This is stricter
+/// than validating the assembled `refs/heads/<name>` full ref: a syntactically
+/// valid full ref can still name an unusable branch. `git check-ref-format
+/// refs/heads/HEAD` accepts the full ref, but `git check-ref-format --branch
+/// HEAD` rejects it; the same holds for a leading `-` or a bare `@`. The Git
+/// checkpoint write-through points `.git/HEAD` at `refs/heads/<name>`, so
+/// reject here exactly what Git's porcelain would refuse there.
+fn git_branch_name_is_valid(name: &str) -> bool {
+    if gix::refs::FullName::try_from(format!("refs/heads/{name}").as_str()).is_err() {
+        return false;
+    }
+    // Branch-shorthand rules `--branch` adds on top of full-ref syntax: not
+    // the reserved `HEAD`, not a bare `@`, and no leading `-`.
+    !(name == "HEAD" || name == "@" || name.starts_with('-'))
 }
 
 /// Whether the discovered Git repository at `path` has a detached HEAD
