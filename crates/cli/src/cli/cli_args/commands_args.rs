@@ -8,6 +8,7 @@ Examples:
   heddle init                                  # initialize the current directory
   heddle init my-project                       # initialize a subdirectory
   heddle init --principal-name 'Ada Lovelace'  # set attribution at init time
+  heddle init --quickstart                     # init, identity, first capture + checkpoint in one step
 ")]
 pub struct InitArgs {
     /// Directory to initialize (default: current directory).
@@ -20,6 +21,21 @@ pub struct InitArgs {
     /// Principal email for attribution.
     #[arg(long)]
     pub principal_email: Option<String>,
+
+    /// Walk from a fresh directory to a first checkpointed commit in one
+    /// command: after the normal init steps, resolve identity, start a
+    /// thread, make one capture, and (on Git-overlay repos) one checkpoint.
+    #[arg(long)]
+    pub quickstart: bool,
+
+    /// Name for the thread `--quickstart` starts (default: `quickstart`).
+    #[arg(long, value_name = "NAME")]
+    pub quickstart_thread: Option<String>,
+
+    /// Skip the `--quickstart` confirmation gate before writing into a
+    /// directory that already has Heddle data or non-empty Git history.
+    #[arg(long)]
+    pub yes: bool,
 
     /// Install harness integrations after init.
     #[arg(long)]

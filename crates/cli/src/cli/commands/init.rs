@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Initialize command.
 
-use std::path::PathBuf;
+use std::{
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Result, bail};
-use objects::object::Principal;
+use objects::object::{Principal, ThreadName, Tree};
+use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 use tracing::{debug, info};
@@ -12,12 +16,34 @@ use tracing::{debug, info};
 use super::{
     RecoveryAdvice,
     action_line::print_next,
+    checkpoint::create_git_checkpoint,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
 };
 use crate::{
-    cli::{Cli, InitArgs, should_output_json},
+    bridge::{
+        GitBridge, git_core::git_config_identity_with_global_fallback, git_import::import_all,
+    },
+    cli::{Cli, InitArgs, is_tty, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
+
+/// Short pointer file Heddle writes (and captures) when `--quickstart`
+/// runs in a directory with no capturable user files yet, so the first
+/// `heddle log` has a user-visible state to show.
+const QUICKSTART_PLACEHOLDER: &str = "\
+# Quickstart
+
+This repository was bootstrapped with `heddle init --quickstart`.
+
+Heddle captured this file as your first state so `heddle log` has
+something to show. Replace it with your own work and run
+`heddle capture -m \"...\"` to record your next step.
+
+Next:
+  heddle log       # see the history Heddle is tracking
+  heddle status    # check what changed
+";
 
 #[derive(Serialize)]
 struct InitOutput {
@@ -38,6 +64,11 @@ struct InitOutput {
     message: String,
     next_action: Option<String>,
     recommended_action: Option<String>,
+    /// Quickstart actions (thread/capture/checkpoint). Render-only;
+    /// excluded from the JSON contract so the `init` output schema is
+    /// unchanged whether or not `--quickstart` was passed.
+    #[serde(skip)]
+    quickstart: Option<QuickstartSummary>,
     #[allow(dead_code)]
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
@@ -48,6 +79,31 @@ struct InitOutput {
 struct InitPrincipalOutput {
     name: String,
     email: String,
+}
+
+/// What `--quickstart` did after the normal init steps.
+struct QuickstartSummary {
+    thread: String,
+    change_id: String,
+    git_commit: Option<String>,
+    wrote_placeholder: bool,
+}
+
+/// Outcome of the pre-write quickstart phase (confirmation + identity).
+/// Resolved before any filesystem write so a Ctrl-C at a prompt leaves
+/// the directory exactly as it was found.
+struct QuickstartPreflight {
+    proceed: bool,
+    persist_principal: Option<(String, String)>,
+}
+
+impl Default for QuickstartPreflight {
+    fn default() -> Self {
+        Self {
+            proceed: true,
+            persist_principal: None,
+        }
+    }
 }
 
 pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
@@ -76,7 +132,25 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     // empty-tree snapshot. Otherwise, seed `main` so the repo is immediately
     // usable for snapshot/history/etc.
     let has_git = gix::discover(&path).is_ok();
-    let repo = if has_git {
+
+    // Quickstart confirms and resolves identity BEFORE any write so a
+    // Ctrl-C (or declined prompt) leaves the directory untouched — no
+    // half-written `.heddle/`.
+    let preflight = if args.quickstart {
+        quickstart_preflight(cli, &args, &path, has_git)?
+    } else {
+        QuickstartPreflight::default()
+    };
+    if !preflight.proceed {
+        return Ok(());
+    }
+
+    let repo = if args.quickstart && path.join(".heddle").exists() {
+        // Confirmed (or `--yes`) quickstart over a directory that already
+        // has Heddle data: open it and run the quickstart actions rather
+        // than re-initializing (which would refuse).
+        Repository::open(&path)?
+    } else if has_git {
         Repository::bootstrap_git_overlay(&path)?
     } else {
         Repository::init_default(&path)?
@@ -88,7 +162,25 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     let mut user_config = UserConfig::load_default()?;
     let mut principal_configured = false;
-    if args.principal_name.is_some() || args.principal_email.is_some() {
+    // Quickstart writes the resolved identity to the *repo* config
+    // (`.heddle/config.toml`) rather than the global user config: the
+    // flag/prompt identity must win over an ambient Git `user.*`, and
+    // `resolve_principal`'s precedence ranks repo config above Git
+    // config but ranks user config below it. Re-open the repo afterwards
+    // so the in-memory `repo.config()` the capture reads reflects it.
+    let mut repo = repo;
+    if args.quickstart {
+        if let Some((name, email)) = &preflight.persist_principal {
+            let config_path = repo.heddle_dir().join("config.toml");
+            let mut repo_config = repo::RepoConfig::load(&config_path).unwrap_or_default();
+            repo_config.set_principal(name.clone(), email.clone());
+            repo_config.save(&config_path)?;
+            info!(principal_name = %name, principal_email = %email, "Principal configured");
+            debug!(config_path = %config_path.display(), "Repo config updated");
+            repo = Repository::open(&path)?;
+            principal_configured = true;
+        }
+    } else if args.principal_name.is_some() || args.principal_email.is_some() {
         let name = args.principal_name.clone().ok_or_else(|| {
             anyhow::anyhow!(RecoveryAdvice::init_principal_field_required(
                 "--principal-name"
@@ -108,6 +200,12 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     super::maybe_prompt_init_install(cli, &repo, &args)?;
 
+    let quickstart = if args.quickstart {
+        Some(run_quickstart_actions(&repo, &args)?)
+    } else {
+        None
+    };
+
     let message = if has_git {
         format!(
             "Initialized Heddle data in {} for Git-overlay workflows",
@@ -121,8 +219,13 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     };
 
     let trust = build_repository_verification_state(&repo);
-    let next_action =
-        (!trust.recommended_action.is_empty()).then(|| trust.recommended_action.clone());
+    // After a quickstart the user has a captured state to inspect, so
+    // point them at `heddle log` regardless of the trust-derived action.
+    let next_action = if quickstart.is_some() {
+        Some("heddle log".to_string())
+    } else {
+        (!trust.recommended_action.is_empty()).then(|| trust.recommended_action.clone())
+    };
     let principal_status = init_principal_status(&repo, &user_config)?;
     let output = InitOutput {
         output_kind: "init",
@@ -142,6 +245,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         message,
         next_action: next_action.clone(),
         recommended_action: next_action,
+        quickstart,
         trust,
     };
 
@@ -186,6 +290,22 @@ fn render_init(output: &InitOutput, json: bool) -> Result<()> {
             println!("Side effects:");
             for effect in &output.side_effects {
                 println!("  - {effect}");
+            }
+        }
+        if let Some(quickstart) = output.quickstart.as_ref() {
+            if quickstart.wrote_placeholder {
+                println!(
+                    "Wrote {} and captured it as your first state.",
+                    style::accent("QUICKSTART.md")
+                );
+            }
+            println!("Thread: {}", style::bold(&quickstart.thread));
+            println!("Captured: {}", style::change_id(&quickstart.change_id));
+            if let Some(commit) = quickstart.git_commit.as_deref() {
+                println!(
+                    "Checkpoint: {}",
+                    style::dim(&commit[..commit.len().min(12)])
+                );
             }
         }
         if let Some(next) = output.recommended_action.as_deref() {
@@ -276,4 +396,283 @@ fn init_side_effects(has_git: bool, principal_configured: bool) -> Vec<String> {
         side_effects.push("updated default principal attribution".to_string());
     }
     side_effects
+}
+
+/// Pre-write phase of `--quickstart`: run the confirmation gate and
+/// resolve the principal identity. Everything here happens before the
+/// first filesystem write so a Ctrl-C (or a declined prompt) leaves the
+/// directory exactly as it was found.
+fn quickstart_preflight(
+    cli: &Cli,
+    args: &InitArgs,
+    path: &Path,
+    has_git: bool,
+) -> Result<QuickstartPreflight> {
+    let json = should_output_json(cli, None);
+
+    // Confirmation gate before touching a directory that already holds
+    // work. Truly fresh directories skip straight through.
+    let heddle_exists = path.join(".heddle").exists();
+    let git_nonempty = has_git && git_has_commits(path);
+    if (heddle_exists || git_nonempty) && !args.yes {
+        let thread = args.quickstart_thread.as_deref().unwrap_or("quickstart");
+        if !json {
+            println!(
+                "{}",
+                style::warn(
+                    "heddle init --quickstart would act on a directory that already has work:"
+                )
+            );
+            if heddle_exists {
+                println!("  - existing .heddle/ data is present");
+            }
+            if git_nonempty {
+                println!("  - this Git repository already has commits");
+            }
+            println!(
+                "It would resolve your identity, start the '{thread}' thread, capture once, and (on Git-overlay) checkpoint once."
+            );
+            println!("Existing files are not modified.");
+        }
+        // No interactive terminal to confirm at: require an explicit
+        // `--yes` rather than proceeding silently.
+        if json || cli.quiet || !is_tty() {
+            bail!(quickstart_needs_confirmation_advice());
+        }
+        print!("Proceed? [y/N] ");
+        io::stdout().flush().ok();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("Aborted; no changes made.");
+            return Ok(QuickstartPreflight {
+                proceed: false,
+                persist_principal: None,
+            });
+        }
+    }
+
+    let persist_principal = resolve_quickstart_identity(cli, args, path, has_git, json)?;
+    Ok(QuickstartPreflight {
+        proceed: true,
+        persist_principal,
+    })
+}
+
+/// Resolve the principal for `--quickstart`. Priority: explicit
+/// `--principal-*` flags → an already-resolvable identity (env, user
+/// config, or Git config) → an interactive prompt. Returns the
+/// `(name, email)` to persist when it came from flags or the prompt, or
+/// `None` when an identity is already available without writing. Fails
+/// fast (no placeholder) when nothing is resolvable and there is no TTY
+/// to prompt.
+fn resolve_quickstart_identity(
+    cli: &Cli,
+    args: &InitArgs,
+    path: &Path,
+    has_git: bool,
+    json: bool,
+) -> Result<Option<(String, String)>> {
+    match (args.principal_name.clone(), args.principal_email.clone()) {
+        (Some(name), Some(email)) => return Ok(Some((name, email))),
+        (Some(_), None) => {
+            bail!(RecoveryAdvice::init_principal_field_required(
+                "--principal-email"
+            ))
+        }
+        (None, Some(_)) => {
+            bail!(RecoveryAdvice::init_principal_field_required(
+                "--principal-name"
+            ))
+        }
+        (None, None) => {}
+    }
+
+    if quickstart_identity_available(path, has_git) {
+        return Ok(None);
+    }
+
+    if is_tty() && !cli.quiet && !json {
+        let name = prompt_line("Your name: ")?;
+        let email = prompt_line("Your email: ")?;
+        if name.is_empty() || email.is_empty() {
+            bail!(quickstart_identity_required_advice());
+        }
+        return Ok(Some((name, email)));
+    }
+
+    bail!(quickstart_identity_required_advice())
+}
+
+/// Whether a real (non-placeholder) principal is already resolvable
+/// without writing one — from the environment, the user config, or, in
+/// a Git repo, Git's own `user.name`/`user.email`.
+fn quickstart_identity_available(path: &Path, has_git: bool) -> bool {
+    if let Some(principal) = Principal::from_env()
+        && !principal_is_unconfigured(&principal)
+    {
+        return true;
+    }
+    if let Ok(user_config) = UserConfig::load_default()
+        && let Some(config) = &user_config.principal
+        && !principal_is_unconfigured(&Principal::new(&config.name, &config.email))
+    {
+        return true;
+    }
+    if has_git
+        && git_config_identity_with_global_fallback(path)
+            .ok()
+            .flatten()
+            .is_some()
+    {
+        return true;
+    }
+    false
+}
+
+fn prompt_line(label: &str) -> Result<String> {
+    print!("{label}");
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+/// Whether the discovered Git repository at `path` already has at least
+/// one commit (a non-empty history). An unborn branch reads as empty.
+fn git_has_commits(path: &Path) -> bool {
+    gix::discover(path)
+        .ok()
+        .map(|repo| repo.head_id().is_ok())
+        .unwrap_or(false)
+}
+
+/// The write batch of `--quickstart`: start the thread, make one
+/// capture, and (Git-overlay only) one checkpoint. Runs only after the
+/// preflight has confirmed and resolved identity, so every fallible
+/// prompt is already behind us.
+fn run_quickstart_actions(repo: &Repository, args: &InitArgs) -> Result<QuickstartSummary> {
+    // A Git-overlay repo that already has commits must have that history
+    // imported into Heddle before a capture/checkpoint has a base to
+    // build on — the same import `heddle adopt` performs. Fresh/empty
+    // Git repos (no commits) and native repos skip this.
+    if repo.capability() == RepositoryCapability::GitOverlay && git_has_commits(repo.root()) {
+        let mut bridge = GitBridge::new(repo);
+        import_all(&mut bridge, Some(repo.root()))?;
+    }
+
+    let thread = args
+        .quickstart_thread
+        .clone()
+        .unwrap_or_else(|| "quickstart".to_string());
+    ensure_quickstart_thread(repo, &thread)?;
+
+    let user_config = UserConfig::load_default().unwrap_or_default();
+    let wrote_placeholder = ensure_capturable_content(repo)?;
+    let snapshot = create_snapshot(
+        repo,
+        &user_config,
+        Some("quickstart: initial capture".to_string()),
+        None,
+        SnapshotAgentOverrides {
+            provider: None,
+            model: None,
+            session: None,
+            segment: None,
+            policy: None,
+            no_policy: false,
+            no_agent: false,
+        },
+    )?;
+
+    // Checkpoint is Git-overlay only; on native repos the capture above
+    // is the user-visible "first commit".
+    let git_commit = if repo.capability() == RepositoryCapability::GitOverlay {
+        let record = create_git_checkpoint(
+            repo,
+            Some("quickstart: first commit"),
+            worktree_status_options(Some(repo.config())),
+        )?;
+        Some(record.git_commit)
+    } else {
+        None
+    };
+
+    Ok(QuickstartSummary {
+        thread,
+        change_id: snapshot.change_id,
+        git_commit,
+        wrote_placeholder,
+    })
+}
+
+/// Create the named quickstart thread at the current state and attach
+/// HEAD to it. Idempotent: a re-run that is already on the thread is a
+/// no-op. `ensure_current_state` returns the existing state for a
+/// freshly-seeded native repo without creating an extra capture.
+fn ensure_quickstart_thread(repo: &Repository, name: &str) -> Result<()> {
+    let target = ThreadName::new(name);
+    let current = ensure_current_state(
+        repo,
+        &UserConfig::load_default().unwrap_or_default(),
+        Some(format!("Bootstrap before quickstart thread {name}")),
+    )?;
+    if repo.refs().get_thread(&target)?.is_none() {
+        repo.refs().set_thread(&target, &current)?;
+    }
+    let already_attached =
+        matches!(repo.head_ref()?, Head::Attached { thread } if thread == target);
+    if !already_attached {
+        repo.refs().write_head(&Head::Attached { thread: target })?;
+    }
+    Ok(())
+}
+
+/// Ensure there is something user-visible to capture. When the worktree
+/// has no capturable files (a fresh empty directory), write the
+/// root-level `QUICKSTART.md` pointer and report that we did. The
+/// root-level path matters: the default ignore list excludes `.heddle/`
+/// (`repo_config::default_ignore`), so a placeholder under `.heddle/`
+/// would be silently dropped by the capture walk. Non-destructive: an
+/// existing `QUICKSTART.md` is left untouched.
+fn ensure_capturable_content(repo: &Repository) -> Result<bool> {
+    let options = worktree_status_options(Some(repo.config()));
+    let (status, _) = repo.compare_worktree_cached_profiled_with_options(&Tree::new(), &options)?;
+    if !status.added.is_empty() {
+        return Ok(false);
+    }
+    let placeholder = repo.root().join("QUICKSTART.md");
+    if !placeholder.exists() {
+        std::fs::write(&placeholder, QUICKSTART_PLACEHOLDER)?;
+    }
+    Ok(true)
+}
+
+fn quickstart_needs_confirmation_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "quickstart_needs_confirmation",
+        "Refusing to run --quickstart non-interactively against a directory that already has Heddle data or Git history",
+        "Re-run with `--yes` to confirm, or run `heddle init --quickstart` in an interactive terminal to answer the prompt.",
+        "the target directory already has .heddle/ data or non-empty Git history and no interactive terminal is available to confirm",
+        "quickstart would start a thread and capture in a directory that already holds work",
+        "no repository objects, refs, metadata, or worktree files were changed",
+        "heddle init --quickstart --yes",
+        vec!["heddle init --quickstart --yes".to_string()],
+    )
+}
+
+fn quickstart_identity_required_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "quickstart_identity_required",
+        "Refusing to run --quickstart without an accountable identity",
+        "Pass `--principal-name <name> --principal-email <email>`, configure identity first, or run in an interactive terminal to be prompted.",
+        "no principal was resolvable from flags, environment, user config, or Git config, and no interactive terminal is available to prompt",
+        "quickstart would capture history attributed to Unknown <unknown@example.com>",
+        "no repository objects, refs, metadata, or worktree files were changed",
+        "heddle init --quickstart --principal-name <name> --principal-email <email>",
+        vec![
+            "heddle init --quickstart --principal-name <name> --principal-email <email>"
+                .to_string(),
+        ],
+    )
 }
