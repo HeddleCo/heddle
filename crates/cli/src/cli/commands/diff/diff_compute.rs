@@ -416,7 +416,14 @@ pub fn cmd_diff(
     }
 
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        // Worktree-mode diff (`to.is_none()`) groups `changes` into
+        // `{modified, added, deleted}` category arrays mirroring `status`;
+        // a state-to-state diff keeps the flat array.
+        if to.is_none() {
+            println!("{}", worktree_diff_json_string(&output)?);
+        } else {
+            println!("{}", serde_json::to_string(&output)?);
+        }
     } else if name_only {
         for change in &output.changes {
             println!("{}", change.path);
@@ -454,6 +461,52 @@ fn populate_patch_text(output: &mut DiffOutput) {
     if !text.is_empty() {
         output.patch = Some(text);
     }
+}
+
+/// Serialize a worktree-mode diff to JSON with the per-file `changes`
+/// grouped into `{modified, added, deleted}` category arrays, mirroring the
+/// `status` command's `changes` shape (see `StatusOutput`'s `ChangesInfo`)
+/// so a UI can derive add/modify/delete badges from `diff` alone — one
+/// concept, one shape across the two verbs.
+///
+/// Only worktree-mode diff regroups; a state-to-state diff (`diff <a> <b>`)
+/// keeps the flat `changes: [...]` array (its embedders, e.g. `merge
+/// --with-diff`, depend on that). A `renamed` entry buckets under
+/// `modified` — it is an existing file whose identity changed, and its
+/// `kind`/`old_path` fields are retained so a consumer that wants the rename
+/// detail still has it — keeping exactly the three status field names rather
+/// than introducing a divergent fourth bucket.
+fn worktree_diff_json_string(output: &DiffOutput) -> Result<String> {
+    let mut value = serde_json::to_value(output)?;
+    if let serde_json::Value::Object(map) = &mut value {
+        map.insert(
+            "changes".to_string(),
+            group_changes_by_category(&output.changes),
+        );
+    }
+    Ok(serde_json::to_string(&value)?)
+}
+
+/// Bucket each `FileChange` under its add/modify/delete category, serialized
+/// with all its per-file fields. `renamed` (and any non-add/delete kind)
+/// lands in `modified`.
+fn group_changes_by_category(changes: &[FileChange]) -> serde_json::Value {
+    let mut modified = Vec::new();
+    let mut added = Vec::new();
+    let mut deleted = Vec::new();
+    for change in changes {
+        let entry = serde_json::to_value(change).unwrap_or(serde_json::Value::Null);
+        match change.kind.as_str() {
+            "added" => added.push(entry),
+            "deleted" => deleted.push(entry),
+            _ => modified.push(entry),
+        }
+    }
+    let mut map = serde_json::Map::new();
+    map.insert("modified".to_string(), serde_json::Value::Array(modified));
+    map.insert("added".to_string(), serde_json::Value::Array(added));
+    map.insert("deleted".to_string(), serde_json::Value::Array(deleted));
+    serde_json::Value::Object(map)
 }
 
 /// Order a state-to-state change list deterministically by path. `diff_trees`
@@ -525,7 +578,9 @@ fn render_status_changes(
     }
 
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        // HEAD-vs-worktree (plain-Git) is a worktree-mode diff: group
+        // `changes` into `{modified, added, deleted}` to mirror `status`.
+        println!("{}", worktree_diff_json_string(&output)?);
     } else if name_only {
         for change in &output.changes {
             println!("{}", change.path);
@@ -901,7 +956,9 @@ fn render_worktree_status_diff(
     }
 
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        // HEAD-vs-worktree status diff is worktree-mode: group `changes`
+        // into `{modified, added, deleted}` to mirror `status`.
+        println!("{}", worktree_diff_json_string(&output)?);
     } else if name_only {
         for change in &output.changes {
             println!("{}", change.path);

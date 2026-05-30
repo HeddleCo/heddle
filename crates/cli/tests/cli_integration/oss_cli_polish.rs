@@ -3474,7 +3474,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
 
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        status_text.contains("Health: checkpoint needed")
+        status_text.contains("Verdict: checkpoint needed")
             && status_text
                 .contains("Git checkpoint pending: saved Heddle state is not yet a Git commit")
             && status_text.contains("Saved in Heddle")
@@ -7558,7 +7558,7 @@ fn quiet_no_color_and_narrow_text_outputs_preserve_global_contract() {
         "narrow text status should not need stderr: {narrow_stderr}"
     );
     assert!(
-        narrow_stdout.contains("Heddle status") && narrow_stdout.contains("Health:"),
+        narrow_stdout.contains("Heddle status") && narrow_stdout.contains("Verdict:"),
         "narrow status should retain the primary labels: {narrow_stdout}"
     );
     assert!(
@@ -7628,7 +7628,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "status"],
-        &["Heddle status", "Health:"],
+        &["Heddle status", "Verdict:"],
     );
     assert_text_surface(
         temp.path(),
@@ -8262,8 +8262,8 @@ fn isolated_thread_status_and_diff_report_untracked_only_work() {
         "isolated diff must share the same worktree observation as status: {diff}"
     );
     assert_eq!(
-        diff["changes"][0]["path"], "docs/new.md",
-        "isolated diff should list the new file without needing a tracked-file edit: {diff}"
+        diff["changes"]["added"][0]["path"], "docs/new.md",
+        "isolated diff should list the new file under the added category without needing a tracked-file edit: {diff}"
     );
 }
 
@@ -10613,7 +10613,7 @@ fn tty_auto_mode_renders_text_and_explicit_json_stays_json() {
     let text_stdout = String::from_utf8_lossy(&text.stdout);
     assert!(
         text_stdout.contains("Heddle status")
-            && text_stdout.contains("Health:")
+            && text_stdout.contains("Verdict:")
             && !text_stdout.trim_start().starts_with('{')
             && !text_stdout.contains('\u{1b}'),
         "auto mode on a TTY should render no-color human text: {text_stdout:?}"
@@ -11650,7 +11650,7 @@ fn freshly_initialized_repo_reports_clean_health() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Health: clean"),
+        text.contains("Verdict: clean"),
         "a fresh init should be healthy, not 'needs_attention': {text}"
     );
     assert!(

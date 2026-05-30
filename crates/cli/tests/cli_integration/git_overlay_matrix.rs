@@ -4303,8 +4303,10 @@ fn git_overlay_matrix_subdirectory_dirty_commands() {
 
     let diff = json(&nested, &["diff", "HEAD"]);
     assert!(
-        diff["changes"].as_array().is_some(),
-        "diff should remain well-formed after nested-path bootstrap/show/log sequencing: {diff}"
+        diff["changes"]["modified"].as_array().is_some()
+            && diff["changes"]["added"].as_array().is_some()
+            && diff["changes"]["deleted"].as_array().is_some(),
+        "diff should remain well-formed (category object) after nested-path bootstrap/show/log sequencing: {diff}"
     );
 
     let thread_list = json(&nested, &["thread", "list", "--output", "json"]);
@@ -4369,7 +4371,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     );
     assert_eq!(status["verification"]["workflow_status"], "not_checked");
     assert_eq!(status["verification"]["worktree_state"], "not_checked");
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains(
             "Verification: Git branch 'feature/drop-in' advanced outside Heddle; import the new Git tip to restore the mapping"
@@ -4457,8 +4459,13 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         "diagnose must not resurrect stale Heddle-vs-state paths when Git is clean but import is needed: {diagnose}"
     );
     let diff = json(temp.path(), &["diff", "--output", "json", "--stat"]);
+    let diff_changes = diff["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("worktree diff changes should be a category object: {diff}"));
     assert!(
-        diff["changes"].as_array().unwrap().is_empty(),
+        ["modified", "added", "deleted"]
+            .iter()
+            .all(|key| diff_changes[*key].as_array().is_some_and(|a| a.is_empty())),
         "diff must not report stale paths when Git is clean but import is needed: {diff}"
     );
 
@@ -4472,9 +4479,16 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         "diagnose should show the same current Git dirty set as status under needs_import: {dirty_diagnose}"
     );
     let dirty_diff = json(temp.path(), &["diff", "--output", "json", "--stat"]);
+    let dirty_changes = dirty_diff["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("worktree diff changes should be a category object: {dirty_diff}"));
+    let dirty_total: usize = ["modified", "added", "deleted"]
+        .iter()
+        .filter_map(|key| dirty_changes[*key].as_array())
+        .map(Vec::len)
+        .sum();
     assert_eq!(
-        dirty_diff["changes"].as_array().unwrap().len(),
-        1,
+        dirty_total, 1,
         "diff should show the same current Git dirty set as status under needs_import: {dirty_diff}"
     );
 
@@ -4542,7 +4556,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
                 && summary.contains("Heddle thread state")),
         "status should describe Git/Heddle disagreement: {status}"
     );
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains("Git/Heddle mismatch")
             && status_text.contains("Health: Git/Heddle mismatch")
@@ -5632,12 +5646,12 @@ fn git_overlay_matrix_diff_added_symlink_renders_link_target() {
 
     symlink("README.md", temp.path().join("link-to-readme")).unwrap();
     let diff = json(temp.path(), &["--output", "json", "diff"]);
-    let link_change = diff["changes"]
+    let link_change = diff["changes"]["added"]
         .as_array()
         .unwrap()
         .iter()
         .find(|change| change["path"] == "link-to-readme")
-        .unwrap_or_else(|| panic!("diff should include added symlink: {diff}"));
+        .unwrap_or_else(|| panic!("diff should include added symlink under the added category: {diff}"));
     assert_eq!(link_change["kind"], "added");
     let added_line = link_change["lines"]
         .as_array()
@@ -6916,7 +6930,7 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         );
     }
 
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains("Health: clean")
             && !status_text.contains("Setup needed")
