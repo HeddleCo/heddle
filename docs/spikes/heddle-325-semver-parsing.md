@@ -220,30 +220,49 @@ self-tests live as real unit tests.
 4. **Caret-only policy guard (decide explicitly).** The hand-rolled parser
    *rejects* `*`, `>`, `<`, `~`, multi-clause. `semver` *evaluates* them. If the
    "workspace uses caret only" convention is still wanted, keep it as an explicit
-   lint *separate from* satisfaction. **Do not** write the guard as "iterate
-   `VersionReq.comparators` and fail any `Op` that isn't `Caret`/`Exact`" — that
-   formulation **vacuously admits a bare `*`**. `VersionReq::parse("*")` is
-   `VersionReq::STAR`, whose `comparators` vector is **empty** (verified: `comparators.len() == 0`),
-   so an iterate-and-reject loop never sees a rejectable `Op` and the requirement
-   passes. The guard must reject the empty / wildcard case explicitly. Concrete
-   predicate for #81:
+   lint *separate from* satisfaction. The convention is exact: a requirement is
+   caret-only iff it is **a single `Caret` or `Exact` comparator**. Write the guard
+   to assert that shape directly — **do not** approximate it as "iterate
+   `VersionReq.comparators` and fail any `Op` that isn't `Caret`/`Exact`". That
+   `all(...)`-style formulation is wrong twice over: it **vacuously admits a bare
+   `*`** (`VersionReq::parse("*")` is `VersionReq::STAR`, whose `comparators` vector
+   is **empty** — verified `comparators.len() == 0` — so an iterate-and-reject loop
+   never sees a rejectable `Op`), and it **admits a multi-clause list** like
+   `^1, ^2` (two `Caret` comparators: non-empty and every `Op` passes `all`, yet the
+   original shell asserter rejects any comma). The documented single-clause shape
+   excludes both in one predicate. Concrete predicate for #81:
 
    ```rust
-   // Reject unless the requirement is exactly one Caret or Exact comparator.
+   // Caret-only iff the requirement is exactly one Caret or Exact comparator.
    fn is_caret_only(req: &semver::VersionReq) -> bool {
-       !req.comparators.is_empty()                 // rejects bare `*` (STAR: empty comparators)
-           && req.comparators.iter().all(|c| {
-               matches!(c.op, semver::Op::Caret | semver::Op::Exact)
-           })                                       // rejects `1.2.*` (Op::Wildcard), `>`, `<`, `~`, etc.
+       req.comparators.len() == 1
+           && matches!(req.comparators[0].op, semver::Op::Caret | semver::Op::Exact)
    }
    ```
 
-   The `comparators.is_empty()` check is load-bearing: without it `*` slips through.
-   `1.2.*` is caught by the `all(...)` clause because it parses to a single
-   `Op::Wildcard` comparator (verified). Multi-clause (`,`) requirements are caught
-   too — any comparator with a non-`Caret`/`Exact` op fails the `all`. Per the
-   no-backcompat / cleanest-replacement stance, **do not** port the `None` sentinel —
-   make the policy its own check with its own message.
+   The `len() == 1` clause is load-bearing in both directions: it rejects the
+   **empty** case (`*` / `VersionReq::STAR`, `len() == 0`) **and** the **multi-clause**
+   case (`^1, ^2`, `len() >= 2`) — neither of which an `all(...)` loop catches. The
+   `matches!` clause then rejects the single-comparator non-caret shapes: `1.2.*`
+   parses to one `Op::Wildcard` comparator (verified), and `>`, `<`, `~` parse to
+   `Op::Greater` / `Op::Less` / `Op::Tilde`. Per the no-backcompat /
+   cleanest-replacement stance, **do not** port the `None` sentinel — make the policy
+   its own check with its own message.
+
+   **Accept/reject conformance table** (pins the exact shape so #81 cannot drift the
+   guard a third time — each row is the `is_caret_only` verdict on the parsed
+   `VersionReq`):
+
+   | Requirement | Parsed shape | `is_caret_only` | Why |
+   |---|---|---|---|
+   | `^1.0` | 1× `Op::Caret` | **ACCEPT** | single caret — the canonical convention |
+   | `1.0.0` | 1× `Op::Caret` | **ACCEPT** | bare version is caret-by-default in Cargo/`semver` |
+   | `=1.0.0` | 1× `Op::Exact` | **ACCEPT** | exact pin allowed by convention |
+   | `*` | `STAR` (0 comparators) | **REJECT** | `len() == 1` fails (`len() == 0`) |
+   | `1.2.*` | 1× `Op::Wildcard` | **REJECT** | `matches!` fails (not Caret/Exact) |
+   | `^1, ^2` | 2× `Op::Caret` | **REJECT** | `len() == 1` fails (`len() == 2`) — multi-clause |
+   | `>=1.0` | 1× `Op::GreaterEq` | **REJECT** | `matches!` fails (not Caret/Exact) |
+   | `~1.0` | 1× `Op::Tilde` | **REJECT** | `matches!` fails (not Caret/Exact) |
 5. **Tests #81 must add** — port all 7 self-test bundles (`:589-654`) as
    `#[test]` cases, **with two deliberate changes** that record this spike's
    findings:
