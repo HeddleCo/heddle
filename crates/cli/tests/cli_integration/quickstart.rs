@@ -363,6 +363,133 @@ fn quickstart_checkpoints_on_git_overlay() {
     );
 }
 
+/// On an unborn Git overlay (a fresh `git init` with NO commits),
+/// quickstart must produce exactly ONE capture + ONE checkpoint — the
+/// promised single initial commit. Previously it fabricated a "Bootstrap
+/// before quickstart" snapshot before `QUICKSTART.md` was written,
+/// leaving an extra empty parent commit (Codex r3 cid 3328971408).
+#[test]
+fn quickstart_unborn_git_yields_single_capture_and_checkpoint() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir); // unborn: no commits yet
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "quickstart should succeed on an unborn Git repo: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Exactly one Heddle state: the bug left a "Bootstrap before
+    // quickstart" parent in front of the real capture.
+    let log: Value =
+        serde_json::from_str(&heddle(&["log", "--output", "json"], Some(dir)).unwrap()).unwrap();
+    let states = log["states"].as_array().expect("log emits a states array");
+    assert_eq!(
+        states.len(),
+        1,
+        "exactly one capture, no extra bootstrap parent: {log}"
+    );
+    let intent = states[0]["intent"].as_str().unwrap_or_default();
+    assert!(
+        intent.contains("quickstart"),
+        "the single state is the quickstart capture, not a bootstrap: {intent:?}"
+    );
+
+    // And exactly one Git checkpoint commit (no extra bootstrap parent in
+    // the exported history).
+    let grepo = gix::open(dir).expect("open git repo");
+    let tip = grepo
+        .head_id()
+        .expect("HEAD resolves to a checkpoint commit");
+    let commit_count = grepo
+        .rev_walk([tip.detach()])
+        .all()
+        .expect("rev-walk checkpoint history")
+        .count();
+    assert_eq!(
+        commit_count, 1,
+        "exactly one checkpoint commit, no extra bootstrap parent"
+    );
+}
+
+/// The quickstart identity preflight must honor a repo-level
+/// `.heddle/config.toml` `[principal]`: it outranks user and Git config
+/// in `resolve_principal`, so a repo whose ONLY resolvable identity is
+/// its repo-level principal must NOT be refused before it is opened
+/// (Codex r3 cid 3328971410).
+#[test]
+fn quickstart_preflight_honors_repo_level_principal() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    // A Git repo so the test harness skips seeding a user-config identity;
+    // combined with the cleared env below, the repo-level principal we pin
+    // is the ONLY identity available.
+    git_hermetic(&["init"], dir);
+
+    let isolate: &[(&str, &str)] = &[
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_SYSTEM", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("HEDDLE_PRINCIPAL_NAME", ""),
+        ("HEDDLE_PRINCIPAL_EMAIL", ""),
+    ];
+
+    let init =
+        heddle_output_with_env(&["init", "--no-harness-install"], Some(dir), isolate).unwrap();
+    assert!(
+        init.status.success(),
+        "plain init should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr),
+    );
+
+    // Pin a repo-level principal as the sole identity, merged into the
+    // config `init` already wrote (which carries the required
+    // `[repository]` section).
+    let cfg_path = dir.join(".heddle").join("config.toml");
+    let mut cfg = repo::RepoConfig::load(&cfg_path).unwrap_or_default();
+    cfg.set_principal("Repo Local", "repo@example.invalid");
+    cfg.save(&cfg_path).unwrap();
+
+    let out = heddle_output_with_env(
+        &["init", "--quickstart", "--no-harness-install", "--yes"],
+        Some(dir),
+        isolate,
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "repo-level principal must satisfy the quickstart preflight: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let log: Value =
+        serde_json::from_str(&heddle(&["log", "--output", "json"], Some(dir)).unwrap()).unwrap();
+    let states = log["states"].as_array().expect("log emits a states array");
+    assert_eq!(
+        states[0]["principal"].as_str(),
+        Some("Repo Local <repo@example.invalid>"),
+        "capture is attributed to the repo-level principal: {log}"
+    );
+}
+
 /// Non-interactive `--install-harnesses` installs the named harness as a
 /// post-write step (the decision is resolved up front, the install runs
 /// after the repo exists).

@@ -18,7 +18,7 @@ use super::{
     action_line::print_next,
     checkpoint::create_git_checkpoint,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
-    snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
+    snapshot::{SnapshotAgentOverrides, create_snapshot},
 };
 use crate::{
     bridge::{
@@ -521,11 +521,22 @@ fn resolve_quickstart_identity(
 }
 
 /// Whether a real (non-placeholder) principal is already resolvable
-/// without writing one — from the environment, the user config, or, in
-/// a Git repo, Git's own `user.name`/`user.email`.
+/// without writing one. Mirrors `resolve_principal`'s precedence so the
+/// preflight never refuses a repo whose capture would in fact be
+/// attributable: environment, then the repo-level
+/// `.heddle/config.toml` `[principal]` (which outranks user and Git
+/// config in `resolve_principal`), then the user config, then — in a Git
+/// repo — Git's own `user.name`/`user.email`.
 fn quickstart_identity_available(path: &Path, has_git: bool) -> bool {
     if let Some(principal) = Principal::from_env()
         && !principal_is_unconfigured(&principal)
+    {
+        return true;
+    }
+    let repo_config_path = path.join(".heddle").join("config.toml");
+    if let Ok(repo_config) = repo::RepoConfig::load(&repo_config_path)
+        && let Some(config) = &repo_config.principal
+        && !principal_is_unconfigured(&Principal::new(&config.name, &config.email))
     {
         return true;
     }
@@ -622,19 +633,23 @@ fn run_quickstart_actions(repo: &Repository, args: &InitArgs) -> Result<Quicksta
     })
 }
 
-/// Create the named quickstart thread at the current state and attach
-/// HEAD to it. Idempotent: a re-run that is already on the thread is a
-/// no-op. `ensure_current_state` returns the existing state for a
-/// freshly-seeded native repo without creating an extra capture.
+/// Create the named quickstart thread and attach HEAD to it. Idempotent:
+/// a re-run that is already on the thread is a no-op.
+///
+/// When a current state already exists (a freshly-seeded native repo, or
+/// a Git overlay whose history we just imported) the thread is pointed at
+/// it. An unborn Git overlay has NO current state yet: we must NOT
+/// fabricate a bootstrap snapshot here, or the quickstart would land an
+/// extra empty parent commit before `QUICKSTART.md` is even written —
+/// breaking the promised single initial capture/checkpoint. Instead we
+/// just attach HEAD to the thread; the subsequent quickstart capture
+/// creates the thread's first (root) state and advances the ref.
 fn ensure_quickstart_thread(repo: &Repository, name: &str) -> Result<()> {
     let target = ThreadName::new(name);
-    let current = ensure_current_state(
-        repo,
-        &UserConfig::load_default().unwrap_or_default(),
-        Some(format!("Bootstrap before quickstart thread {name}")),
-    )?;
-    if repo.refs().get_thread(&target)?.is_none() {
-        repo.refs().set_thread(&target, &current)?;
+    if let Some(state) = repo.current_state()?
+        && repo.refs().get_thread(&target)?.is_none()
+    {
+        repo.refs().set_thread(&target, &state.change_id)?;
     }
     let already_attached =
         matches!(repo.head_ref()?, Head::Attached { thread } if thread == target);
