@@ -2019,40 +2019,78 @@ fn coordination_severity(status: &CoordinationStatus) -> u8 {
     }
 }
 
+/// Single source of truth for "is the coordination axis genuinely
+/// clean?". `coordination_status` is overloaded: the status builder
+/// encodes a dirty / uncaptured / trust health blocker by setting
+/// `coordination_status = Blocked` (build sites ~571, ~956 — the
+/// blocker is a *health* signal surfaced via the coordination field).
+/// A genuine inter-thread Blocked is only ever produced while health is
+/// clean, so a Blocked accompanied by a non-clean `thread_health` is the
+/// health-signal encoding and the coordination axis is effectively
+/// clean — the health axis carries the blocker. Both the human `-v`
+/// render and the combined verdict route through here so they can't
+/// drift into double-counting that encoding.
+fn coordination_axis_clean(coordination: &CoordinationStatus, thread_health: &str) -> bool {
+    match coordination {
+        CoordinationStatus::Clean => true,
+        CoordinationStatus::Blocked => thread_health != "clean",
+        CoordinationStatus::Ahead
+        | CoordinationStatus::Diverged
+        | CoordinationStatus::MergeReady => false,
+    }
+}
+
+/// Pure core of the combined verdict: which axes are effectively clean
+/// and the resulting reason line. Split from rendering so it is
+/// unit-testable without constructing a full `StatusOutput`.
+fn combined_verdict_axes(
+    thread_health: &str,
+    coordination: &CoordinationStatus,
+) -> (bool, bool, Option<&'static str>) {
+    let health_clean = thread_health == "clean";
+    let coordination_clean = coordination_axis_clean(coordination, thread_health);
+    let reason = match (health_clean, coordination_clean) {
+        (true, true) => None,
+        (false, false) => Some("checkout health and thread coordination both need attention"),
+        (false, true) => Some("checkout health needs attention"),
+        (true, false) => Some("thread coordination needs attention"),
+    };
+    (health_clean, coordination_clean, reason)
+}
+
 /// Combined top-line verdict for the default long view. Returns the
 /// styled verdict word plus an optional one-line reason.
 ///
-/// `clean` only when BOTH the health and coordination axes are clean;
-/// otherwise the more-severe axis is surfaced as the verdict word so a
-/// reader of the default view still learns the checkout is not clean.
-/// Ties favour the local health axis — that's the blocker the user
-/// usually acts on first. The reason names which axis (or both) is at
-/// fault; `-v` then prints the per-axis detail.
+/// `clean` only when BOTH the health and coordination axes are
+/// *effectively* clean; otherwise the more-severe axis is surfaced as
+/// the verdict word so a reader of the default view still learns the
+/// checkout is not clean. Ties favour the local health axis — that's the
+/// blocker the user usually acts on first. The reason names which axis
+/// (or both) is at fault; `-v` then prints the per-axis detail.
 fn status_combined_verdict(output: &StatusOutput) -> (String, Option<&'static str>) {
-    let health_clean = output.thread_health == "clean";
-    let coordination_clean = matches!(output.coordination_status, CoordinationStatus::Clean);
+    let (health_clean, coordination_clean, reason) =
+        combined_verdict_axes(&output.thread_health, &output.coordination_status);
     if health_clean && coordination_clean {
         return ("clean".to_string(), None);
     }
-    let surface_health =
-        !health_clean && health_severity(&output.thread_health) >= coordination_severity(&output.coordination_status);
+    // Surface health when it's the (or the more-severe) non-clean axis,
+    // and always when the coordination axis is only health-encoded — in
+    // that case the health blocker is the real story.
+    let surface_health = !health_clean
+        && (coordination_clean
+            || health_severity(&output.thread_health)
+                >= coordination_severity(&output.coordination_status));
     let word = if surface_health {
         human_thread_health(&output.thread_health)
     } else {
         human_coordination_status(output)
     };
-    let reason = match (health_clean, coordination_clean) {
-        (false, false) => Some("checkout health and thread coordination both need attention"),
-        (false, true) => Some("checkout health needs attention"),
-        (true, false) => Some("thread coordination needs attention"),
-        (true, true) => None,
-    };
     (word, reason)
 }
 
 fn human_coordination_status(output: &StatusOutput) -> String {
-    if local_work_in_progress(output)
-        && matches!(output.coordination_status, CoordinationStatus::Blocked)
+    if matches!(output.coordination_status, CoordinationStatus::Blocked)
+        && coordination_axis_clean(&output.coordination_status, &output.thread_health)
     {
         "work in progress".to_string()
     } else {
@@ -2214,7 +2252,10 @@ mod tests {
     use repo::Repository;
     use tempfile::TempDir;
 
-    use super::{MaterializedThreadInfo, assess_materialized_threads, render_status_materialized};
+    use super::{
+        CoordinationStatus, MaterializedThreadInfo, assess_materialized_threads,
+        combined_verdict_axes, coordination_axis_clean, render_status_materialized,
+    };
 
     fn init_repo_with_materialized_thread(content: &[u8]) -> (TempDir, TempDir, Repository) {
         let repo_dir = TempDir::new().unwrap();
@@ -2329,5 +2370,77 @@ mod tests {
             stale: false,
         }];
         render_status_materialized(&fresh_only, false);
+    }
+
+    #[test]
+    fn dirty_wip_combined_verdict_reason_is_health_only() {
+        // (a) Repro: a dirty/uncaptured checkout encodes its health
+        // blocker as `coordination_status = Blocked`. The combined
+        // verdict must NOT double-count that as a coordination failure —
+        // the reason is the health/WIP reason alone.
+        for health in ["dirty_worktree", "uncaptured"] {
+            let (health_clean, coordination_clean, reason) =
+                combined_verdict_axes(health, &CoordinationStatus::Blocked);
+            assert!(!health_clean, "{health} is a non-clean health state");
+            assert!(
+                coordination_clean,
+                "{health}'s Blocked is a health-signal encoding → coordination effectively clean"
+            );
+            assert_eq!(
+                reason,
+                Some("checkout health needs attention"),
+                "{health}: reason must be health-only, not a coordination/both warning"
+            );
+            let reason = reason.unwrap();
+            assert!(
+                !reason.contains("coordination") && !reason.contains("both need attention"),
+                "{health}: reason must not mention coordination: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_blocked_combined_verdict_reason_is_health_only() {
+        // (a') The same masking covers a trust-blocked WIP checkout: its
+        // Blocked is the verification health signal, not coordination.
+        let (_, coordination_clean, reason) =
+            combined_verdict_axes("git_branch_advanced", &CoordinationStatus::Blocked);
+        assert!(coordination_clean);
+        assert_eq!(reason, Some("checkout health needs attention"));
+    }
+
+    #[test]
+    fn genuine_coordination_states_still_surface() {
+        // (b) Guard against over-suppression: a real inter-thread
+        // coordination state with clean health must still be reported by
+        // the combined verdict.
+        for coordination in [
+            CoordinationStatus::Ahead,
+            CoordinationStatus::Diverged,
+            CoordinationStatus::MergeReady,
+            // A genuine Blocked is produced only with clean health.
+            CoordinationStatus::Blocked,
+        ] {
+            assert!(
+                !coordination_axis_clean(&coordination, "clean"),
+                "{coordination:?} with clean health is a genuine coordination state"
+            );
+            let (health_clean, coordination_clean, reason) =
+                combined_verdict_axes("clean", &coordination);
+            assert!(health_clean && !coordination_clean);
+            assert_eq!(
+                reason,
+                Some("thread coordination needs attention"),
+                "{coordination:?}: combined verdict must name coordination"
+            );
+        }
+    }
+
+    #[test]
+    fn both_axes_clean_verdict_has_no_reason() {
+        let (health_clean, coordination_clean, reason) =
+            combined_verdict_axes("clean", &CoordinationStatus::Clean);
+        assert!(health_clean && coordination_clean);
+        assert_eq!(reason, None);
     }
 }

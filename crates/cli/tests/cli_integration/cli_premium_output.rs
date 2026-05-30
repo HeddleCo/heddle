@@ -323,6 +323,17 @@ fn status_long_default_verdict_signals_non_clean_when_health_dirty() {
         !text.contains("Health:") && !text.contains("Coordination:"),
         "default long mode must hide the per-axis component lines: {text}"
     );
+    // The dirty health blocker is encoded as `coordination_status =
+    // Blocked`; the combined verdict reason must not double-count it as a
+    // coordination failure (heddle#276 r2 / cid 3327903846).
+    assert!(
+        !text.contains("coordination") && !text.contains("both need attention"),
+        "ordinary dirty WIP must not surface a coordination warning: {text}"
+    );
+    assert!(
+        text.contains("checkout health needs attention"),
+        "the reason for dirty WIP must be the health/WIP reason alone: {text}"
+    );
 }
 
 #[test]
