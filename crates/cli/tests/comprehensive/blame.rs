@@ -61,6 +61,86 @@ fn test_blame_empty_file() {
 }
 
 #[test]
+fn test_blame_json_attribution_is_structured() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    fs::write(temp.path().join("tracked.txt"), "line 1\n").unwrap();
+    heddle(&["capture", "-m", "First line"], Some(temp.path())).unwrap();
+
+    let output = heddle(
+        &["--output", "json", "blame", "tracked.txt"],
+        Some(temp.path()),
+    )
+    .expect("blame --output json should succeed");
+    let v: Value = serde_json::from_str(&output).expect("blame should emit JSON");
+
+    let line = &v["lines"][0];
+    // No flattened `author` string — attribution is structured like
+    // `log` / `show` so consumers don't have to string-parse.
+    assert!(
+        line.get("author").is_none(),
+        "blame line should not carry a flattened `author` string: {output}"
+    );
+    assert_eq!(line["principal"]["name"], "Heddle Test");
+    assert_eq!(line["principal"]["email"], "test@heddle.dev");
+    // Agent is either absent (`null`) or a structured object — never a
+    // string baked into the principal field.
+    let agent = &line["agent"];
+    assert!(
+        agent.is_null() || agent.is_object(),
+        "blame agent must be structured or null, got: {agent}"
+    );
+
+    // Origins mirror the same structured shape.
+    let origin = &line["origins"][0];
+    assert!(
+        origin.get("author").is_none(),
+        "blame origin should not carry a flattened `author` string: {output}"
+    );
+    assert_eq!(origin["principal"]["name"], "Heddle Test");
+    assert_eq!(origin["principal"]["email"], "test@heddle.dev");
+}
+
+#[test]
+fn test_blame_json_agent_is_structured_object() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    fs::write(temp.path().join("tracked.txt"), "line 1\n").unwrap();
+    heddle(
+        &[
+            "capture",
+            "-m",
+            "Agent line",
+            "--agent-provider",
+            "anthropic",
+            "--agent-model",
+            "claude-opus-4-7",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    let output = heddle(
+        &["--output", "json", "blame", "tracked.txt"],
+        Some(temp.path()),
+    )
+    .expect("blame --output json should succeed");
+    let v: Value = serde_json::from_str(&output).expect("blame should emit JSON");
+
+    let agent = &v["lines"][0]["agent"];
+    assert_eq!(
+        agent["provider"], "anthropic",
+        "blame should expose the agent provider as a field: {output}"
+    );
+    assert_eq!(
+        agent["model"], "claude-opus-4-7",
+        "blame should expose the agent model as a field: {output}"
+    );
+}
+
+#[test]
 fn test_blame_multiple_commits_attribution() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
