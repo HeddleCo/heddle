@@ -2,10 +2,11 @@
 #
 # Keep the per-component `target` values in sync with the
 # `--gate <crate>=<pct>` flags in `.github/workflows/rust-tests.yml`
-# (job `coverage`, step `Coverage gate`) and with the table in
-# `CONTRIBUTING.md` § "Coverage gate". The Rust-side gate in
-# `heddle-devtools audit-coverage` is the authoritative check (it
-# fails the CI job before the Codecov upload runs); Codecov mirrors
+# (job `coverage`, step `Coverage gate`) and with the per-crate table
+# in `docs/contributor-guide/coverage.md` (the canonical policy; the
+# CONTRIBUTING.md § "Coverage gate" summary links to it). The Rust-side
+# gate in `heddle-devtools audit-coverage` is the authoritative check
+# (it fails the CI job before the Codecov upload runs); Codecov mirrors
 # the same numbers so PR-level reporting matches CI-level enforcement.
 
 coverage:
@@ -23,6 +24,18 @@ coverage:
         threshold: 1%
         informational: true
 
+      # Per-crate project floors. Each `target` MUST equal the matching
+      # `--gate <crate>=<pct>` in `.github/workflows/rust-tests.yml` and
+      # the row in `docs/contributor-guide/coverage.md`. `threshold: 0%`
+      # makes any drop below `target` a failing status. Where a crate's
+      # current coverage is below its policy GOAL, the enforced floor is
+      # ratcheted to (just under) current main — see the coverage doc for
+      # the goal-vs-floor split and how to request a bump.
+      #
+      # `crates/grpc` is intentionally absent: its surface is tonic-
+      # generated code emitted to `OUT_DIR`, which never appears under
+      # `crates/grpc/` in lcov, so there are no lines to gate. Its 60%
+      # goal is tracked in the doc, not enforced here.
       objects:
         target: 80%
         threshold: 0%
@@ -31,16 +44,6 @@ coverage:
         paths:
           - crates/objects/
 
-      repo:
-        # Ratchet floor: pinned at current main (78.66%). Goal is 80% —
-        # raise this as the `repo` crate gains tests. See CONTRIBUTING.md.
-        target: 78.66%
-        threshold: 0%
-        flags:
-          - rust
-        paths:
-          - crates/repo/
-
       refs:
         target: 80%
         threshold: 0%
@@ -48,6 +51,95 @@ coverage:
           - rust
         paths:
           - crates/refs/
+
+      repo:
+        # Ratchet floor at 82% (current main 82.48%). Goal is 85% —
+        # raise this as the `repo` crate gains tests. See the coverage doc.
+        target: 82%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/repo/
+
+      cli:
+        target: 75%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/cli/
+
+      mount:
+        # Ratchet floor at 68% (current main 68.64%, platform-gated).
+        # Goal is 70%.
+        target: 68%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/mount/
+
+      semantic:
+        # Ratchet floor at 78% (current main 78.38%). Goal is 80%.
+        target: 78%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/semantic/
+
+      oplog:
+        # Ratchet floor at 78% (current main 78.25%). Goal is 80%.
+        target: 78%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/oplog/
+
+      proto:
+        # Ratchet floor at 60% (current main 60.27%). Goal is 80%.
+        target: 60%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/proto/
+
+      state_review:
+        # Ratchet floor at 76% (current main 76.59%). Goal is 80%.
+        target: 76%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/state_review/
+
+      crypto:
+        # Ratchet floor at 64% (current main 64.36%). Goal is 80%.
+        target: 64%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/crypto/
+
+      daemon:
+        target: 80%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/daemon/
+
+      ingest:
+        target: 80%
+        threshold: 0%
+        flags:
+          - rust
+        paths:
+          - crates/ingest/
 
     patch:
       # New-or-changed lines in a PR must clear 80% — this is the
@@ -78,11 +170,47 @@ component_management:
       name: objects
       paths:
         - crates/objects/**
-    - component_id: repo
-      name: repo
-      paths:
-        - crates/repo/**
     - component_id: refs
       name: refs
       paths:
         - crates/refs/**
+    - component_id: repo
+      name: repo
+      paths:
+        - crates/repo/**
+    - component_id: cli
+      name: cli
+      paths:
+        - crates/cli/**
+    - component_id: mount
+      name: mount
+      paths:
+        - crates/mount/**
+    - component_id: semantic
+      name: semantic
+      paths:
+        - crates/semantic/**
+    - component_id: oplog
+      name: oplog
+      paths:
+        - crates/oplog/**
+    - component_id: proto
+      name: proto
+      paths:
+        - crates/proto/**
+    - component_id: state_review
+      name: state_review
+      paths:
+        - crates/state_review/**
+    - component_id: crypto
+      name: crypto
+      paths:
+        - crates/crypto/**
+    - component_id: daemon
+      name: daemon
+      paths:
+        - crates/daemon/**
+    - component_id: ingest
+      name: ingest
+      paths:
+        - crates/ingest/**
