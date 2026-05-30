@@ -645,9 +645,17 @@ fn run_one_attempt(
     }
 }
 
-/// Compute the parent ↔ thread-tip diff and return its file count. The
-/// state IDs flow through `repo.resolve_state` so we accept either a
-/// short or full change-id without re-deriving the prefix arithmetic.
+/// Compute the parent ↔ thread-tip diff and return its file count,
+/// excluding ignored paths. The state IDs flow through
+/// `repo.resolve_state` so we accept either a short or full change-id
+/// without re-deriving the prefix arithmetic.
+///
+/// Ignored paths are filtered out of the count because the ranking
+/// signal must reflect *source* changes, not artifacts an attempt's
+/// command happened to materialize. An attempt that runs `npm ci`
+/// captures the freshly-installed (and ignored) `node_modules` tree;
+/// counting those thousands of files would swamp the ranking and make
+/// every attempt look equally huge.
 fn diff_file_count(repo: &Repository, parent_head: &str, thread_tip: &str) -> Result<usize> {
     let from = repo
         .resolve_state(parent_head)?
@@ -656,7 +664,21 @@ fn diff_file_count(repo: &Repository, parent_head: &str, thread_tip: &str) -> Re
         .resolve_state(thread_tip)?
         .ok_or_else(|| anyhow!("thread state '{}' not resolvable", thread_tip))?;
     let diff = compute_state_diff(repo, &from, &to, false, 0)?;
-    Ok(diff.changes.len())
+    let ignore_patterns = repo.ignore_patterns()?;
+    Ok(count_unignored_paths(
+        diff.changes.iter().map(|change| change.path.as_str()),
+        &ignore_patterns,
+    ))
+}
+
+/// Count paths that are not covered by the repo's ignore rules. Pulled
+/// out of `diff_file_count` so the ignore-aware ranking can be tested
+/// without standing up a full state-to-state diff.
+fn count_unignored_paths<'a>(
+    paths: impl Iterator<Item = &'a str>,
+    _ignore_patterns: &[String],
+) -> usize {
+    paths.count()
 }
 
 /// Sort key for ranking. Lower values rank earlier.
@@ -836,6 +858,27 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         (temp, repo)
+    }
+
+    #[test]
+    fn diff_file_count_ranking_excludes_ignored_paths() {
+        // Regression for heddle#304: an attempt whose command runs
+        // `npm ci` captures the freshly-installed `node_modules` tree.
+        // Those paths are ignored, so they must NOT inflate the
+        // `diff_files` ranking signal — only real source changes count.
+        let patterns = vec!["node_modules".to_string(), "target".to_string()];
+        let paths = [
+            "src/main.rs",
+            "src/lib.rs",
+            "node_modules/left-pad/index.js",
+            "node_modules/.package-lock.json",
+            "target/debug/build/foo",
+        ];
+        assert_eq!(
+            count_unignored_paths(paths.iter().copied(), &patterns),
+            2,
+            "only the two source files should count; ignored deps must not dominate"
+        );
     }
 
     #[test]
