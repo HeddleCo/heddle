@@ -40,6 +40,7 @@ sketch.
 > | `OpRecord::Fork` | `{ from, new_state }` — **ref-blind** (no published thread/HEAD identity) | `oplog_types.rs:39` |
 > | `OpRecord::Collapse` | `{ sources, result }` — **ref-blind** (carries target, not which ref it published) | `oplog_types.rs:41-44` |
 > | remote-thread / undo-recovery writes | `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery` write the ref **directly** (`lock_refs()` + `write_string`/`remove_file`), **no `OpRecord` appended** | `refs_manager.rs:261`,`:284`,`:242` |
+> | second ref backend (`PgRefBackend`) | the hosted/server `RefBackend` impl publishes thread/marker/HEAD via its **own** SQL `pool.begin()…tx.commit()` over the `refs`/`heads` tables, writing **no** oplog record in that tx — a second raw publish entirely separate from the file path's `update_refs_with_lock` temp→rename | `pg_refs.rs:35`,`:324`,`:328` |
 > | `cmd_fork` / `cmd_collapse` ordering | **publish ref before** appending the oplog record (phase-5-before-phase-4); `cmd_fork` *also* passes `record_fork`'s args **reversed** — `record_fork(from, new_state)` (`oplog_records.rs:113`) vs the call `record_fork(&new_state.change_id, &source_state.change_id)` (`fork.rs:94-95`), so the source is persisted as the fork *result* | `fork.rs:74-95`, `collapse.rs:99-113`, `oplog_records.rs:113` |
 > | read path | the ten `RefManager` read methods touch raw storage directly; **no** `reconciled_load` primitive, **no** `RefReconciler` trait | `refs_manager.rs:114`–`:327` |
 > | commit dedup | only the **window-bounded** `record_batch_scoped_if_no_transaction`; **no** unbounded `transaction_id` index | `oplog_core.rs:281` |
@@ -203,7 +204,25 @@ sketch.
   private with `commit_and_publish` its sole caller, so the CAS/create wrappers
   (`set_thread_cas`/`set_marker_cas`/`create_marker`) and every future writer are covered
   by construction, the write-side mirror of r7's single-`reconciled_load` read closure, cid
-  3329019023.** See §2.2 "The write chokepoint" + §2.4.
+  3329019023.**
+  **(r18, cid 3329052679) But r17's single-sole-writer closure seals only the FILE backend.**
+  The raw publish r17 privatized is the file path's temp→rename (`refs_transactions.rs:228-256`);
+  there is a SECOND ref backend — `PgRefBackend` (`pg_refs.rs:35`, the hosted/server impl of the
+  `RefBackend` trait, `ref_backend.rs:15`) — whose `update_refs` (`pg_refs.rs:324`) publishes
+  thread/marker/HEAD changes directly with SQL (`pool.begin()…tx.commit()`, `:328`), a publish the
+  file seam never touches. So r18 lifts `commit_and_publish` from a repo/oplog-layer free function
+  to a **`RefBackend`-trait method both backends implement**, each with a *private* raw publish
+  behind it — the single-sole-writer invariant restated PER BACKEND. The two earn atomicity by
+  different native mechanisms: the **file** backend via oplog-append-then-publish + per-read
+  reconciliation (record and publish are two durable subsystems with a crash window — the whole
+  r4–r17 design), the **Postgres** backend via ONE SQL transaction that inserts the ref-carrying
+  oplog record(s) AND the ref/head updates together (`PgOpLogBackend` shares the same `PgPool`,
+  `pg_oplog.rs:40`,`:259`) — native ACID atomicity, so it needs NO temp→rename, NO oplog-replay
+  reconciliation, NO watermark. Lifting the seam to the trait is made possible by the same
+  dependency-inversion the read side already uses (a `refs`-defined trait whose `oplog`-backed
+  impl is injected from `repo`), which revises r17's "the write primitive consumes an `oplog` type
+  so it must sit one layer up" — that very placement is what left the Postgres publish uncovered.
+  See §2.2 "The write chokepoint" + §2.4.
 - **Nesting = enroll-into-outermost (savepoint) by default; eager-commit only
   when an effect must be visible to another process before the outer commit**
   (the #251 reserve). This is a **type-level split**, not a runtime const:
@@ -696,6 +715,59 @@ publish to compile against. The 46-count survives only as an *illustration* that
 known writers already converge — it is no longer load-bearing, because the bound is now
 the visibility boundary, not the count.
 
+**Two backends — the seam is on the `RefBackend` trait, not just `RefManager` (r18, cid
+3329052679).** Everything above privatized exactly ONE raw publish: the file path's
+temp→rename + `sync_directory` (`refs_transactions.rs:228-256`). But `RefManager` is only one
+implementor of the backend interface. The `RefBackend` trait (`ref_backend.rs:15`,
+`RefBackend: CoreRefBackend<Error = HeddleError>`) has a second production impl —
+`PgRefBackend` (`pg_refs.rs:35`), the hosted/server backend — and its publish path is
+**entirely separate code**: `PgRefBackend::update_refs` (`pg_refs.rs:324`, the
+`CoreRefBackend::update_refs` impl, `backend.rs:74`) applies every thread/marker/HEAD update
+with SQL inside a single `pool.begin()…tx.commit()` (`pg_refs.rs:328`) against the
+`refs`/`heads` tables — it never goes near `update_refs_with_lock` or the temp→rename. So a
+closure that only makes the *file* temp→rename private leaves `PgRefBackend::update_refs` as a
+**second public raw publish that can still emit a ref with no preceding ref-carrying record** —
+the write class is closed for the file backend and wide open for the Postgres backend. A
+per-`RefManager` chokepoint is a chokepoint with a whole *backend* outside it.
+
+The fix is to state the single-sole-writer invariant **per backend** by lifting
+`commit_and_publish` onto the `RefBackend` trait:
+
+> **Single-sole-writer invariant, per backend (r18): each `RefBackend` impl has exactly one
+> raw ref publish, private, with that backend's `commit_and_publish` its sole caller.**
+> `commit_and_publish(op_records, ref_updates)` is a **method on the `RefBackend` trait**, not
+> a free function over one concrete manager. Every backend implements it; every backend's bare
+> publish — the file backend's temp→rename (`refs_transactions.rs:228-256`), the Postgres
+> backend's SQL-tx-of-refs (`PgRefBackend::update_refs`, `pg_refs.rs:324`/`:328`) — is private
+> and reachable only through it. There is no public writer, on either backend, that publishes a
+> canonical ref without first committing a ref-carrying record.
+
+**Each backend earns the invariant by its substrate's native atomicity mechanism — same
+invariant, different proof per backend.**
+
+- **File backend (`RefManager`) — oplog-as-commit + reconciliation (the r4–r17 design,
+  unchanged).** The record append (to the file oplog) and the ref publish (temp→rename) are
+  **two durable steps in two subsystems** with a crash window between phase 4 and phase 5.
+  `commit_and_publish` orders append-then-publish; the residual lag (record durable, ref not yet
+  renamed) is repaired by **per-read reconciliation** + the class-split watermark (§2.2 "Reader
+  model," §2.4). This backend *needs* reconciliation precisely because it has no single durable
+  transaction spanning both subsystems.
+- **Postgres backend (`PgRefBackend`) — one SQL transaction, no reconciliation needed.** The
+  oplog records and the refs/heads rows live in the **same database**: `PgOpLogBackend`
+  (`pg_oplog.rs:39`) appends via `INSERT INTO oplog (…)` (`pg_oplog.rs:259`) over the same
+  `Arc<PgPool>` (`pg_oplog.rs:40`) that `PgRefBackend` holds (`pg_refs.rs:36`). So
+  `PgRefBackend::commit_and_publish` does, in **one** `pool.begin()…tx.commit()`, both the
+  ref-carrying record `INSERT` **and** the ref/head updates that `update_refs` already applies
+  (`pg_refs.rs:328`). Postgres's ACID transaction makes "committed ⇔ the record row exists" hold
+  **atomically** — there is no crash window between record and publish, because they commit or
+  roll back as one. The Postgres path therefore needs **NO temp→rename, NO oplog-replay
+  reconciliation, NO watermark** — the file backend's entire crash-recovery apparatus is moot
+  here. r18 routes `PgRefBackend::update_refs` through the seam: the existing SQL-tx-of-just-refs
+  becomes the private raw publish, and `commit_and_publish` adds the record `INSERT` to that same
+  transaction; no caller reaches the bare SQL publish, mirroring the file backend's
+  private-temp→rename rule. (The test-only in-memory `MemRefBackend`, `backend.rs:127`, is
+  non-durable and outside the durability argument.)
+
 The writers that route through the chokepoint, **illustratively** (this table is coverage
 illustration, not the proof — the proof is the visibility boundary above; the CAS/create
 entry points cid 3329019023 flagged are folded in):
@@ -721,24 +793,34 @@ guarantee holds without the primitive ever needing context it cannot see. This i
 difference between an enumerated audit ("we fixed fork and collapse," "we also counted
 CAS") and a closed class ("no path can publish without a record").
 
-**Crate-dependency seam.** The primitive must append `OpRecord`s (an `oplog` type)
-*and* drive the canonical-ref publish (a `refs` operation), but `refs` does **not**
-depend on `oplog` (`crates/refs/Cargo.toml`). Because the op-descriptor model (r15/r16)
-feeds the primitive a *full* `OpRecord` batch — including `Fork`/`Collapse` payloads that
-carry `sources`/`from`, data `refs` does **not** own — the fusion point cannot live
-inside `RefManager`: it would have to name `OpRecord`. So `commit_and_publish` lives at
-the **`repo`/`oplog` layer**, which already depends on both
-(`crates/repo/Cargo.toml:22` oplog, `:24` refs). `refs` exposes only a **private
-publish sub-step** (the stage + temp→rename, `refs_transactions.rs:228-256`) that the
-primitive drives in phase 5; the bare publish is not callable on its own, and the
-write-side conformance check asserts the primitive is its **sole** caller. This keeps
-`refs` free of any `oplog` dep (it never names `OpRecord`) while still fusing
-append-then-publish in exactly one place. (This is the asymmetry with the read side:
-the `RefReconciler` *can* be a `refs`-defined trait because its outputs are
-`refs` types — `Head`/`ChangeId` — whereas the write primitive *consumes* an
-`oplog` type, so it sits one layer up rather than being inverted into `refs`.) A
-bootstrap path with no oplog wired keeps today's plain-publish behavior (used only
-before the oplog exists, mirroring the no-reconciler bootstrap read).
+**Crate-dependency seam — why the seam can live on the trait (r18 revises r17).**
+`commit_and_publish` must commit `OpRecord`s (an `oplog` type) *and* drive the canonical-ref
+publish (a `refs` operation), but `refs` does **not** depend on `oplog`
+(`crates/refs/Cargo.toml`). r17 read this as "the fusion point cannot live inside `refs` — it
+would have to name `OpRecord` — so `commit_and_publish` sits at the `repo`/`oplog` layer as a
+free function over `RefManager`, to which `refs` exposes only a private temp→rename sub-step."
+That placement *did* fuse append-then-publish in one place — **but only for `RefManager`.** A
+free function over the file manager is structurally incapable of being a chokepoint for the
+*other* `RefBackend` impl (`PgRefBackend`, `pg_refs.rs:35`), whose publish is separate SQL
+(`pg_refs.rs:324`/`:328`) it never calls — which is exactly the hole cid 3329052679 found. The
+asymmetry claim ("the write primitive consumes an `oplog` type, so unlike `RefReconciler` it
+cannot be inverted into `refs`") was the error: the record crosses the `RefBackend` boundary
+through the **same dependency-inversion the read side uses** — a **`refs`-defined committer
+trait** (the write-side dual of `RefReconciler`) whose `oplog`-backed impl is injected from the
+`repo`/`oplog` layer (`crates/repo/Cargo.toml:22` oplog, `:24` refs) at `Repository`/server
+construction. The `RefBackend::commit_and_publish` signature names that `refs`-defined trait,
+**not** `OpRecord`; the concrete `OpRecord` batch (including the `Fork`/`Collapse` payloads
+carrying `sources`/`from`, data `refs` does not own) is built and encoded at the `repo`/`oplog`
+layer — where both crates are visible — and handed across opaquely. So `refs` still never names
+`oplog`, *and* the seam lives on the trait both backends implement. Each backend's
+`commit_and_publish` then fuses by its native mechanism: the **file** backend calls the injected
+committer to append to the file oplog, then runs its private temp→rename
+(`refs_transactions.rs:228-256`) — two subsystems, so the crash window is bridged by
+reconciliation; the **Postgres** backend runs one SQL tx inserting the record row + the ref/head
+rows (one subsystem ⇒ natively atomic, no reconciliation). The **per-backend** write-side
+conformance check asserts each backend's bare publish has no caller but its own
+`commit_and_publish`. A bootstrap path with no committer wired keeps today's plain-publish
+behavior (used only before the oplog exists, mirroring the no-reconciler bootstrap read).
 
 **Relationship to the `execute`/`Tx` model — one invariant, two embodiments.** The
 chokepoint is the *lowest* enforcement layer, below `execute`. A writer reaches the
@@ -1457,11 +1539,14 @@ txn log), `rewind` correctness is the load-bearing contract:
 > **Precondition (PROPOSED, not shipped).** This proof establishes the invariant
 > **for the design after the impl epic lands** — i.e. after the three net-new
 > mechanisms below are *built*: (1) the read chokepoint (`reconciled_load` +
-> `RefReconciler`), (2) the write chokepoint (the `RefManager` write methods that
-> record-before-publish) **plus** the `OpRecord` format changes it relies on
-> (the net-new `RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`
-> variants and the `Fork`/`Collapse` ref-identity retrofit), and (3) the unbounded
-> indexed `transaction_id` commit. **None of these exist in the current tree**
+> `RefReconciler`), (2) the write chokepoint as a **per-backend `RefBackend`-trait
+> `commit_and_publish` seam** (r18, cid 3329052679) — closing the record-before-publish
+> property on **both** the file backend (`RefManager`, temp→rename) and the hosted
+> backend (`PgRefBackend`, its own SQL publish, `pg_refs.rs:324`/`:328`) — **plus** the
+> `OpRecord` format changes it relies on (the net-new
+> `RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate` variants and the
+> `Fork`/`Collapse` ref-identity retrofit), and (3) the unbounded indexed
+> `transaction_id` commit. **None of these exist in the current tree**
 > (see the EXISTING-vs-PROPOSED note in the header and §6 O1/O7/O9). Today's code
 > still has the direct-write exceptions (`set_remote_thread`/`set_undo_recovery`
 > write directly; `cmd_fork`/`cmd_collapse` publish before recording and emit
@@ -1592,6 +1677,24 @@ Together they hold the invariant for every writer, reader, and crash timing:
   ref-carrying record** — is **unreachable on the write path**, for *any* writer,
   single- or multi-record, not merely for capture. This is the structural dual of the read chokepoint: r7 made every
   *read* reconcile; r11 makes every *write* record-first.
+  **(r18, cid 3329052679) The chokepoint is a `RefBackend`-trait seam — closed for BOTH
+  backends, not just the file one.** Everything above privatized one raw publish: the file
+  path's temp→rename (`refs_transactions.rs:228-256`). But the hosted backend `PgRefBackend`
+  (`pg_refs.rs:35`, impl of `RefBackend`, `ref_backend.rs:15`) publishes refs through separate
+  SQL — `PgRefBackend::update_refs` (`pg_refs.rs:324`) applies every thread/marker/HEAD update
+  in one `pool.begin()…tx.commit()` (`:328`) — which a file-only closure never touches, leaving
+  a second public raw publish with no record-first guarantee. So `commit_and_publish` is a
+  **method on the `RefBackend` trait**; each backend's bare publish is private behind its own
+  impl. They satisfy the invariant by different native mechanisms: the **file** backend by
+  oplog-append-then-publish + per-read reconciliation (record and ref are two durable subsystems
+  with a crash window — the entire reconciliation/watermark apparatus exists to bridge it); the
+  **Postgres** backend by ONE SQL transaction that inserts the ref-carrying record row **and**
+  the ref/head rows together (`PgOpLogBackend` shares the `PgPool`, `pg_oplog.rs:40`,`:259`), so
+  "committed ⇔ the record row exists" is atomic and the Postgres path needs no temp→rename, no
+  reconciliation, no watermark. Routed through the seam, `PgRefBackend::update_refs` becomes the
+  private raw publish and `commit_and_publish` adds the record `INSERT` to the same tx. The
+  forbidden state — a published ref with no backing record — is now unreachable on *both*
+  backends' write paths.
 - **Write side (2) — unbounded indexed exact-once commit (§2.2 "Idempotency of the
   commit," retained from r3).** The phase-4 linearization point deduplicates on an
   **unbounded, indexed `transaction_id` → committed-batch-id** lookup under the
@@ -1612,7 +1715,12 @@ The one forbidden state — a NEW, committed-*looking* canonical ref with **no**
 backing ref-carrying record — is structurally impossible regardless of
 writer/reader/handle/timing, because the **write chokepoint** (§2.2) makes the
 canonical-ref publish unreachable except through a primitive that has *already*
-appended a ref-identifying record — nothing publishes a canonical ref before its
+appended a ref-identifying record — **on every backend** (r18, cid 3329052679): the
+seam is a `RefBackend`-trait method, so the file backend's temp→rename and the Postgres
+backend's SQL publish (`pg_refs.rs:324`/`:328`) are *each* private behind their own
+`commit_and_publish` (the file backend ordering append-then-publish across two
+subsystems, the Postgres backend committing record + refs in one ACID transaction).
+Nothing publishes a canonical ref before its
 phase-4 record is durable, and the record names the ref it publishes (the
 `Fork`/`Collapse` retrofit closes the last variants that did not);
 and the only post-crash residue (a *lagging* OLD ref with the record already present)
@@ -2115,6 +2223,18 @@ to `AtomicMutation` here; they simply route their existing publishes through the
 chokepoint, exactly as readers were not migrated to `execute` but route through
 `reconciled_load`.)
 
+**The chokepoint is per backend (r18, cid 3329052679).** All of the above closes the *file*
+backend's publish (`RefManager` → `update_refs_with_lock` → temp→rename). The hosted backend
+`PgRefBackend` (`pg_refs.rs:35`) is a second `RefBackend` impl (`ref_backend.rs:15`) whose
+`update_refs` (`pg_refs.rs:324`) publishes refs via its own SQL transaction (`:328`), untouched
+by a file-only closure. r18 makes `commit_and_publish` a **`RefBackend`-trait method** both
+backends implement, each with a private raw publish: the file backend keeps
+oplog-append-then-publish + reconciliation (two subsystems, crash window), while
+`PgRefBackend::commit_and_publish` inserts the ref-carrying record(s) and the ref/head updates
+in **one** `pool.begin()…tx.commit()` (`PgOpLogBackend` shares the pool, `pg_oplog.rs:40`,`:259`)
+— native ACID atomicity, no reconciliation or watermark. So "zero ref-write paths without a
+preceding ref-carrying record" holds for the Postgres backend too, by its own mechanism.
+
 ### 5.6 — Inventory summary
 
 | Site | File:line | Nests? | Eager leg? | Priority | What the primitive fixes |
@@ -2128,6 +2248,7 @@ chokepoint, exactly as readers were not migrated to `execute` but route through
 | fork | `fork.rs:74-92` | no | no | — | published thread+HEAD *before* `record_fork` (`:94`), passed `record_fork`'s args **reversed** (`oplog_records.rs:113` vs `:94-95`, r15), and `OpRecord::Fork` was ref-blind (cid 3328926767); fix: `cmd_fork` builds `Fork { from: source_state, new_state, thread, head }` (corrected order + published ref) and calls `commit_and_publish(&[op_record], ref_updates)` (one-element batch; r11 chokepoint, records-first; existing variant extended in place, pre-1.0 clean format break, no shim) |
 | collapse | `collapse.rs:99-108` | no | no | — | published thread/HEAD *before* `record_collapse` (`:112`) and `OpRecord::Collapse` was ref-blind (cid 3328926767); fix: `cmd_collapse` builds `Collapse { sources, result, <published-ref> }` and calls `commit_and_publish(&[op_record], ref_updates)` (one-element batch; r11 chokepoint, records-first; existing variant extended in place, pre-1.0 clean format break, no shim) |
 | thread-rename | `thread.rs:3061-3116` | no | no | — | publishes an **atomic ref batch** — create-new + delete-old (± HEAD move) in one `update_refs` vector (`:3074-3100`) — backed by a **two-record** batch (`ThreadCreateV2`+`ThreadDelete`, `oplog_records.rs:96-110`); the **multi-record motivator for the batch chokepoint (r16, cid 3329003333)**: a single-`OpRecord` primitive would drop a backing record or split the atomic batch. Fix: `cmd_thread_rename` calls `commit_and_publish(&[create, delete], ref_updates)` — full record batch + atomic ref batch, published together |
+| pg ref backend | `pg_refs.rs:35`,`:324`,`:328` | n/a | no | — | second `RefBackend` impl (`ref_backend.rs:15`); `update_refs` published thread/marker/HEAD via its **own** SQL `pool.begin()…tx.commit()`, bypassing the file temp→rename seam (cid 3329052679); fix (r18): `commit_and_publish` is a **`RefBackend`-trait method** — `PgRefBackend` inserts the ref-carrying record(s) + ref/head rows in **one** SQL tx (`PgOpLogBackend` shares the pool, `pg_oplog.rs:40`,`:259`), native ACID atomicity, no reconciliation/watermark; its raw SQL publish made private behind the seam |
 
 ---
 
@@ -2366,6 +2487,38 @@ chokepoint, exactly as readers were not migrated to `execute` but route through
   check in (b) enforces it. The ref-write sites are **not**
   migrated to `AtomicMutation` here — they keep their existing publishes and merely
   route through the chokepoint; full `execute` migration is the §7 epic's job.
+- **O10 — The write chokepoint is a `RefBackend`-trait seam, closed per backend (r18, cid
+  3329052679).** O9 privatized one raw publish — the file path's temp→rename
+  (`refs_transactions.rs:228-256`). But `RefBackend` (`ref_backend.rs:15`) has a second
+  production impl, `PgRefBackend` (`pg_refs.rs:35`), whose `update_refs` (`pg_refs.rs:324`)
+  publishes thread/marker/HEAD via its own `pool.begin()…tx.commit()` (`:328`) and never touches
+  the file seam — so a file-only closure leaves a second public raw publish with no record-first
+  guarantee. Impl work: **(a)** make `commit_and_publish(op_records, ref_updates)` a method on
+  the **`RefBackend` trait** (not a free function over `RefManager`), so every backend implements
+  it and the single-sole-writer invariant is stated **per backend**; the trait method names a
+  **`refs`-defined committer trait** (the write-side dual of `RefReconciler`), not `OpRecord`, so
+  `refs` keeps no `oplog` dep while the seam lives on the trait (this revises O9's "must sit at
+  the repo/oplog layer" placement, which was what left the Pg publish uncovered). **(b)** File
+  backend: `commit_and_publish` calls the injected committer to append to the file oplog, then
+  runs its private temp→rename — two durable subsystems, so the crash window is bridged by the O7
+  per-read reconciliation/watermark (unchanged). **(c)** Postgres backend:
+  `PgRefBackend::commit_and_publish` does the ref-carrying record `INSERT` **and** the ref/head
+  updates in **one** `pool.begin()…tx.commit()` — `PgOpLogBackend` (`pg_oplog.rs:39`) appends via
+  `INSERT INTO oplog (…)` (`:259`) over the same `Arc<PgPool>` (`:40`) `PgRefBackend` holds
+  (`pg_refs.rs:36`), so the record row and the ref/head rows commit atomically; "committed ⇔ the
+  record row exists" holds **natively**, and the Postgres path needs **no** temp→rename, **no**
+  oplog-replay reconciliation, **no** watermark. Route the existing `PgRefBackend::update_refs`
+  (the SQL-tx-of-just-refs) into the seam as the **private** raw publish, with
+  `commit_and_publish` adding the record `INSERT` to the same tx; the per-backend write-side
+  conformance check asserts each backend's bare publish has only its own `commit_and_publish` as
+  caller. **(d)** The impl must confirm the server constructs `PgRefBackend` and `PgOpLogBackend`
+  over a **shared** pool so the record `INSERT` can join the refs transaction (both take
+  `Arc<PgPool>` + `repo_id` today, `pg_refs.rs:46` / `pg_oplog.rs:50`); if a future deployment
+  splits them across databases the Postgres path loses native single-tx atomicity and must fall
+  back to the file backend's append-then-reconcile model. The test-only `MemRefBackend`
+  (`backend.rs:127`) is non-durable and outside the invariant. Like O8/O9, the Postgres-side
+  change touches a persisted format (the oplog row now co-committed with the refs) and is
+  reviewed as **format-stability-sensitive**.
 
 ---
 
@@ -2408,6 +2561,15 @@ carry the published thread name + HEAD, which become the authoritative replay ta
 pre-1.0 with no users and no production oplogs, a clean format break with no migration
 shim, no compat shim, and no versioned `…V2` variant (old dev-only logs are
 discardable).
+The chokepoint is a **`RefBackend`-trait seam closed per backend (r18, cid 3329052679)**:
+r17's single-sole-writer closure privatized only the *file* backend's temp→rename, leaving the
+hosted `PgRefBackend`'s separate SQL publish (`pg_refs.rs:324`/`:328`) uncovered, so
+`commit_and_publish` becomes a trait method every backend implements — the file backend earning
+atomicity via oplog-append-then-publish + reconciliation (two subsystems, crash window) and the
+Postgres backend via ONE SQL transaction inserting the ref-carrying record + ref/head rows
+together (native ACID, no reconciliation/watermark); the record crosses the trait boundary
+through a `refs`-defined committer trait (the write-side dual of `RefReconciler`), so `refs`
+still names no `oplog` type.
 On the **read** side,
 **per-read reconciliation inside _one internal `reconciled_load` primitive_** —
 the sole path for **logical reads** to touch raw ref storage (the maintenance path
@@ -2497,6 +2659,14 @@ materialization is kept only as an optimization on top of the read-side guarante
    the ten-reader reconciliation is non-vacuous (the oplog-format change — new tail
    variants for the r9 remote/undo classes + in-place extension of `Fork`/`Collapse`,
    no migration shim — is part of this issue).
+   The write chokepoint is landed as a **`RefBackend`-trait method** (`ref_backend.rs:15`) so
+   **both** backends are closed (r18, cid 3329052679, O10): the file backend keeps temp→rename +
+   reconciliation, and `PgRefBackend` (`pg_refs.rs:35`) implements `commit_and_publish` as one
+   `pool.begin()…tx.commit()` inserting the ref-carrying record (via `PgOpLogBackend`'s shared
+   pool, `pg_oplog.rs:40`,`:259`) + the ref/head rows — native ACID atomicity, no
+   reconciliation/watermark — with its existing `update_refs` (`pg_refs.rs:324`) made the private
+   raw publish behind it. The record crosses the `RefBackend` boundary via a `refs`-defined
+   committer trait (the write-side dual of `RefReconciler`), so `refs` gains no `oplog` dep.
    Unit tests mirroring `refs_transactions.rs:341-377` (reverse-order
    rewind) + a panic-unwind test + a delayed-retry exact-once test (retry past the
    old window) + reconciliation tests on **all ten read methods** (a conformance
@@ -2616,7 +2786,8 @@ revision, only one migration is in flight, not five.
 - [x] **(2b) The write side is a structural chokepoint too (r11, cid 3328926767; the
   op-descriptor refinement + fork arg-order fix are r15, cid 3328979498 / 3328979497; the
   record-batch refinement is r16, cid 3329003333; the full-batch-record-coverage invariant
-  + the single-sole-writer structural closure are r17, cid 3329019021 / 3329019023)** —
+  + the single-sole-writer structural closure are r17, cid 3329019021 / 3329019023; the
+  per-backend `RefBackend`-trait seam is r18, cid 3329052679)** —
   §2.2 "The write chokepoint": r9 closed the writers that recorded *nothing*; r11
   closes the writers that recorded the *wrong order* or a *ref-blind* shape. `cmd_fork`
   (`fork.rs:74-92`) and `cmd_collapse` (`collapse.rs:99-108`) published the thread/HEAD
@@ -2683,7 +2854,18 @@ revision, only one migration is in flight, not five.
   `RefReconciler`). After r11+r15+r16, "zero ref-write paths
   without a *preceding, ref-carrying* committed record" is **structural on both sides**,
   for single- and multi-record atomic batches alike.
-  Format-stability-sensitive (§6 O9).
+  **r18 (cid 3329052679) closes the *second backend*:** `commit_and_publish` is lifted onto the
+  `RefBackend` trait (`ref_backend.rs:15`), so the hosted `PgRefBackend` (`pg_refs.rs:35`) —
+  whose `update_refs` (`pg_refs.rs:324`/`:328`) published refs via its own SQL tx, bypassing the
+  file temp→rename seam — is closed too: it implements the seam as ONE `pool.begin()…tx.commit()`
+  inserting the ref-carrying record + ref/head rows (native ACID, no reconciliation/watermark, via
+  `PgOpLogBackend`'s shared pool, `pg_oplog.rs:40`,`:259`), with its raw SQL publish made private
+  behind it. The single-sole-writer invariant is stated **per backend** (file: temp→rename + oplog
+  + reconciliation; Postgres: one SQL tx), and the record crosses the trait boundary via a
+  `refs`-defined committer trait (the write-side dual of `RefReconciler`) so `refs` keeps no
+  `oplog` dep — revising r17's "the write primitive must sit one layer up," the very placement
+  that left the Pg publish uncovered.
+  Format-stability-sensitive (§6 O9, O10).
 - [x] **(3) Nesting** — §3: enroll-into-outermost (savepoint) default, eager-
   commit exception **rule pinned** (§3.2), **type-level** compensator
   enforcement (§3.3: `SavepointMutation`/`EagerMutation` bound split on
