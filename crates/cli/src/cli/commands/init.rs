@@ -95,6 +95,10 @@ struct QuickstartSummary {
 struct QuickstartPreflight {
     proceed: bool,
     persist_principal: Option<(String, String)>,
+    /// Harnesses the user agreed to connect, decided at the prompt before
+    /// any write. Installed only after the repo is created so a Ctrl-C at
+    /// the harness prompt leaves the directory untouched.
+    harness_install: Vec<String>,
 }
 
 impl Default for QuickstartPreflight {
@@ -102,6 +106,7 @@ impl Default for QuickstartPreflight {
         Self {
             proceed: true,
             persist_principal: None,
+            harness_install: Vec::new(),
         }
     }
 }
@@ -198,7 +203,13 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         principal_configured = true;
     }
 
-    super::maybe_prompt_init_install(cli, &repo, &args)?;
+    if args.quickstart {
+        // Decision was made up front in the preflight; only the install
+        // (a write) runs here, after the repo exists.
+        super::perform_init_install(cli, &repo, &args, &preflight.harness_install)?;
+    } else {
+        super::maybe_prompt_init_install(cli, &repo, &args)?;
+    }
 
     let quickstart = if args.quickstart {
         Some(run_quickstart_actions(&repo, &args)?)
@@ -447,15 +458,20 @@ fn quickstart_preflight(
             println!("Aborted; no changes made.");
             return Ok(QuickstartPreflight {
                 proceed: false,
-                persist_principal: None,
+                ..QuickstartPreflight::default()
             });
         }
     }
 
     let persist_principal = resolve_quickstart_identity(cli, args, path, has_git, json)?;
+    // The harness-install prompt is the LAST interactive gate, decided
+    // here before any write so Ctrl-C at it leaves the directory
+    // untouched. The install itself runs post-write in `cmd_init`.
+    let harness_install = super::prompt_init_install_decision(cli, path, args, json)?;
     Ok(QuickstartPreflight {
         proceed: true,
         persist_principal,
+        harness_install,
     })
 }
 

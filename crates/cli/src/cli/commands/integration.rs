@@ -141,35 +141,42 @@ pub fn maybe_prompt_init_install(
     repo: &Repository,
     args: &crate::cli::InitArgs,
 ) -> Result<()> {
-    if should_output_json(cli, Some(repo.config()))
-        || cli.quiet
-        || !is_tty()
-        || args.no_harness_install
-    {
-        if let Some(selection) = &args.install_harnesses {
-            let harnesses = resolve_selection(repo, selection)?;
-            if !harnesses.is_empty() {
-                install_selected(
-                    cli,
-                    repo,
-                    &harnesses,
-                    IntegrationScope::parse(&args.harness_install_scope)?,
-                    args.harness_install_force,
-                    PathMode::Relative,
-                )?;
-            }
-        }
-        return Ok(());
+    let json = should_output_json(cli, Some(repo.config()));
+    let harnesses = prompt_init_install_decision(cli, repo.root(), args, json)?;
+    perform_init_install(cli, repo, args, &harnesses)
+}
+
+/// Pre-write phase of the harness-install prompt: detect harnesses and
+/// (interactively) ask the user whether to connect them, WITHOUT writing
+/// anything. Returns the harnesses to install once writes are safe.
+///
+/// `--quickstart` calls this before any filesystem mutation so a Ctrl-C
+/// at the harness prompt leaves the directory untouched — the install
+/// itself is deferred to [`perform_init_install`] after the writes land.
+/// Only the directory `root` is needed (PATH lookups + `.claude`/
+/// `.opencode` probes), so it works before the repository exists on disk.
+pub fn prompt_init_install_decision(
+    cli: &Cli,
+    root: &Path,
+    args: &crate::cli::InitArgs,
+    json: bool,
+) -> Result<Vec<String>> {
+    if json || cli.quiet || !is_tty() || args.no_harness_install {
+        // Non-interactive: only an explicit `--install-harnesses`
+        // selection installs anything; detection never auto-installs.
+        return match &args.install_harnesses {
+            Some(selection) => resolve_selection_for_root(root, selection),
+            None => Ok(Vec::new()),
+        };
     }
 
-    let detected = detect_harnesses(repo)?;
     let harnesses = if let Some(selection) = &args.install_harnesses {
-        resolve_selection(repo, selection)?
+        resolve_selection_for_root(root, selection)?
     } else {
-        detected
+        detect_harnesses_for_root(root)
     };
     if harnesses.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     println!(
@@ -179,13 +186,27 @@ pub fn maybe_prompt_init_install(
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Ok(Vec::new());
+    }
+    Ok(harnesses)
+}
+
+/// Post-write phase: install the harnesses chosen by
+/// [`prompt_init_install_decision`]. No prompting happens here, so it is
+/// safe to run after the repository has been created.
+pub fn perform_init_install(
+    cli: &Cli,
+    repo: &Repository,
+    args: &crate::cli::InitArgs,
+    harnesses: &[String],
+) -> Result<()> {
+    if harnesses.is_empty() {
         return Ok(());
     }
-
     install_selected(
         cli,
         repo,
-        &harnesses,
+        harnesses,
         IntegrationScope::parse(&args.harness_install_scope)?,
         args.harness_install_force,
         PathMode::Relative,
@@ -517,6 +538,14 @@ fn integration_status(
 }
 
 fn detect_harnesses(repo: &Repository) -> Result<Vec<String>> {
+    Ok(detect_harnesses_for_root(repo.root()))
+}
+
+/// Path-based harness detection: PATH lookups for the harness binaries
+/// plus `.claude`/`.opencode` directory probes under `root`. Works
+/// before the repository exists, which the pre-write quickstart prompt
+/// relies on.
+fn detect_harnesses_for_root(root: &Path) -> Vec<String> {
     let mut found = BTreeSet::new();
     for harness in ["codex", "claude", "opencode"] {
         if command_on_path(harness) {
@@ -527,13 +556,13 @@ fn detect_harnesses(repo: &Repository) -> Result<Vec<String>> {
             found.insert(normalized.to_string());
         }
     }
-    if repo.root().join(".claude").exists() {
+    if root.join(".claude").exists() {
         found.insert("claude-code".to_string());
     }
-    if repo.root().join(".opencode").exists() {
+    if root.join(".opencode").exists() {
         found.insert("opencode".to_string());
     }
-    Ok(found.into_iter().collect())
+    found.into_iter().collect()
 }
 
 fn command_on_path(bin: &str) -> bool {
@@ -544,10 +573,10 @@ fn command_on_path(bin: &str) -> bool {
         .any(|dir| dir.join(bin).exists())
 }
 
-fn resolve_selection(repo: &Repository, selection: &str) -> Result<Vec<String>> {
+fn resolve_selection_for_root(root: &Path, selection: &str) -> Result<Vec<String>> {
     match selection {
         "none" => Ok(Vec::new()),
-        "auto" => detect_harnesses(repo),
+        "auto" => Ok(detect_harnesses_for_root(root)),
         value => normalize_harnesses(value.split(',').map(|item| item.to_string()).collect()),
     }
 }

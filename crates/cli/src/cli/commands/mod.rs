@@ -168,7 +168,9 @@ pub use heddle_client::{
 pub use hook::cmd_hook;
 pub use index::cmd_index;
 pub use init::cmd_init;
-pub use integration::{cmd_integration, maybe_prompt_init_install};
+pub use integration::{
+    cmd_integration, maybe_prompt_init_install, perform_init_install, prompt_init_install_decision,
+};
 pub use log::{LogCommandOptions, cmd_log};
 pub use maintenance::cmd_maintenance;
 pub use marker::cmd_marker;
