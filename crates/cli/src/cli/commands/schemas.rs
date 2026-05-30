@@ -1007,13 +1007,27 @@ pub struct DiffSchema {
     pub patch: Option<String>,
 }
 
-/// Worktree-mode `changes`: per-file diff entries bucketed by category,
-/// mirroring the `status` command's `{modified, added, deleted}` field
-/// names. Each entry carries its path plus the per-file diff fields
-/// (`kind`, `old_path`, `lines`, …). A `renamed` entry buckets under
-/// `modified` (its `kind`/`old_path` identify the rename).
+/// `changes` admits the two documented shapes the `diff` command emits:
+/// worktree mode (`heddle diff` with no revision args) groups entries into
+/// `{modified, added, deleted}` category arrays; a state-to-state diff
+/// (`heddle diff <a> <b>`) emits a flat `array<object>`. The schema is a
+/// union of both so either documented output validates.
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct DiffChangesSchema {
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum DiffChangesSchema {
+    /// Worktree-mode: per-file diff entries bucketed by category, mirroring
+    /// the `status` command's `{modified, added, deleted}` field names. Each
+    /// entry carries its path plus the per-file diff fields (`kind`,
+    /// `old_path`, `lines`, …). A `renamed` entry buckets under `modified`
+    /// (its `kind`/`old_path` identify the rename).
+    Grouped(DiffChangesGroupedSchema),
+    /// State-to-state: a flat array of per-file diff entries.
+    Flat(Vec<Value>),
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiffChangesGroupedSchema {
     pub modified: Vec<Value>,
     pub added: Vec<Value>,
     pub deleted: Vec<Value>,
