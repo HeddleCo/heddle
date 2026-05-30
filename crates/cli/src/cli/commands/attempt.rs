@@ -41,7 +41,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use objects::worktree::should_ignore;
+use objects::worktree::{WorktreeIgnoreMatcher, build_worktree_ignore};
 use repo::Repository;
 use serde::Serialize;
 
@@ -665,22 +665,28 @@ fn diff_file_count(repo: &Repository, parent_head: &str, thread_tip: &str) -> Re
         .resolve_state(thread_tip)?
         .ok_or_else(|| anyhow!("thread state '{}' not resolvable", thread_tip))?;
     let diff = compute_state_diff(repo, &from, &to, false, 0)?;
-    let ignore_patterns = repo.ignore_patterns()?;
+    // Compile the ignore matcher ONCE per diff, then match each path
+    // against it. `diff.changes` can hold thousands of ignored paths
+    // (e.g. a `node_modules` tree from `npm ci`); rebuilding the glob
+    // set per path would make ranking O(changed_paths × patterns).
+    let matcher = build_worktree_ignore(&repo.ignore_patterns()?);
     Ok(count_unignored_paths(
         diff.changes.iter().map(|change| change.path.as_str()),
-        &ignore_patterns,
+        &matcher,
     ))
 }
 
 /// Count paths that are not covered by the repo's ignore rules. Pulled
 /// out of `diff_file_count` so the ignore-aware ranking can be tested
-/// without standing up a full state-to-state diff.
+/// without standing up a full state-to-state diff. Takes a prebuilt
+/// matcher so the caller pays the glob-compile cost once per diff, not
+/// once per path.
 fn count_unignored_paths<'a>(
     paths: impl Iterator<Item = &'a str>,
-    ignore_patterns: &[String],
+    matcher: &WorktreeIgnoreMatcher,
 ) -> usize {
     paths
-        .filter(|path| !should_ignore(Path::new(path), ignore_patterns))
+        .filter(|path| !matcher.is_ignored(Path::new(path)))
         .count()
 }
 
@@ -870,6 +876,7 @@ mod tests {
         // Those paths are ignored, so they must NOT inflate the
         // `diff_files` ranking signal — only real source changes count.
         let patterns = vec!["node_modules".to_string(), "target".to_string()];
+        let matcher = build_worktree_ignore(&patterns);
         let paths = [
             "src/main.rs",
             "src/lib.rs",
@@ -878,9 +885,35 @@ mod tests {
             "target/debug/build/foo",
         ];
         assert_eq!(
-            count_unignored_paths(paths.iter().copied(), &patterns),
+            count_unignored_paths(paths.iter().copied(), &matcher),
             2,
             "only the two source files should count; ignored deps must not dominate"
+        );
+    }
+
+    #[test]
+    fn diff_file_count_ranking_correct_at_scale() {
+        // heddle#304 r2: the `npm ci` scenario can produce thousands of
+        // ignored paths in one diff. The matcher must be compiled ONCE
+        // and reused per path (O(1) compile, O(changed_paths) matches),
+        // and the result must still be correct at that scale — every
+        // ignored path excluded, every source path counted.
+        let patterns = vec!["node_modules".to_string(), "target".to_string()];
+        let matcher = build_worktree_ignore(&patterns);
+
+        let ignored: Vec<String> =
+            (0..5_000).map(|i| format!("node_modules/pkg-{i}/index.js")).collect();
+        let sources: Vec<String> = (0..7).map(|i| format!("src/mod-{i}.rs")).collect();
+        let all: Vec<&str> = ignored
+            .iter()
+            .chain(sources.iter())
+            .map(String::as_str)
+            .collect();
+
+        assert_eq!(
+            count_unignored_paths(all.into_iter(), &matcher),
+            sources.len(),
+            "only source files count, regardless of how large the ignored tree is"
         );
     }
 
