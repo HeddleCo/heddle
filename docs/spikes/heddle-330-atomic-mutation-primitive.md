@@ -16,7 +16,7 @@ between the issue's proposed shape and what the three durability domains
 sketch.
 
 > **EXISTING vs PROPOSED — read this first.** This is a **design doc**; nothing
-> in it has been built. The round tags **r6–r11** below are *revisions of this
+> in it has been built. The round tags **r6–r15** below are *revisions of this
 > spike* (Codex review iterations on the document), **not shipped code**. Every
 > mechanism this spike introduces — the new/retrofitted `OpRecord` variants
 > (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, and the
@@ -40,7 +40,7 @@ sketch.
 > | `OpRecord::Fork` | `{ from, new_state }` — **ref-blind** (no published thread/HEAD identity) | `oplog_types.rs:39` |
 > | `OpRecord::Collapse` | `{ sources, result }` — **ref-blind** (carries target, not which ref it published) | `oplog_types.rs:41-44` |
 > | remote-thread / undo-recovery writes | `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery` write the ref **directly** (`lock_refs()` + `write_string`/`remove_file`), **no `OpRecord` appended** | `refs_manager.rs:261`,`:284`,`:242` |
-> | `cmd_fork` / `cmd_collapse` ordering | **publish ref before** appending the oplog record (phase-5-before-phase-4) | `fork.rs:74-95`, `collapse.rs:99-113` |
+> | `cmd_fork` / `cmd_collapse` ordering | **publish ref before** appending the oplog record (phase-5-before-phase-4); `cmd_fork` *also* passes `record_fork`'s args **reversed** — `record_fork(from, new_state)` (`oplog_records.rs:113`) vs the call `record_fork(&new_state.change_id, &source_state.change_id)` (`fork.rs:94-95`), so the source is persisted as the fork *result* | `fork.rs:74-95`, `collapse.rs:99-113`, `oplog_records.rs:113` |
 > | read path | the ten `RefManager` read methods touch raw storage directly; **no** `reconciled_load` primitive, **no** `RefReconciler` trait | `refs_manager.rs:114`–`:327` |
 > | commit dedup | only the **window-bounded** `record_batch_scoped_if_no_transaction`; **no** unbounded `transaction_id` index | `oplog_core.rs:281` |
 >
@@ -150,19 +150,28 @@ sketch.
   **publish** the thread/HEAD ref *before* appending the oplog record (`record_fork`
   `fork.rs:94`, `record_collapse` `collapse.rs:112` run AFTER the
   `update_refs`/`write_head`/`set_thread` publish) — the phase-5-before-phase-4
-  ordering §2.2 forbids; **(b) completeness** — `OpRecord::Fork { from, new_state }`
+  ordering §2.2 forbids; **and `cmd_fork` passes the `record_fork` args reversed**
+  (r15) — `record_fork(from, new_state)` (`oplog_records.rs:113`) names the source as
+  `from`, but the call passes `(&new_state.change_id, &source_state.change_id)`
+  (`fork.rs:94-95`), persisting the source as the fork *result*; **(b) completeness** — `OpRecord::Fork { from, new_state }`
   (`oplog_types.rs:38`) and `Collapse { sources, result }` (`:40`) do **not** carry
   the *published ref identity* (which thread name, or detached HEAD), so an
   oplog-first fork/collapse that crashes pre-publish cannot know **which** ref to
   materialize on replay — the record is unreplayable for ref purposes. The fix is the
-  write analog of r7: the **`RefManager` write methods** (`update_refs`
-  `refs_manager.rs:319`, `write_head`, `set_thread`, `set_marker`, `set_remote_thread`,
-  `set_undo_recovery`) are the single **write chokepoint** — each appends the
-  **ref-carrying** record (phase 4, the commit point) *before* publishing the
-  canonical ref (phase 5), so the **46 direct ref-write call sites** (verified
-  2026-05-30; the same enumeration r7 did for readers) inherit correct ordering **by
-  construction**, and no production path publishes a ref without a preceding,
-  replayable, ref-identifying record. The published thread name + HEAD are added
+  write analog of r7: a single **write chokepoint** — one commit-then-publish
+  primitive `commit_and_publish(op_record: OpRecord, ref_updates: &[RefUpdate])` (the
+  canonical publish, temp→rename `refs_transactions.rs:230`, reachable **only** through
+  it) that appends the **caller-supplied** `op_record` (phase 4, the commit point)
+  *before* publishing the `ref_updates` (phase 5). It **takes** the caller's record
+  rather than synthesizing one (r15): the generic `RefManager` write methods see only
+  ref identity + target, not the `sources`/`from` the `Collapse`/`Fork` variants need
+  — so the semantic callers (`cmd_fork`/`cmd_collapse`) build their full record and
+  hand it in, while a plain ref edit passes a generic ref-update record (the thin
+  `set_thread`/`write_head`/`set_marker` wrappers build it for the caller). All
+  publication still funnels through the one primitive, so the **46 direct ref-write
+  call sites** (verified 2026-05-30; the same enumeration r7 did for readers) inherit
+  correct ordering + atomicity **by construction**, and no production path publishes a
+  ref without a preceding, replayable, ref-identifying record. The published thread name + HEAD are added
   **directly to the existing `Fork`/`Collapse` variants** — `Fork { from, new_state }`
   gains the published thread name + HEAD it set; `Collapse { sources, result }` gains the
   published ref identity (thread name or detached-HEAD marker) — mutated **in place**, not
@@ -468,8 +477,15 @@ reversal, and their records are not even replayable for ref purposes:
 - **`cmd_fork` (`fork.rs:74-92`).** When a name is given it publishes a thread + HEAD
   via `repo.refs().update_refs([RefUpdate::Thread, RefUpdate::Head])` (`:85`); detached,
   via `repo.refs().write_head(..)` (`:88-90`) — and **only then** calls
-  `repo.oplog().record_fork(&new_state, &source)` (`:94-95`). Publish (phase 5) runs
-  *before* the record (phase 4).
+  `repo.oplog().record_fork(&new_state.change_id, &source_state.change_id)` (`:94-95`).
+  Publish (phase 5) runs *before* the record (phase 4) — **and the call's arguments are
+  reversed (r15).** `record_fork(from, new_state)` (`oplog_records.rs:113`) names the
+  source as `from` and the fork result as `new_state`, but the call passes `new_state`
+  as `from` and `source_state` as `new_state` — so today's `OpRecord::Fork` persists
+  the source as the fork *result* and the result as its origin (the two positions are
+  swapped). This is the concrete reason the retrofit's **published-ref fields**, not
+  the from/new_state positional pair, must be the authoritative replay/materialization
+  target (the variant audit + impl item below).
 - **`cmd_collapse` (`collapse.rs:99-108`).** Publishes the thread ref
   (`set_thread`, `:101`) for an attached HEAD or detached HEAD (`write_head`, `:104`),
   **then** `record_collapse(&sources, &new_state)` (`:112-113`). Same reversal.
@@ -490,12 +506,42 @@ first**:
 
 > **Write chokepoint (the invariant): no canonical ref is published except by a
 > primitive that has *first* appended a durable, ref-identifying oplog record.** The
-> seam is the set of `RefManager` write methods — `update_refs` (`refs_manager.rs:319`),
-> `write_head`, `set_thread`, `set_marker`, and (per r9) `set_remote_thread` /
-> `set_undo_recovery`. Each fuses **append-record (phase 4) → publish-ref (phase 5)**
-> in that order; the bare temp→rename publish is a *private* sub-step below the
-> chokepoint, never callable on its own. A writer therefore *cannot* publish a ref
-> without committing a replayable record that names the ref it publishes.
+> seam is **one commit-then-publish primitive** —
+> `commit_and_publish(op_record: OpRecord, ref_updates: &[RefUpdate])` — that appends
+> `op_record` (phase 4, the commit point) and *then* publishes `ref_updates` (phase 5,
+> temp→rename), atomically and in that order; the bare temp→rename publish is a
+> *private* sub-step below it, never callable on its own. **The primitive *takes* the
+> caller's `OpRecord` rather than synthesizing one (r15)** — because the generic
+> `RefManager` write methods (`set_thread(name, state)`, `write_head(head)`,
+> `update_refs(&[RefUpdate])`) receive only ref *identity + target*, not the
+> high-level operation data the extended variants carry: on the collapse path
+> `set_thread`/`write_head` see only the target state, never the `sources` that
+> `OpRecord::Collapse` needs; detached `fork`'s `write_head` sees neither the `from`
+> nor any thread context. A write method that *synthesized* its own record from what
+> it can see could only emit a generic `ThreadUpdate`/`Goto` — either **losing** the
+> fork/collapse semantics the spike preserves, or emitting a **duplicate** generic
+> record alongside the real one. So the record's *semantic content* is the caller's
+> responsibility; the primitive's job is the *structural* guarantee —
+> record-before-publish, atomically — which it enforces uniformly no matter which
+> `OpRecord` it is handed. A writer therefore *cannot* publish a ref without
+> committing a replayable record that names the ref it publishes, and the record it
+> commits is the one that actually describes its operation.
+
+The callers split by whether they carry a high-level operation:
+
+- **Semantic callers build their full `OpRecord` and hand it in.** `cmd_fork` builds
+  `OpRecord::Fork { from: source_state, new_state, thread, head }` — correct
+  from/new_state order per the arg-reversal fix above, plus the published thread name
+  (`None` when detached) and the HEAD it set — and the matching
+  `RefUpdate::Thread`/`RefUpdate::Head`. `cmd_collapse` builds
+  `OpRecord::Collapse { sources, result, <published-ref discriminant> }` (thread name
+  or detached-HEAD marker) and the matching `RefUpdate`. Each then calls
+  `commit_and_publish(op_record, ref_updates)`.
+- **Plain ref edits (no high-level operation) pass a *generic* ref-update record** —
+  `ThreadUpdate { name, state }`, `Goto { target }`, `MarkerCreate { name, state }`,
+  … — for which the ref identity + target *is* the whole semantic content, so the thin
+  `set_thread`/`write_head`/`set_marker` wrappers build that generic record themselves
+  and call `commit_and_publish` for the caller. These keep their existing call shape.
 
 **The 46-call-site audit is the structural proof (the write-side mirror of r7's
 ten-reader enumeration).** A grep for the four canonical-publishing write methods —
@@ -513,40 +559,60 @@ call sites (verified 2026-05-30), spanning:
 | `client/src/grpc_hosted/{hydration,sync,mod}.rs` | hosted-sync ref materialization |
 | `repo/src/repository_thread_materialize.rs` | thread-materialize HEAD/thread publish |
 
-Because publish is reachable **only** through the chokepoint, all 46 sites — and any
-*future* writer — append a ref-carrying record before publishing **by construction**:
-there is no raw publish to call around it. This is the difference between an
-enumerated audit ("we fixed fork and collapse") and a closed class ("no path can
-publish without a record"). A "47th writer" added later inherits the ordering and the
-record automatically, with no reviewer vigilance — the same future-proofing the read
-chokepoint gives readers.
+Because publish is reachable **only** through `commit_and_publish`, all 46 sites — and
+any *future* writer — append a ref-carrying record before publishing **by
+construction**: there is no raw publish to call around it. The op-descriptor model
+(r15) cleanly **separates the two concerns**: the primitive guarantees the
+*structural* property — ordering (record before publish) and atomicity — *universally*,
+for every site; each site supplies the record's *content* (its own `OpRecord`). A
+semantic site (fork/collapse) hands in its rich variant; a plain ref edit hands in a
+generic ref-update record; **both** route through the one primitive, so the
+by-construction ordering claim holds without the primitive ever needing context it
+cannot see. This is the difference between an enumerated audit ("we fixed fork and
+collapse") and a closed class ("no path can publish without a record"). A "47th writer"
+added later inherits the ordering and atomicity automatically, with no reviewer
+vigilance — it need only pass the `OpRecord` that describes it — the same
+future-proofing the read chokepoint gives readers.
 
-**Crate-dependency seam (same inversion as the read side).** A `RefManager` write
-method must append to the oplog, but `refs` does **not** depend on `oplog`
-(`crates/refs/Cargo.toml`). Resolved by the *same* dependency inversion r7 used for
-reads: a narrow recorder trait defined **in `refs`** (over the ref identity + target
-`refs` already owns), held as an injected handle via a builder (cf. `with_reconciler` /
-`with_local_head` `refs_manager.rs:50`), with the concrete oplog-backed appender
-injected from the `repo`/`oplog` layer at `Repository` construction
-(`crates/repo/Cargo.toml:22` oplog, `:24` refs). The record-append happens *inside*
-the chokepoint, so `refs` gains no `oplog` dep and the ordering lives in exactly one
-place. A bootstrap `RefManager` with no recorder keeps today's plain-publish behavior
-(used only before the oplog is wired, mirroring the no-reconciler bootstrap read).
+**Crate-dependency seam.** The primitive must append an `OpRecord` (an `oplog` type)
+*and* drive the canonical-ref publish (a `refs` operation), but `refs` does **not**
+depend on `oplog` (`crates/refs/Cargo.toml`). Because the op-descriptor model (r15)
+feeds the primitive a *full* `OpRecord` — including `Fork`/`Collapse` payloads that
+carry `sources`/`from`, data `refs` does **not** own — the fusion point cannot live
+inside `RefManager`: it would have to name `OpRecord`. So `commit_and_publish` lives at
+the **`repo`/`oplog` layer**, which already depends on both
+(`crates/repo/Cargo.toml:22` oplog, `:24` refs). `refs` exposes only a **private
+publish sub-step** (the stage + temp→rename, `refs_transactions.rs:228-256`) that the
+primitive drives in phase 5; the bare publish is not callable on its own, and the
+write-side conformance check asserts the primitive is its **sole** caller. This keeps
+`refs` free of any `oplog` dep (it never names `OpRecord`) while still fusing
+append-then-publish in exactly one place. (This is the asymmetry with the read side:
+the `RefReconciler` *can* be a `refs`-defined trait because its outputs are
+`refs` types — `Head`/`ChangeId` — whereas the write primitive *consumes* an
+`oplog` type, so it sits one layer up rather than being inverted into `refs`.) A
+bootstrap path with no oplog wired keeps today's plain-publish behavior (used only
+before the oplog exists, mirroring the no-reconciler bootstrap read).
 
 **Relationship to the `execute`/`Tx` model — one invariant, two embodiments.** The
 chokepoint is the *lowest* enforcement layer, below `execute`. A writer reaches the
 record-before-publish guarantee in one of two ways, both honoring phase-4-before-phase-5:
 
-- **Standalone (un-migrated) writer** — the 46 sites today: the `RefManager` write
-  method **fuses** append-record then publish-ref in a single call. This is what
-  closes the class for code that has *not* yet been migrated to `AtomicMutation`,
-  exactly as `reconciled_load` reconciles for readers that were never migrated to
-  `execute`.
-- **Inside an `execute` transaction** — §2.1/§3.4: ref writes route through `Tx`
-  helpers (not the raw methods), which **stage** the temp in phase 3, let the executor
-  append **all** records at the single phase-4 commit, then publish **all** refs in
-  phase 5. The `Tx` is the chokepoint in this mode — the append is batched across the
-  transaction rather than per-write, but the record still precedes every publish.
+- **Standalone (un-migrated) writer** — the 46 sites today: the caller builds its
+  `OpRecord` and calls `commit_and_publish(op_record, ref_updates)`, which **fuses**
+  append-record then publish-ref in a single call (for a plain ref edit the thin
+  `set_thread`/`write_head`/`set_marker` wrapper builds the generic record and makes
+  that call for it; fork/collapse build their rich record and call it directly). This
+  is what closes the class for code that has *not* yet been migrated to
+  `AtomicMutation`, exactly as `reconciled_load` reconciles for readers that were never
+  migrated to `execute`.
+- **Inside an `execute` transaction** — §2.1/§3.4: the op already yields its records
+  via `StagedCommit { oplog: Vec<OpRecord> }` (§2.1), so the executor has the caller's
+  descriptors in hand: ref writes **stage** the temp in phase 3, the executor appends
+  **all** those records at the single phase-4 commit, then publishes **all** refs in
+  phase 5. The append is batched across the transaction rather than per-write, but the
+  record still precedes every publish — the same op-descriptor-into-commit shape as the
+  standalone primitive, just batched. (The `execute`/`Tx` model is the spike's proposed
+  migration target, not an existing abstraction in `refs`/`repo`.)
 
 Either way, **no published canonical ref lacks a preceding ref-carrying record**, and
 the `OpRecord` variant that backs each publish must carry the ref it publishes — which
@@ -1338,21 +1404,31 @@ Together they hold the invariant for every writer, reader, and crash timing:
   by the same mechanism as the first two.
 
 - **Write side (1) — the write chokepoint: every publish preceded by a ref-carrying
-  record (§2.2 "The write chokepoint," r11, cid 3328926767).** The canonical-ref
-  publish (temp→rename, `refs_transactions.rs:230`) is reachable **only** through the
-  `RefManager` write methods (`update_refs` `:319`, `write_head`, `set_thread`,
-  `set_marker`, `set_remote_thread`, `set_undo_recovery`), each of which appends a
-  **ref-carrying** `OpRecord` (phase 4) *before* publishing (phase 5). The **46**
-  direct ref-write call sites (verified 2026-05-30) inherit this ordering by
-  construction — including the two that had it backwards (`fork.rs:74-92`,
-  `collapse.rs:99-108`, which published *before* recording) — and any future writer
-  does too, because there is no raw publish to call around the chokepoint. Combined
-  with the variant audit (every publishing `OpRecord` now names the ref it publishes —
-  the existing `Fork`/`Collapse` variants are extended in place to carry the published
-  thread+HEAD, the rest already do), this guarantees the forbidden state — a NEW, committed-*looking* canonical ref
-  with **no backing ref-carrying record** — is **unreachable on the write path**, for
-  *any* writer, not merely for capture. This is the structural dual of the read
-  chokepoint: r7 made every *read* reconcile; r11 makes every *write* record-first.
+  record (§2.2 "The write chokepoint," r11, cid 3328926767; op-descriptor refinement
+  r15, cid 3328979498).** The canonical-ref publish (temp→rename,
+  `refs_transactions.rs:230`) is reachable **only** through one commit-then-publish
+  primitive `commit_and_publish(op_record, ref_updates)`, which appends the
+  **caller-supplied** ref-carrying `OpRecord` (phase 4) *before* publishing the
+  `ref_updates` (phase 5). The primitive *takes* the record rather than synthesizing
+  it — the generic write methods see only ref identity + target, not the
+  `sources`/`from` the `Collapse`/`Fork` variants need — so the semantic caller builds
+  its full `OpRecord` and hands it in, while a plain ref edit passes a generic
+  ref-update record; either way the publish routes through the one primitive, which
+  enforces ordering + atomicity *universally* regardless of which record it is handed.
+  The **46** direct ref-write call sites (verified 2026-05-30) inherit the
+  record-before-publish ordering by construction — including the two that had it
+  backwards (`fork.rs:74-92`, `collapse.rs:99-108`, which published *before* recording,
+  and whose `record_fork(from, new_state)` call (`oplog_records.rs:113`) also passed
+  its arguments reversed, `fork.rs:94-95`, persisting the source as the result) — and
+  any future writer does too, because there is no raw publish to call around the
+  chokepoint. Combined with the variant audit (every publishing `OpRecord` now names
+  the ref it publishes — the existing `Fork`/`Collapse` variants are extended in place
+  to carry the published thread+HEAD, which become the **authoritative replay target**
+  over the from/new_state positions, the rest already do), this guarantees the
+  forbidden state — a NEW, committed-*looking* canonical ref with **no backing
+  ref-carrying record** — is **unreachable on the write path**, for *any* writer, not
+  merely for capture. This is the structural dual of the read chokepoint: r7 made every
+  *read* reconcile; r11 makes every *write* record-first.
 - **Write side (2) — unbounded indexed exact-once commit (§2.2 "Idempotency of the
   commit," retained from r3).** The phase-4 linearization point deduplicates on an
   **unbounded, indexed `transaction_id` → committed-batch-id** lookup under the
@@ -1843,14 +1919,22 @@ thread+HEAD (`update_refs` `:85` / `write_head` `:88`) **before** `record_fork`
 (`:94`), and `cmd_collapse` (`collapse.rs:99-108`) publishes (`set_thread` `:101` /
 `write_head` `:104`) **before** `record_collapse` (`:112`) — phase-5-before-phase-4 —
 and neither `OpRecord::Fork { from, new_state }` (`oplog_types.rs:38`) nor `Collapse {
-sources, result }` (`:40`) names the ref it published. Rather than patch these two
-call sites (the drip pattern at the writer level), r11 routes **all** ref publication
-through the single **write chokepoint** — the `RefManager` write methods, which append
-the ref-carrying record (phase 4) before publishing (phase 5) — so the **46** direct
-ref-write call sites (§2.2 "The write chokepoint") inherit correct ordering by
-construction, and the published thread name + HEAD are carried by **extending the
-existing `Fork`/`Collapse` variants in place** (extra fields on the existing variant
-bodies, discriminant indices unchanged). Pre-1.0 with no users and no production oplogs,
+sources, result }` (`:40`) names the ref it published — and `cmd_fork` additionally
+passed `record_fork`'s args reversed (`oplog_records.rs:113` vs `fork.rs:94-95`, r15).
+Rather than patch these two call sites (the drip pattern at the writer level), r11
+routes **all** ref publication through a single **write chokepoint** — one
+commit-then-publish primitive `commit_and_publish(op_record, ref_updates)` that appends
+the **caller-supplied** ref-carrying record (phase 4) before publishing (phase 5). It
+*takes* the caller's `OpRecord` rather than synthesizing one (r15): the generic write
+methods see only ref identity + target, not the `sources`/`from` the `Collapse`/`Fork`
+variants need, so the semantic callers build their full record and plain ref edits pass
+a generic one — but **all** publication funnels through the one primitive, so the
+**46** direct ref-write call sites (§2.2 "The write chokepoint") inherit correct
+ordering + atomicity by construction, and the published thread name + HEAD are carried
+by **extending the existing `Fork`/`Collapse` variants in place** (extra fields on the
+existing variant bodies, discriminant indices unchanged) — `cmd_fork` rebuilding
+`Fork { from: source_state, new_state, thread, head }` with the corrected arg order.
+Pre-1.0 with no users and no production oplogs,
 changing those payloads is a clean format break — any old dev-only logs are discardable,
 so no migration, no compat shim, no versioned `…V2` variants. After
 r11 there are **zero** ref-write paths that publish without a *preceding, ref-carrying*
@@ -1869,8 +1953,8 @@ chokepoint, exactly as readers were not migrated to `execute` but route through
 | op-id reserve | `operation_id.rs:115` | as sub-op | **yes** | 4 | eager-commit exemplar; stale `InFlight` on rollback |
 | ref writes | `refs_manager.rs:319` | n/a | no | — | already in-domain atomic; becomes the "stage refs" leg |
 | remote/undo refs | `refs_manager.rs:242`,`:261`,`:284` | n/a | no | — | were direct-write, no `OpRecord` (cid 3328869364); r9 routes through oplog-commit + new variants so reconciliation is non-vacuous |
-| fork | `fork.rs:74-92` | no | no | — | published thread+HEAD *before* `record_fork` (`:94`) and `OpRecord::Fork` was ref-blind (cid 3328926767); r11 chokepoint records-first + existing `Fork` variant extended in place to carry published thread+HEAD (pre-1.0 clean format break, no shim) |
-| collapse | `collapse.rs:99-108` | no | no | — | published thread/HEAD *before* `record_collapse` (`:112`) and `OpRecord::Collapse` was ref-blind (cid 3328926767); r11 chokepoint records-first + existing `Collapse` variant extended in place to carry published ref (pre-1.0 clean format break, no shim) |
+| fork | `fork.rs:74-92` | no | no | — | published thread+HEAD *before* `record_fork` (`:94`), passed `record_fork`'s args **reversed** (`oplog_records.rs:113` vs `:94-95`, r15), and `OpRecord::Fork` was ref-blind (cid 3328926767); fix: `cmd_fork` builds `Fork { from: source_state, new_state, thread, head }` (corrected order + published ref) and calls `commit_and_publish(op_record, ref_updates)` (r11 chokepoint, records-first; existing variant extended in place, pre-1.0 clean format break, no shim) |
+| collapse | `collapse.rs:99-108` | no | no | — | published thread/HEAD *before* `record_collapse` (`:112`) and `OpRecord::Collapse` was ref-blind (cid 3328926767); fix: `cmd_collapse` builds `Collapse { sources, result, <published-ref> }` and calls `commit_and_publish(op_record, ref_updates)` (r11 chokepoint, records-first; existing variant extended in place, pre-1.0 clean format break, no shim) |
 
 ---
 
@@ -2025,16 +2109,25 @@ chokepoint, exactly as readers were not migrated to `execute` but route through
   guarantee (O7) is only sound if every published ref *has* a preceding ref-carrying
   record; r11 makes that structural on the write side. Impl work: **(a)** route the
   canonical-ref publish (temp→rename, `refs_transactions.rs:230`) so it is reachable
-  **only** through the `RefManager` write methods (`update_refs` `:319`, `write_head`,
-  `set_thread`, `set_marker`, `set_remote_thread`, `set_undo_recovery`), each appending
-  the ref-carrying `OpRecord` (phase 4) before publishing (phase 5) — the bare publish
-  becomes a private sub-step, mirroring how r7 made the raw loaders private below
-  `reconciled_load`; supply the oplog appender by the **same dependency inversion** as
-  the `RefReconciler` (a recorder trait in `refs`, concrete impl injected from
-  `repo`/`oplog`, since `refs` has no `oplog` dep). **(b)** Add a one-line conformance
-  check (the write-side analog of O7's read-side check) asserting the raw publish has
-  no caller but the chokepoint — so the 46 sites and any future writer cannot publish
-  around it. **(c)** **Extend the existing `Fork` (`:38`) / `Collapse` (`:40`) variants
+  **only** through one commit-then-publish primitive
+  `commit_and_publish(op_record: OpRecord, ref_updates: &[RefUpdate])` that appends the
+  **caller-supplied** `op_record` (phase 4) before publishing `ref_updates` (phase 5) —
+  the bare publish becomes a private sub-step, mirroring how r7 made the raw loaders
+  private below `reconciled_load`. The primitive **takes** the record rather than
+  synthesizing it (r15, cid 3328979498), because the generic write methods
+  (`set_thread`/`write_head`/`update_refs`) see only ref identity + target, not the
+  `sources`/`from`/thread context the `Collapse`/`Fork` variants need — synthesizing
+  would lose those semantics or emit a duplicate generic record; the thin
+  `set_thread`/`write_head`/`set_marker` wrappers stay for plain ref edits and build a
+  generic ref-update record before calling the primitive. Because `op_record` is an
+  `oplog` type carrying data `refs` does not own (`Fork`/`Collapse` `sources`/`from`),
+  `commit_and_publish` lives at the **`repo`/`oplog` layer** (which depends on both,
+  `crates/repo/Cargo.toml:22`,`:24`); `refs` exposes only a private publish sub-step it
+  drives, so `refs` still gains no `oplog` dep — the write-side asymmetry with the
+  `RefReconciler` (which *can* live in `refs` since its outputs are `refs` types).
+  **(b)** Add a one-line conformance check (the write-side analog of O7's read-side
+  check) asserting the raw publish has no caller but the primitive — so the 46 sites
+  and any future writer cannot publish around it. **(c)** **Extend the existing `Fork` (`:38`) / `Collapse` (`:40`) variants
   in place** — add fields to the existing variant bodies, discriminant indices unchanged:
   `Fork { from, new_state, thread: Option<String>, head }` (published thread name, `None`
   for detached, + HEAD) and `Collapse { sources, result, <published-ref discriminant> }`
@@ -2047,8 +2140,19 @@ chokepoint, exactly as readers were not migrated to `execute` but route through
   no-backcompat stance and is not taken. Update the existing `Fork`/`Collapse` replay/
   reconcile arms to read the new fields (materialize the named thread/HEAD from the record).
   **(d)** Fix `cmd_fork` (`fork.rs:74-92`) and `cmd_collapse` (`collapse.rs:99-108`) to
-  populate the new fields and publish via the chokepoint, eliminating the current
-  publish-before-record order. **Format implication:** extending `Fork`/`Collapse` is a
+  build their full `OpRecord` (populating the new published-ref fields) and publish via
+  `commit_and_publish`, eliminating the current publish-before-record order. `cmd_fork`
+  must **also correct the reversed `record_fork` arguments** (r15, cid 3328979497):
+  `record_fork(from, new_state)` (`oplog_records.rs:113`) takes the source as `from` and
+  the result as `new_state`, but today's call passes
+  `(&new_state.change_id, &source_state.change_id)` (`fork.rs:94-95`) — source and
+  result swapped — so the rebuilt `OpRecord::Fork { from, new_state, thread, head }`
+  must set `from = source_state`, `new_state = new_state`. Once the variant carries the
+  published thread/HEAD, **those published-ref fields — not the from/new_state
+  positional pair — are the authoritative replay/materialization target**:
+  reconciliation re-publishes the ref named by the explicit fields, so a future
+  positional slip cannot mis-materialize the wrong ref. **Format implication:**
+  extending `Fork`/`Collapse` is a
   **clean in-place format break**, pre-1.0, **no migration shim** (old dev logs are
   discardable; there are no production oplogs to preserve). It remains
   **format-stability-sensitive** and is reviewed as such (cf. O8) — not because old logs
@@ -2069,15 +2173,25 @@ idempotent oplog append, orphan-tolerant object store, atomic FS rename) already
 exist — the work is sequencing them under one ledger, not inventing durability.
 The genuinely net-new pieces are the close-the-class mechanisms (O7, O9), which now
 span **both** sides of the commit. On the **write** side, a single **write chokepoint**
-(O9, cid 3328926767): every ref publication routes through the `RefManager` write
-methods, which append a **ref-carrying** `OpRecord` (phase 4) *before* publishing the
-canonical ref (phase 5), so the **46** direct ref-write call sites — including
-`cmd_fork` (`fork.rs:74-92`) and `cmd_collapse` (`collapse.rs:99-108`), which today
-publish *before* recording — inherit correct ordering by construction, and the two
-ref-blind variants (`OpRecord::Fork`/`Collapse`, `oplog_types.rs:38`,`:40`) are
-**extended in place** to carry the published thread name + HEAD — pre-1.0 with no users
-and no production oplogs, a clean format break with no migration shim, no compat shim, and
-no versioned `…V2` variant (old dev-only logs are discardable).
+(O9, cid 3328926767; op-descriptor refinement r15, cid 3328979498): every ref
+publication routes through one commit-then-publish primitive
+`commit_and_publish(op_record, ref_updates)`, which appends the **caller-supplied**
+ref-carrying `OpRecord` (phase 4) *before* publishing the canonical ref (phase 5). The
+primitive **takes** the caller's operation descriptor rather than having the generic
+write methods synthesize it (they see only ref identity + target, not the
+`sources`/`from` the `Collapse`/`Fork` variants need): semantic callers (fork/collapse)
+build their full record, plain ref edits pass a generic ref-update record, and **all**
+publications funnel through the one primitive — so the **46** direct ref-write call
+sites — including `cmd_fork` (`fork.rs:74-92`) and `cmd_collapse`
+(`collapse.rs:99-108`), which today publish *before* recording (and whose `record_fork`
+call also passes its arguments reversed against the `record_fork(from, new_state)`
+definition, `oplog_records.rs:113` vs `fork.rs:94-95`, r15) — inherit correct ordering
++ atomicity by construction, and the two ref-blind variants
+(`OpRecord::Fork`/`Collapse`, `oplog_types.rs:38`,`:40`) are **extended in place** to
+carry the published thread name + HEAD, which become the authoritative replay target —
+pre-1.0 with no users and no production oplogs, a clean format break with no migration
+shim, no compat shim, and no versioned `…V2` variant (old dev-only logs are
+discardable).
 On the **read** side,
 **per-read reconciliation inside _one internal `reconciled_load` primitive_** —
 the sole path for **logical reads** to touch raw ref storage (the maintenance path
@@ -2130,12 +2244,17 @@ materialization is kept only as an optimization on top of the read-side guarante
    value (cid 3328894984); the `Repository::open` eager pass is an optional
    optimization on top).
    It also lands the **write chokepoint** (O9): the canonical-ref publish becomes
-   reachable only through the `RefManager` write methods (`update_refs` `:319`,
-   `write_head`, `set_thread`, `set_marker`, `set_remote_thread`, `set_undo_recovery`),
-   each appending a ref-carrying `OpRecord` before publishing — with a one-line
-   write-side conformance check (the raw publish has no caller but the chokepoint, so
-   all **46** ref-write sites and any future writer record-first by construction) and
-   the recorder injected by the same dependency inversion as the `RefReconciler`. It
+   reachable only through one commit-then-publish primitive
+   `commit_and_publish(op_record, ref_updates)` that appends the **caller-supplied**
+   `op_record` before publishing — the generic write methods cannot synthesize the
+   record (they lack the `sources`/`from` the `Collapse`/`Fork` variants need, r15), so
+   semantic callers pass their full record and the thin `set_thread`/`write_head`/
+   `set_marker` wrappers build a generic one for plain edits — with a one-line
+   write-side conformance check (the raw publish has no caller but the primitive, so
+   all **46** ref-write sites and any future writer record-first by construction). The
+   primitive lives at the `repo`/`oplog` layer (it names `OpRecord`, an `oplog` type),
+   with `refs` exposing only a private publish sub-step, so `refs` keeps no `oplog`
+   dep. It
    lands the three r9 `OpRecord` variants
    (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, O8) **and** the
    `Fork`/`Collapse` ref-carrying retrofit (O9 — the existing `Fork`/`Collapse` variants
@@ -2143,8 +2262,10 @@ materialization is kept only as an optimization on top of the read-side guarante
    discriminant; pre-1.0 clean format break, old dev logs discardable), and routes
    `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`
    (`refs_manager.rs:261`/`:284`/`:242`) plus `cmd_fork` (`fork.rs:74-92`) and
-   `cmd_collapse` (`collapse.rs:99-108`) through the oplog-commit point + phase-5
-   publish, so no ref class and no writer is a direct-write/wrong-order exception and
+   `cmd_collapse` (`collapse.rs:99-108`) through `commit_and_publish` (oplog-commit
+   point + phase-5 publish), with `cmd_fork` also rebuilding its record with the
+   corrected, non-reversed `record_fork` arg order (`from = source_state`, r15), so no
+   ref class and no writer is a direct-write/wrong-order/reversed-arg exception and
    the ten-reader reconciliation is non-vacuous (the oplog-format change — new tail
    variants for the r9 remote/undo classes + in-place extension of `Fork`/`Collapse`,
    no migration shim — is part of this issue).
@@ -2264,34 +2385,49 @@ revision, only one migration is in flight, not five.
   an empty tail, and replay materializes these refs from their records like any
   thread/marker write. Additive oplog-format change, pre-1.0 no migration shim,
   format-stability-sensitive (§6 O8).
-- [x] **(2b) The write side is a structural chokepoint too (r11, cid 3328926767)** —
+- [x] **(2b) The write side is a structural chokepoint too (r11, cid 3328926767; the
+  op-descriptor refinement + fork arg-order fix are r15, cid 3328979498 / 3328979497)** —
   §2.2 "The write chokepoint": r9 closed the writers that recorded *nothing*; r11
   closes the writers that recorded the *wrong order* or a *ref-blind* shape. `cmd_fork`
   (`fork.rs:74-92`) and `cmd_collapse` (`collapse.rs:99-108`) published the thread/HEAD
   ref **before** appending the oplog record (`record_fork` `:94` / `record_collapse`
-  `:112`), and `OpRecord::Fork { from, new_state }` (`oplog_types.rs:38`) / `Collapse {
-  sources, result }` (`:40`) did **not** name the ref they published — unreplayable for
-  ref purposes. The fix is the write-side mirror of r7's read chokepoint: the canonical
-  publish (temp→rename, `refs_transactions.rs:230`) is reachable **only** through the
-  `RefManager` write methods (`update_refs` `:319`, `write_head`, `set_thread`,
-  `set_marker`, `set_remote_thread`, `set_undo_recovery`), each appending a
-  **ref-carrying** `OpRecord` (phase 4) *before* publishing (phase 5). The **46** direct
+  `:112`); `cmd_fork` *also* passed `record_fork`'s args **reversed**
+  (`record_fork(from, new_state)` `oplog_records.rs:113` vs the call
+  `record_fork(&new_state.change_id, &source_state.change_id)` `:94-95`, persisting the
+  source as the result, r15); and `OpRecord::Fork { from, new_state }`
+  (`oplog_types.rs:38`) / `Collapse { sources, result }` (`:40`) did **not** name the
+  ref they published — unreplayable for ref purposes. The fix is the write-side mirror
+  of r7's read chokepoint: the canonical publish (temp→rename,
+  `refs_transactions.rs:230`) is reachable **only** through one commit-then-publish
+  primitive `commit_and_publish(op_record, ref_updates)` that appends the
+  **caller-supplied** `OpRecord` (phase 4) *before* publishing `ref_updates` (phase 5).
+  The primitive **takes** the caller's record rather than synthesizing it (r15): the
+  generic write methods see only ref identity + target, not the `sources`/`from` the
+  `Collapse`/`Fork` variants need, so semantic callers (fork/collapse) build their full
+  record while plain ref edits pass a generic ref-update record — all funneling through
+  the one primitive. The **46** direct
   ref-write call sites (verified 2026-05-30 — the same enumeration r7 did for the ten
   readers; `fork.rs`, `collapse.rs`, `thread.rs`/`thread_cmd.rs`, `clone.rs`,
   `actor_cmd.rs`, `attempt.rs`, `remote/*`, `git_core.rs`/`git_sync.rs`,
   `grpc_hosted/{hydration,sync,mod}.rs`, `repository_thread_materialize.rs`, …) inherit
-  correct ordering **by construction**, and any future writer does too — there is no raw
-  publish to call around the chokepoint (a one-line write-side conformance check, the
-  analog of the read-side one). The published thread name + HEAD are carried by
+  correct ordering + atomicity **by construction**, and any future writer does too —
+  there is no raw publish to call around the primitive (a one-line write-side
+  conformance check, the analog of the read-side one). `cmd_fork` rebuilds
+  `OpRecord::Fork { from: source_state, new_state, thread, head }` with the corrected
+  arg order, and the published thread name + HEAD are carried by
   **extending the existing `Fork`/`Collapse` variants in place** — extra fields on the
   existing variant bodies, discriminant indices unchanged, modelled on existing variants
-  like `ThreadUpdate { name, state }`. Pre-1.0 with no users and no production oplogs, this
+  like `ThreadUpdate { name, state }` — those published-ref fields being the
+  authoritative replay target over the from/new_state positions. Pre-1.0 with no users
+  and no production oplogs, this
   is a clean format break: the changed payloads mean old dev-only logs no longer
   deserialize those records, which is fine — no migration shim, no compat shim, no
   versioned `…V2` variant (that compatibility-preserving escape is the opposite of the
-  no-backcompat stance; every other publishing variant already carries its ref). The recorder is injected by the
-  **same dependency inversion** as the `RefReconciler` (a trait in `refs`, concrete impl
-  from `repo`/`oplog`, since `refs` has no `oplog` dep). After r11, "zero ref-write paths
+  no-backcompat stance; every other publishing variant already carries its ref). Because
+  `op_record` is an `oplog` type carrying data `refs` does not own, `commit_and_publish`
+  lives at the `repo`/`oplog` layer with `refs` exposing only a private publish sub-step,
+  so `refs` keeps no `oplog` dep (the write-side asymmetry with the `refs`-defined
+  `RefReconciler`). After r11+r15, "zero ref-write paths
   without a *preceding, ref-carrying* committed record" is **structural on both sides**.
   Format-stability-sensitive (§6 O9).
 - [x] **(3) Nesting** — §3: enroll-into-outermost (savepoint) default, eager-
