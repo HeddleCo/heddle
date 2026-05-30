@@ -17,9 +17,12 @@ that renders one real verb (`heddle init`) both ways and measures the result.
 > is **proposed** — the `#[heddle_verb]` / `HeddleVerbOutput` macro names, the
 > `inventory`-style auto-registration, and the deletion of the
 > `schema_registry!` table do **not** exist yet; they are #205's work. The PoC
-> crate proves the *measurable* claims (both emitters cover the documented
-> keys; schemars lifts doc comments; the discriminator-const gap is real); it
-> does **not** implement the proc-macro itself.
+> crate proves the *measurable* claims by asserting them against types that
+> mirror the **real** `init.rs` (both emitters cover the documented keys;
+> schemars lifts doc comments; the discriminator-const gap is real; schemars
+> re-exposes the skip-serialized `verification` field; the typed example
+> diverges from the curated doc sample); it does **not** implement the
+> proc-macro itself.
 
 ---
 
@@ -40,6 +43,13 @@ The mirror is registered by the hand-maintained `schema_registry!` macro table
 threading `JsonSchema` through every workspace output type (`repo`, `objects`,
 …) — at the cost that "when a real output struct changes, the mirror here must
 change too."
+
+The mirror also does hand-curation the real struct can't: the real `InitOutput`
+carries a `#[serde(skip_serializing)] #[serde(rename = "verification")] trust`
+field (`init.rs:41-44`) that never reaches the wire, and `InitSchema`
+(`schemas.rs:842`) simply omits it. So the mirror and the wire bytes agree
+today *because a human kept them in agreement* — which is exactly the property a
+naive "derive on the real struct" migration loses (see §2 point 1).
 
 Drift is policed at PR time, not prevented:
 
@@ -63,9 +73,16 @@ share a verb key.
 
 ## 2. The PoC — one verb, both ways
 
-`crates/cli-macro-poc/` reproduces `init` faithfully: the field set and
-doc-comment text are copied from the registered `InitSchema` mirror and the
-`docs/json-schemas.md` sample. It emits the output schema two ways:
+`crates/cli-macro-poc/` reproduces `init` faithfully against the **real**
+`init.rs` types, not the simplified mirror: the args struct is modelled as the
+real `clap::Args` `InitArgs` wired through a `Subcommand` enum
+(`crates/cli-macro-poc/src/args.rs`), and the output struct replicates the real
+private `InitOutput` field-for-field — INCLUDING the `#[serde(skip_serializing)]
+#[serde(rename = "verification")] trust` field
+(`crates/cli-macro-poc/src/output.rs`). (The real `InitOutput` is a crate-private
+`struct`, so a throwaway crate can't import it; it replicates the exact field
+types and serde/schemars attributes instead.) It emits the output schema two
+ways:
 
 - **Path A — schemars** (`schemars_path::schema()`): `#[derive(JsonSchema)]` on
   the output struct + `schema_for!`. This is what heddle registers **today**.
@@ -76,31 +93,46 @@ doc-comment text are copied from the registered `InitSchema` mirror and the
 `cargo test -p heddle-cli-macro-poc -- --nocapture` prints both schemas and the
 table below; the assertions in `tests/measure.rs` are the contract checks.
 
-### Measured comparison (`init`, 17 output fields)
+### Measured comparison (`init`, 17 serialized fields + 1 skip-serialized)
 
 | metric | schemars | custom |
 |---|---|---|
-| pretty-printed schema bytes | 4435 | 4070 |
-| top-level property keys | 17 | 17 |
+| pretty-printed schema bytes | 5954 | 4096 |
+| top-level property keys | 18 | 17 |
 | covers all 13 documented sample keys | ✅ | ✅ |
+| phantom `verification` property (never on wire) | ❌ **present** (`writeOnly`, **required**) | ✅ absent |
 | JSON Schema dialect | draft-07 | draft 2020-12 |
-| nested types (`InitPrincipal`) | `$ref` + `definitions` | inlined |
+| nested types (`InitPrincipalOutput`) | `$ref` + `definitions` | inlined |
 | `output_kind` discriminator pinned | ❌ (`{"type":"string"}`) | ✅ (`"const":"init"`) |
 | field descriptions from `///` | ✅ (native) | ✅ (table column) |
 | carries example payload | ✅ | ✅ |
-| net-new schema code per verb | 0 (derive) | ~1 field-table row each |
+| net-new schema code per verb | 0 (derive) + skip-attrs as needed | ~1 field-table row each |
 | extra dependency | `schemars` (already in tree) | none |
 
-(Bytes/keys are emitted by `print_measurement_table`; coverage and the
-discriminator gap are asserted by the other four tests.)
+(Bytes/keys are emitted by `print_measurement_table`; the discriminator gap,
+the phantom-`verification` drift, and documented-key coverage are each pinned by
+a dedicated assertion in `tests/measure.rs`.)
 
 ### What the measurement decides
 
-1. **schemars is already the registered shape.** Path A *is* what
-   `heddle schemas init` returns today, so adopting it changes **zero** schema
-   semantics — the macro's only job is to move the derive from the throwaway
-   mirror onto the real `InitOutput` and auto-register it. Migration risk ≈ 0
-   for the gate corpus.
+1. **schemars matches the registered shape for the *serialized* fields — but
+   the migration is NOT semantics-free.** For the 17 serialized fields, Path A
+   reproduces what `heddle schemas init` returns today. The catch the
+   mirror-shaped PoC hid: deriving `JsonSchema` on the **real** `InitOutput`
+   also picks up the `#[serde(skip_serializing)] trust` field. schemars treats
+   `skip_serializing` as a schema-visible `writeOnly` property (it stays in the
+   *deserialize* contract) — so the derived schema gains a `verification`
+   property, lists it as **required**, and yet `heddle init` never emits it.
+   The hand-written `InitSchema` mirror dropped that field by hand; the derive
+   re-introduces it. `doctor schemas` checks only that documented sample keys
+   *appear* in the schema (not that the schema has no extras), so it would
+   **not** catch this. Migration is therefore a per-verb task, not a zero-touch
+   refactor: each migrated output struct must add `#[schemars(skip)]` to its
+   skip-serialized fields (the PoC asserts the drift in
+   `schemars_re_exposes_skip_serialized_verification_field`). This does not sink
+   the schemars recommendation — the fix is one attribute per skip-serialized
+   field — but it does delete the "migration risk ≈ 0 / zero schema semantics"
+   claim. See §4 item 5, which already budgets for this.
 2. **The discriminator gap is real and matters.** schemars renders
    `output_kind` as a bare `{"type":"string"}` — it cannot express the
    `"const":"init"` pin from a plain `String`/`&'static str` field. heddle
@@ -121,14 +153,27 @@ discriminator gap are asserted by the other four tests.)
 
 ### Q1 — Where do examples and descriptions live?
 
-**Descriptions: `#[doc]` (`///`). Decided — proven, no new attribute needed.**
-schemars lifts both struct-level and field-level doc comments into the schema's
-`description` natively (PoC test `schemars_emits_field_descriptions_from_doc_comments`;
-the rendered schemars schema shows `"path": { "description": "Path to the
-initialized `.heddle` …" }`). So the narrative that lives as prose blocks in
-`docs/json-schemas.md` today moves onto the field as a doc comment, and the
-macro carries it into *both* `--help` (via clap, which also reads `///`) and the
-JSON schema (via schemars). One source, two surfaces.
+**Descriptions: `#[doc]` (`///`). Decided — proven, no new sibling attribute
+needed *per surface*.** schemars lifts both struct-level and field-level doc
+comments into the schema's `description` natively (PoC test
+`schemars_emits_field_descriptions_from_doc_comments`; the rendered schemars
+schema shows `"path": { "description": "Path to the initialized `.heddle` …" }`).
+For each surface, the `///` is the single source — clap reads it for `--help`,
+schemars reads it for the schema `description` — so no separate description
+attribute is ever required.
+
+**Caveat — it is NOT "one comment, both surfaces".** clap reads doc comments off
+the **args** type (`InitArgs`) and schemars reads them off the **output** type
+(`InitOutput`), and those are different types with **zero field overlap** (Q3).
+A doc comment on an output field feeds the JSON schema but never `--help`; a doc
+comment on an args field feeds `--help` but never the schema. So per-field
+narrative lives in *two* places (one per type), not one. The prose blocks in
+`docs/json-schemas.md` today describe the *output* shape, so they move onto the
+**output** fields as doc comments (feeding the schema). The `--help` text is a
+separate source on the args fields. The only way to get a literal single doc
+comment driving both would be a module-level macro that maps one declaration to
+both types (option (a) in Q3) — the two-derive shape we recommend keeps them
+separate, by design.
 
 **Examples: a sibling `#[heddle_verb(example = …)]` key the macro lowers to a
 typed example function — NOT inline literals, NOT prose blocks.** schemars'
@@ -148,52 +193,97 @@ struct**, so it cannot drift from the struct's shape — it stops compiling if a
 field is renamed. That is strictly better than the current literal-JSON blocks
 that `doctor schemas` has to police after the fact.
 
+**Concretely, the prose sample has *already* drifted, and the PoC proves it.**
+The PoC's `init_example()` is the real typed value, so serializing it emits the
+always-present `principal_status`, `principal_source`, `principal`, and
+`principal_recommended_action` fields (none is `skip_serializing_if`). The
+curated `## heddle init --output json` sample in `docs/json-schemas.md` omits
+all four. The PoC asserts exactly this divergence
+(`typed_example_diverges_from_curated_doc_sample`): the real output is a
+superset of the documented sample by those four keys. So the in-code example is
+**not** byte-for-byte the documented sample — and that is the point. A typed
+example tracks the struct automatically; the hand-curated prose sample fell
+behind. heddle#205 should rebaseline the `docs/json-schemas.md` `init` sample
+from the typed example when it lands the derive.
+
 ### Q2 — schemars vs custom emitter
 
 **Recommendation: schemars (Path A) for #205 v1. Keep the custom emitter PoC as
 the documented fallback.** Rationale, from the measurement:
 
-- It is already the registered shape → the macro is a *refactor* (delete the
-  mirror, derive on the real struct, auto-register), not a re-baseline of every
-  schema sample. The custom emitter would change dialect, nesting, and
-  const-pinning, forcing a rewrite of the `docs/json-schemas.md` corpus and a
-  re-blessing of `doctor schemas`.
-- The one real loss (discriminator-const) is recoverable *within* the schemars
-  path without adopting the whole custom emitter: a small `JsonSchema` helper /
-  newtype for `output_kind` that emits `{"const": "<verb>"}`, applied by the
-  macro from the `verb` key it already knows. File that as a #205 follow-up, not
-  a blocker.
+- For the serialized fields it is already the registered shape → the macro is a
+  *refactor* (delete the mirror, derive on the real struct, auto-register), not
+  a re-baseline of the whole sample corpus. The custom emitter would change
+  dialect, nesting, and const-pinning, forcing a rewrite of the
+  `docs/json-schemas.md` corpus and a re-blessing of `doctor schemas`. The
+  schemars migration's per-verb cost is bounded and mechanical (see below),
+  whereas the custom emitter's cost is corpus-wide.
+- Two known schemars costs, both recoverable *within* the schemars path without
+  adopting the whole custom emitter:
+  - **discriminator-const** — a small `JsonSchema` helper / newtype for
+    `output_kind` that emits `{"const": "<verb>"}`, applied by the macro from
+    the `verb` key it already knows.
+  - **`skip_serializing` phantom fields** — each migrated output struct must add
+    `#[schemars(skip)]` to fields that serde skips on serialize (e.g. `init`'s
+    `verification`/`trust`), or the schema gains required properties the wire
+    never emits (§2 point 1). Mechanical, but per-field, so it can't be waved
+    away as zero-touch.
+
+  File both as #205 work, not blockers.
 
 **When to revisit the custom emitter:** if we ever publish these schemas for
 external validation and need (a) inlined flat schemas that validate the
 `docs/json-schemas.md` samples with a stock validator, and (b) discriminator
 const-pinning across the board, the custom emitter delivers both with no
-`schemars` opinions to fight. The PoC's `custom_path` module is a working
-~90-line template for that future. Until then it's net-new code that buys us a
-gap the gate doesn't care about.
+`schemars` opinions to fight. The PoC's `custom_path` module is a working,
+self-contained template for that future (no `schemars` dependency, and — unlike
+the derive — it omits skip-serialized fields and pins the discriminator by
+construction). Until then it's net-new code that buys us gaps the gate doesn't
+care about today.
 
 ### Q3 — Layering input (clap) + output (JSON) under one macro
 
 The input and output are genuinely different types: `InitArgs` has 7 input
-fields, `InitOutput` has 17 output fields, **zero overlap**. Forcing them into
+fields (and derives `clap::Args`), `InitOutput` has 18 declared fields (17
+serialized + the skip-serialized `trust`), **zero overlap**. Forcing them into
 one struct is wrong. Two viable couplings:
 
 - **(a) Attribute on a module:** `#[heddle_verb(name = "init")] mod init { pub
-  struct Args {…} pub struct Output {…} }` — the macro emits the clap derive on
-  `Args`, the schema derive + registry entry on `Output`.
+  struct Args {…} pub struct Output {…} }` — an *attribute* macro can rewrite the
+  items before their derives expand, so it can attach `#[derive(clap::Args)]` to
+  `Args` and `#[derive(JsonSchema)]` + the registry entry to `Output`, and can
+  even map one declaration to both surfaces.
 - **(b) Two cooperating derives keyed by verb:** `#[derive(HeddleVerbArgs)]` on
   the args struct and `#[derive(HeddleVerbOutput)]` on the output struct, tied
-  by a shared `#[heddle_verb("init")]` key. The `Output` derive is the one that
-  matters — it adds `JsonSchema` *and* emits the registry registration that
-  today is the hand-written `(&["init"], InitSchema)` row.
+  by a shared `#[heddle_verb("init")]` key. **A derive macro cannot add another
+  derive (`JsonSchema`) to the very struct it is invoked on** — derives only
+  *append* items, they don't rewrite the annotated item's attribute list. So
+  `HeddleVerbOutput` cannot "turn on schemars" by itself; the output struct must
+  **also** `#[derive(schemars::JsonSchema)]` (i.e. `HeddleVerbOutput` *requires*
+  a `JsonSchema` bound it does not provide), and `HeddleVerbOutput`'s own job is
+  the registry registration that today is the hand-written `(&["init"],
+  InitSchema)` row. (The alternatives — hand-implementing `JsonSchema` inside
+  `HeddleVerbOutput`, or making it an attribute macro — collapse (b) into either
+  the custom-emitter path or option (a).)
 
-**Recommendation: (b).** It keeps clap and schema as separate concerns on
-separate types (which they are), couples them by a verb-name key rather than by
-forcing a shared type, and localizes the new magic to the output side — exactly
-where the drift problem lives. The clap side barely changes: `HeddleVerbArgs`
-is mostly a passthrough that re-exports `clap::Parser` and records the verb key,
-so `--help`, completions, and error messages keep flowing through clap
-unchanged (a heddle#205 discipline guard).
+**Recommendation: (b)**, with the output struct co-deriving `JsonSchema`
+explicitly. It keeps clap and schema as separate concerns on separate types
+(which they are), couples them by a verb-name key rather than by forcing a
+shared type, and localizes the new magic to the output side — exactly where the
+drift problem lives. The clap side barely changes: `HeddleVerbArgs` is a
+passthrough over **`clap::Args`** (the reusable arg set that subcommand tuple
+variants like `Commands::Init(InitArgs)` consume — NOT `clap::Parser`, which
+stays on the top-level `Cli`) that records the verb key, so `--help`,
+completions, and error messages keep flowing through clap unchanged (a
+heddle#205 discipline guard). The PoC's `src/args.rs` wires exactly this shape
+(`Parser` on `Cli`, `Args` on the leaf) to prove the args type slots into a real
+subcommand tree.
+
+(If the literal "one doc comment feeds both `--help` and the schema" property
+from Q1 turns out to be a hard requirement, that's the lever that tips the
+choice to option (a): only a module-level attribute macro can map a single
+declaration onto both types. (b) deliberately accepts two doc sources — one per
+type — as the cost of keeping args and output as independent derives.)
 
 The registry registration should use an `inventory`/`linkme`-style collected
 registration so the `schema_registry!` table at schemas.rs:58 disappears
@@ -205,27 +295,37 @@ a hand-maintained `if $verbs.contains(&verb)` chain.
 
 ## 4. Impl shape for heddle#205 (proposed — confirm scope with user)
 
-1. **Land `crates/cli-macro/`** with the `HeddleVerbOutput` derive (schemars +
-   collected registration) and the thin `HeddleVerbArgs` passthrough. Delete
-   `crates/cli-macro-poc/`.
+1. **Land `crates/cli-macro/`** with the `HeddleVerbOutput` derive (registry
+   registration; the output struct co-derives `schemars::JsonSchema` — the derive
+   cannot add it, see Q3) and the thin `HeddleVerbArgs` passthrough over
+   `clap::Args`. Delete `crates/cli-macro-poc/`.
 2. **Migrate one proof verb** (`init` is the smallest real output; `status` is
    the richest — pick `init` for the first landing per #205's "pick a small
-   one"). Derive `HeddleVerbOutput` on the real `InitOutput`
-   (`crates/cli/src/cli/commands/init.rs:23`); delete the `InitSchema` mirror
-   and its `schema_registry!` row.
+   one"). Co-derive `HeddleVerbOutput` + `JsonSchema` on the real `InitOutput`
+   (`crates/cli/src/cli/commands/init.rs:23`); add `#[schemars(skip)]` to its
+   `trust` field (else the schema gains a required `verification` property the
+   wire never emits — §2 point 1); delete the `InitSchema` mirror and its
+   `schema_registry!` row. **Rebaseline** the `docs/json-schemas.md` `init`
+   sample from the typed example (it currently omits the always-serialized
+   principal fields — Q1).
 3. **Add the discriminator-const helper** so `output_kind` emits
-   `{"const":"init"}` — recovers the one measured schemars gap.
+   `{"const":"init"}` — recovers the measured discriminator gap.
 4. **Run the full gate set** the migrated verb must still pass:
    `cargo test --locked -p heddle-cli --test cli_integration doctor_schemas_has_no_drift_or_unmatched_registered_verbs`,
    `… doctor_docs`, plus `target/debug/heddle doctor schemas --output json` and
    `doctor docs --all --output json` (the exact commands CI runs —
    `.github/workflows/rust-tests.yml:181-184`).
-5. **Known friction to budget for:** real output structs that embed foreign
-   workspace types (e.g. `InitOutput.trust: RepositoryVerificationState`,
-   `#[serde(skip_serializing)]` at init.rs) must either skip those fields on the
-   schema side too or grow `JsonSchema` impls. The mirror existed precisely to
-   dodge this (schemas.rs:6–13); the macro re-confronts it. Each migration batch
-   should enumerate the foreign types its verbs touch.
+5. **Known friction to budget for — now measured, not hypothetical:** any field
+   serde skips on serialize (`#[serde(skip_serializing)]`, e.g.
+   `InitOutput.trust`/`verification` at init.rs:41-44) is schema-VISIBLE under
+   schemars' derive (`writeOnly`, and required) — the PoC measures and asserts
+   this. Each migrated struct must add `#[schemars(skip)]` to such fields, or it
+   ships a schema that describes properties the command never emits (and
+   `doctor schemas`, which only checks documented keys *appear*, won't catch it).
+   Separately, output structs that embed foreign workspace types may need
+   `JsonSchema` impls/bounds; the mirror existed precisely to dodge both
+   (schemas.rs:6–13), and the macro re-confronts them. Each migration batch
+   should enumerate the skip-serialized and foreign-typed fields its verbs touch.
 6. **Then** the verb-by-verb migration batches (~30 verbs, the registered set in
    `schema_registry!`), one issue each, as #205 already scopes.
 
@@ -235,12 +335,18 @@ a hand-maintained `if $verbs.contains(&verb)` chain.
 
 | Question | Decision | Confidence |
 |---|---|---|
-| Descriptions | `#[doc]` `///`, carried to both `--help` and schema | high — proven in PoC |
-| Examples | `#[heddle_verb(example = fn)]` → typed example fn → schemars `examples` | high — proven in PoC |
-| schemars vs custom | **schemars** for v1 (zero re-baseline); custom emitter is the documented fallback | high — it is already the registered shape |
-| Discriminator const | schemars gap; fix with a small `output_kind` `JsonSchema` helper, not the custom emitter | medium — helper not yet built |
-| Macro layering | two derives (`HeddleVerbArgs` + `HeddleVerbOutput`) keyed by verb; output derive auto-registers via `inventory` | medium — proposed, not prototyped |
+| Descriptions | `#[doc]` `///`, single source *per surface* — but args and output are separate types, so it's two doc sources, not "one comment, both surfaces" | high — proven in PoC |
+| Examples | `#[heddle_verb(example = fn)]` → typed example fn → schemars `examples`; #205 rebaselines the prose `docs/json-schemas.md` sample (already drifted) from it | high — proven in PoC |
+| schemars vs custom | **schemars** for v1; *not* zero-touch — per-verb `#[schemars(skip)]` for skip-serialized fields + a const helper. Custom emitter is the documented fallback | high — recommendation holds; "zero re-baseline" evidence corrected |
+| Discriminator const | schemars gap (measured + asserted); fix with a small `output_kind` `JsonSchema` helper, not the custom emitter | medium — helper not yet built |
+| `skip_serializing` drift | schemars re-exposes skip-serialized fields as required `writeOnly` props (measured + asserted); fix per-verb with `#[schemars(skip)]` | high — measured in PoC |
+| Macro layering | two derives (`HeddleVerbArgs` over `clap::Args` + `HeddleVerbOutput`) keyed by verb; output struct **co-derives** `JsonSchema` (the derive can't add it); registry via `inventory` | medium — proposed, args shape prototyped in PoC |
 
-Nothing here blocks heddle#205; it unblocks it. The one open build-time
+The corrected measurements **do not change the overall recommendation** —
+schemars for #205 v1, custom emitter as the documented fallback — but they
+replace the "migration risk ≈ 0 / zero drift / one comment feeds both surfaces"
+evidence with the accurate picture: a bounded, mechanical per-verb cost
+(`#[schemars(skip)]` + a const helper + a docs-sample rebaseline). Nothing here
+blocks heddle#205; it unblocks it, with eyes open. The one open build-time
 question (`inventory` vs `linkme` for collected registration) is a #205
 implementation choice, not a design fork.
