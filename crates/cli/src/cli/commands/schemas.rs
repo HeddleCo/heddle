@@ -613,7 +613,8 @@ pub struct BlameLineSchema {
     pub line_number: usize,
     pub content: String,
     pub change_id: String,
-    pub author: String,
+    pub principal: BlamePrincipalSchema,
+    pub agent: Option<BlameAgentSchema>,
     pub timestamp: String,
     pub origins: Option<Vec<BlameOriginSchema>>,
 }
@@ -621,8 +622,25 @@ pub struct BlameLineSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BlameOriginSchema {
     pub change_id: String,
-    pub author: String,
+    pub principal: BlamePrincipalSchema,
+    pub agent: Option<BlameAgentSchema>,
     pub timestamp: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BlamePrincipalSchema {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BlameAgentSchema {
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
