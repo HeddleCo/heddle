@@ -1387,6 +1387,307 @@ fn quickstart_rejects_git_branch_invalid_shorthand_before_writes() {
     }
 }
 
+/// Recursively snapshot every file under `dir` as `(relative_path, bytes)`,
+/// sorted — a content fingerprint used to prove a refused quickstart performed
+/// ZERO writes (no metadata so it can't flake on mtime/atime).
+fn snapshot_tree(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    fn walk(
+        base: &std::path::Path,
+        dir: &std::path::Path,
+        out: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => walk(base, &path, out),
+                Ok(ft) if ft.is_file() => {
+                    let rel = path.strip_prefix(base).unwrap().to_path_buf();
+                    out.push((rel, std::fs::read(&path).unwrap_or_default()));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Codex r8 (cid 3329342102 / 3329342201): run from a SUBDIRECTORY of an
+/// existing NATIVE Heddle repo, quickstart used to `init_default(<cwd>)` — a
+/// nested `.heddle/` at the subdir — because both the preflight and the write
+/// path keyed on `<cwd>/.heddle`. With a single root resolved by ancestor
+/// discovery, it must operate on the DISCOVERED repo, creating no nested repo.
+#[test]
+fn quickstart_from_subdir_targets_discovered_native_repo() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    heddle(&["init", "--no-harness-install"], Some(root)).unwrap();
+    assert!(root.join(".heddle").is_dir(), "native repo created at the root");
+
+    let sub = root.join("nested").join("deeper");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let out = heddle_output(
+        &["init", "--quickstart", "--no-harness-install", "--yes"],
+        Some(&sub),
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "quickstart from a subdir of a native repo must proceed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // The discovered repo is the target — NOT a nested repo at the subdir.
+    assert!(
+        !sub.join(".heddle").exists(),
+        "must NOT create a nested .heddle/ at the subdirectory"
+    );
+    assert!(
+        root.join(".heddle").is_dir(),
+        "the discovered repo root stays the single repo"
+    );
+    // The quickstart ran against the discovered repo: it has the thread.
+    let status = status_json(root);
+    assert_eq!(
+        status.get("thread").and_then(Value::as_str),
+        Some("quickstart"),
+        "the discovered repo carries the quickstart thread: {status}"
+    );
+    // The placeholder/capture landed at the discovered root, not the subdir.
+    assert!(
+        root.join("QUICKSTART.md").is_file(),
+        "the capture wrote QUICKSTART.md at the discovered root"
+    );
+    assert!(
+        !sub.join("QUICKSTART.md").exists(),
+        "nothing was written into the subdirectory"
+    );
+}
+
+/// Codex r8 (cid 3329342104 / 3329342205): run from a SUBDIRECTORY of a Git
+/// checkout (no Heddle yet), quickstart used to `bootstrap_git_overlay(<cwd>)`
+/// — a `.heddle/` at the subdir whose root has no `.git`, so it came up NATIVE
+/// and never imported/checkpointed, while the preflight had classified it a Git
+/// overlay (and could refuse on the ancestor's detached HEAD). It must now
+/// bootstrap at the DISCOVERED Git root and run as a real Git overlay.
+#[test]
+fn quickstart_from_subdir_targets_discovered_git_root() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    git_hermetic(&["init"], root);
+    std::fs::write(root.join("a.txt"), "hi\n").unwrap();
+    git_hermetic(&["add", "."], root);
+    git_hermetic(&["commit", "-m", "initial"], root);
+
+    let sub = root.join("src").join("inner");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(&sub),
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "quickstart from a subdir of a Git checkout must proceed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Targets the discovered Git ROOT, not a nested repo at the subdir.
+    assert!(
+        !sub.join(".heddle").exists(),
+        "must NOT create a nested .heddle/ at the subdirectory"
+    );
+    assert!(
+        root.join(".heddle").is_dir(),
+        "Heddle data is created at the discovered Git root"
+    );
+
+    // It runs as a real Git overlay (not the native repo the subdir bug made).
+    let init: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(
+        init["repository_mode"].as_str(),
+        Some("git-overlay"),
+        "the discovered Git root is a Git overlay: {init}"
+    );
+    assert_eq!(
+        init["git_detected"].as_bool(),
+        Some(true),
+        "git is detected for the discovered root: {init}"
+    );
+
+    // The checkpoint advanced a real branch — impossible if it had come up as a
+    // native repo at the subdir. History (initial) plus the checkpoint commit.
+    let grepo = gix::open(root).expect("open git repo at the discovered root");
+    let tip = grepo.head_id().expect("HEAD resolves to a commit");
+    let commit_count = grepo
+        .rev_walk([tip.detach()])
+        .all()
+        .expect("rev-walk checkpoint history")
+        .count();
+    assert!(
+        commit_count >= 2,
+        "the Git-overlay quickstart imported history and added a checkpoint commit: count={commit_count}"
+    );
+}
+
+/// Codex r8 (cid 3329342100 / 3329342200): the preflight used to
+/// `Repository::open` the existing repo to read its capability/identity. For a
+/// Git-overlay repo, `open` synchronizes `.heddle/HEAD` to Git's HEAD — a WRITE
+/// that fired BEFORE the confirmation gate could refuse. A refused quickstart
+/// (existing repo, non-interactive, no `--yes`) must now perform ZERO writes:
+/// the preflight is fully read-only and never opens the repo.
+#[test]
+fn quickstart_refusal_on_existing_git_overlay_writes_nothing() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir);
+    std::fs::write(dir.join("a.txt"), "hi\n").unwrap();
+    git_hermetic(&["add", "."], dir);
+    git_hermetic(&["commit", "-m", "initial"], dir);
+    // Existing Heddle Git-overlay repo: `.heddle/HEAD` now exists and matches
+    // Git's current branch.
+    heddle(&["init", "--no-harness-install"], Some(dir)).unwrap();
+    // Drift Git's HEAD away from Heddle's HEAD so that opening the repo WOULD
+    // re-sync `.heddle/HEAD` (the exact write the old preflight performed).
+    git_hermetic(&["switch", "-c", "feature"], dir);
+
+    let heddle_dir = dir.join(".heddle");
+    let before = snapshot_tree(&heddle_dir);
+
+    // Non-interactive, no `--yes`: the existing-history confirmation gate must
+    // refuse — before any write.
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "must refuse without --yes on an existing repo: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_needs_confirmation"),
+        "the refusal is the confirmation gate: {stderr}"
+    );
+
+    let after = snapshot_tree(&heddle_dir);
+    assert!(
+        before == after,
+        "a refused quickstart must not write to .heddle/ (HEAD-sync must not fire): \
+         the preflight is read-only and must not open the repo"
+    );
+}
+
+/// Codex r8 (cid 3329342103 / 3329342203): harness installs used to run BEFORE
+/// the first capture, so `ensure_capturable_content` saw the generated
+/// scaffolding (`.claude/settings.json`, …) as the user's content — skipping
+/// the `QUICKSTART.md` placeholder and recording integration files as the first
+/// state. Capture must run first: the first state is the user's content; the
+/// install lands after and stays uncaptured.
+#[test]
+fn quickstart_captures_before_installing_harness() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--install-harnesses",
+            "claude-code",
+            "--harness-install-scope",
+            "repo",
+            "--yes",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "quickstart with a harness install must succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // The install ran (after the capture).
+    assert!(
+        dir.join(".claude").join("settings.json").is_file(),
+        "the selected harness was installed"
+    );
+    // Capture-before-install: an EMPTY dir still got the QUICKSTART.md
+    // placeholder. With install-first, `.claude/` would have made the dir look
+    // non-empty and the placeholder would have been skipped.
+    assert!(
+        dir.join("QUICKSTART.md").is_file(),
+        "the capture ran before the install, so the empty dir got QUICKSTART.md"
+    );
+
+    // Exactly one capture, and it recorded the user's content — not the harness
+    // scaffolding, which remains UNTRACKED (installed after the capture).
+    let log: Value =
+        serde_json::from_str(&heddle(&["log", "--output", "json"], Some(dir)).unwrap()).unwrap();
+    assert_eq!(
+        log["states"].as_array().map(Vec::len),
+        Some(1),
+        "exactly one capture: {log}"
+    );
+    let status = status_json(dir);
+    let added: Vec<String> = status["changes"]["added"]
+        .as_array()
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(|p| p.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        added.iter().any(|p| p.contains(".claude")),
+        "harness scaffolding is UNTRACKED — it was installed after the capture: {status}"
+    );
+    assert!(
+        !added.iter().any(|p| p.contains("QUICKSTART.md")),
+        "QUICKSTART.md was the captured first state, not untracked: {status}"
+    );
+}
+
 /// Codex r7 (cid 3329270262): an invalid `--harness-install-scope` was not
 /// parsed until the post-init install step, so a pure argument error left a
 /// partially initialized repo. The pre-write decision now validates the scope
