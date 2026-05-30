@@ -39,21 +39,31 @@ sketch.
   canonical ref is a *cache* of the committed oplog. **Correctness rests on
   per-read reconciliation, the universal rule: every ref read reconciles against
   the oplog at read time** — funnelled through **one internal `reconciled_load`
-  primitive that is the sole code in `RefManager` permitted to touch raw ref
-  storage**, so all **ten** public read methods (`read_head` `:114`, `get_thread`
-  `:129`, `get_marker` `:185`, `get_undo_recovery` `:252`, `get_remote_thread`
-  `:256`, `list_threads` `:178`, `list_markers` `:230`, `list_remotes` `:305`,
-  `list_remote_threads` `:312`, `resolve` `:327`, all in `refs_manager.rs`) obtain
-  ref data **only** by calling it, and the reconciliation (op_scope filter + cheap
-  generation gate) lives *inside* it — reached via a `RefReconciler` trait defined
-  in `refs` and injected from `repo`, so `refs` keeps no `oplog` dep. Because the
-  raw-storage loaders are reachable **only** from inside the primitive, every
-  present reader **and any future `RefManager` read method** reconciles
-  automatically — there is no reader enumeration to keep complete. (Placing the
-  hook at the bypassable `Repository` accessors, or enumerating a *subset* of read
-  methods as r6 did — it covered only `read_head`/`get_thread`/`get_marker` and
-  left the four `list_*`, both remote, undo-recovery, and `resolve` readers
-  observing stale state, cid 3328832780 — leaves the invariant with holes.) This
+  primitive that is the sole path for LOGICAL READS (reads that serve a ref value
+  to a caller) to touch raw ref storage** (the maintenance path `pack_refs` touches
+  the raw loaders directly to compact storage but serves no logical value and is an
+  explicit, reasoned exemption, cid 3328894984), so all **ten** public read methods
+  (`read_head` `:114`, `get_thread` `:129`, `get_marker` `:185`, `get_undo_recovery`
+  `:252`, `get_remote_thread` `:256`, `list_threads` `:178`, `list_markers` `:230`,
+  `list_remotes` `:305`, `list_remote_threads` `:312`, `resolve` `:327`, all in
+  `refs_manager.rs`) obtain ref data **only** by calling it, and the reconciliation
+  lives *inside* it — reached via a `RefReconciler` trait defined in `refs` and
+  injected from `repo`, so `refs` keeps no `oplog` dep. **Reconciliation scope is a
+  property of the ref class (r10, cid 3328894983): local refs — `HEAD`,
+  undo-recovery, beside the per-worktree HEAD (`refs_storage.rs:69-93`) — reconcile
+  within this `op_scope`; shared refs — thread, marker, remote-thread, under the
+  shared ref root (`refs_storage.rs:50-67`) — reconcile GLOBALLY across all lanes,
+  since one file serves every worktree** (applying the `op_scope` filter to a shared
+  ref is itself a correctness bug — it would miss a co-tenant's committed-but-
+  unpublished shared write; r5's filter is scoped down to the local classes only).
+  Because the raw-storage loaders are reachable from a logical read **only** from
+  inside the primitive, every present reader **and any future `RefManager` read
+  method** reconciles automatically — there is no reader enumeration to keep
+  complete. (Placing the hook at the bypassable `Repository` accessors, or
+  enumerating a *subset* of read methods as r6 did — it covered only
+  `read_head`/`get_thread`/`get_marker` and left the four `list_*`, both remote,
+  undo-recovery, and `resolve` readers observing stale state, cid 3328832780 —
+  leaves the invariant with holes.) This
   holds for **every reader path, every handle age, every crash timing** —
   crucially the daemon's **long-held `Arc<Repository>`**
   (`local_daemon.rs:330`) that **never re-passes `Repository::open`**
@@ -61,11 +71,12 @@ sketch.
   (cid 3328112197). "Recover at open" is kept only as an **eager optimization**,
   not the guarantee; the hot path stays cheap via an O(1) oplog-generation
   (`head_id`, `packed_oplog.rs:26`,`:55`) check — a **watermark of *fully-
-  materialized* committed batches**, advanced only after a lagged read materializes
-  a crashed batch's *every* ref (batch-atomic, r8 cid 3328853451), never on a
-  partial single-ref reconcile, so the global gate cannot short-circuit a batch
-  sibling for any read shape (point, list, remote) — full reconcile only on the rare
-  lag. **And the commit is deduplicated by an *unbounded, indexed*
+  materialized* committed batches, split by ref class** (a per-`op_scope` cell for
+  local refs, a global cell for shared refs, r10), advanced only after a lagged read
+  materializes a crashed batch's *every* ref of that class (batch-atomic, r8 cid
+  3328853451), never on a partial single-ref reconcile, so the gate cannot
+  short-circuit a batch sibling for any read shape (point, list, remote) — full
+  reconcile only on the rare lag. **And the commit is deduplicated by an *unbounded, indexed*
   `transaction_id` lookup, not the window-bounded
   `record_batch_scoped_if_no_transaction` (which only scans a caller-supplied
   window — the rebase caller passes `64` and documents that aging past it
@@ -387,45 +398,80 @@ before ph5" window would leave the daemon's already-open handle resolving the
 stale canonical ref indefinitely. The guarantee must therefore live one seam
 deeper — at the **read** itself:
 
-> **Universal rule: a ref read reconciles against the oplog at read time, within
-> the current worktree's `op_scope`.** A reader NEVER treats a canonical ref as
-> authoritative-committed unless its committing oplog entry exists **in this
-> repository's `op_scope`**; and if the committed oplog tail — *filtered to this
-> `op_scope`* — names a newer target for that ref than the canonical value (a
-> publication not yet materialized), the read resolves the **authoritative value
-> from the oplog** (and MAY re-publish the canonical ref lazily). So the read
-> never trusts a *lagging* cache (oplog ahead of ref) and never trusts a
-> *committed-looking* ref with no backing entry (ref ahead of oplog —
-> structurally impossible pre-commit anyway).
+> **Universal rule: a ref read reconciles against the committed oplog at read
+> time; the *scope* of that reconciliation is a property of the ref class.** A
+> reader NEVER treats a canonical ref as authoritative-committed unless its
+> committing oplog entry exists; and if the committed oplog tail names a newer
+> target for that ref than the canonical value (a publication not yet
+> materialized), the read resolves the **authoritative value from the oplog** (and
+> MAY re-publish the canonical ref lazily). So the read never trusts a *lagging*
+> cache (oplog ahead of ref) and never trusts a *committed-looking* ref with no
+> backing entry (ref ahead of oplog — structurally impossible pre-commit anyway).
+> **What counts as "the committed tail" for a given read depends on whether the
+> ref is per-checkout (local) or shared across worktrees — the r5 `op_scope`
+> filter applies to the former, never the latter:**
 >
-> The `op_scope` filter is load-bearing for **shared-oplog setups** (multiple
-> worktrees sharing one oplog backend via `.heddle/objectstore`). The local HEAD
-> pointer — and thus the canonical refs a read resolves — is *per worktree*, so
-> the reconciliation must resolve each lane against its own committed entries.
-> Without the filter, a long-lived checkout B reading next could reconcile its
-> local HEAD/thread refs to a *different* checkout A's newest committed target,
-> lazily publishing A's state into B's lane. The scope is exactly the worktree
-> discriminator `Repository::op_scope()` already exists to provide
-> (`repository.rs:1636-1654`: "unique per worktree even when several worktrees
-> share one oplog backend … `undo`/`redo`/`--list` filter by exact-match
-> scope"), reused unchanged — undo/redo already scope every oplog scan this way
-> (`undo.rs:108-109`, `:131-132`: `recent_batches_scoped`/`undo_batches_scoped`
-> with `Some(&scope)`; redo at `repository.rs:941-942`). Per-read reconciliation
-> reuses that same `Some(&op_scope())` filter on its tail scan; it does not
-> invent a new scoping mechanism.
+> - **Local ref classes — `HEAD` and undo-recovery — reconcile within the current
+>   worktree's `op_scope` (the r5 rule, now scoped down to exactly these two
+>   classes).** Both live beside the *per-worktree* `HEAD` pointer, not under the
+>   shared ref root: `head_path()` returns the per-checkout `local_head` when set
+>   (`refs_storage.rs:69-74`) and `undo_recovery_path()` is its sibling
+>   (`refs_storage.rs:89-93`, whose own doc-comment pins "undo/redo recovery state
+>   is scoped to the same checkout … never the shared ref root"). `Repository::open`
+>   builds the per-worktree manager as
+>   `RefManager::new(&shared_galeed_dir).with_local_head(local_head_path)`
+>   (`repository.rs:659`; `with_local_head` builder `refs_manager.rs:50`). So a read
+>   of `HEAD`/undo-recovery in checkout B resolves **B's lane only** — the committed
+>   tail it folds is the `Some(&op_scope())`-filtered one. The filter is
+>   load-bearing *here*: without it a long-lived checkout B reconciling its local
+>   `HEAD` to checkout A's newest committed target would lazily publish A's HEAD
+>   into B's lane (cid 3328776063) — a cross-lane leak that is real precisely
+>   *because each worktree has its own HEAD file*. The scope is the worktree
+>   discriminator `Repository::op_scope()` already provides
+>   (`repository.rs:1636-1654`), reused unchanged — undo/redo scope every oplog
+>   scan this way (`undo.rs:108-109`, `:131-132`:
+>   `recent_batches_scoped`/`undo_batches_scoped` with `Some(&scope)`; redo at
+>   `repository.rs:941-942`); per-read reconciliation of a local ref reuses that
+>   same filter and invents no new mechanism.
+>
+> - **Shared ref classes — thread, marker, remote-thread — reconcile GLOBALLY,
+>   NOT `op_scope`-filtered.** These live under the *shared* ref root
+>   (`threads_dir`/`flat_threads_dir` `refs_storage.rs:50-55`, `markers_dir` `:63`,
+>   `remotes_dir` `:66` — all under `refs_dir()` = `root/refs`, the
+>   `shared_galeed_dir` every sibling worktree shares, `repository.rs:659`). There
+>   is exactly **one** file per shared ref, visible to all worktrees, so its
+>   authoritative value is whatever the **newest committed oplog entry names —
+>   regardless of which worktree's `op_scope` committed it**. A read of a shared
+>   ref therefore folds the **full** committed tail across all lanes, newest-wins.
+>   **Applying the `op_scope` filter to a shared ref is a correctness bug:** if
+>   checkout A commits a thread/marker/remote update to the shared oplog and
+>   crashes after phase 4 (oplog commit) but before phase 5 (ref publish), a
+>   checkout-B read that filtered the tail to B's `op_scope` would **miss A's
+>   committed shared-ref update** — A's record sits under A's lane — and keep
+>   returning the stale shared ref indefinitely, even though a non-crashed A would
+>   have published that value *for all worktrees*. The global fold is exactly what
+>   a shared ref's materialized-view semantics require; r5's filter is **removed
+>   for these classes** (it was over-applied — r5's own example wrongly named
+>   "local HEAD/thread refs," but thread refs are shared, not per-lane). Note this
+>   changes only *reconciliation read* scope: undo/redo keep their per-lane oplog
+>   scans (undoing your own lane's batches is correct), and `op_scope` still keys
+>   every committed `OpRecord` for undo/redo purposes — a shared ref's reconcile
+>   simply reads across all lanes' records to find the newest committed target.
 
 This single rule holds the invariant across **all four axes at once** — reader
 path (daemon RPC vs direct CLI), **handle age** (freshly opened vs a long-held
 `Arc<Repository>`), crash timing (immediate vs delayed), and **oplog topology**
 (a private oplog vs a shared backend fronting multiple worktrees) — precisely
-because reconciliation happens *per read*, not *per open*, and *within the
-current `op_scope`*: it re-reads the current oplog state from disk on every
-resolve, filtered to this worktree's lane, so a handle opened once at process
-start still reconciles on its ten-thousandth read and never crosses into another
-lane's state. "Recover at open" structurally cannot do
-this; per-read reconciliation is what makes the daemon-handle cell hold, and it
-subsumes the daemon-vs-CLI and immediate-vs-delayed cells the prior rounds
-enumerated one at a time.
+because reconciliation happens *per read*, not *per open*, and *at the scope its
+ref class demands*: it re-reads the current oplog state from disk on every
+resolve, so a handle opened once at process start still reconciles on its
+ten-thousandth read. A local-ref read (HEAD, undo-recovery) folds this worktree's
+lane and never crosses into another lane's state; a shared-ref read (thread,
+marker, remote-thread) folds the full committed tail so it never misses a
+co-tenant worktree's committed-but-unpublished update to a shared ref. "Recover
+at open" structurally cannot do this; per-read reconciliation is what makes the
+daemon-handle cell hold, and it subsumes the daemon-vs-CLI and
+immediate-vs-delayed cells the prior rounds enumerated one at a time.
 
 **Where the rule hooks (grounded) — ONE internal load primitive, not a set of
 enumerated read methods.** The seam must be the single place every read funnels
@@ -462,32 +508,43 @@ oplog-committed create/delete in the "after ph4, before ph5" window, every one o
 seven holes (cid 3328832780). Enumerating "the 3," then "the 5," then "the 7" is
 the drip pattern at the method level: a longer list is not a closed class.
 
-**The structural fix — one load primitive, the sole toucher of raw storage.**
+**The structural fix — one load primitive, the sole path for LOGICAL READS.**
 Reconciliation does not live in the ten read methods; it lives in **one internal
-primitive `reconciled_load`** that is the *only* code in `RefManager` permitted to
-touch raw ref storage. Every public read method obtains its ref data exclusively
-by calling it:
+primitive `reconciled_load`** that is the *only* path in `RefManager` by which a
+**logical read** — a read that serves a ref value to a caller — obtains ref data.
+Every public read method obtains its ref data exclusively by calling it. (This is
+"sole path for logical reads," not "sole toucher of raw storage": the
+maintenance/compaction path `pack_refs` legitimately touches the raw loaders
+directly and is explicitly exempt — see "Maintenance paths are exempt" below.)
 
 ```rust
-// The ONE place ref data is loaded. The raw-storage loaders
+// The ONE place a LOGICAL read loads ref data. The raw-storage loaders
 // (read_change_id_at, read_head_state, try_read_ref_summary_index,
 // *_from_storage, PackedRefs::load) are PRIVATE sub-steps invoked from here
-// and NOWHERE else — no public read method may call them directly.
+// for logical reads — no public *read* method may call them directly. (The
+// maintenance path `pack_refs` is the one non-read caller; it rewrites the
+// storage representation and serves no logical value — exempted below.)
 fn reconciled_load(&self, req: LoadRequest) -> Result<Loaded> {
     let raw = self.raw_load(req);                  // the request-scoped raw read
     let Some(rec) = &self.reconciler else { return Ok(raw) };   // bootstrap: plain cache
     let tip = rec.generation();                    // current oplog head_id (O(1) header read)
-    if tip == self.cached_generation.get() {        // r4 O(1) watermark gate
-        return Ok(raw);                            // every batch ≤ watermark FULLY materialized ⇒ cache current
+    // Scope + watermark are a property of the ref CLASS (r10):
+    //   local  (Head, UndoRecovery)        → this worktree's op_scope, cached_local_generation
+    //   shared (Thread, Marker, Remote*)   → GLOBAL (all lanes),       cached_shared_generation
+    let class = req.ref_class();
+    let scope = class.reconcile_scope(self);       // Some(&op_scope()) for local; None (global) for shared
+    let watermark = class.watermark(self);         // the per-op_scope cell for local; the global cell for shared
+    if tip == watermark.get() {                     // r4/r8 O(1) gate, now SELECTED BY CLASS
+        return Ok(raw);                            // every batch ≤ this class's watermark FULLY materialized
     }
-    // Watermark lagged ⇒ some committed batch ≤ tip is not yet fully materialized.
-    // Reconcile is BATCH-ATOMIC (r8): it materializes EVERY ref of EVERY lagged
-    // committed batch in this op_scope — not just `req`'s ref — then advances the
-    // watermark. Request shape (point/list) selects what is RETURNED, never how
-    // much of a lagged batch is MATERIALIZED, so the gate is never advanced on a
-    // partial single-ref reconcile that would leave a batch sibling stale-but-gated.
-    let loaded = rec.reconcile_batches(raw, req, tip, &self.op_scope())?;  // r5 op_scope filter
-    self.cached_generation.set(tip);               // advance ONLY after full-batch materialization
+    // Watermark lagged ⇒ some committed batch ≤ tip touching THIS class is not yet
+    // fully materialized. Reconcile is BATCH-ATOMIC (r8): materialize EVERY ref of
+    // EVERY lagged committed batch (within `scope`) — not just `req`'s ref — then
+    // advance. Request shape (point/list) selects what is RETURNED, never how much
+    // of a lagged batch is MATERIALIZED, so the gate never advances on a partial
+    // single-ref reconcile that would leave a batch sibling stale-but-gated.
+    let loaded = rec.reconcile_batches(raw, req, tip, scope)?;  // scope: local→op_scope, shared→global
+    watermark.set(tip);                            // advance THIS class's watermark ONLY after full materialization
     Ok(loaded)
 }
 ```
@@ -523,11 +580,16 @@ other way to obtain ref data.
 
 **Structural impossibility of bypass (the future-proofing).** The raw loaders
 (`read_change_id_at`, `read_head_state`, `try_read_ref_summary_index`, the
-`*_from_storage` scanners, and `PackedRefs::load`) are made reachable **only** from
-inside `reconciled_load` — a module-visibility boundary enforced by a one-line
-conformance check (a test/lint asserting each raw loader has exactly one caller,
-`reconciled_load`). Because a public reader can reach ref data *only* through
-`reconciled_load`, and `reconciled_load` *always* reconciles:
+`*_from_storage` scanners, and `PackedRefs::load`) are reachable from a **logical
+read** path **only** through `reconciled_load` — a module-visibility boundary
+enforced by a one-line conformance check. The check targets *logical-read*
+call-sites: it asserts each raw loader's only logical-read caller is
+`reconciled_load`, against a small explicit allowlist of **maintenance** callers
+(`pack_refs`, below). (A naive "exactly one caller" check would fail, because
+`pack_refs` legitimately calls four of these loaders directly — that is precisely
+the carve-out the next paragraph reasons through, not a hole.) Because a public
+*reader* can reach ref data *only* through `reconciled_load`, and `reconciled_load`
+*always* reconciles:
 
 - every one of the ten present readers reconciles, and
 - **any read method added to `RefManager` in the future reconciles automatically**
@@ -537,9 +599,44 @@ conformance check (a test/lint asserting each raw loader has exactly one caller,
   type/visibility level, not by vigilance.
 
 That is the difference between r6 and r7: r6 enumerated entry points (and the
-enumeration was incomplete); r7 makes raw storage *unreachable* except through the
-one reconciling primitive, so the set of covered readers is "all of them, present
-and future," with no list to keep complete.
+enumeration was incomplete); r7 makes raw storage *unreachable* from a logical read
+except through the one reconciling primitive, so the set of covered readers is "all
+of them, present and future," with no list to keep complete.
+
+**Maintenance paths are exempt — `pack_refs` rewrites the representation, it does
+not serve a logical value (r10, cid 3328894984).** The "sole path for logical
+reads" claim is about reads that *return a ref value to a caller*. `pack_refs`
+(`refs_manager.rs:337-380`, exposed as `CoreRefBackend::pack_refs` `:479` and run by
+`heddle gc`, `gc.rs:104`) is not such a read: under `lock_refs()` (`:338`) it loads
+each loose thread/marker via the raw loaders — `PackedRefs::load` (`:340`),
+`list_threads_from_storage` (`:342`), `read_change_id_at` (`:345`,`:352`),
+`list_markers_from_storage` (`:349`) — folds them into `packed-refs`, saves, and
+deletes the now-redundant loose files. It **compacts the storage representation**;
+it returns no ref value to a caller, so it has no reconciliation to do and is
+correctly exempt from the conformance check (it appears on the allowlist, not as a
+logical-read caller). The exemption is a *reasoned carve-out*, not a hand-wave:
+
+- **Consistency w.r.t. reconciliation.** `pack_refs` operates on a **committed,
+  already-materialized snapshot** — it reads loose ref files (the phase-5
+  materialized form) under `lock_refs()` and rewrites them into `packed-refs`,
+  which the loaders read back identically (`get_thread`/`get_marker` fall back to
+  `PackedRefs::load`, `refs_manager.rs:134`,`:190`). Packing a ref is value-
+  preserving: the loose file and its packed entry resolve to the same `ChangeId`,
+  so a subsequent `reconciled_load` sees the same raw value before and after — the
+  generation/head_id gate is unaffected (packing appends nothing to the oplog), and
+  reconciliation against the committed tail yields the identical result.
+- **It must not drop an oplog-committed-but-not-yet-materialized ref.** The one
+  hazard is ordering: a ref whose update is committed in the oplog (phase 4) but
+  whose canonical file is not yet renamed into place (phase 5) is invisible to
+  `pack_refs`'s loose-file scan, so packing *that* ref's *current* file is a no-op
+  on the unmaterialized value — packing cannot "lose" it, because there is nothing
+  on disk to pack and reconciliation will still materialize it on the next read
+  from the oplog tail. `pack_refs` only ever compacts files that already exist; it
+  never deletes a ref the oplog still names. The standing impl requirement (carried
+  to §6 O7) is that `pack_refs` runs under the same `lock_refs()` that phase-5
+  publication takes, so it observes a *quiescent* materialized snapshot and never
+  races a half-done rename — it packs what is durably materialized and leaves the
+  reconciler to materialize the rest.
 
 *Why an accessor-layer hook still fails (unchanged from r6, now at the primitive
 level).* Placing reconciliation on the `Repository` accessors (`repo.head()`
@@ -582,7 +679,9 @@ thread, state }` / `UndoRecoveryUpdate { state }` for the remote-thread and
 undo-recovery classes (new tail variants appended after `GitCheckpoint`
 (`oplog_types.rs:222-228`) so existing on-disk discriminants are unperturbed; see
 "Remote-thread and undo-recovery writes are oplog-committed too" below) — and the read
-takes the newest committed target *within the current `op_scope`* in the tail
+takes the newest committed target in the tail *at the scope its ref class demands*
+— this worktree's `op_scope` for a **local** ref (HEAD, undo-recovery), the **full**
+tail across all lanes for a **shared** ref (thread, marker, remote-thread)
 (newest-wins, so two committed txns on one ref resolve to the same value a
 non-crashed run would produce). **For a set-valued (list) request the same records
 drive membership, not just a single target:** a committed `ThreadCreate` /
@@ -600,10 +699,17 @@ Before r9 these two classes had **no** `OpRecord` at all — `set_undo_recovery`
 (`refs_manager.rs:242`) and `set_remote_thread` (`:261`) wrote the ref directly with
 no oplog append (cid 3328869364) — so reconciling them folded an *empty* tail; r9
 closes that by giving them committed records, immediately below.) "Newest in
-the tail" always means newest among *this worktree's* entries — the scan is the
+the tail" is scoped **by ref class** (r10): for a **local** ref (HEAD,
+undo-recovery) it means newest among *this worktree's* entries — the scan is the
 `Some(&op_scope())`-filtered one undo/redo already run (`undo.rs:108-109`,
 `:131-132`), so in a shared-oplog setup a read in checkout B resolves B's lane only
-and never lifts checkout A's newest committed target.
+and never lifts checkout A's newest committed HEAD. For a **shared** ref (thread,
+marker, remote-thread) it means newest across **all** lanes — there is one shared
+ref file (under the shared `refs/` root, `refs_storage.rs:50-67`) whose
+authoritative value is whatever the newest committed entry names, so checkout B's
+read of a shared thread/marker/remote ref MUST fold checkout A's committed update
+too; filtering it to B's lane would miss A's committed-but-unpublished shared
+write (the §2.2 universal-rule bug).
 
 **Remote-thread and undo-recovery writes are oplog-committed too (r9 — closing the
 last direct-write exceptions, cid 3328869364).** The reconciliation above is only
@@ -658,42 +764,62 @@ is readable from the file header without parsing the log; every append advances 
 `:308`). A reader caches the `head_id` it last reconciled against, and on each
 read reads the current `head_id` (an O(1) header read) and:
 
-- if it is **unchanged**, no commit has landed since the last reconcile ⇒ the
-  canonical ref (or the cached summary set) is current ⇒ return it directly —
-  **no tail scan, no write**;
+- if **this ref class's watermark** is **unchanged** vs the current `head_id`, no
+  commit affecting that class has landed since the last reconcile ⇒ the canonical
+  ref (or the cached summary set) is current ⇒ return it directly — **no tail scan,
+  no write**;
 - only if it has **advanced** does the primitive scan the tail from `cached+1` for
-  committed `TransactionCommit` entries **in this `op_scope`** and reconcile
-  **batch-atomically**: for every lagged committed batch it materializes **every**
-  ref that batch touched (newest-committed target / membership change per ref,
-  lazily re-publishing each lagging ref or summary) — *not only* the ref `req`
-  asked for — and **only then** advances the cached watermark to the scanned
-  `head_id`. Materializing the whole batch before the watermark moves is what makes
-  the gate safe for the *next* read of any sibling ref (the r8 watermark, below).
-  The scan applies the same `Some(&op_scope())` exact-match filter
-  undo/redo use (`undo.rs:108-109`, `:131-132`), so a `head_id` advance driven
-  purely by *another* worktree's commit in a shared oplog finds no entry for
-  this lane and the reconcile is a no-op — the reader keeps returning its own
-  canonical ref while still advancing its watermark (nothing in-scope lagged).
+  committed `TransactionCommit` entries — **filtered to this `op_scope` for a local
+  ref (HEAD, undo-recovery), unfiltered/global for a shared ref (thread, marker,
+  remote-thread)** (r10) — and reconcile **batch-atomically**: for every lagged
+  committed batch it materializes **every** ref of that class the batch touched
+  (newest-committed target / membership change per ref, lazily re-publishing each
+  lagging ref or summary) — *not only* the ref `req` asked for — and **only then**
+  advances **that class's** cached watermark to the scanned `head_id`. Materializing
+  the whole batch before the watermark moves is what makes the gate safe for the
+  *next* read of any sibling ref (the r8 watermark, below). For a **local**-ref scan
+  the same `Some(&op_scope())` exact-match filter undo/redo use (`undo.rs:108-109`,
+  `:131-132`) applies, so a `head_id` advance driven purely by *another* worktree's
+  *local* commit finds no entry for this lane and the reconcile is a no-op — the
+  reader keeps returning its own canonical HEAD while still advancing its
+  per-`op_scope` watermark. For a **shared**-ref scan there is no lane filter: a
+  `head_id` advance driven by *any* worktree's shared-ref commit is folded, so the
+  reader picks up a co-tenant's committed thread/marker/remote update (the global
+  watermark, below).
 
-So the steady-state hot path is one small header read plus an integer compare;
+So the steady-state hot path is one small header read plus an integer compare
+against the **class-selected** watermark (local→per-`op_scope`, shared→global);
 the full reconcile runs only on the rare post-crash lag. (A per-ref committed
 index tightens this further — reconcile only when *this ref's* newest committed
-target advanced — but the single `head_id` generation gate is the simple floor.
-**If a per-ref index is adopted it must still be batch-atomic:** a reconcile
-advances the per-ref watermark for **every** ref the lagged batch materialized,
-not just the requested one — else it reintroduces exactly the sibling gap r8
+target advanced — but the two class-split `head_id` watermarks are the simple floor.
+**If a per-ref index is adopted it must still be batch-atomic *and* class-scoped:**
+a reconcile advances the per-ref watermark for **every** ref the lagged batch
+materialized, not just the requested one — else it reintroduces exactly the sibling gap r8
 closes. Exposing a cheap `OpLog::head_id()`/`tip()` header accessor is net-new
 impl work, §6 O7.)
 
 **The generation is a watermark of *fully-materialized* batches, not of partial
-reconciles (r8, cid 3328853451).** The cheap gate above is a *global* `head_id`
-compare, so its meaning must be pinned precisely or it can short-circuit a sibling
-ref. Define the watermark exactly:
+reconciles (r8, cid 3328853451) — and it is SPLIT by ref class (r10, cid
+3328894983).** The cheap gate above is a `head_id` compare, so its meaning must be
+pinned precisely or it can short-circuit a sibling ref. Because reconciliation
+scope is now a property of the ref class (§2.2 universal rule), the single watermark
+splits into **two** cached cells, each compared against the same monotonic oplog
+`head_id` but advanced by a scan at its class's scope:
 
-> `cached_generation == N` means **every ref of every committed batch with
-> generation ≤ N (in this `op_scope`) has been materialized.** It is a watermark of
-> *fully-materialized* batches — it never names a batch that has been only partially
-> reconciled.
+> - **`cached_local_generation == N`** (gates HEAD + undo-recovery reads) means
+>   **every *local* ref of every committed batch with generation ≤ N *in this
+>   `op_scope`* has been materialized.**
+> - **`cached_shared_generation == N`** (gates thread + marker + remote-thread
+>   reads) means **every *shared* ref of every committed batch with generation ≤ N
+>   *across all lanes* has been materialized.**
+>
+> Each is a watermark of *fully-materialized* batches for its class — neither ever
+> names a batch only partially reconciled. A read checks the watermark **matching
+> its ref class**; a committed batch's reconcile advances the watermark(s) for the
+> ref class(es) it touched — a batch touching both a local and a shared ref (e.g. a
+> `capture`, which writes HEAD *and* a thread ref) advances **both** once each
+> class's refs are materialized. The O(1) hot path is unchanged: one header read +
+> one integer compare against the class-selected watermark.
 
 *The bug a looser definition admits.* A single committed batch can update
 **multiple** refs (`a`, `b`, …) — `update_refs(&[RefUpdate])` applies a batch of
@@ -709,10 +835,12 @@ bypassing the primitive (r7 closed that class — all ten readers funnel through
 reconcile.
 
 *The fix — batch-atomic materialization, one rule.* A lagged read reconciles the
-**full** pending batch(es): it materializes **all** refs each lagged committed batch
-touched in this `op_scope`, **before** advancing the watermark. The watermark moves
-in lockstep with *whole batches*, never with individual refs, so it is "current" iff
-every ref of every batch ≤ it is materialized. The read stays lazy — it does real
+**full** pending batch(es): it materializes **all** refs *of the read's class* each
+lagged committed batch touched (within that class's scope — this `op_scope` for
+local, all lanes for shared), **before** advancing that class's watermark. The
+watermark moves in lockstep with *whole batches*, never with individual refs, so it
+is "current" iff every ref of its class in every batch ≤ it is materialized. The
+read stays lazy — it does real
 work *only* on the rare lag; the no-lag hot path is the unchanged O(1) header
 compare with no materialization — the change is solely that when it *does*
 reconcile, it completes the whole crashed batch, not just the one ref it was asked
@@ -760,16 +888,24 @@ unchanged** — a no-lag read still does exactly one header read + one integer
 compare, materializing nothing. We trade a slightly heavier *rare* reconcile for a
 global O(1) gate correct across all read shapes.
 
-*The watermark stays `op_scope`-scoped (r5).* It is per-`op_scope`: the
+*Watermark scope is per ref class (r5 for local; global for shared — r10).* The
+**local** watermark stays `op_scope`-scoped exactly as r5 mandated: its
 batch-materialization scan is the same `Some(&op_scope())` exact-match filter
-undo/redo apply (`undo.rs:108-109`, `:131-132`), so "every ref of every batch ≤ N"
-means every ref of every batch ≤ N **in this worktree's lane**. A `head_id` advance
-driven purely by a *co-tenant* worktree's commit in a shared oplog materializes
-nothing for this lane (no in-scope batch lagged) and still advances this lane's
-watermark — the cross-lane-publish hazard cid 3328776063 fixed stays fixed. The
-generation/commit-index identity from r4 (the gate *is* the oplog's monotonic
-`head_id`, `packed_oplog.rs:26`,`:55`) is unchanged; r8 only pins *when* the cached
-copy may advance — after a full-batch materialization, never a partial one.
+undo/redo apply (`undo.rs:108-109`, `:131-132`), so "every local ref of every batch
+≤ N" means every HEAD/undo-recovery ref of every batch ≤ N **in this worktree's
+lane**. A `head_id` advance driven purely by a *co-tenant* worktree's **local**
+commit materializes nothing for this lane and still advances this lane's local
+watermark — the cross-lane-publish hazard cid 3328776063 fixed stays fixed (a
+checkout never lifts a co-tenant's HEAD). The **shared** watermark is **global**, by
+construction: its scan is *unfiltered*, so a `head_id` advance driven by *any*
+worktree's shared-ref commit materializes that committed thread/marker/remote update
+for this reader too — which is required, because a shared ref has one file visible
+to all worktrees and filtering its reconcile to a lane would miss a co-tenant's
+committed-but-unpublished shared write (cid 3328894983). The generation/commit-index
+identity from r4 (the gate *is* the oplog's monotonic `head_id`,
+`packed_oplog.rs:26`,`:55`) is unchanged; r8 pins *when* a cached copy may advance
+(after a full-batch materialization, never a partial one); r10 pins *which* copy and
+*at what scope* (local→op_scope, shared→global).
 
 **"Recover at open" is demoted to an optimization, not the guarantee.** Keeping
 an eager materialization pass at `Repository::open` (`repository.rs:594`, hit by
@@ -882,9 +1018,12 @@ txn log), `rewind` correctness is the load-bearing contract:
 
 ### 2.4 — Crash/retry coverage (the close-the-class proof)
 
-The invariant — stated precisely, **`committed ⇔ oplog entry exists` *within each
-`op_scope`*** (each worktree/lane is its own commit/recovery domain) — must hold
-for *every* reader and *every* retry timing. The prior rounds tried to prove this **cell by cell** —
+The invariant — stated precisely, **`committed ⇔ oplog entry exists`, with the
+*recovery domain* set by the ref class** (a **local** ref — HEAD, undo-recovery —
+recovers within its own `op_scope`/lane; a **shared** ref — thread, marker,
+remote-thread — recovers **globally**, across all lanes, since one file serves every
+worktree) — must hold for *every* reader and *every* retry timing. The prior rounds
+tried to prove this **cell by cell** —
 r1 fixed ordering, r2 added daemon recovery + a window dedup, r3 moved recovery to
 the `open` seam to cover the direct-CLI cell — and each round closed one cell only
 to have Codex surface its **sibling**: the daemon-only gap, then the windowed-dedup
@@ -903,8 +1042,10 @@ invariant once, from a mechanism that sits in the path every reader shares.**
   reconciles against the committed oplog tail at read time, because all **ten**
   public `RefManager` read methods (point, list, remote, undo-recovery, and
   `resolve` — `refs_manager.rs:114`–`:327`) obtain ref data through **one internal
-  `reconciled_load` primitive**, the sole code permitted to touch raw ref storage
-  (§2.2 "Where the rule hooks"). **The reconciliation is non-vacuous for every one
+  `reconciled_load` primitive**, the sole path for **logical reads** to touch raw
+  ref storage (§2.2 "Where the rule hooks"; the maintenance path `pack_refs` touches
+  the loaders directly but serves no logical value and is exempt, §2.2 "Maintenance
+  paths are exempt"). **The reconciliation is non-vacuous for every one
   of those classes:** as of r9 the remote-thread and undo-recovery writes carry
   committed `OpRecord`s (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`,
   `oplog_types.rs:16`) appended at the oplog-commit point — they are no longer
@@ -917,32 +1058,41 @@ invariant once, from a mechanism that sits in the path every reader shares.**
   the ~124 direct `repo.refs()` readers (and every `Repository` accessor, and the
   daemon handler `transaction.rs:143-152`) inherit it with no call-site changes,
   reached via a `refs`-crate `RefReconciler` trait the `repo`/`oplog` layer injects
-  (dependency inversion — no `refs`→`oplog` crate dep). The reconciliation scans
-  **only this repository's `op_scope`** — the same `Some(&op_scope())` exact-match
-  filter undo/redo apply to every oplog scan (`undo.rs:108-109`, `:131-132`;
-  `Repository::op_scope()` `repository.rs:1636`), so each worktree/lane resolves
-  against its own committed entries. Therefore a reader on
+  (dependency inversion — no `refs`→`oplog` crate dep). **The reconciliation scans
+  at the scope its ref class demands** (r10): a **local**-ref read (HEAD,
+  undo-recovery) folds **only this repository's `op_scope`** — the same
+  `Some(&op_scope())` exact-match filter undo/redo apply to every oplog scan
+  (`undo.rs:108-109`, `:131-132`; `Repository::op_scope()` `repository.rs:1636`), so
+  each lane resolves its own HEAD/recovery; a **shared**-ref read (thread, marker,
+  remote-thread) folds the **full** tail across all lanes, because one shared ref
+  file serves every worktree and its authoritative value is the newest committed
+  entry from *any* lane. Therefore a reader on
   **any path** (daemon RPC or direct CLI), holding a handle of **any age**
   (freshly opened or a long-held `Arc<Repository>`), observing a crash at **any
   time** (immediate or delayed), under **any oplog topology** (a private oplog or
   a shared backend fronting multiple worktrees):
     1. never treats a canonical ref as committed without its backing oplog entry
-       *in its own `op_scope`* (the read confirms the entry), and
-    2. never returns a stale canonical ref this lane's oplog has already
-       superseded, and **never lifts another lane's target** (the read resolves
-       the committed target within its own `op_scope`).
-  Because the check is *in the read*, not *at the open*, and *scoped to the
-  reader's own lane*, there is no reader, handle, timing, or co-tenant worktree
+       *in its recovery domain* — its own `op_scope` for a local ref, any lane for
+       a shared ref (the read confirms the entry), and
+    2. never returns a stale canonical ref the oplog has already superseded: for a
+       local ref it resolves the committed target **within its own `op_scope`** and
+       **never lifts another lane's HEAD**; for a shared ref it resolves the newest
+       committed target **across all lanes** and **never misses a co-tenant's
+       committed-but-unpublished shared write** (cid 3328894983).
+  Because the check is *in the read*, not *at the open*, and *at each class's
+  correct scope*, there is no reader, handle, timing, or co-tenant worktree
   that escapes it. (The cheap O(1) gate that makes this affordable is a **watermark
-  of *fully-materialized* batches** — advanced only after a lagged read materializes
-  a crashed batch's *every* ref, never on a partial single-ref reconcile (§2.2 r8,
-  cid 3328853451) — so a point/list/remote read of a *batch sibling* cannot slip
-  past the gate onto stale storage: "gate current" *means* every ref of every batch
-  ≤ it is materialized, so the collapse below is not undermined by the optimization
-  that makes it cheap.) The matrix collapses to **"all reads reconcile, in scope, ∎"**
-  — there are no cells left to enumerate, because the third axis (handle age) and
-  fourth axis (shared-oplog topology) the per-cell frame missed are closed by the
-  same mechanism as the first two.
+  of *fully-materialized* batches, split by ref class** — a per-`op_scope` cell for
+  local refs and a global cell for shared refs — advanced only after a lagged read
+  materializes a crashed batch's *every* ref of that class, never on a partial
+  single-ref reconcile (§2.2 r8/r10, cid 3328853451 + 3328894983) — so a
+  point/list/remote read of a *batch sibling* cannot slip past the gate onto stale
+  storage: "gate current" *means* every ref of its class in every batch ≤ it is
+  materialized, so the collapse below is not undermined by the optimization that
+  makes it cheap.) The matrix collapses to **"all reads reconcile, at their class's
+  scope, ∎"** — there are no cells left to enumerate, because the third axis (handle
+  age) and fourth axis (shared-oplog topology) the per-cell frame missed are closed
+  by the same mechanism as the first two.
 
 - **Write side — unbounded indexed exact-once commit (§2.2 "Idempotency of the
   commit," retained from r3).** The phase-4 linearization point deduplicates on an
@@ -962,11 +1112,14 @@ backing oplog entry — is structurally impossible regardless of reader/handle/t
 because nothing publishes a canonical ref before its phase-4 oplog entry is durable;
 and the only post-crash residue (a *lagging* OLD ref with the entry already present)
 is resolved at the read by reconciliation, on every path and handle age, not merely
-at the next `open` — and, because the reconcile is `op_scope`-filtered, a reader in
-a shared-oplog setup resolves only its own lane and never observes another
-worktree's uncommitted-to-its-own-refs state. That is the close-the-class result:
-not a covered matrix, but a single invariant — `committed ⇔ oplog entry exists`,
-*per `op_scope`* — enforced in the shared read path. The impl epic (§6 O1, O7) carries
+at the next `open` — and, because the reconcile scopes **by ref class**, a
+**local**-ref read in a shared-oplog setup resolves only its own lane (never lifting
+a co-tenant's HEAD), while a **shared**-ref read folds all lanes (never missing a
+co-tenant's committed-but-unpublished thread/marker/remote write). That is the
+close-the-class result: not a covered matrix, but a single invariant —
+`committed ⇔ oplog entry exists`, with the recovery domain set by ref class
+(per-`op_scope` for local, global for shared) — enforced in the shared read path.
+The impl epic (§6 O1, O7) carries
 the two mechanisms — the per-read reconciliation hook and the unbounded index — as
 the concrete deliverables; the `open`-time materialization survives only as the
 eager fast-path that prefetches what the read would otherwise do lazily (§2.2),
@@ -1253,7 +1406,10 @@ impl AtomicMutation for Undo {
     fn apply(&mut self, tx: &mut Tx) -> Result<StagedCommit<UndoSummary>> {
         // savepoint sub-op: stage the recovery ref (temp file; its committed
         // `UndoRecoveryUpdate` record (§2.2, r9) is the commit point, the ref is
-        // published post-commit in phase 5, rewind = unlink the temp)
+        // published post-commit in phase 5, rewind = unlink the temp). Undo-recovery
+        // is a LOCAL (per-checkout) ref — sibling of this worktree's HEAD
+        // (refs_storage.rs:89-93) — so it reconciles within THIS op_scope (r10),
+        // never lifting a sibling checkout's recovery pointer.
         tx.enroll(SetUndoRecovery::new(self.head))?;
         for batch in &self.batches {
             // savepoint sub-op per batch: stage worktree rewrite + the
@@ -1345,7 +1501,12 @@ the daemon's long-held `Arc<Repository>` (`local_daemon.rs:330`,
 `transaction.rs:143-152`) that never re-opens — sees the oplog generation has
 advanced, folds the committed `OpRecord::Snapshot { new_state, thread }`
 (`oplog_types.rs:18-22`) from the tail, and resolves the committed target (lazily
-re-publishing the ref). The `Repository::open` (`repository.rs:594`) eager pass is
+re-publishing the ref). A capture batch touches **both** ref classes — the
+**thread** ref (shared, reconciled across all lanes) and `HEAD` (local, reconciled
+within this `op_scope`) — so it advances **both** watermarks (§2.2 r10); a sibling
+worktree's read of the now-committed shared thread ref folds capture's `Snapshot`
+record even though capture ran under a different lane, while each worktree's `HEAD`
+stays per-lane. The `Repository::open` (`repository.rs:594`) eager pass is
 an optimization on top, not the guarantee — even a daemonless `heddle
 capture`/`status` is correct without it, and a long-lived daemon stays correct
 *because* the guarantee is in the read, not the open. This **closes** the
@@ -1473,12 +1634,18 @@ are **zero** ref-write paths exempt from oplog-as-sole-commit.
     open-time eager pass (optimization).** Correctness lives in the read: every ref
     resolve reconciles against the committed oplog tail (§2.2 "Reader model"). The
     reconciliation lands **inside one internal `reconciled_load` primitive** that is
-    the sole code in `RefManager` permitted to touch raw ref storage; all **ten**
-    public read methods (point, list, remote, undo-recovery, `resolve` —
+    the sole path for **logical reads** in `RefManager` to touch raw ref storage; all
+    **ten** public read methods (point, list, remote, undo-recovery, `resolve` —
     `refs_manager.rs:114`–`:327`) obtain ref data only through it, and the raw
     loaders (`read_change_id_at`, `read_head_state`, `try_read_ref_summary_index`,
-    `*_from_storage`, `PackedRefs::load`) are reachable **only** from inside it
-    (enforced by a one-line conformance check). This is **not** at the `Repository`
+    `*_from_storage`, `PackedRefs::load`) are reachable from a logical read **only**
+    from inside it (enforced by a one-line conformance check whose target is
+    *logical-read* call-sites, with an explicit allowlist for the **maintenance**
+    path `pack_refs` — `refs_manager.rs:337-380`, run by `heddle gc` `gc.rs:104` —
+    which touches four of those loaders directly to compact storage but serves no
+    logical value, cid 3328894984; the impl must encode this exemption rather than a
+    naive "exactly one caller" assert, which `pack_refs` would trip). This is
+    **not** at the `Repository`
     accessors, because an accessor-layer hook is bypassed by the ~124 direct
     `repo.refs()` readers (`cli/src/cli/commands/status.rs:1795`,
     `cli/src/cli/commands/collapse.rs:99`, `client/src/grpc_hosted/sync.rs:588`,
@@ -1501,22 +1668,34 @@ are **zero** ref-write paths exempt from oplog-as-sole-commit.
     **Cost:** the hot path must be near-free or it taxes every read
     (daemon RPC and `heddle log`/`status` alike) — hence the O(1) generation check
     on the oplog `head_id` (`packed_oplog.rs:26`, the file's leading field `:55`),
-    so a read that finds `head_id` unchanged returns immediately with no tail scan
-    and no write; full reconcile (and lazy re-publish) only on the rare advanced-
-    generation lag. The cached `head_id` is a **watermark of fully-materialized
-    batches**: a lagged read materializes **every** ref of every lagged committed
-    batch *before* advancing it (batch-atomic, cid 3328853451), so the global gate
-    reads "current" iff no ref of any batch ≤ it is stale — a partial single-ref
-    reconcile must never advance it, else a batch sibling (point *or* list read)
-    would observe stale storage behind a "current" gate. This needs a cheap
+    so a read that finds the **class-selected** watermark unchanged vs `head_id`
+    returns immediately with no tail scan and no write; full reconcile (and lazy
+    re-publish) only on the rare advanced-generation lag. The cached generation is a
+    **watermark of fully-materialized batches, split by ref class** (r10, cid
+    3328894983): **two** cells — a per-`op_scope` watermark guarding local-ref reads
+    (HEAD, undo-recovery) and a **global** watermark guarding shared-ref reads
+    (thread, marker, remote-thread) — each compared against the same `head_id`. A
+    lagged read materializes **every** ref *of its class* in every lagged committed
+    batch *before* advancing that class's watermark (batch-atomic, cid 3328853451),
+    so the gate reads "current" iff no ref of its class in any batch ≤ it is stale —
+    a partial single-ref reconcile must never advance it, else a batch sibling (point
+    *or* list read) would observe stale storage behind a "current" gate. A committed
+    batch advances whichever watermark(s) match the ref classes it touched (a
+    `capture`, touching HEAD + a thread ref, advances both). The local-ref scan keeps
+    the `Some(&op_scope())` filter (r5, scoped down to local refs); the shared-ref
+    scan is **unfiltered/global** — filtering a shared ref to a lane would miss a
+    co-tenant's committed-but-unpublished shared write (the correctness bug cid
+    3328894983 fixes). This needs a cheap
     `OpLog::head_id()`/`tip()` header accessor (net-new). The `Repository::open` (`repository.rs:594`) eager materialization
     is kept as an *optional* prefetch — it repairs lag once at open so subsequent
     reads on that handle skip even the reconcile — but is **not** load-bearing and
     may be dropped; it must not itself need the recovery it provides (bootstrap
-    ordering inside `open`). A per-ref committed index (vs the single `head_id`
-    gate) is an optional refinement to avoid reconciling a read when a *different*
-    ref advanced — but it must stay batch-atomic (advance the per-ref watermark for
-    **every** ref a reconcile materialized, not just the requested one), or it
+    ordering inside `open`). A per-ref committed index (vs the two class-split
+    `head_id` watermarks) is an optional refinement to avoid reconciling a read when
+    a *different* ref advanced — but it must stay batch-atomic **and** preserve the
+    per-class scope (advance the per-ref watermark for **every** ref a reconcile
+    materialized, not just the requested one, and keep local refs `op_scope`-scoped
+    while shared refs stay global), or it
     reintroduces the sibling gap cid 3328853451.
   - **Unbounded indexed `transaction_id` map.** The exact-once commit needs a
     `transaction_id → committed-batch-id` index maintained under the oplog write
@@ -1562,17 +1741,25 @@ idempotent oplog append, orphan-tolerant object store, atomic FS rename) already
 exist — the work is sequencing them under one ledger, not inventing durability.
 The two genuinely net-new pieces are the close-the-class mechanisms (O7):
 **per-read reconciliation inside _one internal `reconciled_load` primitive_** —
-the sole code permitted to touch raw ref storage, which all **ten** public
-`RefManager` read methods (point, list, remote, undo-recovery, `resolve`) funnel
-through, so reconciliation cannot be bypassed by any present reader, the ~124
+the sole path for **logical reads** to touch raw ref storage (the maintenance path
+`pack_refs` touches the loaders directly to compact storage but serves no logical
+value and is an explicit, reasoned exemption, cid 3328894984), which all **ten**
+public `RefManager` read methods (point, list, remote, undo-recovery, `resolve`)
+funnel through, so reconciliation cannot be bypassed by any present reader, the ~124
 direct `repo.refs()` readers, **or any read method added later** (raw storage is
-unreachable except through the primitive) — reached via a `refs`-crate
-`RefReconciler` trait injected from `repo` (dependency inversion, so `refs` keeps
-no `oplog` dep), and **filtered to the current `op_scope`** (so the
-`committed ⇔ oplog entry exists` invariant holds
-per-lane for every reader path, *handle age*, crash timing, and oplog topology —
+unreachable from a logical read except through the primitive) — reached via a
+`refs`-crate `RefReconciler` trait injected from `repo` (dependency inversion, so
+`refs` keeps no `oplog` dep), and **scoped by ref class** (cid 3328894983): local
+refs — `HEAD`, undo-recovery (beside the per-worktree HEAD, `refs_storage.rs:69-93`)
+— reconcile within the current `op_scope`; shared refs — thread, marker,
+remote-thread (under the shared ref root, `refs_storage.rs:50-67`) — reconcile
+**globally** across all lanes (filtering a shared ref to a lane is a correctness bug
+— it would miss a co-tenant's committed-but-unpublished shared write), so the
+`committed ⇔ oplog entry exists` invariant holds with the recovery domain set by ref
+class for every reader path, *handle age*, crash timing, and oplog topology —
 including the daemon's long-held `Arc<Repository>` an open-time-only pass cannot
-reach, and shared-oplog worktrees that must not cross lanes) and an **unbounded indexed `transaction_id`
+reach, and shared-oplog worktrees (local reads stay per-lane, shared reads span
+lanes) — and an **unbounded indexed `transaction_id`
 commit dedup** (so exact-once holds at any retry timing, not just within a 64-batch
 window). The `Repository::open` eager materialization is kept only as an
 optimization on top of the read-side guarantee.
@@ -1590,10 +1777,16 @@ optimization on top of the read-side guarantee.
    that all ten public `RefManager` read methods funnel through (point, list,
    remote, undo-recovery, `resolve`), via a `refs`-crate `RefReconciler` trait
    injected from `repo` (O7 — the read-side guarantee; the primitive is the sole
-   toucher of raw ref storage, below all ~124 `repo.refs()` readers, so **no
-   per-call-site edits** and any future read method is covered automatically; add
-   the one-line conformance check that the raw loaders have no caller but the
-   primitive; the `Repository::open` eager pass is an optional optimization on top).
+   path for **logical reads** to raw ref storage, below all ~124 `repo.refs()`
+   readers, so **no per-call-site edits** and any future read method is covered
+   automatically; reconciliation is **scoped by ref class** — local refs HEAD +
+   undo-recovery within `op_scope`, shared refs thread/marker/remote-thread globally
+   (cid 3328894983) — backed by **two** watermarks (per-`op_scope` + global); add the
+   one-line conformance check that the raw loaders have no *logical-read* caller but
+   the primitive, with an explicit allowlist for the `pack_refs` maintenance path,
+   which legitimately touches the loaders to compact storage and serves no logical
+   value (cid 3328894984); the `Repository::open` eager pass is an optional
+   optimization on top).
    It also lands the three r9 `OpRecord` variants
    (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, O8) and routes
    `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`
@@ -1635,21 +1828,28 @@ revision, only one migration is in flight, not five.
 - [x] **(2) Commit-point + ordering** — §2.2: the oplog append is the **sole**
   commit; refs are a post-commit materialized view; correctness rests on
   **per-read reconciliation** — every ref read reconciles against the oplog at
-  read time *within the current `op_scope`*, hooked **inside one internal
-  `reconciled_load` primitive** that is the sole code in `RefManager` permitted to
-  touch raw ref storage and through which all **ten** public read methods funnel —
-  point (`read_head` `:114`, `get_thread` `:129`, `get_marker` `:185`,
-  `get_undo_recovery` `:252`, `get_remote_thread` `:256`), list (`list_threads`
-  `:178`, `list_markers` `:230`, `list_remotes` `:305`, `list_remote_threads`
-  `:312`), and `resolve` `:327` (all `refs_manager.rs`). The raw loaders
+  read time, hooked **inside one internal `reconciled_load` primitive** that is the
+  sole path for **logical reads** (reads that serve a ref value to a caller) in
+  `RefManager` to touch raw ref storage and through which all **ten** public read
+  methods funnel — point (`read_head` `:114`, `get_thread` `:129`, `get_marker`
+  `:185`, `get_undo_recovery` `:252`, `get_remote_thread` `:256`), list
+  (`list_threads` `:178`, `list_markers` `:230`, `list_remotes` `:305`,
+  `list_remote_threads` `:312`), and `resolve` `:327` (all `refs_manager.rs`). The
+  raw loaders
   (`read_change_id_at`/`read_head_state`/`try_read_ref_summary_index`/`*_from_storage`/`PackedRefs::load`)
-  are reachable only from inside the primitive (one-line conformance check), so the
-  closure is **structural, not an enumeration**: r6's three-method hook
+  are reachable from a logical read only from inside the primitive (one-line
+  conformance check targeting logical-read call-sites, with an explicit allowlist for
+  the `pack_refs` maintenance path — `refs_manager.rs:337-380`, run by `heddle gc`
+  `gc.rs:104` — which touches four of those loaders directly to **compact storage**,
+  serves no logical value, and is therefore a reasoned exemption, **cid 3328894984**;
+  it operates on a committed, already-materialized snapshot under `lock_refs()` and
+  must not drop an oplog-committed-but-unmaterialized ref). The closure is therefore
+  **structural, not an enumeration**: r6's three-method hook
   (`read_head`/`get_thread`/`get_marker`) left the four `list_*`, both remote,
   undo-recovery, and `resolve` readers bypassing (cid 3328832780), whereas every
-  present reader **and any future read method** now reconciles because raw storage
-  has no other entry. An accessor-layer hook would be bypassed by the **~124**
-  direct `repo.refs()` readers (e.g. `cli/src/cli/commands/status.rs:1795`,
+  present *reader* **and any future read method** now reconciles because raw storage
+  has no other logical-read entry. An accessor-layer hook would be bypassed by the
+  **~124** direct `repo.refs()` readers (e.g. `cli/src/cli/commands/status.rs:1795`,
   `cli/src/cli/commands/collapse.rs:99`, `client/src/grpc_hosted/sync.rs:588`,
   `:1001`, `thread.rs:507`, `marker.rs:64`). The
   `refs` crate has no `oplog` dep (`crates/refs/Cargo.toml`); the seam clears that
@@ -1657,27 +1857,40 @@ revision, only one migration is in flight, not five.
   from the `repo`/`oplog` layer (`crates/repo/Cargo.toml:22`,`:24`) at `Repository`
   construction and invoked inside the primitive — so reconciliation reaches every
   reader (and the daemon handler `transaction.rs:143-152`) with no call-site
-  changes. Both the O(1) `head_id` generation gate (`packed_oplog.rs:26`,`:55`) and
-  the `op_scope` filter run inside the primitive; the gate is a **watermark of
-  *fully-materialized* batches** — advanced only after a lagged read materializes a
-  crashed batch's *every* ref (batch-atomic, cid 3328853451), never on a partial
-  single-ref reconcile, so it cannot short-circuit a batch sibling for any read
-  shape (point, list, remote). The tail scan reuses the
-  `Some(&op_scope())` exact-match filter undo/redo already apply (`undo.rs:108-109`,
-  `:131-132`; `Repository::op_scope()` `repository.rs:1636`), so each worktree/lane
-  resolves only its own committed entries. This holds for **every reader path,
-  handle age, crash timing, and oplog topology** — including the daemon's long-held
-  `Arc<Repository>` (`local_daemon.rs:330`) that never re-passes `Repository::open`
+  changes. **Reconciliation scope is a property of the ref class (cid 3328894983):**
+  local refs — `HEAD`, undo-recovery, both beside the *per-worktree* HEAD pointer
+  (`refs_storage.rs:69-93`; `Repository::open` builds
+  `RefManager::new(&shared_galeed_dir).with_local_head(...)`, `repository.rs:659`) —
+  reconcile within this `op_scope`; shared refs — thread, marker, remote-thread,
+  under the *shared* ref root (`refs_storage.rs:50-67`) — reconcile **globally**
+  across all lanes, since one file serves every worktree (applying the `op_scope`
+  filter to a shared ref is a correctness bug: it would miss a co-tenant's
+  committed-but-unpublished shared write; r5's filter is scoped **down** to the local
+  classes). The O(1) `head_id` generation gate (`packed_oplog.rs:26`,`:55`) runs
+  inside the primitive as **two watermarks, split by ref class** — a per-`op_scope`
+  cell (local) + a global cell (shared) — each a **watermark of *fully-materialized*
+  batches**, advanced only after a lagged read materializes a crashed batch's *every*
+  ref of that class (batch-atomic, cid 3328853451), never on a partial single-ref
+  reconcile, so it cannot short-circuit a batch sibling for any read shape (point,
+  list, remote); a batch advances whichever watermark(s) match the classes it
+  touched. The **local**-ref scan reuses the `Some(&op_scope())` exact-match filter
+  undo/redo apply (`undo.rs:108-109`, `:131-132`; `Repository::op_scope()`
+  `repository.rs:1636`), so each lane resolves its own HEAD/recovery; the
+  **shared**-ref scan is unfiltered so it folds every lane's committed thread/marker/
+  remote update. This holds for **every reader path, handle age, crash timing, and
+  oplog topology** — including the daemon's long-held `Arc<Repository>`
+  (`local_daemon.rs:330`) that never re-passes `Repository::open`
   (`repository.rs:594`), the cell cid 3328112197 exposed and an open-time pass
-  cannot reach, and shared-oplog worktrees (cid 3328776063) that must resolve
-  their own lane, never a co-tenant's target. "Recover at open" is demoted to an **eager optimization**. Commit
-  dedup is an **unbounded indexed `transaction_id` lookup**, *not* the
-  window-bounded `record_batch_scoped_if_no_transaction` (`oplog_core.rs:281`, the
-  rebase caller's 64-batch window, `rebase_ops.rs:192-202`). §2.4 collapses the
-  per-cell matrix into a **single universal proof** — all reads reconcile in scope
-  (read side) + unbounded index (write side) ⇒ `committed ⇔ oplog entry exists`
-  *per `op_scope`* across the whole {path × handle age × timing × topology} space —
-  against lock-free readers
+  cannot reach, and shared-oplog worktrees (cid 3328776063 — local reads stay
+  per-lane, shared reads span lanes). "Recover at open" is demoted to an **eager
+  optimization**. Commit dedup is an **unbounded indexed `transaction_id` lookup**,
+  *not* the window-bounded `record_batch_scoped_if_no_transaction`
+  (`oplog_core.rs:281`, the rebase caller's 64-batch window,
+  `rebase_ops.rs:192-202`). §2.4 collapses the per-cell matrix into a **single
+  universal proof** — all reads reconcile at their class's scope (read side) +
+  unbounded index (write side) ⇒ `committed ⇔ oplog entry exists` (recovery domain
+  set by ref class: per-`op_scope` for local, global for shared) across the whole
+  {path × handle age × timing × topology} space — against lock-free readers
   (`refs_head.rs:22-41`, `refs_manager.rs:129-135`) + temp→rename apply
   (`refs_transactions.rs:230`). §2.3 idempotency.
 - [x] **(2a) Every ref class has committed records (r9, cid 3328869364)** — §2.2
