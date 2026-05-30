@@ -352,12 +352,22 @@ pub(crate) struct ThreadCaptureSummary {
 
 /// Undo a partially-materialized `start` when a later step fails — today
 /// the only such step is `--hydrate` directory-symlinking, which can fail
-/// on a host/FS that rejects directory symlinks. Removes the freshly
-/// materialized worktree (its dep symlinks are removed with it, since
-/// `remove_dir_all` unlinks symlinks without following them, so the
-/// origin's deps are never touched) and, for a thread this invocation
-/// created, deletes the ref + records the compensating delete + sweeps
-/// any manifest — leaving the repo as if `start` never ran.
+/// on a host/FS that rejects directory symlinks. The compensator undoes
+/// only what THIS invocation created, never pre-existing user state:
+///
+/// - `target_dir_created` true → this invocation made the worktree
+///   directory, so remove it entirely (restore "didn't exist"). Its dep
+///   symlinks go with it, since `remove_dir_all` unlinks symlinks without
+///   following them, so the origin's deps are never touched.
+/// - `target_dir_created` false → the user supplied an already-existing
+///   empty `--path` dir; preserve the directory and clear only the
+///   contents we materialized inside it, restoring the empty dir the user
+///   provided. (`prepare_worktree_target` only accepts a pre-existing dir
+///   when it is empty, so clearing its contents is safe.)
+///
+/// For a thread this invocation created it also deletes the ref + records
+/// the compensating delete + sweeps any manifest — leaving the repo as if
+/// `start` never ran.
 ///
 /// Best-effort: rollback sub-failures are warned, not propagated, so the
 /// original hydrate error still surfaces to the user.
@@ -368,8 +378,14 @@ fn rollback_started_thread(
     base_state: &ChangeId,
     thread_was_created: bool,
     is_materialized: bool,
+    target_dir_created: bool,
 ) {
-    if let Err(err) = std::fs::remove_dir_all(worktree)
+    let checkout_rollback = if target_dir_created {
+        std::fs::remove_dir_all(worktree)
+    } else {
+        clear_dir_contents(worktree)
+    };
+    if let Err(err) = checkout_rollback
         && err.kind() != std::io::ErrorKind::NotFound
     {
         tracing::warn!(
@@ -402,6 +418,25 @@ fn rollback_started_thread(
             }
         }
     }
+}
+
+/// Remove every entry inside `dir` without removing `dir` itself, so a
+/// pre-existing user-provided directory survives a rollback while the
+/// contents this invocation materialized are cleared. Symlinks are
+/// unlinked directly (never followed): `file_type()` does not traverse
+/// symlinks, so a symlinked dep dir takes the `remove_file` branch and the
+/// origin's deps stay untouched.
+fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
@@ -1760,7 +1795,9 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     if args.path.is_some() {
         ensure_explicit_start_path_outside_repo(repo, &args.name, &path)?;
     }
-    let abs_path = normalize_path_for_containment(&prepare_worktree_target(repo, &path)?)?;
+    let prepared_target = prepare_worktree_target(repo, &path)?;
+    let target_dir_created = prepared_target.target_dir_created;
+    let abs_path = normalize_path_for_containment(&prepared_target.path)?;
 
     // Item 2.1 of the heddle 6→8 plan: when starting a heavy
     // (materialized/lightweight) thread in a Rust workspace, redirect
@@ -1868,6 +1905,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
                             &base_state,
                             existing_thread_state.is_none(),
                             matches!(thread_mode, ThreadMode::Materialized),
+                            target_dir_created,
                         );
                         return Err(err.context(
                             "--hydrate could not create a directory symlink in the new \

@@ -239,6 +239,115 @@ fn hydrate_symlink_failure_leaves_no_partial_thread() {
 }
 
 #[test]
+fn hydrate_symlink_failure_removes_self_created_target_dir() {
+    // Case (a): `--path` points at a directory that did NOT exist before
+    // this invocation. A symlink failure rolls back by removing the dir
+    // entirely — it was created by this `start`, so "didn't exist" is the
+    // correct pre-start state to restore.
+    let temp = TempDir::new().unwrap();
+    init_deps_in_ignored_dir_project(temp.path());
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
+
+    let thread_path = temp.path().join("iso-new");
+    assert!(
+        std::fs::symlink_metadata(&thread_path).is_err(),
+        "precondition: target dir must not exist before start"
+    );
+
+    let output = heddle_output_with_env(
+        &[
+            "start",
+            "iso-new",
+            "--path",
+            thread_path.to_str().unwrap(),
+            "--hydrate",
+        ],
+        Some(temp.path()),
+        &[("HEDDLE_FAULT_INJECT", "hydrate_symlink_dir")],
+    )
+    .expect("the heddle binary should run");
+
+    assert!(
+        !output.status.success(),
+        "start --hydrate must fail when directory symlinks are rejected"
+    );
+    assert!(
+        std::fs::symlink_metadata(&thread_path).is_err(),
+        "a self-created target dir must be removed entirely on rollback: {}",
+        thread_path.display()
+    );
+}
+
+#[test]
+fn hydrate_symlink_failure_preserves_preexisting_empty_target_dir() {
+    // Case (b): `--path` points at an empty directory the USER created
+    // before running `start`. A symlink failure must roll back the
+    // contents this invocation materialized WITHOUT destroying the
+    // user-provided directory — restoring it to the empty dir they gave us
+    // (cid 3327521537). Blanket-deleting the dir would obliterate user
+    // state this command never created.
+    let temp = TempDir::new().unwrap();
+    init_deps_in_ignored_dir_project(temp.path());
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
+
+    // The user pre-creates an empty dir and hands it to `--path`.
+    let thread_path = temp.path().join("iso-existing");
+    std::fs::create_dir(&thread_path).unwrap();
+
+    let output = heddle_output_with_env(
+        &[
+            "start",
+            "iso-existing",
+            "--path",
+            thread_path.to_str().unwrap(),
+            "--hydrate",
+        ],
+        Some(temp.path()),
+        &[("HEDDLE_FAULT_INJECT", "hydrate_symlink_dir")],
+    )
+    .expect("the heddle binary should run");
+
+    assert!(
+        !output.status.success(),
+        "start --hydrate must fail when directory symlinks are rejected"
+    );
+
+    // The user's directory must STILL EXIST...
+    let meta = std::fs::symlink_metadata(&thread_path).unwrap_or_else(|e| {
+        panic!(
+            "a pre-existing user dir must NOT be deleted on rollback ({}): {e}",
+            thread_path.display()
+        )
+    });
+    assert!(
+        meta.is_dir(),
+        "the pre-existing target must remain a directory after rollback"
+    );
+
+    // ...and be EMPTY again — every entry this invocation materialized
+    // (the .heddle metadata, the checkout, any partial symlinks) cleared.
+    let remaining: Vec<_> = std::fs::read_dir(&thread_path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "rollback must clear materialized contents from a pre-existing dir, leaving it empty; \
+         found: {remaining:?}"
+    );
+
+    // And no dangling thread ref, same as the self-created case.
+    let list = heddle(&["thread", "list"], Some(temp.path()))
+        .expect("thread list should run after the rolled-back start");
+    assert!(
+        !list.contains("iso-existing"),
+        "a hydrate failure must not leave a dangling thread ref; got:\n{list}"
+    );
+}
+
+#[test]
 fn hydrate_does_not_link_admin_dirs() {
     let temp = TempDir::new().unwrap();
     init_deps_in_ignored_dir_project(temp.path());

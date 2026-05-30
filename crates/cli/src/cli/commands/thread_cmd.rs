@@ -1130,7 +1130,7 @@ fn cmd_thread_promote(
         }
     }
     let path = path.unwrap_or_else(|| default_materialized_thread_path(repo, thread_id));
-    let abs_path = prepare_worktree_target(repo, &path)?;
+    let abs_path = prepare_worktree_target(repo, &path)?.path;
     write_isolated_checkout(repo, &abs_path, &state_id, Some(&thread.thread))?;
 
     thread.mode = ThreadMode::Solid;
