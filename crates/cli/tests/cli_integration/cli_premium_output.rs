@@ -17,11 +17,10 @@ fn status_text_counts_dirty_worktree_paths() {
         "status should still list the dirty file: {text}"
     );
     assert!(
-        text.contains("Health: work in progress")
-            && text.contains("Coordination: work in progress")
+        text.contains("Verdict: work in progress")
             && text.contains("Lifecycle: active")
             && text.contains("Work in progress")
-            && !text.contains("Coordination: blocked")
+            && !text.contains("Verdict: blocked")
             && !text.contains("Lifecycle: blocked")
             && !text.contains("Blocked by"),
         "ordinary dirty work should read like work in progress, not failure: {text}"
@@ -282,6 +281,89 @@ fn init_git_repo(path: &std::path::Path) {
         .current_dir(path)
         .output()
         .expect("git config name should run");
+}
+
+#[test]
+fn status_long_default_shows_combined_verdict_not_component_axes() {
+    // (a) Both axes clean → default long mode shows ONE combined
+    // verdict and hides the per-axis Health/Coordination lines.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
+    assert!(
+        text.contains("Verdict: clean"),
+        "default long mode should show a combined verdict: {text}"
+    );
+    assert!(
+        !text.contains("Health:") && !text.contains("Coordination:"),
+        "default long mode must hide the per-axis component lines: {text}"
+    );
+}
+
+#[test]
+fn status_long_default_verdict_signals_non_clean_when_health_dirty() {
+    // (a) Non-clean axis → the combined verdict must still surface the
+    // problem so a default-view reader learns the checkout isn't clean,
+    // without the per-axis lines being printed.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("dirty.txt"), "pending").unwrap();
+
+    let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
+    assert!(
+        text.contains("Verdict: work in progress"),
+        "a dirty worktree must read as a non-clean combined verdict: {text}"
+    );
+    assert!(
+        !text.contains("Verdict: clean"),
+        "combined verdict must not claim clean when an axis is dirty: {text}"
+    );
+    assert!(
+        !text.contains("Health:") && !text.contains("Coordination:"),
+        "default long mode must hide the per-axis component lines: {text}"
+    );
+}
+
+#[test]
+fn status_long_verbose_shows_combined_verdict_and_both_axes() {
+    // (b) `-v` long mode → combined verdict PLUS both component lines.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("dirty.txt"), "pending").unwrap();
+
+    let text = heddle(&["--output", "text", "-v", "status"], Some(temp.path())).unwrap();
+    assert!(
+        text.contains("Verdict: work in progress")
+            && text.contains("Health: work in progress")
+            && text.contains("Coordination: work in progress"),
+        "verbose long mode should show the verdict and both component axes: {text}"
+    );
+}
+
+#[test]
+fn status_json_always_emits_both_component_fields() {
+    // (c) JSON always carries BOTH component fields, schema unchanged,
+    // for clean and non-clean cases alike.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let clean = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let clean: Value = serde_json::from_str(&clean).unwrap();
+    assert_eq!(clean["thread_health"], "clean");
+    assert_eq!(clean["coordination_status"], "clean");
+
+    std::fs::write(temp.path().join("dirty.txt"), "pending").unwrap();
+    let dirty = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let dirty: Value = serde_json::from_str(&dirty).unwrap();
+    assert!(
+        dirty["thread_health"].is_string() && dirty["coordination_status"].is_string(),
+        "non-clean JSON must still carry both component fields: {dirty}"
+    );
+    assert_ne!(
+        dirty["thread_health"], "clean",
+        "dirty worktree should report a non-clean health in JSON: {dirty}"
+    );
 }
 
 fn git_commit_all(path: &std::path::Path, message: &str) {

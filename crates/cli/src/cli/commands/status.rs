@@ -1319,13 +1319,28 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
     } else {
         println!("HEAD detached");
     }
-    // Health text is short ("clean" / "blocked" / etc.) — colour it
-    // so a glance tells you the state without reading the word.
-    println!(
-        "Health: {}",
-        style::thread_state(&human_thread_health(&output.thread_health))
-    );
-    println!("Coordination: {}", human_coordination_status(output));
+    // Progressive disclosure: the default view shows ONE combined
+    // verdict answering "is my checkout OK?". The two component axes
+    // (Health = local checkout state, Coordination = cross-thread
+    // integration state) overlap and create read-carefully overhead,
+    // so they only appear under `-v`. The combined verdict still
+    // signals non-clean whenever either axis is, so the default reader
+    // never loses the "something's wrong" signal — `-v` then tells
+    // them which axis. JSON is unaffected (both fields always emitted).
+    let (verdict, verdict_reason) = status_combined_verdict(output);
+    println!("Verdict: {}", style::thread_state(&verdict));
+    if let Some(reason) = verdict_reason {
+        println!("  {}", style::dim(reason));
+    }
+    if verbose {
+        // Health text is short ("clean" / "blocked" / etc.) — colour it
+        // so a glance tells you the state without reading the word.
+        println!(
+            "Health: {}",
+            style::thread_state(&human_thread_health(&output.thread_health))
+        );
+        println!("Coordination: {}", human_coordination_status(output));
+    }
     if verbose && let Some(base) = &output.base_state {
         println!("Base: {}", style::dim(base));
     }
@@ -1977,6 +1992,62 @@ fn human_thread_health(status: &str) -> String {
         "dirty_worktree" | "uncaptured" => "work in progress".to_string(),
         other => other.to_string(),
     }
+}
+
+/// Severity rank for the `thread_health` axis. Higher = more
+/// blocking. Drives which axis a non-clean combined verdict surfaces.
+fn health_severity(thread_health: &str) -> u8 {
+    match thread_health {
+        "clean" => 0,
+        "needs_reconcile" | "git_branch_advanced" => 4,
+        "needs_init" | "needs_import" => 3,
+        "needs_checkpoint" => 2,
+        // dirty_worktree / uncaptured / unknown: local work in progress.
+        _ => 1,
+    }
+}
+
+/// Severity rank for the coordination axis. Ahead / merge-ready are
+/// non-clean but benign forward states, so they rank below the
+/// integration blockers (diverged / blocked).
+fn coordination_severity(status: &CoordinationStatus) -> u8 {
+    match status {
+        CoordinationStatus::Clean => 0,
+        CoordinationStatus::Ahead | CoordinationStatus::MergeReady => 1,
+        CoordinationStatus::Diverged => 3,
+        CoordinationStatus::Blocked => 4,
+    }
+}
+
+/// Combined top-line verdict for the default long view. Returns the
+/// styled verdict word plus an optional one-line reason.
+///
+/// `clean` only when BOTH the health and coordination axes are clean;
+/// otherwise the more-severe axis is surfaced as the verdict word so a
+/// reader of the default view still learns the checkout is not clean.
+/// Ties favour the local health axis — that's the blocker the user
+/// usually acts on first. The reason names which axis (or both) is at
+/// fault; `-v` then prints the per-axis detail.
+fn status_combined_verdict(output: &StatusOutput) -> (String, Option<&'static str>) {
+    let health_clean = output.thread_health == "clean";
+    let coordination_clean = matches!(output.coordination_status, CoordinationStatus::Clean);
+    if health_clean && coordination_clean {
+        return ("clean".to_string(), None);
+    }
+    let surface_health =
+        !health_clean && health_severity(&output.thread_health) >= coordination_severity(&output.coordination_status);
+    let word = if surface_health {
+        human_thread_health(&output.thread_health)
+    } else {
+        human_coordination_status(output)
+    };
+    let reason = match (health_clean, coordination_clean) {
+        (false, false) => Some("checkout health and thread coordination both need attention"),
+        (false, true) => Some("checkout health needs attention"),
+        (true, false) => Some("thread coordination needs attention"),
+        (true, true) => None,
+    };
+    (word, reason)
 }
 
 fn human_coordination_status(output: &StatusOutput) -> String {
