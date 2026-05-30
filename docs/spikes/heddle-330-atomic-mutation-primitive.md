@@ -15,6 +15,39 @@ between the issue's proposed shape and what the three durability domains
 (object store / refs / oplog / FS) actually do today — not an abstract trait
 sketch.
 
+> **EXISTING vs PROPOSED — read this first.** This is a **design doc**; nothing
+> in it has been built. The round tags **r6–r11** below are *revisions of this
+> spike* (Codex review iterations on the document), **not shipped code**. Every
+> mechanism this spike introduces — the new/retrofitted `OpRecord` variants
+> (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, and the
+> `Fork`/`Collapse` published-ref-identity fields), the `reconciled_load` read
+> chokepoint, the `RefReconciler` trait, the `RefManager` write chokepoint, the
+> class-split materialization watermark, and the unbounded `transaction_id`
+> commit index — is **PROPOSED impl-epic work (§6/§7)**, not present in the
+> current tree. When a sentence reads "r9 closed …" / "r11 makes …", parse it as
+> "the spike's r9/r11 design closes/makes …", a property that holds **after the
+> proposed work lands**, not a description of today's code. Where the universal
+> `committed ⇔ ref-carrying oplog record` proof (§2.2/§2.4) says the invariant
+> holds for *all* ref classes and *all* writers, it holds **conditionally on the
+> proposed format + writer changes being implemented** — today's tree still has
+> the direct-write exceptions called out below.
+>
+> **What exists in code today (verified 2026-05-30):**
+>
+> | Surface | Today's reality | Cite |
+> |---|---|---|
+> | `OpRecord` enum tail | ends at `GitCheckpoint`; **no** `RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate` variants (grep finds these names only in *this doc*) | `oplog/src/oplog/oplog_types.rs:223` |
+> | `OpRecord::Fork` | `{ from, new_state }` — **ref-blind** (no published thread/HEAD identity) | `oplog_types.rs:39` |
+> | `OpRecord::Collapse` | `{ sources, result }` — **ref-blind** (carries target, not which ref it published) | `oplog_types.rs:41-44` |
+> | remote-thread / undo-recovery writes | `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery` write the ref **directly** (`lock_refs()` + `write_string`/`remove_file`), **no `OpRecord` appended** | `refs_manager.rs:261`,`:284`,`:242` |
+> | `cmd_fork` / `cmd_collapse` ordering | **publish ref before** appending the oplog record (phase-5-before-phase-4) | `fork.rs:74-95`, `collapse.rs:99-113` |
+> | read path | the ten `RefManager` read methods touch raw storage directly; **no** `reconciled_load` primitive, **no** `RefReconciler` trait | `refs_manager.rs:114`–`:327` |
+> | commit dedup | only the **window-bounded** `record_batch_scoped_if_no_transaction`; **no** unbounded `transaction_id` index | `oplog_core.rs:281` |
+>
+> Everything else this spike describes as a "chokepoint," "watermark," "primitive,"
+> or "invariant that holds universally" is **proposed design**, to be built per
+> §6/§7 — not an account of shipped behavior.
+
 ---
 
 ## §0 — TL;DR / recommendation
@@ -86,8 +119,10 @@ sketch.
   across reader path, handle age, and retry timing. See §2.2 + the §2.4
   crash/retry-coverage proof — the single most load-bearing correction in the
   spike.
-- **Every ref *class* a reader resolves now has committed oplog records — r9
-  closed the last two direct-write exceptions (cid 3328869364).** Before r9,
+- **(PROPOSED, r9) Every ref *class* a reader resolves would have committed oplog
+  records once the r9 design lands — closing the last two direct-write exceptions
+  (cid 3328869364). This is spike design, not shipped: today's tree still writes
+  these two classes directly (see the EXISTING-vs-PROPOSED note above).** Today,
   `set_remote_thread` (`refs_manager.rs:261`), its removal path
   `delete_remote_thread` (`:284`), and `set_undo_recovery` (`:242`) wrote their
   refs **directly** (`lock_refs()` + `write_string`/`remove_file`) with **no**
@@ -95,17 +130,22 @@ sketch.
   thread/marker/HEAD but none for remote-thread or undo-recovery — so reconciling
   `get_remote_thread`/`list_remote_threads`/`list_remotes`/`get_undo_recovery` was
   *vacuous*: nothing in the tail to reconcile against, and after an oplog-only
-  commit + crash those refs could not be re-derived. r9 adds committed `OpRecord`
-  variants (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, appended
-  at the enum tail, `oplog_types.rs:16`,`:222-228`) and routes those setters through
-  the oplog-as-sole-commit path, so the all-ten reconciliation guarantee holds
-  **literally** — there is no ref class whose read reconciles against an empty tail.
+  commit + crash those refs could not be re-derived. The r9 design **proposes**
+  three net-new committed `OpRecord` variants
+  (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, to be appended
+  at the enum tail — today the tail ends at `GitCheckpoint`, `oplog_types.rs:223`)
+  and routing those setters through the oplog-as-sole-commit path, so that **once
+  built** the all-ten reconciliation guarantee holds **literally** — there would be
+  no ref class whose read reconciles against an empty tail. **Until then, the tree
+  has no such variants and the two setters still write directly.**
   See §2.2 "Remote-thread and undo-recovery writes are oplog-committed too."
-- **The write side is a structural chokepoint too — every ref publication is
-  preceded by a ref-carrying committed record (r11, cid 3328926767).** r9 closed
-  the last writers that recorded *nothing*; r11 closes the last writers that record
-  the *wrong shape* or in the *wrong order* — the write-side mirror of r7's read
-  chokepoint. Two residual holes remained, verified in real code (2026-05-30): **(a)
+- **(PROPOSED, r11) The write side becomes a structural chokepoint too — every ref
+  publication preceded by a ref-carrying committed record (cid 3328926767). This is
+  spike design, not shipped.** The r9 design closes
+  the last writers that recorded *nothing*; the r11 design closes the last writers
+  that record the *wrong shape* or in the *wrong order* — the write-side mirror of
+  r7's read chokepoint. Two residual holes exist in today's tree, verified in real
+  code (2026-05-30): **(a)
   ordering** — `cmd_fork` (`fork.rs:74-92`) and `cmd_collapse` (`collapse.rs:99-108`)
   **publish** the thread/HEAD ref *before* appending the oplog record (`record_fork`
   `fork.rs:94`, `record_collapse` `collapse.rs:112` run AFTER the
@@ -125,10 +165,11 @@ sketch.
   replayable, ref-identifying record. `Fork`/`Collapse` gain the published thread
   name + HEAD fields (additive tail change, pre-1.0, no migration shim — `FastForwardV2`
   `oplog_types.rs:169` is the existing precedent of a record that carries *both* the
-  published ref identity and its target). So "zero ref-write paths without a committed
-  ref-carrying record" is now **structural on BOTH sides** — write chokepoint (record
-  before publish) + read chokepoint (reconcile on read) — not aspirational. See §2.2
-  "The write chokepoint" + §2.4.
+  published ref identity and its target). So **after the proposed work lands**, "zero
+  ref-write paths without a committed ref-carrying record" becomes **structural on
+  BOTH sides** — write chokepoint (record before publish) + read chokepoint (reconcile
+  on read). Today neither chokepoint exists; both are impl-epic deliverables (§6/§7).
+  See §2.2 "The write chokepoint" + §2.4.
 - **Nesting = enroll-into-outermost (savepoint) by default; eager-commit only
   when an effect must be visible to another process before the outer commit**
   (the #251 reserve). This is a **type-level split**, not a runtime const:
@@ -507,23 +548,30 @@ the audit below enforces.
 
 **Audit: every ref-publishing `OpRecord` variant must carry the published ref
 identity + target.** Reconciliation/replay can only re-materialize a published ref if
-the record names *which* ref and its target value. Auditing all publishing variants
-(`oplog_types.rs`):
+the record names *which* ref and its target value. The table below classifies every
+publishing variant by **whether it exists in today's tree** and **what this spike
+proposes** (`oplog_types.rs`). The "Status" column is the load-bearing distinction:
+rows tagged **EXISTING** are in the current enum; rows tagged **PROPOSED** are net-new
+or retrofitted impl-epic work this spike designs — they are *not* in the tree (grep
+confirms the proposed variant names appear only in this doc):
 
-| Variant | Publishes | Carries ref identity + target? | Action |
-|---|---|---|---|
-| `Snapshot { new_state, prev_head, thread }` (`:18`) | thread + HEAD | ✅ `thread` name + `new_state` target | none |
-| `Goto { target, prev_head }` (`:24`) | HEAD | ✅ HEAD is the unique implicit ref; `target` is its value | none |
-| `ThreadCreate`/`ThreadCreateV2`/`ThreadUpdate`/`ThreadDelete` (`:29`,`:215`,`:33`,`:31`) | thread | ✅ `name` + `state` | none |
-| `MarkerCreate`/`MarkerDelete { name, state }` (`:46`,`:47`) | marker | ✅ `name` + `state` | none |
-| `Checkpoint { parent, state, thread }` (`:53`) | thread + HEAD | ✅ `thread` + `state` | none |
-| `FastForwardV2 { source_thread, target_thread, pre_target_id, post_target_id }` (`:169`) | `target_thread` ref | ✅ `target_thread` + `post_target_id` — **the precedent**: heddle#99 r2 added `post_target_id` *specifically* so replay names the published ref *and* its target | none |
-| `RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate` (r9, `:222-228`) | remote-thread / undo-recovery | ✅ remote+thread / recovery target | none (r9) |
-| **`Fork { from, new_state }`** (`:38`) | thread + HEAD (`fork.rs:85`,`:88`) | ❌ **no** published thread name, **no** HEAD | **retrofit** → add `thread: Option<String>` (the published thread name, `None` for detached) + the HEAD it set |
-| **`Collapse { sources, result }`** (`:40`) | thread *or* detached HEAD (`collapse.rs:101`,`:104`) | ❌ carries `result` target but **not** which ref it published | **retrofit** → add the published-ref discriminant (the thread name, or detached-HEAD marker) |
+| Variant | Status | Publishes | Carries ref identity + target? | Action |
+|---|---|---|---|---|
+| `Snapshot { new_state, prev_head, thread }` (`:18`) | EXISTING | thread + HEAD | ✅ `thread` name + `new_state` target | none — already correct |
+| `Goto { target, prev_head }` (`:24`) | EXISTING | HEAD | ✅ HEAD is the unique implicit ref; `target` is its value | none — already correct |
+| `ThreadCreate`/`ThreadCreateV2`/`ThreadUpdate`/`ThreadDelete` (`:29`,`:215`,`:33`,`:31`) | EXISTING | thread | ✅ `name` + `state` | none — already correct |
+| `MarkerCreate`/`MarkerDelete { name, state }` (`:46`,`:47`) | EXISTING | marker | ✅ `name` + `state` | none — already correct |
+| `Checkpoint { parent, state, thread }` (`:53`) | EXISTING | thread + HEAD | ✅ `thread` + `state` | none — already correct |
+| `FastForwardV2 { source_thread, target_thread, pre_target_id, post_target_id }` (`:169`) | EXISTING | `target_thread` ref | ✅ `target_thread` + `post_target_id` — **the precedent**: heddle#99 r2 added `post_target_id` *specifically* so replay names the published ref *and* its target | none — already correct |
+| `RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate` | **PROPOSED (r9)** — **do NOT exist** in the tree; enum tail ends at `GitCheckpoint` (`oplog_types.rs:223`); the corresponding writes (`set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`, `refs_manager.rs:261`,`:284`,`:242`) currently write the ref **directly with no `OpRecord`** | remote-thread / undo-recovery | (designed to) ✅ remote+thread / recovery target | **BUILD** → add these three tail variants + route the three direct setters through the oplog-commit path so their reconciliation is non-vacuous |
+| **`Fork { from, new_state }`** (`:39`) | **EXISTING, ref-blind → PROPOSED retrofit** | thread + HEAD (`fork.rs:85`,`:88`) | ❌ **no** published thread name, **no** HEAD | **BUILD** → add `thread: Option<String>` (the published thread name, `None` for detached) + the HEAD it set |
+| **`Collapse { sources, result }`** (`:41-44`) | **EXISTING, ref-blind → PROPOSED retrofit** | thread *or* detached HEAD (`collapse.rs:101`,`:104`) | ❌ carries `result` target but **not** which ref it published | **BUILD** → add the published-ref discriminant (the thread name, or detached-HEAD marker) |
 
-So only **`Fork` and `Collapse`** lack ref identity; every other publishing variant —
-including `FastForwardV2`, which is the *model* — already carries it. The retrofit adds
+So among the variants **in the tree today**, only **`Fork` and `Collapse`** lack ref
+identity (every other *existing* publishing variant — including `FastForwardV2`, the
+*model* — already carries it); and the **remote-thread / undo-recovery** publishing
+variants **do not exist at all yet** — they are net-new spike-proposed work, not
+"covered." The retrofit adds
 the missing field(s) **at the enum tail** (or, where a variant body must change shape,
 as a tail `…V2` variant, exactly as `FastForwardV2` and `ThreadCreateV2` did) so
 existing on-disk discriminants are unperturbed (`oplog_types.rs:12-14`: rmp-serde
@@ -1168,6 +1216,20 @@ txn log), `rewind` correctness is the load-bearing contract:
   writer that moved the ref after us — it fails loud rather than overwriting.
 
 ### 2.4 — Crash/retry coverage (the close-the-class proof)
+
+> **Precondition (PROPOSED, not shipped).** This proof establishes the invariant
+> **for the design after the impl epic lands** — i.e. after the three net-new
+> mechanisms below are *built*: (1) the read chokepoint (`reconciled_load` +
+> `RefReconciler`), (2) the write chokepoint (the `RefManager` write methods that
+> record-before-publish) **plus** the `OpRecord` format changes it relies on
+> (the net-new `RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`
+> variants and the `Fork`/`Collapse` ref-identity retrofit), and (3) the unbounded
+> indexed `transaction_id` commit. **None of these exist in the current tree**
+> (see the EXISTING-vs-PROPOSED note in the header and §6 O1/O7/O9). Today's code
+> still has the direct-write exceptions (`set_remote_thread`/`set_undo_recovery`
+> write directly; `cmd_fork`/`cmd_collapse` publish before recording and emit
+> ref-blind records), so the universal claim does **not** describe shipped
+> behavior — it is the target state the spike designs and the impl epic builds.
 
 The invariant — stated precisely, **`committed ⇔ a ref-carrying oplog record
 exists`, with the *recovery domain* set by the ref class** (a **local** ref — HEAD,
