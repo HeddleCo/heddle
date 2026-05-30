@@ -75,6 +75,21 @@ sketch.
   across reader path, handle age, and retry timing. See §2.2 + the §2.4
   crash/retry-coverage proof — the single most load-bearing correction in the
   spike.
+- **Every ref *class* a reader resolves now has committed oplog records — r9
+  closed the last two direct-write exceptions (cid 3328869364).** Before r9,
+  `set_remote_thread` (`refs_manager.rs:261`), its removal path
+  `delete_remote_thread` (`:284`), and `set_undo_recovery` (`:242`) wrote their
+  refs **directly** (`lock_refs()` + `write_string`/`remove_file`) with **no**
+  `OpRecord` appended — the `OpRecord` enum (`oplog_types.rs:16`) had variants for
+  thread/marker/HEAD but none for remote-thread or undo-recovery — so reconciling
+  `get_remote_thread`/`list_remote_threads`/`list_remotes`/`get_undo_recovery` was
+  *vacuous*: nothing in the tail to reconcile against, and after an oplog-only
+  commit + crash those refs could not be re-derived. r9 adds committed `OpRecord`
+  variants (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, appended
+  at the enum tail, `oplog_types.rs:16`,`:222-228`) and routes those setters through
+  the oplog-as-sole-commit path, so the all-ten reconciliation guarantee holds
+  **literally** — there is no ref class whose read reconciles against an empty tail.
+  See §2.2 "Remote-thread and undo-recovery writes are oplog-committed too."
 - **Nesting = enroll-into-outermost (savepoint) by default; eager-commit only
   when an effect must be visible to another process before the outer commit**
   (the #251 reserve). This is a **type-level split**, not a runtime const:
@@ -561,7 +576,12 @@ bootstrap `RefManager::new` with no reconciler keeps today's plain-cache behavio
 Reconciliation re-derives the committed target with no extra bookkeeping: every
 committed state `OpRecord` carries the ref identity + target — `Snapshot {
 new_state, thread }` (`oplog_types.rs:18-22`), `ThreadCreate/ThreadUpdate { name,
-… state }` (`:29`, `:33`), `Goto { target }` (`:24`) for HEAD — and the read
+… state }` (`:29`, `:33`), `Goto { target }` (`:24`) for HEAD, and — as of r9 —
+`RemoteThreadUpdate { remote, thread, state }` / `RemoteThreadDelete { remote,
+thread, state }` / `UndoRecoveryUpdate { state }` for the remote-thread and
+undo-recovery classes (new tail variants appended after `GitCheckpoint`
+(`oplog_types.rs:222-228`) so existing on-disk discriminants are unperturbed; see
+"Remote-thread and undo-recovery writes are oplog-committed too" below) — and the read
 takes the newest committed target *within the current `op_scope`* in the tail
 (newest-wins, so two committed txns on one ref resolve to the same value a
 non-crashed run would produce). **For a set-valued (list) request the same records
@@ -570,12 +590,63 @@ drive membership, not just a single target:** a committed `ThreadCreate` /
 from the reconciled set the primitive returns, so `list_threads`/`list_markers`/
 `list_remotes`/`list_remote_threads` never report a name whose create/delete is
 committed-but-not-yet-materialized — exactly the stale-list hole cid 3328832780
-flagged. (Remote and undo-recovery refs reconcile identically: their committed
-records name the remote-thread / recovery target, folded the same way.) "Newest in
+flagged. (Remote-thread and undo-recovery refs reconcile identically — and, as of
+r9, *non-vacuously*: their committed records — `RemoteThreadUpdate` /
+`RemoteThreadDelete` / `UndoRecoveryUpdate` — now actually exist in the tail and
+name the remote-thread / recovery target, folded exactly like a thread/marker
+record (a `RemoteThreadDelete` removes the name from the reconciled
+`list_remotes`/`list_remote_threads` set, just as `MarkerDelete` does for markers).
+Before r9 these two classes had **no** `OpRecord` at all — `set_undo_recovery`
+(`refs_manager.rs:242`) and `set_remote_thread` (`:261`) wrote the ref directly with
+no oplog append (cid 3328869364) — so reconciling them folded an *empty* tail; r9
+closes that by giving them committed records, immediately below.) "Newest in
 the tail" always means newest among *this worktree's* entries — the scan is the
 `Some(&op_scope())`-filtered one undo/redo already run (`undo.rs:108-109`,
 `:131-132`), so in a shared-oplog setup a read in checkout B resolves B's lane only
 and never lifts checkout A's newest committed target.
+
+**Remote-thread and undo-recovery writes are oplog-committed too (r9 — closing the
+last direct-write exceptions, cid 3328869364).** The reconciliation above is only
+non-vacuous if the ref classes it reconciles *have* committed records to reconcile
+against. Two did not. `set_undo_recovery` (`refs_manager.rs:242`) and
+`set_remote_thread` (`:261`) — together with the removal path `delete_remote_thread`
+(`:284`) — wrote their refs **directly** (`lock_refs()` + `write_string`/`remove_file`
++ a summary-index rebuild), with **no** `OpRecord` appended; the `OpRecord` enum
+(`oplog_types.rs:16`) carried variants for thread/marker/HEAD writes but **none**
+for remote-thread or undo-recovery. So `get_remote_thread` / `list_remote_threads`
+/ `list_remotes` (#5/#9/#8) and `get_undo_recovery` (#4) reconciled against a tail
+that, for their class, was always empty — after an oplog-only commit + a hard crash
+those refs could not be re-derived, and "every read reconciles" was *vacuously*
+true for them. r9 removes the exception by treating these writes exactly like
+thread/marker writes:
+
+- **New committed `OpRecord` variants**, modeled on `ThreadUpdate { name, old_state,
+  new_state }` (`oplog_types.rs:33`) and `MarkerCreate`/`MarkerDelete { name, state }`
+  (`:46`,`:47`) and appended at the enum tail after `GitCheckpoint` (`:222-228`) per
+  the append-only, discriminant-stable rule (`:12-14`: rmp-serde encodes variants by
+  index, so new variants append and never reorder): `RemoteThreadUpdate { remote:
+  String, thread: String, state: ChangeId }` (covers `set_remote_thread`),
+  `RemoteThreadDelete { remote: String, thread: String, state: ChangeId }` (covers
+  `delete_remote_thread`, the remote-thread removal path), and `UndoRecoveryUpdate {
+  state: ChangeId }` (covers `set_undo_recovery` — a single rolling ORIG_HEAD-style
+  pointer with no delete path, so one update variant suffices).
+- **The setter's commit point becomes the oplog append, not the `write_string`.**
+  `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery` are re-specified to
+  append their `OpRecord` as the phase-4 linearization point under the oplog write
+  lock — the same oplog-as-sole-commit rule §2.2 already mandates for thread/marker
+  writes — and only then publish the canonical ref (the `write_string`/`remove_file`
+  + index rebuild become a phase-5 post-commit materialization, temp→rename like
+  every other ref). These three writers are therefore **no longer exceptions** to
+  "the oplog append is the SOLE commit point"; there are now **zero** ref-write paths
+  that publish a committed-looking ref without a backing committed record.
+- **Recovery replay materializes them like any other class.** Because the writes now
+  carry committed records, the `reconciled_load` primitive (and the crash-replay in
+  the crash table above) re-derives a remote-thread or undo-recovery ref from its
+  newest in-scope `RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`
+  exactly as it does a thread ref from `ThreadUpdate`: a delete record drops the name
+  from the reconciled `list_remotes`/`list_remote_threads` set, an update record sets
+  the point value. The "after ph4, before ph5" lag and the hard-crash residue resolve
+  identically for these classes — no longer a no-op against an empty tail.
 
 **Keeping it cheap (the cost the decision accepts).** Reconciling on *every* read
 must not become a full oplog scan per read. The hot-path check is a **generation
@@ -664,7 +735,13 @@ instant the gate reads "current":
 - the **remote / undo-recovery** readers (`get_remote_thread`, `get_undo_recovery`)
   and **any future** `RefManager` read method: identical — they read through the
   same gate, and "gate current" means "all refs of all batches ≤ watermark
-  materialized," independent of which ref or shape was requested.
+  materialized," independent of which ref or shape was requested. And as of r9 a
+  *write* to either class is itself an oplog-committed batch
+  (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, §2.2 "Remote-thread
+  and undo-recovery writes are oplog-committed too"), so a batch that touches a
+  remote-thread or undo-recovery ref is materialized whole before the watermark
+  advances, exactly like a thread/marker batch — the watermark covers these classes
+  too, not just thread/marker/HEAD.
 
 A *per-ref* gate (Codex's other option) also fixes the flagged point read, but it
 would need **separate** reasoning to show the list readers are safe (a list touches
@@ -827,7 +904,14 @@ invariant once, from a mechanism that sits in the path every reader shares.**
   public `RefManager` read methods (point, list, remote, undo-recovery, and
   `resolve` — `refs_manager.rs:114`–`:327`) obtain ref data through **one internal
   `reconciled_load` primitive**, the sole code permitted to touch raw ref storage
-  (§2.2 "Where the rule hooks"). The reconciliation lives *inside* that primitive,
+  (§2.2 "Where the rule hooks"). **The reconciliation is non-vacuous for every one
+  of those classes:** as of r9 the remote-thread and undo-recovery writes carry
+  committed `OpRecord`s (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`,
+  `oplog_types.rs:16`) appended at the oplog-commit point — they are no longer
+  written directly (cid 3328869364) — so `get_remote_thread`/`list_remote_threads`/
+  `list_remotes`/`get_undo_recovery` reconcile against records that actually exist,
+  exactly like the thread/marker readers; no reader resolves a class whose tail is
+  empty by construction. The reconciliation lives *inside* that primitive,
   so every present reader — and any future `RefManager` read method, since raw
   storage is unreachable except through the primitive — reconciles automatically;
   the ~124 direct `repo.refs()` readers (and every `Repository` accessor, and the
@@ -1167,8 +1251,9 @@ struct Undo { batches: Vec<OpBatch>, head: Option<ChangeId> }
 impl AtomicMutation for Undo {
     type Output = UndoSummary;
     fn apply(&mut self, tx: &mut Tx) -> Result<StagedCommit<UndoSummary>> {
-        // savepoint sub-op: stage the recovery ref (temp file; published
-        // post-commit in phase 5, rewind = unlink the temp)
+        // savepoint sub-op: stage the recovery ref (temp file; its committed
+        // `UndoRecoveryUpdate` record (§2.2, r9) is the commit point, the ref is
+        // published post-commit in phase 5, rewind = unlink the temp)
         tx.enroll(SetUndoRecovery::new(self.head))?;
         for batch in &self.batches {
             // savepoint sub-op per batch: stage worktree rewrite + the
@@ -1311,6 +1396,18 @@ own; they become the executor's "stage refs" leg (§2.2 phase 3). The win is onl
 realized when a ref write is *combined* with an oplog append or an FS effect in
 one mutation (capture, undo) — which §5.1–5.3 cover.
 
+**Exception (closed in r9): the direct-write setters that bypass `update_refs`.**
+`set_remote_thread` (`refs_manager.rs:261`), `delete_remote_thread` (`:284`), and
+`set_undo_recovery` (`:242`) do **not** go through `update_refs`/`RefUpdate` — they
+take `lock_refs()` and `write_string`/`remove_file` the ref directly, with **no**
+oplog append (cid 3328869364). They were the last ref-write paths that published a
+committed-looking ref with no backing `OpRecord`, leaving `get_remote_thread`/
+`list_remote_threads`/`list_remotes`/`get_undo_recovery` reconciling against an empty
+tail. r9 folds them into the commit model: each appends its new `OpRecord`
+(`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, §2.2) as the phase-4
+commit point, then publishes the ref as a phase-5 materialization. After r9 there
+are **zero** ref-write paths exempt from oplog-as-sole-commit.
+
 ### 5.6 — Inventory summary
 
 | Site | File:line | Nests? | Eager leg? | Priority | What the primitive fixes |
@@ -1320,6 +1417,7 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
 | capture | `repository_snapshot.rs:52` | no | no | 3 | ref-moved-but-not-recorded window; ref publish becomes a post-commit materialized view |
 | op-id reserve | `operation_id.rs:115` | as sub-op | **yes** | 4 | eager-commit exemplar; stale `InFlight` on rollback |
 | ref writes | `refs_manager.rs:319` | n/a | no | — | already in-domain atomic; becomes the "stage refs" leg |
+| remote/undo refs | `refs_manager.rs:242`,`:261`,`:284` | n/a | no | — | were direct-write, no `OpRecord` (cid 3328869364); r9 routes through oplog-commit + new variants so reconciliation is non-vacuous |
 
 ---
 
@@ -1429,6 +1527,28 @@ one mutation (capture, undo) — which §5.1–5.3 cover.
     derived-on-load from a full scan), and whether to GC the index for very long
     histories (it grows with distinct transaction ids). The full-tail-scan
     fallback is the zero-new-state correctness floor if a sidecar is undesirable.
+- **O8 — New oplog record variants for remote-thread + undo-recovery (r9, cid
+  3328869364), and the additive format bump they imply.** Bringing
+  `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`
+  (`refs_manager.rs:261`/`:284`/`:242`) into the oplog-commit model (§2.2 "Remote-thread
+  and undo-recovery writes are oplog-committed too") adds three `OpRecord` variants —
+  `RemoteThreadUpdate`, `RemoteThreadDelete`, `UndoRecoveryUpdate` — appended at the
+  enum tail after `GitCheckpoint` (`oplog_types.rs:222-228`), per the
+  discriminant-stability rule (`:12-14`: rmp-serde encodes variants by index, so new
+  variants append at the tail and never reorder). The impl must: (a) add the three
+  variants + their `description()` arms (`oplog_types.rs:231`+); (b) route the three
+  setters through the phase-4 oplog-commit point + phase-5 publish, supplying the
+  oplog the same way the `RefReconciler` is injected (the `refs` crate has no `oplog`
+  dep, so the append is driven from the `repo`/`oplog` layer, not from inside
+  `RefManager`); (c) add replay/reconcile handling for the new variants in
+  `reconciled_load` and crash-replay (delete-record ⇒ drop from the reconciled list
+  set; update-record ⇒ set the point value). **Format implication:** this changes the
+  persisted oplog record set, so the oplog format is extended. Per the pre-1.0
+  no-backcompat stance this is a **straight additive** change — new tail variants,
+  **no migration shim** — so the impl must NOT over-engineer a versioned migration;
+  old on-disk logs simply never contain the new variants and continue to read.
+  This is a **format-stability-sensitive** change (new persisted record types) and
+  should be reviewed as such.
 
 ---
 
@@ -1474,6 +1594,13 @@ optimization on top of the read-side guarantee.
    per-call-site edits** and any future read method is covered automatically; add
    the one-line conformance check that the raw loaders have no caller but the
    primitive; the `Repository::open` eager pass is an optional optimization on top).
+   It also lands the three r9 `OpRecord` variants
+   (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, O8) and routes
+   `set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`
+   (`refs_manager.rs:261`/`:284`/`:242`) through the oplog-commit point + phase-5
+   publish, so no ref class is a direct-write exception and the ten-reader
+   reconciliation is non-vacuous (the additive oplog-format bump, no migration shim,
+   is part of this issue).
    Unit tests mirroring `refs_transactions.rs:341-377` (reverse-order
    rewind) + a panic-unwind test + a delayed-retry exact-once test (retry past the
    old window) + reconciliation tests on **all ten read methods** (a conformance
@@ -1553,6 +1680,17 @@ revision, only one migration is in flight, not five.
   against lock-free readers
   (`refs_head.rs:22-41`, `refs_manager.rs:129-135`) + temp→rename apply
   (`refs_transactions.rs:230`). §2.3 idempotency.
+- [x] **(2a) Every ref class has committed records (r9, cid 3328869364)** — §2.2
+  "Remote-thread and undo-recovery writes are oplog-committed too": the last
+  direct-write setters (`set_remote_thread` `:261`, `delete_remote_thread` `:284`,
+  `set_undo_recovery` `:242`) gain committed `OpRecord` variants
+  (`RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate`, appended at the
+  `OpRecord` tail after `GitCheckpoint`, `oplog_types.rs:16`,`:222-228`) and route
+  through the oplog-as-sole-commit path, so the all-ten reconciliation proof (§2.4)
+  is **non-vacuous** for the remote/undo classes too — no reader reconciles against
+  an empty tail, and replay materializes these refs from their records like any
+  thread/marker write. Additive oplog-format change, pre-1.0 no migration shim,
+  format-stability-sensitive (§6 O8).
 - [x] **(3) Nesting** — §3: enroll-into-outermost (savepoint) default, eager-
   commit exception **rule pinned** (§3.2), **type-level** compensator
   enforcement (§3.3: `SavepointMutation`/`EagerMutation` bound split on
