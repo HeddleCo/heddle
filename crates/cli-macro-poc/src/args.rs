@@ -17,6 +17,13 @@
 //! half. The `Cli` / `Commands` wiring below proves the args struct slots into
 //! a real subcommand tree — exactly the integration #205's `HeddleVerbArgs`
 //! passthrough must preserve.
+//!
+//! COMPLETE FAITHFUL MIRROR: this `InitArgs` reproduces every derive, every
+//! `#[command(...)]` attribute (incl. the `after_help` examples block), and
+//! every field with its `#[arg(...)]` attributes from the real
+//! `commands_args.rs:5-39` `InitArgs`. The spike uses this crate to prove the
+//! `HeddleVerbArgs` passthrough preserves clap behavior — including help text —
+//! so the after_help block is load-bearing, not decoration.
 
 use clap::{Args, Parser, Subcommand};
 
@@ -40,6 +47,12 @@ pub enum Commands {
 /// Arguments for the `init` command. Derives **`clap::Args`** — the reusable
 /// argument set the subcommand enum consumes — copied from the real `InitArgs`.
 #[derive(Clone, Debug, Args)]
+#[command(after_help = "\
+Examples:
+  heddle init                                  # initialize the current directory
+  heddle init my-project                       # initialize a subdirectory
+  heddle init --principal-name 'Ada Lovelace'  # set attribution at init time
+")]
 pub struct InitArgs {
     /// Directory to initialize (default: current directory).
     pub path: Option<std::path::PathBuf>,

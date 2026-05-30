@@ -33,7 +33,7 @@ sync by two PR-time gates rather than by construction:
 
 | Declaration | For `init` | Derives | Drives |
 |---|---|---|---|
-| Clap args struct | `InitArgs` — `crates/cli/src/cli/cli_args/commands_args.rs:12` | `clap::Parser` | parsing + `--help` |
+| Clap args struct | `InitArgs` — `crates/cli/src/cli/cli_args/commands_args.rs:12` | `clap::Args` | parsing + `--help` |
 | Real output struct | `InitOutput` — `crates/cli/src/cli/commands/init.rs:23` | `serde::Serialize` only | the actual `--output json` bytes |
 | Schema mirror | `InitSchema` — `crates/cli/src/cli/commands/schemas.rs` (`pub struct InitSchema`) | `schemars::JsonSchema` | `heddle schemas init` + drift checks |
 
@@ -97,7 +97,7 @@ table below; the assertions in `tests/measure.rs` are the contract checks.
 
 | metric | schemars | custom |
 |---|---|---|
-| pretty-printed schema bytes | 5954 | 4096 |
+| pretty-printed schema bytes | 5954 | 4218 |
 | top-level property keys | 18 | 17 |
 | covers all 13 documented sample keys | ✅ | ✅ |
 | phantom `verification` property (never on wire) | ❌ **present** (`writeOnly`, **required**) | ✅ absent |

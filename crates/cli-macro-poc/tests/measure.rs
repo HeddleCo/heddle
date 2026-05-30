@@ -16,11 +16,18 @@ use heddle_cli_macro_poc::{
 };
 use serde_json::Value;
 
-/// `output_kind` is "pinned" if the schema constrains it to a single value via
-/// `const` or a one-element `enum`.
+/// `output_kind` is "pinned" if the schema constrains it to EXACTLY ONE value —
+/// a `const`, or a single-element `enum`. A multi-element `enum` (e.g.
+/// `["init","status"]`) does NOT pin the discriminator: it still admits more
+/// than one value, so it must not satisfy this predicate.
 fn output_kind_pinned(schema: &Value) -> bool {
-    schema.pointer("/properties/output_kind/const").is_some()
-        || schema.pointer("/properties/output_kind/enum").is_some()
+    if schema.pointer("/properties/output_kind/const").is_some() {
+        return true;
+    }
+    schema
+        .pointer("/properties/output_kind/enum")
+        .and_then(Value::as_array)
+        .is_some_and(|variants| variants.len() == 1)
 }
 
 fn serialized_example_keys() -> BTreeSet<String> {

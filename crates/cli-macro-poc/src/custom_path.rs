@@ -22,7 +22,12 @@ struct Field {
     ty: Value,
     /// `///`-equivalent narrative.
     description: &'static str,
-    /// Whether the field is required (non-`Option`).
+    /// Whether the field's KEY is always present in the wire bytes — i.e.
+    /// JSON-Schema-`required`. This is NOT "is the field non-`Option`": the real
+    /// `InitOutput` Option fields carry NO `skip_serializing_if`, so serde always
+    /// emits the key (`null` when unset). heddle's JSON discipline treats an
+    /// always-present key as required, so every serialized field here is
+    /// `required: true` and nullability is expressed in `ty` instead.
     required: bool,
 }
 
@@ -120,19 +125,23 @@ fn fields() -> Vec<Field> {
             name: "principal_source",
             ty: nullable_string_ty(),
             description: "Where the principal identity was sourced from, if any.",
-            required: false,
+            // Option, but no `skip_serializing_if` on the real field → key always
+            // emitted (null when unset) → required.
+            required: true,
         },
         Field {
             name: "principal",
             ty: principal_ty(),
             description: "Resolved principal identity, if one was configured.",
-            required: false,
+            // Option, but no `skip_serializing_if` → key always emitted → required.
+            required: true,
         },
         Field {
             name: "principal_recommended_action",
             ty: nullable_string_ty(),
             description: "Suggested follow-up to configure a principal, if unset.",
-            required: false,
+            // Option, but no `skip_serializing_if` → key always emitted → required.
+            required: true,
         },
         Field {
             name: "side_effects",
@@ -150,13 +159,15 @@ fn fields() -> Vec<Field> {
             name: "next_action",
             ty: nullable_string_ty(),
             description: "Primary verification-guided next command.",
-            required: false,
+            // Option, but no `skip_serializing_if` → key always emitted → required.
+            required: true,
         },
         Field {
             name: "recommended_action",
             ty: nullable_string_ty(),
             description: "Alias of `next_action` for the shared recovery-advice contract.",
-            required: false,
+            // Option, but no `skip_serializing_if` → key always emitted → required.
+            required: true,
         },
     ]
 }
