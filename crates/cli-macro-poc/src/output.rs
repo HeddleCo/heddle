@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Output shape for the spike — a FAITHFUL mirror of the real init output.
+//! Output shape for the spike — an ILLUSTRATIVE, DIRECTIONAL measurement aid.
 //!
-//! This PoC mirrors the real `crates/cli/src/cli/commands/init.rs` `InitOutput`
-//! arg/output types so the measured drift/discriminator numbers reflect the
-//! production surface, not a simplification. The real `InitOutput` is a private
-//! (`struct`, not `pub`) type in `crates/cli`, so this throwaway crate cannot
-//! import it; instead it replicates the EXACT field set, field types, and
-//! serde/schemars attributes — including the `#[serde(skip_serializing)]
-//! #[serde(rename = "verification")]` `trust` field (`init.rs:41-44`) that the
-//! hand-written `InitSchema` mirror (`schemas.rs:842`) deliberately drops.
+//! This is NOT a byte-faithful mirror of the real init output. It models the
+//! shape of `crates/cli/src/cli/commands/init.rs` `InitOutput` closely enough to
+//! demonstrate the schemars-vs-custom-emitter tradeoff *directionally* — which
+//! path pins the discriminator, which re-exposes a skip-serialized field — but
+//! exact field values, byte counts, and the `RepositoryVerificationState`
+//! stand-in are approximate/representative, not production-exact. heddle#205
+//! derives the real macro from `init.rs` directly, not from this throwaway crate.
+//!
+//! The load-bearing structural facts it DOES reproduce: the field is an
+//! `#[serde(skip_serializing)] #[serde(rename = "verification")]` `trust` field
+//! (mirroring `init.rs:41-44`) that the hand-written `InitSchema` mirror
+//! (`schemas.rs:842`) deliberately drops.
 //!
 //! That `trust` field is the load-bearing difference. The mirror omits it by
 //! hand, so today there is no schema/serialize drift. But heddle#205's plan is
@@ -87,12 +91,17 @@ pub struct InitPrincipalOutput {
     pub email: String,
 }
 
-/// Stand-in for the real `pub(crate)` `RepositoryVerificationState`
+/// Minimal stand-in for the real `pub(crate)` `RepositoryVerificationState`
 /// (`crates/cli/src/cli/commands/git_overlay_health.rs:51`). The real type is
-/// large and crate-private; only its presence as a `skip_serializing` /
-/// `rename = "verification"` field on `InitOutput` matters for the drift this
-/// PoC measures, so a minimal `Serialize + JsonSchema` stand-in is faithful for
-/// that purpose.
+/// large, crate-private, and has nested schema-bearing types; this stand-in is
+/// deliberately small. Only its PRESENCE as a `skip_serializing` /
+/// `rename = "verification"` field drives the drift fact this PoC asserts (a
+/// phantom `verification` property appears in the schemars schema but never on
+/// the wire). The schema *byte counts* printed by `print_measurement_table` are
+/// therefore APPROXIMATE/directional — the real type would expand larger under
+/// the naive derive, so the schemars-vs-custom size gap is understated here, not
+/// overstated. The measured contract is the directional inequality and the
+/// property presence/absence, not the exact byte magnitudes.
 #[allow(dead_code)]
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RepositoryVerificationState {
@@ -101,16 +110,18 @@ pub struct RepositoryVerificationState {
     pub summary: String,
 }
 
-/// Canonical TYPED value the real `heddle init` emits.
+/// Illustrative TYPED value used to drive the example-carry-through measurement.
 ///
-/// NOTE: this is the real emitted shape, not the curated `docs/json-schemas.md`
-/// sample. The real `InitOutput` always serializes `principal_source`,
-/// `principal`, and `principal_recommended_action` (no `skip_serializing_if`),
-/// so they appear here as `null`/value even though the documented sample omits
-/// them. `tests/measure.rs` asserts this typed-example-vs-doc-sample divergence
-/// — it is itself evidence for the spike's "typed examples beat hand-curated
-/// prose samples" point, and flags that heddle#205 must rebaseline the prose
-/// sample. The `trust` block is built but never serialized (`skip_serializing`).
+/// This is a REPRESENTATIVE value, not the canonical `init` output and not a
+/// rebaseline source for heddle#205 (individual field values — e.g. the
+/// principal status string — are illustrative; the real command computes them).
+/// The DIRECTIONAL point it demonstrates: a typed example tracks the struct, so
+/// it always carries the always-serialized fields (`principal_source`,
+/// `principal`, `principal_recommended_action` — no `skip_serializing_if`) that
+/// a hand-curated prose sample can drift away from. `tests/measure.rs` asserts
+/// that *presence* divergence, not the literal values — evidence for the spike's
+/// "typed examples beat hand-curated prose samples" point. The `trust` block is
+/// built but never serialized (`skip_serializing`).
 pub fn init_example() -> InitOutput {
     InitOutput {
         output_kind: "init",
