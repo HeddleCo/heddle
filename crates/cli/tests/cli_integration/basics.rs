@@ -1066,12 +1066,12 @@ fn test_cli_diff_head_to_worktree_in_plain_git_repo_uses_git_overlay_baseline() 
         "diff HEAD in a plain Git repo must be observe-only"
     );
     assert!(
-        parsed["changes"]
+        parsed["changes"]["modified"]
             .as_array()
             .unwrap()
             .iter()
             .any(|change| change["path"] == "tracked.txt"),
-        "diff from HEAD should reflect tracked modification: {parsed}"
+        "diff from HEAD should reflect tracked modification under the modified category: {parsed}"
     );
 }
 
