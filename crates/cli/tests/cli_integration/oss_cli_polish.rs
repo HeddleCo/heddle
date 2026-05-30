@@ -8262,8 +8262,8 @@ fn isolated_thread_status_and_diff_report_untracked_only_work() {
         "isolated diff must share the same worktree observation as status: {diff}"
     );
     assert_eq!(
-        diff["changes"][0]["path"], "docs/new.md",
-        "isolated diff should list the new file without needing a tracked-file edit: {diff}"
+        diff["changes"]["added"][0]["path"], "docs/new.md",
+        "isolated diff should list the new file under the added category without needing a tracked-file edit: {diff}"
     );
 }
 
