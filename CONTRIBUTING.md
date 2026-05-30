@@ -327,67 +327,24 @@ need, the PR should explain why the alternative isn't viable.
 
 The `Coverage` job in
 [`.github/workflows/rust-tests.yml`](.github/workflows/rust-tests.yml)
-runs `cargo llvm-cov` over the OSS feature set and then enforces a
-per-crate line-coverage floor on the resulting `lcov.info`. The gate
-is the `Coverage gate (objects / repo / refs)` step; it shells out to
-the `audit-coverage` subcommand of `heddle-devtools`:
+runs `cargo llvm-cov` over the OSS feature set and enforces a
+**per-crate line-coverage floor** on the resulting `lcov.info` via the
+`audit-coverage` subcommand of `heddle-devtools`. The step exits
+non-zero — failing the build before the Codecov upload, on both `main`
+pushes and PRs — when any gated crate drops below its floor.
+[`codecov.yml`](codecov.yml) mirrors the same floors as per-crate
+status checks so the PR comment matches CI enforcement.
 
-```bash
-cargo run -p heddle-devtools --quiet -- \
-  audit-coverage lcov.info \
-    --gate objects=80 \
-    --gate repo=78.66 \
-    --gate refs=80
-```
+The full per-crate floor/goal table, the rationale for the
+floor-vs-goal split, the reason `grpc` isn't gated, the local-run
+recipe, and **how to request a target bump** all live in the canonical
+policy doc:
 
-`audit-coverage` parses `SF:` / `LF:` / `LH:` records in the lcov
-output, aggregates by workspace crate (matched on
-`crates/<name>/...`), and exits non-zero when any gated crate is
-below its threshold. The CI step fails *before* the Codecov upload,
-so the build stays red whether or not Codecov is reachable.
+> [`docs/contributor-guide/coverage.md`](docs/contributor-guide/coverage.md)
 
-### Current thresholds
-
-| Crate | Threshold | Goal |
-|---|---|---|
-| `objects` | 80% | 80% |
-| `repo` | 78.66% | 80% (ratchet) |
-| `refs` | 80% | 80% |
-
-The `repo` threshold is a ratchet floor: current main is **78.66%**,
-so the gate locks that as the no-regression line. Raise the number
-in this table, in
-[`.github/workflows/rust-tests.yml`](.github/workflows/rust-tests.yml),
-and in [`codecov.yml`](codecov.yml) in the same PR that adds the
-tests that push `repo`'s coverage to ≥80%.
-
-### Codecov mirror
-
-[`codecov.yml`](codecov.yml) declares `coverage.status.project.<crate>`
-entries with the same `target:` values as the CI gate, so Codecov's
-PR comment reports the same numbers the build enforces. Codecov is
-not the gate of record — the in-CI step is — but the two must agree.
-When you change a threshold, change it in all three places
-(`rust-tests.yml`, `codecov.yml`, this table).
-
-### Running the gate locally
-
-```bash
-cargo llvm-cov --locked --workspace \
-  --features git-overlay,native,semantic,zstd \
-  --lcov --output-path lcov.info
-
-cargo run -p heddle-devtools --quiet -- \
-  audit-coverage lcov.info \
-    --gate objects=80 --gate repo=78.66 --gate refs=80
-```
-
-A green local run means a green CI run, modulo lcov's normal
-sensitivity to feature flags. The `--features` list above mirrors
-the one the CI `Coverage` job uses (see
-[`.github/workflows/rust-tests.yml`](.github/workflows/rust-tests.yml)
-— the comment above the `Generate coverage report` step explains why
-this set, not `--all-features`).
+When you change a floor, change it in all three places it appears
+(`rust-tests.yml`, `codecov.yml`, and that doc's table) in the same PR
+that adds the tests justifying the change.
 
 ## Getting unstuck
 

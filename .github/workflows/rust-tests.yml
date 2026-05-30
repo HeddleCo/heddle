@@ -663,15 +663,32 @@ jobs:
 
       # Per-crate coverage gate. Keep the --gate thresholds in sync with
       # codecov.yml's `coverage.status.project.<crate>.target` and with
-      # the table in CONTRIBUTING.md. See heddle-devtools::run_audit_coverage
-      # for the parsing and reporting logic.
-      - name: Coverage gate (objects / repo / refs)
+      # the table in docs/contributor-guide/coverage.md. See
+      # heddle-devtools::run_audit_coverage for the parsing and reporting
+      # logic. This step fails the job BEFORE the Codecov upload, so a
+      # per-crate regression turns the build red on both `main` pushes and
+      # PRs regardless of whether Codecov is reachable.
+      #
+      # `crates/grpc` is intentionally not gated: its surface is tonic-
+      # generated code emitted to OUT_DIR, which never lands under
+      # `crates/grpc/` in lcov, so audit-coverage would `bail` with
+      # "no lines counted". Its 60% goal is tracked in the doc only.
+      - name: Coverage gate (per crate)
         run: |
           cargo run -p heddle-devtools --quiet -- \
             audit-coverage lcov.info \
               --gate objects=80 \
-              --gate repo=78.66 \
-              --gate refs=80
+              --gate refs=80 \
+              --gate repo=82 \
+              --gate cli=75 \
+              --gate mount=68 \
+              --gate semantic=78 \
+              --gate oplog=78 \
+              --gate proto=60 \
+              --gate state_review=76 \
+              --gate crypto=64 \
+              --gate daemon=80 \
+              --gate ingest=80
 
       - name: Upload coverage to Codecov
         if: ${{ env.HAVE_CODECOV_TOKEN == 'true' }}
