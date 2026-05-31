@@ -856,6 +856,49 @@ mod chokepoint {
         assert_eq!(plain.get_thread(&ThreadName::new("feature")).unwrap(), None);
     }
 
+    /// heddle#354 r10 (cid 3330632443): when phase-5 publish fails AFTER the
+    /// record durably committed, the operation has already linearized — the arm
+    /// LOGS the swallowed publish error (operator visibility) and still returns
+    /// `Ok(())`. Returning `Err` here would falsely report failure for a
+    /// successful op; reconciliation materializes the committed effect later.
+    #[test]
+    #[cfg(unix)]
+    fn publish_failure_after_commit_logs_and_returns_ok() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_t, dir) = manager();
+        let refs = RefManager::new(&dir);
+        refs.init().unwrap();
+
+        // Read-only threads dir makes the phase-5 temp write fail, while the
+        // phase-3 read of the still-missing ref (which needs no write perm)
+        // succeeds — isolating a publish-after-commit failure.
+        let threads_dir = refs.threads_dir();
+        let original = std::fs::metadata(&threads_dir).unwrap().permissions().mode();
+        std::fs::set_permissions(&threads_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let lock = refs.lock_refs().unwrap();
+        let updates = vec![RefUpdate::Thread {
+            name: ThreadName::new("feature"),
+            expected: RefExpectation::Missing,
+            new: Some(ChangeId::generate()),
+        }];
+        // commit() reports the record durably committed (committed_for_reconcile);
+        // publish then fails. Behavior must be Ok(()), not Err.
+        let result = refs.validate_commit_publish(&updates, &lock, || Ok(true));
+
+        std::fs::set_permissions(&threads_dir, std::fs::Permissions::from_mode(original)).unwrap();
+        drop(lock);
+
+        assert!(
+            result.is_ok(),
+            "a publish failure after a durable commit linearized the op: must return Ok(()), not Err"
+        );
+        // The ref was NOT published (publish failed) — reconciliation will
+        // materialize the committed effect on the next read.
+        assert_eq!(refs.get_thread(&ThreadName::new("feature")).unwrap(), None);
+    }
+
     /// The remote-thread raw read/write/delete + list paths and `pack_refs`,
     /// `resolve`, and the `RefBackend`/`CoreRefBackend` trait delegations.
     #[test]

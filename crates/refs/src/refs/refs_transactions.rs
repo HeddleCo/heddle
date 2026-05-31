@@ -118,8 +118,9 @@ impl RefManager {
     /// that will not publish (no validation-failure leak). `commit` (phase 4)
     /// then runs, immediately followed by the phase-5 publish. If phase 5
     /// fails after a ref-carrying record was durably committed, the operation
-    /// has already linearized; return success and let reconciliation materialize
-    /// the committed effect on the next read.
+    /// has already linearized; log the swallowed publish error (warn) for
+    /// operator visibility, then return success and let reconciliation
+    /// materialize the committed effect on the next read.
     pub(super) fn validate_commit_publish(
         &self,
         updates: &[RefUpdate],
@@ -130,7 +131,14 @@ impl RefManager {
         let committed_for_reconcile = commit()?;
         match self.publish_ref_plans(plans, lock) {
             Ok(()) => Ok(()),
-            Err(_err) if committed_for_reconcile => Ok(()),
+            Err(err) if committed_for_reconcile => {
+                tracing::warn!(
+                    error = %err,
+                    "ref publish failed after the record committed; the operation \
+                     linearized and reconciliation will materialize it on the next read"
+                );
+                Ok(())
+            }
             Err(err) => Err(err),
         }
     }
