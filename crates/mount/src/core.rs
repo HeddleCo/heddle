@@ -73,7 +73,7 @@ use objects::{
     store::{AnyStore, ObjectStore},
 };
 use oplog::OpLog;
-use refs::{Head, RefManager};
+use refs::RefManager;
 use repo::Repository;
 use tracing::{debug, instrument, warn};
 
@@ -3958,46 +3958,26 @@ impl ContentAddressedMount {
         state = state.with_confidence(self.inner.repo.config().defaults.confidence);
         self.store().put_state(&state).map_err(MountError::Store)?;
 
-        // Step 3: advance the thread's HEAD. We respect whatever
-        // head the repo currently has (Attached vs Detached): mounts
-        // are always created against a thread name, so we walk the
-        // attached path, but be defensive and fall back to setting
-        // the named thread directly if HEAD is detached.
+        // Step 3 + 3a unified: advance the served thread and record the
+        // `OpRecord::Snapshot` **record-first** through the write chokepoint
+        // (heddle#354 r8). The pre-r8 path published the thread ref FIRST and
+        // recorded SECOND — the same cross-crate publish-first snapshot class as
+        // `repository_snapshot.rs`. Because the reconciler folds a `Snapshot`
+        // record authoritatively, a late snapshot record carrying a stale thread
+        // value could clobber a newer concurrent write. Routing through
+        // `commit_snapshot_atomic` makes the record commit before the publish,
+        // so the newest committed record is the newest write.
+        //
+        // A mount always serves one specific thread, so the snapshot always
+        // advances `self.inner.thread` — HEAD being attached elsewhere (or
+        // detached) does not change which ref the mount advances.
         let change_id = state.change_id;
         let prev_head_change_id = state_snapshot.change_id;
-        match self.inner.repo.head_ref().map_err(MountError::Store)? {
-            Head::Attached { thread } if thread == self.inner.thread => {
-                self.inner
-                    .repo
-                    .refs()
-                    .set_thread(&thread, &change_id)
-                    .map_err(MountError::Store)?;
-            }
-            _ => {
-                // Always update the named thread, even if HEAD is
-                // pointed elsewhere. The mount serves a specific
-                // thread; that's what should advance.
-                self.inner
-                    .repo
-                    .refs()
-                    .set_thread(&objects::object::ThreadName::from(self.inner.thread.as_str()), &change_id)
-                    .map_err(MountError::Store)?;
-            }
-        }
-
-        // Step 3a: record the snapshot in the oplog. Mirrors what
-        // `repository_snapshot.rs` does after a worktree-walk
-        // capture and what `cmd_snapshot` relies on for `heddle
-        // undo` / `heddle log`. We pass `prev_head` so the entry
-        // captures the parent-state edge for traversal.
-        if let Err(err) = repo::snapshot_metadata::record_snapshot_in_oplog(
-            &self.inner.repo,
-            &change_id,
-            Some(&prev_head_change_id),
-            Some(&self.inner.thread),
-        ) {
-            warn!(?err, "oplog record_snapshot from mount capture failed");
-        }
+        let served_thread = objects::object::ThreadName::from(self.inner.thread.as_str());
+        self.inner
+            .repo
+            .commit_snapshot_atomic(&change_id, Some(prev_head_change_id), Some(&served_thread))
+            .map_err(MountError::Store)?;
 
         // Step 3b: refresh the active thread record's metadata
         // (changed paths, heavy-impact paths, freshness, etc).

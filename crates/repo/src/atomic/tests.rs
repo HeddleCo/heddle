@@ -1523,6 +1523,284 @@ fn detached_snapshot_after_fork_reconcile_yields_snapshot_head() {
     );
 }
 
+// ---- Snapshot record-first close-the-class (heddle#354 r8) ----
+//
+// The snapshot path now commits its `OpRecord::Snapshot` BEFORE publishing the
+// paired ref (record-first via `commit_snapshot_atomic` →
+// `commit_and_publish`). These tests pin the two properties that makes that
+// safe: (1) a detached snapshot's HEAD is reconstructable from its record after
+// a phase-4-committed / phase-5-unpublished crash, and (2) the reconciler's
+// authoritative `Snapshot` fold yields the NEWEST committed value, so a snapshot
+// can never clobber a newer concurrent write. (The cross-crate conformance that
+// FORCES the production reorder lives in `heddle-devtools`
+// `check-snapshot-atomicity`.)
+
+/// Detached snapshot is record-first as of r8: a crash between the record
+/// commit (phase 4) and the HEAD publish (phase 5) must be recovered by
+/// reconstructing `Head::Detached{new_state}` from the committed record. Before
+/// r8 the detached `Snapshot` fold deferred to canonical (`HeadFold::Canonical`),
+/// which — now that the publish is record-first — would LOSE the snapshot's HEAD
+/// move. This test fails under the pre-r8 `Canonical` arm and passes under the
+/// `Republish` arm.
+#[test]
+fn detached_snapshot_record_first_crash_recovery_reconstructs_head() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .unwrap();
+
+    // Phase 4 only: a detached snapshot committed its record, the phase-5 HEAD
+    // publish never ran (canonical HEAD is still `Attached{main}`).
+    let snap = ChangeId::generate();
+    repo.oplog()
+        .record_snapshot(&snap, Some(&base), None, Some(&scope))
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: snap },
+        "a record-first detached snapshot's HEAD must be reconstructed after a phase-5 crash"
+    );
+}
+
+/// Snapshot-vs-newer-write race (attached): A's snapshot commits its record at a
+/// LOWER oplog id than B's later thread write. Because the snapshot is now
+/// record-first, the snapshot's record reflects when A actually committed, so
+/// B's newer record (higher id) wins under the reconciler's id-ordered
+/// authoritative fold — the stale snapshot value must NOT clobber it. (A
+/// publish-first snapshot would have recorded AFTER B, inverting the ids and
+/// resurrecting the stale snapshot.)
+#[test]
+fn snapshot_does_not_clobber_newer_committed_thread_write_attached() {
+    let (temp, repo) = test_repo();
+    let scope = repo.op_scope();
+    let s0 = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("feature"), &s0)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("feature"),
+        })
+        .unwrap();
+
+    // A's snapshot (record-first) advances `feature` = sA at the lower id.
+    let sa = ChangeId::generate();
+    repo.oplog()
+        .record_snapshot(&sa, Some(&s0), Some("feature"), Some(&scope))
+        .unwrap();
+    // B advances `feature` = sB and records (record-first) at the higher id.
+    let sb = ChangeId::generate();
+    repo.oplog()
+        .record_thread_create("feature", &sb, None, Some(&scope))
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().get_thread(&ThreadName::new("feature")).unwrap(),
+        Some(sb),
+        "the newest committed write (B) must win; the older snapshot (A) must not clobber it"
+    );
+
+    // The reconcile materialized the canonical too: a raw, reconciler-free
+    // handle reads the newest committed value.
+    let raw = RefManager::new(repo.heddle_dir());
+    assert_eq!(
+        raw.get_thread(&ThreadName::new("feature")).unwrap(),
+        Some(sb),
+        "the newest committed value must be materialized to the canonical ref"
+    );
+    drop(temp);
+}
+
+/// Snapshot-vs-newer-write race (detached): a later detached snapshot (higher
+/// id) wins over an earlier one. Both are record-first `Republish(Detached)`
+/// movers, so the id-ordered fold takes the newest.
+#[test]
+fn snapshot_does_not_clobber_newer_committed_write_detached() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    repo.refs()
+        .write_head(&Head::Detached { state: base })
+        .unwrap();
+
+    let sa = ChangeId::generate();
+    repo.oplog()
+        .record_snapshot(&sa, Some(&base), None, Some(&scope))
+        .unwrap();
+    let sb = ChangeId::generate();
+    repo.oplog()
+        .record_snapshot(&sb, Some(&sa), None, Some(&scope))
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: sb },
+        "the newest committed detached snapshot must win"
+    );
+}
+
+/// `commit_snapshot_atomic` (attached): records an `OpRecord::Snapshot` AND
+/// publishes the thread ref through the record-first chokepoint, atomically.
+#[test]
+fn commit_snapshot_atomic_attached_records_and_publishes() {
+    let (_t, repo) = test_repo();
+    let s0 = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("feature"), &s0)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("feature"),
+        })
+        .unwrap();
+
+    let sa = ChangeId::generate();
+    repo.commit_snapshot_atomic(&sa, Some(s0), Some(&ThreadName::new("feature")))
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().get_thread(&ThreadName::new("feature")).unwrap(),
+        Some(sa),
+        "the snapshot must publish the thread ref"
+    );
+    let has_snap = repo.oplog().recent(16).unwrap().into_iter().any(|e| {
+        matches!(
+            &e.operation,
+            OpRecord::Snapshot { new_state, thread: Some(t), .. } if *new_state == sa && t == "feature"
+        )
+    });
+    assert!(
+        has_snap,
+        "commit_snapshot_atomic must append the paired OpRecord::Snapshot"
+    );
+}
+
+/// `commit_snapshot_atomic` (detached): records an `OpRecord::Snapshot` with no
+/// thread AND republishes a detached HEAD, atomically.
+#[test]
+fn commit_snapshot_atomic_detached_records_and_publishes() {
+    let (_t, repo) = test_repo();
+    let base = ChangeId::generate();
+    repo.refs()
+        .write_head(&Head::Detached { state: base })
+        .unwrap();
+
+    let sb = ChangeId::generate();
+    repo.commit_snapshot_atomic(&sb, Some(base), None).unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: sb },
+        "the detached snapshot must publish HEAD = Detached{{new_state}}"
+    );
+    let has_snap = repo.oplog().recent(16).unwrap().into_iter().any(|e| {
+        matches!(
+            &e.operation,
+            OpRecord::Snapshot { new_state, thread: None, .. } if *new_state == sb
+        )
+    });
+    assert!(
+        has_snap,
+        "commit_snapshot_atomic must append the paired detached OpRecord::Snapshot"
+    );
+}
+
+/// Cross-class recovery atomicity (heddle#354 r8, cid 3330183592): a named fork
+/// committed (phase 4) a new thread `topic` AND HEAD = Attached(topic), but the
+/// phase-5 publish never ran. A LOCAL-class read (HEAD) must recover BOTH HEAD
+/// and the paired thread under one lock, before the Local watermark advances —
+/// so HEAD = Attached(topic) is never observable with `topic` missing. Without
+/// the cross-class fix the Local reconcile republishes only HEAD and advances
+/// its watermark while `topic` is still unmaterialized, which a raw read of
+/// `topic` exposes.
+#[test]
+fn named_fork_recovery_materializes_head_and_paired_thread() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .unwrap();
+
+    // Phase 4 only: the fork's record is committed (thread `topic` + HEAD =
+    // Attached(topic)); no phase-5 publish ran.
+    let forked = ChangeId::generate();
+    repo.oplog()
+        .record_fork(&base, &forked, Some("topic"), None, Some(&scope))
+        .unwrap();
+
+    // A LOCAL-class read recovers HEAD.
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Attached {
+            thread: ThreadName::new("topic")
+        },
+        "named-fork recovery must republish HEAD = Attached(topic)"
+    );
+
+    // RAW read (no reconciler): the paired thread must already be on disk after
+    // the Local reconcile — materialized atomically with the recovered HEAD, not
+    // deferred to a later Shared read.
+    let raw = RefManager::new(repo.heddle_dir());
+    assert_eq!(
+        raw.get_thread(&ThreadName::new("topic")).unwrap(),
+        Some(forked),
+        "the paired thread must be materialized atomically with the recovered HEAD"
+    );
+}
+
+/// Cross-class recovery atomicity — the collapse analogue: a collapse that
+/// attaches HEAD to `topic` must, on a LOCAL-class read, recover HEAD AND the
+/// paired thread together.
+#[test]
+fn collapse_recovery_materializes_head_and_paired_thread() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .unwrap();
+
+    // Phase 4 only: a collapse into thread `topic` (HEAD = Attached(topic)).
+    let result = ChangeId::generate();
+    repo.oplog()
+        .record_collapse(&[base], &result, Some("topic"), Some(&scope))
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Attached {
+            thread: ThreadName::new("topic")
+        },
+        "collapse recovery must republish HEAD = Attached(topic)"
+    );
+
+    let raw = RefManager::new(repo.heddle_dir());
+    assert_eq!(
+        raw.get_thread(&ThreadName::new("topic")).unwrap(),
+        Some(result),
+        "the paired thread must be materialized atomically with the recovered HEAD"
+    );
+}
+
 // ---- Eager one-mechanism guard (heddle#354 r4) ----
 
 /// An eager mutation that OVERRIDES `rewind` (sets `rewound`) and whose

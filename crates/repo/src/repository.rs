@@ -78,7 +78,7 @@ use objects::{
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
-use refs::{Head, RefBackend, RefManager, RefUpdate};
+use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 
 use crate::git_worktree_status::GitWorktreeEntryState;
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
@@ -1712,7 +1712,57 @@ impl Repository {
             })
             .collect::<Result<Vec<_>>>()?;
         let scope = self.op_scope();
-        self.refs.commit_and_publish(&encoded, ref_updates, Some(&scope))
+        let result = self.refs.commit_and_publish(&encoded, ref_updates, Some(&scope));
+        // The committer appended through a fresh `OpLog` handle (the `refs`→`repo`
+        // seam), so this repository's own cached oplog handle is now stale.
+        // Refresh it so a same-process read via `self.oplog()` observes the
+        // just-committed records — the long-lived mount/daemon handle would
+        // otherwise miss them (heddle#354 r8). Best-effort: a refresh failure
+        // only costs a stale cache until the next disk reload, never correctness.
+        let _ = self.oplog.refresh_cache();
+        result
+    }
+
+    /// Atomically commit a snapshot's `OpRecord::Snapshot` and its paired ref
+    /// publish through the write chokepoint, **record-first** (heddle#354 r8).
+    ///
+    /// The pre-r8 snapshot path published the ref FIRST (`refs.set_thread` /
+    /// `refs.write_head`) and recorded SECOND. Because the reconciler folds a
+    /// `Snapshot` record authoritatively (newest committed record wins), a late
+    /// snapshot record carrying a stale thread value could clobber a newer
+    /// concurrent write that had already recorded. Routing every snapshot ref
+    /// write through this single chokepoint makes the record the unit of
+    /// ordering: the newest committed record IS the newest write, so the
+    /// authoritative fold can no longer resurrect a stale snapshot.
+    ///
+    /// `thread = Some(name)` advances that thread (HEAD stays attached);
+    /// `thread = None` republishes a detached HEAD. The detached case is now
+    /// record-first too, so a phase-4-committed / phase-5-unpublished crash is
+    /// recovered by the reconciler reconstructing `Head::Detached{new_state}`
+    /// (see `atomic::reconciler`'s detached-`Snapshot` arm).
+    pub fn commit_snapshot_atomic(
+        &self,
+        new_state: &ChangeId,
+        prev_head: Option<ChangeId>,
+        thread: Option<&ThreadName>,
+    ) -> Result<()> {
+        let record = OpRecord::Snapshot {
+            new_state: *new_state,
+            prev_head,
+            thread: thread.map(|name| name.to_string()),
+        };
+        let ref_update = match thread {
+            Some(name) => RefUpdate::Thread {
+                name: name.clone(),
+                expected: RefExpectation::Any,
+                new: Some(*new_state),
+            },
+            None => RefUpdate::Head {
+                expected: RefExpectation::Any,
+                new: Head::Detached { state: *new_state },
+            },
+        };
+        self.commit_and_publish(vec![record], &[ref_update])
     }
 
     pub fn repo_config(&self) -> &RepoConfig {

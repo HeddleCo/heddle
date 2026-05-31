@@ -79,3 +79,27 @@ jobs:
 
       - name: Assert no `get_tree(...)?.unwrap_or_default()` regressions
         run: bash scripts/check-no-silent-default-tree-load.sh
+
+  no-publish-first-snapshot:
+    name: no cross-crate publish-first snapshot (heddle#354 r8)
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Workspace-wide `syn` AST walker (heddle-devtools subcommand): a
+      # snapshot must record its `OpRecord::Snapshot` before publishing
+      # the paired ref. Closes the cross-crate coverage hole the
+      # refs-internal r7 conformance left.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: asserter-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Build asserter binary
+        run: cargo build -p heddle-devtools --quiet
+
+      - name: Assert no cross-crate publish-first snapshot regressions
+        run: bash scripts/check-snapshot-atomicity.sh

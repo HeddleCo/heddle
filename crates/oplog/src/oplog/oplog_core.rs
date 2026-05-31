@@ -124,6 +124,19 @@ impl OpLog {
         Ok(guard)
     }
 
+    /// Force this handle's in-memory cache to reload from disk, so it observes
+    /// commits written through a DIFFERENT `OpLog` handle of the same file —
+    /// e.g. the refs write chokepoint's committer, which appends via its own
+    /// fresh handle (the `refs`→`repo` seam). Without this, a long-lived handle
+    /// (the mount/daemon's `repo.oplog()`) keeps a stale cache after a
+    /// `commit_and_publish` and a same-process `recent()` would miss the just
+    /// committed batch (heddle#354 r8). Same staleness class as the
+    /// cross-process case the reconciler already refreshes for (cid 3329711888).
+    pub fn refresh_cache(&self) -> Result<()> {
+        let _guard = self.refresh_cached()?;
+        Ok(())
+    }
+
     /// Get the last operation entry.
     pub fn last(&self) -> Result<Option<OpEntry>> {
         let guard = self.load_cached()?;

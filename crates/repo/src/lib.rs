@@ -78,7 +78,7 @@ pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{
     ABSENT_CONFIDENCE_DISPLAY, ThreadMetadataRefresh, classify_impact_categories,
-    compute_heavy_impact_paths, format_confidence, record_snapshot_in_oplog,
+    compute_heavy_impact_paths, format_confidence,
     refresh_active_thread_metadata, refresh_thread_freshness, summarize_confidence,
     summarize_verification, update_thread_state_from_state,
 };
