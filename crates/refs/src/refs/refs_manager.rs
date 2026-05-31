@@ -27,6 +27,18 @@ use crate::fs_atomic::sync_directory;
 /// `head_id` so the first read after a reconciler is injected always reconciles.
 const WATERMARK_UNSET: u64 = u64::MAX;
 
+/// Per-worktree persisted **local**-class watermark (HEAD + undo-recovery),
+/// stored beside the per-checkout `HEAD`. Local refs are worktree-private, so
+/// each checkout tracks its own.
+const RECONCILE_WATERMARK_LOCAL: &str = "RECONCILE_WATERMARK_LOCAL";
+
+/// Persisted **shared**-class watermark (thread / marker / remote-thread),
+/// stored in the SHARED Heddle dir so every sibling worktree advances and seeds
+/// from the SAME value (heddle#354 r6, cid 3329711893). A per-worktree shared
+/// watermark let a checkout opened with a lagging file re-fold a shared create a
+/// sibling had already processed/published — resurrecting it cross-worktree.
+const RECONCILE_WATERMARK_SHARED: &str = "RECONCILE_WATERMARK_SHARED";
+
 /// Well-known refspec that resolves the heddle-internal pre-undo recovery
 /// pointer (so `heddle goto .undo-recovery` works). It is UNSHADOWABLE by any
 /// user marker or thread, in BOTH directions (heddle#305 r3):
@@ -259,66 +271,100 @@ impl RefManager {
     /// When no watermark has been persisted yet (a fresh repo, or a repo from
     /// before this version), seed conservatively at the current generation and
     /// write the file, so the next process has a real last-clean point.
+    ///
+    /// The two classes seed from SEPARATE files: the local watermark from the
+    /// per-worktree file, the shared watermark from the shared-dir file (cid
+    /// 3329711893). A sibling worktree that already advanced the shared
+    /// watermark publishes it to the shared file, so this checkout seeds at that
+    /// shared last-clean point and never re-folds a shared create the sibling
+    /// already processed.
     pub fn init_reconcile_watermark(&self) -> Result<()> {
         if self.reconciler.is_none() {
             return Ok(());
         }
-        match self.read_persisted_reconcile_watermark()? {
-            Some((local, shared)) => {
-                self.cached_local_generation.store(local, Ordering::Release);
-                self.cached_shared_generation
-                    .store(shared, Ordering::Release);
-            }
-            None => {
-                let lock = self.lock_refs()?;
-                self.persist_reconcile_watermark(&lock)?;
-            }
+        let (local, shared) = self.read_persisted_reconcile_watermark()?;
+        if let Some(local) = local {
+            self.cached_local_generation.store(local, Ordering::Release);
+        }
+        if let Some(shared) = shared {
+            self.cached_shared_generation
+                .store(shared, Ordering::Release);
+        }
+        // Any class with no persisted last-clean point yet (fresh repo, or a
+        // repo from before this version) keeps the current-generation seed from
+        // `with_reconciler` and gets written, so the next process has a real
+        // last-clean point.
+        if local.is_none() || shared.is_none() {
+            let lock = self.lock_refs()?;
+            self.persist_reconcile_watermark(&lock)?;
         }
         Ok(())
     }
 
-    /// Path of the per-worktree persisted reconcile watermark, beside `HEAD`
-    /// and `UNDO_RECOVERY` (the local watermark is per-`op_scope`; the shared
-    /// watermark is persisted per-worktree too — a conservative lower bound just
-    /// means more folding, never a missed record).
-    fn reconcile_watermark_path(&self) -> PathBuf {
+    /// Per-worktree LOCAL watermark file (HEAD + undo-recovery), beside the
+    /// per-checkout `HEAD` and `UNDO_RECOVERY` — local refs are worktree-private.
+    fn reconcile_watermark_local_path(&self) -> PathBuf {
         self.head_path()
             .parent()
-            .map(|dir| dir.join("RECONCILE_WATERMARK"))
-            .unwrap_or_else(|| self.root.join("RECONCILE_WATERMARK"))
+            .map(|dir| dir.join(RECONCILE_WATERMARK_LOCAL))
+            .unwrap_or_else(|| self.root.join(RECONCILE_WATERMARK_LOCAL))
     }
 
-    /// Read the persisted `(local, shared)` watermark, or `None` when absent /
-    /// unparseable (treated as "no last-clean point yet").
-    fn read_persisted_reconcile_watermark(&self) -> Result<Option<(u64, u64)>> {
-        let Some(contents) = self.read_optional_string(&self.reconcile_watermark_path())? else {
+    /// SHARED watermark file (thread / marker / remote-thread), in the SHARED
+    /// Heddle dir (`self.root`, objectstore-pointed). Every sibling worktree
+    /// resolves the SAME path, so a shared create one worktree advances past is
+    /// never re-folded by another (cid 3329711893). Mirrors `refs/`, which lives
+    /// under the same shared root and whose `LOCK` already serializes writers.
+    fn reconcile_watermark_shared_path(&self) -> PathBuf {
+        self.root.join(RECONCILE_WATERMARK_SHARED)
+    }
+
+    /// Read the persisted `(local, shared)` watermark from their two scope
+    /// files; each component is `None` when absent / unparseable ("no last-clean
+    /// point yet" for that class).
+    fn read_persisted_reconcile_watermark(&self) -> Result<(Option<u64>, Option<u64>)> {
+        let local = self.read_single_watermark(&self.reconcile_watermark_local_path())?;
+        let shared = self.read_single_watermark(&self.reconcile_watermark_shared_path())?;
+        Ok((local, shared))
+    }
+
+    /// Read a single `u64` watermark from `path`, or `None` when absent /
+    /// unparseable.
+    fn read_single_watermark(&self, path: &Path) -> Result<Option<u64>> {
+        let Some(contents) = self.read_optional_string(path)? else {
             return Ok(None);
         };
-        let mut parts = contents.split_whitespace();
-        match (
-            parts.next().and_then(|s| s.parse::<u64>().ok()),
-            parts.next().and_then(|s| s.parse::<u64>().ok()),
-        ) {
-            (Some(local), Some(shared)) => Ok(Some((local, shared))),
-            _ => Ok(None),
-        }
+        Ok(contents
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<u64>().ok()))
     }
 
-    /// Persist the current in-memory `(local, shared)` watermark under the held
-    /// refs lock. Called after a read advances a watermark, and at open when no
-    /// file exists yet.
+    /// Persist the current in-memory local + shared watermarks, each to its own
+    /// scope file, under the held refs lock. Called after a read advances a
+    /// watermark, and at open when a file does not exist yet.
     fn persist_reconcile_watermark(&self, _lock: &RefsLock) -> Result<()> {
         let local = self.cached_local_generation.load(Ordering::Acquire);
         let shared = self.cached_shared_generation.load(Ordering::Acquire);
-        // A still-unset watermark (no reconciler, or seeded UNSET on a header
-        // error) is not a meaningful last-clean point — skip it.
-        if local == WATERMARK_UNSET || shared == WATERMARK_UNSET {
+        self.persist_watermark_file(&self.reconcile_watermark_local_path(), local)?;
+        self.persist_watermark_file(&self.reconcile_watermark_shared_path(), shared)?;
+        Ok(())
+    }
+
+    /// Write `value` to a watermark file ADVANCE-ONLY: never below what is
+    /// already on disk. The shared file is written by concurrent sibling
+    /// worktrees (serialized by the shared refs `LOCK`); a checkout whose
+    /// in-memory shared watermark lags a sibling's published value must not
+    /// regress the file when it persists after a local-only read (cid
+    /// 3329711893). A still-`UNSET` watermark (no reconciler, or seeded UNSET on
+    /// a header error) is not a meaningful last-clean point — skip it.
+    fn persist_watermark_file(&self, path: &Path, value: u64) -> Result<()> {
+        if value == WATERMARK_UNSET {
             return Ok(());
         }
-        self.write_string(
-            &self.reconcile_watermark_path(),
-            &format!("{} {}\n", local, shared),
-        )
+        let on_disk = self.read_single_watermark(path)?.unwrap_or(0);
+        let next = value.max(on_disk);
+        self.write_string(path, &format!("{next}\n"))
     }
 
     /// Lazily re-publish (phase-5 materialization) the refs a reconcile found

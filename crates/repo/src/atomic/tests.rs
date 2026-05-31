@@ -1716,6 +1716,85 @@ fn persisted_watermark_does_not_resurrect_unrecorded_delete() {
     );
 }
 
+/// Finding 3 (cid 3329711893) — the SHARED-class reconcile watermark is shared
+/// across sibling worktrees, not per-worktree. Worktree B persists a shared
+/// watermark at a low generation; worktree A then records+publishes a shared
+/// (thread) create and a read advances the SHARED watermark past it; the create
+/// is deleted via an unrecorded path. When B reopens, it seeds its shared
+/// watermark from the SHARED file (which A advanced), so it does NOT re-fold and
+/// resurrect the create — even though B's own per-worktree state is behind. With
+/// a per-worktree shared watermark (the bug), B would seed below the create and
+/// resurrect it.
+#[test]
+fn shared_watermark_is_cross_worktree_no_resurrect() {
+    let main_holder = TempDir::new().unwrap();
+    let main = Repository::init_default(main_holder.path()).unwrap();
+    let shared_heddle = main.heddle_dir().to_path_buf();
+
+    // Two sibling worktrees pointing at the same shared store.
+    let wt_holder = TempDir::new().unwrap();
+    let wt_a = wt_holder.path().join("a");
+    let wt_b = wt_holder.path().join("b");
+    Repository::init_worktree(&wt_a, &shared_heddle).unwrap();
+    Repository::init_worktree(&wt_b, &shared_heddle).unwrap();
+
+    // B opens early and reads a shared ref, persisting its shared watermark at
+    // the current (pre-create) generation — the "behind" per-worktree state.
+    {
+        let repo_b = Repository::open(&wt_b).unwrap();
+        let _ = repo_b.refs().get_thread(&ThreadName::new("not-yet")).unwrap();
+    }
+
+    // A records + publishes a shared-ref create, then a read advances + persists
+    // the SHARED watermark past it.
+    let created = ChangeId::generate();
+    {
+        let repo_a = Repository::open(&wt_a).unwrap();
+        repo_a
+            .commit_and_publish(
+                vec![OpRecord::ThreadCreateV2 {
+                    name: "shared-thread".to_string(),
+                    state: created,
+                    manager_snapshot: None,
+                }],
+                &[RefUpdate::Thread {
+                    name: ThreadName::new("shared-thread"),
+                    expected: RefExpectation::Missing,
+                    new: Some(created),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            repo_a
+                .refs()
+                .get_thread(&ThreadName::new("shared-thread"))
+                .unwrap(),
+            Some(created)
+        );
+        // Delete via the unrecorded path (no oplog record): canonical gone, the
+        // create record still sits in the tail.
+        repo_a
+            .refs()
+            .delete_thread(&ThreadName::new("shared-thread"))
+            .unwrap();
+    }
+
+    // B reopens: its per-worktree state is behind the create, but it seeds the
+    // SHARED watermark from the shared file A advanced, so the read does not
+    // re-fold the stale create. A per-worktree shared watermark would resurrect
+    // it here.
+    let repo_b = Repository::open(&wt_b).unwrap();
+    assert_eq!(
+        repo_b
+            .refs()
+            .get_thread(&ThreadName::new("shared-thread"))
+            .unwrap(),
+        None,
+        "a shared create another worktree processed past the shared watermark \
+         must not be re-folded/resurrected by a sibling worktree"
+    );
+}
+
 /// Class A (cid 3329631079) — a `Missing`/CAS expectation is validated against
 /// the RECONCILED state, not a stale on-disk read. A committed-but-unpublished
 /// Fork record creates "explore" (canonical still absent); a later
@@ -1966,5 +2045,35 @@ fn corrupt_oplog_header_fails_reconciled_read_loudly() {
     assert!(
         result.is_err(),
         "a corrupt oplog header must fail the reconciled read, not default to generation 0"
+    );
+}
+
+/// Finding 2 (cid 3329711891) — a right-magic / unsupported-version oplog must
+/// FAIL a reconciled read, not yield a silently-trusted generation that lets
+/// the `tip == watermark` fast path skip the full parser (which would reject
+/// the version). Sibling of Finding D extended from corrupt-magic to
+/// wrong-version.
+#[test]
+fn unsupported_oplog_version_fails_reconciled_read_loudly() {
+    let (_t, repo) = test_repo();
+    let base = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
+
+    // Bump the version field (bytes 8..12) to a forward-incompatible value on
+    // an EXISTING file, leaving the magic intact.
+    let oplog_path = repo.heddle_dir().join("oplog").join("oplog.bin");
+    let mut bytes = std::fs::read(&oplog_path).unwrap();
+    assert!(bytes.len() >= 12, "oplog file must have magic + version");
+    // Any value distinct from the current on-disk version is unsupported.
+    let current = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    bytes[8..12].copy_from_slice(&current.wrapping_add(1).to_le_bytes());
+    std::fs::write(&oplog_path, &bytes).unwrap();
+
+    let result = repo.refs().get_thread(&ThreadName::new("main"));
+    assert!(
+        result.is_err(),
+        "an unsupported oplog version must fail the reconciled read, not be silently trusted via the fast path"
     );
 }

@@ -305,6 +305,95 @@ fn record_batch_exactly_once_dedups_past_any_window() {
     assert!(other.is_some(), "a different transaction id must commit");
 }
 
+/// Finding 1 (heddle#354 r6, cid 3329711888) — the dedup-hit output
+/// reconstruction reads a FRESH oplog, not a long-lived handle's stale cache.
+/// Process A commits tx T; process B (a separate handle whose cache was
+/// populated *before* T) replays T: the commit dedups to `None` AND
+/// `committed_batch_records` recovers the batch A actually committed via a
+/// refresh — not an empty stale-cache miss.
+#[test]
+fn committed_batch_records_refreshes_for_cross_process_dedup_hit() {
+    let temp = TempDir::new().unwrap();
+    let heddle_dir = temp.path().join(".heddle");
+    std::fs::create_dir_all(&heddle_dir).unwrap();
+
+    // Two independent handles on the same on-disk oplog — two "processes",
+    // each with its own in-memory cache.
+    let proc_a = OpLog::new_unattributed(&heddle_dir);
+    let proc_b = OpLog::new_unattributed(&heddle_dir);
+    proc_a.init().unwrap();
+
+    // B reads first, populating its cache with the pre-T (empty) state.
+    let before = proc_b.recent(10).unwrap();
+    assert!(
+        before.iter().all(|e| !matches!(
+            &e.operation,
+            OpRecord::TransactionCommit { transaction_id, .. } if transaction_id == "tx-shared"
+        )),
+        "precondition: B's cache must not yet contain the shared tx"
+    );
+
+    // A commits the transaction with a distinguishable Snapshot payload.
+    let committed_state = ChangeId::generate();
+    let appended = proc_a
+        .record_batch_exactly_once(
+            vec![
+                OpRecord::Snapshot {
+                    new_state: committed_state,
+                    prev_head: None,
+                    thread: None,
+                },
+                OpRecord::TransactionCommit {
+                    transaction_id: "tx-shared".into(),
+                    op_count: 1,
+                },
+            ],
+            Some("lane"),
+            "tx-shared",
+        )
+        .unwrap();
+    assert!(appended.is_some(), "A's commit must append");
+
+    // B replays the same transaction id: a cross-process dedup hit. B's
+    // regenerated Snapshot id differs from A's, so a stale reconstruction
+    // would diverge even if it found anything.
+    let replay = proc_b
+        .record_batch_exactly_once(
+            vec![
+                OpRecord::Snapshot {
+                    new_state: ChangeId::generate(),
+                    prev_head: None,
+                    thread: None,
+                },
+                OpRecord::TransactionCommit {
+                    transaction_id: "tx-shared".into(),
+                    op_count: 1,
+                },
+            ],
+            Some("lane"),
+            "tx-shared",
+        )
+        .unwrap();
+    assert!(replay.is_none(), "cross-process replay must dedup to None");
+
+    // The reconstruction must read the FRESH oplog and recover A's record,
+    // even though B's cache predates A's commit. Pre-fix (stale `load_cached`)
+    // this returned an empty vec.
+    let prior = proc_b.committed_batch_records("tx-shared").unwrap();
+    let recovered: Vec<_> = prior
+        .iter()
+        .filter_map(|op| match op {
+            OpRecord::Snapshot { new_state, .. } => Some(*new_state),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        recovered,
+        vec![committed_state],
+        "B reconstructs the batch A committed (via refresh), not a stale miss"
+    );
+}
+
 /// rmp-serde round-trips every `OpRecord` variant — the on-disk encoding
 /// the oplog actually uses. Asserts the variant survives encode→decode
 /// unchanged (catches a reordered/inserted discriminant) and that

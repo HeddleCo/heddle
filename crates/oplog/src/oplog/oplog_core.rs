@@ -113,6 +113,17 @@ impl OpLog {
         Ok(guard)
     }
 
+    /// Force a fresh disk load into the cache, returning the refreshed guard.
+    /// Read paths that must observe a CROSS-PROCESS commit use this instead of
+    /// [`load_cached`]: a long-lived handle's already-populated cache is a stale
+    /// view that would miss a batch another process wrote (heddle#354 r6, cid
+    /// 3329711888).
+    fn refresh_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLog>>> {
+        let mut guard = self.cached.lock().unwrap();
+        *guard = Some(self.load_fresh()?);
+        Ok(guard)
+    }
+
     /// Get the last operation entry.
     pub fn last(&self) -> Result<Option<OpEntry>> {
         let guard = self.load_cached()?;
@@ -404,7 +415,13 @@ impl OpLog {
     /// empty vec if no batch committed that id, or if the batch held only its
     /// marker.
     pub fn committed_batch_records(&self, transaction_id: &str) -> Result<Vec<OpRecord>> {
-        let guard = self.load_cached()?;
+        // Refresh, don't trust the cache: this is only ever reached on a dedup
+        // hit, which may be CROSS-PROCESS — another process committed the batch
+        // while this long-lived handle's cache stayed stale. A cached read would
+        // fail to find the batch and reconstruct a miss (heddle#354 r6, cid
+        // 3329711888). The committed batch is durable and append-only, so a
+        // lock-free fresh read observes it consistently.
+        let guard = self.refresh_cached()?;
         let packed = guard.as_ref().unwrap();
 
         let Some(commit_entry) = packed.entries.iter().find(|entry| {
