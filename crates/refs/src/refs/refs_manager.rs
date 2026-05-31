@@ -857,6 +857,27 @@ impl RefManager {
         )
     }
 
+    /// Remove the heddle-internal pre-undo recovery pointer, returning the repo
+    /// to the "no undo has run" state. Routes through the same
+    /// [`write_chokepoint`](Self::write_chokepoint) as the setter so it cannot
+    /// bypass reconciliation, and is a no-op when no pointer exists. Used as the
+    /// inverse of [`set_undo_recovery`](Self::set_undo_recovery) when the atomic
+    /// `undo` transaction rewinds and the pointer had no prior value to restore
+    /// (the first-ever undo): the pointer is written with no oplog record of its
+    /// own, so deleting the canonical file is a complete clear.
+    pub fn clear_undo_recovery(&self) -> Result<()> {
+        self.write_chokepoint(|lock| self.clear_undo_recovery_locked(lock))
+    }
+
+    fn clear_undo_recovery_locked(&self, _lock: &RefsLock) -> Result<()> {
+        let path = self.undo_recovery_path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(HeddleError::Io(e)),
+        }
+    }
+
     /// Read the heddle-internal pre-undo recovery pointer, if one has been
     /// recorded. Returns `None` when no undo has run in this repo.
     pub fn get_undo_recovery(&self) -> Result<Option<ChangeId>> {

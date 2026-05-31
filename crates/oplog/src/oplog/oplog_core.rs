@@ -19,6 +19,16 @@ use super::{
     packed_oplog::PackedOpLog,
 };
 
+/// A `TransactionCommit` marker carries no user-facing operation: it is the
+/// atomic commit sentinel, not a forward op. The undo/redo eligibility scans
+/// ignore it so a record-less transaction (e.g. an `undo`/`redo` whose commit
+/// batch holds only the marker) is never itself selected as an undoable or
+/// redoable unit. A batch with at least one *non-marker* entry (the common
+/// `[op, …, TransactionCommit]` shape) still qualifies on that entry.
+fn is_transaction_commit(op: &OpRecord) -> bool {
+    matches!(op, OpRecord::TransactionCommit { .. })
+}
+
 /// Operation log for tracking operations and enabling undo.
 pub struct OpLog {
     pub(crate) root: PathBuf,
@@ -164,7 +174,12 @@ impl OpLog {
     pub fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         self.collect_batches_scoped(
             count,
-            |batch| batch.entries.iter().any(|e| !e.undone),
+            |batch| {
+                batch
+                    .entries
+                    .iter()
+                    .any(|e| !e.undone && !is_transaction_commit(&e.operation))
+            },
             scope,
         )
     }
@@ -174,7 +189,16 @@ impl OpLog {
     }
 
     pub fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
-        self.collect_batches_scoped(count, |batch| batch.entries.iter().any(|e| e.undone), scope)
+        self.collect_batches_scoped(
+            count,
+            |batch| {
+                batch
+                    .entries
+                    .iter()
+                    .any(|e| e.undone && !is_transaction_commit(&e.operation))
+            },
+            scope,
+        )
     }
 
     /// Mark a batch as undone.

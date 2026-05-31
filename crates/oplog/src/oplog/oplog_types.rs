@@ -537,6 +537,24 @@ pub struct OpBatch {
     pub entries: Vec<OpEntry>,
 }
 
+impl OpBatch {
+    /// True iff every entry is a [`OpRecord::TransactionCommit`] marker — the
+    /// commit sentinel of an atomic transaction that staged only direct,
+    /// already-durable effects and so contributed no domain record of its own
+    /// (e.g. `undo`/`redo`, which navigate existing states and append no new
+    /// record). Such a batch carries nothing to undo, redo, or surface in
+    /// operation history; the undo/redo eligibility scans and the `undo --list`
+    /// view filter it out so a record-less transaction's sentinel never
+    /// pollutes the user-facing log.
+    pub fn is_transaction_marker_only(&self) -> bool {
+        !self.entries.is_empty()
+            && self
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+    }
+}
+
 #[cfg(test)]
 mod verb_catalog_tests {
     use super::*;

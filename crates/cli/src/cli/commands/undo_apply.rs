@@ -15,30 +15,18 @@ use gix::{
         transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
     },
 };
+use objects::error::{HeddleError, Result as HeddleResult};
 use objects::object::{ChangeId, MarkerName, ThreadName};
 use oplog::{OpBatch, OpEntry, OpRecord};
 use refs::Head;
 use repo::{
     CommitGraphIndex, Repository, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadState, refresh_thread_freshness,
+    atomic::{AtomicMutation, SavepointMutation, StagedCommit, Tx},
 };
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
 use crate::bridge::git_core::{open_repo as open_git_repo, set_reference};
-
-pub(super) fn apply_undo_batch(repo: &Repository, batch: &OpBatch) -> Result<()> {
-    for entry in batch.entries.iter().rev() {
-        apply_undo_entry(repo, entry)?;
-    }
-    Ok(())
-}
-
-pub(super) fn apply_redo_batch(repo: &Repository, batch: &OpBatch) -> Result<()> {
-    for entry in &batch.entries {
-        apply_redo_entry(repo, entry)?;
-    }
-    Ok(())
-}
 
 pub(super) fn preflight_undo_batches(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
     if !batches_have_git_checkpoint(batches) {
@@ -946,4 +934,595 @@ fn remove_thread_manager_record(repo: &Repository, thread_name: &str) -> Result<
         manager.delete(&thread.id)?;
     }
     Ok(())
+}
+
+// ---- Atomic undo/redo (heddle#355 impl-b) ----
+//
+// `undo`/`redo` are migrated to the `AtomicMutation` primitive so the whole
+// operation is all-or-nothing: a failure anywhere mid-apply rewinds every
+// already-applied step back to the exact pre-operation state instead of
+// leaving the repo half-rewound (the spike §5.1 hazard — batch N fails after
+// batches `0..N` were applied AND marked undone, with no rollback).
+//
+// SHAPE. `undo`/`redo` perform direct, immediately-visible, **idempotent**
+// canonical mutations (ref writes, `goto` worktree material, thread-record and
+// git-mirror state, and the in-place `mark_batch_undone` flag flip) and append
+// NO new domain oplog record — they navigate states that already exist. So:
+//   * Each sub-op stages its effect and registers its inverse via the granular
+//     `Tx::on_rewind` ledger (the inverse of "undo entry E" is "redo entry E",
+//     and vice-versa; both are absolute SET operations, so the inverse restores
+//     the pre-step state regardless of how far a failed step got).
+//   * The parent NESTS the sub-ops via `Tx::enroll` (savepoint enrollment) —
+//     the recovery-ref child then one child per batch — so a child that stages
+//     then fails rewinds the child AND unwinds the parent through the shared
+//     ledger. This is the nesting path the migration exists to validate.
+//   * The commit point is the executor's lone `TransactionCommit` marker over
+//     an EMPTY domain batch (`StagedCommit::pure`). `OpBatch::is_transaction_
+//     marker_only` keeps that record-less commit sentinel out of the undo/redo
+//     eligibility scans and the `undo --list` view.
+//
+// TWO VALIDATION NOTES (see the PR description) — neither blocks the migration,
+// both are properties of mapping a self-mutating, immediately-visible op onto
+// the primitive:
+//   1. IDEMPOTENCY KEY. `undo`/`redo` have no unique content identity (they
+//      revisit existing states), so a key derived from "operation identity"
+//      (batch ids + head) COLLIDES on the legitimate `undo → redo → undo`
+//      toggle, and the primitive's dedup-then-`rewind_all` on a hit would
+//      silently REVERT the second undo. The key is therefore derived from the
+//      oplog GENERATION (`head_id`) at command start — unique per committed
+//      transaction (every undo/redo appends a marker that bumps the
+//      generation), so the dedup branch is never taken. The crash-retry dedup
+//      the trait optimizes for is both unreachable (a committed undo marks its
+//      batches undone, so a retry re-derives a different batch set) and
+//      unnecessary (re-applying an undo is idempotent) for this op.
+//   2. SAVEPOINT SEMANTICS. The children use the savepoint ENROLLMENT mechanism
+//      (`enroll` + `on_rewind`) for its apply+ledger-rewind shape, but their
+//      effects are direct canonical writes (visible immediately), not the
+//      invisible-until-commit staging `SavepointMutation` describes. This adds
+//      FAILURE atomicity (rewind), not concurrent-reader isolation — matching
+//      the pre-migration concurrency semantics, where undo already published
+//      refs batch-by-batch.
+//
+// EXACTNESS SCOPE. The rewind restores the exact pre-operation state for `undo`
+// of any batch count and for single-batch `redo` (the `-n 1` default). A
+// MULTI-batch `redo -n N>1` replays batches newest-first with absolute `goto`s
+// (pre-existing forward behavior this migration preserves), so the per-entry
+// inverses do not compose back to the exact pre-redo head — a mid-redo fault
+// there rewinds to a consistent intermediate state, not the precise pre-redo
+// tip. Still strictly safer than the pre-migration path, which had no rollback
+// at all. Fixing it would mean reordering redo replay (a forward-behavior
+// change) — out of scope for the atomicity migration.
+
+/// Convert an `anyhow` error raised by an undo/redo apply helper into the
+/// `HeddleError` the primitive's `Result` requires. The structured
+/// `RecoveryAdvice` refusals are produced by the command-level preflights
+/// (which run BEFORE `execute`), so a wrapped message here only ever surfaces a
+/// genuinely-unexpected mid-apply failure — one the preflights could not
+/// foresee — whose rewind has already restored the pre-operation state.
+fn apply_error(err: anyhow::Error) -> HeddleError {
+    HeddleError::Conflict(format!("{err:#}"))
+}
+
+/// Build the stable-per-transaction idempotency key. Derived from the oplog
+/// `generation` (read at command start) rather than the batch contents — see
+/// the "IDEMPOTENCY KEY" note above for why a content-derived key is unsafe for
+/// a self-mutating op.
+pub(super) fn undo_redo_transaction_id(
+    action: &str,
+    scope: &str,
+    generation: u64,
+    batches: &[OpBatch],
+) -> String {
+    let ids: Vec<String> = batches.iter().map(|batch| batch.id.to_string()).collect();
+    format!("{action}:{scope}:gen{generation}:[{}]", ids.join(","))
+}
+
+/// Savepoint child: preserve the pre-undo HEAD into the heddle-internal
+/// recovery pointer (the heddle#305 `ORIG_HEAD`-style ref), registering its
+/// restore as the inverse so an outer failure puts the prior pointer back
+/// (or clears it, on the first-ever undo).
+struct StageUndoRecovery {
+    head: Option<ChangeId>,
+}
+
+impl AtomicMutation for StageUndoRecovery {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        // Enrolled children never reach the commit point; only the root's id is
+        // used. A constant is sufficient and never minted fresh.
+        "undo:stage-recovery".to_string()
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
+        let Some(state) = self.head else {
+            return Ok(StagedCommit::pure(()));
+        };
+        let repo = tx.repo();
+        // Reconciled read of the prior pointer so the inverse restores exactly
+        // what was there (never a raw-ref bypass).
+        let prior = repo.refs().get_undo_recovery()?;
+        tx.on_rewind(move || match prior {
+            Some(prior) => repo.refs().set_undo_recovery(&prior),
+            None => repo.refs().clear_undo_recovery(),
+        });
+        repo.refs().set_undo_recovery(&state)?;
+        Ok(StagedCommit::pure(()))
+    }
+}
+
+impl SavepointMutation for StageUndoRecovery {}
+
+/// Savepoint child: undo one batch. Each entry's inverse (`apply_redo_entry`)
+/// is registered on the shared ledger BEFORE its `apply_undo_entry` runs, so a
+/// mid-batch failure rewinds exactly the entries already touched; the
+/// `mark_batch_undone` flip is paired with its `mark_batch_redone` inverse.
+struct ApplyUndoBatch {
+    batch: OpBatch,
+    /// Test seam: when `Some(n)`, fail immediately after undoing `n` entries,
+    /// to exercise the mid-batch rewind path. Always `None` in production.
+    #[cfg(test)]
+    fail_after_entries: Option<usize>,
+}
+
+impl ApplyUndoBatch {
+    fn new(batch: OpBatch) -> Self {
+        Self {
+            batch,
+            #[cfg(test)]
+            fail_after_entries: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn failing_after(batch: OpBatch, entries: usize) -> Self {
+        Self {
+            batch,
+            fail_after_entries: Some(entries),
+        }
+    }
+}
+
+impl AtomicMutation for ApplyUndoBatch {
+    type Output = OpBatch;
+
+    fn transaction_id(&self) -> String {
+        format!("undo:batch:{}", self.batch.id)
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<OpBatch>> {
+        let repo = tx.repo();
+        for (applied, entry) in self.batch.entries.iter().rev().enumerate() {
+            let redo_entry = entry.clone();
+            tx.on_rewind(move || apply_redo_entry(repo, &redo_entry).map_err(apply_error));
+            apply_undo_entry(repo, entry).map_err(apply_error)?;
+            #[cfg(test)]
+            if self.fail_after_entries == Some(applied + 1) {
+                return Err(HeddleError::Conflict(
+                    "injected mid-undo fault".to_string(),
+                ));
+            }
+            #[cfg(not(test))]
+            let _ = applied;
+        }
+        let batch_for_redo = self.batch.clone();
+        tx.on_rewind(move || repo.oplog().mark_batch_redone(&batch_for_redo).map(|_| ()));
+        let updated = repo.oplog().mark_batch_undone(&self.batch)?;
+        Ok(StagedCommit::pure(updated))
+    }
+}
+
+impl SavepointMutation for ApplyUndoBatch {}
+
+/// Savepoint child: redo one batch — the mirror of [`ApplyUndoBatch`]. Entries
+/// replay in forward order; each inverse is `apply_undo_entry`, and the
+/// `mark_batch_redone` flip pairs with `mark_batch_undone`.
+struct ApplyRedoBatch {
+    batch: OpBatch,
+    #[cfg(test)]
+    fail_after_entries: Option<usize>,
+}
+
+impl ApplyRedoBatch {
+    fn new(batch: OpBatch) -> Self {
+        Self {
+            batch,
+            #[cfg(test)]
+            fail_after_entries: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn failing_after(batch: OpBatch, entries: usize) -> Self {
+        Self {
+            batch,
+            fail_after_entries: Some(entries),
+        }
+    }
+}
+
+impl AtomicMutation for ApplyRedoBatch {
+    type Output = OpBatch;
+
+    fn transaction_id(&self) -> String {
+        format!("redo:batch:{}", self.batch.id)
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<OpBatch>> {
+        let repo = tx.repo();
+        for (applied, entry) in self.batch.entries.iter().enumerate() {
+            let undo_entry = entry.clone();
+            tx.on_rewind(move || apply_undo_entry(repo, &undo_entry).map_err(apply_error));
+            apply_redo_entry(repo, entry).map_err(apply_error)?;
+            #[cfg(test)]
+            if self.fail_after_entries == Some(applied + 1) {
+                return Err(HeddleError::Conflict(
+                    "injected mid-redo fault".to_string(),
+                ));
+            }
+            #[cfg(not(test))]
+            let _ = applied;
+        }
+        let batch_for_undo = self.batch.clone();
+        tx.on_rewind(move || repo.oplog().mark_batch_undone(&batch_for_undo).map(|_| ()));
+        let updated = repo.oplog().mark_batch_redone(&self.batch)?;
+        Ok(StagedCommit::pure(updated))
+    }
+}
+
+impl SavepointMutation for ApplyRedoBatch {}
+
+/// Root composite for `heddle undo`: stage the recovery pointer, then nest one
+/// [`ApplyUndoBatch`] per batch. Returns the updated (undone) batches for the
+/// command's output. Appends no domain record — the executor's commit marker
+/// is the sole commit point.
+pub(super) struct UndoOp {
+    batches: Vec<OpBatch>,
+    recovery_head: Option<ChangeId>,
+    transaction_id: String,
+}
+
+impl UndoOp {
+    pub(super) fn new(
+        batches: Vec<OpBatch>,
+        recovery_head: Option<ChangeId>,
+        transaction_id: String,
+    ) -> Self {
+        Self {
+            batches,
+            recovery_head,
+            transaction_id,
+        }
+    }
+}
+
+impl AtomicMutation for UndoOp {
+    type Output = Vec<OpBatch>;
+
+    fn transaction_id(&self) -> String {
+        self.transaction_id.clone()
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<Vec<OpBatch>>> {
+        tx.enroll(StageUndoRecovery {
+            head: self.recovery_head,
+        })?;
+        let mut updated = Vec::with_capacity(self.batches.len());
+        for batch in &self.batches {
+            let staged = tx.enroll(ApplyUndoBatch::new(batch.clone()))?;
+            updated.push(staged.output);
+        }
+        Ok(StagedCommit::pure(updated))
+    }
+}
+
+/// Root composite for `heddle redo`: nest one [`ApplyRedoBatch`] per batch. No
+/// recovery child (redo restores the pre-undo state the recovery pointer was
+/// captured against).
+pub(super) struct RedoOp {
+    batches: Vec<OpBatch>,
+    transaction_id: String,
+}
+
+impl RedoOp {
+    pub(super) fn new(batches: Vec<OpBatch>, transaction_id: String) -> Self {
+        Self {
+            batches,
+            transaction_id,
+        }
+    }
+}
+
+impl AtomicMutation for RedoOp {
+    type Output = Vec<OpBatch>;
+
+    fn transaction_id(&self) -> String {
+        self.transaction_id.clone()
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<Vec<OpBatch>>> {
+        let mut updated = Vec::with_capacity(self.batches.len());
+        for batch in &self.batches {
+            let staged = tx.enroll(ApplyRedoBatch::new(batch.clone()))?;
+            updated.push(staged.output);
+        }
+        Ok(StagedCommit::pure(updated))
+    }
+}
+
+#[cfg(test)]
+mod atomic_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Init a repo and create two snapshots on `main`. The worktree at `s2`
+    /// holds both `a.txt` (from `s1`) and `b.txt` (from `s2`); `s1` holds only
+    /// `a.txt`; the initial state holds neither. Returns the repo + temp dir +
+    /// the two states.
+    fn repo_with_two_snapshots() -> (TempDir, Repository, ChangeId, ChangeId) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+        let s1 = repo.snapshot(Some("s1".to_string()), None).unwrap();
+        std::fs::write(temp.path().join("b.txt"), "b").unwrap();
+        let s2 = repo.snapshot(Some("s2".to_string()), None).unwrap();
+        (temp, repo, s1.change_id, s2.change_id)
+    }
+
+    #[test]
+    fn apply_error_wraps_anyhow_into_conflict() {
+        let wrapped = apply_error(anyhow!("boom"));
+        assert!(
+            matches!(&wrapped, HeddleError::Conflict(message) if message.contains("boom")),
+            "an apply-helper error must surface as a HeddleError::Conflict carrying the message"
+        );
+    }
+
+    fn commit_marker_count(repo: &Repository) -> usize {
+        repo.oplog()
+            .recent(256)
+            .unwrap()
+            .iter()
+            .filter(|entry| matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+            .count()
+    }
+
+    fn main_thread(repo: &Repository) -> Option<ChangeId> {
+        repo.refs().get_thread(&ThreadName::new("main")).unwrap()
+    }
+
+    /// Test-only parent mirroring [`UndoOp`] but injecting a fault: the LAST
+    /// enrolled batch child fails after undoing `fail_after` of its entries.
+    /// Reuses the REAL [`StageUndoRecovery`] + [`ApplyUndoBatch`] children, so
+    /// it exercises the real compensators + nesting + rewind path.
+    struct FaultyUndo {
+        batches: Vec<OpBatch>,
+        recovery_head: Option<ChangeId>,
+        fail_after: usize,
+    }
+
+    impl AtomicMutation for FaultyUndo {
+        type Output = ();
+
+        fn transaction_id(&self) -> String {
+            "test-undo-fault".to_string()
+        }
+
+        fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
+            tx.enroll(StageUndoRecovery {
+                head: self.recovery_head,
+            })?;
+            let last = self.batches.len() - 1;
+            for (i, batch) in self.batches.iter().enumerate() {
+                if i == last {
+                    tx.enroll(ApplyUndoBatch::failing_after(batch.clone(), self.fail_after))?;
+                } else {
+                    tx.enroll(ApplyUndoBatch::new(batch.clone()))?;
+                }
+            }
+            Ok(StagedCommit::pure(()))
+        }
+    }
+
+    /// Test-only parent mirroring [`RedoOp`] with an injected fault on the last
+    /// enrolled batch child.
+    struct FaultyRedo {
+        batches: Vec<OpBatch>,
+        fail_after: usize,
+    }
+
+    impl AtomicMutation for FaultyRedo {
+        type Output = ();
+
+        fn transaction_id(&self) -> String {
+            "test-redo-fault".to_string()
+        }
+
+        fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
+            let last = self.batches.len() - 1;
+            for (i, batch) in self.batches.iter().enumerate() {
+                if i == last {
+                    tx.enroll(ApplyRedoBatch::failing_after(batch.clone(), self.fail_after))?;
+                } else {
+                    tx.enroll(ApplyRedoBatch::new(batch.clone()))?;
+                }
+            }
+            Ok(StagedCommit::pure(()))
+        }
+    }
+
+    /// Behavioral parity: a clean atomic `UndoOp` reverts the worktree, HEAD,
+    /// and thread ref, marks the batch undone, captures the recovery pointer,
+    /// and commits exactly one marker — same observable result as the
+    /// pre-migration sequential path.
+    #[test]
+    fn atomic_undo_success_reverts_and_records_recovery() {
+        let (temp, repo, s1, s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+
+        let recovery_head = repo.head().unwrap();
+        let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
+        let updated = repo::atomic::execute(&repo, UndoOp::new(batches, recovery_head, txid)).unwrap();
+
+        assert_eq!(updated.len(), 1);
+        assert!(updated[0].entries.iter().all(|e| e.undone));
+        assert_eq!(repo.head().unwrap(), Some(s1), "HEAD reverted to s1");
+        assert_eq!(main_thread(&repo), Some(s1));
+        assert!(temp.path().join("a.txt").exists(), "s1 file kept");
+        assert!(!temp.path().join("b.txt").exists(), "s2 file reverted");
+        assert_eq!(
+            repo.refs().get_undo_recovery().unwrap(),
+            Some(s2),
+            "recovery pointer pins the pre-undo tip"
+        );
+        assert_eq!(commit_marker_count(&repo), 1, "exactly one commit marker");
+    }
+
+    /// Fault-injection: a failure mid-undo (after the first batch is fully
+    /// applied, partway into the second) rewinds EVERY applied step back to the
+    /// exact pre-operation state — no partial ref / oplog / worktree leak.
+    #[test]
+    fn fault_mid_undo_rewinds_to_pre_operation_state() {
+        let (temp, repo, _s1, s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+
+        let pre_head = repo.head().unwrap();
+        assert_eq!(pre_head, Some(s2));
+        let pre_main = main_thread(&repo);
+        assert_eq!(repo.refs().get_undo_recovery().unwrap(), None);
+        let pre_markers = commit_marker_count(&repo);
+
+        let batches = repo.oplog().undo_batches_scoped(2, Some(&scope)).unwrap();
+        assert_eq!(batches.len(), 2, "two snapshots are undoable");
+        let result = repo::atomic::execute(
+            &repo,
+            FaultyUndo {
+                batches,
+                recovery_head: pre_head,
+                fail_after: 1,
+            },
+        );
+        assert!(result.is_err(), "the injected fault must fail the undo");
+
+        // Exact pre-operation state restored across every dimension.
+        assert_eq!(repo.head().unwrap(), Some(s2), "HEAD rewound to pre-undo tip");
+        assert_eq!(main_thread(&repo), pre_main, "main ref rewound");
+        assert!(temp.path().join("a.txt").exists(), "s1 file restored");
+        assert!(temp.path().join("b.txt").exists(), "s2 file restored");
+        assert_eq!(
+            repo.oplog()
+                .undo_batches_scoped(2, Some(&scope))
+                .unwrap()
+                .len(),
+            2,
+            "no batch left marked undone"
+        );
+        assert_eq!(
+            repo.refs().get_undo_recovery().unwrap(),
+            None,
+            "recovery pointer cleared by rewind (it had no prior value)"
+        );
+        assert_eq!(
+            commit_marker_count(&repo),
+            pre_markers,
+            "a failed transaction commits no marker"
+        );
+    }
+
+    /// Fault-injection: a failure mid-redo rewinds the replay back to the
+    /// fully-undone pre-redo state — no partial effect leaks.
+    #[test]
+    fn fault_mid_redo_rewinds_to_pre_operation_state() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+        let _s1 = repo.snapshot(Some("s1".to_string()), None).unwrap();
+        let scope = repo.op_scope();
+
+        // Cleanly undo the single snapshot through the real atomic UndoOp.
+        let recovery_head = repo.head().unwrap();
+        let undo_batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &undo_batches);
+        repo::atomic::execute(&repo, UndoOp::new(undo_batches, recovery_head, txid)).unwrap();
+
+        // Pre-redo state: the initial (pre-s1) state — a.txt gone, one batch
+        // redoable.
+        assert!(!temp.path().join("a.txt").exists(), "undone: a.txt gone");
+        let pre_redo_head = repo.head().unwrap();
+        let pre_redo_main = main_thread(&repo);
+        assert_eq!(
+            repo.oplog()
+                .redo_batches_scoped(1, Some(&scope))
+                .unwrap()
+                .len(),
+            1,
+            "one batch is redoable"
+        );
+        let pre_markers = commit_marker_count(&repo);
+
+        let redo_batches = repo.oplog().redo_batches_scoped(1, Some(&scope)).unwrap();
+        let result = repo::atomic::execute(
+            &repo,
+            FaultyRedo {
+                batches: redo_batches,
+                fail_after: 1,
+            },
+        );
+        assert!(result.is_err(), "the injected fault must fail the redo");
+
+        // Rewound to the fully-undone pre-redo state.
+        assert_eq!(repo.head().unwrap(), pre_redo_head, "HEAD rewound");
+        assert_eq!(main_thread(&repo), pre_redo_main, "main ref rewound");
+        assert!(!temp.path().join("a.txt").exists(), "s1 file not resurrected");
+        assert_eq!(
+            repo.oplog()
+                .redo_batches_scoped(1, Some(&scope))
+                .unwrap()
+                .len(),
+            1,
+            "batch still redoable"
+        );
+        assert_eq!(
+            commit_marker_count(&repo),
+            pre_markers,
+            "a failed transaction commits no marker"
+        );
+    }
+
+    /// A successful round trip via the atomic ops: undo then redo restores the
+    /// original tip, and the marker-only commit batches are excluded from the
+    /// undo/redo eligibility scans (so the round trip terminates instead of
+    /// chasing its own commit sentinels).
+    #[test]
+    fn atomic_undo_redo_round_trip_ignores_commit_markers() {
+        let (temp, repo, s1, s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+
+        // Undo s2.
+        let recovery_head = repo.head().unwrap();
+        let undo_batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &undo_batches);
+        repo::atomic::execute(&repo, UndoOp::new(undo_batches, recovery_head, txid)).unwrap();
+        assert_eq!(repo.head().unwrap(), Some(s1));
+
+        // The undo's commit marker is a record-less batch — not itself undoable.
+        let still_undoable = repo.oplog().undo_batches_scoped(2, Some(&scope)).unwrap();
+        assert_eq!(
+            still_undoable.len(),
+            1,
+            "only the s1 snapshot remains undoable; the commit marker is excluded"
+        );
+
+        // Redo s2.
+        let redo_batches = repo.oplog().redo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("redo", &scope, generation, &redo_batches);
+        repo::atomic::execute(&repo, RedoOp::new(redo_batches, txid)).unwrap();
+        assert_eq!(repo.head().unwrap(), Some(s2), "redo restored the s2 tip");
+        assert!(temp.path().join("b.txt").exists(), "s2 file restored by redo");
+    }
 }

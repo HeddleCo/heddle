@@ -15,7 +15,7 @@ use super::{
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     undo_apply::{
-        apply_redo_batch, apply_undo_batch, preflight_redo_batches, preflight_undo_batches,
+        RedoOp, UndoOp, preflight_redo_batches, preflight_undo_batches, undo_redo_transaction_id,
     },
     worktree_safety::ensure_worktree_clean,
 };
@@ -106,7 +106,15 @@ pub fn cmd_undo(
 
     if list {
         let scope = repo.op_scope();
-        let batches = repo.oplog().recent_batches_scoped(depth, Some(&scope))?;
+        // Drop record-less commit sentinels (an `undo`/`redo`'s marker-only
+        // batch) so they never pollute the history view — they carry no
+        // user-facing operation. See `OpBatch::is_transaction_marker_only`.
+        let batches: Vec<OpBatch> = repo
+            .oplog()
+            .recent_batches_scoped(depth, Some(&scope))?
+            .into_iter()
+            .filter(|batch| !batch.is_transaction_marker_only())
+            .collect();
         let output = OpListOutput {
             output_kind: "undo_list",
             batches: batches.iter().map(build_batch_output).collect(),
@@ -192,17 +200,21 @@ pub fn cmd_undo(
     //
     // heddle#305 r2: this is written to a heddle-INTERNAL ref, not a user
     // marker — see UNDO_RECOVERY_MARKER. Keeping it out of `refs/markers/`
-    // means the `MarkerDelete` undo inverse below can never collide with it.
+    // means the `MarkerDelete` undo inverse can never collide with it.
+    //
+    // heddle#355: the recovery-ref write and every batch's worktree rewrite +
+    // mark-undone now run inside ONE atomic transaction (`UndoOp`), so a
+    // failure mid-undo rewinds every applied step back to the pre-undo state
+    // instead of leaving the repo half-rewound. The preflights above still run
+    // outside the transaction (their structured refusals are unchanged).
     let recovery_state = repo.head()?;
-    if let Some(state) = recovery_state {
-        repo.refs().set_undo_recovery(&state)?;
-    }
-
-    let mut updated_batches = Vec::with_capacity(batches.len());
-    for batch in batches {
-        apply_undo_batch(&repo, &batch)?;
-        updated_batches.push(repo.oplog().mark_batch_undone(&batch)?);
-    }
+    let generation = repo.oplog().head_id()?;
+    let transaction_id = undo_redo_transaction_id("undo", &scope, generation, &batches);
+    let updated_batches = repo::atomic::execute(
+        &repo,
+        UndoOp::new(batches, recovery_state, transaction_id),
+    )
+    .map_err(|e| anyhow!(e))?;
 
     let post_undo_repo = Repository::open(repo.root())?;
     let post_undo_trust = build_repository_verification_state(&post_undo_repo);
@@ -312,11 +324,12 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     ensure_worktree_clean(&repo, "redo")?;
     preflight_redo_batches(&repo, &batches)?;
 
-    let mut updated_batches = Vec::with_capacity(batches.len());
-    for batch in batches {
-        apply_redo_batch(&repo, &batch)?;
-        updated_batches.push(repo.oplog().mark_batch_redone(&batch)?);
-    }
+    // heddle#355: replay + mark-redone run as ONE atomic transaction so a
+    // failure mid-redo rewinds every applied step (mirror of `cmd_undo`).
+    let generation = repo.oplog().head_id()?;
+    let transaction_id = undo_redo_transaction_id("redo", &scope, generation, &batches);
+    let updated_batches =
+        repo::atomic::execute(&repo, RedoOp::new(batches, transaction_id)).map_err(|e| anyhow!(e))?;
 
     let post_redo_trust = build_repository_verification_state(&repo);
     let recommended_action = ActionFields::from_action(&post_redo_trust.recommended_action);
