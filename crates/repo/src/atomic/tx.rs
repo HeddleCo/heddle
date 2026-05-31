@@ -94,9 +94,46 @@ impl<'a> Tx<'a> {
         self.depth
     }
 
+    /// Run a reversible **leaf effect** as one atomic step: execute `forward`
+    /// FIRST, and push `inverse` onto the rewind ledger **only if `forward`
+    /// returned `Ok`**. A `forward` that fails (or panics) leaves the ledger
+    /// untouched, so it is structurally impossible to register an inverse for an
+    /// effect that did not happen — the register-then-forward footgun that
+    /// corrupted pre-existing refs on rollback when a forward failed after its
+    /// compensator was already queued (heddle#355 cid 3330867774 / 3330867775).
+    ///
+    /// This is the ONLY way for code outside `atomic` to add to the rewind
+    /// ledger: the raw `on_rewind` register is `pub(crate)`, so a consumer that
+    /// tried to hand-order a compensator ahead of its forward would not compile.
+    /// `inverse` runs in reverse (LIFO) order with the rest of the ledger on any
+    /// later unwind and may borrow the [`Repository`](crate::Repository) for the
+    /// transaction lifetime. Reach for [`enroll`](Self::enroll) /
+    /// [`enroll_eager`](Self::enroll_eager) instead when the unit of work is a
+    /// whole sub-mutation rather than a single reversible write.
+    pub fn step<T, Fwd, Inv>(&mut self, forward: Fwd, inverse: Inv) -> Result<T>
+    where
+        Fwd: FnOnce() -> Result<T>,
+        Inv: FnOnce() -> Result<()> + 'a,
+    {
+        let value = forward()?;
+        // Reached only on a successful forward: the inverse now compensates an
+        // effect that demonstrably happened.
+        self.on_rewind(inverse);
+        Ok(value)
+    }
+
     /// Register an inverse for an effect just staged. Closures run in reverse
     /// (LIFO) order on unwind. The closure may borrow the `Repository`.
-    pub fn on_rewind<F>(&mut self, f: F)
+    ///
+    /// `pub(crate)` on purpose (heddle#355): this primitive has NO ordering
+    /// enforcement, so calling it directly lets a caller register an inverse
+    /// *before* — or *without* — its forward effect, which is the exact
+    /// register-then-forward footgun the validation migration removed. Consumer
+    /// crates compose reversible leaf effects through the forward-first
+    /// [`step`](Self::step) combinator (or [`enroll`](Self::enroll) for whole
+    /// sub-mutations); inside `atomic`, `step` / `enroll` / `enroll_whole_op` are
+    /// its only callers.
+    pub(crate) fn on_rewind<F>(&mut self, f: F)
     where
         F: FnOnce() -> Result<()> + 'a,
     {

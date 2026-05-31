@@ -15,7 +15,8 @@ use super::{
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     undo_apply::{
-        RedoOp, UndoOp, preflight_redo_batches, preflight_undo_batches, undo_redo_transaction_id,
+        RedoOp, UndoOp, acquire_undo_redo_lock, preflight_redo_batches, preflight_undo_batches,
+        undo_redo_transaction_id,
     },
     worktree_safety::ensure_worktree_clean,
 };
@@ -106,15 +107,14 @@ pub fn cmd_undo(
 
     if list {
         let scope = repo.op_scope();
-        // Drop record-less commit sentinels (an `undo`/`redo`'s marker-only
-        // batch) so they never pollute the history view — they carry no
-        // user-facing operation. See `OpBatch::is_transaction_marker_only`.
+        // Count only user-facing batches toward `depth`, dropping the record-less
+        // commit sentinels (an `undo`/`redo`'s marker-only batch) BEFORE the
+        // limit applies. Filtering after a fixed-count fetch made `--depth 1`
+        // return empty whenever the latest op was itself an undo/redo, whose
+        // marker is the newest batch (heddle#355 cid 3330867777).
         let batches: Vec<OpBatch> = repo
             .oplog()
-            .recent_batches_scoped(depth, Some(&scope))?
-            .into_iter()
-            .filter(|batch| !batch.is_transaction_marker_only())
-            .collect();
+            .recent_user_batches_scoped(depth, Some(&scope))?;
         let output = OpListOutput {
             output_kind: "undo_list",
             batches: batches.iter().map(build_batch_output).collect(),
@@ -135,6 +135,12 @@ pub fn cmd_undo(
 
         return Ok(());
     }
+
+    // Serialize the whole select→apply→commit against concurrent undo/redo so two
+    // invocations can't collide on the generation-derived transaction id (see
+    // `acquire_undo_redo_lock`; heddle#355 cid 3330867776). Held until the
+    // command returns, covering the `--preview` short-circuit and the commit.
+    let _undo_redo_lock = acquire_undo_redo_lock(&repo)?;
 
     let scope = repo.op_scope();
     let batches = repo.oplog().undo_batches_scoped(steps, Some(&scope))?;
@@ -269,6 +275,10 @@ pub fn cmd_undo(
 
 pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+
+    // Serialize against concurrent undo/redo (mirror of `cmd_undo`; heddle#355
+    // cid 3330867776).
+    let _undo_redo_lock = acquire_undo_redo_lock(&repo)?;
 
     let scope = repo.op_scope();
     let batches = repo.oplog().redo_batches_scoped(steps, Some(&scope))?;

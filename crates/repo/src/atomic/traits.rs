@@ -45,8 +45,8 @@ impl<T> StagedCommit<T> {
 /// idempotent rewind. `apply` performs only **staged, not-yet-visible** side
 /// effects — object-store puts (orphan until referenced), FS temp writes, ref
 /// temp writes — and registers each effect's inverse on the transaction via
-/// [`Tx::on_rewind`]. It MUST NOT publish a canonical ref or append to the
-/// oplog; both happen at/after the executor's single commit step.
+/// [`Tx::step`] (forward-first). It MUST NOT publish a canonical ref or append
+/// to the oplog; both happen at/after the executor's single commit step.
 pub trait AtomicMutation {
     /// The value produced on a committed run.
     type Output;
@@ -65,16 +65,16 @@ pub trait AtomicMutation {
     fn transaction_id(&self) -> String;
 
     /// Forward, staged, fallible side effects. Every effect performed here
-    /// MUST be paired with an inverse registered via [`Tx::on_rewind`] (the
-    /// granular ledger), OR be undone wholesale by [`AtomicMutation::rewind`].
-    /// Use one mechanism per mutation, not both.
+    /// MUST be paired with an inverse registered via [`Tx::step`] (the
+    /// forward-first granular ledger), OR be undone wholesale by
+    /// [`AtomicMutation::rewind`]. Use one mechanism per mutation, not both.
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>>;
 
     /// Undo whatever THIS mutation's `apply` staged. Called in reverse order
     /// on any pre-commit failure or panic-unwind. MUST be idempotent (may run
     /// after a partial apply) and MUST undo ONLY what this invocation created,
     /// never pre-existing user state (the #302 r4 lesson). The default is a
-    /// no-op for mutations that register their undo via [`Tx::on_rewind`].
+    /// no-op for mutations that register their undo via [`Tx::step`].
     fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
         Ok(())
     }

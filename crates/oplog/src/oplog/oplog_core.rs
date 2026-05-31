@@ -167,6 +167,21 @@ impl OpLog {
         self.collect_batches_scoped(count, |_| true, scope)
     }
 
+    /// Like [`recent_batches_scoped`](Self::recent_batches_scoped) but counts
+    /// only **user-facing** batches: the record-less `TransactionCommit`
+    /// sentinels an `undo`/`redo` appends are dropped by the predicate BEFORE
+    /// the `count` limit applies, so `--depth N` yields N real operations even
+    /// when the newest batch is a commit marker. Filtering *after* a fixed-count
+    /// fetch returned empty for `--depth 1` whenever the latest op was itself an
+    /// undo/redo (heddle#355 cid 3330867777).
+    pub fn recent_user_batches_scoped(
+        &self,
+        count: usize,
+        scope: Option<&str>,
+    ) -> Result<Vec<OpBatch>> {
+        self.collect_batches_scoped(count, |batch| !batch.is_transaction_marker_only(), scope)
+    }
+
     pub fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
         self.undo_batches_scoped(count, None)
     }

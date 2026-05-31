@@ -16,6 +16,7 @@ use gix::{
     },
 };
 use objects::error::{HeddleError, Result as HeddleResult};
+use objects::lock::{RepoLock, WriteLockGuard};
 use objects::object::{ChangeId, MarkerName, ThreadName};
 use oplog::{OpBatch, OpEntry, OpRecord};
 use refs::Head;
@@ -948,10 +949,12 @@ fn remove_thread_manager_record(repo: &Repository, thread_name: &str) -> Result<
 // canonical mutations (ref writes, `goto` worktree material, thread-record and
 // git-mirror state, and the in-place `mark_batch_undone` flag flip) and append
 // NO new domain oplog record — they navigate states that already exist. So:
-//   * Each sub-op stages its effect and registers its inverse via the granular
-//     `Tx::on_rewind` ledger (the inverse of "undo entry E" is "redo entry E",
-//     and vice-versa; both are absolute SET operations, so the inverse restores
-//     the pre-step state regardless of how far a failed step got).
+//   * Each sub-op stages its effect through the forward-first `Tx::step`
+//     combinator, which registers the inverse on the granular ledger ONLY after
+//     the forward succeeds (the inverse of "undo entry E" is "redo entry E", and
+//     vice-versa; both are absolute SET operations, so the inverse restores the
+//     pre-step state regardless of how far a failed step got — and a forward
+//     that fails registers no inverse at all).
 //   * The parent NESTS the sub-ops via `Tx::enroll` (savepoint enrollment) —
 //     the recovery-ref child then one child per batch — so a child that stages
 //     then fails rewinds the child AND unwinds the parent through the shared
@@ -976,7 +979,7 @@ fn remove_thread_manager_record(repo: &Repository, thread_name: &str) -> Result<
 //      batches undone, so a retry re-derives a different batch set) and
 //      unnecessary (re-applying an undo is idempotent) for this op.
 //   2. SAVEPOINT SEMANTICS. The children use the savepoint ENROLLMENT mechanism
-//      (`enroll` + `on_rewind`) for its apply+ledger-rewind shape, but their
+//      (`enroll` + `step`) for its apply+ledger-rewind shape, but their
 //      effects are direct canonical writes (visible immediately), not the
 //      invisible-until-commit staging `SavepointMutation` describes. This adds
 //      FAILURE atomicity (rewind), not concurrent-reader isolation — matching
@@ -1001,6 +1004,29 @@ fn remove_thread_manager_record(repo: &Repository, thread_name: &str) -> Result<
 /// foresee — whose rewind has already restored the pre-operation state.
 fn apply_error(err: anyhow::Error) -> HeddleError {
     HeddleError::Conflict(format!("{err:#}"))
+}
+
+/// Acquire the per-repository undo/redo serialization lock, held across the
+/// whole `select batches → preflight → apply → commit` critical section.
+///
+/// Two concurrent `heddle undo` (or `redo`) invocations that both read the same
+/// oplog generation derive the SAME generation-based [`undo_redo_transaction_id`];
+/// the second then dedup-hits `AlreadyCommitted` inside the executor and
+/// `rewind_all`s its own replay — silently reverting the first invocation while
+/// returning success (heddle#355 cid 3330867776). Serializing the critical
+/// section forces the second invocation to (re-)select its batches only AFTER
+/// the first has committed, so it observes the already-undone batch and cleanly
+/// undoes the next op (or finds nothing to do) — never colliding on the key.
+/// Crash-retry of the same logical op is unaffected: a retry re-selects against
+/// the post-commit generation and idempotently re-derives the correct batch set.
+///
+/// Uses a dedicated `locks/undo-redo.lock`, NOT the repo-wide `repo.lock`: the
+/// apply path calls `goto`, which itself takes `repo.lock`, so reusing it here
+/// would self-deadlock on the non-reentrant exclusive `flock`.
+pub(super) fn acquire_undo_redo_lock(repo: &Repository) -> Result<WriteLockGuard> {
+    RepoLock::at(repo.heddle_dir().join("locks/undo-redo.lock"))
+        .write()
+        .map_err(|e| anyhow!("failed to acquire undo/redo serialization lock: {e}"))
 }
 
 /// Build the stable-per-transaction idempotency key. Derived from the oplog
@@ -1042,11 +1068,16 @@ impl AtomicMutation for StageUndoRecovery {
         // Reconciled read of the prior pointer so the inverse restores exactly
         // what was there (never a raw-ref bypass).
         let prior = repo.refs().get_undo_recovery()?;
-        tx.on_rewind(move || match prior {
-            Some(prior) => repo.refs().set_undo_recovery(&prior),
-            None => repo.refs().clear_undo_recovery(),
-        });
-        repo.refs().set_undo_recovery(&state)?;
+        // Forward-first via `Tx::step`: the restore inverse is registered ONLY
+        // after the pointer is actually overwritten, so a failed write leaves
+        // the pre-existing recovery pointer untouched on rollback.
+        tx.step(
+            || repo.refs().set_undo_recovery(&state),
+            move || match prior {
+                Some(prior) => repo.refs().set_undo_recovery(&prior),
+                None => repo.refs().clear_undo_recovery(),
+            },
+        )?;
         Ok(StagedCommit::pure(()))
     }
 }
@@ -1094,8 +1125,14 @@ impl AtomicMutation for ApplyUndoBatch {
         let repo = tx.repo();
         for (applied, entry) in self.batch.entries.iter().rev().enumerate() {
             let redo_entry = entry.clone();
-            tx.on_rewind(move || apply_redo_entry(repo, &redo_entry).map_err(apply_error));
-            apply_undo_entry(repo, entry).map_err(apply_error)?;
+            // Forward-first: `apply_undo_entry` runs, and only on success is its
+            // `apply_redo_entry` inverse registered. A failed undo entry leaves
+            // the ledger empty for it, so the rollback never redoes an undo that
+            // didn't happen (heddle#355 cid 3330867774).
+            tx.step(
+                || apply_undo_entry(repo, entry).map_err(apply_error),
+                move || apply_redo_entry(repo, &redo_entry).map_err(apply_error),
+            )?;
             #[cfg(test)]
             if self.fail_after_entries == Some(applied + 1) {
                 return Err(HeddleError::Conflict(
@@ -1106,8 +1143,10 @@ impl AtomicMutation for ApplyUndoBatch {
             let _ = applied;
         }
         let batch_for_redo = self.batch.clone();
-        tx.on_rewind(move || repo.oplog().mark_batch_redone(&batch_for_redo).map(|_| ()));
-        let updated = repo.oplog().mark_batch_undone(&self.batch)?;
+        let updated = tx.step(
+            || repo.oplog().mark_batch_undone(&self.batch),
+            move || repo.oplog().mark_batch_redone(&batch_for_redo).map(|_| ()),
+        )?;
         Ok(StagedCommit::pure(updated))
     }
 }
@@ -1152,8 +1191,13 @@ impl AtomicMutation for ApplyRedoBatch {
         let repo = tx.repo();
         for (applied, entry) in self.batch.entries.iter().enumerate() {
             let undo_entry = entry.clone();
-            tx.on_rewind(move || apply_undo_entry(repo, &undo_entry).map_err(apply_error));
-            apply_redo_entry(repo, entry).map_err(apply_error)?;
+            // Forward-first mirror of `ApplyUndoBatch`: register the
+            // `apply_undo_entry` inverse only after `apply_redo_entry` succeeds
+            // (heddle#355 cid 3330867775).
+            tx.step(
+                || apply_redo_entry(repo, entry).map_err(apply_error),
+                move || apply_undo_entry(repo, &undo_entry).map_err(apply_error),
+            )?;
             #[cfg(test)]
             if self.fail_after_entries == Some(applied + 1) {
                 return Err(HeddleError::Conflict(
@@ -1164,8 +1208,10 @@ impl AtomicMutation for ApplyRedoBatch {
             let _ = applied;
         }
         let batch_for_undo = self.batch.clone();
-        tx.on_rewind(move || repo.oplog().mark_batch_undone(&batch_for_undo).map(|_| ()));
-        let updated = repo.oplog().mark_batch_redone(&self.batch)?;
+        let updated = tx.step(
+            || repo.oplog().mark_batch_redone(&self.batch),
+            move || repo.oplog().mark_batch_undone(&batch_for_undo).map(|_| ()),
+        )?;
         Ok(StagedCommit::pure(updated))
     }
 }
@@ -1524,5 +1570,205 @@ mod atomic_tests {
         repo::atomic::execute(&repo, RedoOp::new(redo_batches, txid)).unwrap();
         assert_eq!(repo.head().unwrap(), Some(s2), "redo restored the s2 tip");
         assert!(temp.path().join("b.txt").exists(), "s2 file restored by redo");
+    }
+
+    /// The undo/redo serialization lock is mutually exclusive: while one holder
+    /// has it, a second writer on the same lock file is blocked; once released it
+    /// is acquirable again (heddle#355 cid 3330867776).
+    #[test]
+    fn undo_redo_lock_is_exclusive() {
+        let (_temp, repo, _s1, _s2) = repo_with_two_snapshots();
+        let lock_path = repo.heddle_dir().join("locks/undo-redo.lock");
+
+        let guard = acquire_undo_redo_lock(&repo).unwrap();
+        let contended = RepoLock::at(lock_path.clone()).try_write().unwrap();
+        assert!(
+            contended.is_none(),
+            "a second writer must be blocked while the lock is held"
+        );
+
+        drop(guard);
+        let reacquired = RepoLock::at(lock_path).try_write().unwrap();
+        assert!(
+            reacquired.is_some(),
+            "the lock is acquirable again after the holder releases it"
+        );
+    }
+
+    /// The serialized outcome the lock guarantees: a second undo invocation that
+    /// (re-)selects its batches only AFTER the first has committed sees the
+    /// already-undone batch and targets the PRECEDING op instead — it never
+    /// re-selects the batch the first undid, so the two can't derive the same
+    /// generation-keyed transaction id and the second can't dedup-hit and
+    /// self-revert the first (heddle#355 cid 3330867776).
+    #[test]
+    fn serialized_second_undo_selects_a_different_batch() {
+        let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+
+        // Invocation 1, under the lock: undo the newest batch (s2).
+        let first_ids: Vec<u64> = {
+            let _lock = acquire_undo_redo_lock(&repo).unwrap();
+            let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+            let ids = batches.iter().map(|b| b.id).collect();
+            let recovery = repo.head().unwrap();
+            let generation = repo.oplog().head_id().unwrap();
+            let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
+            repo::atomic::execute(&repo, UndoOp::new(batches, recovery, txid)).unwrap();
+            ids
+        };
+        assert_eq!(repo.head().unwrap(), Some(s1), "first undo reverted to s1");
+
+        // Invocation 2, under the lock (after 1 released + committed): the s2
+        // batch is now undone, so re-selection returns the preceding s1 batch.
+        let _lock = acquire_undo_redo_lock(&repo).unwrap();
+        let second = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let second_ids: Vec<u64> = second.iter().map(|b| b.id).collect();
+        assert!(!second_ids.is_empty(), "a preceding op is still undoable");
+        assert_ne!(
+            second_ids, first_ids,
+            "the serialized second undo must not re-select the batch the first already undid"
+        );
+    }
+
+    /// `undo --list --depth N` returns N *user-facing* batches even when the
+    /// newest batch is an undo/redo's record-less commit marker (heddle#355 cid
+    /// 3330867777). After undoing s2, `recent_batches_scoped(1)` surfaces only
+    /// the marker sentinel; `recent_user_batches_scoped(1)` skips it and returns
+    /// the preceding real op (the s1 snapshot).
+    #[test]
+    fn list_depth_one_returns_preceding_user_op_past_commit_marker() {
+        let (_temp, repo, _s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+
+        // Undo s2 — this appends a marker-only `TransactionCommit` batch that is
+        // now the newest batch in the log.
+        let recovery_head = repo.head().unwrap();
+        let undo_batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &undo_batches);
+        repo::atomic::execute(&repo, UndoOp::new(undo_batches, recovery_head, txid)).unwrap();
+
+        // The fixed-count fetch surfaces only the commit marker for depth 1...
+        let raw = repo.oplog().recent_batches_scoped(1, Some(&scope)).unwrap();
+        assert_eq!(raw.len(), 1);
+        assert!(
+            raw[0].is_transaction_marker_only(),
+            "the newest batch is the undo's commit marker"
+        );
+
+        // ...while the user-facing query skips it and returns the real op.
+        let user = repo
+            .oplog()
+            .recent_user_batches_scoped(1, Some(&scope))
+            .unwrap();
+        assert_eq!(user.len(), 1, "depth 1 returns exactly one user-facing batch");
+        assert!(
+            !user[0].is_transaction_marker_only(),
+            "the returned batch is a real op, not the marker sentinel"
+        );
+        assert!(
+            user[0]
+                .entries
+                .iter()
+                .any(|e| matches!(e.operation, OpRecord::Snapshot { .. })),
+            "it is the preceding s1 snapshot"
+        );
+    }
+
+    /// Compensator class, undo direction (heddle#355 cid 3330867774). Undoing a
+    /// `MarkerDelete` recreates the marker (`create_marker`). When that forward
+    /// FAILS because a marker of the same name already exists (a pre-existing
+    /// ref), the migration onto `Tx::step` guarantees NO `delete_marker` inverse
+    /// was registered — so the rollback leaves the pre-existing marker intact.
+    /// Pre-`step` (register-then-forward) the inverse ran on rollback and deleted
+    /// the pre-existing marker.
+    #[test]
+    fn undo_marker_delete_forward_failure_keeps_preexisting_marker() {
+        let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+        let marker = MarkerName::new("keep");
+
+        // A `MarkerDelete` batch becomes the newest undoable op; undoing it will
+        // attempt `create_marker("keep", s1)`.
+        repo.oplog()
+            .record_batch_scoped(
+                vec![OpRecord::MarkerDelete {
+                    name: "keep".to_string(),
+                    state: s1,
+                }],
+                Some(&scope),
+            )
+            .unwrap();
+
+        // Plant a pre-existing marker of the same name — the undo's
+        // `create_marker` will now collide and fail.
+        repo.refs().create_marker(&marker, &s1).unwrap();
+
+        let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        assert!(
+            matches!(
+                batches[0].entries[0].operation,
+                OpRecord::MarkerDelete { .. }
+            ),
+            "the newest undoable batch is the MarkerDelete"
+        );
+        let recovery_head = repo.head().unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
+        let result = repo::atomic::execute(&repo, UndoOp::new(batches, recovery_head, txid));
+
+        assert!(result.is_err(), "the colliding create_marker must fail the undo");
+        assert_eq!(
+            repo.refs().get_marker(&marker).unwrap(),
+            Some(s1),
+            "the pre-existing marker survives the rolled-back undo (no delete inverse ran)"
+        );
+    }
+
+    /// Compensator class, redo direction (heddle#355 cid 3330867775). Redoing a
+    /// `MarkerCreate` re-runs `create_marker`. A collision with a pre-existing
+    /// marker must NOT delete it on rollback — the mirror of the undo case.
+    #[test]
+    fn redo_marker_create_forward_failure_keeps_preexisting_marker() {
+        let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+        let marker = MarkerName::new("keep");
+
+        // Record a `MarkerCreate`, then mark it undone so it is REDOABLE; redoing
+        // it will attempt `create_marker("keep", s1)`.
+        repo.oplog()
+            .record_batch_scoped(
+                vec![OpRecord::MarkerCreate {
+                    name: "keep".to_string(),
+                    state: s1,
+                }],
+                Some(&scope),
+            )
+            .unwrap();
+        let created = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        repo.oplog().mark_batch_undone(&created[0]).unwrap();
+
+        // Plant the pre-existing colliding marker.
+        repo.refs().create_marker(&marker, &s1).unwrap();
+
+        let redo_batches = repo.oplog().redo_batches_scoped(1, Some(&scope)).unwrap();
+        assert!(
+            matches!(
+                redo_batches[0].entries[0].operation,
+                OpRecord::MarkerCreate { .. }
+            ),
+            "the redoable batch is the MarkerCreate"
+        );
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("redo", &scope, generation, &redo_batches);
+        let result = repo::atomic::execute(&repo, RedoOp::new(redo_batches, txid));
+
+        assert!(result.is_err(), "the colliding create_marker must fail the redo");
+        assert_eq!(
+            repo.refs().get_marker(&marker).unwrap(),
+            Some(s1),
+            "the pre-existing marker survives the rolled-back redo (no delete inverse ran)"
+        );
     }
 }

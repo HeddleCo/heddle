@@ -116,6 +116,73 @@ fn reverse_order_rewind_on_failure() {
     );
 }
 
+/// `Tx::step` ordering — the heddle#355 hardening. A `forward` that returns
+/// `Err` must leave the ledger EMPTY: no inverse is registered for an effect
+/// that never happened, so a later unwind compensates nothing. This is the
+/// invariant that makes the register-then-forward footgun unrepresentable.
+#[test]
+fn step_registers_no_inverse_when_forward_fails() {
+    let (_t, repo) = test_repo();
+    let mut tx = Tx::root(&repo, "step-forward-fails".to_string());
+    let inverse_ran = Rc::new(RefCell::new(false));
+    let flag = Rc::clone(&inverse_ran);
+
+    let result: Result<()> = tx.step(
+        || Err(HeddleError::Config("forward failed".to_string())),
+        move || {
+            *flag.borrow_mut() = true;
+            Ok(())
+        },
+    );
+
+    assert!(result.is_err(), "step surfaces the forward's error");
+    // Unwind: with an empty ledger this is a no-op and the inverse never runs.
+    tx.rewind_all().unwrap();
+    assert!(
+        !*inverse_ran.borrow(),
+        "a forward that failed must register NO inverse"
+    );
+}
+
+/// `Tx::step` happy path: a successful `forward` returns its value and registers
+/// EXACTLY ONE inverse, which runs (once) on a later unwind — not before.
+#[test]
+fn step_registers_one_inverse_after_forward_succeeds() {
+    let (_t, repo) = test_repo();
+    let mut tx = Tx::root(&repo, "step-forward-ok".to_string());
+    let unwound = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&unwound);
+    let forward_ran = Rc::new(RefCell::new(false));
+    let observed = Rc::clone(&forward_ran);
+
+    let value = tx
+        .step(
+            || {
+                *observed.borrow_mut() = true;
+                Ok(7u32)
+            },
+            move || {
+                sink.borrow_mut().push(1u32);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(value, 7, "step returns the forward's produced value");
+    assert!(*forward_ran.borrow(), "forward ran");
+    assert!(
+        unwound.borrow().is_empty(),
+        "the inverse must NOT run until the transaction unwinds"
+    );
+
+    tx.rewind_all().unwrap();
+    assert_eq!(
+        *unwound.borrow(),
+        vec![1],
+        "exactly one inverse was registered and it runs once on unwind"
+    );
+}
+
 /// A mutation whose `apply` panics after staging an effect.
 struct Panicker {
     log: Rc<RefCell<Vec<u32>>>,
