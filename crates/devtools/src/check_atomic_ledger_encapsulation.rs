@@ -34,7 +34,10 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use syn::{Attribute, ImplItemFn, ItemFn, ItemMod, Meta, visit::Visit};
+use syn::{
+    Attribute, ImplItemFn, ItemFn, ItemMod, Meta, MetaList, Token, parse::Parser,
+    punctuated::Punctuated, visit::Visit,
+};
 use walkdir::WalkDir;
 
 const DEFAULT_SEARCH_DIRS: &[&str] = &["crates"];
@@ -190,24 +193,100 @@ fn is_test_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// True iff the item carries a `#[cfg(test)]` attribute (directly, or nested in
-/// an `all(...)` / `any(...)` predicate).
+/// True iff the item is genuinely *test-only* — compiled out of every non-test
+/// build — and so legitimately allowed to drive the raw primitive.
+///
+/// This is NOT a substring match on `test`: `#[cfg(not(test))]` mentions `test`
+/// but is *production* code, and skipping it was a real bypass of the exact
+/// `on_rewind` call the gate guards (cid 3330966933). We parse the `cfg`
+/// predicate and skip the item only when it can NEVER be active with the `test`
+/// flag unset. Over-approximating toward *scanning* (the false-positive direction)
+/// is the safe bias for an encapsulation gate, so an unparseable or unknown
+/// predicate is treated as live.
 fn is_cfg_test(attrs: &[Attribute]) -> bool {
-    fn meta_mentions_test(meta: &Meta) -> bool {
-        match meta {
-            Meta::Path(path) => path.is_ident("test"),
-            Meta::List(list) if list.path.is_ident("cfg") => {
-                list.tokens.to_string().contains("test")
-            }
-            Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
-                list.tokens.to_string().contains("test")
-            }
-            _ => false,
-        }
-    }
     attrs
         .iter()
-        .any(|attr| attr.path().is_ident("cfg") && meta_mentions_test(&attr.meta))
+        .any(|attr| attr.path().is_ident("cfg") && cfg_is_test_only(&attr.meta))
+}
+
+/// Evaluate a `#[cfg(...)]` attribute's predicate: is the gated item excluded
+/// from all non-test builds (i.e. test-only)?
+fn cfg_is_test_only(cfg_meta: &Meta) -> bool {
+    let Meta::List(list) = cfg_meta else {
+        return false;
+    };
+    if !list.path.is_ident("cfg") {
+        return false;
+    }
+    match syn::parse2::<Meta>(list.tokens.clone()) {
+        // Test-only iff the predicate can never be true once `test` is unset.
+        Ok(inner) => !pred_can_be_true_without_test(&inner),
+        // Unparseable predicate → don't exempt it (scan, the safe direction).
+        Err(_) => false,
+    }
+}
+
+/// Can this `cfg` predicate be satisfied in a build where `test` is NOT set
+/// (treating every other cfg atom as a free variable)? Mutually recursive with
+/// [`pred_can_be_false_without_test`] to evaluate `not(...)`.
+fn pred_can_be_true_without_test(meta: &Meta) -> bool {
+    match meta {
+        // The `test` atom is false in a non-test build; any other atom is free.
+        Meta::Path(path) => !path.is_ident("test"),
+        Meta::List(list) if list.path.is_ident("not") => match cfg_children(list) {
+            Some(children) if children.len() == 1 => {
+                pred_can_be_false_without_test(&children[0])
+            }
+            _ => true,
+        },
+        Meta::List(list) if list.path.is_ident("all") => match cfg_children(list) {
+            Some(children) => children.iter().all(pred_can_be_true_without_test),
+            None => true,
+        },
+        Meta::List(list) if list.path.is_ident("any") => match cfg_children(list) {
+            Some(children) => children.iter().any(pred_can_be_true_without_test),
+            None => true,
+        },
+        // `feature = "x"`, `target_os = "y"`, or an unknown predicate fn: a free
+        // atom that can be true in a non-test build.
+        _ => true,
+    }
+}
+
+/// Can this `cfg` predicate be *false* in a build where `test` is NOT set?
+/// Dual of [`pred_can_be_true_without_test`], used to evaluate `not(...)`.
+fn pred_can_be_false_without_test(meta: &Meta) -> bool {
+    match meta {
+        // `test` is false in prod (so the predicate is falsifiable); any other
+        // atom is free and can be left unset.
+        Meta::Path(_) => true,
+        Meta::List(list) if list.path.is_ident("not") => match cfg_children(list) {
+            Some(children) if children.len() == 1 => {
+                pred_can_be_true_without_test(&children[0])
+            }
+            _ => true,
+        },
+        // `all` is false if any child can be false; `any` is false only if every
+        // child can be false.
+        Meta::List(list) if list.path.is_ident("all") => match cfg_children(list) {
+            Some(children) => children.iter().any(pred_can_be_false_without_test),
+            None => true,
+        },
+        Meta::List(list) if list.path.is_ident("any") => match cfg_children(list) {
+            Some(children) => children.iter().all(pred_can_be_false_without_test),
+            None => true,
+        },
+        _ => true,
+    }
+}
+
+/// Parse the comma-separated child predicates of an `all(...)` / `any(...)` /
+/// `not(...)` cfg combinator.
+fn cfg_children(list: &MetaList) -> Option<Vec<Meta>> {
+    Punctuated::<Meta, Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
+        .ok()
+        .map(|punctuated| punctuated.into_iter().collect())
 }
 
 struct Finder<'a> {
@@ -259,6 +338,20 @@ impl<'ast> Visit<'ast> for Finder<'_> {
             self.record(node.method.span().start().line);
         }
         syn::visit::visit_expr_method_call(self, node);
+    }
+
+    /// Catch the UFCS / free-function-call form, `Tx::on_rewind(tx, ...)` (or
+    /// `<Tx>::on_rewind(...)`), which `visit_expr_method_call` never sees — a
+    /// real bypass, since `on_rewind` is `pub(crate)` and any other `repo`
+    /// module could reach it this way (cid 3330966935).
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(expr_path) = node.func.as_ref()
+            && let Some(segment) = expr_path.path.segments.last()
+            && segment.ident == LEDGER_METHOD
+        {
+            self.record(segment.ident.span().start().line);
+        }
+        syn::visit::visit_expr_call(self, node);
     }
 }
 
@@ -369,6 +462,91 @@ mod tests {
         assert!(
             check(&[dir.path().to_path_buf()], &[]).is_ok(),
             "on_rewind inside crates/repo/src/atomic/ is allowed"
+        );
+    }
+
+    #[test]
+    fn flags_cfg_not_test_on_rewind() {
+        // `#[cfg(not(test))]` is PRODUCTION code — it mentions `test` but is live
+        // whenever `test` is unset, so the old substring match wrongly exempted
+        // it (cid 3330966933). The predicate-aware walk must flag it.
+        let hits = scan_source(
+            "#[cfg(not(test))] \
+             fn prod(tx: &mut Tx) -> Result<()> { tx.on_rewind(move || Ok(())); Ok(()) }",
+        );
+        assert_eq!(
+            hits.len(),
+            1,
+            "on_rewind under #[cfg(not(test))] is production and must be flagged"
+        );
+    }
+
+    #[test]
+    fn still_skips_genuinely_test_only_cfg() {
+        // The legitimate exemptions stay exempt: `cfg(test)` and any predicate
+        // that requires `test` (e.g. `all(unix, test)`).
+        assert!(
+            scan_source("#[cfg(test)] fn t(tx: &mut Tx) { tx.on_rewind(|| Ok(())); }").is_empty(),
+            "#[cfg(test)] item is test-only and must be skipped"
+        );
+        assert!(
+            scan_source("#[cfg(all(unix, test))] fn t(tx: &mut Tx) { tx.on_rewind(|| Ok(())); }")
+                .is_empty(),
+            "#[cfg(all(unix, test))] requires test → test-only → skipped"
+        );
+    }
+
+    #[test]
+    fn scans_any_test_or_feature_cfg() {
+        // `any(test, feature = "x")` is live in a non-test build (feature x), so
+        // it must NOT be exempted just because it mentions `test`.
+        let hits = scan_source(
+            "#[cfg(any(test, feature = \"x\"))] \
+             fn prod(tx: &mut Tx) { tx.on_rewind(|| Ok(())); }",
+        );
+        assert_eq!(hits.len(), 1, "any(test, feature) is prod-reachable and must be flagged");
+    }
+
+    #[test]
+    fn flags_ufcs_on_rewind() {
+        // The UFCS / path-call form is invisible to method-call scanning but is a
+        // real bypass (cid 3330966935): `on_rewind` is `pub(crate)`.
+        let hits = scan_source(
+            "fn stage(tx: &mut Tx) -> Result<()> { Tx::on_rewind(tx, move || Ok(())); Ok(()) }",
+        );
+        assert_eq!(hits.len(), 1, "a UFCS Tx::on_rewind call must be flagged");
+    }
+
+    #[test]
+    fn check_bails_on_cfg_not_test_bypass() {
+        let dir = tempfile::tempdir().unwrap();
+        let crate_src = dir.path().join("cli/src");
+        std::fs::create_dir_all(&crate_src).unwrap();
+        std::fs::write(
+            crate_src.join("bypass.rs"),
+            "#[cfg(not(test))]\n\
+             fn prod(tx: &mut Tx) -> Result<()> { tx.on_rewind(move || Ok(())); Ok(()) }",
+        )
+        .unwrap();
+        assert!(
+            check(&[dir.path().to_path_buf()], &[]).is_err(),
+            "a #[cfg(not(test))] on_rewind bypass must fail the check"
+        );
+    }
+
+    #[test]
+    fn check_bails_on_ufcs_bypass() {
+        let dir = tempfile::tempdir().unwrap();
+        let crate_src = dir.path().join("cli/src");
+        std::fs::create_dir_all(&crate_src).unwrap();
+        std::fs::write(
+            crate_src.join("bypass.rs"),
+            "fn stage(tx: &mut Tx) -> Result<()> { Tx::on_rewind(tx, move || Ok(())); Ok(()) }",
+        )
+        .unwrap();
+        assert!(
+            check(&[dir.path().to_path_buf()], &[]).is_err(),
+            "a UFCS Tx::on_rewind bypass must fail the check"
         );
     }
 

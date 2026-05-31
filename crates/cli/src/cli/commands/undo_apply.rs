@@ -21,7 +21,7 @@ use objects::object::{ChangeId, MarkerName, ThreadName};
 use oplog::{OpBatch, OpEntry, OpRecord};
 use refs::Head;
 use repo::{
-    CommitGraphIndex, Repository, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
+    CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadState, refresh_thread_freshness,
     atomic::{AtomicMutation, SavepointMutation, StagedCommit, Tx},
 };
@@ -122,7 +122,253 @@ fn ensure_simulated_git_head_is(
     )))
 }
 
-fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
+// ---- Per-effect step toolkit (heddle#355 r3, cid 3330966930 / 3330966931) ----
+//
+// Every externally-visible write inside an undo/redo entry runs through its OWN
+// `Tx::step`, so a failure on the Nth write leaves the prior N-1 inverses on the
+// rewind ledger and the rollback restores the EXACT pre-entry state. No `step`
+// forward performs more than one independently-failable write — the granularity
+// bug a per-ENTRY `step` had: a forward that did write-A (ok) then write-B (err)
+// returned `Err` with no compensator for A, leaving the repo half-rewound.
+//
+// Inverses capture the value the write is about to overwrite (capture-before),
+// so a step restores its own pre-state regardless of how far it got, and the
+// composition restores the whole entry. `goto_without_record` always re-detaches
+// HEAD, so `step_goto`'s inverse restores the full captured `Head` (worktree
+// state AND ref attachment) — otherwise a later re-attach effect would not be
+// undone in LIFO order. Inverses (rollback, best-effort) MAY touch more than one
+// ref; only forwards are held to the one-write rule.
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: when armed with `Some(n)`, the (n+1)-th per-effect step within
+    /// an entry application returns an injected error WITHOUT running its forward
+    /// — modeling "the (n+1)-th visible write fails after the first n succeeded",
+    /// so the mid-ENTRY rollback path can be asserted. Counts across every
+    /// `entry_step` of the current entry; disarms on trip.
+    static ENTRY_WRITE_FAULT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Arm the mid-entry write-fault seam for the duration of `body`, clearing it
+/// afterwards so it never leaks into another test on the same thread.
+#[cfg(test)]
+fn with_entry_write_fault<T>(skip_then_fail_at: usize, body: impl FnOnce() -> T) -> T {
+    ENTRY_WRITE_FAULT.with(|f| f.set(Some(skip_then_fail_at)));
+    let out = body();
+    ENTRY_WRITE_FAULT.with(|f| f.set(None));
+    out
+}
+
+/// Run one reversible leaf write of an undo/redo entry as a `Tx::step`. `forward`
+/// performs exactly one externally-visible write; `inverse` restores the state
+/// captured immediately before it. Honors the [`ENTRY_WRITE_FAULT`] test seam.
+fn entry_step<'a, T>(
+    tx: &mut Tx<'a>,
+    forward: impl FnOnce() -> HeddleResult<T>,
+    inverse: impl FnOnce() -> HeddleResult<()> + 'a,
+) -> HeddleResult<T> {
+    #[cfg(test)]
+    {
+        let trip = ENTRY_WRITE_FAULT.with(|f| match f.get() {
+            Some(0) => {
+                f.set(None);
+                true
+            }
+            Some(n) => {
+                f.set(Some(n - 1));
+                false
+            }
+            None => false,
+        });
+        if trip {
+            return Err(HeddleError::Conflict(
+                "injected mid-entry write fault".to_string(),
+            ));
+        }
+    }
+    tx.step(forward, inverse)
+}
+
+/// Step: navigate HEAD + worktree to `target`. Inverse restores the FULL pre-step
+/// HEAD (worktree state AND ref attachment).
+fn step_goto<'a>(tx: &mut Tx<'a>, target: ChangeId) -> HeddleResult<()> {
+    let repo = tx.repo();
+    let prev_head_ref = repo.head_ref()?;
+    let prev_state = repo.head()?;
+    entry_step(
+        tx,
+        move || repo.goto_without_record(&target),
+        move || restore_head(repo, prev_state, &prev_head_ref),
+    )
+}
+
+/// Restore HEAD to a captured worktree `state` + ref attachment: re-materialize
+/// the worktree (if a state was captured), then restore the exact `Head` ref.
+fn restore_head(repo: &Repository, state: Option<ChangeId>, head_ref: &Head) -> HeddleResult<()> {
+    if let Some(state) = state {
+        repo.goto_without_record(&state)?;
+    }
+    repo.refs().write_head(head_ref)
+}
+
+/// Step: write HEAD to `head`; inverse restores the prior HEAD ref.
+fn step_write_head<'a>(tx: &mut Tx<'a>, head: Head) -> HeddleResult<()> {
+    let repo = tx.repo();
+    let prev = repo.head_ref()?;
+    entry_step(
+        tx,
+        move || repo.refs().write_head(&head),
+        move || repo.refs().write_head(&prev),
+    )
+}
+
+/// Step: set thread ref `name` to `state`; inverse restores its prior value (or
+/// deletes it if it had none).
+fn step_set_thread<'a>(tx: &mut Tx<'a>, name: &str, state: ChangeId) -> HeddleResult<()> {
+    let repo = tx.repo();
+    let forward_name = ThreadName::new(name);
+    let prev = repo.refs().get_thread(&forward_name)?;
+    let restore_name = name.to_string();
+    entry_step(
+        tx,
+        move || repo.refs().set_thread(&forward_name, &state),
+        move || {
+            let name = ThreadName::new(restore_name);
+            match prev {
+                Some(prev) => repo.refs().set_thread(&name, &prev),
+                None => repo.refs().delete_thread(&name).map(|_| ()),
+            }
+        },
+    )
+}
+
+/// Step: delete thread ref `name`; inverse restores its prior value.
+fn step_delete_thread<'a>(tx: &mut Tx<'a>, name: &str) -> HeddleResult<()> {
+    let repo = tx.repo();
+    let forward_name = ThreadName::new(name);
+    let prev = repo.refs().get_thread(&forward_name)?;
+    let restore_name = name.to_string();
+    entry_step(
+        tx,
+        move || repo.refs().delete_thread(&forward_name).map(|_| ()),
+        move || match prev {
+            Some(prev) => repo.refs().set_thread(&ThreadName::new(restore_name), &prev),
+            None => Ok(()),
+        },
+    )
+}
+
+/// Step: create marker `name` at `state`; inverse restores its prior value
+/// (delete if it didn't exist). On a name collision the forward fails, so no
+/// inverse is registered and a pre-existing marker survives the rollback.
+fn step_create_marker<'a>(tx: &mut Tx<'a>, name: &str, state: ChangeId) -> HeddleResult<()> {
+    let repo = tx.repo();
+    let forward_name = MarkerName::new(name);
+    let prev = repo.refs().get_marker(&forward_name)?;
+    let restore_name = name.to_string();
+    entry_step(
+        tx,
+        move || repo.refs().create_marker(&forward_name, &state),
+        move || {
+            let name = MarkerName::new(restore_name);
+            match prev {
+                Some(prev) => repo.refs().create_marker(&name, &prev),
+                None => repo.refs().delete_marker(&name).map(|_| ()),
+            }
+        },
+    )
+}
+
+/// Step: delete marker `name`; inverse recreates it at its prior value.
+fn step_delete_marker<'a>(tx: &mut Tx<'a>, name: &str) -> HeddleResult<()> {
+    let repo = tx.repo();
+    let forward_name = MarkerName::new(name);
+    let prev = repo.refs().get_marker(&forward_name)?;
+    let restore_name = name.to_string();
+    entry_step(
+        tx,
+        move || repo.refs().delete_marker(&forward_name).map(|_| ()),
+        move || match prev {
+            Some(prev) => repo.refs().create_marker(&MarkerName::new(restore_name), &prev),
+            None => Ok(()),
+        },
+    )
+}
+
+/// Step: persist a mutated ThreadManager record; inverse restores the record's
+/// prior persisted form (or removes it if there was none).
+fn step_save_thread_record<'a>(tx: &mut Tx<'a>, record: Thread) -> HeddleResult<()> {
+    let repo = tx.repo();
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let prev = manager.find_by_thread(&record.thread)?;
+    let new_id = record.id.clone();
+    entry_step(
+        tx,
+        move || ThreadManager::new(repo.heddle_dir()).save(&record),
+        move || {
+            let manager = ThreadManager::new(repo.heddle_dir());
+            match prev {
+                Some(prev) => manager.save(&prev),
+                None => manager.delete(&new_id),
+            }
+        },
+    )
+}
+
+/// Step: delete a ThreadManager record; inverse re-saves it.
+fn step_delete_thread_record<'a>(tx: &mut Tx<'a>, record: Thread) -> HeddleResult<()> {
+    let repo = tx.repo();
+    let id = record.id.clone();
+    entry_step(
+        tx,
+        move || ThreadManager::new(repo.heddle_dir()).delete(&id),
+        move || ThreadManager::new(repo.heddle_dir()).save(&record),
+    )
+}
+
+/// Step: restore a ThreadManager record from a redo snapshot; inverse restores
+/// the prior persisted form (or removes the restored record if there was none).
+/// A snapshot that fails to decode is a non-fatal warning (pre-migration parity).
+fn step_restore_thread_record<'a>(
+    tx: &mut Tx<'a>,
+    name: &str,
+    bytes: &[u8],
+) -> HeddleResult<()> {
+    let repo = tx.repo();
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let prev = manager.find_by_thread(name)?;
+    let bytes = bytes.to_vec();
+    let forward_name = name.to_string();
+    let restore_name = name.to_string();
+    entry_step(
+        tx,
+        move || {
+            let manager = ThreadManager::new(repo.heddle_dir());
+            if let Err(e) = manager.restore_thread_record_from_snapshot(&bytes) {
+                eprintln!(
+                    "warning: redo of `ThreadCreate` for '{}' restored the ref but failed to \
+                     decode the ThreadManager record snapshot ({}). Record-backed commands \
+                     (`thread cd`, delegate) may degrade on this thread — run `heddle thread \
+                     start {}` to recreate the record.",
+                    forward_name, e, forward_name
+                );
+            }
+            Ok(())
+        },
+        move || {
+            let manager = ThreadManager::new(repo.heddle_dir());
+            match prev {
+                Some(prev) => manager.save(&prev),
+                None => match manager.find_by_thread(&restore_name)? {
+                    Some(record) => manager.delete(&record.id),
+                    None => Ok(()),
+                },
+            }
+        },
+    )
+}
+
+fn apply_undo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
     match &entry.operation {
         OpRecord::Snapshot {
             prev_head: Some(prev),
@@ -130,21 +376,24 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             new_state,
             ..
         } => {
-            repo.goto_without_record(prev)?;
+            step_goto(tx, *prev)?;
             if let Some(thread) = thread {
-                repo.refs().set_thread(&ThreadName::new(thread.as_str()), prev)?;
-                repo.refs().write_head(&Head::Attached {
-                    thread: ThreadName::new(thread.as_str()),
-                })?;
-                sync_thread_record_state(repo, thread, *prev)?;
-                mark_merged_threads_unintegrated_for_target(repo, thread, new_state, prev)?;
+                step_set_thread(tx, thread.as_str(), *prev)?;
+                step_write_head(
+                    tx,
+                    Head::Attached {
+                        thread: ThreadName::new(thread.as_str()),
+                    },
+                )?;
+                sync_thread_record_state(tx, thread, *prev)?;
+                mark_merged_threads_unintegrated_for_target(tx, thread, new_state, prev)?;
             }
         }
         OpRecord::Goto {
             prev_head: Some(prev),
             ..
         } => {
-            repo.goto_without_record(prev)?;
+            step_goto(tx, *prev)?;
         }
         OpRecord::Snapshot {
             prev_head: None, ..
@@ -153,7 +402,7 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             prev_head: None, ..
         } => {}
         OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
-            delete_thread_safely(repo, &ThreadName::new(name.as_str()))?;
+            delete_thread_safely(tx, &ThreadName::new(name.as_str()))?;
             // Cross-thread contract rule 4 (docs/design/cross-thread-undo.md):
             // the inverse of `ThreadCreate` must also remove the matching
             // ThreadManager record so `heddle thread show` and the record-
@@ -170,21 +419,21 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             // is recorded for redo, so undo can still destroy the live
             // record without losing the data needed to put it back.
             // Matches the FastForward/V2 shared-undo shape.
-            remove_thread_manager_record(repo, name)?;
+            remove_thread_manager_record(tx, name)?;
         }
         OpRecord::ThreadDelete { name, state } => {
-            repo.refs().set_thread(&ThreadName::new(name.as_str()), state)?;
+            step_set_thread(tx, name.as_str(), *state)?;
         }
         OpRecord::ThreadUpdate {
             name, old_state, ..
         } => {
-            repo.refs().set_thread(&ThreadName::new(name.as_str()), old_state)?;
+            step_set_thread(tx, name.as_str(), *old_state)?;
         }
         OpRecord::MarkerCreate { name, .. } => {
-            repo.refs().delete_marker(&MarkerName::new(name.as_str()))?;
+            step_delete_marker(tx, name.as_str())?;
         }
         OpRecord::MarkerDelete { name, state } => {
-            repo.refs().create_marker(&MarkerName::new(name.as_str()), state)?;
+            step_create_marker(tx, name.as_str(), *state)?;
         }
         // Redaction inverse: drop the specific redaction record so
         // subsequent materialize calls restore the original blob
@@ -207,7 +456,12 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             state,
             path,
         } => {
-            repo.remove_redaction(blob, state, path, redaction_id)?;
+            // A single write, and redo of a redaction is refused upstream
+            // (`ensure_redaction_redo_supported`), so there is no inverse to
+            // register — matching the pre-migration no-op redo for this record.
+            tx.repo()
+                .remove_redaction(blob, state, path, redaction_id)
+                .map_err(apply_error)?;
         }
         // Fast-forward merge inverse: restore both HEAD and the target
         // thread ref to the pre-FF tip. The source thread never moved
@@ -228,7 +482,7 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             pre_target_id,
             ..
         } => {
-            apply_ff_undo(repo, source_thread, target_thread, pre_target_id)?;
+            apply_ff_undo(tx, source_thread, target_thread, pre_target_id)?;
         }
         OpRecord::GitCheckpoint {
             branch,
@@ -236,7 +490,7 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             new_git_oid,
             ..
         } => {
-            apply_git_checkpoint_undo(repo, branch, previous_git_oid.as_deref(), new_git_oid)?;
+            apply_git_checkpoint_undo(tx, branch, previous_git_oid.as_deref(), new_git_oid)?;
         }
         // No undo inverse: these records don't move a ref the undo chain
         // restores, or their reversal is irreversible / handled outside the
@@ -271,39 +525,45 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
 }
 
 fn apply_ff_undo(
-    repo: &Repository,
+    tx: &mut Tx<'_>,
     source_thread: &str,
     target_thread: &str,
     pre_target_id: &ChangeId,
-) -> Result<()> {
-    repo.goto_without_record(pre_target_id)?;
-    repo.refs().set_thread(&ThreadName::new(target_thread), pre_target_id)?;
-    repo.refs().write_head(&Head::Attached {
-        thread: ThreadName::new(target_thread),
-    })?;
-    sync_thread_record_state(repo, target_thread, *pre_target_id)?;
-    mark_source_thread_unintegrated(repo, source_thread, pre_target_id)
+) -> HeddleResult<()> {
+    step_goto(tx, *pre_target_id)?;
+    step_set_thread(tx, target_thread, *pre_target_id)?;
+    step_write_head(
+        tx,
+        Head::Attached {
+            thread: ThreadName::new(target_thread),
+        },
+    )?;
+    sync_thread_record_state(tx, target_thread, *pre_target_id)?;
+    mark_source_thread_unintegrated(tx, source_thread, pre_target_id)
 }
 
-fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
+fn apply_redo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
     match &entry.operation {
         OpRecord::Snapshot {
             new_state,
             prev_head,
             thread,
         } => {
-            repo.goto_without_record(new_state)?;
+            step_goto(tx, *new_state)?;
             if let Some(thread) = thread {
-                repo.refs().set_thread(&ThreadName::new(thread.as_str()), new_state)?;
-                repo.refs().write_head(&Head::Attached {
-                    thread: ThreadName::new(thread.as_str()),
-                })?;
-                sync_thread_record_state(repo, thread, *new_state)?;
-                mark_ready_threads_integrated_for_target(repo, thread, new_state, prev_head)?;
+                step_set_thread(tx, thread.as_str(), *new_state)?;
+                step_write_head(
+                    tx,
+                    Head::Attached {
+                        thread: ThreadName::new(thread.as_str()),
+                    },
+                )?;
+                sync_thread_record_state(tx, thread, *new_state)?;
+                mark_ready_threads_integrated_for_target(tx, thread, new_state, prev_head)?;
             }
         }
         OpRecord::Goto { target, .. } => {
-            repo.goto_without_record(target)?;
+            step_goto(tx, *target)?;
         }
         // V1 ThreadCreate redo: ref-only, with a stderr note that the
         // ThreadManager record is not being restored. V1 records were
@@ -316,7 +576,7 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         // <name>` if they want the record back. V1 ages out as the
         // live oplog window slides forward.
         OpRecord::ThreadCreate { name, state } => {
-            repo.refs().set_thread(&ThreadName::new(name.as_str()), state)?;
+            step_set_thread(tx, name.as_str(), *state)?;
             eprintln!(
                 "warning: redo of legacy V1 `ThreadCreate` for '{}' restores the ref only — \
                  the matching ThreadManager record body was not snapshotted by this oplog entry. \
@@ -339,37 +599,24 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             state,
             manager_snapshot,
         } => {
-            repo.refs().set_thread(&ThreadName::new(name.as_str()), state)?;
+            step_set_thread(tx, name.as_str(), *state)?;
             if let Some(bytes) = manager_snapshot {
-                let manager = ThreadManager::new(repo.heddle_dir());
-                match manager.restore_thread_record_from_snapshot(bytes) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        eprintln!(
-                            "warning: redo of `ThreadCreate` for '{}' restored the ref but \
-                             failed to decode the ThreadManager record snapshot ({}). \
-                             Record-backed commands (`thread cd`, delegate) may degrade \
-                             on this thread — run `heddle thread start {}` to recreate \
-                             the record.",
-                            name, e, name
-                        );
-                    }
-                }
+                step_restore_thread_record(tx, name, bytes)?;
             }
         }
         OpRecord::ThreadDelete { name, .. } => {
-            delete_thread_safely(repo, &ThreadName::new(name.as_str()))?;
+            delete_thread_safely(tx, &ThreadName::new(name.as_str()))?;
         }
         OpRecord::ThreadUpdate {
             name, new_state, ..
         } => {
-            repo.refs().set_thread(&ThreadName::new(name.as_str()), new_state)?;
+            step_set_thread(tx, name.as_str(), *new_state)?;
         }
         OpRecord::MarkerCreate { name, state } => {
-            repo.refs().create_marker(&MarkerName::new(name.as_str()), state)?;
+            step_create_marker(tx, name.as_str(), *state)?;
         }
         OpRecord::MarkerDelete { name, .. } => {
-            repo.refs().delete_marker(&MarkerName::new(name.as_str()))?;
+            step_delete_marker(tx, name.as_str())?;
         }
         // FF merge redo (V2): replay the *recorded* FF target. We do
         // not re-read `source_thread` — the recorded `post_target_id`
@@ -384,7 +631,7 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             post_target_id,
             ..
         } => {
-            apply_ff_redo(repo, source_thread, target_thread, post_target_id)?;
+            apply_ff_redo(tx, source_thread, target_thread, post_target_id)?;
         }
         OpRecord::GitCheckpoint {
             branch,
@@ -392,7 +639,7 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             new_git_oid,
             ..
         } => {
-            apply_git_checkpoint_redo(repo, branch, previous_git_oid.as_deref(), new_git_oid)?;
+            apply_git_checkpoint_redo(tx, branch, previous_git_oid.as_deref(), new_git_oid)?;
         }
         // FF merge redo (V1, legacy): the r1 implementation didn't
         // record `post_target_id`, so we have to re-resolve
@@ -406,14 +653,18 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             target_thread,
             ..
         } => {
-            let source_tip = repo.refs().get_thread(&ThreadName::new(source_thread.as_str()))?.ok_or_else(|| {
-                anyhow!(
-                    "cannot redo fast-forward: source thread '{}' no longer exists \
-                     (legacy V1 oplog record; re-run the merge or `heddle gc oplog` to prune)",
-                    source_thread
-                )
-            })?;
-            apply_ff_redo(repo, source_thread, target_thread, &source_tip)?;
+            let source_tip = tx
+                .repo()
+                .refs()
+                .get_thread(&ThreadName::new(source_thread.as_str()))?
+                .ok_or_else(|| {
+                    HeddleError::Conflict(format!(
+                        "cannot redo fast-forward: source thread '{}' no longer exists \
+                         (legacy V1 oplog record; re-run the merge or `heddle gc oplog` to prune)",
+                        source_thread
+                    ))
+                })?;
+            apply_ff_redo(tx, source_thread, target_thread, &source_tip)?;
         }
         // No redo replay: these records don't re-advance a ref redo touches, or
         // they are refused upstream. Enumerated explicitly (no wildcard) so a
@@ -448,97 +699,273 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
 }
 
 fn apply_ff_redo(
-    repo: &Repository,
+    tx: &mut Tx<'_>,
     source_thread: &str,
     target_thread: &str,
     post_target_id: &ChangeId,
-) -> Result<()> {
-    repo.goto_without_record(post_target_id)?;
-    repo.refs().set_thread(&ThreadName::new(target_thread), post_target_id)?;
-    repo.refs().write_head(&Head::Attached {
-        thread: ThreadName::new(target_thread),
-    })?;
-    sync_thread_record_state(repo, target_thread, *post_target_id)?;
-    mark_source_thread_integrated(repo, source_thread, post_target_id)
+) -> HeddleResult<()> {
+    step_goto(tx, *post_target_id)?;
+    step_set_thread(tx, target_thread, *post_target_id)?;
+    step_write_head(
+        tx,
+        Head::Attached {
+            thread: ThreadName::new(target_thread),
+        },
+    )?;
+    sync_thread_record_state(tx, target_thread, *post_target_id)?;
+    mark_source_thread_integrated(tx, source_thread, post_target_id)
+}
+
+/// The pre-entry Git state a checkpoint undo/redo entry overwrites, captured
+/// before any write so a partial failure restores it exactly. `git`-side writes
+/// span the checkout repo (HEAD file, branch ref, index) and the heddle mirror
+/// (branch ref), so all four are snapshotted.
+#[derive(Clone)]
+struct GitState {
+    /// Raw `.git/HEAD` of the checkout repo (symref or detached oid line).
+    head_file: Option<String>,
+    /// `refs/heads/{branch}` in the checkout repo.
+    checkout_branch_oid: Option<ObjectId>,
+    /// Resolved checkout HEAD commit — the index is reset back to this.
+    checkout_head_oid: Option<String>,
+    /// `refs/heads/{branch}` in the heddle mirror.
+    mirror_branch_oid: Option<ObjectId>,
+}
+
+fn capture_git_state(repo: &Repository, branch: &str) -> HeddleResult<GitState> {
+    let git = git_checkout_repo(repo).map_err(apply_error)?;
+    let checkout_branch_oid = if branch == "HEAD" {
+        None
+    } else {
+        ref_target_oid(&git, &format!("refs/heads/{branch}")).map_err(apply_error)?
+    };
+    let head_file = fs::read_to_string(git.git_dir().join("HEAD")).ok();
+    let checkout_head_oid = git.head_id().ok().map(|id| id.detach().to_string());
+    let mirror_branch_oid = capture_mirror_oid(repo, branch).map_err(apply_error)?;
+    Ok(GitState {
+        head_file,
+        checkout_branch_oid,
+        checkout_head_oid,
+        mirror_branch_oid,
+    })
+}
+
+/// Restore the checkout + mirror Git state captured in [`GitState`]. Runs only on
+/// the rollback path; absolute SET/DELETE ops, so re-running it (LIFO across the
+/// entry's steps) is idempotent.
+fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> HeddleResult<()> {
+    let git = git_checkout_repo(repo).map_err(apply_error)?;
+    if branch != "HEAD" {
+        let ref_name = format!("refs/heads/{branch}");
+        match state.checkout_branch_oid {
+            Some(oid) => set_reference(
+                &git,
+                &ref_name,
+                oid,
+                PreviousValue::Any,
+                "heddle: rollback git checkpoint",
+            )
+            .map_err(|error| apply_error(anyhow!(error)))?,
+            None => delete_ref_if_present(&git, &ref_name).map_err(apply_error)?,
+        }
+    }
+    if let Some(head) = &state.head_file {
+        let head_path = git.git_dir().join("HEAD");
+        fs::write(&head_path, head)?;
+        fsync_file_and_parent(&head_path).map_err(apply_error)?;
+    }
+    if let Some(oid) = &state.checkout_head_oid {
+        let oid = parse_git_oid(oid).map_err(apply_error)?;
+        reset_git_index_to_commit(&git, oid).map_err(apply_error)?;
+    }
+    restore_mirror_oid(repo, branch, state.mirror_branch_oid).map_err(apply_error)?;
+    Ok(())
+}
+
+fn capture_mirror_oid(repo: &Repository, branch: &str) -> Result<Option<ObjectId>> {
+    if branch == "HEAD" {
+        return Ok(None);
+    }
+    let mirror = repo.heddle_dir().join("git");
+    if !mirror.exists() {
+        return Ok(None);
+    }
+    let git = open_git_repo(&mirror)?;
+    ref_target_oid(&git, &format!("refs/heads/{branch}"))
+}
+
+fn restore_mirror_oid(repo: &Repository, branch: &str, oid: Option<ObjectId>) -> Result<()> {
+    if branch == "HEAD" {
+        return Ok(());
+    }
+    let mirror = repo.heddle_dir().join("git");
+    if !mirror.exists() {
+        return Ok(());
+    }
+    let git = open_git_repo(&mirror)?;
+    let ref_name = format!("refs/heads/{branch}");
+    match oid {
+        Some(oid) => set_reference(
+            &git,
+            &ref_name,
+            oid,
+            PreviousValue::Any,
+            "heddle: rollback mirror checkpoint ref",
+        )
+        .map_err(|error| anyhow!(error)),
+        None => delete_ref_if_present(&git, &ref_name),
+    }
+}
+
+fn delete_ref_if_present(git: &gix::Repository, ref_name: &str) -> Result<()> {
+    if ref_target_oid(git, ref_name)?.is_some() {
+        delete_reference_matching(git, ref_name, None)?;
+    }
+    Ok(())
+}
+
+/// Run one checkout-repo Git write as a per-effect step. `forward` performs
+/// exactly one externally-visible write; on a later failure the rollback restores
+/// the captured `snapshot`. A fresh checkout handle is opened per step (cold path).
+fn git_step<'a>(
+    tx: &mut Tx<'a>,
+    repo: &'a Repository,
+    branch: &str,
+    snapshot: &GitState,
+    forward: impl FnOnce() -> Result<()>,
+) -> HeddleResult<()> {
+    let snapshot = snapshot.clone();
+    let branch = branch.to_string();
+    entry_step(
+        tx,
+        move || forward().map_err(apply_error),
+        move || restore_git_state(repo, &branch, &snapshot),
+    )
 }
 
 fn apply_git_checkpoint_undo(
-    repo: &Repository,
+    tx: &mut Tx<'_>,
     branch: &str,
     previous_git_oid: Option<&str>,
     new_git_oid: &str,
-) -> Result<()> {
-    ensure_git_head_is(repo, new_git_oid, "undo git checkpoint")?;
-    ensure_git_worktree_clean(repo, "undo git checkpoint")?;
-    let git = git_checkout_repo(repo)?;
-    let new_oid = parse_git_oid(new_git_oid)?;
+) -> HeddleResult<()> {
+    let repo = tx.repo();
+    ensure_git_head_is(repo, new_git_oid, "undo git checkpoint").map_err(apply_error)?;
+    ensure_git_worktree_clean(repo, "undo git checkpoint").map_err(apply_error)?;
+    let snapshot = capture_git_state(repo, branch)?;
+    let new_oid = parse_git_oid(new_git_oid).map_err(apply_error)?;
     match previous_git_oid {
         Some(previous) => {
-            let previous_oid = parse_git_oid(previous)?;
+            let previous_oid = parse_git_oid(previous).map_err(apply_error)?;
             if branch != "HEAD" {
-                let ref_name = format!("refs/heads/{branch}");
-                if ref_target_oid(&git, &ref_name)? != Some(previous_oid) {
-                    attach_git_head_to_branch(&git, branch)?;
-                    set_attached_git_head(
-                        &git,
-                        branch,
-                        previous_oid,
-                        new_oid,
-                        "heddle: undo git checkpoint",
-                    )?;
+                let git = git_checkout_repo(repo).map_err(apply_error)?;
+                if ref_target_oid(&git, &format!("refs/heads/{branch}")).map_err(apply_error)?
+                    != Some(previous_oid)
+                {
+                    git_step(tx, repo, branch, &snapshot, || {
+                        attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
+                    })?;
+                    git_step(tx, repo, branch, &snapshot, || {
+                        set_attached_git_head(
+                            &git_checkout_repo(repo)?,
+                            branch,
+                            previous_oid,
+                            new_oid,
+                            "heddle: undo git checkpoint",
+                        )
+                    })?;
                 }
-                attach_git_head_to_branch(&git, branch)?;
+                git_step(tx, repo, branch, &snapshot, || {
+                    attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
+                })?;
             }
-            reset_git_index_to_commit(&git, previous_oid)?;
-            update_mirror_branch_ref(repo, branch, Some(previous), Some(new_git_oid))?;
+            git_step(tx, repo, branch, &snapshot, || {
+                reset_git_index_to_commit(&git_checkout_repo(repo)?, previous_oid)
+            })?;
+            let previous = previous.to_string();
+            let new_git_oid = new_git_oid.to_string();
+            git_step(tx, repo, branch, &snapshot, || {
+                update_mirror_branch_ref(repo, branch, Some(&previous), Some(&new_git_oid))
+            })?;
         }
         None => {
             if branch != "HEAD" {
-                delete_reference_matching(&git, &format!("refs/heads/{branch}"), Some(new_oid))?;
+                git_step(tx, repo, branch, &snapshot, || {
+                    delete_reference_matching(
+                        &git_checkout_repo(repo)?,
+                        &format!("refs/heads/{branch}"),
+                        Some(new_oid),
+                    )
+                })?;
             }
-            update_mirror_branch_ref(repo, branch, None, Some(new_git_oid))?;
+            let new_git_oid = new_git_oid.to_string();
+            git_step(tx, repo, branch, &snapshot, || {
+                update_mirror_branch_ref(repo, branch, None, Some(&new_git_oid))
+            })?;
         }
     }
     Ok(())
 }
 
 fn apply_git_checkpoint_redo(
-    repo: &Repository,
+    tx: &mut Tx<'_>,
     branch: &str,
     previous_git_oid: Option<&str>,
     new_git_oid: &str,
-) -> Result<()> {
+) -> HeddleResult<()> {
+    let repo = tx.repo();
     if let Some(previous) = previous_git_oid {
-        ensure_git_head_is(repo, previous, "redo git checkpoint")?;
+        ensure_git_head_is(repo, previous, "redo git checkpoint").map_err(apply_error)?;
     }
-    let git = git_checkout_repo(repo)?;
-    let new_oid = parse_git_oid(new_git_oid)?;
+    let snapshot = capture_git_state(repo, branch)?;
+    let new_oid = parse_git_oid(new_git_oid).map_err(apply_error)?;
     if branch != "HEAD" {
         match previous_git_oid {
             Some(previous) => {
-                attach_git_head_to_branch(&git, branch)?;
-                set_attached_git_head(
-                    &git,
-                    branch,
-                    new_oid,
-                    parse_git_oid(previous)?,
-                    "heddle: redo git checkpoint",
-                )?;
+                let previous_oid = parse_git_oid(previous).map_err(apply_error)?;
+                git_step(tx, repo, branch, &snapshot, || {
+                    attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
+                })?;
+                git_step(tx, repo, branch, &snapshot, || {
+                    set_attached_git_head(
+                        &git_checkout_repo(repo)?,
+                        branch,
+                        new_oid,
+                        previous_oid,
+                        "heddle: redo git checkpoint",
+                    )
+                })?;
             }
             None => {
-                set_reference(
-                    &git,
-                    &format!("refs/heads/{branch}"),
-                    new_oid,
-                    PreviousValue::Any,
-                    "heddle: redo git checkpoint",
-                )?;
-                attach_git_head_to_branch(&git, branch)?;
+                git_step(tx, repo, branch, &snapshot, || {
+                    set_reference(
+                        &git_checkout_repo(repo)?,
+                        &format!("refs/heads/{branch}"),
+                        new_oid,
+                        PreviousValue::Any,
+                        "heddle: redo git checkpoint",
+                    )
+                    .map_err(|error| anyhow!(error))
+                })?;
+                git_step(tx, repo, branch, &snapshot, || {
+                    attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
+                })?;
             }
         }
     }
-    reset_git_index_to_commit(&git, new_oid)?;
-    update_mirror_branch_ref(repo, branch, Some(new_git_oid), previous_git_oid)?;
+    git_step(tx, repo, branch, &snapshot, || {
+        reset_git_index_to_commit(&git_checkout_repo(repo)?, new_oid)
+    })?;
+    let previous_git_oid = previous_git_oid.map(|previous| previous.to_string());
+    let new_git_oid = new_git_oid.to_string();
+    git_step(tx, repo, branch, &snapshot, || {
+        update_mirror_branch_ref(
+            repo,
+            branch,
+            Some(&new_git_oid),
+            previous_git_oid.as_deref(),
+        )
+    })?;
     Ok(())
 }
 
@@ -765,40 +1192,45 @@ fn fsync_file_and_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn delete_thread_safely(repo: &Repository, name: &ThreadName) -> Result<()> {
+fn delete_thread_safely(tx: &mut Tx<'_>, name: &ThreadName) -> HeddleResult<()> {
+    let repo = tx.repo();
     if let Head::Attached { thread } = repo.head_ref()?
         && thread == *name
     {
-        let state = repo
-            .refs()
-            .get_thread(name)?
-            .ok_or_else(|| anyhow!(thread_not_found_advice(name.as_str(), "delete thread")))?;
-        repo.refs().write_head(&Head::Detached { state })?;
+        let state = repo.refs().get_thread(name)?.ok_or_else(|| {
+            HeddleError::Conflict(
+                thread_not_found_advice(name.as_str(), "delete thread").to_string(),
+            )
+        })?;
+        // Detaching HEAD is its own effect (inverse restores the prior attached
+        // HEAD), separate from the ref deletion below.
+        step_write_head(tx, Head::Detached { state })?;
     }
 
-    repo.refs().delete_thread(name)?;
+    step_delete_thread(tx, name.as_str())?;
     Ok(())
 }
 
 fn sync_thread_record_state(
-    repo: &Repository,
+    tx: &mut Tx<'_>,
     thread_name: &str,
     state: objects::object::ChangeId,
-) -> Result<()> {
-    let manager = ThreadManager::new(repo.heddle_dir());
+) -> HeddleResult<()> {
+    let manager = ThreadManager::new(tx.repo().heddle_dir());
     if let Some(mut thread) = manager.find_by_thread(thread_name)? {
         thread.current_state = Some(state.short());
         thread.updated_at = chrono::Utc::now();
-        manager.save(&thread)?;
+        step_save_thread_record(tx, thread)?;
     }
     Ok(())
 }
 
 fn mark_source_thread_unintegrated(
-    repo: &Repository,
+    tx: &mut Tx<'_>,
     source_thread: &str,
     target_after_undo: &ChangeId,
-) -> Result<()> {
+) -> HeddleResult<()> {
+    let repo = tx.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
     let Some(mut thread) = manager.find_by_thread(source_thread)? else {
         return Ok(());
@@ -829,16 +1261,17 @@ fn mark_source_thread_unintegrated(
         thread.freshness = ThreadFreshness::Current;
     }
     thread.updated_at = chrono::Utc::now();
-    manager.save(&thread)?;
+    step_save_thread_record(tx, thread)?;
     Ok(())
 }
 
 fn mark_merged_threads_unintegrated_for_target(
-    repo: &Repository,
+    tx: &mut Tx<'_>,
     target_thread: &str,
     integrated_state: &ChangeId,
     target_after_undo: &ChangeId,
-) -> Result<()> {
+) -> HeddleResult<()> {
+    let repo = tx.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
     for thread in manager.list()? {
         if thread.thread == target_thread
@@ -854,17 +1287,20 @@ fn mark_merged_threads_unintegrated_for_target(
             .and_then(|state| repo.resolve_state(state).ok().flatten())
             .is_some_and(|state| state == *integrated_state);
         if points_at_integrated_state {
-            mark_source_thread_unintegrated(repo, &thread.thread, target_after_undo)?;
+            // Each affected record is saved through its own per-effect step, so a
+            // mid-loop failure rolls each one back independently.
+            mark_source_thread_unintegrated(tx, &thread.thread, target_after_undo)?;
         }
     }
     Ok(())
 }
 
 fn mark_source_thread_integrated(
-    repo: &Repository,
+    tx: &mut Tx<'_>,
     source_thread: &str,
     target_after_redo: &ChangeId,
-) -> Result<()> {
+) -> HeddleResult<()> {
+    let repo = tx.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
     let Some(mut thread) = manager.find_by_thread(source_thread)? else {
         return Ok(());
@@ -889,16 +1325,17 @@ fn mark_source_thread_integrated(
     };
     thread.freshness = ThreadFreshness::Current;
     thread.updated_at = chrono::Utc::now();
-    manager.save(&thread)?;
+    step_save_thread_record(tx, thread)?;
     Ok(())
 }
 
 fn mark_ready_threads_integrated_for_target(
-    repo: &Repository,
+    tx: &mut Tx<'_>,
     target_thread: &str,
     integrated_state: &ChangeId,
     target_before_redo: &Option<ChangeId>,
-) -> Result<()> {
+) -> HeddleResult<()> {
+    let repo = tx.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
     for thread in manager.list()? {
         if thread.thread == target_thread
@@ -915,7 +1352,7 @@ fn mark_ready_threads_integrated_for_target(
                 .as_ref()
                 .is_some_and(|before| change_contains(repo, &source_tip, before));
         if newly_integrated {
-            mark_source_thread_integrated(repo, &thread.thread, integrated_state)?;
+            mark_source_thread_integrated(tx, &thread.thread, integrated_state)?;
         }
     }
     Ok(())
@@ -929,10 +1366,10 @@ fn change_contains(repo: &Repository, ancestor: &ChangeId, descendant: &ChangeId
 /// Remove the ThreadManager record matching `thread_name`. No-op when no
 /// record exists. Used by the `ThreadCreate` inverse to keep refs and
 /// record-store state in lockstep (cross-thread undo contract rule 4).
-fn remove_thread_manager_record(repo: &Repository, thread_name: &str) -> Result<()> {
-    let manager = ThreadManager::new(repo.heddle_dir());
+fn remove_thread_manager_record(tx: &mut Tx<'_>, thread_name: &str) -> HeddleResult<()> {
+    let manager = ThreadManager::new(tx.repo().heddle_dir());
     if let Some(thread) = manager.find_by_thread(thread_name)? {
-        manager.delete(&thread.id)?;
+        step_delete_thread_record(tx, thread)?;
     }
     Ok(())
 }
@@ -951,10 +1388,15 @@ fn remove_thread_manager_record(repo: &Repository, thread_name: &str) -> Result<
 // NO new domain oplog record — they navigate states that already exist. So:
 //   * Each sub-op stages its effect through the forward-first `Tx::step`
 //     combinator, which registers the inverse on the granular ledger ONLY after
-//     the forward succeeds (the inverse of "undo entry E" is "redo entry E", and
-//     vice-versa; both are absolute SET operations, so the inverse restores the
-//     pre-step state regardless of how far a failed step got — and a forward
-//     that fails registers no inverse at all).
+//     the forward succeeds (a forward that fails registers no inverse at all).
+//     Crucially this is done PER EFFECT: `apply_undo_entry` / `apply_redo_entry`
+//     wrap EACH individual write (`goto`, each ref/marker/thread-record write,
+//     each git write) in its own `step` with that write's capture-before inverse,
+//     so a failure on the Nth write of an entry leaves the prior N-1 inverses on
+//     the ledger and the rollback restores the exact pre-entry state. A whole-
+//     entry `step` (one forward = many writes) would leave a write half-applied
+//     when a LATER write in the same entry failed (heddle#355 cid 3330966930 /
+//     3330966931) — the granularity bug this migration must NOT reintroduce.
 //   * The parent NESTS the sub-ops via `Tx::enroll` (savepoint enrollment) —
 //     the recovery-ref child then one child per batch — so a child that stages
 //     then fails rewinds the child AND unwinds the parent through the shared
@@ -1084,9 +1526,9 @@ impl AtomicMutation for StageUndoRecovery {
 
 impl SavepointMutation for StageUndoRecovery {}
 
-/// Savepoint child: undo one batch. Each entry's inverse (`apply_redo_entry`)
-/// is registered on the shared ledger BEFORE its `apply_undo_entry` runs, so a
-/// mid-batch failure rewinds exactly the entries already touched; the
+/// Savepoint child: undo one batch. `apply_undo_entry` registers a per-EFFECT
+/// inverse for every individual write it performs, so a mid-ENTRY failure rewinds
+/// exactly the writes already applied (not just whole entries); the
 /// `mark_batch_undone` flip is paired with its `mark_batch_redone` inverse.
 struct ApplyUndoBatch {
     batch: OpBatch,
@@ -1124,15 +1566,13 @@ impl AtomicMutation for ApplyUndoBatch {
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<OpBatch>> {
         let repo = tx.repo();
         for (applied, entry) in self.batch.entries.iter().rev().enumerate() {
-            let redo_entry = entry.clone();
-            // Forward-first: `apply_undo_entry` runs, and only on success is its
-            // `apply_redo_entry` inverse registered. A failed undo entry leaves
-            // the ledger empty for it, so the rollback never redoes an undo that
-            // didn't happen (heddle#355 cid 3330867774).
-            tx.step(
-                || apply_undo_entry(repo, entry).map_err(apply_error),
-                move || apply_redo_entry(repo, &redo_entry).map_err(apply_error),
-            )?;
+            // `apply_undo_entry` wraps EACH of its writes in its own `Tx::step`
+            // with that write's specific inverse, so a failure on the Nth write
+            // of the entry leaves the prior N-1 inverses on the ledger and the
+            // rollback restores the exact pre-entry state (heddle#355 cid
+            // 3330966930). No outer per-entry `step` is needed — and a whole-entry
+            // one would reintroduce the granularity bug it once papered over.
+            apply_undo_entry(tx, entry)?;
             #[cfg(test)]
             if self.fail_after_entries == Some(applied + 1) {
                 return Err(HeddleError::Conflict(
@@ -1154,8 +1594,8 @@ impl AtomicMutation for ApplyUndoBatch {
 impl SavepointMutation for ApplyUndoBatch {}
 
 /// Savepoint child: redo one batch — the mirror of [`ApplyUndoBatch`]. Entries
-/// replay in forward order; each inverse is `apply_undo_entry`, and the
-/// `mark_batch_redone` flip pairs with `mark_batch_undone`.
+/// replay in forward order; `apply_redo_entry` registers a per-effect inverse for
+/// each write, and the `mark_batch_redone` flip pairs with `mark_batch_undone`.
 struct ApplyRedoBatch {
     batch: OpBatch,
     #[cfg(test)]
@@ -1190,14 +1630,11 @@ impl AtomicMutation for ApplyRedoBatch {
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<OpBatch>> {
         let repo = tx.repo();
         for (applied, entry) in self.batch.entries.iter().enumerate() {
-            let undo_entry = entry.clone();
-            // Forward-first mirror of `ApplyUndoBatch`: register the
-            // `apply_undo_entry` inverse only after `apply_redo_entry` succeeds
-            // (heddle#355 cid 3330867775).
-            tx.step(
-                || apply_redo_entry(repo, entry).map_err(apply_error),
-                move || apply_undo_entry(repo, &undo_entry).map_err(apply_error),
-            )?;
+            // Mirror of `ApplyUndoBatch`: `apply_redo_entry` registers a
+            // per-effect inverse for each of its writes, so a mid-entry redo
+            // failure rolls back per-write to the exact pre-entry state
+            // (heddle#355 cid 3330966931).
+            apply_redo_entry(tx, entry)?;
             #[cfg(test)]
             if self.fail_after_entries == Some(applied + 1) {
                 return Err(HeddleError::Conflict(
@@ -1535,6 +1972,230 @@ mod atomic_tests {
             commit_marker_count(&repo),
             pre_markers,
             "a failed transaction commits no marker"
+        );
+    }
+
+    /// Per-effect rollback, UNDO direction (heddle#355 cid 3330966930). A threaded
+    /// `Snapshot` undo performs several writes — `goto` (moves HEAD + worktree),
+    /// then the thread-ref / HEAD / record updates. Injecting a failure on the
+    /// SECOND write, after the goto already moved HEAD + worktree, must roll the
+    /// goto back too, restoring the EXACT pre-entry state. Under the old
+    /// whole-entry `step`, the goto leaked: a forward that failed partway had no
+    /// inverse registered, leaving HEAD/worktree half-rewound.
+    #[test]
+    fn per_effect_rollback_threaded_snapshot_undo() {
+        let (temp, repo, _s1, s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+
+        let pre_head = repo.head().unwrap();
+        assert_eq!(pre_head, Some(s2));
+        let pre_main = main_thread(&repo);
+        let pre_markers = commit_marker_count(&repo);
+        assert_eq!(repo.refs().get_undo_recovery().unwrap(), None);
+
+        let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
+        // Fail the entry's 2nd per-effect write: the goto (write 1) succeeds and
+        // moves HEAD/worktree, then the thread-ref update (write 2) errors.
+        let result = with_entry_write_fault(1, || {
+            repo::atomic::execute(&repo, UndoOp::new(batches, pre_head, txid))
+        });
+        assert!(result.is_err(), "the injected 2nd-write fault must fail the undo");
+
+        // The goto was rolled back along with everything else.
+        assert_eq!(
+            repo.head().unwrap(),
+            Some(s2),
+            "HEAD goto rolled back to the pre-undo tip"
+        );
+        assert_eq!(main_thread(&repo), pre_main, "main ref unchanged");
+        assert!(temp.path().join("a.txt").exists(), "s1 file present");
+        assert!(
+            temp.path().join("b.txt").exists(),
+            "s2 file restored by the goto rollback (the per-effect inverse ran)"
+        );
+        assert_eq!(
+            repo.oplog()
+                .undo_batches_scoped(1, Some(&scope))
+                .unwrap()
+                .len(),
+            1,
+            "no batch left marked undone"
+        );
+        assert_eq!(
+            repo.refs().get_undo_recovery().unwrap(),
+            None,
+            "recovery pointer cleared by rewind"
+        );
+        assert_eq!(commit_marker_count(&repo), pre_markers, "no marker committed");
+    }
+
+    /// Per-effect rollback, REDO direction (heddle#355 cid 3330966931). Mirror of
+    /// the undo case: a threaded `Snapshot` redo's `goto` moves HEAD + worktree,
+    /// then the 2nd write fails — the goto must roll back to the fully-undone
+    /// pre-redo state, not leave the s2 worktree material resurrected. The
+    /// `GitCheckpoint` redo Codex named is the same multi-write class, now routed
+    /// through the identical per-effect `entry_step` machinery this exercises.
+    #[test]
+    fn per_effect_rollback_threaded_snapshot_redo() {
+        let (temp, repo, s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+
+        // Cleanly undo s2 so it becomes redoable; pre-redo state is the s1 tip.
+        let recovery_head = repo.head().unwrap();
+        let undo_batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &undo_batches);
+        repo::atomic::execute(&repo, UndoOp::new(undo_batches, recovery_head, txid)).unwrap();
+        assert_eq!(repo.head().unwrap(), Some(s1), "undone to s1");
+        assert!(!temp.path().join("b.txt").exists(), "b.txt gone after undo");
+
+        let pre_redo_head = repo.head().unwrap();
+        let pre_redo_main = main_thread(&repo);
+        let pre_markers = commit_marker_count(&repo);
+
+        let redo_batches = repo.oplog().redo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("redo", &scope, generation, &redo_batches);
+        let result = with_entry_write_fault(1, || {
+            repo::atomic::execute(&repo, RedoOp::new(redo_batches, txid))
+        });
+        assert!(result.is_err(), "the injected 2nd-write fault must fail the redo");
+
+        assert_eq!(
+            repo.head().unwrap(),
+            pre_redo_head,
+            "HEAD goto rolled back to the pre-redo (fully-undone) state"
+        );
+        assert_eq!(main_thread(&repo), pre_redo_main, "main ref unchanged");
+        assert!(temp.path().join("a.txt").exists(), "s1 file present");
+        assert!(
+            !temp.path().join("b.txt").exists(),
+            "s2 file NOT resurrected — the goto's per-effect inverse rolled it back"
+        );
+        assert_eq!(
+            repo.oplog()
+                .redo_batches_scoped(1, Some(&scope))
+                .unwrap()
+                .len(),
+            1,
+            "batch still redoable"
+        );
+        assert_eq!(commit_marker_count(&repo), pre_markers, "no marker committed");
+    }
+
+    /// Per-effect rollback of marker writes. Undoing a batch whose entries delete
+    /// one marker (`mc`) and re-create another (`md`) registers a per-effect
+    /// inverse for each; a later write failing must restore both markers to their
+    /// exact pre-undo presence (`mc` back, `md` gone again).
+    #[test]
+    fn per_effect_rollback_restores_marker_writes() {
+        let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+        // `mc` exists (its MarkerCreate undo = delete_marker, inverse recreate);
+        // `md` does not (its MarkerDelete undo = create_marker, inverse delete).
+        repo.refs().create_marker(&MarkerName::new("mc"), &s1).unwrap();
+        let main_state = main_thread(&repo).unwrap();
+
+        repo.oplog()
+            .record_batch_scoped(
+                vec![
+                    OpRecord::ThreadUpdate {
+                        name: "main".to_string(),
+                        old_state: main_state,
+                        new_state: main_state,
+                    },
+                    OpRecord::MarkerCreate {
+                        name: "mc".to_string(),
+                        state: s1,
+                    },
+                    OpRecord::MarkerDelete {
+                        name: "md".to_string(),
+                        state: s1,
+                    },
+                ],
+                Some(&scope),
+            )
+            .unwrap();
+
+        let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let recovery_head = repo.head().unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
+        // Undo order (entries.rev()): create `md` [w1], delete `mc` [w2], then the
+        // ThreadUpdate undo's set_thread [w3] — trip at w3 so both marker inverses
+        // are on the ledger.
+        let result = with_entry_write_fault(2, || {
+            repo::atomic::execute(&repo, UndoOp::new(batches, recovery_head, txid))
+        });
+        assert!(result.is_err(), "the injected fault must fail the undo");
+
+        assert_eq!(
+            repo.refs().get_marker(&MarkerName::new("mc")).unwrap(),
+            Some(s1),
+            "mc restored by the delete_marker inverse"
+        );
+        assert_eq!(
+            repo.refs().get_marker(&MarkerName::new("md")).unwrap(),
+            None,
+            "md removed again by the create_marker inverse"
+        );
+    }
+
+    /// Per-effect rollback of thread-ref writes. Undoing a batch that re-creates a
+    /// deleted thread (`new`) and deletes a created thread (`old`) registers a
+    /// per-effect inverse for each; a later write failing must restore both refs.
+    #[test]
+    fn per_effect_rollback_restores_thread_ref_writes() {
+        let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+        // `old` exists (its ThreadCreate undo = delete_thread, inverse re-set);
+        // `new` does not (its ThreadDelete undo = set_thread, inverse delete).
+        repo.refs().set_thread(&ThreadName::new("old"), &s1).unwrap();
+        let main_state = main_thread(&repo).unwrap();
+
+        repo.oplog()
+            .record_batch_scoped(
+                vec![
+                    OpRecord::ThreadUpdate {
+                        name: "main".to_string(),
+                        old_state: main_state,
+                        new_state: main_state,
+                    },
+                    OpRecord::ThreadCreate {
+                        name: "old".to_string(),
+                        state: s1,
+                    },
+                    OpRecord::ThreadDelete {
+                        name: "new".to_string(),
+                        state: s1,
+                    },
+                ],
+                Some(&scope),
+            )
+            .unwrap();
+
+        let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let recovery_head = repo.head().unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
+        // Undo order (entries.rev()): set `new` [w1], delete `old` [w2], then the
+        // ThreadUpdate undo's set_thread [w3] — trip at w3.
+        let result = with_entry_write_fault(2, || {
+            repo::atomic::execute(&repo, UndoOp::new(batches, recovery_head, txid))
+        });
+        assert!(result.is_err(), "the injected fault must fail the undo");
+
+        assert_eq!(
+            repo.refs().get_thread(&ThreadName::new("old")).unwrap(),
+            Some(s1),
+            "old restored by the delete_thread inverse"
+        );
+        assert_eq!(
+            repo.refs().get_thread(&ThreadName::new("new")).unwrap(),
+            None,
+            "new removed again by the set_thread inverse"
         );
     }
 
