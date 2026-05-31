@@ -11560,8 +11560,8 @@ fn default_undo_text_hides_batches_and_checkpoint_ids_until_verbose() {
 
 #[test]
 fn blame_drops_email_when_attribution_overflows_column() {
-    // `Luke Thorne <the.thorne48@gmail.com>` blew the 20-char column,
-    // truncating to `Luke Thorne <the...` — keeping the noise and
+    // `Ada Lovelace <ada@really.long.example.com>` blew the 20-char column,
+    // truncating to `Ada Lovelace <ada...` — keeping the noise and
     // dropping the signal. The fit_author helper drops the email
     // entirely when the name alone fits the column.
     let temp = TempDir::new().unwrap();

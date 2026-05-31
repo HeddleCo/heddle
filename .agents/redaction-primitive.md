@@ -70,7 +70,7 @@ pub enum OpKind {
 Materialization path (the place where `Repository::read_file` builds a working file from a state's tree) checks for an outstanding `Redaction` on the blob hash before returning bytes. If redacted, return a stub:
 
 ```
-# this file was redacted on 2026-05-10T14:33Z by anan@heddle.sh
+# this file was redacted on 2026-05-10T14:33Z by grace@example.com
 # reason: leaked credential
 # redaction: hd-r4d4c7e0 (signed)
 ```
