@@ -106,7 +106,13 @@ pub trait RefReconciler: Send + Sync {
     /// Current oplog generation — the monotonic `head_id`. The cheap O(1) gate:
     /// a read whose class watermark equals this returns the raw value with no
     /// tail scan.
-    fn generation(&self) -> u64;
+    ///
+    /// Returns `Err` when the generation cannot be read (a truncated/corrupt/
+    /// unreadable oplog header) — it MUST NOT report a fallback generation
+    /// (cid 3329631081): a header error silently reported as generation 0 makes
+    /// a logical read skip every committed record, data-loss masquerading as an
+    /// empty oplog. The reconciled read fails loudly instead.
+    fn generation(&self) -> Result<u64>;
 
     /// Fold the committed oplog tail (scoped by the request's ref class) into
     /// `raw`, returning the authoritative value + the re-materialization set for

@@ -78,6 +78,28 @@ pub trait AtomicMutation {
     fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
         Ok(())
     }
+
+    /// Reconstruct the output the ORIGINAL committed run produced, from the
+    /// deduped committed record batch (heddle#354 r5, cid 3329631075). Called
+    /// ONLY on a crash-retry that dedup-hits an already-committed
+    /// `transaction_id`: this run re-ran `apply` and may have produced a
+    /// *different* output than what was persisted — e.g. a freshly generated
+    /// `ChangeId` — so returning this run's value would hand the caller an
+    /// identity that does not match the committed record. Derive the committed
+    /// identity from `committed_records` (the prior batch, marker stripped).
+    ///
+    /// The default returns this run's output unchanged, correct when the output
+    /// is deterministic from the mutation's inputs (the common case). A mutation
+    /// whose output is generated non-deterministically MUST override this to read
+    /// the committed identity out of `committed_records`.
+    fn reconstruct_committed_output(
+        &self,
+        committed_records: &[OpRecord],
+        this_run: Self::Output,
+    ) -> Result<Self::Output> {
+        let _ = committed_records;
+        Ok(this_run)
+    }
 }
 
 /// Opt-in marker for a **savepoint-enrollable** mutation: its staged effects

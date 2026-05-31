@@ -12,6 +12,7 @@ use super::{
     RefManager, RefUpdate, format_change_id_text,
     packed_refs::PackedRefs,
     parse_change_id_text,
+    reconcile::{LoadRequest, Loaded},
     refs_storage::RefsLock,
     refs_types::{
         describe_change_id, describe_expectation_change_id, describe_expectation_head,
@@ -25,7 +26,7 @@ enum PackedRemove {
     Marker(String),
 }
 
-struct RefUpdatePlan {
+pub(super) struct RefUpdatePlan {
     path: PathBuf,
     new_content: Option<String>,
     previous_content: Option<String>,
@@ -135,9 +136,20 @@ impl RefManager {
     }
 
     /// Phase 3 (heddle#330 §2.2): plan + validate every update against the
-    /// current on-disk value, rejecting CAS conflicts and duplicate targets up
-    /// front. Pure validation — touches no canonical ref and no temp file, so a
-    /// failed expectation returns `Err` before anything is staged or committed.
+    /// **reconciled** current value, rejecting CAS conflicts and duplicate
+    /// targets up front. Pure validation — touches no canonical ref and no temp
+    /// file, so a failed expectation returns `Err` before anything is staged or
+    /// committed.
+    ///
+    /// **Validation + publish base come from the under-lock reconciled state, not
+    /// a pre-lock raw disk read (heddle#354 r5, cid 3329631079).** Because a
+    /// committed-but-unpublished record can leave the on-disk ref stale (a crash
+    /// between phase 4 and phase 5, or a co-tenant lane's lagging publish), a
+    /// `Missing`/CAS expectation checked against raw disk would validate against
+    /// the wrong value. The caller already holds the refs lock, so
+    /// [`reconciled_value_under_lock`](RefManager::reconciled_value_under_lock)
+    /// folds the committed tail without re-locking; the fold→validate→publish
+    /// sequence is therefore one atomic unit under the single held lock.
     fn plan_ref_updates(&self, updates: &[RefUpdate]) -> Result<Vec<RefUpdatePlan>> {
         let mut seen = HashSet::new();
         let mut plans = Vec::new();
@@ -149,7 +161,7 @@ impl RefManager {
                     expected,
                     new,
                 } => {
-                    let (path, current, effective_prev) =
+                    let (path, _raw_current, _raw_prev) =
                         self.read_track_with_packed_fallback(name)?;
                     if !seen.insert(path.clone()) {
                         return Err(HeddleError::Conflict(format!(
@@ -158,6 +170,12 @@ impl RefManager {
                         )));
                     }
 
+                    let current = match self
+                        .reconciled_value_under_lock(&LoadRequest::Thread(name.clone()))?
+                    {
+                        Loaded::Point(id) => id,
+                        _ => unreachable!("Thread request yields Point"),
+                    };
                     if !matches_expectation(expected, current.as_ref(), current.is_some()) {
                         return Err(HeddleError::Conflict(format!(
                             "thread {} expected {}, found {}",
@@ -168,6 +186,7 @@ impl RefManager {
                     }
 
                     let new_content = new.as_ref().map(format_change_id_text);
+                    let previous_content = current.as_ref().map(format_change_id_text);
                     let packed_remove = if new.is_none() && current.is_some() {
                         Some(PackedRemove::Thread(name.to_string()))
                     } else {
@@ -176,7 +195,7 @@ impl RefManager {
                     plans.push(RefUpdatePlan {
                         path,
                         new_content,
-                        previous_content: effective_prev,
+                        previous_content,
                         description: format!("thread {}", name),
                         temp_path: None,
                         packed_remove,
@@ -195,9 +214,12 @@ impl RefManager {
                         )));
                     }
 
-                    let (current, effective_prev) =
-                        self.read_marker_with_packed_fallback(&path, name)?;
-
+                    let current = match self
+                        .reconciled_value_under_lock(&LoadRequest::Marker(name.clone()))?
+                    {
+                        Loaded::Point(id) => id,
+                        _ => unreachable!("Marker request yields Point"),
+                    };
                     if !matches_expectation(expected, current.as_ref(), current.is_some()) {
                         return Err(HeddleError::Conflict(format!(
                             "marker {} expected {}, found {}",
@@ -208,6 +230,7 @@ impl RefManager {
                     }
 
                     let new_content = new.as_ref().map(format_change_id_text);
+                    let previous_content = current.as_ref().map(format_change_id_text);
                     let packed_remove = if new.is_none() && current.is_some() {
                         Some(PackedRemove::Marker(name.to_string()))
                     } else {
@@ -216,21 +239,29 @@ impl RefManager {
                     plans.push(RefUpdatePlan {
                         path,
                         new_content,
-                        previous_content: effective_prev,
+                        previous_content,
                         description: format!("marker {}", name),
                         temp_path: None,
                         packed_remove,
                     });
                 }
                 RefUpdate::Head { expected, new } => {
-                    let state = self.read_head_state()?;
-                    let current_desc = if state.exists {
-                        describe_head(&state.head)
+                    let raw_state = self.read_head_state()?;
+                    let reconciled_head = match self.reconciled_value_under_lock(&LoadRequest::Head)?
+                    {
+                        Loaded::Head(head) => head,
+                        _ => unreachable!("Head request yields Head"),
+                    };
+                    // HEAD "exists" if its file is present OR a committed record
+                    // reconstructs a value the stale on-disk HEAD does not reflect.
+                    let exists = raw_state.exists || reconciled_head != raw_state.head;
+                    let current_desc = if exists {
+                        describe_head(&reconciled_head)
                     } else {
                         "missing".to_string()
                     };
 
-                    if !matches_expectation(expected, Some(&state.head), state.exists) {
+                    if !matches_expectation(expected, Some(&reconciled_head), exists) {
                         return Err(HeddleError::Conflict(format!(
                             "HEAD expected {}, found {}",
                             describe_expectation_head(expected),
@@ -238,10 +269,19 @@ impl RefManager {
                         )));
                     }
 
+                    // Publish base from the reconciled HEAD: when a committed
+                    // record reconstructs a value the raw HEAD lags, a rollback
+                    // restores that authoritative value, not the stale disk one.
+                    let previous_content = if reconciled_head == raw_state.head {
+                        raw_state.raw
+                    } else {
+                        Some(reconciled_head.to_text())
+                    };
+
                     plans.push(RefUpdatePlan {
                         path: self.head_path(),
                         new_content: Some(new.to_text()),
-                        previous_content: state.raw,
+                        previous_content,
                         description: "HEAD".to_string(),
                         temp_path: None,
                         packed_remove: None,
@@ -253,12 +293,92 @@ impl RefManager {
         Ok(plans)
     }
 
+    /// Build the publish plans for the reconciler's lazy re-materialization set
+    /// (heddle#354 r5). Unlike [`plan_ref_updates`](Self::plan_ref_updates) this
+    /// does NOT re-reconcile or validate: the `republish` values are already the
+    /// authoritative under-lock fold (computed by the caller before the lock was
+    /// taken stale-free), so re-folding here would be redundant and could double-
+    /// count the reconciler's call budget. Each entry is skipped when the current
+    /// canonical already equals the folded value (no-op), and the publish base is
+    /// the current canonical (so a failed publish rolls back to exactly what was
+    /// on disk).
+    pub(super) fn plan_materialization(
+        &self,
+        republish: &[RefUpdate],
+    ) -> Result<Vec<RefUpdatePlan>> {
+        let mut plans = Vec::new();
+        for update in republish {
+            match update {
+                RefUpdate::Thread { name, new, .. } => {
+                    let (path, current, effective_prev) =
+                        self.read_track_with_packed_fallback(name)?;
+                    if current == *new {
+                        continue;
+                    }
+                    let packed_remove = if new.is_none() && current.is_some() {
+                        Some(PackedRemove::Thread(name.to_string()))
+                    } else {
+                        None
+                    };
+                    plans.push(RefUpdatePlan {
+                        path,
+                        new_content: new.as_ref().map(format_change_id_text),
+                        previous_content: effective_prev,
+                        description: format!("thread {}", name),
+                        temp_path: None,
+                        packed_remove,
+                    });
+                }
+                RefUpdate::Marker { name, new, .. } => {
+                    let path = self.marker_path(name)?;
+                    let (current, effective_prev) =
+                        self.read_marker_with_packed_fallback(&path, name)?;
+                    if current == *new {
+                        continue;
+                    }
+                    let packed_remove = if new.is_none() && current.is_some() {
+                        Some(PackedRemove::Marker(name.to_string()))
+                    } else {
+                        None
+                    };
+                    plans.push(RefUpdatePlan {
+                        path,
+                        new_content: new.as_ref().map(format_change_id_text),
+                        previous_content: effective_prev,
+                        description: format!("marker {}", name),
+                        temp_path: None,
+                        packed_remove,
+                    });
+                }
+                RefUpdate::Head { new, .. } => {
+                    let state = self.read_head_state()?;
+                    if state.exists && state.head == *new {
+                        continue;
+                    }
+                    plans.push(RefUpdatePlan {
+                        path: self.head_path(),
+                        new_content: Some(new.to_text()),
+                        previous_content: state.raw,
+                        description: "HEAD".to_string(),
+                        temp_path: None,
+                        packed_remove: None,
+                    });
+                }
+            }
+        }
+        Ok(plans)
+    }
+
     /// Phase 5 (heddle#330 §2.2): stage each update into a temp file, rename the
     /// temps into their canonical paths (the publish), apply packed-ref removals,
     /// and rebuild the summary index. On any apply error the reverse-order
     /// `rollback_updates` restores prior contents. Called only after
     /// [`plan_ref_updates`](Self::plan_ref_updates) has validated the batch.
-    fn publish_ref_plans(&self, mut plans: Vec<RefUpdatePlan>, _lock: &RefsLock) -> Result<()> {
+    pub(super) fn publish_ref_plans(
+        &self,
+        mut plans: Vec<RefUpdatePlan>,
+        _lock: &RefsLock,
+    ) -> Result<()> {
         for plan in &mut plans {
             if let Some(ref content) = plan.new_content {
                 let temp_path = self.write_string_temp(&plan.path, content)?;
@@ -431,8 +551,8 @@ mod tests {
     }
 
     impl RefReconciler for OneMarkerReconciler {
-        fn generation(&self) -> u64 {
-            self.generation.load(Ordering::Acquire)
+        fn generation(&self) -> Result<u64> {
+            Ok(self.generation.load(Ordering::Acquire))
         }
 
         fn reconcile(

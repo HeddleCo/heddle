@@ -229,7 +229,14 @@ impl<'a> Tx<'a> {
             self.committed = true;
             Ok(CommitOutcome::Committed)
         } else {
-            Ok(CommitOutcome::AlreadyCommitted)
+            // Dedup hit: a prior (possibly cross-process) run already committed
+            // this transaction. Carry its records back so the executor can
+            // reconstruct the originally-committed output (cid 3329631075).
+            let prior = self
+                .repo
+                .oplog()
+                .committed_batch_records(&self.transaction_id)?;
+            Ok(CommitOutcome::AlreadyCommitted(prior))
         }
     }
 
@@ -254,10 +261,13 @@ impl<'a> Tx<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) enum CommitOutcome {
     Committed,
-    AlreadyCommitted,
+    /// The transaction was already committed by a prior run; carries that
+    /// committed batch's records (marker stripped) so the executor can
+    /// reconstruct the originally-committed output (cid 3329631075).
+    AlreadyCommitted(Vec<OpRecord>),
 }
 
 impl Drop for Tx<'_> {

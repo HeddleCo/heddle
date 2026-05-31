@@ -49,14 +49,27 @@ where
 
     match tx.commit(oplog) {
         Ok(CommitOutcome::Committed) => Ok(output),
-        Ok(CommitOutcome::AlreadyCommitted) => match tx.rewind_all() {
-            Ok(()) => Ok(output),
-            Err(rewind_err) => Err(HeddleError::Conflict(format!(
-                "transaction {} was already committed, but replay rewind failed: {}",
-                tx.transaction_id(),
-                rewind_err
-            ))),
-        },
+        Ok(CommitOutcome::AlreadyCommitted(prior_records)) => {
+            // Dedup hit: this run's `output` may diverge from what was actually
+            // committed (e.g. a regenerated `ChangeId`), so reconstruct the
+            // originally-committed identity from the prior batch (cid 3329631075).
+            // Reconstruct BEFORE rewinding — `rewind_all` runs the whole-op
+            // rewind, which takes the mutation out of its cell.
+            let reconstructed = mutation
+                .borrow()
+                .as_ref()
+                .expect("root mutation present before replay rewind")
+                .reconstruct_committed_output(&prior_records, output);
+            match (reconstructed, tx.rewind_all()) {
+                (Ok(committed_output), Ok(())) => Ok(committed_output),
+                (Ok(_), Err(rewind_err)) => Err(HeddleError::Conflict(format!(
+                    "transaction {} was already committed, but replay rewind failed: {}",
+                    tx.transaction_id(),
+                    rewind_err
+                ))),
+                (Err(reconstruct_err), _) => Err(reconstruct_err),
+            }
+        }
         Err(e) => rewind_error(&mut tx, e),
     }
 }

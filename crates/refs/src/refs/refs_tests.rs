@@ -571,8 +571,8 @@ mod chokepoint {
     }
 
     impl RefReconciler for FakeReconciler {
-        fn generation(&self) -> u64 {
-            self.generation.load(Ordering::Acquire)
+        fn generation(&self) -> Result<u64> {
+            Ok(self.generation.load(Ordering::Acquire))
         }
         fn reconcile(&self, req: &LoadRequest, raw: Loaded, _since: u64) -> Result<ReconcileOutcome> {
             self.calls.fetch_add(1, Ordering::AcqRel);

@@ -392,6 +392,53 @@ impl OpLog {
         }
     }
 
+    /// The non-marker records of the batch that committed `transaction_id`
+    /// (heddle#354 r5, cid 3329631075) — i.e. the batch whose `TransactionCommit`
+    /// marker carries that id, minus the marker itself. A crash-retry that
+    /// dedup-hits an already-committed transaction uses these to reconstruct the
+    /// ORIGINAL committed identity, instead of returning this run's freshly
+    /// (re-)generated value, which may diverge from what was actually persisted.
+    ///
+    /// Unbounded scan, matching the dedup domain of
+    /// [`record_batch_exactly_once`](Self::record_batch_exactly_once). Returns an
+    /// empty vec if no batch committed that id, or if the batch held only its
+    /// marker.
+    pub fn committed_batch_records(&self, transaction_id: &str) -> Result<Vec<OpRecord>> {
+        let guard = self.load_cached()?;
+        let packed = guard.as_ref().unwrap();
+
+        let Some(commit_entry) = packed.entries.iter().find(|entry| {
+            matches!(
+                &entry.operation,
+                OpRecord::TransactionCommit { transaction_id: id, .. }
+                    if id == transaction_id
+            )
+        }) else {
+            return Ok(Vec::new());
+        };
+        let batch_id = if commit_entry.batch_id == 0 {
+            commit_entry.id
+        } else {
+            commit_entry.batch_id
+        };
+
+        let records = packed
+            .entries
+            .iter()
+            .filter(|entry| {
+                let bid = if entry.batch_id == 0 {
+                    entry.id
+                } else {
+                    entry.batch_id
+                };
+                bid == batch_id
+            })
+            .filter(|entry| !matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+            .map(|entry| entry.operation.clone())
+            .collect();
+        Ok(records)
+    }
+
     pub(super) fn record_single_scoped(
         &self,
         operation: OpRecord,

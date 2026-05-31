@@ -1617,3 +1617,354 @@ fn eager_override_rewind_does_not_double_undo() {
         "the overridden whole-op rewind must NOT run for an eager mutation (no double-undo)"
     );
 }
+
+// ---- heddle#354 r5 — reconcile-consistency closures ----
+
+/// Finding B (cid 3329631074) — cross-process pre-open recovery via the
+/// persisted reconcile watermark. A prior process durably commits a Fork's
+/// phase-4 record naming "explore" but crashes before phase-5 publishes the
+/// canonical ref; the handle is dropped without advancing the watermark past
+/// that record. A FRESH handle seeds its per-read watermark from the PERSISTED
+/// last-clean point (below the unpublished record), so its next read folds
+/// `(seed, tip]` — the crash tail — and recovers the committed mutation, instead
+/// of seeding at tip and silently losing it cross-process.
+#[test]
+fn persisted_watermark_recovers_cross_process_crash_tail() {
+    let temp = TempDir::new().unwrap();
+    let base = ChangeId::generate();
+    let forked = ChangeId::generate();
+    {
+        let repo = Repository::init_default(temp.path()).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("main"), &base)
+            .unwrap();
+        // "Prior process": phase-4 commit only (Fork naming "explore"), no
+        // phase-5 publish, then the handle drops.
+        repo.oplog()
+            .record_fork(&base, &forked, Some("explore"), None)
+            .unwrap();
+    }
+
+    // Fresh process: a brand-new handle whose watermark seeds at the current
+    // generation (past the unpublished record). The open-time pass recovers it.
+    let reopened = Repository::open(temp.path()).unwrap();
+    assert_eq!(
+        reopened
+            .refs()
+            .get_thread(&ThreadName::new("explore"))
+            .unwrap(),
+        Some(forked),
+        "a prior process's committed-but-unpublished ref must materialize on fresh open"
+    );
+
+    // It was materialized to canonical: a second fresh open reads it the same.
+    let reread = Repository::open(temp.path()).unwrap();
+    assert_eq!(
+        reread
+            .refs()
+            .get_thread(&ThreadName::new("explore"))
+            .unwrap(),
+        Some(forked)
+    );
+}
+
+/// Finding B safety — the persisted watermark must NOT resurrect a ref deleted
+/// via an UNRECORDED path (the un-migrated delete the record-first retrofit has
+/// not yet reached). A thread is created (recorded + published) and a read
+/// advances + persists the watermark past it; the thread is then deleted
+/// directly, appending NO oplog record. A fresh handle seeds from the persisted
+/// watermark (at/above the create), so its read does not re-fold the stale
+/// create — the thread stays deleted. (An eager open-time fold of the tail, by
+/// contrast, WOULD resurrect it — the reason this fix is a persisted watermark,
+/// not an eager pass.)
+#[test]
+fn persisted_watermark_does_not_resurrect_unrecorded_delete() {
+    let temp = TempDir::new().unwrap();
+    let state = ChangeId::generate();
+    {
+        let repo = Repository::init_default(temp.path()).unwrap();
+        // Create through the chokepoint (records + publishes).
+        repo.commit_and_publish(
+            vec![OpRecord::ThreadCreateV2 {
+                name: "fcn".to_string(),
+                state,
+                manager_snapshot: None,
+            }],
+            &[RefUpdate::Thread {
+                name: ThreadName::new("fcn"),
+                expected: RefExpectation::Missing,
+                new: Some(state),
+            }],
+        )
+        .unwrap();
+        // A read advances + persists the watermark past the create.
+        assert_eq!(
+            repo.refs().get_thread(&ThreadName::new("fcn")).unwrap(),
+            Some(state)
+        );
+        // Delete directly — NO oplog record (the un-migrated delete path).
+        repo.refs().delete_thread(&ThreadName::new("fcn")).unwrap();
+    }
+
+    // Fresh process: seeding from the persisted watermark (≥ the create's
+    // generation) means the read does not fold the stale create ⇒ no resurrect.
+    let reopened = Repository::open(temp.path()).unwrap();
+    assert_eq!(
+        reopened.refs().get_thread(&ThreadName::new("fcn")).unwrap(),
+        None,
+        "a ref deleted via an unrecorded path must not be resurrected on reopen"
+    );
+}
+
+/// Class A (cid 3329631079) — a `Missing`/CAS expectation is validated against
+/// the RECONCILED state, not a stale on-disk read. A committed-but-unpublished
+/// Fork record creates "explore" (canonical still absent); a later
+/// `commit_and_publish` with a `Missing` expectation on "explore" must FAIL,
+/// because under the lock the reconciled value shows it already exists.
+#[test]
+fn commit_and_publish_validates_against_reconciled_not_stale_disk() {
+    let (_t, repo) = test_repo();
+    let base = ChangeId::generate();
+    let committed = ChangeId::generate();
+
+    // Phase-4 only: "explore" is committed-but-unpublished (canonical absent).
+    repo.oplog()
+        .record_fork(&base, &committed, Some("explore"), None)
+        .unwrap();
+
+    // A Missing expectation must fail: the reconciled state shows "explore"
+    // exists even though the raw on-disk ref is absent.
+    let result = repo.commit_and_publish(
+        vec![OpRecord::Fork {
+            from: base,
+            new_state: ChangeId::generate(),
+            thread: Some("explore".to_string()),
+            head: None,
+        }],
+        &[RefUpdate::Thread {
+            name: ThreadName::new("explore"),
+            expected: RefExpectation::Missing,
+            new: Some(ChangeId::generate()),
+        }],
+    );
+    assert!(
+        result.is_err(),
+        "a Missing expectation must fail against a committed-but-unpublished value (reconciled, not stale disk)"
+    );
+
+    // A CAS to the COMMITTED value (not the absent on-disk value) must succeed.
+    let next = ChangeId::generate();
+    repo.commit_and_publish(
+        vec![OpRecord::Fork {
+            from: committed,
+            new_state: next,
+            thread: Some("explore".to_string()),
+            head: None,
+        }],
+        &[RefUpdate::Thread {
+            name: ThreadName::new("explore"),
+            expected: RefExpectation::Value(committed),
+            new: Some(next),
+        }],
+    )
+    .expect("a CAS against the reconciled committed value must succeed");
+    assert_eq!(
+        repo.refs().get_thread(&ThreadName::new("explore")).unwrap(),
+        Some(next)
+    );
+}
+
+/// Class A (cid 3329631077) — the fold→publish TOCTOU. A lagging reader folds
+/// while a writer concurrently publishes a NEWER value; the reader's lazy
+/// re-publish must never clobber the writer's newer publish with a stale folded
+/// value. The fold now runs UNDER the publish lock, so it serializes with the
+/// writer's commit-and-publish and always observes the newest committed record.
+/// Stress loop: each iteration reaches the same end state — the published
+/// canonical equals the newest committed Fork record — never an older value.
+#[test]
+fn lagging_reader_never_clobbers_concurrent_publish() {
+    for _ in 0..25 {
+        let temp = TempDir::new().unwrap();
+        let base = ChangeId::generate();
+        {
+            let repo = Repository::init_default(temp.path()).unwrap();
+            repo.refs()
+                .set_thread(&ThreadName::new("main"), &base)
+                .unwrap();
+            // A committed-but-unpublished OLD value a lagging reader would fold.
+            repo.oplog()
+                .record_fork(&base, &ChangeId::generate(), Some("main"), None)
+                .unwrap();
+        }
+        let path = temp.path().to_path_buf();
+        let v_new = ChangeId::generate();
+
+        std::thread::scope(|s| {
+            let p_r = path.clone();
+            s.spawn(move || {
+                let reader = Repository::open(&p_r).unwrap();
+                for _ in 0..40 {
+                    let _ = reader.refs().get_thread(&ThreadName::new("main"));
+                }
+            });
+            let p_w = path.clone();
+            s.spawn(move || {
+                let writer = Repository::open(&p_w).unwrap();
+                let _ = writer.commit_and_publish(
+                    vec![OpRecord::Fork {
+                        from: base,
+                        new_state: v_new,
+                        thread: Some("main".to_string()),
+                        head: None,
+                    }],
+                    &[RefUpdate::Thread {
+                        name: ThreadName::new("main"),
+                        expected: RefExpectation::Any,
+                        new: Some(v_new),
+                    }],
+                );
+            });
+        });
+
+        // The published canonical must equal the newest committed Fork record
+        // for "main" — the reader's materialize never republished a stale value.
+        let reader = Repository::open(temp.path()).unwrap();
+        let published = reader.refs().get_thread(&ThreadName::new("main")).unwrap();
+        let newest = reader
+            .oplog()
+            .recent(64)
+            .unwrap()
+            .into_iter()
+            .filter(|e| matches!(&e.operation, OpRecord::Fork { thread: Some(t), .. } if t == "main"))
+            .max_by_key(|e| e.id)
+            .map(|e| match e.operation {
+                OpRecord::Fork { new_state, .. } => new_state,
+                _ => unreachable!(),
+            });
+        assert_eq!(
+            published, newest,
+            "a lagging reader's materialize must not clobber the newest committed publish"
+        );
+    }
+}
+
+/// A mutation that REGENERATES its `ChangeId` output on every `apply` run, and
+/// reconstructs the committed identity from the deduped record on a dedup hit.
+struct RegeneratesChangeId {
+    key: String,
+    fresh_ids: Rc<RefCell<Vec<ChangeId>>>,
+}
+
+impl AtomicMutation for RegeneratesChangeId {
+    type Output = ChangeId;
+
+    fn transaction_id(&self) -> String {
+        self.key.clone()
+    }
+
+    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<ChangeId>> {
+        // A fresh, NON-deterministic output each run — a crash-retry's value
+        // would diverge from the originally-committed one.
+        let fresh = ChangeId::generate();
+        self.fresh_ids.borrow_mut().push(fresh);
+        Ok(StagedCommit::new(
+            fresh,
+            vec![OpRecord::Snapshot {
+                new_state: fresh,
+                prev_head: None,
+                thread: None,
+            }],
+        ))
+    }
+
+    fn reconstruct_committed_output(
+        &self,
+        committed_records: &[OpRecord],
+        _this_run: ChangeId,
+    ) -> Result<ChangeId> {
+        for op in committed_records {
+            if let OpRecord::Snapshot { new_state, .. } = op {
+                return Ok(*new_state);
+            }
+        }
+        Err(HeddleError::Config(
+            "no committed snapshot to reconstruct from".to_string(),
+        ))
+    }
+}
+
+/// Finding C (cid 3329631075) — a dedup-hit replay returns the ORIGINALLY
+/// committed output, not this run's freshly regenerated value. The replay's
+/// `apply` mints a *different* ChangeId; `execute` must reconstruct the
+/// committed identity from the deduped record and return that.
+#[test]
+fn dedup_hit_returns_prior_committed_output_not_replays_fresh_one() {
+    let (_t, repo) = test_repo();
+    let fresh_ids = Rc::new(RefCell::new(Vec::new()));
+    let key = "regenerating-op".to_string();
+
+    let first = execute(
+        &repo,
+        RegeneratesChangeId {
+            key: key.clone(),
+            fresh_ids: Rc::clone(&fresh_ids),
+        },
+    )
+    .unwrap();
+
+    let second = execute(
+        &repo,
+        RegeneratesChangeId {
+            key,
+            fresh_ids: Rc::clone(&fresh_ids),
+        },
+    )
+    .unwrap();
+
+    let minted = fresh_ids.borrow();
+    assert_eq!(minted.len(), 2, "both runs minted a fresh id");
+    assert_ne!(
+        minted[0], minted[1],
+        "the replay regenerated a DIFFERENT id (non-vacuous)"
+    );
+    assert_eq!(
+        first, minted[0],
+        "the first run returns its committed id"
+    );
+    assert_eq!(
+        second, minted[0],
+        "the dedup-hit replay returns the ORIGINALLY committed id, not its own fresh one"
+    );
+    assert_ne!(
+        second, minted[1],
+        "the replay must NOT return the value it freshly regenerated"
+    );
+}
+
+/// Finding D (cid 3329631081) — a truncated/corrupt oplog header must FAIL a
+/// reconciled read loudly, never silently report generation 0 (which would make
+/// the read skip every committed record, data-loss masquerading as an empty
+/// oplog).
+#[test]
+fn corrupt_oplog_header_fails_reconciled_read_loudly() {
+    let (_t, repo) = test_repo();
+    let base = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
+
+    // Clobber the oplog magic so the header read fails on an EXISTING file.
+    let oplog_path = repo.heddle_dir().join("oplog").join("oplog.bin");
+    let mut bytes = std::fs::read(&oplog_path).unwrap();
+    assert!(bytes.len() >= 8, "oplog file must have a header");
+    for b in bytes.iter_mut().take(8) {
+        *b = 0xFF;
+    }
+    std::fs::write(&oplog_path, &bytes).unwrap();
+
+    let result = repo.refs().get_thread(&ThreadName::new("main"));
+    assert!(
+        result.is_err(),
+        "a corrupt oplog header must fail the reconciled read, not default to generation 0"
+    );
+}

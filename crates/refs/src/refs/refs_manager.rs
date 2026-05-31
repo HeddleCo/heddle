@@ -18,6 +18,7 @@ use super::{
     packed_refs::PackedRefs,
     reconcile::{LoadRequest, Loaded, RefClass, RefCommitter, RefReconciler},
     ref_backend::RefBackend,
+    refs_storage::RefsLock,
     resolve_refspec,
 };
 use crate::fs_atomic::sync_directory;
@@ -97,7 +98,11 @@ impl RefManager {
     /// refs from old records in the un-migrated tree, where deletes do not all
     /// record yet.
     pub fn with_reconciler(mut self, reconciler: Arc<dyn RefReconciler>) -> Self {
-        let generation = reconciler.generation();
+        // Seed both watermarks to the current generation. On a header read error
+        // (cid 3329631081) seed `WATERMARK_UNSET` rather than swallowing it as a
+        // generation — the next [`reconciled_load`] re-reads `generation()` and
+        // propagates the error loudly instead of trusting a fabricated value.
+        let generation = reconciler.generation().unwrap_or(WATERMARK_UNSET);
         self.cached_local_generation
             .store(generation, Ordering::Release);
         self.cached_shared_generation
@@ -157,32 +162,163 @@ impl RefManager {
     /// from inside here — the maintenance path `pack_refs` is the one allowlisted
     /// non-logical caller. With no reconciler this is the plain raw load.
     fn reconciled_load(&self, req: LoadRequest) -> Result<Loaded> {
+        let Some(reconciler) = self.reconciler.as_ref() else {
+            return self.raw_load(&req);
+        };
+
+        let watermark = match req.ref_class() {
+            RefClass::Local => &self.cached_local_generation,
+            RefClass::Shared => &self.cached_shared_generation,
+        };
+
+        // Cheap O(1) gate: when this class's watermark already equals the oplog
+        // tip, every committed record of the class is materialized into
+        // canonical ⇒ the raw read is authoritative ⇒ no lock, no tail scan.
+        // A `generation()` error propagates (cid 3329631081) — never silently
+        // treated as generation 0.
+        let tip = reconciler.generation()?;
+        if tip == watermark.load(Ordering::Acquire) {
+            return self.raw_load(&req);
+        }
+
+        // Lag: the fold AND the lazy re-publish must be atomic w.r.t. a
+        // concurrent `commit_and_publish` (cid 3329631077). Take the publish
+        // lock FIRST, then re-read tip + raw and fold UNDER the lock — so a
+        // concurrent publish that lands a newer value cannot interpose between
+        // the fold and the materialize. The fold sees the newest committed
+        // record (highest id wins), so materialization never republishes a stale
+        // value over a freshly-published newer one.
+        let lock = self.lock_refs()?;
+        let tip = reconciler.generation()?;
+        let cached = watermark.load(Ordering::Acquire);
         let raw = self.raw_load(&req)?;
+        if tip == cached {
+            // A concurrent reconcile materialized the lag while we waited for the
+            // lock; the freshly-read canonical is now authoritative.
+            return Ok(raw);
+        }
+
+        // The reconcile is batch-atomic — it returns the re-materialization set
+        // for every ref the lagged batches touched, which we publish (under the
+        // held lock) so the watermark can advance without leaving a batch sibling
+        // stale.
+        let since = if cached == WATERMARK_UNSET { 0 } else { cached };
+        let outcome = reconciler.reconcile(&req, raw, since)?;
+        self.materialize(&outcome, &lock)?;
+        watermark.store(tip, Ordering::Release);
+        // Persist the advanced watermark so a future process seeds from this
+        // last-clean point and folds only the genuine crash tail above it, never
+        // re-deriving long-since-deleted refs from ancient records (cid
+        // 3329631074). Best-effort: a write failure only costs extra folding next
+        // open, never correctness.
+        let _ = self.persist_reconcile_watermark(&lock);
+        Ok(outcome.loaded)
+    }
+
+    /// Fold the committed-but-unpublished oplog tail over the raw value WITHOUT
+    /// taking the refs lock — the caller already holds it (phase-3 validation in
+    /// [`plan_ref_updates`](Self::plan_ref_updates)). Closes the stale-validation
+    /// gap (cid 3329631079): a `Missing`/CAS expectation, and the publish base,
+    /// are computed from the reconciled state — never a pre-lock raw read that a
+    /// crash-left committed-but-unpublished record has made stale. The same O(1)
+    /// gate applies: with the watermark current, the raw value is authoritative.
+    pub(super) fn reconciled_value_under_lock(&self, req: &LoadRequest) -> Result<Loaded> {
+        let raw = self.raw_load(req)?;
         let Some(reconciler) = self.reconciler.as_ref() else {
             return Ok(raw);
         };
-
-        let tip = reconciler.generation();
+        let tip = reconciler.generation()?;
         let watermark = match req.ref_class() {
             RefClass::Local => &self.cached_local_generation,
             RefClass::Shared => &self.cached_shared_generation,
         };
         let cached = watermark.load(Ordering::Acquire);
         if tip == cached {
-            // No commit affecting this class since the last full materialization
-            // ⇒ the canonical cache is current ⇒ no tail scan, no write.
             return Ok(raw);
         }
-
-        // Lag possible: fold the committed tail newer than the watermark. The
-        // reconcile is batch-atomic — it returns the re-materialization set for
-        // every ref the lagged batches touched, which we publish so the
-        // watermark can advance without leaving a batch sibling stale.
         let since = if cached == WATERMARK_UNSET { 0 } else { cached };
-        let outcome = reconciler.reconcile(&req, raw, since)?;
-        self.materialize(&outcome)?;
-        watermark.store(tip, Ordering::Release);
-        Ok(outcome.loaded)
+        Ok(reconciler.reconcile(req, raw, since)?.loaded)
+    }
+
+    /// Seed the per-read watermarks from the persisted last-clean point
+    /// (heddle#354 r5, cid 3329631074), so a fresh handle recovers a prior
+    /// process's committed-but-unpublished crash tail.
+    ///
+    /// A `RefManager` seeds its in-memory watermarks at the current generation
+    /// ([`with_reconciler`](Self::with_reconciler)) — so the per-read gate, on a
+    /// fresh process, would never fold a record committed *before* this handle
+    /// opened, and a cross-process crash (phase-4 committed, phase-5 publish
+    /// never ran) would be silently lost. The fix is NOT an eager open-time fold
+    /// (that would re-derive long-since-deleted refs from ancient records, since
+    /// the un-migrated delete paths do not all record yet): it is a **persisted
+    /// watermark**. Reads advance and persist it past every materialized record,
+    /// so on open the seed sits at the last point canonical was known-consistent;
+    /// the per-read reconcile then folds only `(seed, tip]` — the genuine crash
+    /// tail — and never the ancient records below the seed.
+    ///
+    /// When no watermark has been persisted yet (a fresh repo, or a repo from
+    /// before this version), seed conservatively at the current generation and
+    /// write the file, so the next process has a real last-clean point.
+    pub fn init_reconcile_watermark(&self) -> Result<()> {
+        if self.reconciler.is_none() {
+            return Ok(());
+        }
+        match self.read_persisted_reconcile_watermark()? {
+            Some((local, shared)) => {
+                self.cached_local_generation.store(local, Ordering::Release);
+                self.cached_shared_generation
+                    .store(shared, Ordering::Release);
+            }
+            None => {
+                let lock = self.lock_refs()?;
+                self.persist_reconcile_watermark(&lock)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Path of the per-worktree persisted reconcile watermark, beside `HEAD`
+    /// and `UNDO_RECOVERY` (the local watermark is per-`op_scope`; the shared
+    /// watermark is persisted per-worktree too — a conservative lower bound just
+    /// means more folding, never a missed record).
+    fn reconcile_watermark_path(&self) -> PathBuf {
+        self.head_path()
+            .parent()
+            .map(|dir| dir.join("RECONCILE_WATERMARK"))
+            .unwrap_or_else(|| self.root.join("RECONCILE_WATERMARK"))
+    }
+
+    /// Read the persisted `(local, shared)` watermark, or `None` when absent /
+    /// unparseable (treated as "no last-clean point yet").
+    fn read_persisted_reconcile_watermark(&self) -> Result<Option<(u64, u64)>> {
+        let Some(contents) = self.read_optional_string(&self.reconcile_watermark_path())? else {
+            return Ok(None);
+        };
+        let mut parts = contents.split_whitespace();
+        match (
+            parts.next().and_then(|s| s.parse::<u64>().ok()),
+            parts.next().and_then(|s| s.parse::<u64>().ok()),
+        ) {
+            (Some(local), Some(shared)) => Ok(Some((local, shared))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Persist the current in-memory `(local, shared)` watermark under the held
+    /// refs lock. Called after a read advances a watermark, and at open when no
+    /// file exists yet.
+    fn persist_reconcile_watermark(&self, _lock: &RefsLock) -> Result<()> {
+        let local = self.cached_local_generation.load(Ordering::Acquire);
+        let shared = self.cached_shared_generation.load(Ordering::Acquire);
+        // A still-unset watermark (no reconciler, or seeded UNSET on a header
+        // error) is not a meaningful last-clean point — skip it.
+        if local == WATERMARK_UNSET || shared == WATERMARK_UNSET {
+            return Ok(());
+        }
+        self.write_string(
+            &self.reconcile_watermark_path(),
+            &format!("{} {}\n", local, shared),
+        )
     }
 
     /// Lazily re-publish (phase-5 materialization) the refs a reconcile found
@@ -200,37 +336,26 @@ impl RefManager {
     /// rewritten; a write equal to the canonical is skipped as a no-op. (The
     /// rare un-migrated case where an unrecorded direct write raced in *after*
     /// the commit is the residual the writers' record-first migration closes.)
-    fn materialize(&self, outcome: &super::reconcile::ReconcileOutcome) -> Result<()> {
-        let mut to_publish = Vec::new();
-        for update in &outcome.republish {
-            match update {
-                RefUpdate::Thread { name, new, .. } => {
-                    if self.raw_get_thread(name)? != *new {
-                        to_publish.push(update.clone());
-                    }
-                }
-                RefUpdate::Marker { name, new, .. } => {
-                    if self.raw_get_marker(name)? != *new {
-                        to_publish.push(update.clone());
-                    }
-                }
-                RefUpdate::Head { new, .. } => {
-                    if self.read_head_state()?.head != *new {
-                        to_publish.push(update.clone());
-                    }
-                }
-            }
-        }
-        if !to_publish.is_empty() {
-            let lock = self.lock_refs()?;
-            self.update_refs_with_lock(&to_publish, &lock)?;
+    fn materialize(
+        &self,
+        outcome: &super::reconcile::ReconcileOutcome,
+        lock: &RefsLock,
+    ) -> Result<()> {
+        // The whole materialization runs under the caller's single held lock so
+        // the fold that produced `outcome` and these re-publishes are one atomic
+        // unit vs a concurrent publish (cid 3329631077). The publish values are
+        // the authoritative folded values; the no-op skip is against the current
+        // canonical, computed inside `plan_materialization`.
+        let plans = self.plan_materialization(&outcome.republish)?;
+        if !plans.is_empty() {
+            self.publish_ref_plans(plans, lock)?;
         }
         for (remote, thread, value) in &outcome.remote_updates {
             if self.raw_get_remote_thread(remote, thread)? != *value {
                 match value {
-                    Some(state) => self.set_remote_thread_raw(remote, thread, state)?,
+                    Some(state) => self.set_remote_thread_locked(remote, thread, state, lock)?,
                     None => {
-                        self.delete_remote_thread_raw(remote, thread)?;
+                        self.delete_remote_thread_locked(remote, thread, lock)?;
                     }
                 }
             }
@@ -242,7 +367,7 @@ impl RefManager {
                 UNDO_RECOVERY_HANDLE,
             )?;
             if current.as_ref() != Some(state) {
-                self.set_undo_recovery_raw(state)?;
+                self.set_undo_recovery_locked(state, lock)?;
             }
         }
         Ok(())
@@ -518,7 +643,14 @@ impl RefManager {
     /// phase-5 materialization sub-step (used by both the public setter and the
     /// reconciler's lazy re-publish).
     fn set_undo_recovery_raw(&self, state: &ChangeId) -> Result<()> {
-        let _lock = self.lock_refs()?;
+        let lock = self.lock_refs()?;
+        self.set_undo_recovery_locked(state, &lock)
+    }
+
+    /// The lock-free core of [`set_undo_recovery_raw`](Self::set_undo_recovery_raw):
+    /// the caller already holds the refs lock (e.g. the reconciler's
+    /// materialization runs the whole fold + re-publish under one lock).
+    fn set_undo_recovery_locked(&self, state: &ChangeId, _lock: &RefsLock) -> Result<()> {
         self.write_string(
             &self.undo_recovery_path(),
             &super::format_change_id_text(state),
@@ -561,7 +693,19 @@ impl RefManager {
         thread: &ThreadName,
         state: &ChangeId,
     ) -> Result<()> {
-        let _lock = self.lock_refs()?;
+        let lock = self.lock_refs()?;
+        self.set_remote_thread_locked(remote, thread, state, &lock)
+    }
+
+    /// The lock-free core of [`set_remote_thread_raw`](Self::set_remote_thread_raw):
+    /// the caller already holds the refs lock.
+    fn set_remote_thread_locked(
+        &self,
+        remote: &str,
+        thread: &ThreadName,
+        state: &ChangeId,
+        lock: &RefsLock,
+    ) -> Result<()> {
         let path = self.remote_thread_path(remote, thread)?;
         let content = format_change_id_text(state);
         let parent = path.parent().ok_or_else(|| {
@@ -572,7 +716,7 @@ impl RefManager {
         })?;
         std::fs::create_dir_all(parent)?;
         self.write_string(&path, &content)?;
-        if self.rebuild_ref_summary_index_with_lock(&_lock).is_err() {
+        if self.rebuild_ref_summary_index_with_lock(lock).is_err() {
             self.invalidate_ref_summary_index();
         }
         Ok(())
@@ -592,7 +736,18 @@ impl RefManager {
         remote: &str,
         thread: &ThreadName,
     ) -> Result<Option<ChangeId>> {
-        let _lock = self.lock_refs()?;
+        let lock = self.lock_refs()?;
+        self.delete_remote_thread_locked(remote, thread, &lock)
+    }
+
+    /// The lock-free core of [`delete_remote_thread_raw`](Self::delete_remote_thread_raw):
+    /// the caller already holds the refs lock.
+    fn delete_remote_thread_locked(
+        &self,
+        remote: &str,
+        thread: &ThreadName,
+        lock: &RefsLock,
+    ) -> Result<Option<ChangeId>> {
         let state = self.raw_get_remote_thread(remote, thread)?;
         if state.is_some() {
             let path = self.remote_thread_path(remote, thread)?;
@@ -602,7 +757,7 @@ impl RefManager {
                 Err(e) => return Err(HeddleError::from(e)),
             }
         }
-        if self.rebuild_ref_summary_index_with_lock(&_lock).is_err() {
+        if self.rebuild_ref_summary_index_with_lock(lock).is_err() {
             self.invalidate_ref_summary_index();
         }
         Ok(state)

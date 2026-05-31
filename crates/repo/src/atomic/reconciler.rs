@@ -220,21 +220,18 @@ impl Fold {
     }
 }
 
-impl RefReconciler for OplogRefReconciler {
-    fn generation(&self) -> u64 {
-        self.oplog().head_id().unwrap_or(0)
-    }
+/// The re-materialization set a folded window implies for one ref class:
+/// (`republish` thread/marker/HEAD updates, `remote_updates`, `undo_recovery`).
+type ClassMaterialization = (
+    Vec<RefUpdate>,
+    Vec<(String, ThreadName, Option<ChangeId>)>,
+    Option<ChangeId>,
+);
 
-    fn reconcile(&self, req: &LoadRequest, raw: Loaded, since: u64) -> Result<ReconcileOutcome> {
-        let class = req.ref_class();
-        let scope = match class {
-            RefClass::Local => Some(self.op_scope.as_str()),
-            RefClass::Shared => None,
-        };
-
-        // Replay committed (non-undone) entries newer than the watermark, in id
-        // order, so the fold reflects the newest committed target per ref.
-        let batches = self.oplog().recent_batches_scoped(usize::MAX, scope)?;
+impl OplogRefReconciler {
+    /// Fold the committed entries of `batches` newer than `since` into a
+    /// [`Fold`], in id order so the newest committed target per ref wins.
+    fn fold_batches(&self, batches: Vec<oplog::OpBatch>, since: u64) -> Fold {
         let mut entries: Vec<_> = batches
             .into_iter()
             .flat_map(|b| b.entries)
@@ -246,7 +243,13 @@ impl RefReconciler for OplogRefReconciler {
         for entry in &entries {
             fold.apply(&entry.operation);
         }
+        fold
+    }
 
+    /// The re-materialization set a folded window implies for `class`: thread /
+    /// marker / remote-thread for shared; reconstructed HEAD + undo-recovery for
+    /// local.
+    fn class_materialization(class: RefClass, fold: &Fold) -> ClassMaterialization {
         let mut republish = Vec::new();
         let mut remote_updates = Vec::new();
         let mut undo_recovery = None;
@@ -285,6 +288,32 @@ impl RefReconciler for OplogRefReconciler {
             }
         }
 
+        (republish, remote_updates, undo_recovery)
+    }
+}
+
+impl RefReconciler for OplogRefReconciler {
+    fn generation(&self) -> Result<u64> {
+        // Propagate a header read error (cid 3329631081): never report a
+        // truncated/corrupt/unreadable header as generation 0, which would make
+        // logical reads silently skip committed records. `head_id` itself maps a
+        // not-yet-created oplog to 0; only a genuine read failure surfaces here.
+        self.oplog().head_id()
+    }
+
+    fn reconcile(&self, req: &LoadRequest, raw: Loaded, since: u64) -> Result<ReconcileOutcome> {
+        let class = req.ref_class();
+        let scope = match class {
+            RefClass::Local => Some(self.op_scope.as_str()),
+            RefClass::Shared => None,
+        };
+
+        // Replay committed (non-undone) entries newer than the watermark, in id
+        // order, so the fold reflects the newest committed target per ref.
+        let batches = self.oplog().recent_batches_scoped(usize::MAX, scope)?;
+        let fold = self.fold_batches(batches, since);
+
+        let (republish, remote_updates, undo_recovery) = Self::class_materialization(class, &fold);
         let loaded = reconciled_value(req, &raw, &fold, &self.heddle_dir)?;
 
         Ok(ReconcileOutcome {

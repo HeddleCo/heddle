@@ -386,6 +386,11 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
         let committer =
             std::sync::Arc::new(crate::atomic::OplogRefCommitter::new(&heddle_dir, actor));
         let refs = refs.with_reconciler(reconciler).with_committer(committer);
+        // Seed the per-read watermark from the persisted last-clean point
+        // (heddle#354 r5, cid 3329631074) so a fresh handle folds — and recovers
+        // — a prior process's committed-but-unpublished crash tail on its next
+        // read, without re-deriving long-since-deleted refs from ancient records.
+        refs.init_reconcile_watermark()?;
         Ok(Self::from_parts(
             root, heddle_dir, store, refs, oplog, config, shallow,
         ))
@@ -559,6 +564,10 @@ impl Repository {
             objects::object::Principal::new("<unknown>", ""),
         ));
         let refs = refs.with_reconciler(reconciler).with_committer(committer);
+        // Establish the persisted reconcile watermark at init (heddle#354 r5,
+        // cid 3329631074) so subsequent processes seed from a real last-clean
+        // point — parity with `open_raw`.
+        refs.init_reconcile_watermark()?;
 
         let capability = repository_capability_for_root(&root);
         Ok(Self {
