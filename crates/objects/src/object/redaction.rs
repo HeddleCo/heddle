@@ -205,8 +205,8 @@ mod tests {
 
     fn principal() -> Principal {
         Principal {
-            name: "Anan".into(),
-            email: "anan@heddle.sh".into(),
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
         }
     }
 
@@ -280,8 +280,8 @@ mod tests {
         // The stub is the ONLY thing readers see for redacted files. It
         // must carry every field a reviewer would want: who, when, why,
         // and whether the bytes are still recoverable.
-        assert!(stub.contains("Anan"));
-        assert!(stub.contains("anan@heddle.sh"));
+        assert!(stub.contains("Grace Hopper"));
+        assert!(stub.contains("grace@example.com"));
         assert!(stub.contains("leaked credential"));
         assert!(stub.contains("# redacted-at:"));
         assert!(stub.contains("# redaction:"));

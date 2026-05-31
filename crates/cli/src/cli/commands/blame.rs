@@ -414,8 +414,8 @@ fn truncate(s: &str, max_len: usize) -> String {
 
 /// Fit an attribution string (`Name <email>`) into `max_len` characters
 /// without losing semantic information. The default truncation cuts
-/// `"Luke Thorne <the.thorne48@gmail.com>"` to `"Luke Thorne <the..."` —
-/// which keeps the noise (`<the...`) and drops the signal (the actual
+/// `"Ada Lovelace <ada@really.long.example.com>"` to `"Ada Lovelace <ada..."` —
+/// which keeps the noise (`<ada...`) and drops the signal (the actual
 /// name and email host). Strategy:
 ///
 /// 1. If the full string fits, return it.

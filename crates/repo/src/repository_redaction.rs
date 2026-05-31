@@ -789,8 +789,8 @@ mod tests {
 
     fn sample_principal() -> Principal {
         Principal {
-            name: "Anan".into(),
-            email: "anan@heddle.sh".into(),
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
         }
     }
 
