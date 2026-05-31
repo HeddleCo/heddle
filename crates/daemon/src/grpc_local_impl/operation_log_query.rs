@@ -43,25 +43,6 @@ fn parse_unix_secs(secs: i64) -> Option<chrono::DateTime<chrono::Utc>> {
     chrono::Utc.timestamp_opt(secs, 0).single()
 }
 
-/// Default verbs included when `include_checkpoints` is `false` and the
-/// caller didn't supply an explicit verb filter. Mirrors the snake-case
-/// names used by the index, which in turn mirror the `OpRecord` variants
-/// minus `Checkpoint`.
-const DEFAULT_NON_CHECKPOINT_VERBS: &[&str] = &[
-    "snapshot",
-    "goto",
-    "thread_create",
-    "thread_delete",
-    "thread_update",
-    "fork",
-    "collapse",
-    "marker_create",
-    "marker_delete",
-    "transaction_abort",
-    "ephemeral_thread_collapse",
-    "conflict_resolved",
-];
-
 /// Query is an operator-facing inspection command, so it should answer from
 /// the live oplog even before the rebuildable index sidecar has been warmed.
 /// Keep the scan bounded; long-tail history can use the index once populated.
@@ -79,12 +60,11 @@ fn build_query(req: &QueryOperationsRequest) -> OperationLogQuery {
         limit: (req.limit > 0).then_some(req.limit as usize),
     };
     if !req.include_checkpoints && q.verbs.is_none() {
-        q.verbs = Some(
-            DEFAULT_NON_CHECKPOINT_VERBS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-        );
+        // Derived from the oplog verb catalog (the single source of truth), not
+        // a hand-maintained list — so a new `OpRecord` variant is surfaced by
+        // default the moment it joins the catalog, instead of being silently
+        // dropped from the default query (heddle#354 r9, cid 3330304663).
+        q.verbs = Some(OpRecord::verbs(false).iter().map(|s| s.to_string()).collect());
     }
     q
 }
@@ -151,11 +131,10 @@ fn query_oplog_fallback(
 }
 
 fn indexed_from_oplog_entry(entry: &OpEntry) -> IndexedOperation {
-    let verb = verb_for(&entry.operation);
     IndexedOperation {
         seq: entry.id,
         timestamp_secs: entry.timestamp.timestamp(),
-        verb: verb.to_string(),
+        verb: entry.operation.verb().to_string(),
         actor_email: entry.actor.email.clone(),
         operation_id: entry.operation_id,
         thread: thread_for(&entry.operation),
@@ -203,32 +182,6 @@ fn indexed_operation_matches(hit: &IndexedOperation, query: &OperationLogQuery) 
         return false;
     }
     true
-}
-
-fn verb_for(op: &OpRecord) -> &'static str {
-    match op {
-        OpRecord::Snapshot { .. } => "snapshot",
-        OpRecord::Goto { .. } => "goto",
-        OpRecord::ThreadCreate { .. } | OpRecord::ThreadCreateV2 { .. } => "thread_create",
-        OpRecord::ThreadDelete { .. } => "thread_delete",
-        OpRecord::ThreadUpdate { .. } => "thread_update",
-        OpRecord::Fork { .. } => "fork",
-        OpRecord::Collapse { .. } => "collapse",
-        OpRecord::MarkerCreate { .. } => "marker_create",
-        OpRecord::MarkerDelete { .. } => "marker_delete",
-        OpRecord::Checkpoint { .. } => "checkpoint",
-        OpRecord::TransactionAbort { .. } => "transaction_abort",
-        OpRecord::TransactionCommit { .. } => "transaction_commit",
-        OpRecord::EphemeralThreadCollapse { .. } => "ephemeral_thread_collapse",
-        OpRecord::ConflictResolved { .. } => "conflict_resolved",
-        OpRecord::Redact { .. } => "redact",
-        OpRecord::Purge { .. } => "purge",
-        OpRecord::FastForward { .. } | OpRecord::FastForwardV2 { .. } => "fast_forward",
-        OpRecord::GitCheckpoint { .. } => "git_checkpoint",
-        OpRecord::RemoteThreadUpdate { .. } => "remote_thread_update",
-        OpRecord::RemoteThreadDelete { .. } => "remote_thread_delete",
-        OpRecord::UndoRecoveryUpdate { .. } => "undo_recovery_update",
-    }
 }
 
 fn thread_for(op: &OpRecord) -> Option<String> {
@@ -424,6 +377,35 @@ mod tests {
             .into_inner();
         assert_eq!(resp.hits.len(), 1);
         assert_eq!(resp.hits[0].verb, "snapshot");
+    }
+
+    #[tokio::test]
+    async fn default_query_includes_newer_non_checkpoint_verbs() {
+        // Non-vacuous for cid 3330304663: `transaction_commit` was missing from
+        // the old hand-maintained default list, so it was silently dropped from
+        // the default (non-checkpoint) view. Now the default is derived from the
+        // oplog catalog, so it surfaces.
+        let (_t, svc) = fresh_service();
+        write_oplog_record(
+            &svc,
+            OpRecord::TransactionCommit {
+                transaction_id: "tx-1".into(),
+                op_count: 3,
+            },
+        );
+
+        let req = QueryOperationsRequest {
+            include_checkpoints: false,
+            ..Default::default()
+        };
+        let resp = svc
+            .query_operations(Request::new(req))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.hits.len(), 1, "newer non-checkpoint verb must not be dropped");
+        assert_eq!(resp.hits[0].verb, "transaction_commit");
     }
 
     #[tokio::test]

@@ -31,13 +31,28 @@ pub trait RefBackend: CoreRefBackend<Error = HeddleError> {
     /// committer override it. (`PgRefBackend`'s single-tx co-commit needs the
     /// server's shared-pool wiring, which is out of this tree; it keeps the
     /// default until that lands.)
+    ///
+    /// **Fail closed (heddle#354 r9, cid 3330304656).** A backend with no
+    /// record committer MUST NOT publish the ref batch while silently dropping
+    /// the records it was handed — committed data must never be lost. A
+    /// record-free publish has nothing to lose and stays on the plain path; a
+    /// publish carrying records is refused with an error so the caller learns
+    /// the records would have vanished, rather than discovering it after the
+    /// fact via a reconcile that folds an empty tail.
     fn commit_and_publish(
         &self,
         encoded_records: &[Vec<u8>],
         ref_updates: &[RefUpdate],
         scope: Option<&str>,
     ) -> Result<()> {
-        let _ = (encoded_records, scope);
+        let _ = scope;
+        if !encoded_records.is_empty() {
+            return Err(HeddleError::Config(format!(
+                "commit_and_publish was handed {} record(s) on a backend with no record \
+                 committer; refusing to publish and silently drop committed data",
+                encoded_records.len()
+            )));
+        }
         self.update_refs(ref_updates)
     }
 

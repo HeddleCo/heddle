@@ -827,6 +827,35 @@ mod chokepoint {
         assert_eq!(plain.get_marker(&MarkerName::new("v2")).unwrap(), Some(other));
     }
 
+    /// Fail closed (heddle#354 r9, cid 3330304656): a `commit_and_publish` with
+    /// records but NO committer must error and publish NOTHING — committed data
+    /// can never be silently dropped while the ref is published anyway.
+    #[test]
+    fn commit_and_publish_without_committer_fails_closed_on_records() {
+        let (_t, dir) = manager();
+        let plain = RefManager::new(&dir);
+        plain.init().unwrap();
+
+        let state = ChangeId::generate();
+        let result = plain.commit_and_publish(
+            &[vec![1u8, 2, 3]],
+            &[RefUpdate::Thread {
+                name: ThreadName::new("feature"),
+                expected: RefExpectation::Missing,
+                new: Some(state),
+            }],
+            None,
+        );
+
+        // Errors rather than silently dropping the record...
+        assert!(
+            result.is_err(),
+            "records with no committer must fail closed, not drop silently"
+        );
+        // ...and the ref was NOT published (no half-applied write).
+        assert_eq!(plain.get_thread(&ThreadName::new("feature")).unwrap(), None);
+    }
+
     /// The remote-thread raw read/write/delete + list paths and `pack_refs`,
     /// `resolve`, and the `RefBackend`/`CoreRefBackend` trait delegations.
     #[test]

@@ -305,15 +305,67 @@ struct CallCollector {
     /// A snapshot record append (`oplog.record_snapshot(...)` or the free-fn
     /// `record_snapshot_in_oplog(...)` wrapper) is present.
     has_snapshot_record: bool,
+    /// Local bindings that alias a refs handle (`let r = &self.refs;`,
+    /// `let refs = self.inner.repo.refs();`). A publish method invoked on one of
+    /// these names is a publish too — closes the aliased-handle blind spot
+    /// where a bypass routed through a local escaped the analyzer (heddle#354
+    /// r9, cid 3330304661). Over-approximating across sibling scopes is the safe
+    /// direction for an atomicity gate (better to flag than to miss).
+    refs_aliases: std::collections::HashSet<String>,
+}
+
+impl CallCollector {
+    /// True iff `expr` resolves to a refs handle: a `.refs` field, a `.refs()`
+    /// accessor, or a local bound to one of those (tracked in `refs_aliases`).
+    /// Peels `&`/`?`/paren/group/await wrappers so an aliased or borrowed handle
+    /// is seen the same as a direct one.
+    fn expr_is_refs_handle(&self, expr: &Expr) -> bool {
+        let mut cur = expr;
+        loop {
+            match cur {
+                Expr::Field(field) => {
+                    return matches!(&field.member, syn::Member::Named(ident) if ident == "refs");
+                }
+                Expr::MethodCall(mc) => return mc.method == "refs",
+                Expr::Path(p) => {
+                    return p
+                        .path
+                        .get_ident()
+                        .is_some_and(|id| self.refs_aliases.contains(&id.to_string()));
+                }
+                Expr::Reference(r) => cur = &r.expr,
+                Expr::Try(t) => cur = &t.expr,
+                Expr::Paren(p) => cur = &p.expr,
+                Expr::Group(g) => cur = &g.expr,
+                Expr::Await(a) => cur = &a.base,
+                _ => return false,
+            }
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for CallCollector {
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        // `let <ident> = <refs handle>;` registers `<ident>` as an alias, so a
+        // later `<ident>.set_thread(...)` is recognized as a publish. Handles
+        // alias-of-alias chains (`let b = a;`) because `expr_is_refs_handle`
+        // also accepts a path that is already a known alias.
+        if let Some(init) = &node.init
+            && self.expr_is_refs_handle(&init.expr)
+            && let syn::Pat::Ident(pat_ident) = &node.pat
+            && pat_ident.subpat.is_none()
+        {
+            self.refs_aliases.insert(pat_ident.ident.to_string());
+        }
+        syn::visit::visit_local(self, node);
+    }
+
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let method = node.method.to_string();
         if method == "record_snapshot" {
             self.has_snapshot_record = true;
         } else if PUBLISH_METHODS.contains(&method.as_str())
-            && receiver_is_refs_handle(&node.receiver)
+            && self.expr_is_refs_handle(&node.receiver)
         {
             self.publishes
                 .push((method, node.method.span().start().line));
@@ -331,27 +383,6 @@ impl<'ast> Visit<'ast> for CallCollector {
             self.has_snapshot_record = true;
         }
         syn::visit::visit_expr_call(self, node);
-    }
-}
-
-/// True iff the immediate receiver of a publish method call is a `refs` handle:
-/// a `.refs` field (`self.refs.set_thread(...)`) or a `.refs()` accessor call
-/// (`self.inner.repo.refs().set_thread(...)`). Peels `?`/paren/group/await that
-/// can sit between.
-fn receiver_is_refs_handle(expr: &Expr) -> bool {
-    let mut cur = expr;
-    loop {
-        match cur {
-            Expr::Field(field) => {
-                return matches!(&field.member, syn::Member::Named(ident) if ident == "refs");
-            }
-            Expr::MethodCall(mc) => return mc.method == "refs",
-            Expr::Try(t) => cur = &t.expr,
-            Expr::Paren(p) => cur = &p.expr,
-            Expr::Group(g) => cur = &g.expr,
-            Expr::Await(a) => cur = &a.base,
-            _ => return false,
-        }
     }
 }
 
@@ -400,6 +431,50 @@ mod tests {
         );
         assert_eq!(hits.len(), 1, "planted cross-crate bypass must be flagged");
         assert_eq!(hits[0].method, "set_thread");
+    }
+
+    #[test]
+    fn flags_publish_via_aliased_refs_handle() {
+        // A bypass routed through a local alias of the refs handle must still
+        // be flagged (heddle#354 r9, cid 3330304661) — an aliased handle was a
+        // blind spot the gate missed.
+        let hits = scan_source(
+            "fn cap(&self) -> Result<()> { \
+                let r = &self.refs; \
+                r.set_thread(&t, &id)?; \
+                self.oplog.record_snapshot(&id, p, th, s)?; \
+                Ok(()) }",
+        );
+        assert_eq!(hits.len(), 1, "publish via aliased refs handle must be flagged");
+        assert_eq!(hits[0].method, "set_thread");
+    }
+
+    #[test]
+    fn flags_publish_via_accessor_alias_chain() {
+        // Alias of a `.refs()` accessor, then an alias-of-alias chain.
+        let hits = scan_source(
+            "fn cap(&self) -> Result<()> { \
+                let a = self.inner.repo.refs(); \
+                let b = a; \
+                b.write_head(&Head::Detached { state })?; \
+                self.oplog.record_snapshot(&id, p, th, s)?; \
+                Ok(()) }",
+        );
+        assert_eq!(hits.len(), 1, "publish via aliased accessor handle must be flagged");
+        assert_eq!(hits[0].method, "write_head");
+    }
+
+    #[test]
+    fn ignores_non_refs_alias() {
+        // A local bound to a non-refs value must NOT be treated as a refs alias.
+        let hits = scan_source(
+            "fn f(&self) -> Result<()> { \
+                let r = &self.cache; \
+                r.set_thread(&t, &id)?; \
+                self.oplog.record_snapshot(&id, p, th, s)?; \
+                Ok(()) }",
+        );
+        assert!(hits.is_empty(), "a non-refs local must not be a refs alias");
     }
 
     #[test]

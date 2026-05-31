@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 
 mod check_no_silent_default_tree_load;
+mod check_oprecord_exhaustiveness;
 mod check_snapshot_atomicity;
 mod fuse_dispatch_bench;
 
@@ -21,6 +22,9 @@ fn main() -> Result<()> {
             check_no_silent_default_tree_load::run(args.collect())
         }
         Some("check-snapshot-atomicity") => check_snapshot_atomicity::run(args.collect()),
+        Some("check-oprecord-exhaustiveness") => {
+            check_oprecord_exhaustiveness::run(args.collect())
+        }
         Some("fuse-dispatch-bench") => fuse_dispatch_bench::run(args.collect()),
         Some(command) => bail!("unknown command '{command}'"),
         None => bail!("expected a command (for example: web-proto)"),

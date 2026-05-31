@@ -1762,11 +1762,15 @@ fn named_fork_recovery_materializes_head_and_paired_thread() {
     );
 }
 
-/// Cross-class recovery atomicity — the collapse analogue: a collapse that
-/// attaches HEAD to `topic` must, on a LOCAL-class read, recover HEAD AND the
-/// paired thread together.
+/// Attached collapse is NOT a HEAD-mover (heddle#354 r9, cid 3330304665). The
+/// collapse command, when HEAD is attached, publishes ONLY the thread ref and
+/// never re-attaches HEAD — so a crash-replayed attached collapse must advance
+/// the thread but leave HEAD where it is. Republishing `Attached(<named>)`
+/// moved HEAD when it should stay put. Non-vacuous: the record names a thread
+/// (`topic`) different from the attached one (`main`), so the pre-fix code
+/// republished HEAD = Attached(topic) and this assertion failed.
 #[test]
-fn collapse_recovery_materializes_head_and_paired_thread() {
+fn attached_collapse_advances_thread_without_moving_head() {
     let (_t, repo) = test_repo();
     let scope = repo.op_scope();
     let base = ChangeId::generate();
@@ -1779,25 +1783,52 @@ fn collapse_recovery_materializes_head_and_paired_thread() {
         })
         .unwrap();
 
-    // Phase 4 only: a collapse into thread `topic` (HEAD = Attached(topic)).
+    // Phase 4 only: an attached collapse naming thread `topic`.
     let result = ChangeId::generate();
     repo.oplog()
         .record_collapse(&[base], &result, Some("topic"), Some(&scope))
         .unwrap();
 
+    // HEAD must stay Attached(main): the attached collapse advances the thread,
+    // it does NOT move/republish HEAD.
     assert_eq!(
         repo.refs().read_head().unwrap(),
         Head::Attached {
-            thread: ThreadName::new("topic")
+            thread: ThreadName::new("main")
         },
-        "collapse recovery must republish HEAD = Attached(topic)"
+        "attached collapse must NOT republish/move HEAD"
     );
 
-    let raw = RefManager::new(repo.heddle_dir());
+    // The named thread still advances (Shared-class fold materializes it).
     assert_eq!(
-        raw.get_thread(&ThreadName::new("topic")).unwrap(),
+        repo.refs().get_thread(&ThreadName::new("topic")).unwrap(),
         Some(result),
-        "the paired thread must be materialized atomically with the recovered HEAD"
+        "attached collapse must still advance the thread it published"
+    );
+}
+
+/// Detached collapse DOES republish HEAD: the command emits `RefUpdate::Head`
+/// Detached record-first, so a phase-4-committed / phase-5-unpublished collapse
+/// recovers HEAD = Detached(result). The counterpart to the attached case above.
+#[test]
+fn detached_collapse_republishes_detached_head() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    repo.refs()
+        .write_head(&Head::Detached { state: base })
+        .unwrap();
+
+    // Phase 4 only: a detached collapse (thread = None).
+    let result = ChangeId::generate();
+    repo.oplog()
+        .record_collapse(&[base], &result, None, Some(&scope))
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: result },
+        "detached collapse must republish HEAD = Detached(result)"
     );
 }
 

@@ -166,6 +166,17 @@ impl RefManager {
                     self.committer.is_some() && !encoded_records.is_empty();
                 if let Some(committer) = self.committer.as_ref() {
                     committer.commit_records(encoded_records, scope)?;
+                } else if !encoded_records.is_empty() {
+                    // Fail closed (heddle#354 r9, cid 3330304656): no committer
+                    // is wired but records were handed in. Publishing the refs
+                    // here would silently drop them — committed data must never
+                    // be lost. The bootstrap/no-committer path only legitimately
+                    // runs with an empty record batch.
+                    return Err(HeddleError::Config(format!(
+                        "commit_and_publish was handed {} record(s) but this RefManager has no \
+                         committer; refusing to publish and silently drop committed data",
+                        encoded_records.len()
+                    )));
                 }
                 Ok(committed_for_reconcile)
             })

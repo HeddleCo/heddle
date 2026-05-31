@@ -51,14 +51,19 @@ impl OplogRefReconciler {
 /// `B`. The last HEAD-mover in id order wins; every earlier mover is masked.
 ///
 /// The two republish modes differ by the latest mover's commit ordering:
-/// - [`HeadFold::Republish`] — `Fork`/`Collapse` AND the detached `Snapshot`
-///   are emitted by the atomic write chokepoint, which commits the oplog record
-///   (phase 4) BEFORE publishing HEAD (phase 5). A crash in between leaves the
-///   record committed but HEAD unpublished, so reconstruct from the record and
-///   republish to recover it (the
-///   `crash_replay_reconstructs_committed_head_update` case). The detached
-///   snapshot joined this set in heddle#354 r8 when its publish moved
-///   record-first through `commit_and_publish`.
+/// - [`HeadFold::Republish`] — the HEAD-moving records emitted by the atomic
+///   write chokepoint, which commits the oplog record (phase 4) BEFORE
+///   publishing HEAD (phase 5). A crash in between leaves the record committed
+///   but HEAD unpublished, so reconstruct from the record and republish to
+///   recover it (the `crash_replay_reconstructs_committed_head_update` case).
+///   This set is the *HEAD-moving* shapes only: a named `Fork` (creates a
+///   thread and attaches HEAD to it), a detached `Fork`/`Collapse`/`Snapshot`
+///   (publishes a detached HEAD). An ATTACHED `Collapse` or `Snapshot` is NOT
+///   here — it only advances the thread it is already attached to, so HEAD's
+///   identity is unchanged and canonical already reflects it (the attached
+///   collapse was wrongly republishing `Attached` until heddle#354 r9, cid
+///   3330304665). The detached snapshot joined this set in heddle#354 r8 when
+///   its publish moved record-first through `commit_and_publish`.
 /// - [`HeadFold::Canonical`] — `Goto`, detached `Checkpoint`, and `FastForward`
 ///   write HEAD DIRECTLY *before* recording (`repository_goto.rs` `:160`,
 ///   `ff_record.rs`). Canonical therefore already reflects the move; worse, an
@@ -156,16 +161,26 @@ impl Fold {
                     self.head = HeadFold::Republish(Head::Detached { state: *head });
                 }
             }
-            OpRecord::Collapse { result, thread, .. } => {
-                if let Some(name) = thread {
+            OpRecord::Collapse { result, thread, .. } => match thread {
+                // Attached collapse advances the thread; HEAD stays
+                // `Attached{name}` (identity unchanged), so it is NOT a
+                // HEAD-mover — mirror the attached `Snapshot` arm. The collapse
+                // command publishes ONLY the thread ref when HEAD is attached
+                // (it never re-attaches HEAD), so canonical HEAD is already
+                // correct and republishing `Attached` here moved HEAD when it
+                // should stay attached (heddle#354 r9, cid 3330304665). The
+                // thread ref is recovered via the Shared-class fold below.
+                Some(name) => {
                     self.threads.insert(name.clone(), Some(*result));
-                    self.head = HeadFold::Republish(Head::Attached {
-                        thread: ThreadName::new(name),
-                    });
-                } else {
+                }
+                // Detached collapse publishes HEAD record-first (the command
+                // emits `RefUpdate::Head` Detached): reconstruct it so a
+                // phase-4-committed / phase-5-unpublished collapse is recovered
+                // (symmetric with the detached `Snapshot` / `Fork` arms).
+                None => {
                     self.head = HeadFold::Republish(Head::Detached { state: *result });
                 }
-            }
+            },
             OpRecord::MarkerCreate { name, state } => {
                 self.markers.insert(name.clone(), Some(*state));
             }
