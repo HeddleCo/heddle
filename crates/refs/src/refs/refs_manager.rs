@@ -131,21 +131,24 @@ impl RefManager {
         self
     }
 
-    /// THE write chokepoint (heddle#330 §2.2): commit the caller-supplied
-    /// ref-carrying record batch (phase 4) **before** publishing the atomic ref
-    /// batch (phase 5), record-before-publish, the whole batch published as one
-    /// unit. `encoded_records` are opaque rmp-serde `OpRecord` bytes (so `refs`
-    /// names no `oplog` type). The bare publish (temp→rename, via
-    /// `update_refs_with_lock`) is reachable through this seam, never with a ref
-    /// published ahead of its record. With no committer it degrades to a plain
-    /// publish (bootstrap).
+    /// The atomic-write entry of THE write chokepoint (heddle#330 §2.2): commit
+    /// the caller-supplied ref-carrying record batch (phase 4) **before**
+    /// publishing the atomic ref batch (phase 5), record-before-publish, the
+    /// whole batch published as one unit. `encoded_records` are opaque rmp-serde
+    /// `OpRecord` bytes (so `refs` names no `oplog` type). The bare publish
+    /// (temp→rename, via `update_refs_with_lock`) is reachable through this seam,
+    /// never with a ref published ahead of its record. With no committer it
+    /// degrades to a plain publish (bootstrap).
     ///
     /// **Invariant (cid 3329490978 / 3329490984): the oplog record and the ref
     /// publish commit together under the refs lock; a record exists iff its
     /// publish succeeded, and concurrent publishes to the same ref serialize
-    /// record-and-publish as a unit.** The refs lock is taken FIRST, the ref
-    /// expectations are validated (phase 3) BEFORE the record is appended (phase
-    /// 4), and the publish (phase 5) follows under the same lock — so a failed
+    /// record-and-publish as a unit.** Routed through
+    /// [`write_chokepoint`](Self::write_chokepoint), which takes the refs lock
+    /// FIRST and materializes the committed-but-unpublished tail of every class
+    /// BEFORE the body runs; the ref expectations are then validated (phase 3)
+    /// against that reconciled state, BEFORE the record is appended (phase 4),
+    /// and the publish (phase 5) follows under the same lock — so a failed
     /// expectation never leaks a record, and two concurrent callers can never
     /// append in one order and publish in another. (For `PgRefBackend` the single
     /// `pool.begin()…commit()` gives the same atomicity natively.)
@@ -155,16 +158,147 @@ impl RefManager {
         ref_updates: &[RefUpdate],
         scope: Option<&str>,
     ) -> Result<()> {
-        let lock = self.lock_refs()?;
-        self.validate_commit_publish(ref_updates, &lock, || {
-            // Phase 4 — the commit point: append the ref-carrying records only
-            // after phase-3 validation has passed, under the held refs lock.
-            let committed_for_reconcile = self.committer.is_some() && !encoded_records.is_empty();
-            if let Some(committer) = self.committer.as_ref() {
-                committer.commit_records(encoded_records, scope)?;
-            }
-            Ok(committed_for_reconcile)
+        self.write_chokepoint(|lock| {
+            self.validate_commit_publish(ref_updates, lock, || {
+                // Phase 4 — the commit point: append the ref-carrying records
+                // only after phase-3 validation has passed, under the held lock.
+                let committed_for_reconcile =
+                    self.committer.is_some() && !encoded_records.is_empty();
+                if let Some(committer) = self.committer.as_ref() {
+                    committer.commit_records(encoded_records, scope)?;
+                }
+                Ok(committed_for_reconcile)
+            })
         })
+    }
+
+    /// THE write chokepoint (heddle#354 r7): the SOLE path by which any ref
+    /// write reaches the backend. Under ONE held publish lock it
+    ///
+    /// 1. reconciles AND materializes the committed-but-unpublished tail of
+    ///    BOTH ref classes ([`materialize_committed_tail`](Self::materialize_committed_tail)),
+    ///    advancing+persisting each class watermark to the current oplog tip, and
+    /// 2. runs the caller's `body` (validate → commit → publish) against the
+    ///    now-materialized canonical state.
+    ///
+    /// Materializing FIRST is what closes the lost-/clobbered-record class (cid
+    /// 3329765073): a non-atomic [`update_refs`](Self::update_refs) — or any
+    /// remote-thread / undo-recovery setter — used to fold the committed tail
+    /// only for *validation* and discard it, so the canonical never caught up
+    /// and a later read could re-fold an ancient record over the just-written
+    /// value. Now every write first persists the committed tail and advances the
+    /// watermark to the tip, so the write lands on a fully-reconciled canonical
+    /// and no later read re-folds across it.
+    ///
+    /// **No-bypass invariant.** The raw backend writers (`publish_ref_plans`,
+    /// `set_remote_thread_locked`, `delete_remote_thread_locked`,
+    /// `set_undo_recovery_locked`) are private and reached ONLY from a
+    /// chokepoint `body` or from [`materialize`](Self::materialize) (which itself
+    /// runs only here and on the read chokepoint). A source-level conformance
+    /// check (`write_read_conformance` in the refs tests) fails CI if any other
+    /// path calls a raw writer, so a path-by-path allowlist cannot silently
+    /// re-open the class.
+    fn write_chokepoint<T>(&self, body: impl FnOnce(&RefsLock) -> Result<T>) -> Result<T> {
+        let lock = self.lock_refs()?;
+        self.materialize_committed_tail(&lock)?;
+        body(&lock)
+    }
+
+    /// Reconcile + materialize the committed-but-unpublished tail of BOTH ref
+    /// classes under the held lock — the first step of every write
+    /// ([`write_chokepoint`](Self::write_chokepoint)). The O(1) gate
+    /// (watermark == tip) skips a class with no lag, so on the hot path this is
+    /// two `generation()` header reads and no fold.
+    fn materialize_committed_tail(&self, lock: &RefsLock) -> Result<()> {
+        self.materialize_class(RefClass::Local, lock)?;
+        self.materialize_class(RefClass::Shared, lock)?;
+        Ok(())
+    }
+
+    /// Materialize one class's committed tail under the held lock — the
+    /// class-scoped form of [`reconciled_load`](Self::reconciled_load)'s lag
+    /// branch, driven by a lightweight probe request of the class (the
+    /// materialization set covers EVERY ref the lagged batches touched and does
+    /// not depend on the specific request — only on the class + fold). No-op
+    /// when the class is not lagging or no reconciler is injected.
+    fn materialize_class(&self, class: RefClass, lock: &RefsLock) -> Result<()> {
+        let Some(reconciler) = self.reconciler.as_ref() else {
+            return Ok(());
+        };
+        let watermark = self.class_watermark(class);
+        let tip = reconciler.generation()?;
+        if tip == watermark.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        // Re-read the persisted (possibly sibling-advanced) last-clean point
+        // before folding, so a long-lived handle never re-derives a record a
+        // sibling already materialized past (cid 3329765075).
+        self.refresh_persisted_watermark(class, lock)?;
+        let cached = watermark.load(Ordering::Acquire);
+        if tip == cached {
+            return Ok(());
+        }
+        let req = Self::class_probe(class);
+        let raw = self.raw_load(&req)?;
+        let since = if cached == WATERMARK_UNSET { 0 } else { cached };
+        let outcome = reconciler.reconcile(&req, raw, since)?;
+        self.materialize(&outcome, lock)?;
+        watermark.store(tip, Ordering::Release);
+        let _ = self.persist_reconcile_watermark(lock);
+        Ok(())
+    }
+
+    /// The per-read class watermark atomic.
+    fn class_watermark(&self, class: RefClass) -> &AtomicU64 {
+        match class {
+            RefClass::Local => &self.cached_local_generation,
+            RefClass::Shared => &self.cached_shared_generation,
+        }
+    }
+
+    /// A lightweight probe request of `class` to drive a class-wide reconcile.
+    /// The materialization set (`republish` / `remote_updates` / `undo_recovery`)
+    /// is class-derived, not request-derived, so any request of the class yields
+    /// the full set; the projected `loaded` value is discarded by the caller.
+    fn class_probe(class: RefClass) -> LoadRequest {
+        match class {
+            RefClass::Local => LoadRequest::Head,
+            RefClass::Shared => LoadRequest::MarkerList,
+        }
+    }
+
+    /// Advance the in-memory class watermark to the persisted last-clean point
+    /// when a sibling worktree (or a prior read) has advanced it past our
+    /// in-memory value (heddle#354 r7, cid 3329765075). The persisted watermark
+    /// is a known-materialized point, so adopting it is always safe and
+    /// ADVANCE-ONLY — it never regresses what this handle already materialized.
+    ///
+    /// This is what makes a long-lived handle behave like a fresh open: rather
+    /// than re-folding from a value frozen at open, each reconcile re-reads the
+    /// CURRENT shared (or local) last-clean point and folds only what genuinely
+    /// lags above it. Called under the held lock so the load→store is serialized
+    /// with every other watermark writer.
+    fn refresh_persisted_watermark(&self, class: RefClass, _lock: &RefsLock) -> Result<()> {
+        let path = match class {
+            RefClass::Local => self.reconcile_watermark_local_path(),
+            RefClass::Shared => self.reconcile_watermark_shared_path(),
+        };
+        let Some(persisted) = self.read_single_watermark(&path)? else {
+            return Ok(());
+        };
+        let watermark = self.class_watermark(class);
+        let cached = watermark.load(Ordering::Acquire);
+        // The `UNSET` sentinel is `u64::MAX`, so a plain `max` would keep it;
+        // adopt the persisted value outright in that case.
+        let next = if cached == WATERMARK_UNSET {
+            persisted
+        } else {
+            cached.max(persisted)
+        };
+        if next != cached {
+            watermark.store(next, Ordering::Release);
+        }
+        Ok(())
     }
 
     /// THE read chokepoint (heddle#330 §2.2): the sole path for a **logical
@@ -202,6 +336,13 @@ impl RefManager {
         // value over a freshly-published newer one.
         let lock = self.lock_refs()?;
         let tip = reconciler.generation()?;
+        // Re-read the CURRENT persisted watermark (heddle#354 r7, cid 3329765075):
+        // a long-lived handle's in-memory watermark is frozen at open, so a
+        // sibling worktree that advanced the shared last-clean point past it
+        // would otherwise be re-folded from the stale frozen value. Refreshing
+        // here makes a long-lived handle fold from the same floor a fresh open
+        // would — re-deriving only what genuinely lags above the current point.
+        self.refresh_persisted_watermark(req.ref_class(), &lock)?;
         let cached = watermark.load(Ordering::Acquire);
         let raw = self.raw_load(&req)?;
         if tip == cached {
@@ -685,12 +826,14 @@ impl RefManager {
         self.set_undo_recovery_raw(state)
     }
 
-    /// The raw canonical write for undo-recovery, with no oplog append — the
-    /// phase-5 materialization sub-step (used by both the public setter and the
-    /// reconciler's lazy re-publish).
+    /// The undo-recovery write entry of the write chokepoint: materialize the
+    /// committed tail FIRST, then write canonical under the held lock. Has no
+    /// oplog append of its own (undo-recovery is recorded via the atomic
+    /// `commit_and_publish` path); routing it through
+    /// [`write_chokepoint`](Self::write_chokepoint) keeps it from bypassing
+    /// reconciliation (heddle#354 r7).
     fn set_undo_recovery_raw(&self, state: &ChangeId) -> Result<()> {
-        let lock = self.lock_refs()?;
-        self.set_undo_recovery_locked(state, &lock)
+        self.write_chokepoint(|lock| self.set_undo_recovery_locked(state, lock))
     }
 
     /// The lock-free core of [`set_undo_recovery_raw`](Self::set_undo_recovery_raw):
@@ -731,16 +874,16 @@ impl RefManager {
         self.set_remote_thread_raw(remote, thread, state)
     }
 
-    /// The raw canonical write for a remote-thread ref, with no oplog append —
-    /// the phase-5 materialization sub-step.
+    /// The remote-thread write entry of the write chokepoint: materialize the
+    /// committed tail FIRST, then write canonical under the held lock
+    /// (heddle#354 r7), so a remote-thread setter cannot bypass reconciliation.
     fn set_remote_thread_raw(
         &self,
         remote: &str,
         thread: &ThreadName,
         state: &ChangeId,
     ) -> Result<()> {
-        let lock = self.lock_refs()?;
-        self.set_remote_thread_locked(remote, thread, state, &lock)
+        self.write_chokepoint(|lock| self.set_remote_thread_locked(remote, thread, state, lock))
     }
 
     /// The lock-free core of [`set_remote_thread_raw`](Self::set_remote_thread_raw):
@@ -776,14 +919,15 @@ impl RefManager {
         self.delete_remote_thread_raw(remote, thread)
     }
 
-    /// The raw canonical delete for a remote-thread ref, with no oplog append.
+    /// The remote-thread delete entry of the write chokepoint: materialize the
+    /// committed tail FIRST, then delete canonical under the held lock
+    /// (heddle#354 r7), so a remote-thread delete cannot bypass reconciliation.
     fn delete_remote_thread_raw(
         &self,
         remote: &str,
         thread: &ThreadName,
     ) -> Result<Option<ChangeId>> {
-        let lock = self.lock_refs()?;
-        self.delete_remote_thread_locked(remote, thread, &lock)
+        self.write_chokepoint(|lock| self.delete_remote_thread_locked(remote, thread, lock))
     }
 
     /// The lock-free core of [`delete_remote_thread_raw`](Self::delete_remote_thread_raw):
@@ -829,8 +973,13 @@ impl RefManager {
         if updates.is_empty() {
             return Ok(());
         }
-        let lock = self.lock_refs()?;
-        self.update_refs_with_lock(updates, &lock)
+        // The non-atomic write path funnels through the same chokepoint as the
+        // atomic one: materialize the committed tail FIRST, then validate +
+        // publish under the held lock (heddle#354 r7). Validating + writing
+        // against the reconciled-and-materialized canonical is what stops a
+        // non-atomic write from losing a committed record or being re-folded
+        // over by an ancient one (cid 3329765073).
+        self.write_chokepoint(|lock| self.update_refs_with_lock(updates, lock))
     }
 
     pub fn resolve(&self, refspec: &str) -> Result<Option<ChangeId>> {

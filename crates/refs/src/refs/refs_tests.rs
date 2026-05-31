@@ -886,4 +886,307 @@ mod chokepoint {
         let _ = RefBackend::rebuild_ref_summary_index(&refs).unwrap();
         RefBackend::cleanup_stale_temps(&refs);
     }
+
+    /// heddle#354 r7 (cid 3329765075) — a long-lived handle re-reads the CURRENT
+    /// persisted (shared) watermark on each reconcile, so a sibling worktree's
+    /// advance stops it re-folding records the sibling already materialized.
+    /// Two contrasting cases on a handle whose in-memory watermark is frozen at
+    /// its open value (5) while a sibling advanced the oplog tip to 10:
+    ///
+    /// * **A** — the sibling never persisted the advance: the handle still folds
+    ///   the lag (the frozen-at-open behaviour, unchanged).
+    /// * **B** — THE FIX: the sibling persisted the shared watermark to the tip;
+    ///   the handle re-reads it and does NOT re-fold. Pre-r7 (no refresh) this
+    ///   would fold from the frozen 5 and re-derive the sibling's work.
+    #[test]
+    fn long_lived_handle_refreshes_persisted_shared_watermark() {
+        // Case A — no persisted advance ⇒ the lag is folded.
+        let (_ta, dir_a) = manager();
+        let calls_a = Arc::new(AtomicU64::new(0));
+        let recon_a = Arc::new(FakeReconciler {
+            generation: AtomicU64::new(5),
+            republish: Vec::new(),
+            remote_updates: Vec::new(),
+            undo_recovery: None,
+            calls: Arc::clone(&calls_a),
+        });
+        let refs_a =
+            RefManager::new(&dir_a).with_reconciler(Arc::clone(&recon_a) as Arc<dyn RefReconciler>);
+        refs_a.init().unwrap();
+        // A sibling advanced the oplog tip to 10 but never persisted the shared
+        // watermark; this handle's in-memory watermark stays frozen at 5.
+        recon_a.generation.store(10, Ordering::Release);
+        let _ = refs_a.get_marker(&MarkerName::new("any")).unwrap();
+        assert_eq!(
+            calls_a.load(Ordering::Acquire),
+            1,
+            "no persisted advance ⇒ the lag is folded"
+        );
+
+        // Case B — the sibling persisted the shared watermark to the tip; the
+        // long-lived handle re-reads it and does NOT re-fold.
+        let (_tb, dir_b) = manager();
+        let calls_b = Arc::new(AtomicU64::new(0));
+        let recon_b = Arc::new(FakeReconciler {
+            generation: AtomicU64::new(5),
+            republish: Vec::new(),
+            remote_updates: Vec::new(),
+            undo_recovery: None,
+            calls: Arc::clone(&calls_b),
+        });
+        let refs_b =
+            RefManager::new(&dir_b).with_reconciler(Arc::clone(&recon_b) as Arc<dyn RefReconciler>);
+        refs_b.init().unwrap();
+        recon_b.generation.store(10, Ordering::Release);
+        // The sibling's persisted SHARED last-clean point (the shared-dir file).
+        std::fs::write(dir_b.join("RECONCILE_WATERMARK_SHARED"), "10\n").unwrap();
+        let _ = refs_b.get_marker(&MarkerName::new("any")).unwrap();
+        assert_eq!(
+            calls_b.load(Ordering::Acquire),
+            0,
+            "a long-lived handle must re-read the sibling-advanced shared \
+             watermark and NOT re-fold (frozen-at-open would re-fold here)"
+        );
+    }
+}
+
+/// heddle#354 r7 — source-level conformance checks (the point of the
+/// close-the-class round): they FAIL CI if any path bypasses the read/write
+/// chokepoints. They walk the PRODUCTION source of `refs_manager.rs` +
+/// `refs_transactions.rs`, partition it into per-function chunks, and assert the
+/// no-bypass invariants:
+///
+/// * every raw backend WRITER is reached only from the chokepoint body or
+///   `materialize` (so no write reaches the backend without first
+///   reconciling+materializing under the lock);
+/// * the per-request raw-loader funnel `raw_load` is reached only from the read
+///   chokepoint (so no logical read bypasses `reconciled_load`);
+/// * every public writer/reader funnels through the respective chokepoint; and
+/// * the read chokepoint re-reads the persisted watermark each reconcile.
+///
+/// A planted-bypass fixture proves the analyzer is non-vacuous.
+mod write_read_conformance {
+    use std::collections::BTreeSet;
+
+    const MANAGER_SRC: &str = include_str!("refs_manager.rs");
+    const TXNS_SRC: &str = include_str!("refs_transactions.rs");
+
+    /// Everything before the in-file `#[cfg(test)]` module — the invariant is
+    /// enforced on production code only, never on the tests' own scaffolding.
+    fn production(src: &str) -> &str {
+        src.split("#[cfg(test)]").next().unwrap()
+    }
+
+    /// The function name a declaration line introduces, if any (`pub fn x(`,
+    /// `pub(super) fn x(`, `async fn x(`, `fn x<T>(`, …). `None` otherwise.
+    fn parse_fn_name(trimmed: &str) -> Option<String> {
+        let idx = trimmed.find("fn ")?;
+        let before = &trimmed[..idx];
+        if !(before.is_empty() || before.ends_with(' ')) {
+            return None;
+        }
+        let rest = &trimmed[idx + 3..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            return None;
+        }
+        let after = rest[name.len()..].trim_start();
+        (after.starts_with('(') || after.starts_with('<')).then_some(name)
+    }
+
+    /// Partition source into `(fn_name, body_text)` chunks: a new chunk starts at
+    /// each function declaration and runs until the next one. Comment lines never
+    /// start a chunk. Sufficient for "which fn contains this call" without brace
+    /// counting, since every method here is a 4-space-indented `impl` item.
+    fn fn_chunks(src: &str) -> Vec<(String, String)> {
+        let mut chunks = Vec::new();
+        let mut name = "<prologue>".to_string();
+        let mut body = String::new();
+        for line in production(src).lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("//")
+                && let Some(decl) = parse_fn_name(trimmed)
+            {
+                chunks.push((std::mem::take(&mut name), std::mem::take(&mut body)));
+                name = decl;
+            }
+            body.push_str(line);
+            body.push('\n');
+        }
+        chunks.push((name, body));
+        chunks
+    }
+
+    /// The set of function names whose body contains a call `.callee(`.
+    fn callers_of(srcs: &[&str], callee: &str) -> BTreeSet<String> {
+        let pat = format!(".{callee}(");
+        let mut out = BTreeSet::new();
+        for src in srcs {
+            for (name, body) in fn_chunks(src) {
+                if body.contains(&pat) {
+                    out.insert(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// The body of the FIRST function named `name` (the inherent `impl
+    /// RefManager` definition precedes the trait-delegation `impl`s).
+    fn first_body(srcs: &[&str], name: &str) -> String {
+        for src in srcs {
+            for (fname, body) in fn_chunks(src) {
+                if fname == name {
+                    return body;
+                }
+            }
+        }
+        panic!("function `{name}` not found in sources");
+    }
+
+    fn strays(callers: &BTreeSet<String>, allow: &[&str]) -> Vec<String> {
+        let allow: BTreeSet<String> = allow.iter().map(|s| s.to_string()).collect();
+        callers.difference(&allow).cloned().collect()
+    }
+
+    fn assert_only(callers: &BTreeSet<String>, allow: &[&str], primitive: &str) {
+        let strays = strays(callers, allow);
+        assert!(
+            strays.is_empty(),
+            "chokepoint bypass: `{primitive}` is reached from {strays:?}, outside the \
+             allowlist {allow:?} — route the write through `write_chokepoint` (or the \
+             read through `reconciled_load`) instead of calling the raw primitive"
+        );
+    }
+
+    /// WRITE no-bypass: every raw backend writer is reached only from a
+    /// chokepoint body or from `materialize` (the read/write catch-up).
+    #[test]
+    fn raw_writers_are_reached_only_through_the_chokepoint() {
+        let srcs = [MANAGER_SRC, TXNS_SRC];
+        assert_only(
+            &callers_of(&srcs, "publish_ref_plans"),
+            &[
+                "materialize",
+                "update_refs_with_lock",
+                "validate_commit_publish",
+            ],
+            "publish_ref_plans",
+        );
+        assert_only(
+            &callers_of(&srcs, "set_remote_thread_locked"),
+            &["materialize", "set_remote_thread_raw"],
+            "set_remote_thread_locked",
+        );
+        assert_only(
+            &callers_of(&srcs, "delete_remote_thread_locked"),
+            &["materialize", "delete_remote_thread_raw"],
+            "delete_remote_thread_locked",
+        );
+        assert_only(
+            &callers_of(&srcs, "set_undo_recovery_locked"),
+            &["materialize", "set_undo_recovery_raw"],
+            "set_undo_recovery_locked",
+        );
+    }
+
+    /// READ no-bypass: the per-request raw-loader funnel `raw_load` is reached
+    /// only from the read chokepoint and the write-side reconcile catch-up.
+    #[test]
+    fn raw_load_is_reached_only_through_the_read_chokepoint() {
+        assert_only(
+            &callers_of(&[MANAGER_SRC], "raw_load"),
+            &[
+                "reconciled_load",
+                "reconciled_value_under_lock",
+                "materialize_class",
+            ],
+            "raw_load",
+        );
+    }
+
+    /// Every public ref WRITER funnels through `write_chokepoint`.
+    #[test]
+    fn public_writers_funnel_through_write_chokepoint() {
+        for writer in [
+            "update_refs",
+            "commit_and_publish",
+            "set_undo_recovery_raw",
+            "set_remote_thread_raw",
+            "delete_remote_thread_raw",
+        ] {
+            assert!(
+                first_body(&[MANAGER_SRC], writer).contains("write_chokepoint("),
+                "write bypass: `{writer}` must route through `write_chokepoint`"
+            );
+        }
+    }
+
+    /// Every public ref READER funnels through `reconciled_load` and never calls
+    /// a raw loader directly.
+    #[test]
+    fn public_readers_funnel_through_reconciled_load() {
+        for reader in [
+            "read_head",
+            "get_thread",
+            "get_marker",
+            "get_undo_recovery",
+            "get_remote_thread",
+            "list_threads",
+            "list_markers",
+            "list_remotes",
+            "list_remote_threads",
+        ] {
+            let body = first_body(&[MANAGER_SRC], reader);
+            assert!(
+                body.contains("reconciled_load("),
+                "read bypass: `{reader}` must funnel through `reconciled_load`"
+            );
+            for raw in [".raw_load(", ".raw_get_", ".read_head_state(", ".raw_list_"] {
+                assert!(
+                    !body.contains(raw),
+                    "read bypass: `{reader}` calls a raw loader (`{raw}`) directly"
+                );
+            }
+        }
+    }
+
+    /// The read chokepoint re-reads the persisted watermark each reconcile, so a
+    /// long-lived handle never folds from a frozen-at-open value (cid 3329765075).
+    #[test]
+    fn read_chokepoint_refreshes_watermark_fresh() {
+        assert!(
+            first_body(&[MANAGER_SRC], "reconciled_load")
+                .contains("refresh_persisted_watermark("),
+            "the read chokepoint must re-read the persisted watermark each reconcile"
+        );
+    }
+
+    /// The analyzer has TEETH: a planted bypass (a function calling a raw writer
+    /// outside the allowlist) is both detected by `callers_of` AND surfaced as a
+    /// stray by the allowlist check — proving the conformance checks above are
+    /// non-vacuous and would fail if such a function existed in production.
+    #[test]
+    fn analyzer_detects_a_planted_bypass() {
+        let fixture = "\
+    fn legit(&self, lock: &RefsLock) -> Result<()> {
+        self.materialize(outcome, lock)
+    }
+    fn sneaky_bypass(&self, lock: &RefsLock) -> Result<()> {
+        self.publish_ref_plans(plans, lock)
+    }
+";
+        let callers = callers_of(&[fixture], "publish_ref_plans");
+        assert!(
+            callers.contains("sneaky_bypass"),
+            "analyzer must flag a planted raw-writer bypass"
+        );
+        assert!(
+            strays(&callers, &["materialize"]).contains(&"sneaky_bypass".to_string()),
+            "the allowlist check must surface the planted bypass as a stray (non-vacuous)"
+        );
+    }
 }

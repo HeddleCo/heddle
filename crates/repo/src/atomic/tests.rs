@@ -8,7 +8,7 @@ use std::rc::Rc;
 use objects::error::{HeddleError, Result};
 use objects::object::{ChangeId, MarkerName, ThreadName};
 use oplog::{OpLogBackend, OpRecord};
-use refs::{Head, RefExpectation, RefUpdate};
+use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;
 
 use super::{
@@ -427,7 +427,7 @@ fn crash_replay_reconciles_on_long_held_handle() {
     // phase-5 canonical publish of "explore".
     let forked = ChangeId::generate();
     repo.oplog()
-        .record_fork(&base, &forked, Some("explore"), None)
+        .record_fork(&base, &forked, Some("explore"), None, None)
         .unwrap();
 
     // The canonical "explore" ref was never written, yet the long-held handle
@@ -461,7 +461,7 @@ fn crash_replay_reconciles_a_concurrent_commit() {
     let forked = ChangeId::generate();
     committer
         .oplog()
-        .record_fork(&base, &forked, Some("explore"), None)
+        .record_fork(&base, &forked, Some("explore"), None, None)
         .unwrap();
 
     // The reader handle — opened before the commit, never re-opened —
@@ -488,7 +488,7 @@ fn all_ten_readers_reconcile() {
     // Shared classes — committed records, canonical refs unpublished.
     let thread_state = ChangeId::generate();
     repo.oplog()
-        .record_fork(&ChangeId::generate(), &thread_state, Some("ft"), None)
+        .record_fork(&ChangeId::generate(), &thread_state, Some("ft"), None, None)
         .unwrap();
     let marker_state = ChangeId::generate();
     repo.oplog()
@@ -699,7 +699,7 @@ fn reconcile_folds_every_record_shape() {
     }])
     .unwrap();
     // Collapse with a thread, and one detaching HEAD (thread = None arm).
-    op.record_collapse(&[v1, v1b], &coll, Some("t_coll"))
+    op.record_collapse(&[v1, v1b], &coll, Some("t_coll"), None)
         .unwrap();
     op.record_batch(vec![OpRecord::Collapse {
         sources: vec![v1],
@@ -1196,7 +1196,7 @@ fn crash_replay_reconciles_update_to_existing_ref() {
     // Phase 4 only: record a Collapse updating "main", with no phase-5 publish.
     let result = ChangeId::generate();
     repo.oplog()
-        .record_collapse(&[base], &result, Some("main"))
+        .record_collapse(&[base], &result, Some("main"), None)
         .unwrap();
 
     assert_eq!(
@@ -1641,7 +1641,7 @@ fn persisted_watermark_recovers_cross_process_crash_tail() {
         // "Prior process": phase-4 commit only (Fork naming "explore"), no
         // phase-5 publish, then the handle drops.
         repo.oplog()
-            .record_fork(&base, &forked, Some("explore"), None)
+            .record_fork(&base, &forked, Some("explore"), None, None)
             .unwrap();
     }
 
@@ -1795,6 +1795,160 @@ fn shared_watermark_is_cross_worktree_no_resurrect() {
     );
 }
 
+// ---- heddle#354 r7 — close-the-class (unified write chokepoint + scoped forks) ----
+
+/// cid 3329765073 — a NON-ATOMIC `update_refs`-class write funnels through the
+/// same write chokepoint as the atomic path, which materializes the committed
+/// tail FIRST. So a committed-but-unpublished record is persisted to canonical
+/// by the write, not discarded. Pre-r7 the non-atomic path folded the tail only
+/// for validation and threw the `ReconcileOutcome` away, leaving the record
+/// unmaterialized (and re-foldable over the very write that should have
+/// superseded it).
+#[test]
+fn non_atomic_write_materializes_committed_tail() {
+    let (_t, repo) = test_repo();
+    let v_new = ChangeId::generate();
+    // Phase-4 only: a committed-but-unpublished thread "x" (canonical absent,
+    // watermark behind).
+    repo.oplog()
+        .record_batch(vec![OpRecord::ThreadCreateV2 {
+            name: "x".to_string(),
+            state: v_new,
+            manager_snapshot: None,
+        }])
+        .unwrap();
+
+    // A no-reconciler view reads RAW canonical: "x" is not yet materialized.
+    assert_eq!(
+        RefManager::new(repo.heddle_dir())
+            .get_thread(&ThreadName::new("x"))
+            .unwrap(),
+        None,
+        "precondition: the committed record is not yet materialized to canonical"
+    );
+
+    // A NON-ATOMIC write to a DIFFERENT ref runs the write chokepoint, which
+    // materializes the committed tail before publishing.
+    let y = ChangeId::generate();
+    repo.refs().set_thread(&ThreadName::new("y"), &y).unwrap();
+
+    // The committed "x" is now in canonical — observable WITHOUT reconciliation.
+    // Pre-r7 the non-atomic write discarded the reconcile outcome and "x" stayed
+    // absent until a reconciling read happened to fold it.
+    assert_eq!(
+        RefManager::new(repo.heddle_dir())
+            .get_thread(&ThreadName::new("x"))
+            .unwrap(),
+        Some(v_new),
+        "a non-atomic write must materialize the committed tail (no lost records)"
+    );
+}
+
+/// cid 3329765073, the clobber face — a non-atomic delete of a ref whose
+/// committed-but-unpublished record would otherwise be re-folded over the
+/// delete. The write chokepoint materializes + advances the watermark to the
+/// tip, so the delete lands on a fully-reconciled canonical and no later read
+/// re-derives the deleted value. Pre-r7 the watermark stayed behind and the
+/// next read re-folded the create, resurrecting the deleted ref.
+#[test]
+fn non_atomic_delete_is_not_clobbered_by_a_committed_record() {
+    let (_t, repo) = test_repo();
+    let v_old = ChangeId::generate();
+    let v_new = ChangeId::generate();
+    // Publish "x"=v_old (no record), then commit (don't publish) "x"=v_new.
+    repo.refs()
+        .set_thread(&ThreadName::new("x"), &v_old)
+        .unwrap();
+    repo.oplog()
+        .record_batch(vec![OpRecord::ThreadUpdate {
+            name: "x".to_string(),
+            old_state: v_old,
+            new_state: v_new,
+        }])
+        .unwrap();
+
+    // Non-atomic delete via `update_refs` (no preceding reconciling read).
+    repo.refs()
+        .update_refs(&[RefUpdate::Thread {
+            name: ThreadName::new("x"),
+            expected: RefExpectation::Any,
+            new: None,
+        }])
+        .unwrap();
+
+    // The delete is preserved: a read does NOT re-fold the committed update.
+    assert_eq!(
+        repo.refs().get_thread(&ThreadName::new("x")).unwrap(),
+        None,
+        "a non-atomic delete must not be clobbered by re-folding a committed record"
+    );
+}
+
+/// cid 3329765074 — a HEAD-moving fork recorded via the `record_fork` HELPER is
+/// SCOPED to `op_scope`, so the read chokepoint's `Local`-class (scoped) fold
+/// reconciles it. Covers BOTH a detached fork (`head = Some`) and an attached
+/// fork (`thread = Some`, which also moves HEAD), plus the contrast that an
+/// UNSCOPED helper-recorded fork is invisible to the scoped fold (the pre-r7
+/// `record_single` bug — proving the scope is load-bearing).
+#[test]
+fn helper_recorded_head_moving_fork_is_scoped_and_reconciles() {
+    // Detached fork, scoped → HEAD reconciles.
+    let (_t1, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    let forked = ChangeId::generate();
+    repo.oplog()
+        .record_fork(&base, &forked, None, Some(&forked), Some(&scope))
+        .unwrap();
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: forked },
+        "a scoped helper-recorded detached fork must reconcile HEAD"
+    );
+
+    // Attached fork, scoped → HEAD reconciles to the new thread AND the thread
+    // ref reconciles.
+    let (_t2, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    let forked = ChangeId::generate();
+    repo.oplog()
+        .record_fork(&base, &forked, Some("topic"), None, Some(&scope))
+        .unwrap();
+    assert_eq!(
+        repo.refs().get_thread(&ThreadName::new("topic")).unwrap(),
+        Some(forked),
+        "a scoped helper-recorded attached fork must reconcile the thread ref"
+    );
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Attached {
+            thread: ThreadName::new("topic")
+        },
+        "a scoped helper-recorded attached fork must reconcile HEAD to the new thread"
+    );
+
+    // Contrast: an UNSCOPED detached fork is invisible to the scoped Local fold,
+    // so HEAD is NOT reconstructed (the pre-r7 bug — scope is load-bearing).
+    let (_t3, repo) = test_repo();
+    let base = ChangeId::generate();
+    let head_before = repo.refs().read_head().unwrap();
+    repo.oplog()
+        .record_fork(
+            &base,
+            &ChangeId::generate(),
+            None,
+            Some(&ChangeId::generate()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        head_before,
+        "an unscoped detached fork must NOT reconcile HEAD (scope is load-bearing)"
+    );
+}
+
 /// Class A (cid 3329631079) — a `Missing`/CAS expectation is validated against
 /// the RECONCILED state, not a stale on-disk read. A committed-but-unpublished
 /// Fork record creates "explore" (canonical still absent); a later
@@ -1808,7 +1962,7 @@ fn commit_and_publish_validates_against_reconciled_not_stale_disk() {
 
     // Phase-4 only: "explore" is committed-but-unpublished (canonical absent).
     repo.oplog()
-        .record_fork(&base, &committed, Some("explore"), None)
+        .record_fork(&base, &committed, Some("explore"), None, None)
         .unwrap();
 
     // A Missing expectation must fail: the reconciled state shows "explore"
@@ -1872,7 +2026,7 @@ fn lagging_reader_never_clobbers_concurrent_publish() {
                 .unwrap();
             // A committed-but-unpublished OLD value a lagging reader would fold.
             repo.oplog()
-                .record_fork(&base, &ChangeId::generate(), Some("main"), None)
+                .record_fork(&base, &ChangeId::generate(), Some("main"), None, None)
                 .unwrap();
         }
         let path = temp.path().to_path_buf();

@@ -633,10 +633,10 @@ fn record_methods_persist_expected_variants() {
         .unwrap();
     assert_eq!(rename_ids.len(), 2);
     oplog
-        .record_fork(&from, &result, Some("topic"), None)
+        .record_fork(&from, &result, Some("topic"), None, None)
         .unwrap();
     oplog
-        .record_collapse(&[from, result], &result, Some("trunk"))
+        .record_collapse(&[from, result], &result, Some("trunk"), None)
         .unwrap();
     oplog.record_marker_create("v1", &result).unwrap();
     oplog.record_marker_delete("v1", &result).unwrap();
@@ -922,10 +922,10 @@ mod default_backend {
             .unwrap();
         assert_eq!(rename_ids.len(), 2, "rename emits create + delete");
         backend
-            .record_fork(&from, &cid, Some("topic"), Some(&cid))
+            .record_fork(&from, &cid, Some("topic"), Some(&cid), Some("s"))
             .unwrap();
         backend
-            .record_collapse(&[from, cid], &cid, Some("trunk"))
+            .record_collapse(&[from, cid], &cid, Some("trunk"), Some("s"))
             .unwrap();
         backend
             .record_remote_thread_update("origin", "rt", &cid, Some("s"))

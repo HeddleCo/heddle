@@ -226,35 +226,52 @@ pub trait OpLogBackend: Send + Sync {
     /// result (correct argument order — heddle#330 r15 fixed the
     /// `cmd_fork` call site that passed these reversed). `thread`/`head`
     /// name the published ref so crash-replay can re-materialize it.
+    ///
+    /// `scope` MUST be the writer's `op_scope` for a HEAD-moving fork
+    /// (heddle#354 r7, cid 3329765074): the read chokepoint reconciles the
+    /// `Local` HEAD class scoped to `op_scope`, so an unscoped record would be
+    /// invisible to the fold and a crash before HEAD-publish would strand it.
     fn record_fork(
         &self,
         from: &ChangeId,
         new_state: &ChangeId,
         thread: Option<&str>,
         head: Option<&ChangeId>,
+        scope: Option<&str>,
     ) -> Result<u64> {
-        let ids = self.record_batch(vec![OpRecord::Fork {
-            from: *from,
-            new_state: *new_state,
-            thread: thread.map(str::to_string),
-            head: head.copied(),
-        }])?;
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::Fork {
+                from: *from,
+                new_state: *new_state,
+                thread: thread.map(str::to_string),
+                head: head.copied(),
+            }],
+            scope,
+        )?;
         Ok(ids[0])
     }
 
     /// Record a collapse. `thread` names the published ref (`Some(name)`
     /// for a thread ref, `None` for a detached HEAD at `result`).
+    ///
+    /// `scope` MUST be the writer's `op_scope` for a detached (HEAD-moving)
+    /// collapse (heddle#354 r7, cid 3329765074), for the same reason as
+    /// [`record_fork`](Self::record_fork).
     fn record_collapse(
         &self,
         sources: &[ChangeId],
         result: &ChangeId,
         thread: Option<&str>,
+        scope: Option<&str>,
     ) -> Result<u64> {
-        let ids = self.record_batch(vec![OpRecord::Collapse {
-            sources: sources.to_vec(),
-            result: *result,
-            thread: thread.map(str::to_string),
-        }])?;
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::Collapse {
+                sources: sources.to_vec(),
+                result: *result,
+                thread: thread.map(str::to_string),
+            }],
+            scope,
+        )?;
         Ok(ids[0])
     }
 
