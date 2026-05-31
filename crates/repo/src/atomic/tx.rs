@@ -184,6 +184,17 @@ impl<'a> Tx<'a> {
             }
         };
         self.ledger.push(compensator.into_fn());
+        // One-mechanism contract (heddle#354 r4): an eager mutation's undo is its
+        // `Compensator` (returned by `commit_eager`), NEVER the whole-op
+        // `rewind`. `enroll_whole_op` above registered the whole-op rewind only
+        // to clean up a FAILED `apply`/`commit_eager` (the early returns reach
+        // it via the shared ledger). Now that `commit_eager` has succeeded and
+        // the compensator owns the undo, take the mutation out of its cell so
+        // that pre-registered whole-op rewind closure finds `None` and is a
+        // guaranteed no-op. Without this, an `EagerMutation` that overrode
+        // `rewind` would run BOTH the override AND the compensator on an outer
+        // rollback — a double-undo.
+        let _ = mutation.borrow_mut().take();
         self.depth -= 1;
         Ok(staged.output)
     }

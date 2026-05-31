@@ -1347,3 +1347,273 @@ fn crash_replay_reconstructs_committed_head_update() {
         "a committed HEAD publish must be reconstructed after phase-4 crash"
     );
 }
+
+// ---- HEAD-class closure (heddle#354 r4) ----
+//
+// HEAD reconciliation must fold the LATEST HEAD-moving record of ANY shape, not
+// a Fork/Collapse allowlist. A publish-first mover (Goto / FastForward /
+// detached Snapshot) that lands AFTER an atomic Fork must mask the fork so the
+// reconcile cannot resurrect the fork's stale HEAD over the live canonical.
+// Each test below records a Fork (whose reconstruction a Fork/Collapse-only
+// allowlist would republish) then a later mover, on a handle whose watermark
+// predates the fork, and asserts HEAD is the later (canonical) value.
+
+/// Fork-then-goto: a `goto` recorded after a `Fork` must win. The goto writes
+/// canonical HEAD directly (publish-first) before recording; the reconcile must
+/// defer to that canonical, never republish the stale fork target.
+#[test]
+fn fork_then_goto_reconcile_yields_goto_target_not_stale_fork() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .unwrap();
+
+    // An atomic Fork committed (phase 4) a published HEAD = Detached{fork_a}.
+    let fork_a = ChangeId::generate();
+    repo.oplog()
+        .record_batch_scoped(
+            vec![OpRecord::Fork {
+                from: base,
+                new_state: fork_a,
+                thread: None,
+                head: Some(fork_a),
+            }],
+            Some(&scope),
+        )
+        .unwrap();
+
+    // `goto goto_b` then writes canonical HEAD = Detached{goto_b} DIRECTLY
+    // (publish-first) and records a `Goto`. The direct write is the canonical
+    // the reconciler reads; the record masks the older Fork.
+    let goto_b = ChangeId::generate();
+    repo.refs()
+        .write_head(&Head::Detached { state: goto_b })
+        .unwrap();
+    repo.oplog()
+        .record_batch_scoped(
+            vec![OpRecord::Goto {
+                target: goto_b,
+                prev_head: Some(fork_a),
+            }],
+            Some(&scope),
+        )
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: goto_b },
+        "a goto recorded after a fork must win — the stale fork must not resurrect"
+    );
+}
+
+/// FastForward-after-Fork: a fast-forward re-attaches HEAD and writes it
+/// directly before recording `FastForwardV2`. The reconcile must defer to the
+/// re-attached canonical HEAD, not the stale fork. (This is the exact
+/// stale-HEAD clobber a Fork/Collapse-only allowlist re-opens: `FastForwardV2`
+/// is publish-first, so the fork's reconstruction must be masked.)
+#[test]
+fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .unwrap();
+
+    let fork_a = ChangeId::generate();
+    repo.oplog()
+        .record_batch_scoped(
+            vec![OpRecord::Fork {
+                from: base,
+                new_state: fork_a,
+                thread: None,
+                head: Some(fork_a),
+            }],
+            Some(&scope),
+        )
+        .unwrap();
+
+    // A fast-forward advances "main" to ff_target and re-attaches HEAD
+    // (`fast_forward_attached`): canonical HEAD = Attached{main}, written
+    // directly before the FastForwardV2 record.
+    let ff_target = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &ff_target)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .unwrap();
+    repo.oplog()
+        .record_fast_forward("src", "main", &base, &ff_target, Some(&scope))
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Attached {
+            thread: ThreadName::new("main")
+        },
+        "a fast-forward after a fork must defer to the re-attached canonical HEAD, not resurrect the fork"
+    );
+}
+
+/// Detached-Snapshot-after-Fork: a detached snapshot writes HEAD = Detached
+/// directly before recording. The reconcile must yield the snapshot's HEAD, not
+/// the stale fork.
+#[test]
+fn detached_snapshot_after_fork_reconcile_yields_snapshot_head() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .unwrap();
+
+    let fork_a = ChangeId::generate();
+    repo.oplog()
+        .record_batch_scoped(
+            vec![OpRecord::Fork {
+                from: base,
+                new_state: fork_a,
+                thread: None,
+                head: Some(fork_a),
+            }],
+            Some(&scope),
+        )
+        .unwrap();
+
+    // A detached snapshot writes HEAD = Detached{snap_b} directly, then records.
+    let snap_b = ChangeId::generate();
+    repo.refs()
+        .write_head(&Head::Detached { state: snap_b })
+        .unwrap();
+    repo.oplog()
+        .record_batch_scoped(
+            vec![OpRecord::Snapshot {
+                new_state: snap_b,
+                prev_head: Some(fork_a),
+                thread: None,
+            }],
+            Some(&scope),
+        )
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: snap_b },
+        "a detached snapshot after a fork must win — the stale fork must not resurrect"
+    );
+}
+
+// ---- Eager one-mechanism guard (heddle#354 r4) ----
+
+/// An eager mutation that OVERRIDES `rewind` (sets `rewound`) and whose
+/// `commit_eager` returns a compensator (sets `compensated`). The one-mechanism
+/// guard must run ONLY the compensator on outer rollback — never the overridden
+/// whole-op rewind, which would double-undo.
+struct EagerOverrideRewind {
+    compensated: Rc<RefCell<bool>>,
+    rewound: Rc<RefCell<bool>>,
+}
+
+impl AtomicMutation for EagerOverrideRewind {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "eager-override-rewind".to_string()
+    }
+
+    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+        Ok(StagedCommit::pure(()))
+    }
+
+    fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
+        *self.rewound.borrow_mut() = true;
+        Ok(())
+    }
+}
+
+impl EagerMutation for EagerOverrideRewind {
+    fn commit_eager(&mut self, _tx: &mut Tx<'_>) -> Result<Compensator> {
+        let compensated = Rc::clone(&self.compensated);
+        Ok(Compensator::new(move || {
+            *compensated.borrow_mut() = true;
+            Ok(())
+        }))
+    }
+}
+
+struct EagerOverrideThenFail {
+    compensated: Rc<RefCell<bool>>,
+    rewound: Rc<RefCell<bool>>,
+    log: Rc<RefCell<Vec<u32>>>,
+}
+
+impl AtomicMutation for EagerOverrideThenFail {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "eager-override-then-fail".to_string()
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+        tx.enroll_eager(EagerOverrideRewind {
+            compensated: Rc::clone(&self.compensated),
+            rewound: Rc::clone(&self.rewound),
+        })?;
+        tx.enroll(Leg {
+            id: 1,
+            fail: true,
+            log: Rc::clone(&self.log),
+        })?;
+        Ok(StagedCommit::pure(()))
+    }
+}
+
+/// The one-mechanism guard: an `EagerMutation` that overrides `rewind` must not
+/// double-undo. After `commit_eager` succeeds, the pre-registered whole-op
+/// rewind is taken out of play, so an outer rollback runs ONLY the compensator.
+#[test]
+fn eager_override_rewind_does_not_double_undo() {
+    let (_t, repo) = test_repo();
+    let compensated = Rc::new(RefCell::new(false));
+    let rewound = Rc::new(RefCell::new(false));
+    let log = Rc::new(RefCell::new(Vec::new()));
+
+    let result = execute(
+        &repo,
+        EagerOverrideThenFail {
+            compensated: Rc::clone(&compensated),
+            rewound: Rc::clone(&rewound),
+            log: Rc::clone(&log),
+        },
+    );
+
+    assert!(result.is_err(), "the composite must fail");
+    assert!(
+        *compensated.borrow(),
+        "the eager compensator must run on outer rollback"
+    );
+    assert!(
+        !*rewound.borrow(),
+        "the overridden whole-op rewind must NOT run for an eager mutation (no double-undo)"
+    );
+}

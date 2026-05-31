@@ -42,14 +42,52 @@ impl OplogRefReconciler {
     }
 }
 
-/// The folded state of one ref class, replayed from committed entries.
+/// What the folded window implies for canonical HEAD (the `Local` class).
 ///
-/// HEAD is reconstructed only from records that now carry the published HEAD
-/// identity (`Fork` and `Collapse`). Older records that do not identify the
-/// post-HEAD shape remain non-authoritative for HEAD.
+/// HEAD reconciliation folds the **latest HEAD-moving record of ANY shape** in
+/// the window — a per-shape allowlist (Fork/Collapse only) re-opens the
+/// stale-HEAD clobber (heddle#354 r4): a `goto B` recorded *after* a `Fork A`
+/// would be ignored, so a reconcile would resurrect the stale `A` over the live
+/// `B`. The last HEAD-mover in id order wins; every earlier mover is masked.
+///
+/// The two republish modes differ by the latest mover's commit ordering:
+/// - [`HeadFold::Republish`] — `Fork`/`Collapse` are emitted by the atomic
+///   write chokepoint, which commits the oplog record (phase 4) BEFORE
+///   publishing HEAD (phase 5). A crash in between leaves the record committed
+///   but HEAD unpublished, so reconstruct from the record and republish to
+///   recover it (the `crash_replay_reconstructs_committed_head_update` case).
+/// - [`HeadFold::Canonical`] — `Goto`, detached `Snapshot`/`Checkpoint`, and
+///   `FastForward` write HEAD DIRECTLY *before* recording (`repository_goto.rs`
+///   `:160`, `repository_snapshot.rs` `:246`, `ff_record.rs`). Canonical
+///   therefore already reflects the move; worse, an unrecorded follow-up write
+///   (e.g. `fast_forward_attached`'s re-attach to a thread) may have superseded
+///   it. Defer to canonical — republishing the record's intermediate target
+///   here would clobber a newer, legitimately-published HEAD. Reaching this
+///   mode still MASKS an earlier `Republish`, which is what stops the stale
+///   Fork from resurrecting.
+///
+/// Invariant: HEAD reconciliation considers EVERY HEAD-moving record shape, not
+/// a Fork/Collapse allowlist. A publish-first mover defers to canonical (never
+/// republishing its possibly-stale target over a newer HEAD); a record-first
+/// mover reconstructs. Reintroducing a per-shape allowlist re-opens the
+/// stale-HEAD clobber class.
+#[derive(Default)]
+enum HeadFold {
+    /// No HEAD-moving record in the window — canonical is authoritative.
+    #[default]
+    Untouched,
+    /// Latest mover is a record-first atomic publish (Fork/Collapse):
+    /// reconstruct and republish to recover a crash-lost HEAD publish.
+    Republish(Head),
+    /// Latest mover is a publish-first direct write (Goto / detached
+    /// Snapshot / detached Checkpoint / FastForward): canonical wins.
+    Canonical,
+}
+
+/// The folded state of one ref class, replayed from committed entries.
 #[derive(Default)]
 struct Fold {
-    head: Option<Head>,
+    head: HeadFold,
     threads: BTreeMap<String, Option<ChangeId>>,
     markers: BTreeMap<String, Option<ChangeId>>,
     remotes: BTreeMap<(String, String), Option<ChangeId>>,
@@ -61,11 +99,17 @@ impl Fold {
         match op {
             OpRecord::Snapshot {
                 new_state, thread, ..
-            } => {
-                if let Some(name) = thread {
+            } => match thread {
+                Some(name) => {
+                    // Attached snapshot advances the thread; HEAD stays
+                    // `Attached{name}` (identity unchanged), so it is not a
+                    // HEAD-mover.
                     self.threads.insert(name.clone(), Some(*new_state));
                 }
-            }
+                // Detached snapshot writes `Head::Detached` directly before
+                // recording (repository_snapshot.rs:246) — publish-first.
+                None => self.head = HeadFold::Canonical,
+            },
             OpRecord::ThreadCreate { name, state }
             | OpRecord::ThreadUpdate {
                 name,
@@ -83,9 +127,14 @@ impl Fold {
             OpRecord::Fork {
                 new_state, thread, ..
             } => {
+                // Record-first atomic publish: reconstruct the published HEAD so
+                // a phase-4-committed/phase-5-unpublished fork is recovered. A
+                // fork that publishes neither a thread nor a detached HEAD
+                // (`thread = None, head = None`) moves no ref, so it leaves the
+                // fold's HEAD untouched (it must not mask a later/earlier mover).
                 if let Some(name) = thread {
                     self.threads.insert(name.clone(), Some(*new_state));
-                    self.head = Some(Head::Attached {
+                    self.head = HeadFold::Republish(Head::Attached {
                         thread: ThreadName::new(name),
                     });
                 }
@@ -93,17 +142,17 @@ impl Fold {
                     head: Some(head), ..
                 } = op
                 {
-                    self.head = Some(Head::Detached { state: *head });
+                    self.head = HeadFold::Republish(Head::Detached { state: *head });
                 }
             }
             OpRecord::Collapse { result, thread, .. } => {
                 if let Some(name) = thread {
                     self.threads.insert(name.clone(), Some(*result));
-                    self.head = Some(Head::Attached {
+                    self.head = HeadFold::Republish(Head::Attached {
                         thread: ThreadName::new(name),
                     });
                 } else {
-                    self.head = Some(Head::Detached { state: *result });
+                    self.head = HeadFold::Republish(Head::Detached { state: *result });
                 }
             }
             OpRecord::MarkerCreate { name, state } => {
@@ -112,18 +161,26 @@ impl Fold {
             OpRecord::MarkerDelete { name, .. } => {
                 self.markers.insert(name.clone(), None);
             }
-            OpRecord::Checkpoint { state, thread, .. } => {
-                if let Some(name) = thread {
+            OpRecord::Checkpoint { state, thread, .. } => match thread {
+                Some(name) => {
                     self.threads.insert(name.clone(), Some(*state));
                 }
-            }
+                // Detached checkpoint moves HEAD via a publish-first direct
+                // write (symmetric with the detached `Snapshot` arm).
+                None => self.head = HeadFold::Canonical,
+            },
             OpRecord::FastForwardV2 {
                 target_thread,
                 post_target_id,
                 ..
             } => {
+                // The forward FF (`fast_forward_attached_without_record`) writes
+                // HEAD directly before recording — publish-first, so canonical
+                // wins for HEAD. The target thread ref also advances and IS
+                // reconstructable from the record.
                 self.threads
                     .insert(target_thread.clone(), Some(*post_target_id));
+                self.head = HeadFold::Canonical;
             }
             OpRecord::EphemeralThreadCollapse { thread, .. } => {
                 self.threads.insert(thread.clone(), None);
@@ -142,11 +199,18 @@ impl Fold {
             OpRecord::UndoRecoveryUpdate { state } => {
                 self.undo_recovery = Some(*state);
             }
-            // HEAD-only records that do not encode the post-HEAD shape
-            // contribute nothing to materialization.
-            OpRecord::Goto { .. }
-            | OpRecord::FastForward { .. }
-            | OpRecord::TransactionAbort { .. }
+            // Publish-first HEAD moves: `goto` writes `Head::Detached` directly
+            // before recording (repository_goto.rs:160); legacy V1 `FastForward`
+            // likewise moved HEAD via a direct write. Canonical already reflects
+            // them (and may carry a newer unrecorded re-attach), so defer — while
+            // masking any earlier `Republish` so a stale Fork cannot resurrect.
+            OpRecord::Goto { .. } | OpRecord::FastForward { .. } => {
+                self.head = HeadFold::Canonical;
+            }
+            // Records that do not move canonical HEAD: transaction markers,
+            // conflict resolution, redaction bookkeeping, and the Git-overlay
+            // checkpoint leave HEAD where it is.
+            OpRecord::TransactionAbort { .. }
             | OpRecord::TransactionCommit { .. }
             | OpRecord::ConflictResolved { .. }
             | OpRecord::Redact { .. }
@@ -208,7 +272,10 @@ impl RefReconciler for OplogRefReconciler {
                 }
             }
             RefClass::Local => {
-                if let Some(head) = &fold.head {
+                // Only a record-first mover (Fork/Collapse) republishes a
+                // reconstructed HEAD; a publish-first mover defers to canonical
+                // (`HeadFold::Canonical`) so it never clobbers a newer HEAD.
+                if let HeadFold::Republish(head) = &fold.head {
                     republish.push(RefUpdate::Head {
                         expected: RefExpectation::Any,
                         new: head.clone(),
@@ -245,8 +312,10 @@ fn reconciled_value(
 ) -> Result<Loaded> {
     Ok(match req {
         LoadRequest::Head => match &fold.head {
-            Some(head) => Loaded::Head(head.clone()),
-            None => raw.clone(),
+            HeadFold::Republish(head) => Loaded::Head(head.clone()),
+            // A publish-first mover (or no mover at all) leaves canonical
+            // authoritative — return the raw HEAD, never a stale reconstruction.
+            HeadFold::Canonical | HeadFold::Untouched => raw.clone(),
         },
         LoadRequest::UndoRecovery => fill_point(raw, fold.undo_recovery.map(Some)),
         LoadRequest::Thread(name) => fill_point(raw, fold.threads.get(name.as_str()).copied()),
