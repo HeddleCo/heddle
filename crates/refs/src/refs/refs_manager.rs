@@ -2,8 +2,8 @@
 //! Reference manager: threads, markers, HEAD, and packed refs.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use objects::{
     error::{HeddleError, Result},
@@ -12,10 +12,13 @@ use objects::{
 };
 
 use super::{
-    backend::CoreRefBackend, format_change_id_text, packed_refs::PackedRefs,
+    Head, RefExpectation, RefUpdate,
+    backend::CoreRefBackend,
+    format_change_id_text,
+    packed_refs::PackedRefs,
+    reconcile::{LoadRequest, Loaded, RefClass, RefCommitter, RefReconciler},
     ref_backend::RefBackend,
-    reconcile::{Loaded, LoadRequest, RefClass, RefCommitter, RefReconciler},
-    resolve_refspec, Head, RefExpectation, RefUpdate,
+    resolve_refspec,
 };
 use crate::fs_atomic::sync_directory;
 
@@ -95,7 +98,8 @@ impl RefManager {
     /// record yet.
     pub fn with_reconciler(mut self, reconciler: Arc<dyn RefReconciler>) -> Self {
         let generation = reconciler.generation();
-        self.cached_local_generation.store(generation, Ordering::Release);
+        self.cached_local_generation
+            .store(generation, Ordering::Release);
         self.cached_shared_generation
             .store(generation, Ordering::Release);
         self.reconciler = Some(reconciler);
@@ -138,10 +142,11 @@ impl RefManager {
         self.validate_commit_publish(ref_updates, &lock, || {
             // Phase 4 — the commit point: append the ref-carrying records only
             // after phase-3 validation has passed, under the held refs lock.
+            let committed_for_reconcile = self.committer.is_some() && !encoded_records.is_empty();
             if let Some(committer) = self.committer.as_ref() {
                 committer.commit_records(encoded_records, scope)?;
             }
-            Ok(())
+            Ok(committed_for_reconcile)
         })
     }
 
@@ -209,8 +214,11 @@ impl RefManager {
                         to_publish.push(update.clone());
                     }
                 }
-                // HEAD is not reconstructed from the oplog (see the `Fold` doc).
-                RefUpdate::Head { .. } => {}
+                RefUpdate::Head { new, .. } => {
+                    if self.read_head_state()?.head != *new {
+                        to_publish.push(update.clone());
+                    }
+                }
             }
         }
         if !to_publish.is_empty() {

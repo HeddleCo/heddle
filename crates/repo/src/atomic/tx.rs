@@ -7,6 +7,9 @@
 //! only the outermost [`execute`](super::execute) reaches `commit`. The ledger
 //! is a LIFO stack of inverse closures, popped in reverse on any unwind.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use objects::error::{HeddleError, Result};
 use oplog::OpRecord;
 
@@ -20,6 +23,8 @@ use crate::Repository;
 /// entry N" uniformly. The `'a` bound lets a closure borrow the `Repository`
 /// (e.g. to restore a ref) for the lifetime of the transaction.
 type RewindFn<'a> = Box<dyn FnOnce() -> Result<()> + 'a>;
+
+pub(crate) type EnrolledMutation<M> = Rc<RefCell<Option<M>>>;
 
 /// The ledger snapshot handed to [`AtomicMutation::rewind`](super::AtomicMutation::rewind).
 /// Carries the per-transaction scope + depth captured at apply time; a mutation
@@ -98,22 +103,44 @@ impl<'a> Tx<'a> {
         self.ledger.push(Box::new(f));
     }
 
+    pub(crate) fn enroll_whole_op<M>(&mut self, m: M) -> EnrolledMutation<M>
+    where
+        M: super::AtomicMutation + 'a,
+    {
+        let mutation = Rc::new(RefCell::new(Some(m)));
+        let rewind_mutation = Rc::clone(&mutation);
+        let ledger = self.ledger_view();
+        self.on_rewind(move || {
+            let Some(mut mutation) = rewind_mutation.borrow_mut().take() else {
+                return Ok(());
+            };
+            mutation.rewind(&ledger)
+        });
+        mutation
+    }
+
     /// Savepoint enroll — bounded to [`SavepointMutation`] (§3.3). Runs only
     /// `apply` (staged, reversible) against the *same* ledger, then registers
     /// the child's `rewind` so an outer failure unwinds it. An
     /// `EagerMutation`-only mutation fails this bound at compile time.
-    pub fn enroll<M>(&mut self, mut m: M) -> Result<StagedCommit<M::Output>>
+    pub fn enroll<M>(&mut self, m: M) -> Result<StagedCommit<M::Output>>
     where
         M: SavepointMutation + 'a,
     {
         self.depth += 1;
-        // On apply error, any granular inverses the child already pushed stay
-        // on the ledger and run when the root unwinds.
-        let staged = m.apply(self)?;
-        let ledger = self.ledger_view();
-        self.on_rewind(move || m.rewind(&ledger));
+        let mutation = self.enroll_whole_op(m);
+        // On apply error or panic, the child's whole-op rewind is already on
+        // the shared ledger, so the root unwind compensates both granular and
+        // whole-op savepoint staging uniformly.
+        let staged = {
+            let mut guard = mutation.borrow_mut();
+            guard
+                .as_mut()
+                .expect("enrolled mutation must be present during apply")
+                .apply(self)
+        };
         self.depth -= 1;
-        Ok(staged)
+        staged
     }
 
     /// Eager enroll — bounded to [`EagerMutation`], whose sole method *returns*
@@ -122,13 +149,40 @@ impl<'a> Tx<'a> {
     /// compensator is guaranteed to exist because the bound requires the method
     /// that produces it — enrolling an eager op without a compensator does not
     /// compile (§3.3).
-    pub fn enroll_eager<M>(&mut self, mut m: M) -> Result<M::Output>
+    pub fn enroll_eager<M>(&mut self, m: M) -> Result<M::Output>
     where
         M: EagerMutation + 'a,
     {
         self.depth += 1;
-        let staged = m.apply(self)?;
-        let compensator = m.commit_eager(self)?;
+        let mutation = self.enroll_whole_op(m);
+        let staged = {
+            let mut guard = mutation.borrow_mut();
+            guard
+                .as_mut()
+                .expect("enrolled mutation must be present during apply")
+                .apply(self)
+        };
+        let staged = match staged {
+            Ok(staged) => staged,
+            Err(err) => {
+                self.depth -= 1;
+                return Err(err);
+            }
+        };
+        let compensator = {
+            let mut guard = mutation.borrow_mut();
+            guard
+                .as_mut()
+                .expect("enrolled mutation must be present during eager commit")
+                .commit_eager(self)
+        };
+        let compensator = match compensator {
+            Ok(compensator) => compensator,
+            Err(err) => {
+                self.depth -= 1;
+                return Err(err);
+            }
+        };
         self.ledger.push(compensator.into_fn());
         self.depth -= 1;
         Ok(staged.output)
@@ -146,22 +200,26 @@ impl<'a> Tx<'a> {
     /// the **unbounded indexed `transaction_id`** lookup — so a crash-retry at
     /// any later time is exact-once. After this returns `Ok`, the transaction
     /// is committed and `Drop` becomes a no-op.
-    pub(crate) fn commit(&mut self, mut records: Vec<OpRecord>) -> Result<()> {
+    pub(crate) fn commit(&mut self, mut records: Vec<OpRecord>) -> Result<CommitOutcome> {
         if self.committed {
-            return Ok(());
+            return Ok(CommitOutcome::Committed);
         }
         let op_count = records.len() as u32;
         records.push(OpRecord::TransactionCommit {
             transaction_id: self.transaction_id.clone(),
             op_count,
         });
-        self.repo.oplog().record_batch_exactly_once(
+        let outcome = self.repo.oplog().record_batch_exactly_once(
             records,
             Some(&self.scope),
             &self.transaction_id,
         )?;
-        self.committed = true;
-        Ok(())
+        if outcome.is_some() {
+            self.committed = true;
+            Ok(CommitOutcome::Committed)
+        } else {
+            Ok(CommitOutcome::AlreadyCommitted)
+        }
     }
 
     /// Walk the ledger in reverse (LIFO) order, running every inverse. Drains
@@ -183,6 +241,12 @@ impl<'a> Tx<'a> {
             None => Ok(()),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommitOutcome {
+    Committed,
+    AlreadyCommitted,
 }
 
 impl Drop for Tx<'_> {

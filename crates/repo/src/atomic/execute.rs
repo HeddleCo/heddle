@@ -6,10 +6,10 @@
 //! zero vtable. The bound `M: AtomicMutation` makes "register an atomic op
 //! without a `rewind`" a compile error.
 
-use objects::error::Result;
+use objects::error::{HeddleError, Result};
 
 use super::traits::{AtomicMutation, StagedCommit};
-use super::tx::Tx;
+use super::tx::{CommitOutcome, Tx};
 use crate::Repository;
 
 /// Run a mutation as one all-or-nothing transaction.
@@ -23,7 +23,7 @@ use crate::Repository;
 ///
 /// On commit failure the staged effects are rewound too, so the call is
 /// all-or-nothing.
-pub fn execute<'a, M>(repo: &'a Repository, mut m: M) -> Result<M::Output>
+pub fn execute<'a, M>(repo: &'a Repository, m: M) -> Result<M::Output>
 where
     M: AtomicMutation + 'a,
 {
@@ -31,37 +31,42 @@ where
     // identical across retries so a crash-retry deduplicates instead of
     // double-applying.
     let mut tx = Tx::root(repo, m.transaction_id());
+    let mutation = tx.enroll_whole_op(m);
 
-    let staged = match m.apply(&mut tx) {
+    let staged = {
+        let mut guard = mutation.borrow_mut();
+        guard
+            .as_mut()
+            .expect("root mutation must be present during apply")
+            .apply(&mut tx)
+    };
+    let staged = match staged {
         Ok(staged) => staged,
-        Err(e) => {
-            // The whole-op rewind must run on the apply-`Err` path too, or a
-            // mutation that uses it (rather than granular `on_rewind` inverses)
-            // would leak the state its `apply` staged before failing (cid
-            // 3329490979). Register it exactly as the commit-failure path below,
-            // then unwind: the granular ledger AND the whole-op rewind run
-            // together (one is a no-op per the one-mechanism-per-mutation
-            // contract), so zero staged state survives a failed `apply`.
-            let ledger = tx.ledger_view();
-            tx.on_rewind(move || m.rewind(&ledger));
-            let _ = tx.rewind_all();
-            return Err(e);
-        }
+        Err(e) => return rewind_error(&mut tx, e),
     };
 
     let StagedCommit { output, oplog } = staged;
 
-    // Register the top mutation's whole-op rewind (a no-op for mutations that
-    // registered granular inverses). Moves `m` into the ledger closure; on a
-    // successful commit it is never invoked and drops with the ledger.
-    let ledger = tx.ledger_view();
-    tx.on_rewind(move || m.rewind(&ledger));
-
     match tx.commit(oplog) {
-        Ok(()) => Ok(output),
-        Err(e) => {
-            let _ = tx.rewind_all();
-            Err(e)
-        }
+        Ok(CommitOutcome::Committed) => Ok(output),
+        Ok(CommitOutcome::AlreadyCommitted) => match tx.rewind_all() {
+            Ok(()) => Ok(output),
+            Err(rewind_err) => Err(HeddleError::Conflict(format!(
+                "transaction {} was already committed, but replay rewind failed: {}",
+                tx.transaction_id(),
+                rewind_err
+            ))),
+        },
+        Err(e) => rewind_error(&mut tx, e),
+    }
+}
+
+fn rewind_error<T>(tx: &mut Tx<'_>, original: HeddleError) -> Result<T> {
+    match tx.rewind_all() {
+        Ok(()) => Err(original),
+        Err(rewind_err) => Err(HeddleError::Conflict(format!(
+            "transaction failed: {}; rewind failed: {}",
+            original, rewind_err
+        ))),
     }
 }

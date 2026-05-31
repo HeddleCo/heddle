@@ -9,7 +9,7 @@ use objects::{
 };
 
 use super::{
-    format_change_id_text,
+    RefManager, RefUpdate, format_change_id_text,
     packed_refs::PackedRefs,
     parse_change_id_text,
     refs_storage::RefsLock,
@@ -17,7 +17,6 @@ use super::{
         describe_change_id, describe_expectation_change_id, describe_expectation_head,
         describe_head, matches_expectation,
     },
-    RefManager, RefUpdate,
 };
 use crate::fs_atomic::sync_directory;
 
@@ -109,25 +108,30 @@ impl RefManager {
         self.publish_ref_plans(plans, lock)
     }
 
-    /// Validate + commit + publish as one atomic unit under the held refs lock
-    /// (heddle#330 §2.2 write chokepoint, cid 3329490978 / 3329490984).
+    /// Validate + commit + publish under the held refs lock (heddle#330 §2.2
+    /// write chokepoint, cid 3329490978 / 3329490984).
     ///
     /// Phase 3 plans and validates every update against the on-disk value
     /// **first** (writing nothing), so a CAS-expectation failure returns `Err`
     /// before `commit` runs — the oplog record is never appended for a mutation
     /// that will not publish (no validation-failure leak). `commit` (phase 4)
-    /// then runs, immediately followed by the phase-5 publish, all while the
-    /// caller holds the refs lock — so concurrent callers serialize the
-    /// record-and-publish as a single unit (no record/publish order divergence).
+    /// then runs, immediately followed by the phase-5 publish. If phase 5
+    /// fails after a ref-carrying record was durably committed, the operation
+    /// has already linearized; return success and let reconciliation materialize
+    /// the committed effect on the next read.
     pub(super) fn validate_commit_publish(
         &self,
         updates: &[RefUpdate],
         lock: &RefsLock,
-        commit: impl FnOnce() -> Result<()>,
+        commit: impl FnOnce() -> Result<bool>,
     ) -> Result<()> {
         let plans = self.plan_ref_updates(updates)?;
-        commit()?;
-        self.publish_ref_plans(plans, lock)
+        let committed_for_reconcile = commit()?;
+        match self.publish_ref_plans(plans, lock) {
+            Ok(()) => Ok(()),
+            Err(_err) if committed_for_reconcile => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Phase 3 (heddle#330 §2.2): plan + validate every update against the
@@ -364,8 +368,13 @@ impl RefManager {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use objects::object::MarkerName;
     use tempfile::TempDir;
 
+    use super::super::reconcile::{LoadRequest, Loaded, ReconcileOutcome, RefReconciler};
     use super::*;
 
     fn create_ref_manager() -> (TempDir, RefManager) {
@@ -412,6 +421,87 @@ mod tests {
         assert!(
             !thread_path.exists(),
             "rollback should restore packed refs, not leave a loose recovery ref"
+        );
+    }
+
+    struct OneMarkerReconciler {
+        generation: Arc<AtomicU64>,
+        name: MarkerName,
+        state: ChangeId,
+    }
+
+    impl RefReconciler for OneMarkerReconciler {
+        fn generation(&self) -> u64 {
+            self.generation.load(Ordering::Acquire)
+        }
+
+        fn reconcile(
+            &self,
+            req: &LoadRequest,
+            raw: Loaded,
+            _since: u64,
+        ) -> Result<ReconcileOutcome> {
+            let loaded = match req {
+                LoadRequest::Marker(name) if name == &self.name => Loaded::Point(Some(self.state)),
+                _ => raw,
+            };
+            Ok(ReconcileOutcome {
+                loaded,
+                republish: vec![RefUpdate::Marker {
+                    name: self.name.clone(),
+                    expected: super::super::RefExpectation::Any,
+                    new: Some(self.state),
+                }],
+                remote_updates: Vec::new(),
+                undo_recovery: None,
+            })
+        }
+    }
+
+    #[test]
+    fn post_commit_publish_failure_is_deferred_success() {
+        let (temp, plain_refs) = create_ref_manager();
+        let generation = Arc::new(AtomicU64::new(0));
+        let good = MarkerName::new("good");
+        let bad = MarkerName::new("bad");
+        let committed_state = ChangeId::generate();
+        let refs = RefManager::new(temp.path().join(".heddle")).with_reconciler(Arc::new(
+            OneMarkerReconciler {
+                generation: Arc::clone(&generation),
+                name: good.clone(),
+                state: committed_state,
+            },
+        ));
+
+        let updates = vec![
+            RefUpdate::Marker {
+                name: good.clone(),
+                expected: super::super::RefExpectation::Missing,
+                new: Some(committed_state),
+            },
+            RefUpdate::Marker {
+                name: bad.clone(),
+                expected: super::super::RefExpectation::Missing,
+                new: Some(ChangeId::generate()),
+            },
+        ];
+        let lock = refs.lock_refs().unwrap();
+        let result = refs.validate_commit_publish(&updates, &lock, || {
+            generation.store(1, Ordering::Release);
+            std::fs::create_dir(plain_refs.marker_path(bad.as_str()).unwrap()).unwrap();
+            Ok(true)
+        });
+        drop(lock);
+
+        assert!(
+            result.is_ok(),
+            "phase-5 failure after durable commit must not report mutation failure"
+        );
+        std::fs::remove_dir_all(plain_refs.marker_path(bad.as_str()).unwrap()).unwrap();
+        assert_eq!(
+            refs.get_marker(&good).unwrap(),
+            Some(committed_state),
+            "the next read must materialize the committed effect"
         );
     }
 }

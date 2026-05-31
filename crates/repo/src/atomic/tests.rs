@@ -2,7 +2,7 @@
 //! Unit tests for the atomic-mutation primitive (heddle#330 §7 item 1).
 
 use std::cell::RefCell;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use objects::error::{HeddleError, Result};
@@ -12,8 +12,8 @@ use refs::{Head, RefExpectation, RefUpdate};
 use tempfile::TempDir;
 
 use super::{
-    execute, AtomicMutation, Compensator, EagerMutation, RewindLedger, SavepointMutation,
-    StagedCommit, Tx,
+    AtomicMutation, Compensator, EagerMutation, RewindLedger, SavepointMutation, StagedCommit, Tx,
+    execute,
 };
 use crate::Repository;
 
@@ -93,9 +93,12 @@ fn reverse_order_rewind_on_failure() {
     let (_t, repo) = test_repo();
     let log = Rc::new(RefCell::new(Vec::new()));
 
-    let result = execute(&repo, FailingComposite {
-        log: Rc::clone(&log),
-    });
+    let result = execute(
+        &repo,
+        FailingComposite {
+            log: Rc::clone(&log),
+        },
+    );
 
     assert!(result.is_err(), "the composite must fail");
     assert_eq!(
@@ -135,6 +138,33 @@ impl AtomicMutation for Panicker {
     }
 }
 
+/// A whole-op-rewind mutation whose `apply` panics after staging state. It
+/// registers no granular inverse, so only the pre-enrolled whole-op rewind can
+/// clean it up during `Tx::drop`.
+struct WholeOpPanicker {
+    staged: Rc<RefCell<bool>>,
+    rewound: Rc<RefCell<bool>>,
+}
+
+impl AtomicMutation for WholeOpPanicker {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "whole-op-panicker".to_string()
+    }
+
+    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+        *self.staged.borrow_mut() = true;
+        panic!("apply panicked after whole-op staging");
+    }
+
+    fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
+        *self.staged.borrow_mut() = false;
+        *self.rewound.borrow_mut() = true;
+        Ok(())
+    }
+}
+
 /// The `Drop` backstop (heddle#330 §4): a panic that unwinds through `apply`
 /// still runs the reverse-order rewind and never commits.
 #[test]
@@ -143,9 +173,12 @@ fn panic_unwind_runs_drop_backstop() {
     let log = Rc::new(RefCell::new(Vec::new()));
 
     let caught = catch_unwind(AssertUnwindSafe(|| {
-        let _ = execute(&repo, Panicker {
-            log: Rc::clone(&log),
-        });
+        let _ = execute(
+            &repo,
+            Panicker {
+                log: Rc::clone(&log),
+            },
+        );
     }));
 
     assert!(caught.is_err(), "the panic must propagate past execute");
@@ -160,6 +193,80 @@ fn panic_unwind_runs_drop_backstop() {
             .iter()
             .any(|e| matches!(e.operation, OpRecord::TransactionCommit { .. })),
         "a panicked transaction must not commit"
+    );
+}
+
+#[test]
+fn whole_op_rewind_runs_on_apply_panic() {
+    let (_t, repo) = test_repo();
+    let staged = Rc::new(RefCell::new(false));
+    let rewound = Rc::new(RefCell::new(false));
+
+    let caught = catch_unwind(AssertUnwindSafe(|| {
+        let _ = execute(
+            &repo,
+            WholeOpPanicker {
+                staged: Rc::clone(&staged),
+                rewound: Rc::clone(&rewound),
+            },
+        );
+    }));
+
+    assert!(caught.is_err(), "the panic must propagate past execute");
+    assert!(
+        *rewound.borrow(),
+        "the pre-enrolled whole-op rewind must run during panic unwind"
+    );
+    assert!(
+        !*staged.borrow(),
+        "a panicking apply must leave zero whole-op staged state"
+    );
+}
+
+struct CommitFailsRewindFails;
+
+impl AtomicMutation for CommitFailsRewindFails {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "commit-fails-rewind-fails".to_string()
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+        let oplog_path = tx.repo().heddle_dir().join("oplog").join("oplog.bin");
+        if oplog_path.exists() {
+            std::fs::remove_file(&oplog_path)?;
+        }
+        std::fs::create_dir(&oplog_path)?;
+        Ok(StagedCommit::new(
+            (),
+            vec![OpRecord::Snapshot {
+                new_state: ChangeId::generate(),
+                prev_head: None,
+                thread: None,
+            }],
+        ))
+    }
+
+    fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
+        Err(HeddleError::Config("rewind failed too".to_string()))
+    }
+}
+
+#[test]
+fn commit_failure_surfaces_rewind_failure_too() {
+    let (_t, repo) = test_repo();
+
+    let err = execute(&repo, CommitFailsRewindFails).unwrap_err();
+    let message = err.to_string();
+
+    assert!(
+        message.contains("transaction failed"),
+        "the original commit failure must be preserved: {message}"
+    );
+    assert!(
+        message.contains("rewind failed too"),
+        "the rewind failure must be surfaced with the original error: {message}"
     );
 }
 
@@ -284,11 +391,14 @@ fn eager_compensator_runs_on_outer_rollback() {
     let cancelled = Rc::new(RefCell::new(false));
     let log = Rc::new(RefCell::new(Vec::new()));
 
-    let result = execute(&repo, EagerThenFail {
-        reserved: Rc::clone(&reserved),
-        cancelled: Rc::clone(&cancelled),
-        log: Rc::clone(&log),
-    });
+    let result = execute(
+        &repo,
+        EagerThenFail {
+            reserved: Rc::clone(&reserved),
+            cancelled: Rc::clone(&cancelled),
+            log: Rc::clone(&log),
+        },
+    );
 
     assert!(result.is_err(), "the composite must fail");
     assert!(*reserved.borrow(), "the eager effect must have run");
@@ -309,7 +419,9 @@ fn eager_compensator_runs_on_outer_rollback() {
 fn crash_replay_reconciles_on_long_held_handle() {
     let (_t, repo) = test_repo();
     let base = ChangeId::generate();
-    repo.refs().set_thread(&ThreadName::new("main"), &base).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
 
     // Phase 4 only: append the Fork record naming the published thread, with no
     // phase-5 canonical publish of "explore".
@@ -338,7 +450,10 @@ fn crash_replay_reconciles_a_concurrent_commit() {
     let temp = TempDir::new().unwrap();
     let reader = Repository::init_default(temp.path()).unwrap();
     let base = ChangeId::generate();
-    reader.refs().set_thread(&ThreadName::new("main"), &base).unwrap();
+    reader
+        .refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
 
     // A second handle stands in for a concurrent process committing a fork's
     // phase-4 record without publishing the ref.
@@ -352,7 +467,10 @@ fn crash_replay_reconciles_a_concurrent_commit() {
     // The reader handle — opened before the commit, never re-opened —
     // reconciles the unpublished ref on its next read.
     assert_eq!(
-        reader.refs().get_thread(&ThreadName::new("explore")).unwrap(),
+        reader
+            .refs()
+            .get_thread(&ThreadName::new("explore"))
+            .unwrap(),
         Some(forked),
         "a pre-opened handle must reconcile a concurrent committed-but-unpublished ref"
     );
@@ -373,7 +491,9 @@ fn all_ten_readers_reconcile() {
         .record_fork(&ChangeId::generate(), &thread_state, Some("ft"), None)
         .unwrap();
     let marker_state = ChangeId::generate();
-    repo.oplog().record_marker_create("mk", &marker_state).unwrap();
+    repo.oplog()
+        .record_marker_create("mk", &marker_state)
+        .unwrap();
     let remote_state = ChangeId::generate();
     repo.oplog()
         .record_remote_thread_update("origin", "rt", &remote_state, None)
@@ -397,20 +517,36 @@ fn all_ten_readers_reconcile() {
             thread: ThreadName::new("main")
         }
     );
-    assert_eq!(refs.get_thread(&ThreadName::new("ft")).unwrap(), Some(thread_state));
-    assert_eq!(refs.get_marker(&MarkerName::new("mk")).unwrap(), Some(marker_state));
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("ft")).unwrap(),
+        Some(thread_state)
+    );
+    assert_eq!(
+        refs.get_marker(&MarkerName::new("mk")).unwrap(),
+        Some(marker_state)
+    );
     assert_eq!(refs.get_undo_recovery().unwrap(), Some(undo_state));
     assert_eq!(
-        refs.get_remote_thread("origin", &ThreadName::new("rt")).unwrap(),
+        refs.get_remote_thread("origin", &ThreadName::new("rt"))
+            .unwrap(),
         Some(remote_state)
     );
-    assert!(refs.list_threads().unwrap().contains(&ThreadName::new("ft")));
-    assert!(refs.list_markers().unwrap().contains(&MarkerName::new("mk")));
+    assert!(
+        refs.list_threads()
+            .unwrap()
+            .contains(&ThreadName::new("ft"))
+    );
+    assert!(
+        refs.list_markers()
+            .unwrap()
+            .contains(&MarkerName::new("mk"))
+    );
     assert!(refs.list_remotes().unwrap().contains(&"origin".to_string()));
-    assert!(refs
-        .list_remote_threads("origin")
-        .unwrap()
-        .contains(&ThreadName::new("rt")));
+    assert!(
+        refs.list_remote_threads("origin")
+            .unwrap()
+            .contains(&ThreadName::new("rt"))
+    );
     assert_eq!(refs.resolve("ft").unwrap(), Some(thread_state));
 }
 
@@ -510,7 +646,10 @@ fn tx_accessors_and_rewind_error_paths() {
         .into_iter()
         .filter(|e| matches!(e.operation, OpRecord::TransactionCommit { .. }))
         .count();
-    assert_eq!(commits, 1, "the committed guard suppresses the second commit");
+    assert_eq!(
+        commits, 1,
+        "the committed guard suppresses the second commit"
+    );
 
     // Drop backstop: an uncommitted Tx whose inverse fails logs (never panics).
     {
@@ -560,7 +699,8 @@ fn reconcile_folds_every_record_shape() {
     }])
     .unwrap();
     // Collapse with a thread, and one detaching HEAD (thread = None arm).
-    op.record_collapse(&[v1, v1b], &coll, Some("t_coll")).unwrap();
+    op.record_collapse(&[v1, v1b], &coll, Some("t_coll"))
+        .unwrap();
     op.record_batch(vec![OpRecord::Collapse {
         sources: vec![v1],
         result: coll,
@@ -581,7 +721,8 @@ fn reconcile_folds_every_record_shape() {
     }])
     .unwrap();
     // Fast-forward (V2) folds target_thread → post_target_id.
-    op.record_fast_forward("t_src", "t_ff", &v1, &ff, None).unwrap();
+    op.record_fast_forward("t_src", "t_ff", &v1, &ff, None)
+        .unwrap();
     // Fork that publishes no ref (thread = None arm).
     op.record_batch(vec![OpRecord::Fork {
         from: v1,
@@ -612,14 +753,24 @@ fn reconcile_folds_every_record_shape() {
     let refs = repo.refs();
 
     // Point reads fold + fill the absent canonical (fill_point set arm).
-    assert_eq!(refs.get_thread(&ThreadName::new("t_coll")).unwrap(), Some(coll));
-    assert_eq!(refs.get_thread(&ThreadName::new("t_ckpt")).unwrap(), Some(ckpt));
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("t_coll")).unwrap(),
+        Some(coll)
+    );
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("t_ckpt")).unwrap(),
+        Some(ckpt)
+    );
     assert_eq!(refs.get_thread(&ThreadName::new("t_ff")).unwrap(), Some(ff));
-    assert_eq!(refs.get_thread(&ThreadName::new("t_v1")).unwrap(), Some(v1b));
+    assert_eq!(
+        refs.get_thread(&ThreadName::new("t_v1")).unwrap(),
+        Some(v1b)
+    );
     assert_eq!(refs.get_thread(&ThreadName::new("t_v2")).unwrap(), Some(v2));
     assert_eq!(refs.get_marker(&MarkerName::new("mk2")).unwrap(), Some(mk));
     assert_eq!(
-        refs.get_remote_thread("origin", &ThreadName::new("rt2")).unwrap(),
+        refs.get_remote_thread("origin", &ThreadName::new("rt2"))
+            .unwrap(),
         Some(remote)
     );
     assert_eq!(refs.get_undo_recovery().unwrap(), Some(undo));
@@ -632,7 +783,11 @@ fn reconcile_folds_every_record_shape() {
     let threads = refs.list_threads().unwrap();
     assert!(threads.contains(&ThreadName::new("t_coll")));
     assert!(threads.contains(&ThreadName::new("t_ff")));
-    assert!(refs.list_markers().unwrap().contains(&MarkerName::new("mk2")));
+    assert!(
+        refs.list_markers()
+            .unwrap()
+            .contains(&MarkerName::new("mk2"))
+    );
     let remotes = refs.list_remotes().unwrap();
     assert!(remotes.contains(&"origin".to_string()));
     let remote_threads = refs.list_remote_threads("origin").unwrap();
@@ -662,7 +817,9 @@ impl AtomicMutation for StageThenFail {
         // Stage state, relying on the whole-op `rewind` (NOT a granular inverse)
         // to undo it — then fail.
         *self.staged.borrow_mut() = true;
-        Err(HeddleError::Config("apply failed after staging".to_string()))
+        Err(HeddleError::Config(
+            "apply failed after staging".to_string(),
+        ))
     }
 
     fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
@@ -671,6 +828,8 @@ impl AtomicMutation for StageThenFail {
         Ok(())
     }
 }
+
+impl SavepointMutation for StageThenFail {}
 
 /// The whole-op rewind must run on the `apply`-returns-`Err` path, not only
 /// after a successful `apply` (cid 3329490979). Otherwise a mutation that stages
@@ -682,10 +841,13 @@ fn whole_op_rewind_runs_on_apply_err() {
     let staged = Rc::new(RefCell::new(false));
     let rewound = Rc::new(RefCell::new(false));
 
-    let result = execute(&repo, StageThenFail {
-        staged: Rc::clone(&staged),
-        rewound: Rc::clone(&rewound),
-    });
+    let result = execute(
+        &repo,
+        StageThenFail {
+            staged: Rc::clone(&staged),
+            rewound: Rc::clone(&rewound),
+        },
+    );
 
     assert!(result.is_err(), "the mutation must fail");
     assert!(
@@ -695,6 +857,52 @@ fn whole_op_rewind_runs_on_apply_err() {
     assert!(
         !*staged.borrow(),
         "a failing apply must leave zero staged state"
+    );
+}
+
+struct EnrollStageThenFail {
+    staged: Rc<RefCell<bool>>,
+    rewound: Rc<RefCell<bool>>,
+}
+
+impl AtomicMutation for EnrollStageThenFail {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "enroll-stage-then-fail".to_string()
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+        tx.enroll(StageThenFail {
+            staged: Rc::clone(&self.staged),
+            rewound: Rc::clone(&self.rewound),
+        })?;
+        Ok(StagedCommit::pure(()))
+    }
+}
+
+#[test]
+fn savepoint_whole_op_rewind_runs_on_apply_err() {
+    let (_t, repo) = test_repo();
+    let staged = Rc::new(RefCell::new(false));
+    let rewound = Rc::new(RefCell::new(false));
+
+    let result = execute(
+        &repo,
+        EnrollStageThenFail {
+            staged: Rc::clone(&staged),
+            rewound: Rc::clone(&rewound),
+        },
+    );
+
+    assert!(result.is_err(), "the savepoint child must fail");
+    assert!(
+        *rewound.borrow(),
+        "savepoint enrollment must pre-register the child's whole-op rewind"
+    );
+    assert!(
+        !*staged.borrow(),
+        "a failing savepoint apply must leave zero staged state"
     );
 }
 
@@ -716,11 +924,14 @@ impl AtomicMutation for StableKeyed {
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         *self.applied.borrow_mut() += 1;
-        Ok(StagedCommit::new((), vec![OpRecord::Snapshot {
-            new_state: self.state,
-            prev_head: None,
-            thread: None,
-        }]))
+        Ok(StagedCommit::new(
+            (),
+            vec![OpRecord::Snapshot {
+                new_state: self.state,
+                prev_head: None,
+                thread: None,
+            }],
+        ))
     }
 }
 
@@ -736,27 +947,35 @@ fn stable_transaction_id_dedupes_crash_retry() {
     let key = "logical-op-42".to_string();
 
     // First run commits.
-    execute(&repo, StableKeyed {
-        key: key.clone(),
-        state,
-        applied: Rc::clone(&applied),
-    })
+    execute(
+        &repo,
+        StableKeyed {
+            key: key.clone(),
+            state,
+            applied: Rc::clone(&applied),
+        },
+    )
     .unwrap();
     // The crash-retry: identical stable key ⇒ the commit deduplicates.
-    execute(&repo, StableKeyed {
-        key: key.clone(),
-        state,
-        applied: Rc::clone(&applied),
-    })
+    execute(
+        &repo,
+        StableKeyed {
+            key: key.clone(),
+            state,
+            applied: Rc::clone(&applied),
+        },
+    )
     .unwrap();
 
     let recent = repo.oplog().recent(64).unwrap();
     let commits = recent
         .iter()
-        .filter(|e| matches!(
-            &e.operation,
-            OpRecord::TransactionCommit { transaction_id, .. } if transaction_id == &key
-        ))
+        .filter(|e| {
+            matches!(
+                &e.operation,
+                OpRecord::TransactionCommit { transaction_id, .. } if transaction_id == &key
+            )
+        })
         .count();
     assert_eq!(
         commits, 1,
@@ -764,12 +983,77 @@ fn stable_transaction_id_dedupes_crash_retry() {
     );
     let snapshots = recent
         .iter()
-        .filter(|e| matches!(
-            &e.operation,
-            OpRecord::Snapshot { new_state, .. } if *new_state == state
-        ))
+        .filter(|e| {
+            matches!(
+                &e.operation,
+                OpRecord::Snapshot { new_state, .. } if *new_state == state
+            )
+        })
         .count();
     assert_eq!(snapshots, 1, "the staged record must not be double-applied");
+}
+
+struct ReplayStages {
+    key: String,
+    staged_count: Rc<RefCell<u32>>,
+}
+
+impl AtomicMutation for ReplayStages {
+    type Output = u32;
+
+    fn transaction_id(&self) -> String {
+        self.key.clone()
+    }
+
+    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<u32>> {
+        *self.staged_count.borrow_mut() += 1;
+        Ok(StagedCommit::new(
+            7,
+            vec![OpRecord::Snapshot {
+                new_state: ChangeId::generate(),
+                prev_head: None,
+                thread: None,
+            }],
+        ))
+    }
+
+    fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
+        *self.staged_count.borrow_mut() -= 1;
+        Ok(())
+    }
+}
+
+#[test]
+fn exact_once_replay_compensates_this_runs_staging() {
+    let (_t, repo) = test_repo();
+    let staged_count = Rc::new(RefCell::new(0u32));
+    let key = "stable-replay-with-staging".to_string();
+
+    let first = execute(
+        &repo,
+        ReplayStages {
+            key: key.clone(),
+            staged_count: Rc::clone(&staged_count),
+        },
+    )
+    .unwrap();
+    assert_eq!(first, 7);
+    assert_eq!(*staged_count.borrow(), 1);
+
+    let second = execute(
+        &repo,
+        ReplayStages {
+            key,
+            staged_count: Rc::clone(&staged_count),
+        },
+    )
+    .unwrap();
+    assert_eq!(second, 7);
+    assert_eq!(
+        *staged_count.borrow(),
+        1,
+        "a dedup-hit replay must rewind the staging performed by this run"
+    );
 }
 
 /// A ref-expectation failure under `commit_and_publish` must append NO oplog
@@ -840,7 +1124,9 @@ fn concurrent_commit_and_publish_serializes_record_and_publish() {
         {
             let repo = Repository::init_default(temp.path()).unwrap();
             let base = ChangeId::generate();
-            repo.refs().set_thread(&ThreadName::new("main"), &base).unwrap();
+            repo.refs()
+                .set_thread(&ThreadName::new("main"), &base)
+                .unwrap();
         }
         let va = ChangeId::generate();
         let vb = ChangeId::generate();
@@ -875,10 +1161,12 @@ fn concurrent_commit_and_publish_serializes_record_and_publish() {
             .recent(64)
             .unwrap()
             .into_iter()
-            .filter(|e| matches!(
-                &e.operation,
-                OpRecord::Fork { thread: Some(t), .. } if t == "main"
-            ))
+            .filter(|e| {
+                matches!(
+                    &e.operation,
+                    OpRecord::Fork { thread: Some(t), .. } if t == "main"
+                )
+            })
             .max_by_key(|e| e.id)
             .map(|e| match e.operation {
                 OpRecord::Fork { new_state, .. } => new_state,
@@ -901,11 +1189,15 @@ fn concurrent_commit_and_publish_serializes_record_and_publish() {
 fn crash_replay_reconciles_update_to_existing_ref() {
     let (temp, repo) = test_repo();
     let base = ChangeId::generate();
-    repo.refs().set_thread(&ThreadName::new("main"), &base).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
 
     // Phase 4 only: record a Collapse updating "main", with no phase-5 publish.
     let result = ChangeId::generate();
-    repo.oplog().record_collapse(&[base], &result, Some("main")).unwrap();
+    repo.oplog()
+        .record_collapse(&[base], &result, Some("main"))
+        .unwrap();
 
     assert_eq!(
         repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
@@ -919,5 +1211,139 @@ fn crash_replay_reconciles_update_to_existing_ref() {
         reader.refs().get_thread(&ThreadName::new("main")).unwrap(),
         Some(result),
         "the committed update must be materialized to the canonical ref"
+    );
+}
+
+#[test]
+fn crash_replay_reconciles_delete_in_point_and_list_reads() {
+    let (_t, repo) = test_repo();
+    let state = ChangeId::generate();
+    let deleted = ThreadName::new("deleted");
+    repo.refs().set_thread(&deleted, &state).unwrap();
+
+    repo.oplog()
+        .record_batch(vec![OpRecord::ThreadDelete {
+            name: deleted.to_string(),
+            state,
+        }])
+        .unwrap();
+
+    assert!(
+        !repo.refs().list_threads().unwrap().contains(&deleted),
+        "a committed-but-unpublished delete must be absent from list reads"
+    );
+    assert_eq!(
+        repo.refs().get_thread(&deleted).unwrap(),
+        None,
+        "a committed-but-unpublished delete must win for point reads"
+    );
+}
+
+#[test]
+fn crash_replay_reconciles_marker_delete_in_list_reads() {
+    let (_t, repo) = test_repo();
+    let state = ChangeId::generate();
+    let deleted = MarkerName::new("deleted-marker");
+    repo.refs().create_marker(&deleted, &state).unwrap();
+
+    repo.oplog()
+        .record_batch(vec![OpRecord::MarkerDelete {
+            name: deleted.to_string(),
+            state,
+        }])
+        .unwrap();
+
+    assert!(
+        !repo.refs().list_markers().unwrap().contains(&deleted),
+        "a committed-but-unpublished marker delete must be absent from list reads"
+    );
+    assert_eq!(
+        repo.refs().get_marker(&deleted).unwrap(),
+        None,
+        "a committed-but-unpublished marker delete must win for point reads"
+    );
+}
+
+#[test]
+fn crash_replay_reconciles_remote_thread_create_and_delete_in_lists() {
+    let (_t, repo) = test_repo();
+    let original = ChangeId::generate();
+    let replacement = ChangeId::generate();
+    let deleted = ThreadName::new("deleted-remote");
+    let created = ThreadName::new("created-remote");
+    repo.refs()
+        .set_remote_thread("origin", &deleted, &original)
+        .unwrap();
+
+    repo.oplog()
+        .record_remote_thread_delete("origin", deleted.as_ref(), &original, None)
+        .unwrap();
+    repo.oplog()
+        .record_remote_thread_update("upstream", created.as_ref(), &replacement, None)
+        .unwrap();
+
+    let remotes = repo.refs().list_remotes().unwrap();
+    assert!(
+        !remotes.contains(&"origin".to_string()),
+        "a remote with only a committed-but-unpublished deleted thread must be absent"
+    );
+    assert!(
+        remotes.contains(&"upstream".to_string()),
+        "a remote with a committed-but-unpublished created thread must be present"
+    );
+
+    let origin_threads = repo.refs().list_remote_threads("origin").unwrap();
+    assert!(
+        !origin_threads.contains(&deleted),
+        "a committed-but-unpublished remote-thread delete must be absent from list reads"
+    );
+    let upstream_threads = repo.refs().list_remote_threads("upstream").unwrap();
+    assert!(
+        upstream_threads.contains(&created),
+        "a committed-but-unpublished remote-thread create must be present in list reads"
+    );
+
+    assert_eq!(
+        repo.refs().get_remote_thread("origin", &deleted).unwrap(),
+        None,
+        "a committed-but-unpublished remote-thread delete must win for point reads"
+    );
+    assert_eq!(
+        repo.refs().get_remote_thread("upstream", &created).unwrap(),
+        Some(replacement),
+        "a committed-but-unpublished remote-thread create must win for point reads"
+    );
+}
+
+#[test]
+fn crash_replay_reconstructs_committed_head_update() {
+    let (_t, repo) = test_repo();
+    let base = ChangeId::generate();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base)
+        .unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .unwrap();
+
+    let detached = ChangeId::generate();
+    repo.oplog()
+        .record_batch_scoped(
+            vec![OpRecord::Fork {
+                from: base,
+                new_state: detached,
+                thread: None,
+                head: Some(detached),
+            }],
+            Some(&repo.op_scope()),
+        )
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: detached },
+        "a committed HEAD publish must be reconstructed after phase-4 crash"
     );
 }

@@ -14,7 +14,8 @@ use objects::error::Result;
 use objects::object::{ChangeId, MarkerName, ThreadName};
 use oplog::{OpLog, OpRecord};
 use refs::{
-    Loaded, LoadRequest, RefClass, RefExpectation, RefReconciler, ReconcileOutcome, RefUpdate,
+    Head, LoadRequest, Loaded, ReconcileOutcome, RefClass, RefExpectation, RefManager,
+    RefReconciler, RefUpdate,
 };
 
 /// Reads the file oplog from disk (path-based, so a long-held handle observes
@@ -43,15 +44,12 @@ impl OplogRefReconciler {
 
 /// The folded state of one ref class, replayed from committed entries.
 ///
-/// HEAD is intentionally **not** reconstructed here: the pre-existing
-/// `Snapshot`/`Goto` records do not unambiguously encode HEAD attach/detach, so
-/// folding them would corrupt HEAD reads (e.g. a fast-forward that must preserve
-/// HEAD's attachment). HEAD is local and written directly by every publish, so
-/// the canonical HEAD stays authoritative; reconstructing it from the oplog
-/// needs the records to carry the post-HEAD state — a follow-up. `read_head`
-/// still funnels through the chokepoint; it simply returns the raw canonical.
+/// HEAD is reconstructed only from records that now carry the published HEAD
+/// identity (`Fork` and `Collapse`). Older records that do not identify the
+/// post-HEAD shape remain non-authoritative for HEAD.
 #[derive(Default)]
 struct Fold {
+    head: Option<Head>,
     threads: BTreeMap<String, Option<ChangeId>>,
     markers: BTreeMap<String, Option<ChangeId>>,
     remotes: BTreeMap<(String, String), Option<ChangeId>>,
@@ -87,13 +85,25 @@ impl Fold {
             } => {
                 if let Some(name) = thread {
                     self.threads.insert(name.clone(), Some(*new_state));
+                    self.head = Some(Head::Attached {
+                        thread: ThreadName::new(name),
+                    });
+                }
+                if let OpRecord::Fork {
+                    head: Some(head), ..
+                } = op
+                {
+                    self.head = Some(Head::Detached { state: *head });
                 }
             }
-            OpRecord::Collapse {
-                result, thread, ..
-            } => {
+            OpRecord::Collapse { result, thread, .. } => {
                 if let Some(name) = thread {
                     self.threads.insert(name.clone(), Some(*result));
+                    self.head = Some(Head::Attached {
+                        thread: ThreadName::new(name),
+                    });
+                } else {
+                    self.head = Some(Head::Detached { state: *result });
                 }
             }
             OpRecord::MarkerCreate { name, state } => {
@@ -132,9 +142,8 @@ impl Fold {
             OpRecord::UndoRecoveryUpdate { state } => {
                 self.undo_recovery = Some(*state);
             }
-            // HEAD-only / non-thread-publishing records contribute nothing to
-            // the thread/marker/remote/undo materialization the reconciler does
-            // (HEAD itself is not reconstructed — see the `Fold` doc).
+            // HEAD-only records that do not encode the post-HEAD shape
+            // contribute nothing to materialization.
             OpRecord::Goto { .. }
             | OpRecord::FastForward { .. }
             | OpRecord::TransactionAbort { .. }
@@ -199,13 +208,17 @@ impl RefReconciler for OplogRefReconciler {
                 }
             }
             RefClass::Local => {
-                // HEAD is not reconstructed (see `Fold` doc); only undo-recovery
-                // reconciles in the local class.
+                if let Some(head) = &fold.head {
+                    republish.push(RefUpdate::Head {
+                        expected: RefExpectation::Any,
+                        new: head.clone(),
+                    });
+                }
                 undo_recovery = fold.undo_recovery;
             }
         }
 
-        let loaded = reconciled_value(req, &raw, &fold);
+        let loaded = reconciled_value(req, &raw, &fold, &self.heddle_dir)?;
 
         Ok(ReconcileOutcome {
             loaded,
@@ -224,17 +237,25 @@ impl RefReconciler for OplogRefReconciler {
 /// crash-replayed `cmd_collapse` update-to-existing-`main` case). The fold only
 /// holds refs touched by commits newer than the watermark, so a ref with no
 /// recent committed record keeps its canonical value untouched.
-fn reconciled_value(req: &LoadRequest, raw: &Loaded, fold: &Fold) -> Loaded {
-    match req {
-        // HEAD is not reconstructed from the oplog (see `Fold` doc); the
-        // canonical HEAD is authoritative.
-        LoadRequest::Head => raw.clone(),
+fn reconciled_value(
+    req: &LoadRequest,
+    raw: &Loaded,
+    fold: &Fold,
+    heddle_dir: &Path,
+) -> Result<Loaded> {
+    Ok(match req {
+        LoadRequest::Head => match &fold.head {
+            Some(head) => Loaded::Head(head.clone()),
+            None => raw.clone(),
+        },
         LoadRequest::UndoRecovery => fill_point(raw, fold.undo_recovery.map(Some)),
         LoadRequest::Thread(name) => fill_point(raw, fold.threads.get(name.as_str()).copied()),
         LoadRequest::Marker(name) => fill_point(raw, fold.markers.get(name.as_str()).copied()),
         LoadRequest::RemoteThread { remote, thread } => fill_point(
             raw,
-            fold.remotes.get(&(remote.clone(), thread.to_string())).copied(),
+            fold.remotes
+                .get(&(remote.clone(), thread.to_string()))
+                .copied(),
         ),
         LoadRequest::ThreadList => Loaded::ThreadList(
             merge_list(raw_thread_names(raw), &fold.threads)
@@ -248,21 +269,7 @@ fn reconciled_value(req: &LoadRequest, raw: &Loaded, fold: &Fold) -> Loaded {
                 .map(|n| MarkerName::new(&n))
                 .collect(),
         ),
-        LoadRequest::RemoteList => {
-            // A remote is present if it has any non-deleted thread.
-            let mut names: Vec<String> = match raw {
-                Loaded::RemoteList(names) => names.clone(),
-                _ => Vec::new(),
-            };
-            for ((remote, _thread), value) in &fold.remotes {
-                if value.is_some() && !names.contains(remote) {
-                    names.push(remote.clone());
-                }
-            }
-            names.sort();
-            names.dedup();
-            Loaded::RemoteList(names)
-        }
+        LoadRequest::RemoteList => remote_list_value(raw, fold, heddle_dir)?,
         LoadRequest::RemoteThreadList { remote } => {
             let base: Vec<ThreadName> = match raw {
                 Loaded::RemoteThreadList(names) => names.clone(),
@@ -271,13 +278,17 @@ fn reconciled_value(req: &LoadRequest, raw: &Loaded, fold: &Fold) -> Loaded {
             let mut set: BTreeMap<String, ()> =
                 base.into_iter().map(|n| (n.to_string(), ())).collect();
             for ((r, thread), value) in &fold.remotes {
-                if r == remote && value.is_some() {
-                    set.insert(thread.clone(), ());
+                if r == remote {
+                    if value.is_some() {
+                        set.insert(thread.clone(), ());
+                    } else {
+                        set.remove(thread);
+                    }
                 }
             }
             Loaded::RemoteThreadList(set.into_keys().map(|n| ThreadName::new(&n)).collect())
         }
-    }
+    })
 }
 
 /// Authoritative point read: a committed record past the watermark wins over
@@ -306,16 +317,54 @@ fn raw_marker_names(raw: &Loaded) -> Vec<String> {
     }
 }
 
-/// Add the fold's committed-but-unpublished names to the raw list (union).
-/// Additive only — a fold *delete* never removes a name the canonical still
-/// lists, since in the un-migrated tree that name may have been re-created by a
-/// not-yet-recorded raw write (fill-if-absent, see [`fill_point`]).
+/// Apply the fold's committed effect to a raw list: set inserts the name and
+/// delete removes it. The fold only contains records newer than the class
+/// watermark, so its touched refs are authoritative over the canonical view.
 fn merge_list(base: Vec<String>, changes: &BTreeMap<String, Option<ChangeId>>) -> Vec<String> {
     let mut set: BTreeMap<String, ()> = base.into_iter().map(|n| (n, ())).collect();
     for (name, value) in changes {
         if value.is_some() {
             set.insert(name.clone(), ());
+        } else {
+            set.remove(name);
         }
     }
     set.into_keys().collect()
+}
+
+fn remote_list_value(raw: &Loaded, fold: &Fold, heddle_dir: &Path) -> Result<Loaded> {
+    let mut remotes: BTreeMap<String, ()> = match raw {
+        Loaded::RemoteList(names) => names.iter().cloned().map(|n| (n, ())).collect(),
+        _ => BTreeMap::new(),
+    };
+    for ((remote, _thread), value) in &fold.remotes {
+        if value.is_some() {
+            remotes.insert(remote.clone(), ());
+        } else {
+            remotes.entry(remote.clone()).or_insert(());
+        }
+    }
+
+    let raw_refs = RefManager::new(heddle_dir);
+    let mut present = Vec::new();
+    for remote in remotes.into_keys() {
+        let mut threads: BTreeMap<String, ()> = raw_refs
+            .list_remote_threads(&remote)?
+            .into_iter()
+            .map(|name| (name.to_string(), ()))
+            .collect();
+        for ((r, thread), value) in &fold.remotes {
+            if r == &remote {
+                if value.is_some() {
+                    threads.insert(thread.clone(), ());
+                } else {
+                    threads.remove(thread);
+                }
+            }
+        }
+        if !threads.is_empty() {
+            present.push(remote);
+        }
+    }
+    Ok(Loaded::RemoteList(present))
 }
