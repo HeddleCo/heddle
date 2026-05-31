@@ -36,11 +36,32 @@ pub enum OpRecord {
         new_state: ChangeId,
     },
     /// Fork operation.
-    Fork { from: ChangeId, new_state: ChangeId },
-    /// Collapse operation.
+    ///
+    /// `from` is the source state forked from; `new_state` is the fork
+    /// result. `thread`/`head` name the ref the fork *published* so a
+    /// crash-replay (oplog committed, ref not yet materialized) can
+    /// re-derive which ref to publish (heddle#330 write chokepoint):
+    /// `thread = Some(name)` when the fork attached HEAD to a new thread,
+    /// `head = Some(state)` when it detached HEAD at the fork result.
+    /// These published-ref fields — not the `from`/`new_state` positional
+    /// pair — are the authoritative replay/materialization target.
+    Fork {
+        from: ChangeId,
+        new_state: ChangeId,
+        #[serde(default)]
+        thread: Option<String>,
+        #[serde(default)]
+        head: Option<ChangeId>,
+    },
+    /// Collapse operation. `thread` names the published ref: `Some(name)`
+    /// when the collapse published a thread ref, `None` when it published
+    /// a detached HEAD at `result` (heddle#330 write chokepoint — the
+    /// published-ref discriminant replay needs to materialize the ref).
     Collapse {
         sources: Vec<ChangeId>,
         result: ChangeId,
+        #[serde(default)]
+        thread: Option<String>,
     },
     /// Marker creation.
     MarkerCreate { name: String, state: ChangeId },
@@ -226,6 +247,30 @@ pub enum OpRecord {
         previous_git_oid: Option<String>,
         new_git_oid: String,
     },
+    /// A remote-thread ref was published (heddle#330 r9). Before this
+    /// variant `set_remote_thread` wrote the ref directly with no
+    /// committed record, so reconciliation of the remote-thread class
+    /// folded an empty tail. Recording the publish makes that
+    /// reconciliation non-vacuous and lets crash-replay re-materialize
+    /// the ref from its newest in-scope record.
+    RemoteThreadUpdate {
+        remote: String,
+        thread: String,
+        state: ChangeId,
+    },
+    /// A remote-thread ref was deleted (heddle#330 r9). Folded like a
+    /// `MarkerDelete`: drops the name from the reconciled remote-thread
+    /// set. `state` is the value at delete time (forensic context).
+    RemoteThreadDelete {
+        remote: String,
+        thread: String,
+        state: ChangeId,
+    },
+    /// The heddle-internal pre-undo recovery pointer was set (heddle#330
+    /// r9). A single rolling ORIG_HEAD-style pointer with no delete path,
+    /// so one update variant suffices. Local (per-checkout) ref —
+    /// reconciles within its own `op_scope`.
+    UndoRecoveryUpdate { state: ChangeId },
 }
 
 impl OpRecord {
@@ -346,7 +391,109 @@ impl OpRecord {
                     new_git_oid
                 )
             }
+            OpRecord::RemoteThreadUpdate {
+                remote,
+                thread,
+                state,
+            } => {
+                format!("update remote thread {}/{} -> {}", remote, thread, state.short())
+            }
+            OpRecord::RemoteThreadDelete { remote, thread, .. } => {
+                format!("delete remote thread {}/{}", remote, thread)
+            }
+            OpRecord::UndoRecoveryUpdate { state } => {
+                format!("set undo-recovery -> {}", state.short())
+            }
         }
+    }
+}
+
+/// Single source of truth for the oplog verb vocabulary (heddle#354 r9).
+///
+/// Every emitted "kind" string — the daemon op-log index verbs, the
+/// `heddle watch --filter` keywords, the `heddle log` verb filter — derives
+/// from this one catalog, so the verb set can never drift away from the
+/// `OpRecord` variant set. The generated [`OpRecord::verb`] /
+/// [`OpRecord::is_checkpoint_verb`] are **exhaustive** matches: adding an
+/// `OpRecord` variant is a COMPILE error until it is named here, and the
+/// derived [`OpRecord::verbs`] / [`OP_VERB_CATALOG`] pick it up automatically.
+/// This closes the "a new variant is added but not propagated to every
+/// consumer" class for the verb-vocabulary consumers — they no longer keep
+/// hand-maintained string lists that silently fall out of sync.
+macro_rules! op_verb_catalog {
+    ( $( $variant:ident => ($verb:literal, checkpoint = $ckpt:literal) ),+ $(,)? ) => {
+        impl OpRecord {
+            /// The stable snake-case verb for this record's variant. Exhaustive
+            /// match — a new `OpRecord` variant fails to compile until it has a
+            /// verb here. Verbs are shared across variants that fold to one
+            /// concept (e.g. `ThreadCreate`/`ThreadCreateV2` → `thread_create`).
+            pub fn verb(&self) -> &'static str {
+                match self {
+                    $( OpRecord::$variant { .. } => $verb, )+
+                }
+            }
+
+            /// True iff this is the agent-style [`OpRecord::Checkpoint`] that
+            /// `heddle log --no-checkpoints` (the human default) and the daemon
+            /// op-log query hide. New variants surface by default — only the
+            /// catalog entries flagged `checkpoint = true` are hidden.
+            pub fn is_checkpoint_verb(&self) -> bool {
+                match self {
+                    $( OpRecord::$variant { .. } => $ckpt, )+
+                }
+            }
+        }
+
+        /// Every `(verb, is_checkpoint)` pair the vocabulary contains, in
+        /// variant-declaration order. Generated from the same catalog as
+        /// [`OpRecord::verb`], so it tracks the variant set with no drift. A
+        /// verb shared by several variants appears once per variant; dedup at
+        /// the use site (see [`OpRecord::verbs`]).
+        pub const OP_VERB_CATALOG: &[(&str, bool)] = &[ $( ($verb, $ckpt) ),+ ];
+    };
+}
+
+op_verb_catalog! {
+    Snapshot => ("snapshot", checkpoint = false),
+    Goto => ("goto", checkpoint = false),
+    ThreadCreate => ("thread_create", checkpoint = false),
+    ThreadDelete => ("thread_delete", checkpoint = false),
+    ThreadUpdate => ("thread_update", checkpoint = false),
+    Fork => ("fork", checkpoint = false),
+    Collapse => ("collapse", checkpoint = false),
+    MarkerCreate => ("marker_create", checkpoint = false),
+    MarkerDelete => ("marker_delete", checkpoint = false),
+    Checkpoint => ("checkpoint", checkpoint = true),
+    TransactionAbort => ("transaction_abort", checkpoint = false),
+    EphemeralThreadCollapse => ("ephemeral_thread_collapse", checkpoint = false),
+    ConflictResolved => ("conflict_resolved", checkpoint = false),
+    TransactionCommit => ("transaction_commit", checkpoint = false),
+    Redact => ("redact", checkpoint = false),
+    Purge => ("purge", checkpoint = false),
+    FastForward => ("fast_forward", checkpoint = false),
+    FastForwardV2 => ("fast_forward", checkpoint = false),
+    ThreadCreateV2 => ("thread_create", checkpoint = false),
+    GitCheckpoint => ("git_checkpoint", checkpoint = false),
+    RemoteThreadUpdate => ("remote_thread_update", checkpoint = false),
+    RemoteThreadDelete => ("remote_thread_delete", checkpoint = false),
+    UndoRecoveryUpdate => ("undo_recovery_update", checkpoint = false),
+}
+
+impl OpRecord {
+    /// The deduped verb vocabulary. With `include_checkpoints == false` the
+    /// agent `checkpoint` verb is dropped (the `heddle log` human default and
+    /// the daemon op-log query's default filter); every other verb — including
+    /// any future variant — is surfaced. Derived from [`OP_VERB_CATALOG`], so a
+    /// new variant joins the vocabulary the moment it has a catalog entry, with
+    /// no hand-maintained list to forget. Order follows variant declaration.
+    pub fn verbs(include_checkpoints: bool) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = Vec::new();
+        for &(verb, is_checkpoint) in OP_VERB_CATALOG {
+            if (include_checkpoints || !is_checkpoint) && !out.contains(&verb) {
+                out.push(verb);
+            }
+        }
+        out
     }
 }
 
@@ -388,4 +535,206 @@ pub struct OpBatch {
     pub id: u64,
     /// Operations in the batch.
     pub entries: Vec<OpEntry>,
+}
+
+#[cfg(test)]
+mod verb_catalog_tests {
+    use super::*;
+    use objects::object::{ChangeId, ContentHash};
+
+    fn cid() -> ChangeId {
+        ChangeId::from_bytes([7; 16])
+    }
+
+    fn hash() -> ContentHash {
+        ContentHash::from_bytes([3; 32])
+    }
+
+    /// One representative of every `OpRecord` variant. The match is exhaustive,
+    /// so adding a variant forces a new arm here — and the assertions below then
+    /// prove the new variant has a non-empty verb that is present in the
+    /// catalog, i.e. the vocabulary cannot silently drop it.
+    fn one_per_variant() -> Vec<OpRecord> {
+        let sample = OpRecord::Snapshot {
+            new_state: cid(),
+            prev_head: None,
+            thread: None,
+        };
+        // Exhaustiveness anchor: this match has no wildcard, so a new variant
+        // breaks the build until it is added to `all` below too.
+        match &sample {
+            OpRecord::Snapshot { .. }
+            | OpRecord::Goto { .. }
+            | OpRecord::ThreadCreate { .. }
+            | OpRecord::ThreadDelete { .. }
+            | OpRecord::ThreadUpdate { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::MarkerCreate { .. }
+            | OpRecord::MarkerDelete { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::Redact { .. }
+            | OpRecord::Purge { .. }
+            | OpRecord::FastForward { .. }
+            | OpRecord::FastForwardV2 { .. }
+            | OpRecord::ThreadCreateV2 { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. } => {}
+        }
+        vec![
+            sample,
+            OpRecord::Goto {
+                target: cid(),
+                prev_head: None,
+            },
+            OpRecord::ThreadCreate {
+                name: "t".into(),
+                state: cid(),
+            },
+            OpRecord::ThreadDelete {
+                name: "t".into(),
+                state: cid(),
+            },
+            OpRecord::ThreadUpdate {
+                name: "t".into(),
+                old_state: cid(),
+                new_state: cid(),
+            },
+            OpRecord::Fork {
+                from: cid(),
+                new_state: cid(),
+                thread: None,
+                head: None,
+            },
+            OpRecord::Collapse {
+                sources: vec![cid()],
+                result: cid(),
+                thread: None,
+            },
+            OpRecord::MarkerCreate {
+                name: "m".into(),
+                state: cid(),
+            },
+            OpRecord::MarkerDelete {
+                name: "m".into(),
+                state: cid(),
+            },
+            OpRecord::Checkpoint {
+                parent: None,
+                state: cid(),
+                thread: None,
+            },
+            OpRecord::TransactionAbort {
+                transaction_id: "tx".into(),
+                reason: "r".into(),
+            },
+            OpRecord::EphemeralThreadCollapse {
+                thread: "t".into(),
+                final_state: cid(),
+            },
+            OpRecord::ConflictResolved {
+                conflict_id: "c".into(),
+                resolution: "r".into(),
+            },
+            OpRecord::TransactionCommit {
+                transaction_id: "tx".into(),
+                op_count: 1,
+            },
+            OpRecord::Redact {
+                redaction_id: hash(),
+                blob: hash(),
+                state: cid(),
+                path: "p".into(),
+            },
+            OpRecord::Purge {
+                redaction_id: hash(),
+                blob: hash(),
+            },
+            OpRecord::FastForward {
+                source_thread: "s".into(),
+                target_thread: "t".into(),
+                pre_target_id: cid(),
+            },
+            OpRecord::FastForwardV2 {
+                source_thread: "s".into(),
+                target_thread: "t".into(),
+                pre_target_id: cid(),
+                post_target_id: cid(),
+            },
+            OpRecord::ThreadCreateV2 {
+                name: "t".into(),
+                state: cid(),
+                manager_snapshot: None,
+            },
+            OpRecord::GitCheckpoint {
+                branch: "main".into(),
+                state: cid(),
+                previous_git_oid: None,
+                new_git_oid: "oid".into(),
+            },
+            OpRecord::RemoteThreadUpdate {
+                remote: "origin".into(),
+                thread: "t".into(),
+                state: cid(),
+            },
+            OpRecord::RemoteThreadDelete {
+                remote: "origin".into(),
+                thread: "t".into(),
+                state: cid(),
+            },
+            OpRecord::UndoRecoveryUpdate { state: cid() },
+        ]
+    }
+
+    #[test]
+    fn every_variant_has_a_catalog_verb() {
+        for op in one_per_variant() {
+            let verb = op.verb();
+            assert!(!verb.is_empty(), "empty verb for {op:?}");
+            assert!(
+                OP_VERB_CATALOG.iter().any(|(v, _)| *v == verb),
+                "verb {verb:?} for {op:?} missing from OP_VERB_CATALOG"
+            );
+        }
+    }
+
+    #[test]
+    fn only_checkpoint_is_checkpoint_verb() {
+        for op in one_per_variant() {
+            let expected = matches!(op, OpRecord::Checkpoint { .. });
+            assert_eq!(op.is_checkpoint_verb(), expected, "checkpoint flag for {op:?}");
+        }
+    }
+
+    #[test]
+    fn verbs_excludes_checkpoint_by_default_and_dedups() {
+        let with = OpRecord::verbs(true);
+        let without = OpRecord::verbs(false);
+        assert!(with.contains(&"checkpoint"));
+        assert!(!without.contains(&"checkpoint"));
+        // git_checkpoint is NOT the agent checkpoint — it must survive the
+        // no-checkpoints default.
+        assert!(without.contains(&"git_checkpoint"));
+        // Verbs shared by multiple variants appear once.
+        assert_eq!(with.iter().filter(|v| **v == "thread_create").count(), 1);
+        assert_eq!(with.iter().filter(|v| **v == "fast_forward").count(), 1);
+        // Newer tail variants are surfaced by default (the drift the catalog closes).
+        for v in [
+            "transaction_commit",
+            "redact",
+            "purge",
+            "fast_forward",
+            "remote_thread_update",
+            "remote_thread_delete",
+            "undo_recovery_update",
+        ] {
+            assert!(without.contains(&v), "{v} missing from default verb set");
+        }
+    }
 }

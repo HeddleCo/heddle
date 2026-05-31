@@ -529,3 +529,736 @@ fn undo_recovery_is_scoped_per_checkout_on_shared_ref_root() {
     assert_eq!(refs_a.resolve(UNDO_RECOVERY_HANDLE).unwrap(), Some(state_a));
     assert_eq!(refs_b.resolve(UNDO_RECOVERY_HANDLE).unwrap(), Some(state_b));
 }
+
+// ---- Read/write chokepoint coverage (heddle#330 §2.2) ----
+//
+// These drive `RefManager`'s reconciler/committer seams directly via injected
+// test doubles, exercising `reconciled_load`'s hot path + lag path,
+// `materialize`'s fill-if-absent branches, and `commit_and_publish`'s
+// record-before-publish ordering — without the `repo`/`oplog` layer.
+
+mod chokepoint {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use objects::error::Result;
+    use objects::object::{ChangeId, MarkerName, ThreadName};
+    use tempfile::TempDir;
+
+    use super::super::{
+        Loaded, LoadRequest, RefCommitter, RefManager, RefReconciler, ReconcileOutcome,
+        RefExpectation, RefUpdate,
+    };
+
+    fn manager() -> (TempDir, std::path::PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let heddle_dir = temp.path().join(".heddle");
+        std::fs::create_dir_all(&heddle_dir).unwrap();
+        let refs = RefManager::new(&heddle_dir);
+        refs.init().unwrap();
+        (temp, heddle_dir)
+    }
+
+    /// A reconciler whose generation is bumpable after injection (so the
+    /// watermark, seeded at inject time, lags and the reconcile path runs), and
+    /// whose `reconcile` returns a caller-configured materialization set.
+    struct FakeReconciler {
+        generation: AtomicU64,
+        republish: Vec<RefUpdate>,
+        remote_updates: Vec<(String, ThreadName, Option<ChangeId>)>,
+        undo_recovery: Option<ChangeId>,
+        calls: Arc<AtomicU64>,
+    }
+
+    impl RefReconciler for FakeReconciler {
+        fn generation(&self) -> Result<u64> {
+            Ok(self.generation.load(Ordering::Acquire))
+        }
+        fn reconcile(&self, req: &LoadRequest, raw: Loaded, _since: u64) -> Result<ReconcileOutcome> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            // Project the request's authoritative value out of the configured
+            // materialization set (mirrors the real reconciler's per-request fold).
+            let loaded = match req {
+                LoadRequest::Thread(name) => self
+                    .republish
+                    .iter()
+                    .find_map(|u| match u {
+                        RefUpdate::Thread { name: n, new, .. } if n == name => Some(Loaded::Point(*new)),
+                        _ => None,
+                    })
+                    .unwrap_or(raw),
+                LoadRequest::Marker(name) => self
+                    .republish
+                    .iter()
+                    .find_map(|u| match u {
+                        RefUpdate::Marker { name: n, new, .. } if n == name => Some(Loaded::Point(*new)),
+                        _ => None,
+                    })
+                    .unwrap_or(raw),
+                LoadRequest::UndoRecovery => Loaded::Point(self.undo_recovery),
+                LoadRequest::RemoteThread { remote, thread } => self
+                    .remote_updates
+                    .iter()
+                    .find_map(|(r, t, v)| (r == remote && t == thread).then_some(Loaded::Point(*v)))
+                    .unwrap_or(raw),
+                _ => raw,
+            };
+            Ok(ReconcileOutcome {
+                loaded,
+                republish: self.republish.clone(),
+                remote_updates: self.remote_updates.clone(),
+                undo_recovery: self.undo_recovery,
+            })
+        }
+    }
+
+    type CommitCall = (Vec<Vec<u8>>, Option<String>);
+
+    struct FakeCommitter {
+        seen: Mutex<Vec<CommitCall>>,
+    }
+
+    impl RefCommitter for FakeCommitter {
+        fn commit_records(&self, encoded_records: &[Vec<u8>], scope: Option<&str>) -> Result<()> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((encoded_records.to_vec(), scope.map(str::to_string)));
+            Ok(())
+        }
+    }
+
+    /// The hot path: when the class watermark equals the reconciler generation,
+    /// the raw value is returned with no reconcile call (no tail scan, no write).
+    #[test]
+    fn reconciled_load_hot_path_skips_reconcile_when_generation_unchanged() {
+        let (_t, dir) = manager();
+        let calls = Arc::new(AtomicU64::new(0));
+        let reconciler = Arc::new(FakeReconciler {
+            generation: AtomicU64::new(7),
+            republish: Vec::new(),
+            remote_updates: Vec::new(),
+            undo_recovery: None,
+            calls: Arc::clone(&calls),
+        });
+        // `with_reconciler` seeds both watermarks to generation()==7.
+        let refs = RefManager::new(&dir).with_reconciler(reconciler);
+        refs.init().unwrap();
+
+        // Generation still 7 ⇒ tip == cached ⇒ reconcile is never invoked.
+        let got = refs.get_thread(&ThreadName::new("absent")).unwrap();
+        assert_eq!(got, None);
+        assert_eq!(calls.load(Ordering::Acquire), 0, "hot path must not reconcile");
+    }
+
+    /// The lag path drives `materialize`'s authoritative-apply branches: an
+    /// absent thread + marker + remote-thread + undo-recovery are all published
+    /// (create), a present-but-STALE thread is overwritten with the committed
+    /// value (the cid 3329490981 update-to-existing case), a present thread whose
+    /// committed value equals the canonical is a no-op skip, and a `None` remote
+    /// update + the watermark advance are exercised. A second read then takes the
+    /// hot path because the watermark caught up to the (unchanged) generation.
+    #[test]
+    fn reconciled_load_lag_path_materializes_committed_values() {
+        let (_t, dir) = manager();
+
+        // `present` is pre-published with the same value the fold carries ⇒ skip.
+        let present_state = ChangeId::generate();
+        // `stale` is pre-published with an OLD value; the fold carries a newer
+        // committed value ⇒ it must be overwritten (authoritative-apply).
+        let stale_old = ChangeId::generate();
+        let stale_new = ChangeId::generate();
+        let absent_state = ChangeId::generate();
+        let marker_state = ChangeId::generate();
+        let remote_state = ChangeId::generate();
+        // A present-but-stale remote thread (overwrite) + a present remote thread
+        // the fold deleted (remove) + a stale undo-recovery pointer (overwrite).
+        let remote_stale_old = ChangeId::generate();
+        let remote_stale_new = ChangeId::generate();
+        let remote_doomed = ChangeId::generate();
+        let undo_old = ChangeId::generate();
+        let undo_state = ChangeId::generate();
+
+        let calls = Arc::new(AtomicU64::new(0));
+        let reconciler = Arc::new(FakeReconciler {
+            generation: AtomicU64::new(1),
+            republish: vec![
+                RefUpdate::Thread {
+                    name: ThreadName::new("present"),
+                    expected: RefExpectation::Any,
+                    new: Some(present_state),
+                },
+                RefUpdate::Thread {
+                    name: ThreadName::new("stale"),
+                    expected: RefExpectation::Any,
+                    new: Some(stale_new),
+                },
+                RefUpdate::Thread {
+                    name: ThreadName::new("absent"),
+                    expected: RefExpectation::Any,
+                    new: Some(absent_state),
+                },
+                // `new: None` arm — canonical absent ⇒ no-op (nothing to delete).
+                RefUpdate::Thread {
+                    name: ThreadName::new("deleted"),
+                    expected: RefExpectation::Any,
+                    new: None,
+                },
+                RefUpdate::Marker {
+                    name: MarkerName::new("mk"),
+                    expected: RefExpectation::Any,
+                    new: Some(marker_state),
+                },
+            ],
+            remote_updates: vec![
+                ("origin".to_string(), ThreadName::new("rt"), Some(remote_state)),
+                // `None` value, canonical absent — skipped.
+                ("origin".to_string(), ThreadName::new("gone"), None),
+                // Present-but-stale remote thread ⇒ overwritten with committed value.
+                ("origin".to_string(), ThreadName::new("rt_stale"), Some(remote_stale_new)),
+                // Present remote thread the fold deleted ⇒ removed.
+                ("origin".to_string(), ThreadName::new("rt_doomed"), None),
+            ],
+            undo_recovery: Some(undo_state),
+            calls: Arc::clone(&calls),
+        });
+        let refs = RefManager::new(&dir).with_reconciler(Arc::clone(&reconciler) as Arc<dyn RefReconciler>);
+        refs.init().unwrap();
+        // Publish present + stale AFTER injection (raw writes, bypass chokepoint).
+        refs.set_thread(&ThreadName::new("present"), &present_state).unwrap();
+        refs.set_thread(&ThreadName::new("stale"), &stale_old).unwrap();
+        refs.set_remote_thread("origin", &ThreadName::new("rt_stale"), &remote_stale_old).unwrap();
+        refs.set_remote_thread("origin", &ThreadName::new("rt_doomed"), &remote_doomed).unwrap();
+        refs.set_undo_recovery(&undo_old).unwrap();
+
+        // Bump generation so the next read lags ⇒ reconcile + materialize run.
+        reconciler.generation.store(2, Ordering::Release);
+
+        let got = refs.get_thread(&ThreadName::new("absent")).unwrap();
+        assert_eq!(got, Some(absent_state), "reconciled value is surfaced");
+        assert_eq!(calls.load(Ordering::Acquire), 1, "lag path reconciles once");
+
+        // The absent refs were materialized; the present (same-value) one is a
+        // no-op; the stale present one is overwritten with the committed value.
+        assert_eq!(
+            refs.get_thread(&ThreadName::new("present")).unwrap(),
+            Some(present_state)
+        );
+        assert_eq!(
+            refs.get_thread(&ThreadName::new("stale")).unwrap(),
+            Some(stale_new),
+            "a stale present ref must be overwritten with the committed value"
+        );
+        assert_eq!(refs.get_marker(&MarkerName::new("mk")).unwrap(), Some(marker_state));
+        assert_eq!(
+            refs.get_remote_thread("origin", &ThreadName::new("rt")).unwrap(),
+            Some(remote_state)
+        );
+        // The stale remote thread is overwritten; the doomed one is removed.
+        assert_eq!(
+            refs.get_remote_thread("origin", &ThreadName::new("rt_stale")).unwrap(),
+            Some(remote_stale_new),
+            "a stale present remote thread must be overwritten with the committed value"
+        );
+        assert_eq!(
+            refs.get_remote_thread("origin", &ThreadName::new("rt_doomed")).unwrap(),
+            None,
+            "a committed delete must remove a present remote thread"
+        );
+        // The stale undo-recovery pointer is overwritten with the committed value.
+        assert_eq!(refs.get_undo_recovery().unwrap(), Some(undo_state));
+
+        // Second read: watermark now == generation (2) ⇒ hot path, no new reconcile.
+        let before = calls.load(Ordering::Acquire);
+        let _ = refs.get_thread(&ThreadName::new("absent")).unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), before, "watermark caught up ⇒ hot path");
+    }
+
+    /// `commit_and_publish` appends the ref-carrying records (phase 4) before
+    /// publishing the ref batch (phase 5), and degrades to a plain publish when
+    /// no committer is injected.
+    #[test]
+    fn commit_and_publish_records_before_it_publishes() {
+        let (_t, dir) = manager();
+        let committer = Arc::new(FakeCommitter {
+            seen: Mutex::new(Vec::new()),
+        });
+        let refs = RefManager::new(&dir).with_committer(Arc::clone(&committer) as Arc<dyn RefCommitter>);
+        refs.init().unwrap();
+
+        let state = ChangeId::generate();
+        let records = vec![vec![1u8, 2, 3]];
+        let updates = vec![RefUpdate::Thread {
+            name: ThreadName::new("feature"),
+            expected: RefExpectation::Missing,
+            new: Some(state),
+        }];
+        refs.commit_and_publish(&records, &updates, Some("lane")).unwrap();
+
+        // The committer saw the records (phase 4) and the ref published (phase 5).
+        let seen = committer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, records);
+        assert_eq!(seen[0].1.as_deref(), Some("lane"));
+        drop(seen);
+        assert_eq!(
+            refs.get_thread(&ThreadName::new("feature")).unwrap(),
+            Some(state)
+        );
+
+        // No-committer path: a plain publish (no records) still publishes, and
+        // an empty ref batch is a no-op.
+        let (_t2, dir2) = manager();
+        let plain = RefManager::new(&dir2);
+        plain.init().unwrap();
+        plain.commit_and_publish(&[], &[], None).unwrap();
+        let other = ChangeId::generate();
+        plain
+            .commit_and_publish(
+                &[],
+                &[RefUpdate::Marker {
+                    name: MarkerName::new("v2"),
+                    expected: RefExpectation::Missing,
+                    new: Some(other),
+                }],
+                None,
+            )
+            .unwrap();
+        assert_eq!(plain.get_marker(&MarkerName::new("v2")).unwrap(), Some(other));
+    }
+
+    /// Fail closed (heddle#354 r9, cid 3330304656): a `commit_and_publish` with
+    /// records but NO committer must error and publish NOTHING — committed data
+    /// can never be silently dropped while the ref is published anyway.
+    #[test]
+    fn commit_and_publish_without_committer_fails_closed_on_records() {
+        let (_t, dir) = manager();
+        let plain = RefManager::new(&dir);
+        plain.init().unwrap();
+
+        let state = ChangeId::generate();
+        let result = plain.commit_and_publish(
+            &[vec![1u8, 2, 3]],
+            &[RefUpdate::Thread {
+                name: ThreadName::new("feature"),
+                expected: RefExpectation::Missing,
+                new: Some(state),
+            }],
+            None,
+        );
+
+        // Errors rather than silently dropping the record...
+        assert!(
+            result.is_err(),
+            "records with no committer must fail closed, not drop silently"
+        );
+        // ...and the ref was NOT published (no half-applied write).
+        assert_eq!(plain.get_thread(&ThreadName::new("feature")).unwrap(), None);
+    }
+
+    /// heddle#354 r10 (cid 3330632443): when phase-5 publish fails AFTER the
+    /// record durably committed, the operation has already linearized — the arm
+    /// LOGS the swallowed publish error (operator visibility) and still returns
+    /// `Ok(())`. Returning `Err` here would falsely report failure for a
+    /// successful op; reconciliation materializes the committed effect later.
+    #[test]
+    #[cfg(unix)]
+    fn publish_failure_after_commit_logs_and_returns_ok() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_t, dir) = manager();
+        let refs = RefManager::new(&dir);
+        refs.init().unwrap();
+
+        // Read-only threads dir makes the phase-5 temp write fail, while the
+        // phase-3 read of the still-missing ref (which needs no write perm)
+        // succeeds — isolating a publish-after-commit failure.
+        let threads_dir = refs.threads_dir();
+        let original = std::fs::metadata(&threads_dir).unwrap().permissions().mode();
+        std::fs::set_permissions(&threads_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let lock = refs.lock_refs().unwrap();
+        let updates = vec![RefUpdate::Thread {
+            name: ThreadName::new("feature"),
+            expected: RefExpectation::Missing,
+            new: Some(ChangeId::generate()),
+        }];
+        // commit() reports the record durably committed (committed_for_reconcile);
+        // publish then fails. Behavior must be Ok(()), not Err.
+        let result = refs.validate_commit_publish(&updates, &lock, || Ok(true));
+
+        std::fs::set_permissions(&threads_dir, std::fs::Permissions::from_mode(original)).unwrap();
+        drop(lock);
+
+        assert!(
+            result.is_ok(),
+            "a publish failure after a durable commit linearized the op: must return Ok(()), not Err"
+        );
+        // The ref was NOT published (publish failed) — reconciliation will
+        // materialize the committed effect on the next read.
+        assert_eq!(refs.get_thread(&ThreadName::new("feature")).unwrap(), None);
+    }
+
+    /// The remote-thread raw read/write/delete + list paths and `pack_refs`,
+    /// `resolve`, and the `RefBackend`/`CoreRefBackend` trait delegations.
+    #[test]
+    fn remote_threads_pack_and_trait_delegations() {
+        use super::super::{CoreRefBackend, RefBackend};
+
+        let (_t, dir) = manager();
+        let refs = RefManager::new(&dir);
+        refs.init().unwrap();
+
+        let s1 = ChangeId::generate();
+        let s2 = ChangeId::generate();
+        // RefBackend trait surface for remotes.
+        RefBackend::set_remote_thread(&refs, "origin", &ThreadName::new("rt1"), &s1).unwrap();
+        refs.set_remote_thread("origin", &ThreadName::new("rt2"), &s2).unwrap();
+        assert_eq!(
+            RefBackend::get_remote_thread(&refs, "origin", &ThreadName::new("rt1")).unwrap(),
+            Some(s1)
+        );
+        assert!(RefBackend::list_remotes(&refs).unwrap().contains(&"origin".to_string()));
+        let mut rts = RefBackend::list_remote_threads(&refs, "origin").unwrap();
+        rts.sort();
+        assert_eq!(rts.len(), 2);
+        let removed = RefBackend::delete_remote_thread(&refs, "origin", &ThreadName::new("rt1")).unwrap();
+        assert_eq!(removed, Some(s1));
+        // Deleting an absent remote thread returns None.
+        assert_eq!(
+            refs.delete_remote_thread("origin", &ThreadName::new("nope")).unwrap(),
+            None
+        );
+
+        // Threads + markers + pack_refs (packs loose refs into packed-refs).
+        let t = ChangeId::generate();
+        let m = ChangeId::generate();
+        refs.set_thread(&ThreadName::new("main2"), &t).unwrap();
+        refs.create_marker(&MarkerName::new("rel"), &m).unwrap();
+        RefBackend::pack_refs(&refs).unwrap();
+        assert_eq!(refs.get_thread(&ThreadName::new("main2")).unwrap(), Some(t));
+        assert_eq!(refs.get_marker(&MarkerName::new("rel")).unwrap(), Some(m));
+
+        // resolve() funnels through read_head/get_thread/get_marker/undo.
+        assert_eq!(refs.resolve("main2").unwrap(), Some(t));
+        assert_eq!(refs.resolve("rel").unwrap(), Some(m));
+
+        // CoreRefBackend async + sync delegations.
+        let got = pollster::block_on(CoreRefBackend::get_thread(&refs, &ThreadName::new("main2"))).unwrap();
+        assert_eq!(got, Some(t));
+        let gm = pollster::block_on(CoreRefBackend::get_marker(&refs, &MarkerName::new("rel"))).unwrap();
+        assert_eq!(gm, Some(m));
+        assert!(CoreRefBackend::list_threads(&refs).unwrap().contains(&ThreadName::new("main2")));
+        assert!(CoreRefBackend::list_markers(&refs).unwrap().contains(&MarkerName::new("rel")));
+        let r = pollster::block_on(CoreRefBackend::resolve(&refs, "main2")).unwrap();
+        assert_eq!(r, Some(t));
+
+        // Maintenance trait methods.
+        let _ = RefBackend::inspect_ref_summary_index(&refs).unwrap();
+        let _ = RefBackend::rebuild_ref_summary_index(&refs).unwrap();
+        RefBackend::cleanup_stale_temps(&refs);
+    }
+
+    /// heddle#354 r7 (cid 3329765075) — a long-lived handle re-reads the CURRENT
+    /// persisted (shared) watermark on each reconcile, so a sibling worktree's
+    /// advance stops it re-folding records the sibling already materialized.
+    /// Two contrasting cases on a handle whose in-memory watermark is frozen at
+    /// its open value (5) while a sibling advanced the oplog tip to 10:
+    ///
+    /// * **A** — the sibling never persisted the advance: the handle still folds
+    ///   the lag (the frozen-at-open behaviour, unchanged).
+    /// * **B** — THE FIX: the sibling persisted the shared watermark to the tip;
+    ///   the handle re-reads it and does NOT re-fold. Pre-r7 (no refresh) this
+    ///   would fold from the frozen 5 and re-derive the sibling's work.
+    #[test]
+    fn long_lived_handle_refreshes_persisted_shared_watermark() {
+        // Case A — no persisted advance ⇒ the lag is folded.
+        let (_ta, dir_a) = manager();
+        let calls_a = Arc::new(AtomicU64::new(0));
+        let recon_a = Arc::new(FakeReconciler {
+            generation: AtomicU64::new(5),
+            republish: Vec::new(),
+            remote_updates: Vec::new(),
+            undo_recovery: None,
+            calls: Arc::clone(&calls_a),
+        });
+        let refs_a =
+            RefManager::new(&dir_a).with_reconciler(Arc::clone(&recon_a) as Arc<dyn RefReconciler>);
+        refs_a.init().unwrap();
+        // A sibling advanced the oplog tip to 10 but never persisted the shared
+        // watermark; this handle's in-memory watermark stays frozen at 5.
+        recon_a.generation.store(10, Ordering::Release);
+        let _ = refs_a.get_marker(&MarkerName::new("any")).unwrap();
+        assert_eq!(
+            calls_a.load(Ordering::Acquire),
+            1,
+            "no persisted advance ⇒ the lag is folded"
+        );
+
+        // Case B — the sibling persisted the shared watermark to the tip; the
+        // long-lived handle re-reads it and does NOT re-fold.
+        let (_tb, dir_b) = manager();
+        let calls_b = Arc::new(AtomicU64::new(0));
+        let recon_b = Arc::new(FakeReconciler {
+            generation: AtomicU64::new(5),
+            republish: Vec::new(),
+            remote_updates: Vec::new(),
+            undo_recovery: None,
+            calls: Arc::clone(&calls_b),
+        });
+        let refs_b =
+            RefManager::new(&dir_b).with_reconciler(Arc::clone(&recon_b) as Arc<dyn RefReconciler>);
+        refs_b.init().unwrap();
+        recon_b.generation.store(10, Ordering::Release);
+        // The sibling's persisted SHARED last-clean point (the shared-dir file).
+        std::fs::write(dir_b.join("RECONCILE_WATERMARK_SHARED"), "10\n").unwrap();
+        let _ = refs_b.get_marker(&MarkerName::new("any")).unwrap();
+        assert_eq!(
+            calls_b.load(Ordering::Acquire),
+            0,
+            "a long-lived handle must re-read the sibling-advanced shared \
+             watermark and NOT re-fold (frozen-at-open would re-fold here)"
+        );
+    }
+}
+
+/// heddle#354 r7 — source-level conformance checks (the point of the
+/// close-the-class round): they FAIL CI if any path bypasses the read/write
+/// chokepoints. They walk the PRODUCTION source of `refs_manager.rs` +
+/// `refs_transactions.rs`, partition it into per-function chunks, and assert the
+/// no-bypass invariants:
+///
+/// * every raw backend WRITER is reached only from the chokepoint body or
+///   `materialize` (so no write reaches the backend without first
+///   reconciling+materializing under the lock);
+/// * the per-request raw-loader funnel `raw_load` is reached only from the read
+///   chokepoint (so no logical read bypasses `reconciled_load`);
+/// * every public writer/reader funnels through the respective chokepoint; and
+/// * the read chokepoint re-reads the persisted watermark each reconcile.
+///
+/// A planted-bypass fixture proves the analyzer is non-vacuous.
+mod write_read_conformance {
+    use std::collections::BTreeSet;
+
+    const MANAGER_SRC: &str = include_str!("refs_manager.rs");
+    const TXNS_SRC: &str = include_str!("refs_transactions.rs");
+
+    /// Everything before the in-file `#[cfg(test)]` module — the invariant is
+    /// enforced on production code only, never on the tests' own scaffolding.
+    fn production(src: &str) -> &str {
+        src.split("#[cfg(test)]").next().unwrap()
+    }
+
+    /// The function name a declaration line introduces, if any (`pub fn x(`,
+    /// `pub(super) fn x(`, `async fn x(`, `fn x<T>(`, …). `None` otherwise.
+    fn parse_fn_name(trimmed: &str) -> Option<String> {
+        let idx = trimmed.find("fn ")?;
+        let before = &trimmed[..idx];
+        if !(before.is_empty() || before.ends_with(' ')) {
+            return None;
+        }
+        let rest = &trimmed[idx + 3..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            return None;
+        }
+        let after = rest[name.len()..].trim_start();
+        (after.starts_with('(') || after.starts_with('<')).then_some(name)
+    }
+
+    /// Partition source into `(fn_name, body_text)` chunks: a new chunk starts at
+    /// each function declaration and runs until the next one. Comment lines never
+    /// start a chunk. Sufficient for "which fn contains this call" without brace
+    /// counting, since every method here is a 4-space-indented `impl` item.
+    fn fn_chunks(src: &str) -> Vec<(String, String)> {
+        let mut chunks = Vec::new();
+        let mut name = "<prologue>".to_string();
+        let mut body = String::new();
+        for line in production(src).lines() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("//")
+                && let Some(decl) = parse_fn_name(trimmed)
+            {
+                chunks.push((std::mem::take(&mut name), std::mem::take(&mut body)));
+                name = decl;
+            }
+            body.push_str(line);
+            body.push('\n');
+        }
+        chunks.push((name, body));
+        chunks
+    }
+
+    /// The set of function names whose body contains a call `.callee(`.
+    fn callers_of(srcs: &[&str], callee: &str) -> BTreeSet<String> {
+        let pat = format!(".{callee}(");
+        let mut out = BTreeSet::new();
+        for src in srcs {
+            for (name, body) in fn_chunks(src) {
+                if body.contains(&pat) {
+                    out.insert(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// The body of the FIRST function named `name` (the inherent `impl
+    /// RefManager` definition precedes the trait-delegation `impl`s).
+    fn first_body(srcs: &[&str], name: &str) -> String {
+        for src in srcs {
+            for (fname, body) in fn_chunks(src) {
+                if fname == name {
+                    return body;
+                }
+            }
+        }
+        panic!("function `{name}` not found in sources");
+    }
+
+    fn strays(callers: &BTreeSet<String>, allow: &[&str]) -> Vec<String> {
+        let allow: BTreeSet<String> = allow.iter().map(|s| s.to_string()).collect();
+        callers.difference(&allow).cloned().collect()
+    }
+
+    fn assert_only(callers: &BTreeSet<String>, allow: &[&str], primitive: &str) {
+        let strays = strays(callers, allow);
+        assert!(
+            strays.is_empty(),
+            "chokepoint bypass: `{primitive}` is reached from {strays:?}, outside the \
+             allowlist {allow:?} — route the write through `write_chokepoint` (or the \
+             read through `reconciled_load`) instead of calling the raw primitive"
+        );
+    }
+
+    /// WRITE no-bypass: every raw backend writer is reached only from a
+    /// chokepoint body or from `materialize` (the read/write catch-up).
+    #[test]
+    fn raw_writers_are_reached_only_through_the_chokepoint() {
+        let srcs = [MANAGER_SRC, TXNS_SRC];
+        assert_only(
+            &callers_of(&srcs, "publish_ref_plans"),
+            &[
+                "materialize",
+                "update_refs_with_lock",
+                "validate_commit_publish",
+            ],
+            "publish_ref_plans",
+        );
+        assert_only(
+            &callers_of(&srcs, "set_remote_thread_locked"),
+            &["materialize", "set_remote_thread_raw"],
+            "set_remote_thread_locked",
+        );
+        assert_only(
+            &callers_of(&srcs, "delete_remote_thread_locked"),
+            &["materialize", "delete_remote_thread_raw"],
+            "delete_remote_thread_locked",
+        );
+        assert_only(
+            &callers_of(&srcs, "set_undo_recovery_locked"),
+            &["materialize", "set_undo_recovery_raw"],
+            "set_undo_recovery_locked",
+        );
+    }
+
+    /// READ no-bypass: the per-request raw-loader funnel `raw_load` is reached
+    /// only from the read chokepoint and the write-side reconcile catch-up.
+    #[test]
+    fn raw_load_is_reached_only_through_the_read_chokepoint() {
+        assert_only(
+            &callers_of(&[MANAGER_SRC], "raw_load"),
+            &[
+                "reconciled_load",
+                "reconciled_value_under_lock",
+                "materialize_class",
+            ],
+            "raw_load",
+        );
+    }
+
+    /// Every public ref WRITER funnels through `write_chokepoint`.
+    #[test]
+    fn public_writers_funnel_through_write_chokepoint() {
+        for writer in [
+            "update_refs",
+            "commit_and_publish",
+            "set_undo_recovery_raw",
+            "set_remote_thread_raw",
+            "delete_remote_thread_raw",
+        ] {
+            assert!(
+                first_body(&[MANAGER_SRC], writer).contains("write_chokepoint("),
+                "write bypass: `{writer}` must route through `write_chokepoint`"
+            );
+        }
+    }
+
+    /// Every public ref READER funnels through `reconciled_load` and never calls
+    /// a raw loader directly.
+    #[test]
+    fn public_readers_funnel_through_reconciled_load() {
+        for reader in [
+            "read_head",
+            "get_thread",
+            "get_marker",
+            "get_undo_recovery",
+            "get_remote_thread",
+            "list_threads",
+            "list_markers",
+            "list_remotes",
+            "list_remote_threads",
+        ] {
+            let body = first_body(&[MANAGER_SRC], reader);
+            assert!(
+                body.contains("reconciled_load("),
+                "read bypass: `{reader}` must funnel through `reconciled_load`"
+            );
+            for raw in [".raw_load(", ".raw_get_", ".read_head_state(", ".raw_list_"] {
+                assert!(
+                    !body.contains(raw),
+                    "read bypass: `{reader}` calls a raw loader (`{raw}`) directly"
+                );
+            }
+        }
+    }
+
+    /// The read chokepoint re-reads the persisted watermark each reconcile, so a
+    /// long-lived handle never folds from a frozen-at-open value (cid 3329765075).
+    #[test]
+    fn read_chokepoint_refreshes_watermark_fresh() {
+        assert!(
+            first_body(&[MANAGER_SRC], "reconciled_load")
+                .contains("refresh_persisted_watermark("),
+            "the read chokepoint must re-read the persisted watermark each reconcile"
+        );
+    }
+
+    /// The analyzer has TEETH: a planted bypass (a function calling a raw writer
+    /// outside the allowlist) is both detected by `callers_of` AND surfaced as a
+    /// stray by the allowlist check — proving the conformance checks above are
+    /// non-vacuous and would fail if such a function existed in production.
+    #[test]
+    fn analyzer_detects_a_planted_bypass() {
+        let fixture = "\
+    fn legit(&self, lock: &RefsLock) -> Result<()> {
+        self.materialize(outcome, lock)
+    }
+    fn sneaky_bypass(&self, lock: &RefsLock) -> Result<()> {
+        self.publish_ref_plans(plans, lock)
+    }
+";
+        let callers = callers_of(&[fixture], "publish_ref_plans");
+        assert!(
+            callers.contains("sneaky_bypass"),
+            "analyzer must flag a planted raw-writer bypass"
+        );
+        assert!(
+            strays(&callers, &["materialize"]).contains(&"sneaky_bypass".to_string()),
+            "the allowlist check must surface the planted bypass as a stray (non-vacuous)"
+        );
+    }
+}

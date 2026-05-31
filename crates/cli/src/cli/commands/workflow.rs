@@ -1130,8 +1130,30 @@ fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
         OpRecord::FastForwardV2 { post_target_id, .. } => {
             change_id_matches_display(post_target_id, merge_state)
         }
-        OpRecord::FastForward { .. } => false,
-        _ => false,
+        // These records don't advance HEAD/thread to a merge target the ship
+        // flow tracks (legacy V1 `FastForward` re-resolves at apply time and
+        // carries no post-target id). Enumerated explicitly (no wildcard) so a
+        // new state-advancing variant must be considered as a possible merge
+        // target here (heddle#354 r9).
+        OpRecord::FastForward { .. }
+        | OpRecord::ThreadCreate { .. }
+        | OpRecord::ThreadCreateV2 { .. }
+        | OpRecord::ThreadDelete { .. }
+        | OpRecord::ThreadUpdate { .. }
+        | OpRecord::Fork { .. }
+        | OpRecord::Collapse { .. }
+        | OpRecord::MarkerCreate { .. }
+        | OpRecord::MarkerDelete { .. }
+        | OpRecord::TransactionAbort { .. }
+        | OpRecord::EphemeralThreadCollapse { .. }
+        | OpRecord::ConflictResolved { .. }
+        | OpRecord::TransactionCommit { .. }
+        | OpRecord::Redact { .. }
+        | OpRecord::Purge { .. }
+        | OpRecord::GitCheckpoint { .. }
+        | OpRecord::RemoteThreadUpdate { .. }
+        | OpRecord::RemoteThreadDelete { .. }
+        | OpRecord::UndoRecoveryUpdate { .. } => false,
     }
 }
 

@@ -249,7 +249,33 @@ fn apply_undo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
         } => {
             apply_git_checkpoint_undo(repo, branch, previous_git_oid.as_deref(), new_git_oid)?;
         }
-        _ => {}
+        // No undo inverse: these records don't move a ref the undo chain
+        // restores, or their reversal is irreversible / handled outside the
+        // oplog replay. Enumerated explicitly (no wildcard) so a new
+        // `OpRecord` variant is a COMPILE error here until its undo behavior
+        // is decided (heddle#354 r9):
+        //   - Fork / Collapse: structural ops; HEAD/thread restoration is
+        //     driven by the surrounding records in the same batch.
+        //   - Checkpoint: addressable save, goto-reachable; nothing to invert.
+        //   - TransactionAbort / TransactionCommit / ConflictResolved: forensic
+        //     / audit records, no ref to restore.
+        //   - EphemeralThreadCollapse: TTL retirement of a thread pointer; the
+        //     states stay addressable and the pointer is not resurrected here.
+        //   - Purge: irreversible by design (bytes physically removed) — the
+        //     undo preflight (`ensure_redaction_undo_safe`) refuses earlier.
+        //   - RemoteThreadUpdate / RemoteThreadDelete / UndoRecoveryUpdate:
+        //     reconcile-class bookkeeping refs, outside the user undo chain.
+        OpRecord::Fork { .. }
+        | OpRecord::Collapse { .. }
+        | OpRecord::Checkpoint { .. }
+        | OpRecord::TransactionAbort { .. }
+        | OpRecord::TransactionCommit { .. }
+        | OpRecord::ConflictResolved { .. }
+        | OpRecord::EphemeralThreadCollapse { .. }
+        | OpRecord::Purge { .. }
+        | OpRecord::RemoteThreadUpdate { .. }
+        | OpRecord::RemoteThreadDelete { .. }
+        | OpRecord::UndoRecoveryUpdate { .. } => {}
     }
 
     Ok(())
@@ -400,7 +426,33 @@ fn apply_redo_entry(repo: &Repository, entry: &OpEntry) -> Result<()> {
             })?;
             apply_ff_redo(repo, source_thread, target_thread, &source_tip)?;
         }
-        _ => {}
+        // No redo replay: these records don't re-advance a ref redo touches, or
+        // they are refused upstream. Enumerated explicitly (no wildcard) so a
+        // new `OpRecord` variant is a COMPILE error here until its redo
+        // behavior is decided (heddle#354 r9):
+        //   - Fork / Collapse: structural ops; redo is driven by the
+        //     surrounding records in the same batch.
+        //   - Checkpoint: addressable save, goto-reachable; nothing to replay.
+        //   - Redact: redo is refused upstream by `ensure_redaction_redo_supported`
+        //     (the OpRecord doesn't carry the full Redaction needed to recreate
+        //     it); reaching here is a no-op.
+        //   - Purge: irreversible by design; also refused upstream.
+        //   - TransactionAbort / TransactionCommit / ConflictResolved /
+        //     EphemeralThreadCollapse: forensic / TTL records, no ref to replay.
+        //   - RemoteThreadUpdate / RemoteThreadDelete / UndoRecoveryUpdate:
+        //     reconcile-class bookkeeping refs, outside the user redo chain.
+        OpRecord::Fork { .. }
+        | OpRecord::Collapse { .. }
+        | OpRecord::Checkpoint { .. }
+        | OpRecord::TransactionAbort { .. }
+        | OpRecord::TransactionCommit { .. }
+        | OpRecord::ConflictResolved { .. }
+        | OpRecord::EphemeralThreadCollapse { .. }
+        | OpRecord::Redact { .. }
+        | OpRecord::Purge { .. }
+        | OpRecord::RemoteThreadUpdate { .. }
+        | OpRecord::RemoteThreadDelete { .. }
+        | OpRecord::UndoRecoveryUpdate { .. } => {}
     }
 
     Ok(())

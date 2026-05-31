@@ -113,6 +113,30 @@ impl OpLog {
         Ok(guard)
     }
 
+    /// Force a fresh disk load into the cache, returning the refreshed guard.
+    /// Read paths that must observe a CROSS-PROCESS commit use this instead of
+    /// [`load_cached`]: a long-lived handle's already-populated cache is a stale
+    /// view that would miss a batch another process wrote (heddle#354 r6, cid
+    /// 3329711888).
+    fn refresh_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLog>>> {
+        let mut guard = self.cached.lock().unwrap();
+        *guard = Some(self.load_fresh()?);
+        Ok(guard)
+    }
+
+    /// Force this handle's in-memory cache to reload from disk, so it observes
+    /// commits written through a DIFFERENT `OpLog` handle of the same file —
+    /// e.g. the refs write chokepoint's committer, which appends via its own
+    /// fresh handle (the `refs`→`repo` seam). Without this, a long-lived handle
+    /// (the mount/daemon's `repo.oplog()`) keeps a stale cache after a
+    /// `commit_and_publish` and a same-process `recent()` would miss the just
+    /// committed batch (heddle#354 r8). Same staleness class as the
+    /// cross-process case the reconciler already refreshes for (cid 3329711888).
+    pub fn refresh_cache(&self) -> Result<()> {
+        let _guard = self.refresh_cached()?;
+        Ok(())
+    }
+
     /// Get the last operation entry.
     pub fn last(&self) -> Result<Option<OpEntry>> {
         let guard = self.load_cached()?;
@@ -317,6 +341,132 @@ impl OpLog {
         *self.cached.lock().unwrap() = Some(packed);
 
         Ok(Some(ids))
+    }
+
+    /// Append a transaction batch **exactly once**, deduplicated by an
+    /// **unbounded** scan over the entire committed history for a
+    /// matching `OpRecord::TransactionCommit { transaction_id }` marker —
+    /// the linearization point for the atomic-mutation primitive
+    /// (heddle#330 §2.2).
+    ///
+    /// Unlike [`OpLog::record_batch_scoped_if_no_transaction`], which scans
+    /// only a caller-supplied recent window and concedes that "ageing past
+    /// it duplicates the batch", this is exact-once at **any** retry timing
+    /// — including a delayed crash-retry after an arbitrary number of
+    /// intervening commits — because the lookup domain is the whole log.
+    /// The scan and the append are held under the same oplog write lock, so
+    /// two concurrent retriers serialize and exactly one wins.
+    ///
+    /// `operations` must already carry the `TransactionCommit` marker whose
+    /// `transaction_id` matches the `transaction_id` argument. Returns
+    /// `Ok(None)` when the transaction was already committed by a prior
+    /// (possibly long-ago) run.
+    pub fn record_batch_exactly_once(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+    ) -> Result<Option<Vec<u64>>> {
+        if operations.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let _lock = self.write_lock()?;
+        let mut packed = self.load_fresh()?;
+
+        // Unbounded scan over the ENTIRE committed history — not a window.
+        let already_committed = packed.entries.iter().any(|entry| {
+            matches!(
+                &entry.operation,
+                OpRecord::TransactionCommit { transaction_id: id, .. }
+                    if id == transaction_id
+            )
+        });
+        if already_committed {
+            return Ok(None);
+        }
+
+        let start_id = packed.head_id + 1;
+        let timestamp = Utc::now();
+        let scope_owned = scope.map(str::to_string);
+        let new_entries =
+            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
+
+        packed.append(new_entries);
+        packed.save()?;
+        *self.cached.lock().unwrap() = Some(packed);
+
+        Ok(Some(ids))
+    }
+
+    /// Current oplog generation — the monotonic `head_id`
+    /// (`packed_oplog.rs` leading field). Reads only the **fixed-size header**
+    /// from disk (not the whole log), so it is the cheap O(1) gate the per-read
+    /// reconciliation needs (heddle#330 §2.2): a long-held handle observes a
+    /// concurrent commit's advance, and the no-lag hot path is one header read +
+    /// one integer compare against a cached watermark — no tail scan. Returns 0
+    /// when the oplog file does not exist yet.
+    pub fn head_id(&self) -> Result<u64> {
+        match PackedOpLog::read_head_id(&self.oplog_path()) {
+            Ok(id) => Ok(id),
+            // Treat a not-yet-created oplog as generation 0.
+            Err(_) if !self.oplog_path().exists() => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The non-marker records of the batch that committed `transaction_id`
+    /// (heddle#354 r5, cid 3329631075) — i.e. the batch whose `TransactionCommit`
+    /// marker carries that id, minus the marker itself. A crash-retry that
+    /// dedup-hits an already-committed transaction uses these to reconstruct the
+    /// ORIGINAL committed identity, instead of returning this run's freshly
+    /// (re-)generated value, which may diverge from what was actually persisted.
+    ///
+    /// Unbounded scan, matching the dedup domain of
+    /// [`record_batch_exactly_once`](Self::record_batch_exactly_once). Returns an
+    /// empty vec if no batch committed that id, or if the batch held only its
+    /// marker.
+    pub fn committed_batch_records(&self, transaction_id: &str) -> Result<Vec<OpRecord>> {
+        // Refresh, don't trust the cache: this is only ever reached on a dedup
+        // hit, which may be CROSS-PROCESS — another process committed the batch
+        // while this long-lived handle's cache stayed stale. A cached read would
+        // fail to find the batch and reconstruct a miss (heddle#354 r6, cid
+        // 3329711888). The committed batch is durable and append-only, so a
+        // lock-free fresh read observes it consistently.
+        let guard = self.refresh_cached()?;
+        let packed = guard.as_ref().unwrap();
+
+        let Some(commit_entry) = packed.entries.iter().find(|entry| {
+            matches!(
+                &entry.operation,
+                OpRecord::TransactionCommit { transaction_id: id, .. }
+                    if id == transaction_id
+            )
+        }) else {
+            return Ok(Vec::new());
+        };
+        let batch_id = if commit_entry.batch_id == 0 {
+            commit_entry.id
+        } else {
+            commit_entry.batch_id
+        };
+
+        let records = packed
+            .entries
+            .iter()
+            .filter(|entry| {
+                let bid = if entry.batch_id == 0 {
+                    entry.id
+                } else {
+                    entry.batch_id
+                };
+                bid == batch_id
+            })
+            .filter(|entry| !matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+            .map(|entry| entry.operation.clone())
+            .collect();
+        Ok(records)
     }
 
     pub(super) fn record_single_scoped(

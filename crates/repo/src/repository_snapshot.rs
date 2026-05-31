@@ -238,23 +238,11 @@ impl Repository {
                 Head::Detached { .. } => None,
             };
 
-            match head {
-                Head::Attached { thread } => {
-                    self.refs.set_thread(&thread, &state.change_id)?;
-                }
-                Head::Detached { .. } => {
-                    self.refs.write_head(&Head::Detached {
-                        state: state.change_id,
-                    })?;
-                }
-            }
-
-            self.oplog.record_snapshot(
-                &state.change_id,
-                prev_head.as_ref(),
-                thread.as_deref(),
-                Some(&self.op_scope()),
-            )?;
+            // Record-first through the write chokepoint (heddle#354 r8): the
+            // `OpRecord::Snapshot` commits before the thread/HEAD publish, so a
+            // late snapshot record can no longer clobber a newer concurrent
+            // write under the reconciler's authoritative fold.
+            self.commit_snapshot_atomic(&state.change_id, prev_head, thread.as_ref())?;
 
             // Refresh the thread manifest when capturing inside a
             // materialized-thread worktree: bump `state_id` + `tree_hash`
@@ -410,23 +398,8 @@ impl Repository {
                 Head::Detached { .. } => None,
             };
 
-            match head {
-                Head::Attached { thread } => {
-                    self.refs.set_thread(&thread, &state.change_id)?;
-                }
-                Head::Detached { .. } => {
-                    self.refs.write_head(&Head::Detached {
-                        state: state.change_id,
-                    })?;
-                }
-            }
-
-            self.oplog.record_snapshot(
-                &state.change_id,
-                prev_head.as_ref(),
-                thread.as_deref(),
-                Some(&self.op_scope()),
-            )?;
+            // Record-first through the write chokepoint (heddle#354 r8).
+            self.commit_snapshot_atomic(&state.change_id, prev_head, thread.as_ref())?;
 
             Ok(SnapshotExecution {
                 state,
@@ -507,23 +480,8 @@ impl Repository {
             Head::Detached { .. } => None,
         };
 
-        match head {
-            Head::Attached { thread } => {
-                self.refs.set_thread(&thread, &state.change_id)?;
-            }
-            Head::Detached { .. } => {
-                self.refs.write_head(&Head::Detached {
-                    state: state.change_id,
-                })?;
-            }
-        }
-
-        self.oplog.record_snapshot(
-            &state.change_id,
-            Some(&first_parent),
-            thread.as_deref(),
-            Some(&self.op_scope()),
-        )?;
+        // Record-first through the write chokepoint (heddle#354 r8).
+        self.commit_snapshot_atomic(&state.change_id, Some(first_parent), thread.as_ref())?;
 
         Ok(state)
     }

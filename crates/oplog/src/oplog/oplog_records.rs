@@ -109,20 +109,60 @@ impl OpLog {
         )
     }
 
-    /// Record a fork operation.
-    pub fn record_fork(&self, from: &ChangeId, new_state: &ChangeId) -> Result<u64> {
-        self.record_single(OpRecord::Fork {
-            from: *from,
-            new_state: *new_state,
-        })
+    /// Record a fork operation. `from` is the source state, `new_state`
+    /// the fork result; `thread`/`head` name the published ref so
+    /// crash-replay can re-materialize it (heddle#330).
+    ///
+    /// `scope` MUST be the writer's `op_scope` whenever the fork moves HEAD
+    /// (heddle#354 r7, cid 3329765074): a fork that detaches HEAD (`head =
+    /// Some`) — or attaches it to a new thread — is a `Local`-class HEAD-mover,
+    /// and the read chokepoint reconciles `Local` refs scoped to `op_scope`. An
+    /// UNSCOPED fork record (the prior `record_single`) is invisible to that
+    /// scoped fold, so a crash between commit and HEAD-publish would strand an
+    /// unreconcilable record. Routing through `record_single_scoped` makes the
+    /// helper-recorded fork reconcile like every other committed record.
+    pub fn record_fork(
+        &self,
+        from: &ChangeId,
+        new_state: &ChangeId,
+        thread: Option<&str>,
+        head: Option<&ChangeId>,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        self.record_single_scoped(
+            OpRecord::Fork {
+                from: *from,
+                new_state: *new_state,
+                thread: thread.map(str::to_string),
+                head: head.copied(),
+            },
+            scope,
+        )
     }
 
-    /// Record a collapse operation.
-    pub fn record_collapse(&self, sources: &[ChangeId], result: &ChangeId) -> Result<u64> {
-        self.record_single(OpRecord::Collapse {
-            sources: sources.to_vec(),
-            result: *result,
-        })
+    /// Record a collapse operation. `thread` names the published ref
+    /// (`Some` thread name, or `None` for a detached HEAD at `result`).
+    ///
+    /// As with [`record_fork`](Self::record_fork), `scope` MUST be the writer's
+    /// `op_scope`: a detached collapse (`thread = None`) moves HEAD, a
+    /// `Local`-class ref reconciled scoped to `op_scope` (heddle#354 r7, cid
+    /// 3329765074). Recorded via `record_single_scoped` so the HEAD-moving
+    /// record reconciles under the same scope the write chokepoint uses.
+    pub fn record_collapse(
+        &self,
+        sources: &[ChangeId],
+        result: &ChangeId,
+        thread: Option<&str>,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        self.record_single_scoped(
+            OpRecord::Collapse {
+                sources: sources.to_vec(),
+                result: *result,
+                thread: thread.map(str::to_string),
+            },
+            scope,
+        )
     }
 
     /// Record a marker creation.
