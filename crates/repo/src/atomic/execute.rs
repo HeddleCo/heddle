@@ -27,12 +27,23 @@ pub fn execute<'a, M>(repo: &'a Repository, mut m: M) -> Result<M::Output>
 where
     M: AtomicMutation + 'a,
 {
-    let mut tx = Tx::root(repo);
+    // The stable idempotency key, supplied by the mutation (cid 3329490982);
+    // identical across retries so a crash-retry deduplicates instead of
+    // double-applying.
+    let mut tx = Tx::root(repo, m.transaction_id());
 
     let staged = match m.apply(&mut tx) {
         Ok(staged) => staged,
         Err(e) => {
-            // Reverse-order unwind of whatever `apply` staged before failing.
+            // The whole-op rewind must run on the apply-`Err` path too, or a
+            // mutation that uses it (rather than granular `on_rewind` inverses)
+            // would leak the state its `apply` staged before failing (cid
+            // 3329490979). Register it exactly as the commit-failure path below,
+            // then unwind: the granular ledger AND the whole-op rewind run
+            // together (one is a no-op per the one-mechanism-per-mutation
+            // contract), so zero staged state survives a failed `apply`.
+            let ledger = tx.ledger_view();
+            tx.on_rewind(move || m.rewind(&ledger));
             let _ = tx.rewind_all();
             return Err(e);
         }

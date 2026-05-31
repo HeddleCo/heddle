@@ -8,7 +8,6 @@
 //! is a LIFO stack of inverse closures, popped in reverse on any unwind.
 
 use objects::error::{HeddleError, Result};
-use objects::object::ChangeId;
 use oplog::OpRecord;
 
 use super::traits::{EagerMutation, SavepointMutation, StagedCommit};
@@ -50,13 +49,18 @@ pub struct Tx<'a> {
 }
 
 impl<'a> Tx<'a> {
-    /// Build the root transaction: depth 0, a fresh ledger, a fresh
-    /// idempotency key, scoped to this checkout's lane.
-    pub(crate) fn root(repo: &'a Repository) -> Self {
+    /// Build the root transaction: depth 0, a fresh ledger, scoped to this
+    /// checkout's lane, keyed by the caller-supplied **stable** idempotency
+    /// `transaction_id` (heddle#330 §2.2, cid 3329490982). The id must be the
+    /// same across retries of the same logical op — see
+    /// [`AtomicMutation::transaction_id`](super::AtomicMutation::transaction_id)
+    /// — so a crash-retry deduplicates against the prior commit instead of
+    /// minting a new key and double-applying.
+    pub(crate) fn root(repo: &'a Repository, transaction_id: String) -> Self {
         Self {
             repo,
             scope: repo.op_scope(),
-            transaction_id: ChangeId::generate().to_string_full(),
+            transaction_id,
             depth: 0,
             ledger: Vec::new(),
             committed: false,

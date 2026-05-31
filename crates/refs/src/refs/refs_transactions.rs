@@ -103,8 +103,38 @@ impl RefManager {
     pub(super) fn update_refs_with_lock(
         &self,
         updates: &[RefUpdate],
-        _lock: &RefsLock,
+        lock: &RefsLock,
     ) -> Result<()> {
+        let plans = self.plan_ref_updates(updates)?;
+        self.publish_ref_plans(plans, lock)
+    }
+
+    /// Validate + commit + publish as one atomic unit under the held refs lock
+    /// (heddle#330 §2.2 write chokepoint, cid 3329490978 / 3329490984).
+    ///
+    /// Phase 3 plans and validates every update against the on-disk value
+    /// **first** (writing nothing), so a CAS-expectation failure returns `Err`
+    /// before `commit` runs — the oplog record is never appended for a mutation
+    /// that will not publish (no validation-failure leak). `commit` (phase 4)
+    /// then runs, immediately followed by the phase-5 publish, all while the
+    /// caller holds the refs lock — so concurrent callers serialize the
+    /// record-and-publish as a single unit (no record/publish order divergence).
+    pub(super) fn validate_commit_publish(
+        &self,
+        updates: &[RefUpdate],
+        lock: &RefsLock,
+        commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let plans = self.plan_ref_updates(updates)?;
+        commit()?;
+        self.publish_ref_plans(plans, lock)
+    }
+
+    /// Phase 3 (heddle#330 §2.2): plan + validate every update against the
+    /// current on-disk value, rejecting CAS conflicts and duplicate targets up
+    /// front. Pure validation — touches no canonical ref and no temp file, so a
+    /// failed expectation returns `Err` before anything is staged or committed.
+    fn plan_ref_updates(&self, updates: &[RefUpdate]) -> Result<Vec<RefUpdatePlan>> {
         let mut seen = HashSet::new();
         let mut plans = Vec::new();
 
@@ -216,6 +246,15 @@ impl RefManager {
             }
         }
 
+        Ok(plans)
+    }
+
+    /// Phase 5 (heddle#330 §2.2): stage each update into a temp file, rename the
+    /// temps into their canonical paths (the publish), apply packed-ref removals,
+    /// and rebuild the summary index. On any apply error the reverse-order
+    /// `rollback_updates` restores prior contents. Called only after
+    /// [`plan_ref_updates`](Self::plan_ref_updates) has validated the batch.
+    fn publish_ref_plans(&self, mut plans: Vec<RefUpdatePlan>, _lock: &RefsLock) -> Result<()> {
         for plan in &mut plans {
             if let Some(ref content) = plan.new_content {
                 let temp_path = self.write_string_temp(&plan.path, content)?;

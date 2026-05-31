@@ -216,14 +216,14 @@ impl RefReconciler for OplogRefReconciler {
     }
 }
 
-/// Project the authoritative value for the specific request out of the fold,
-/// **filling only when the canonical cache is absent**. In the un-migrated tree
-/// many ref writes do not yet record an oplog entry, so the canonical value can
-/// be *newer* than the oplog fold; trusting a present canonical (and only
-/// re-deriving a genuinely-missing one — the committed-but-unpublished
-/// crash-replay case) keeps reconciliation non-destructive. The committed-but-
-/// stale-present lag (a rarer crash shape) is left to the writers' eventual
-/// record-first migration.
+/// Project the authoritative value for the specific request out of the fold.
+/// A committed record past the class watermark is **authoritative** over the
+/// live canonical, so a folded value wins whether it CREATES a missing ref or
+/// UPDATES a stale present one (cid 3329490981) — not fill-if-absent, which
+/// silently dropped a committed update to an already-existing ref (the
+/// crash-replayed `cmd_collapse` update-to-existing-`main` case). The fold only
+/// holds refs touched by commits newer than the watermark, so a ref with no
+/// recent committed record keeps its canonical value untouched.
 fn reconciled_value(req: &LoadRequest, raw: &Loaded, fold: &Fold) -> Loaded {
     match req {
         // HEAD is not reconstructed from the oplog (see `Fold` doc); the
@@ -280,17 +280,15 @@ fn reconciled_value(req: &LoadRequest, raw: &Loaded, fold: &Fold) -> Loaded {
     }
 }
 
-/// Fill-if-absent for a point read: trust a present canonical value; only when
-/// the canonical is missing do we adopt the fold's committed target.
-/// `folded` is `Some(Some(state))` / `Some(None)` (touched: set/deleted) or
-/// `None` (untouched by the lagged batches).
+/// Authoritative point read: a committed record past the watermark wins over
+/// the live canonical, so whenever the lagged batches *touched* this ref we
+/// adopt the folded target — set or delete, present canonical or not (cid
+/// 3329490981). `folded` is `Some(Some(state))` / `Some(None)` (touched:
+/// set/deleted) or `None` (untouched by the lagged batches ⇒ keep canonical).
 fn fill_point(raw: &Loaded, folded: Option<Option<ChangeId>>) -> Loaded {
-    match raw {
-        Loaded::Point(Some(_)) => raw.clone(),
-        _ => match folded {
-            Some(value) => Loaded::Point(value),
-            None => raw.clone(),
-        },
+    match folded {
+        Some(value) => Loaded::Point(value),
+        None => raw.clone(),
     }
 }
 

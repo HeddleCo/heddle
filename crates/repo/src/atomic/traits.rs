@@ -51,6 +51,19 @@ pub trait AtomicMutation {
     /// The value produced on a committed run.
     type Output;
 
+    /// A **stable** idempotency key for this logical operation — identical
+    /// across retries of the *same* op (heddle#330 §2.2 "Idempotency of the
+    /// commit", cid 3329490982). It MUST be derived deterministically from the
+    /// operation's identity (its inputs / op-id), NEVER minted fresh per
+    /// [`execute`](super::execute): a crash after the commit append but before
+    /// the caller observes success is re-run by the caller, and a freshly-minted
+    /// key would miss the unbounded dedup scan and double-apply. With a stable
+    /// key the replayed op presents the same id, the dedup lookup finds the
+    /// prior commit, and the second run is a no-op. Required (no default), so the
+    /// "minted fresh" footgun is unrepresentable. Only the *root* mutation's key
+    /// is used — an enrolled child never reaches the commit point.
+    fn transaction_id(&self) -> String;
+
     /// Forward, staged, fallible side effects. Every effect performed here
     /// MUST be paired with an inverse registered via [`Tx::on_rewind`] (the
     /// granular ledger), OR be undone wholesale by [`AtomicMutation::rewind`].

@@ -11,7 +11,10 @@ use oplog::{OpLogBackend, OpRecord};
 use refs::{Head, RefExpectation, RefUpdate};
 use tempfile::TempDir;
 
-use super::{execute, AtomicMutation, Compensator, EagerMutation, SavepointMutation, StagedCommit, Tx};
+use super::{
+    execute, AtomicMutation, Compensator, EagerMutation, RewindLedger, SavepointMutation,
+    StagedCommit, Tx,
+};
 use crate::Repository;
 
 fn test_repo() -> (TempDir, Repository) {
@@ -30,6 +33,10 @@ struct Leg {
 
 impl AtomicMutation for Leg {
     type Output = ();
+
+    fn transaction_id(&self) -> String {
+        format!("leg-{}", self.id)
+    }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         let id = self.id;
@@ -54,6 +61,10 @@ struct FailingComposite {
 
 impl AtomicMutation for FailingComposite {
     type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "failing-composite".to_string()
+    }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         tx.enroll(Leg {
@@ -110,6 +121,10 @@ struct Panicker {
 impl AtomicMutation for Panicker {
     type Output = ();
 
+    fn transaction_id(&self) -> String {
+        "panicker".to_string()
+    }
+
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         let log = Rc::clone(&self.log);
         tx.on_rewind(move || {
@@ -155,6 +170,10 @@ struct Recorder {
 
 impl AtomicMutation for Recorder {
     type Output = u32;
+
+    fn transaction_id(&self) -> String {
+        format!("recorder-{}", self.state.to_string_full())
+    }
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<u32>> {
         Ok(StagedCommit::new(
@@ -204,6 +223,10 @@ struct Reserve {
 impl AtomicMutation for Reserve {
     type Output = ();
 
+    fn transaction_id(&self) -> String {
+        "reserve".to_string()
+    }
+
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         Ok(StagedCommit::pure(()))
     }
@@ -230,6 +253,10 @@ struct EagerThenFail {
 
 impl AtomicMutation for EagerThenFail {
     type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "eager-then-fail".to_string()
+    }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         tx.enroll_eager(Reserve {
@@ -442,10 +469,10 @@ fn tx_accessors_and_rewind_error_paths() {
     let (_t, repo) = test_repo();
 
     // Accessors.
-    let mut tx = Tx::root(&repo);
+    let mut tx = Tx::root(&repo, "accessor-tx".to_string());
     assert_eq!(tx.depth(), 0);
     assert_eq!(tx.scope(), repo.op_scope());
-    assert!(!tx.transaction_id().is_empty());
+    assert_eq!(tx.transaction_id(), "accessor-tx");
     let _ = tx.repo();
     let ledger = tx.ledger_view();
     assert_eq!(ledger.depth, 0);
@@ -462,7 +489,7 @@ fn tx_accessors_and_rewind_error_paths() {
     );
 
     // A second commit after a successful one is a no-op (committed guard).
-    let mut tx2 = Tx::root(&repo);
+    let mut tx2 = Tx::root(&repo, "double-commit-tx".to_string());
     tx2.commit(vec![OpRecord::Snapshot {
         new_state: ChangeId::generate(),
         prev_head: None,
@@ -487,7 +514,7 @@ fn tx_accessors_and_rewind_error_paths() {
 
     // Drop backstop: an uncommitted Tx whose inverse fails logs (never panics).
     {
-        let mut tx3 = Tx::root(&repo);
+        let mut tx3 = Tx::root(&repo, "drop-backstop-tx".to_string());
         tx3.on_rewind(|| Err(HeddleError::Config("drop-time".to_string())));
         // tx3 dropped here without commit ⇒ Drop runs rewind_all, gets Err, logs.
     }
@@ -612,4 +639,285 @@ fn reconcile_folds_every_record_shape() {
     assert!(remote_threads.contains(&ThreadName::new("rt2")));
     // The deleted remote thread is absent from the projection.
     assert!(!remote_threads.contains(&ThreadName::new("rt_del")));
+}
+
+// ---- New correctness regressions (heddle#354 r2 Codex findings) ----
+
+/// A whole-op-rewind mutation (no granular `on_rewind` inverses): it stages
+/// state in `apply`, then fails. Its `rewind` — not a ledger inverse — is the
+/// only thing that can undo the staged state.
+struct StageThenFail {
+    staged: Rc<RefCell<bool>>,
+    rewound: Rc<RefCell<bool>>,
+}
+
+impl AtomicMutation for StageThenFail {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "stage-then-fail".to_string()
+    }
+
+    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+        // Stage state, relying on the whole-op `rewind` (NOT a granular inverse)
+        // to undo it — then fail.
+        *self.staged.borrow_mut() = true;
+        Err(HeddleError::Config("apply failed after staging".to_string()))
+    }
+
+    fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
+        *self.staged.borrow_mut() = false;
+        *self.rewound.borrow_mut() = true;
+        Ok(())
+    }
+}
+
+/// The whole-op rewind must run on the `apply`-returns-`Err` path, not only
+/// after a successful `apply` (cid 3329490979). Otherwise a mutation that stages
+/// state then fails leaks it: the granular ledger is empty, and the whole-op
+/// `rewind` was historically registered only post-apply.
+#[test]
+fn whole_op_rewind_runs_on_apply_err() {
+    let (_t, repo) = test_repo();
+    let staged = Rc::new(RefCell::new(false));
+    let rewound = Rc::new(RefCell::new(false));
+
+    let result = execute(&repo, StageThenFail {
+        staged: Rc::clone(&staged),
+        rewound: Rc::clone(&rewound),
+    });
+
+    assert!(result.is_err(), "the mutation must fail");
+    assert!(
+        *rewound.borrow(),
+        "the whole-op rewind must run on the apply-Err path"
+    );
+    assert!(
+        !*staged.borrow(),
+        "a failing apply must leave zero staged state"
+    );
+}
+
+/// A mutation with a STABLE idempotency key derived from a field, staging one
+/// oplog record. Two instances with the same key model the same logical op
+/// being re-run after a crash.
+struct StableKeyed {
+    key: String,
+    state: ChangeId,
+    applied: Rc<RefCell<u32>>,
+}
+
+impl AtomicMutation for StableKeyed {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        self.key.clone()
+    }
+
+    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+        *self.applied.borrow_mut() += 1;
+        Ok(StagedCommit::new((), vec![OpRecord::Snapshot {
+            new_state: self.state,
+            prev_head: None,
+            thread: None,
+        }]))
+    }
+}
+
+/// A crash-retry of the same logical op presents the SAME stable
+/// `transaction_id`, so the unbounded dedup scan finds the prior commit and the
+/// second run is a no-op at the commit point — exactly-once (cid 3329490982).
+/// With a freshly-minted-per-`execute` id the retry would commit a second time.
+#[test]
+fn stable_transaction_id_dedupes_crash_retry() {
+    let (_t, repo) = test_repo();
+    let applied = Rc::new(RefCell::new(0u32));
+    let state = ChangeId::generate();
+    let key = "logical-op-42".to_string();
+
+    // First run commits.
+    execute(&repo, StableKeyed {
+        key: key.clone(),
+        state,
+        applied: Rc::clone(&applied),
+    })
+    .unwrap();
+    // The crash-retry: identical stable key ⇒ the commit deduplicates.
+    execute(&repo, StableKeyed {
+        key: key.clone(),
+        state,
+        applied: Rc::clone(&applied),
+    })
+    .unwrap();
+
+    let recent = repo.oplog().recent(64).unwrap();
+    let commits = recent
+        .iter()
+        .filter(|e| matches!(
+            &e.operation,
+            OpRecord::TransactionCommit { transaction_id, .. } if transaction_id == &key
+        ))
+        .count();
+    assert_eq!(
+        commits, 1,
+        "a replayed op with a stable id must commit exactly once"
+    );
+    let snapshots = recent
+        .iter()
+        .filter(|e| matches!(
+            &e.operation,
+            OpRecord::Snapshot { new_state, .. } if *new_state == state
+        ))
+        .count();
+    assert_eq!(snapshots, 1, "the staged record must not be double-applied");
+}
+
+/// A ref-expectation failure under `commit_and_publish` must append NO oplog
+/// record (cid 3329490978): validation (phase 3) precedes the record append
+/// (phase 4), so a record never exists for a mutation that did not publish.
+#[test]
+fn validation_failure_appends_no_record() {
+    let (_t, repo) = test_repo();
+    let existing = ChangeId::generate();
+
+    // Publish "dup" with a backing record through the chokepoint.
+    repo.commit_and_publish(
+        vec![OpRecord::ThreadCreateV2 {
+            name: "dup".to_string(),
+            state: existing,
+            manager_snapshot: None,
+        }],
+        &[RefUpdate::Thread {
+            name: ThreadName::new("dup"),
+            expected: RefExpectation::Missing,
+            new: Some(existing),
+        }],
+    )
+    .unwrap();
+
+    // A second publish whose ref expectation FAILS: `Missing`, but "dup" exists.
+    let leaked = ChangeId::generate();
+    let result = repo.commit_and_publish(
+        vec![OpRecord::Fork {
+            from: existing,
+            new_state: leaked,
+            thread: Some("dup".to_string()),
+            head: None,
+        }],
+        &[RefUpdate::Thread {
+            name: ThreadName::new("dup"),
+            expected: RefExpectation::Missing,
+            new: Some(leaked),
+        }],
+    );
+    assert!(
+        result.is_err(),
+        "a Missing expectation must fail when the thread already exists"
+    );
+
+    // The Fork record must NOT have been appended — validation precedes commit.
+    let recent = repo.oplog().recent(64).unwrap();
+    assert!(
+        !recent.iter().any(|e| matches!(
+            &e.operation,
+            OpRecord::Fork { new_state, .. } if *new_state == leaked
+        )),
+        "no oplog record may be appended when ref-expectation validation fails"
+    );
+}
+
+/// Concurrent `commit_and_publish` to the same ref (permissive `Any`
+/// expectations) must not let the record order diverge from the publish order
+/// (cid 3329490984): the record append and the ref publish happen as one unit
+/// under the refs lock, so the last-committed record for a ref is always the one
+/// whose value is published. A fresh handle (watermark seeded to the current
+/// generation) reads the RAW published canonical, which must equal the
+/// last-committed Fork record's value.
+#[test]
+fn concurrent_commit_and_publish_serializes_record_and_publish() {
+    for _ in 0..10 {
+        let temp = TempDir::new().unwrap();
+        {
+            let repo = Repository::init_default(temp.path()).unwrap();
+            let base = ChangeId::generate();
+            repo.refs().set_thread(&ThreadName::new("main"), &base).unwrap();
+        }
+        let va = ChangeId::generate();
+        let vb = ChangeId::generate();
+        let path = temp.path().to_path_buf();
+
+        std::thread::scope(|s| {
+            for v in [va, vb] {
+                let p = path.clone();
+                s.spawn(move || {
+                    let repo = Repository::open(&p).unwrap();
+                    let _ = repo.commit_and_publish(
+                        vec![OpRecord::Fork {
+                            from: v,
+                            new_state: v,
+                            thread: Some("main".to_string()),
+                            head: None,
+                        }],
+                        &[RefUpdate::Thread {
+                            name: ThreadName::new("main"),
+                            expected: RefExpectation::Any,
+                            new: Some(v),
+                        }],
+                    );
+                });
+            }
+        });
+
+        let reader = Repository::open(temp.path()).unwrap();
+        let published = reader.refs().get_thread(&ThreadName::new("main")).unwrap();
+        let last_fork = reader
+            .oplog()
+            .recent(64)
+            .unwrap()
+            .into_iter()
+            .filter(|e| matches!(
+                &e.operation,
+                OpRecord::Fork { thread: Some(t), .. } if t == "main"
+            ))
+            .max_by_key(|e| e.id)
+            .map(|e| match e.operation {
+                OpRecord::Fork { new_state, .. } => new_state,
+                _ => unreachable!(),
+            });
+
+        assert_eq!(
+            published, last_fork,
+            "the published ref must equal the last-committed record's value (no interleave)"
+        );
+    }
+}
+
+/// A crash-interrupted UPDATE to an ALREADY-EXISTING ref (cid 3329490981):
+/// `cmd_collapse` on attached "main" records the `Collapse` (phase 4) then
+/// crashes before publishing main's new value (phase 5). On recovery "main"
+/// already exists, so the prior fill-if-absent rule kept the STALE value — the
+/// committed update must now win.
+#[test]
+fn crash_replay_reconciles_update_to_existing_ref() {
+    let (temp, repo) = test_repo();
+    let base = ChangeId::generate();
+    repo.refs().set_thread(&ThreadName::new("main"), &base).unwrap();
+
+    // Phase 4 only: record a Collapse updating "main", with no phase-5 publish.
+    let result = ChangeId::generate();
+    repo.oplog().record_collapse(&[base], &result, Some("main")).unwrap();
+
+    assert_eq!(
+        repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
+        Some(result),
+        "a crash-replayed UPDATE to an existing ref must materialize the committed value"
+    );
+
+    // The read materialized the canonical too: a fresh handle reads it raw.
+    let reader = Repository::open(temp.path()).unwrap();
+    assert_eq!(
+        reader.refs().get_thread(&ThreadName::new("main")).unwrap(),
+        Some(result),
+        "the committed update must be materialized to the canonical ref"
+    );
 }

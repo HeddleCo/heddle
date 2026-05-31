@@ -118,22 +118,31 @@ impl RefManager {
     /// `update_refs_with_lock`) is reachable through this seam, never with a ref
     /// published ahead of its record. With no committer it degrades to a plain
     /// publish (bootstrap).
+    ///
+    /// **Invariant (cid 3329490978 / 3329490984): the oplog record and the ref
+    /// publish commit together under the refs lock; a record exists iff its
+    /// publish succeeded, and concurrent publishes to the same ref serialize
+    /// record-and-publish as a unit.** The refs lock is taken FIRST, the ref
+    /// expectations are validated (phase 3) BEFORE the record is appended (phase
+    /// 4), and the publish (phase 5) follows under the same lock — so a failed
+    /// expectation never leaks a record, and two concurrent callers can never
+    /// append in one order and publish in another. (For `PgRefBackend` the single
+    /// `pool.begin()…commit()` gives the same atomicity natively.)
     pub fn commit_and_publish(
         &self,
         encoded_records: &[Vec<u8>],
         ref_updates: &[RefUpdate],
         scope: Option<&str>,
     ) -> Result<()> {
-        // Phase 4 — the commit point: append every ref-carrying record first.
-        if let Some(committer) = self.committer.as_ref() {
-            committer.commit_records(encoded_records, scope)?;
-        }
-        // Phase 5 — publish the atomic ref batch as one unit (raw publish).
-        if !ref_updates.is_empty() {
-            let lock = self.lock_refs()?;
-            self.update_refs_with_lock(ref_updates, &lock)?;
-        }
-        Ok(())
+        let lock = self.lock_refs()?;
+        self.validate_commit_publish(ref_updates, &lock, || {
+            // Phase 4 — the commit point: append the ref-carrying records only
+            // after phase-3 validation has passed, under the held refs lock.
+            if let Some(committer) = self.committer.as_ref() {
+                committer.commit_records(encoded_records, scope)?;
+            }
+            Ok(())
+        })
     }
 
     /// THE read chokepoint (heddle#330 §2.2): the sole path for a **logical
@@ -175,27 +184,33 @@ impl RefManager {
     /// committed-but-unpublished — the records already exist, so this writes
     /// canonical only (never the oplog).
     ///
-    /// **Fill-if-absent (non-destructive):** only refs whose canonical value is
-    /// *missing* are materialized. In the un-migrated tree many ref writes do
-    /// not yet record an oplog entry, so a present canonical may be newer than
-    /// the fold; overwriting it would regress the ref. So we only fill genuine
-    /// gaps (the committed-but-never-published crash-replay case) and never
-    /// clobber a present canonical.
+    /// **Authoritative-apply (cid 3329490981):** a committed record past the
+    /// class watermark is authoritative over the live canonical, so a folded
+    /// value is materialized when it CREATES a missing ref *or* UPDATES a stale
+    /// present one (the crash-replayed update-to-existing case) — not
+    /// fill-if-absent, which silently dropped a committed update to an
+    /// already-existing ref. The folded set only ever holds refs touched by
+    /// commits newer than the watermark, so applying it respects the
+    /// two-watermark scoping and a ref with no recent committed record is never
+    /// rewritten; a write equal to the canonical is skipped as a no-op. (The
+    /// rare un-migrated case where an unrecorded direct write raced in *after*
+    /// the commit is the residual the writers' record-first migration closes.)
     fn materialize(&self, outcome: &super::reconcile::ReconcileOutcome) -> Result<()> {
         let mut to_publish = Vec::new();
         for update in &outcome.republish {
             match update {
-                RefUpdate::Thread {
-                    name,
-                    new: Some(_),
-                    ..
-                } if self.raw_get_thread(name)?.is_none() => to_publish.push(update.clone()),
-                RefUpdate::Marker {
-                    name,
-                    new: Some(_),
-                    ..
-                } if self.raw_get_marker(name)?.is_none() => to_publish.push(update.clone()),
-                _ => {}
+                RefUpdate::Thread { name, new, .. } => {
+                    if self.raw_get_thread(name)? != *new {
+                        to_publish.push(update.clone());
+                    }
+                }
+                RefUpdate::Marker { name, new, .. } => {
+                    if self.raw_get_marker(name)? != *new {
+                        to_publish.push(update.clone());
+                    }
+                }
+                // HEAD is not reconstructed from the oplog (see the `Fold` doc).
+                RefUpdate::Head { .. } => {}
             }
         }
         if !to_publish.is_empty() {
@@ -203,10 +218,13 @@ impl RefManager {
             self.update_refs_with_lock(&to_publish, &lock)?;
         }
         for (remote, thread, value) in &outcome.remote_updates {
-            if let Some(state) = value
-                && self.raw_get_remote_thread(remote, thread)?.is_none()
-            {
-                self.set_remote_thread_raw(remote, thread, state)?;
+            if self.raw_get_remote_thread(remote, thread)? != *value {
+                match value {
+                    Some(state) => self.set_remote_thread_raw(remote, thread, state)?,
+                    None => {
+                        self.delete_remote_thread_raw(remote, thread)?;
+                    }
+                }
             }
         }
         if let Some(state) = &outcome.undo_recovery {
@@ -215,7 +233,7 @@ impl RefManager {
                 "undo recovery",
                 UNDO_RECOVERY_HANDLE,
             )?;
-            if current.is_none() {
+            if current.as_ref() != Some(state) {
                 self.set_undo_recovery_raw(state)?;
             }
         }

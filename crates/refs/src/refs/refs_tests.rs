@@ -651,21 +651,32 @@ mod chokepoint {
         assert_eq!(calls.load(Ordering::Acquire), 0, "hot path must not reconcile");
     }
 
-    /// The lag path drives `materialize`'s fill-if-absent branches: an absent
-    /// thread + marker + remote-thread + undo-recovery are all published, a
-    /// already-present thread is left untouched, and a `None` remote update and
-    /// the watermark advance are exercised. A second read then takes the hot
-    /// path because the watermark caught up to the (unchanged) generation.
+    /// The lag path drives `materialize`'s authoritative-apply branches: an
+    /// absent thread + marker + remote-thread + undo-recovery are all published
+    /// (create), a present-but-STALE thread is overwritten with the committed
+    /// value (the cid 3329490981 update-to-existing case), a present thread whose
+    /// committed value equals the canonical is a no-op skip, and a `None` remote
+    /// update + the watermark advance are exercised. A second read then takes the
+    /// hot path because the watermark caught up to the (unchanged) generation.
     #[test]
-    fn reconciled_load_lag_path_materializes_absent_refs_only() {
+    fn reconciled_load_lag_path_materializes_committed_values() {
         let (_t, dir) = manager();
 
-        // Pre-publish a present thread so its republish is skipped (fill-if-absent
-        // must not clobber a present canonical).
+        // `present` is pre-published with the same value the fold carries ⇒ skip.
         let present_state = ChangeId::generate();
+        // `stale` is pre-published with an OLD value; the fold carries a newer
+        // committed value ⇒ it must be overwritten (authoritative-apply).
+        let stale_old = ChangeId::generate();
+        let stale_new = ChangeId::generate();
         let absent_state = ChangeId::generate();
         let marker_state = ChangeId::generate();
         let remote_state = ChangeId::generate();
+        // A present-but-stale remote thread (overwrite) + a present remote thread
+        // the fold deleted (remove) + a stale undo-recovery pointer (overwrite).
+        let remote_stale_old = ChangeId::generate();
+        let remote_stale_new = ChangeId::generate();
+        let remote_doomed = ChangeId::generate();
+        let undo_old = ChangeId::generate();
         let undo_state = ChangeId::generate();
 
         let calls = Arc::new(AtomicU64::new(0));
@@ -678,11 +689,16 @@ mod chokepoint {
                     new: Some(present_state),
                 },
                 RefUpdate::Thread {
+                    name: ThreadName::new("stale"),
+                    expected: RefExpectation::Any,
+                    new: Some(stale_new),
+                },
+                RefUpdate::Thread {
                     name: ThreadName::new("absent"),
                     expected: RefExpectation::Any,
                     new: Some(absent_state),
                 },
-                // `new: None` arm — not a fill candidate.
+                // `new: None` arm — canonical absent ⇒ no-op (nothing to delete).
                 RefUpdate::Thread {
                     name: ThreadName::new("deleted"),
                     expected: RefExpectation::Any,
@@ -696,16 +712,24 @@ mod chokepoint {
             ],
             remote_updates: vec![
                 ("origin".to_string(), ThreadName::new("rt"), Some(remote_state)),
-                // `None` value — skipped.
+                // `None` value, canonical absent — skipped.
                 ("origin".to_string(), ThreadName::new("gone"), None),
+                // Present-but-stale remote thread ⇒ overwritten with committed value.
+                ("origin".to_string(), ThreadName::new("rt_stale"), Some(remote_stale_new)),
+                // Present remote thread the fold deleted ⇒ removed.
+                ("origin".to_string(), ThreadName::new("rt_doomed"), None),
             ],
             undo_recovery: Some(undo_state),
             calls: Arc::clone(&calls),
         });
         let refs = RefManager::new(&dir).with_reconciler(Arc::clone(&reconciler) as Arc<dyn RefReconciler>);
         refs.init().unwrap();
-        // Publish the present thread AFTER injection (raw write, bypasses chokepoint).
+        // Publish present + stale AFTER injection (raw writes, bypass chokepoint).
         refs.set_thread(&ThreadName::new("present"), &present_state).unwrap();
+        refs.set_thread(&ThreadName::new("stale"), &stale_old).unwrap();
+        refs.set_remote_thread("origin", &ThreadName::new("rt_stale"), &remote_stale_old).unwrap();
+        refs.set_remote_thread("origin", &ThreadName::new("rt_doomed"), &remote_doomed).unwrap();
+        refs.set_undo_recovery(&undo_old).unwrap();
 
         // Bump generation so the next read lags ⇒ reconcile + materialize run.
         reconciler.generation.store(2, Ordering::Release);
@@ -714,16 +738,34 @@ mod chokepoint {
         assert_eq!(got, Some(absent_state), "reconciled value is surfaced");
         assert_eq!(calls.load(Ordering::Acquire), 1, "lag path reconciles once");
 
-        // The absent refs were materialized; the present one is unchanged.
+        // The absent refs were materialized; the present (same-value) one is a
+        // no-op; the stale present one is overwritten with the committed value.
         assert_eq!(
             refs.get_thread(&ThreadName::new("present")).unwrap(),
             Some(present_state)
+        );
+        assert_eq!(
+            refs.get_thread(&ThreadName::new("stale")).unwrap(),
+            Some(stale_new),
+            "a stale present ref must be overwritten with the committed value"
         );
         assert_eq!(refs.get_marker(&MarkerName::new("mk")).unwrap(), Some(marker_state));
         assert_eq!(
             refs.get_remote_thread("origin", &ThreadName::new("rt")).unwrap(),
             Some(remote_state)
         );
+        // The stale remote thread is overwritten; the doomed one is removed.
+        assert_eq!(
+            refs.get_remote_thread("origin", &ThreadName::new("rt_stale")).unwrap(),
+            Some(remote_stale_new),
+            "a stale present remote thread must be overwritten with the committed value"
+        );
+        assert_eq!(
+            refs.get_remote_thread("origin", &ThreadName::new("rt_doomed")).unwrap(),
+            None,
+            "a committed delete must remove a present remote thread"
+        );
+        // The stale undo-recovery pointer is overwritten with the committed value.
         assert_eq!(refs.get_undo_recovery().unwrap(), Some(undo_state));
 
         // Second read: watermark now == generation (2) ⇒ hot path, no new reconcile.
