@@ -8,6 +8,7 @@ use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
 
+use super::repository_snapshot::{with_snapshot_fault, SnapshotFault};
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
     ThreadFreshness, ThreadManager, WorktreeIndex,
@@ -191,20 +192,11 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
 
     fs::write(temp_dir.path().join("tracked.txt"), "pre-commit crash").unwrap();
-    // SAFETY: this test owns the process-local fault-injection env var for the
-    // duration of the catch_unwind block and clears it before continuing.
-    unsafe {
-        std::env::set_var(
-            "HEDDLE_FAULT_INJECT",
-            "snapshot_after_stage_before_atomic_commit",
-        );
-    }
-    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = repo.snapshot(Some("must not commit".to_string()), None);
-    }));
-    unsafe {
-        std::env::remove_var("HEDDLE_FAULT_INJECT");
-    }
+    let crashed = with_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot(Some("must not commit".to_string()), None);
+        }))
+    });
     assert!(
         crashed.is_err(),
         "the pre-commit checkpoint must crash the in-flight capture"
@@ -216,27 +208,46 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     );
 
     fs::write(temp_dir.path().join("tracked.txt"), "committed once").unwrap();
+    let committed_crash =
+        with_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = repo.snapshot(Some("committed exactly once".to_string()), None);
+            }))
+        });
+    assert!(
+        committed_crash.is_err(),
+        "the post-commit checkpoint must crash after the oplog append"
+    );
     let captured = repo
         .snapshot(Some("committed exactly once".to_string()), None)
         .unwrap();
     let recent = repo.oplog().recent(16).unwrap();
-    let snapshot_count = recent
+    let snapshot_batch = recent
         .iter()
-        .filter(|entry| {
+        .find(|entry| {
             matches!(
                 entry.operation,
                 OpRecord::Snapshot { new_state, .. } if new_state == captured.change_id
             )
         })
+        .map(|entry| entry.batch_id)
+        .expect("capture must append a snapshot record");
+    let batch_entries = recent
+        .iter()
+        .filter(|entry| entry.batch_id == snapshot_batch)
+        .collect::<Vec<_>>();
+    let snapshot_count = batch_entries
+        .iter()
+        .filter(|entry| matches!(entry.operation, OpRecord::Snapshot { .. }))
         .count();
-    let transaction_count = recent
+    let transaction_count = batch_entries
         .iter()
         .filter(|entry| matches!(entry.operation, OpRecord::TransactionCommit { .. }))
         .count();
-    assert_eq!(snapshot_count, 1, "capture must append one snapshot record");
+    assert_eq!(snapshot_count, 1, "capture batch must contain one snapshot record");
     assert_eq!(
         transaction_count, 1,
-        "capture must commit through AtomicMutation with one transaction marker"
+        "capture batch must contain one transaction marker"
     );
 }
 
