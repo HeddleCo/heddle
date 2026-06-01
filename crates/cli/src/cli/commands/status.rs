@@ -12,9 +12,9 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use objects::worktree::WorktreeStatus;
 use repo::{
-    AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus, Thread,
-    ThreadFreshness, ThreadImpactCategory, ThreadMode, ThreadState, WorktreeCompareProfile,
-    describe_thread_advice_with_initial, is_synthetic_root,
+    AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryCapability,
+    RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory, ThreadMode,
+    ThreadState, WorktreeCompareProfile, describe_thread_advice_with_initial, is_synthetic_root,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
@@ -224,6 +224,28 @@ struct PlainGitStatusOutput {
     changed_path_count: usize,
     changes: ChangesInfo,
     git_index: Option<GitIndexPlan>,
+}
+
+/// Recommend the one-command first run when a native Heddle repository
+/// has been initialized but has no user-visible history yet (the log
+/// shows only the filtered synthetic root) and the worktree is clean —
+/// i.e. there is genuinely nothing to act on yet. A dirty worktree
+/// already has its own advice (`heddle commit`), and Git-overlay repos
+/// have their own onboarding (import/adopt), so both are left alone.
+fn quickstart_init_recommendation(
+    repo: &Repository,
+    current_state: Option<&objects::object::State>,
+    worktree_clean: bool,
+) -> Option<String> {
+    if !worktree_clean || repo.capability() != RepositoryCapability::NativeHeddle {
+        return None;
+    }
+    let empty_log = current_state.map(is_synthetic_root).unwrap_or(true);
+    // The repo already has `.heddle/` (it has been init'd to reach this
+    // branch), so a bare `heddle init --quickstart` hits the confirmation
+    // gate and is refused non-interactively. Recommend the runnable form —
+    // `--yes` clears the gate — so an agent/script can run it verbatim.
+    empty_log.then(|| "heddle init --quickstart --yes".to_string())
 }
 
 fn changes_from_status(status: &WorktreeStatus) -> ChangesInfo {
@@ -486,6 +508,12 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         } else {
             trust.recommended_action.clone()
         };
+        let worktree_clean = changes.modified.is_empty()
+            && changes.added.is_empty()
+            && changes.deleted.is_empty();
+        let recommended_action =
+            quickstart_init_recommendation(&repo, current_state.as_ref(), worktree_clean)
+                .unwrap_or(recommended_action);
         debug!(
             repo_open_ms,
             body_ms = body_start.elapsed().as_millis(),
@@ -929,6 +957,12 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     {
         override_trust_recommended_action(&mut trust, recommended_action.clone());
     }
+    // A freshly-`init`'d native repo whose log is still empty (only the
+    // synthetic root) and whose worktree is clean has nothing to act on
+    // yet — point the user at the one-command first run.
+    let recommended_action =
+        quickstart_init_recommendation(&repo, current_state.as_ref(), !has_changes)
+            .unwrap_or(recommended_action);
     let recommended_action_fields = ActionFields::from_action(&recommended_action);
     let thread_health = if trust.verified {
         advice

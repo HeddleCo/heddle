@@ -141,51 +141,84 @@ pub fn maybe_prompt_init_install(
     repo: &Repository,
     args: &crate::cli::InitArgs,
 ) -> Result<()> {
-    if should_output_json(cli, Some(repo.config()))
-        || cli.quiet
-        || !is_tty()
-        || args.no_harness_install
-    {
-        if let Some(selection) = &args.install_harnesses {
-            let harnesses = resolve_selection(repo, selection)?;
-            if !harnesses.is_empty() {
-                install_selected(
-                    cli,
-                    repo,
-                    &harnesses,
-                    IntegrationScope::parse(&args.harness_install_scope)?,
-                    args.harness_install_force,
-                    PathMode::Relative,
-                )?;
+    let json = should_output_json(cli, Some(repo.config()));
+    let harnesses = prompt_init_install_decision(cli, repo.root(), args, json)?;
+    perform_init_install(cli, repo, args, &harnesses)
+}
+
+/// Pre-write phase of the harness-install prompt: detect harnesses and
+/// (interactively) ask the user whether to connect them, WITHOUT writing
+/// anything. Returns the harnesses to install once writes are safe.
+///
+/// `--quickstart` calls this before any filesystem mutation so a Ctrl-C
+/// at the harness prompt leaves the directory untouched — the install
+/// itself is deferred to [`perform_init_install`] after the writes land.
+/// Only the directory `root` is needed (PATH lookups + `.claude`/
+/// `.opencode` probes), so it works before the repository exists on disk.
+pub fn prompt_init_install_decision(
+    cli: &Cli,
+    root: &Path,
+    args: &crate::cli::InitArgs,
+    json: bool,
+) -> Result<Vec<String>> {
+    let harnesses = if json || cli.quiet || !is_tty() || args.no_harness_install {
+        // Non-interactive: only an explicit `--install-harnesses`
+        // selection installs anything; detection never auto-installs.
+        match &args.install_harnesses {
+            Some(selection) => resolve_selection_for_root(root, selection)?,
+            None => Vec::new(),
+        }
+    } else {
+        let harnesses = if let Some(selection) = &args.install_harnesses {
+            resolve_selection_for_root(root, selection)?
+        } else {
+            detect_harnesses_for_root(root)
+        };
+        if harnesses.is_empty() {
+            Vec::new()
+        } else {
+            println!(
+                "Connect Heddle to detected harnesses for ambient actor tracking? [{}] [y/N]",
+                harnesses.join(", ")
+            );
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                harnesses
+            } else {
+                Vec::new()
             }
         }
-        return Ok(());
-    }
-
-    let detected = detect_harnesses(repo)?;
-    let harnesses = if let Some(selection) = &args.install_harnesses {
-        resolve_selection(repo, selection)?
-    } else {
-        detected
     };
+
+    // Validate the install plan with the SAME predicates the install path
+    // uses, in this pre-write decision phase, so an invalid
+    // `--harness-install-scope` OR a harness that rejects the chosen scope
+    // (e.g. `codex` requires `--scope user`) fails before any repo is created
+    // instead of after — keeping the quickstart fail-before-writes contract.
+    // Only matters when something will actually be installed.
+    if !harnesses.is_empty() {
+        validate_install_plan(&harnesses, &args.harness_install_scope)?;
+    }
+    Ok(harnesses)
+}
+
+/// Post-write phase: install the harnesses chosen by
+/// [`prompt_init_install_decision`]. No prompting happens here, so it is
+/// safe to run after the repository has been created.
+pub fn perform_init_install(
+    cli: &Cli,
+    repo: &Repository,
+    args: &crate::cli::InitArgs,
+    harnesses: &[String],
+) -> Result<()> {
     if harnesses.is_empty() {
         return Ok(());
     }
-
-    println!(
-        "Connect Heddle to detected harnesses for ambient actor tracking? [{}] [y/N]",
-        harnesses.join(", ")
-    );
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-        return Ok(());
-    }
-
     install_selected(
         cli,
         repo,
-        &harnesses,
+        harnesses,
         IntegrationScope::parse(&args.harness_install_scope)?,
         args.harness_install_force,
         PathMode::Relative,
@@ -517,6 +550,14 @@ fn integration_status(
 }
 
 fn detect_harnesses(repo: &Repository) -> Result<Vec<String>> {
+    Ok(detect_harnesses_for_root(repo.root()))
+}
+
+/// Path-based harness detection: PATH lookups for the harness binaries
+/// plus `.claude`/`.opencode` directory probes under `root`. Works
+/// before the repository exists, which the pre-write quickstart prompt
+/// relies on.
+fn detect_harnesses_for_root(root: &Path) -> Vec<String> {
     let mut found = BTreeSet::new();
     for harness in ["codex", "claude", "opencode"] {
         if command_on_path(harness) {
@@ -527,13 +568,13 @@ fn detect_harnesses(repo: &Repository) -> Result<Vec<String>> {
             found.insert(normalized.to_string());
         }
     }
-    if repo.root().join(".claude").exists() {
+    if root.join(".claude").exists() {
         found.insert("claude-code".to_string());
     }
-    if repo.root().join(".opencode").exists() {
+    if root.join(".opencode").exists() {
         found.insert("opencode".to_string());
     }
-    Ok(found.into_iter().collect())
+    found.into_iter().collect()
 }
 
 fn command_on_path(bin: &str) -> bool {
@@ -544,10 +585,10 @@ fn command_on_path(bin: &str) -> bool {
         .any(|dir| dir.join(bin).exists())
 }
 
-fn resolve_selection(repo: &Repository, selection: &str) -> Result<Vec<String>> {
+fn resolve_selection_for_root(root: &Path, selection: &str) -> Result<Vec<String>> {
     match selection {
         "none" => Ok(Vec::new()),
-        "auto" => detect_harnesses(repo),
+        "auto" => Ok(detect_harnesses_for_root(root)),
         value => normalize_harnesses(value.split(',').map(|item| item.to_string()).collect()),
     }
 }
@@ -588,6 +629,41 @@ fn target_harnesses(manifest: &IntegrationManifest, requested: Vec<String>) -> R
     normalize_harnesses(requested)
 }
 
+/// Single source of truth for which install scopes a harness accepts. Both the
+/// pre-write preflight ([`validate_install_plan`], so a scope a harness will
+/// reject fails BEFORE any repository is created) and the actual install path
+/// ([`install_codex`] et al.) call this, so the two can never disagree — a
+/// future scope-restricted harness adds its rule here and is automatically
+/// enforced in the preflight. This closes the class behind cid 3329409818: a
+/// `--quickstart --install-harnesses codex` with the default `--scope repo`
+/// must fail in the preflight, not after `.heddle/`/capture/checkpoint exist.
+fn validate_harness_scope(harness: &str, scope: &IntegrationScope) -> Result<()> {
+    match harness {
+        "codex" if *scope != IntegrationScope::User => {
+            Err(anyhow!(RecoveryAdvice::invalid_usage(
+                "integration_codex_scope_invalid",
+                "codex integration currently requires --scope user",
+                "Rerun the install with `--scope user`.",
+                "heddle integration install codex --scope user",
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Pre-write validation of a harness-install plan: the scope string parses AND
+/// every selected harness accepts that scope. The quickstart preflight runs
+/// this before any filesystem write so a harness/scope combination that the
+/// install would reject (e.g. `codex` + `repo`) fails before a repo is created,
+/// not midway through `install_selected` after `.heddle/` already exists.
+fn validate_install_plan(harnesses: &[String], scope_value: &str) -> Result<()> {
+    let scope = IntegrationScope::parse(scope_value)?;
+    for harness in harnesses {
+        validate_harness_scope(harness, &scope)?;
+    }
+    Ok(())
+}
+
 fn install_codex(
     repo: &Repository,
     manifest: &mut IntegrationManifest,
@@ -595,14 +671,7 @@ fn install_codex(
     force: bool,
     path_mode: PathMode,
 ) -> Result<()> {
-    if *scope != IntegrationScope::User {
-        return Err(anyhow!(RecoveryAdvice::invalid_usage(
-            "integration_codex_scope_invalid",
-            "codex integration currently requires --scope user",
-            "Rerun the install with `--scope user`.",
-            "heddle integration install codex --scope user",
-        )));
-    }
+    validate_harness_scope("codex", scope)?;
     let home = env::var("HOME").context("HOME is required for codex integration install")?;
     let config_path = PathBuf::from(home).join(".codex").join("config.toml");
     let existing = if config_path.exists() {

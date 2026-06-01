@@ -81,6 +81,26 @@ Prerequisites: Rust 1.85+, `cargo`, `rustfmt`, `clippy`.
 
 ## Quickstart
 
+New to Heddle? One command takes a fresh directory to a first
+checkpointed change:
+
+```bash
+heddle init --quickstart --principal-name "Ada Lovelace" --principal-email ada@example.com
+```
+
+This initializes the repository, records your identity, starts a
+`quickstart` thread, makes one capture, and — in a Git-overlay repo —
+one matching Git checkpoint. Run it interactively without the
+`--principal-*` flags and Heddle prompts for your name and email; pass
+`--quickstart-thread <name>` to name the thread something other than
+`quickstart`. It finishes by pointing you at `heddle log` so you can see
+the change it just recorded. (`heddle status` on a freshly-initialized
+repo with no history suggests this command too.)
+
+### The verb-by-verb tour
+
+If you would rather drive each step yourself:
+
 ```bash
 # In an ordinary Git repo: inspect, adopt, and verify
 heddle status
