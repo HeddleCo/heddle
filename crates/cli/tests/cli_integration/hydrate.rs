@@ -124,6 +124,99 @@ fn hydrate_preserves_gitignore_only_ignores_in_isolated_checkout() {
 }
 
 #[test]
+fn hydrate_does_not_dirty_a_tracked_heddleignore() {
+    // heddle#356 cid 3333881577: a git-overlay repo that tracks a root
+    // `.heddleignore` (covering unrelated paths) while ignoring deps via
+    // `.gitignore`. The isolated checkout materializes that TRACKED
+    // `.heddleignore`, so `existing` is `Some`. hydrate must record the
+    // dep-ignore rule in the worktree-local, never-captured exclude file —
+    // NOT by appending to the tracked `.heddleignore` — so a successful
+    // `start --hydrate` leaves the checkout's tracked tree clean.
+    let temp = TempDir::new().unwrap();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .status()
+            .expect("git should run");
+        assert!(status.success(), "git {args:?} should succeed");
+    };
+    git(&["init"]);
+    git(&["config", "user.name", "Heddle Test"]);
+    git(&["config", "user.email", "heddle@example.com"]);
+    git(&["checkout", "-b", "main"]);
+
+    // Deps ignored via `.gitignore`; a TRACKED `.heddleignore` with an
+    // unrelated rule that does NOT cover the deps.
+    std::fs::write(temp.path().join(".gitignore"), "node_modules/\n").unwrap();
+    std::fs::write(temp.path().join(".heddleignore"), "*.log\n").unwrap();
+    std::fs::write(temp.path().join("index.ts"), "export const x = 1;\n").unwrap();
+    let node_modules = temp.path().join("node_modules");
+    std::fs::create_dir_all(node_modules.join("left-pad")).unwrap();
+    std::fs::write(
+        node_modules.join("left-pad").join("index.js"),
+        "module.exports = () => {};\n",
+    )
+    .unwrap();
+
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
+
+    let checkout_root = TempDir::new().unwrap();
+    let thread_path = checkout_root.path().join("iso");
+    heddle(
+        &[
+            "start",
+            "iso",
+            "--path",
+            thread_path.to_str().unwrap(),
+            "--hydrate",
+        ],
+        Some(temp.path()),
+    )
+    .expect("start --hydrate should succeed");
+
+    // node_modules is hydrated as a symlink...
+    assert!(
+        std::fs::symlink_metadata(thread_path.join("node_modules"))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "node_modules should be hydrated as a symlink"
+    );
+
+    // ...and the TRACKED `.heddleignore` is byte-for-byte UNCHANGED (pre-fix
+    // hydrate appended `node_modules/` to it, dirtying the tracked tree).
+    let checkout_ignore = std::fs::read_to_string(thread_path.join(".heddleignore")).unwrap();
+    assert_eq!(
+        checkout_ignore, "*.log\n",
+        "hydrate must not modify the tracked .heddleignore"
+    );
+
+    // The dep-ignore rule landed in the worktree-local, never-captured exclude.
+    let exclude = std::fs::read_to_string(
+        thread_path.join(".heddle").join("info").join("exclude"),
+    )
+    .expect("hydrate should write the worktree-local exclude");
+    assert!(
+        exclude.contains("node_modules"),
+        "the dep-ignore rule must live in the worktree-local exclude; got:\n{exclude}"
+    );
+
+    // `status` from the checkout is clean: the dep stays ignored, and the
+    // tracked `.heddleignore` is not reported as modified.
+    let status = heddle(&["status"], Some(&thread_path))
+        .expect("status should run from the hydrated checkout");
+    assert!(
+        !status.contains("node_modules"),
+        "hydrated node_modules must stay ignored in the checkout; got:\n{status}"
+    );
+
+    // Capture must not choke on the absolute, out-of-checkout link target.
+    heddle(&["capture", "-m", "iso work"], Some(&thread_path))
+        .expect("capture in the hydrated checkout must succeed");
+}
+
+#[test]
 fn hydrate_symlinks_ignored_dep_dirs_into_checkout() {
     let temp = TempDir::new().unwrap();
     init_deps_in_ignored_dir_project(temp.path());

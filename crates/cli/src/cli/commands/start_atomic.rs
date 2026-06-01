@@ -45,7 +45,7 @@ use objects::object::{ChangeId, ThreadName};
 use oplog::OpRecord;
 use refs::RefExpectation;
 use repo::{
-    Thread, ThreadManager, ThreadMode,
+    Repository, Thread, ThreadManager, ThreadMode,
     atomic::{AtomicMutation, StagedCommit, Tx},
 };
 
@@ -163,14 +163,91 @@ fn rewind_checkout(abs_path: &Path, target_dir_created: bool) -> HeddleResult<()
     }
 }
 
+/// Inverse of the target-dir creation step: remove the worktree directory ONLY
+/// when this invocation created it (restoring "didn't exist"). A pre-existing
+/// user-supplied `--path` dir is never removed here. Tolerant of an
+/// already-absent dir so it composes after the checkout rewind (which removes a
+/// self-created dir first; this then no-ops on `NotFound`).
+fn remove_self_created_dir(abs_path: &Path, created: bool) -> HeddleResult<()> {
+    if !created {
+        return Ok(());
+    }
+    match std::fs::remove_dir_all(abs_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(HeddleError::from(err)),
+    }
+}
+
+/// CAS-guarded rollback of the thread-ref forward (heddle#356 cid 3333881583).
+///
+/// The forward set the ref to `set_value` (the start's base state). Undo it
+/// ONLY if the ref STILL points there: restore the prior value, or delete a ref
+/// this start created. If a concurrent process advanced/changed the ref after
+/// our forward (a concurrent start or crash-recovery), leave their write in
+/// place — an unconditional reset/delete would clobber it.
+fn cas_guarded_ref_rollback(
+    repo: &Repository,
+    name: &ThreadName,
+    set_value: ChangeId,
+    restore_to: Option<ChangeId>,
+) -> HeddleResult<()> {
+    // Compare-before-write: bail without touching the ref if it no longer holds
+    // the value our forward set.
+    if repo.refs().get_thread(name)? != Some(set_value) {
+        return Ok(());
+    }
+    let result = match restore_to {
+        Some(prior) => repo
+            .refs()
+            .set_thread_cas(name, RefExpectation::Value(set_value), &prior),
+        None => repo
+            .refs()
+            .delete_thread_cas(name, RefExpectation::Value(set_value)),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        // Lost the race between the read above and this CAS: a concurrent writer
+        // advanced the ref. The expectation guard means we wrote nothing — leave
+        // their advance intact (the whole point of the guard).
+        Err(HeddleError::Conflict(_)) => Ok(()),
+        Err(other) => Err(other),
+    }
+}
+
+/// Restore the thread manifest sidecar to its captured pre-start snapshot:
+/// rewrite the prior `manifest.toml` bytes if one existed, or remove the
+/// directory this start created. Restoring (not blind-deleting) preserves an
+/// OLD manifest left by a prior materialization of a reused thread ref
+/// (heddle#356 cid 3333881561).
+fn restore_thread_manifest(
+    heddle_dir: &Path,
+    thread: &str,
+    prior: Option<Vec<u8>>,
+) -> HeddleResult<()> {
+    match prior {
+        Some(bytes) => {
+            let path = repo::thread_manifest::manifest_path(heddle_dir, thread);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(HeddleError::from)?;
+            }
+            std::fs::write(&path, bytes).map_err(HeddleError::from)
+        }
+        None => repo::thread_manifest::remove_thread_manifest_dir(heddle_dir, thread)
+            .map(|_| ())
+            .map_err(HeddleError::from),
+    }
+}
+
 /// A fully all-or-nothing `thread start` (the bytes-on-disk + virtualized
 /// write-path). Holds owned inputs the surrounding `start_thread` precomputed
 /// from reads; `apply` performs the staged writes and registers each effect's
 /// inverse. The executor reaches the single commit point exactly once.
 pub(crate) struct StartThread {
-    /// Stable idempotency key (derived from scope + name + oplog generation in
-    /// `start_thread`, like undo/redo) — identical across retries of the same
-    /// logical start so a crash-retry dedups instead of double-applying.
+    /// Retry-stable idempotency key (derived in `start_thread` from scope +
+    /// name + base state — NOT the advancing oplog head) — identical across
+    /// retries of the same logical start so a crash-retry dedups instead of
+    /// double-applying (heddle#356 cid 3333881568).
     pub transaction_id: String,
     /// The thread name (ref name + record key).
     pub name: String,
@@ -199,6 +276,27 @@ pub(crate) struct StartThread {
 }
 
 impl StartThread {
+    /// Create the materialization target directory as the FIRST transaction
+    /// step, so it lands on the rewind ledger and a self-created dir is removed
+    /// on any later failure. The command resolves + validates the target before
+    /// `execute` but defers the actual `create_dir_all` to here — otherwise a
+    /// failure in the remaining pre-transaction work would orphan a dir created
+    /// before the executor had a ledger (heddle#356 cid 3333881552).
+    ///
+    /// The inverse removes the directory ONLY when this invocation created it; a
+    /// user-supplied pre-existing `--path` dir is preserved (its materialized
+    /// contents are cleared by the checkout rewind, which runs first).
+    fn stage_target_dir(&self, tx: &mut Tx<'_>) -> HeddleResult<()> {
+        let abs = self.abs_path.clone();
+        let rewind_abs = self.abs_path.clone();
+        let created = self.target_dir_created;
+        tx.step_nonatomic(
+            move || Ok(created),
+            move |created| remove_self_created_dir(&rewind_abs, created),
+            move || std::fs::create_dir_all(&abs).map_err(HeddleError::from),
+        )
+    }
+
     /// Stage the thread-ref write (atomic, forward-first), pushing the staged
     /// `ThreadCreateV2` commit record for a brand-new thread.
     fn stage_ref(&self, tx: &mut Tx<'_>, oplog: &mut Vec<OpRecord>) -> HeddleResult<()> {
@@ -210,7 +308,7 @@ impl StartThread {
                 let inv_name = ThreadName::new(&self.name);
                 tx.step(
                     move || repo.refs().set_thread_cas(&fwd_name, RefExpectation::Value(existing), &base_state),
-                    move || repo.refs().set_thread(&inv_name, &existing),
+                    move || cas_guarded_ref_rollback(repo, &inv_name, base_state, Some(existing)),
                 )?;
             }
             None => {
@@ -218,7 +316,7 @@ impl StartThread {
                 let inv_name = ThreadName::new(&self.name);
                 tx.step(
                     move || repo.refs().set_thread_cas(&fwd_name, RefExpectation::Missing, &base_state),
-                    move || repo.refs().delete_thread(&inv_name).map(|_| ()),
+                    move || cas_guarded_ref_rollback(repo, &inv_name, base_state, None),
                 )?;
                 // The domain commit record. `manager_snapshot = None` matches the
                 // pre-migration `cmd_start` (the record is written below, so
@@ -267,13 +365,18 @@ impl StartThread {
         let base_state = self.base_state;
         let fwd_name = self.name.clone();
         let inv_name = self.name.clone();
+        let cap_name = self.name.clone();
+        // Capture the prior manifest bytes (or absence) so the inverse restores
+        // it to its pre-start snapshot. A re-start that reuses an existing
+        // thread ref may have an OLD materialized manifest under
+        // `.heddle/threads/<name>`; blind-deleting it on rollback would lose the
+        // prior manifest (heddle#356 cid 3333881561).
         tx.step_nonatomic(
-            || Ok(()),
-            move |()| {
-                repo::thread_manifest::remove_thread_manifest_dir(repo.heddle_dir(), &inv_name)
-                    .map(|_| ())
-                    .map_err(HeddleError::from)
+            move || {
+                let path = repo::thread_manifest::manifest_path(repo.heddle_dir(), &cap_name);
+                Ok(std::fs::read(&path).ok())
             },
+            move |prior| restore_thread_manifest(repo.heddle_dir(), &inv_name, prior),
             move || {
                 repo.record_thread_manifest(&fwd_name, &base_state, &abs)
                     .map(|_| ())
@@ -338,15 +441,18 @@ impl StartThread {
             )?;
             linked.push(link_name);
         }
-        // Preserve the hydrated deps' ignore rule in the checkout's native
-        // `.heddleignore` (capture-restore so a later failure restores it).
+        // Preserve the hydrated deps' ignore rule in the checkout's
+        // worktree-local, never-captured exclude file (capture-restore so a
+        // later failure restores it). Writing to the exclude file — not the
+        // possibly-tracked `.heddleignore` — keeps a successful `start
+        // --hydrate` from dirtying tracked state (heddle#356 cid 3333881577).
         if !linked.is_empty() {
-            let ignore_path = self.abs_path.join(".heddleignore");
-            let restore_path = ignore_path.clone();
+            let exclude_path = hydrate::hydrate_exclude_path(&self.abs_path);
+            let restore_path = exclude_path.clone();
             let abs = self.abs_path.clone();
             let linked_fwd = linked.clone();
             tx.step_nonatomic(
-                move || Ok(std::fs::read(&ignore_path).ok()),
+                move || Ok(std::fs::read(&exclude_path).ok()),
                 move |prior| restore_ignore_file(&restore_path, prior),
                 move || hydrate::preserve_hydrated_ignores(&abs, &linked_fwd).map_err(apply_error),
             )?;
@@ -406,6 +512,10 @@ impl AtomicMutation for StartThread {
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<Vec<String>>> {
         let mut oplog: Vec<OpRecord> = Vec::new();
 
+        // 0. Create the target dir inside the transaction (first, so its removal
+        //    inverse runs last and a self-created dir never leaks).
+        self.stage_target_dir(tx)?;
+
         // 1. Thread ref (+ staged ThreadCreateV2 for a brand-new thread).
         self.stage_ref(tx, &mut oplog)?;
 
@@ -443,8 +553,8 @@ impl AtomicMutation for StartThread {
     }
 }
 
-/// Restore the checkout's `.heddleignore` to its captured pre-hydrate state:
-/// rewrite the prior bytes, or remove the file we created.
+/// Restore the checkout's hydrate exclude file to its captured pre-hydrate
+/// state: rewrite the prior bytes, or remove the file we created.
 fn restore_ignore_file(path: &Path, prior: Option<Vec<u8>>) -> HeddleResult<()> {
     match prior {
         Some(bytes) => std::fs::write(path, bytes).map_err(HeddleError::from),
@@ -477,7 +587,8 @@ fn symlink_unsupported_error(link: &str) -> HeddleError {
 
 #[cfg(test)]
 mod tests {
-    use super::super::thread::start_thread;
+    use super::super::thread::{start_thread, start_transaction_id};
+    use super::super::worktree_cmd::helpers::plan_worktree_target;
     use super::*;
     use crate::cli::{ThreadStartArgs, WorkspaceModeArg};
     use repo::Repository;
@@ -614,5 +725,149 @@ mod tests {
         // The origin's dep dirs are untouched (we unlink, never follow).
         assert!(temp.path().join("dep_a").is_dir());
         assert!(temp.path().join("dep_b").is_dir());
+    }
+
+    // ---- heddle#356 r2 fixes ----
+
+    /// cid 3333881552: the target dir must be created INSIDE the transaction.
+    /// `plan_worktree_target` resolves + validates but defers creation, so a
+    /// failure in the remaining pre-transaction work can't orphan a directory.
+    #[test]
+    fn plan_worktree_target_defers_dir_creation() {
+        let (temp, repo, _state) = repo_with_state(&[]);
+        let target = temp.path().join("iso-deferred");
+        let prepared = plan_worktree_target(&repo, &target).unwrap();
+        assert!(
+            prepared.target_dir_created,
+            "a non-existent target is flagged as one this start will create"
+        );
+        assert!(
+            std::fs::symlink_metadata(&target).is_err(),
+            "plan must NOT create the target dir — creation is deferred into the \
+             transaction so a pre-execute failure can't orphan it"
+        );
+    }
+
+    /// cid 3333881568: the transaction key must not fold in the live oplog head,
+    /// which advances when the commit marker appends. A re-derivation after an
+    /// unrelated oplog advance must yield the identical key.
+    #[test]
+    fn start_transaction_id_is_stable_across_oplog_advance() {
+        let (temp, repo, state) = repo_with_state(&[]);
+        let scope = repo.op_scope();
+        let id1 = start_transaction_id(&scope, "iso", &state);
+        // Advance the oplog head with an unrelated capture.
+        std::fs::write(temp.path().join("b.txt"), "b").unwrap();
+        repo.snapshot(Some("s2".to_string()), None).unwrap();
+        let id2 = start_transaction_id(&scope, "iso", &state);
+        assert_eq!(
+            id1, id2,
+            "the start transaction key must be independent of the advancing oplog head"
+        );
+    }
+
+    /// cid 3333881568: simulate a post-commit retry. After a start commits, a
+    /// retry re-derives the SAME key (via the same retry-stable derivation), so
+    /// the executor's `transaction_id` dedup makes it exact-once instead of
+    /// re-applying. Pre-fix the committed key folded in the oplog head (which
+    /// advanced at commit), so the re-derived key missed the committed batch.
+    #[test]
+    fn post_commit_retry_rederives_the_committed_key() {
+        let (temp, repo, state) = repo_with_state(&[]);
+        let checkout = temp.path().join("iso");
+        let scope = repo.op_scope();
+        let id = start_transaction_id(&scope, "iso", &state);
+        assert!(
+            repo.oplog().committed_batch_records(&id).unwrap().is_empty(),
+            "no transaction should be committed under the start key before the start runs"
+        );
+        start_thread(&repo, solid_args("iso", &checkout, &state, false))
+            .expect("start should succeed");
+        assert!(
+            !repo.oplog().committed_batch_records(&id).unwrap().is_empty(),
+            "a post-commit retry must re-derive the committed transaction key so the \
+             executor dedups it instead of re-applying the already-committed start"
+        );
+    }
+
+    /// cid 3333881561: the manifest rollback must restore the prior manifest
+    /// snapshot (a stale manifest from a reused thread ref), not blind-delete.
+    #[test]
+    fn restore_thread_manifest_restores_prior_and_removes_when_absent() {
+        let temp = TempDir::new().unwrap();
+        let heddle_dir = temp.path();
+
+        // Prior = Some: an OLD manifest existed. The forward overwrote it; the
+        // inverse must restore the OLD bytes, not the forward's, and not delete.
+        let path = repo::thread_manifest::manifest_path(heddle_dir, "foo");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"OLD").unwrap();
+        let prior = std::fs::read(&path).ok();
+        std::fs::write(&path, b"NEW").unwrap();
+        restore_thread_manifest(heddle_dir, "foo", prior).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"OLD",
+            "rollback must restore the prior manifest snapshot, not delete it"
+        );
+
+        // Prior = None: no manifest existed. The inverse removes what we created.
+        let path2 = repo::thread_manifest::manifest_path(heddle_dir, "bar");
+        std::fs::create_dir_all(path2.parent().unwrap()).unwrap();
+        std::fs::write(&path2, b"NEW").unwrap();
+        restore_thread_manifest(heddle_dir, "bar", None).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&path2).is_err(),
+            "rollback of a freshly-created manifest must remove it"
+        );
+    }
+
+    /// cid 3333881583: the thread-ref rollback is CAS-guarded — it must NOT
+    /// clobber a ref a concurrent process advanced past this transaction's
+    /// forward value, but must still undo a ref that still holds it.
+    #[test]
+    fn cas_guarded_ref_rollback_does_not_clobber_concurrent_advance() {
+        let (temp, repo, base) = repo_with_state(&[]);
+        let _ = &temp;
+        let name = ThreadName::new("foo");
+        let advanced = ChangeId::generate();
+        let prior = ChangeId::generate();
+
+        // Brand-new case (restore_to = None → would otherwise delete). A
+        // concurrent writer advanced the ref past our forward value → leave it.
+        repo.refs().set_thread(&name, &advanced).unwrap();
+        cas_guarded_ref_rollback(&repo, &name, base, None).unwrap();
+        assert_eq!(
+            repo.refs().get_thread(&name).unwrap(),
+            Some(advanced),
+            "rollback must not delete a ref a concurrent process advanced"
+        );
+
+        // Brand-new case, ref still holds our forward value → delete it.
+        repo.refs().set_thread(&name, &base).unwrap();
+        cas_guarded_ref_rollback(&repo, &name, base, None).unwrap();
+        assert_eq!(
+            repo.refs().get_thread(&name).unwrap(),
+            None,
+            "rollback must delete a ref still holding our forward value"
+        );
+
+        // Re-start case (restore_to = Some(prior)). Concurrent advance → leave.
+        repo.refs().set_thread(&name, &advanced).unwrap();
+        cas_guarded_ref_rollback(&repo, &name, base, Some(prior)).unwrap();
+        assert_eq!(
+            repo.refs().get_thread(&name).unwrap(),
+            Some(advanced),
+            "rollback must not reset a ref a concurrent process advanced"
+        );
+
+        // Re-start case, ref still holds our forward value → restore prior.
+        repo.refs().set_thread(&name, &base).unwrap();
+        cas_guarded_ref_rollback(&repo, &name, base, Some(prior)).unwrap();
+        assert_eq!(
+            repo.refs().get_thread(&name).unwrap(),
+            Some(prior),
+            "rollback must restore the prior value when the ref still holds our forward value"
+        );
     }
 }

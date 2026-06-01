@@ -44,7 +44,7 @@ use super::{
     start_atomic,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
     worktree_cmd::{
-        helpers::{prepare_worktree_target, write_isolated_checkout},
+        helpers::{plan_worktree_target, write_isolated_checkout},
         shared_target,
     },
     worktree_safety::ensure_worktree_clean,
@@ -1590,6 +1590,21 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
     }
 }
 
+/// Retry-stable idempotency key for `thread start`.
+///
+/// Derived only from the op scope, the thread name, and the resolved base
+/// state — values fixed before the transaction and identical across a retry of
+/// the same logical start. It deliberately does NOT fold in the live oplog
+/// head: that advances when the `TransactionCommit` marker appends, so a
+/// post-commit crash-retry would read the advanced head, derive a *fresh* key,
+/// miss the executor's `transaction_id` dedup, and re-apply an already-committed
+/// start (heddle#356 cid 3333881568). After the commit the thread ref points at
+/// `base_state`, so a re-run of "start <name> from <base>" re-derives the same
+/// key and dedups exactly-once.
+pub(crate) fn start_transaction_id(scope: &str, name: &str, base_state: &ChangeId) -> String {
+    format!("thread-start:{scope}:{name}:{}", base_state.to_string_full())
+}
+
 pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<ThreadOpOutput> {
     let existing = find_active_thread_entry(repo, &args.name)?;
     if let Some(entry) = existing {
@@ -1686,7 +1701,11 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     if args.path.is_some() {
         ensure_explicit_start_path_outside_repo(repo, &args.name, &path)?;
     }
-    let prepared_target = prepare_worktree_target(repo, &path)?;
+    // Resolve + validate the target but DO NOT create it here: the directory
+    // creation is the transaction's first step, so a failure in the remaining
+    // pre-transaction work below can't orphan a dir we made before `execute`
+    // had a rewind ledger (heddle#356 cid 3333881552).
+    let prepared_target = plan_worktree_target(repo, &path)?;
     let target_dir_created = prepared_target.target_dir_created;
     let abs_path = normalize_path_for_containment(&prepared_target.path)?;
 
@@ -1804,11 +1823,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let mount_ownership =
         mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
     let scope = repo.op_scope();
-    let generation = repo.oplog().head_id()?;
-    // Stable across retries of the same logical start (generation-keyed like
-    // undo/redo, so a legitimately-repeated `(scope, name)` at a later
-    // generation never collides on the dedup key — heddle#355 idempotency note).
-    let transaction_id = format!("thread-start:{scope}:{}:gen{generation}", args.name);
+    let transaction_id = start_transaction_id(&scope, &args.name, &base_state);
     let hydrate_requested =
         args.hydrate && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized);
     let linked = repo::atomic::execute(
